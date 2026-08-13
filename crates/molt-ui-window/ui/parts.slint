@@ -4,7 +4,7 @@
 // Strings globals and its own properties — no AppWindow state. The window
 // (app.slint) composes these into the actual screens.
 
-import { Theme, Strings, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, MemberSync, ProposalRow, HintTip } from "theme.slint";
+import { Theme, Strings, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, MemberSync, ProposalRow, HintTip, PatchView } from "theme.slint";
 import { AppButton, AppField, ScrollHint, HoverTip } from "components.slint";
 
 // A large clickable option card used on the first-run choice screen. The
@@ -1007,6 +1007,10 @@ component CappedStateRow inherits HorizontalLayout {
     in property <string> label;
     in property <string> value;
     in property <bool> emphasized: false;
+    // raw machine text (a git patch): monospace, and a taller cap — the
+    // patch IS the proposal's content, not a footnote
+    in property <bool> mono: false;
+    in property <length> cap: 96px;
     spacing: 8px;
     Text {
         text: root.label;
@@ -1016,7 +1020,7 @@ component CappedStateRow inherits HorizontalLayout {
     }
     Rectangle {
         horizontal-stretch: 1;
-        height: min(cs-txt.preferred-height + 12px, 96px);
+        height: min(cs-txt.preferred-height + 12px, root.cap);
         background: Theme.panel;
         border-radius: Theme.win95 ? 0px : 6px;
         border-width: Theme.border-w;
@@ -1034,6 +1038,7 @@ component CappedStateRow inherits HorizontalLayout {
                 text: root.value;
                 color: root.emphasized ? Theme.text : Theme.dim;
                 font-size: Theme.fs-cap;
+                font-family: root.mono ? "monospace" : "";
                 wrap: word-wrap;
             }
         }
@@ -1249,6 +1254,8 @@ export component ProposalCard inherits Rectangle {
     in property <image> inline-img;
     // save the proposed image's original bytes to disk (save dialog)
     callback save-image();
+    // wiki_patch only: open the raw-patch modal (read-only, copyable)
+    callback view-patch();
     background: Theme.panel-2;
     border-radius: Theme.win95 ? 0px : 10px;
     border-width: Theme.border-w;
@@ -1319,7 +1326,7 @@ export component ProposalCard inherits Rectangle {
         // Organization edit ops fill both; a plain proposal shows neither).
         // Short values sit inline; the charter pair is capped + scrollable;
         // an image change renders the Ist image and links the Soll file.
-        if root.p.current != "" && !root.p.charter-op && !root.p.image-op && !root.p.relay-op: HorizontalLayout {
+        if root.p.current != "" && !root.p.charter-op && !root.p.patch-op && !root.p.image-op && !root.p.relay-op: HorizontalLayout {
             spacing: 8px;
             Text {
                 text: Strings.pc-current;
@@ -1335,7 +1342,7 @@ export component ProposalCard inherits Rectangle {
                 horizontal-stretch: 1;
             }
         }
-        if root.p.proposed != "" && !root.p.charter-op && !root.p.image-op && !root.p.relay-op: HorizontalLayout {
+        if root.p.proposed != "" && !root.p.charter-op && !root.p.patch-op && !root.p.image-op && !root.p.relay-op: HorizontalLayout {
             spacing: 8px;
             Text {
                 text: Strings.pc-proposed;
@@ -1383,6 +1390,21 @@ export component ProposalCard inherits Rectangle {
             label: Strings.pc-proposed;
             value: root.p.proposed;
             emphasized: true;
+        }
+        // wiki_patch: the diff viewer heading the decision's discussion is
+        // the readable form — the raw patch hides behind one button (a
+        // read-only modal, like the charter view)
+        if root.p.patch-op && root.p.proposed != "": HorizontalLayout {
+            alignment: start;
+            AppButton {
+                height: 28px;
+                pad: 10px;
+                emoji: "👁️";
+                label: Strings.pc-show-patch;
+                clicked => {
+                    root.view-patch();
+                }
+            }
         }
         if root.p.image-op && root.p.current != "": HorizontalLayout {
             spacing: 8px;
@@ -2069,6 +2091,137 @@ export component BusyModal inherits Rectangle {
                         root.cancelled();
                     }
                 }
+            }
+        }
+    }
+}
+
+// The wiki-patch diff viewer heading a patch decision's discussion: left
+// the patch's files (moved/deleted marked as such), right the selected
+// file's rendered diff — added characters green, removed characters red,
+// each on a soft tint so whitespace changes stay visible. Read-only by
+// design: browsing a vote's content never edits anything; the raw patch
+// sits behind the proposal card's own button.
+export component DiffViewer inherits Rectangle {
+    background: Theme.panel-2;
+    border-radius: Theme.win95 ? 0px : 10px;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    height: 300px;
+    clip: true;
+    pure function seg-color(tone: int) -> color {
+        return tone == 1 ? Theme.good
+            : tone == 2 ? Theme.bad
+            : tone == 3 ? Theme.faint
+            : Theme.text;
+    }
+    HorizontalLayout {
+        padding: 8px;
+        spacing: 8px;
+        // ---- the patch's files ----
+        Rectangle {
+            width: 220px;
+            background: Theme.panel;
+            border-radius: Theme.win95 ? 0px : 6px;
+            border-width: Theme.border-w;
+            border-color: Theme.line;
+            clip: true;
+            nav-fl := Flickable {
+                width: 100%;
+                height: 100%;
+                viewport-width: self.width;
+                viewport-height: max(self.height, PatchView.nav-rows.length * 26px + 8px);
+                VerticalLayout {
+                    padding: 4px;
+                    spacing: 2px;
+                    alignment: start;
+                    for r[idx] in PatchView.nav-rows: Rectangle {
+                        height: 24px;
+                        border-radius: Theme.win95 ? 0px : 5px;
+                        background: r.selected ? Theme.accent-soft
+                            : (nta.has-hover ? Theme.zebra : transparent);
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            spacing: 6px;
+                            Text {
+                                text: r.label;
+                                color: r.status == 1 ? Theme.good
+                                    : r.status == 3 ? Theme.bad
+                                    : Theme.warn;
+                                font-size: Theme.fs-cap;
+                                font-weight: r.selected ? 600 : 400;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                horizontal-stretch: 1;
+                            }
+                            if r.marker != "": Text {
+                                text: r.marker;
+                                color: Theme.faint;
+                                font-size: Theme.fs-cap;
+                                vertical-alignment: center;
+                            }
+                        }
+                        nta := TouchArea {
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => {
+                                PatchView.select(idx);
+                            }
+                        }
+                    }
+                }
+            }
+            ScrollHint {
+                x: parent.width - 5px;
+                view-h: nav-fl.height;
+                content-h: nav-fl.viewport-height;
+                scroll-y: nav-fl.viewport-y;
+            }
+        }
+        // ---- the selected file's diff (scrolls both ways: char-level
+        // rows must not wrap, a wrapped diff line reads as two) ----
+        Rectangle {
+            horizontal-stretch: 1;
+            background: Theme.panel;
+            border-radius: Theme.win95 ? 0px : 6px;
+            border-width: Theme.border-w;
+            border-color: Theme.line;
+            clip: true;
+            df := Flickable {
+                width: 100%;
+                height: 100%;
+                viewport-width: max(self.width, dcol.preferred-width + 16px);
+                viewport-height: max(self.height, dcol.preferred-height + 16px);
+                dcol := VerticalLayout {
+                    x: 8px;
+                    y: 8px;
+                    width: max(df.width, self.preferred-width) - 16px;
+                    alignment: start;
+                    for r in PatchView.rows: HorizontalLayout {
+                        alignment: start;
+                        height: 18px;
+                        for s in r.segs: Rectangle {
+                            width: st.preferred-width;
+                            background: s.tone == 1 ? Theme.good.transparentize(0.82)
+                                : s.tone == 2 ? Theme.bad.transparentize(0.82)
+                                : transparent;
+                            st := Text {
+                                text: s.text;
+                                color: root.seg-color(s.tone);
+                                font-family: "monospace";
+                                font-size: Theme.fs-cap;
+                                vertical-alignment: center;
+                                height: 100%;
+                            }
+                        }
+                    }
+                }
+            }
+            ScrollHint {
+                x: parent.width - 5px;
+                view-h: df.height;
+                content-h: df.viewport-height;
+                scroll-y: df.viewport-y;
             }
         }
     }

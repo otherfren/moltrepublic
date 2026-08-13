@@ -20,19 +20,19 @@
 // the nav sub-view icons, the reaction pills and the emoji palette.
 import "assets/fonts/Twemoji.Mozilla.ttf";
 
-import { Theme, Strings, HintTip, WikiState, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, InvitePreview, LinkPreview, BackupRow, ChainRow, RelayItem, RelayPick } from "theme.slint";
+import { Theme, Strings, HintTip, WikiState, PatchView, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, InvitePreview, LinkPreview, BackupRow, ChainRow, RelayItem, RelayPick } from "theme.slint";
 import {
     AppButton, AppField, AppArea, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
     ConfirmModal, DotLabel
 } from "components.slint";
 import {
-    BusyModal, ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, SeedConfirmStep, RunView, ProposalCard, DecisionTable, Spinner
+    BusyModal, ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, SeedConfirmStep, RunView, ProposalCard, DecisionTable, Spinner, DiffViewer
 } from "parts.slint";
 // the four staged surfaces' badged DESIGN-MOCK panes (sample data lives
 // .slint-side only; the real governance views stay below in this file)
 import { MemoryPane, MockBadge, QuestsPane, VaultPane, WalletPane } from "surfaces.slint";
 
-export { Strings, Theme, WikiState }
+export { Strings, Theme, WikiState, PatchView }
 
 // A settings form group: caption sitting tight above its control(s), so a
 // label+field pair reads as one unit inside the wider panel rhythm.
@@ -1072,6 +1072,8 @@ export component AppWindow inherits Window {
         || root.org-features-modal-open
         || root.decrypt-modal-open
         || root.charter-view-open
+        || root.mem-cs-confirm-open
+        || root.patch-view-open
         || root.relay-clearnet-modal-open
         || root.nt-open
         || root.recover-link-open;
@@ -1118,6 +1120,11 @@ export component AppWindow inherits Window {
     }
     // modal: confirm closing the workspace (raised by either close button)
     property <bool> confirm-close-open: false;
+    // the wiki changeset panel's "discard all" confirmation
+    property <bool> mem-cs-confirm-open: false;
+    // the raw-patch modal of a wiki_patch proposal (read-only + copy)
+    property <bool> patch-view-open: false;
+    property <string> patch-view-text;
     // modal: confirm quitting the program while a workspace is open
     // (raised from Rust's window close-requested handler)
     in-out property <bool> confirm-quit-open: false;
@@ -1823,6 +1830,10 @@ export component AppWindow inherits Window {
             root.org-name-modal-open = false;
         } else if (root.charter-view-open) {
             root.charter-view-open = false;
+        } else if (root.mem-cs-confirm-open) {
+            root.mem-cs-confirm-open = false;
+        } else if (root.patch-view-open) {
+            root.patch-view-open = false;
         } else if (root.org-retention-modal-open) {
             root.org-retention-modal-open = false;
         } else if (root.org-relays-modal-open) {
@@ -4743,7 +4754,18 @@ export component AppWindow inherits Window {
                                 decline => {
                                     root.decline(root.selected-decision.id);
                                 }
+                                view-patch => {
+                                    root.patch-view-text = root.selected-decision.proposed;
+                                    root.patch-view-open = true;
+                                }
                             }
+
+                            // a wiki-patch decision is voted on its CONTENT:
+                            // the diff viewer sits between the card and the
+                            // discussion, so browsing the changes and talking
+                            // about them share one screen
+                            if root.selected-channel-org && root.selected-decision.id > 0
+                                && root.selected-decision.patch-op: DiffViewer { }
 
                             // A free topic names itself HERE, under the member
                             // pills — the user must see which channel they are
@@ -6428,6 +6450,9 @@ export component AppWindow inherits Window {
                                 }
                                 root.navigate(AppScreen.settings);
                             }
+                            confirm-revert => {
+                                root.mem-cs-confirm-open = true;
+                            }
                         }
                         if s.key == "quests" && root.selected-view != "proposals": QuestsPane {
                             view: root.selected-view;
@@ -6493,6 +6518,10 @@ export component AppWindow inherits Window {
                                         }
                                         save-image => {
                                             root.save-proposal-image(p.img-b64, p.proposed);
+                                        }
+                                        view-patch => {
+                                            root.patch-view-text = p.proposed;
+                                            root.patch-view-open = true;
                                         }
                                     }
                                 }
@@ -7695,6 +7724,21 @@ export component AppWindow inherits Window {
         }
     }
 
+    // Modal: the wiki changeset panel's "discard all" — irreversible (the
+    // undo stack goes with it), so it asks once.
+    if root.mem-cs-confirm-open: ConfirmModal {
+        title: Strings.mem-cs-confirm-title;
+        body: Strings.mem-cs-confirm-body;
+        confirm-label: Strings.mem-cs-revert;
+        dismissed => {
+            root.mem-cs-confirm-open = false;
+        }
+        confirmed => {
+            root.mem-cs-confirm-open = false;
+            WikiState.cs-revert();
+        }
+    }
+
     // Modal: the outside-Tor relay warning — the one place the GUI may reach
     // RelayConfirm with the acknowledgement set. It names the CONCRETE
     // exposure (local box vs. clearnet operator, and whether Tor fronts the
@@ -8251,6 +8295,55 @@ export component AppWindow inherits Window {
                 view-h: cv-fl.height;
                 content-h: cv-fl.viewport-height;
                 scroll-y: cv-fl.viewport-y;
+            }
+        }
+    }
+
+    // Modal: a wiki_patch proposal's RAW git patch — read-only (the
+    // charter-view idiom), with a copy button for tooling.
+    if root.patch-view-open: ConfirmModal {
+        dialog-width: 760px;
+        title: Strings.pv-title;
+        body: "";
+        cancel-label: "";
+        alt-label: Strings.pv-copy;
+        confirm-label: Strings.cv-shrink;
+        alted => {
+            root.copy-text(root.patch-view-text);
+            root.show-toast(Strings.pv-copied);
+        }
+        dismissed => {
+            root.patch-view-open = false;
+        }
+        confirmed => {
+            root.patch-view-open = false;
+        }
+        Rectangle {
+            height: 420px;
+            background: Theme.panel-2;
+            border-radius: Theme.win95 ? 0px : 8px;
+            border-width: Theme.border-w;
+            border-color: Theme.line;
+            clip: true;
+            pv-fl := Flickable {
+                width: 100%;
+                height: 100%;
+                viewport-width: max(self.width, pv-text.preferred-width + 28px);
+                viewport-height: max(self.height, pv-text.preferred-height + 24px);
+                pv-text := Text {
+                    x: 14px;
+                    y: 12px;
+                    text: root.patch-view-text;
+                    color: Theme.text;
+                    font-family: "monospace";
+                    font-size: Theme.fs-cap;
+                }
+            }
+            ScrollHint {
+                x: parent.width - 7px;
+                view-h: pv-fl.height;
+                content-h: pv-fl.viewport-height;
+                scroll-y: pv-fl.viewport-y;
             }
         }
     }

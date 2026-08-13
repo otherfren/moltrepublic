@@ -12,7 +12,7 @@
 //! this module stays slint-free so the whole state machine tests headless.
 
 use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
-use similar::{capture_diff_slices, Algorithm, DiffOp};
+use similar::{capture_diff_slices, Algorithm, DiffOp, TextDiff};
 
 pub type DocId = u32;
 
@@ -124,6 +124,55 @@ pub struct TabRow {
     pub status: Status,
 }
 
+/// One recorded user action — the changeset stack's unit. Carries the
+/// before-state its LIFO inverse needs and a display label frozen at
+/// record time (an action log narrates what happened, not what is).
+#[derive(Clone, Debug)]
+enum Change {
+    Created { id: DocId, label: String },
+    CreatedFolder { name: String },
+    Renamed { id: DocId, from: String, label: String },
+    Moved { id: DocId, from: String, label: String },
+    /// A base-backed doc's pending deletion (the `deleted` flag).
+    DeletedDoc { id: DocId, label: String },
+    /// A locally added doc removed entirely — the snapshot is the undo.
+    DeletedAdded { doc: Doc, label: String },
+    /// One coalesced run of keystrokes on a doc.
+    Edited { id: DocId, before: String, label: String },
+}
+
+/// The kind tag of a [`StackRow`] (drives the panel row's glyph + tone).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ChangeKind {
+    Created,
+    CreatedFolder,
+    Renamed,
+    Moved,
+    Deleted,
+    Edited,
+}
+
+/// One changeset-panel stack row, oldest first.
+#[derive(Clone, Debug)]
+pub struct StackRow {
+    pub kind: ChangeKind,
+    pub label: String,
+}
+
+/// The NET pending change set, recomputed from base vs working state (the
+/// stack narrates actions; these numbers are what a vote would seal).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct ChangesetCounts {
+    /// Files that exist only in the working set.
+    pub added: usize,
+    /// Base files pending deletion.
+    pub deleted: usize,
+    /// Base files whose path changed (rename or move).
+    pub moved: usize,
+    /// Touched content lines across modified base files.
+    pub lines: usize,
+}
+
 pub struct Wiki {
     docs: Vec<Doc>,
     folders: Vec<Folder>,
@@ -134,6 +183,8 @@ pub struct Wiki {
     pub editing: bool,
     renaming: Option<DocId>,
     next_id: DocId,
+    /// The changeset stack: every user action, oldest first.
+    stack: Vec<Change>,
 }
 
 impl Wiki {
@@ -177,6 +228,7 @@ impl Wiki {
             editing: false,
             renaming: None,
             next_id,
+            stack: Vec::new(),
         }
     }
 
@@ -221,7 +273,9 @@ impl Wiki {
         self.active
     }
 
-    /// (added, modified, deleted) doc counts — the pending change set.
+    /// (added, modified, deleted) doc counts — the pending change set
+    /// (test seam; the UI reads [`Wiki::changeset_counts`]).
+    #[cfg(test)]
     pub fn change_counts(&self) -> (usize, usize, usize) {
         let mut c = (0, 0, 0);
         for d in &self.docs {
@@ -467,6 +521,7 @@ impl Wiki {
             .unwrap_or(&name)
             .trim_end_matches(".md")
             .to_string();
+        let label = name.rsplit('/').next().unwrap_or(&name).to_string();
         self.docs.push(Doc {
             id,
             path: name,
@@ -477,6 +532,7 @@ impl Wiki {
             base: None,
             deleted: false,
         });
+        self.stack.push(Change::Created { id, label });
         self.open(id);
         self.renaming = Some(id);
         id
@@ -497,6 +553,7 @@ impl Wiki {
             open: true,
             added: true,
         });
+        self.stack.push(Change::CreatedFolder { name: name.clone() });
         name
     }
 
@@ -539,7 +596,17 @@ impl Wiki {
             return Err("name already taken".to_string());
         }
         if let Some(d) = self.doc_mut(id) {
-            d.path = path;
+            if d.path != path {
+                let from = d.path.clone();
+                let from_name = from.rsplit('/').next().unwrap_or(&from).to_string();
+                let to_name = path.rsplit('/').next().unwrap_or(&path).to_string();
+                d.path = path;
+                self.stack.push(Change::Renamed {
+                    id,
+                    from,
+                    label: format!("{from_name} → {to_name}"),
+                });
+            }
         }
         Ok(())
     }
@@ -561,13 +628,25 @@ impl Wiki {
         let name = d.name().to_string();
         let path = match folder {
             Some(f) => format!("{f}/{name}"),
-            None => name,
+            None => name.clone(),
         };
         if self.docs.iter().any(|o| o.id != id && o.path == path) {
             return Err("name already taken".to_string());
         }
+        let target = match folder {
+            Some(f) => format!("{f}/"),
+            None => "/".to_string(),
+        };
         if let Some(d) = self.doc_mut(id) {
-            d.path = path;
+            if d.path != path {
+                let from = d.path.clone();
+                d.path = path;
+                self.stack.push(Change::Moved {
+                    id,
+                    from,
+                    label: format!("{name} → {target}"),
+                });
+            }
         }
         Ok(())
     }
@@ -592,17 +671,25 @@ impl Wiki {
     /// pending deletion (visible, struck, tab closed); a locally added doc
     /// vanishes entirely — there is nothing to vote on.
     pub fn delete(&mut self, id: DocId) {
-        let Some(is_added) = self.doc(id).map(|d| d.base.is_none()) else {
-            return;
-        };
+        let Some(d) = self.doc(id) else { return };
+        if d.deleted {
+            return; // already a pending deletion
+        }
+        let is_added = d.base.is_none();
+        let label = d.name().to_string();
+        let snapshot = d.clone();
         self.close_tab(id);
         if is_added {
             self.docs.retain(|d| d.id != id);
             if self.marked == Some(id) {
                 self.marked = None;
             }
-        } else if let Some(d) = self.doc_mut(id) {
-            d.deleted = true;
+            self.stack.push(Change::DeletedAdded { doc: snapshot, label });
+        } else {
+            if let Some(d) = self.doc_mut(id) {
+                d.deleted = true;
+            }
+            self.stack.push(Change::DeletedDoc { id, label });
         }
         if self.renaming == Some(id) {
             self.renaming = None;
@@ -612,12 +699,25 @@ impl Wiki {
     // ---- editing + diff ---------------------------------------------------
 
     /// The raw editor's buffer flows here on every edit; reverting to the
-    /// base bytes turns the doc Unchanged again.
+    /// base bytes turns the doc Unchanged again. One RUN of keystrokes on a
+    /// doc coalesces into a single stack entry (its `before` is the state
+    /// the run started from); switching docs starts a new run.
     pub fn set_raw(&mut self, id: DocId, raw: &str) {
+        let Some(d) = self.doc(id) else { return };
+        if d.deleted || d.raw == raw {
+            return;
+        }
+        let coalesce =
+            matches!(self.stack.last(), Some(Change::Edited { id: last, .. }) if *last == id);
+        if !coalesce {
+            self.stack.push(Change::Edited {
+                id,
+                before: d.raw.clone(),
+                label: d.name().to_string(),
+            });
+        }
         if let Some(d) = self.doc_mut(id) {
-            if !d.deleted {
-                d.raw = raw.to_string();
-            }
+            d.raw = raw.to_string();
         }
     }
 
@@ -684,6 +784,281 @@ impl Wiki {
     pub fn links(&self, id: DocId) -> Vec<String> {
         self.doc(id).map(|d| parse_links(&d.raw)).unwrap_or_default()
     }
+
+    // ---- the changeset stack ----------------------------------------------
+
+    /// Recorded actions on the stack (test seam; the panel's visibility
+    /// reads the synced `cs-rows` model length).
+    #[cfg(test)]
+    pub fn stack_len(&self) -> usize {
+        self.stack.len()
+    }
+
+    /// The panel's action list, oldest first.
+    pub fn stack_rows(&self) -> Vec<StackRow> {
+        self.stack
+            .iter()
+            .map(|c| match c {
+                Change::Created { label, .. } => StackRow {
+                    kind: ChangeKind::Created,
+                    label: label.clone(),
+                },
+                Change::CreatedFolder { name } => StackRow {
+                    kind: ChangeKind::CreatedFolder,
+                    label: format!("{name}/"),
+                },
+                Change::Renamed { label, .. } => StackRow {
+                    kind: ChangeKind::Renamed,
+                    label: label.clone(),
+                },
+                Change::Moved { label, .. } => StackRow {
+                    kind: ChangeKind::Moved,
+                    label: label.clone(),
+                },
+                Change::DeletedDoc { label, .. } | Change::DeletedAdded { label, .. } => StackRow {
+                    kind: ChangeKind::Deleted,
+                    label: label.clone(),
+                },
+                Change::Edited { label, .. } => StackRow {
+                    kind: ChangeKind::Edited,
+                    label: label.clone(),
+                },
+            })
+            .collect()
+    }
+
+    /// Undo the latest action (LIFO). Refuses when the inverse would
+    /// collide with the current tree — possible only after a per-file
+    /// revert re-occupied a path mid-stack; the entry then stays put.
+    pub fn undo(&mut self) -> Result<(), String> {
+        let Some(change) = self.stack.last().cloned() else {
+            return Err("nothing to undo".to_string());
+        };
+        match change {
+            Change::Created { id, .. } => {
+                self.close_tab(id);
+                self.docs.retain(|d| d.id != id);
+                if self.marked == Some(id) {
+                    self.marked = None;
+                }
+                if self.renaming == Some(id) {
+                    self.renaming = None;
+                }
+            }
+            Change::CreatedFolder { ref name } => {
+                if self.docs.iter().any(|d| d.folder() == Some(name.as_str())) {
+                    return Err("folder not empty".to_string());
+                }
+                self.folders.retain(|f| !(f.added && f.name == *name));
+            }
+            Change::Renamed { id, ref from, .. } | Change::Moved { id, ref from, .. } => {
+                if self.docs.iter().any(|o| o.id != id && o.path == *from) {
+                    return Err("name already taken".to_string());
+                }
+                if let Some(d) = self.doc_mut(id) {
+                    d.path = from.clone();
+                }
+            }
+            Change::DeletedDoc { id, .. } => {
+                if let Some(d) = self.doc_mut(id) {
+                    d.deleted = false;
+                }
+            }
+            Change::DeletedAdded { ref doc, .. } => {
+                if self.docs.iter().any(|o| o.path == doc.path) {
+                    return Err("name already taken".to_string());
+                }
+                self.docs.push(doc.clone());
+            }
+            Change::Edited { id, ref before, .. } => {
+                if let Some(d) = self.doc_mut(id) {
+                    d.raw = before.clone();
+                }
+            }
+        }
+        self.stack.pop();
+        Ok(())
+    }
+
+    /// Drop the whole changeset: every doc back to base, added docs and
+    /// folders gone, stack cleared.
+    pub fn revert_all(&mut self) {
+        let added: Vec<DocId> = self
+            .docs
+            .iter()
+            .filter(|d| d.base.is_none())
+            .map(|d| d.id)
+            .collect();
+        for id in added {
+            self.close_tab(id);
+            if self.marked == Some(id) {
+                self.marked = None;
+            }
+            if self.renaming == Some(id) {
+                self.renaming = None;
+            }
+        }
+        self.docs.retain(|d| d.base.is_some());
+        for d in &mut self.docs {
+            if let Some(b) = &d.base {
+                d.path = b.path.clone();
+                d.raw = b.raw.clone();
+            }
+            d.deleted = false;
+        }
+        self.folders.retain(|f| !f.added);
+        self.stack.clear();
+    }
+
+    /// Revert ONE base-backed doc to its base state (content, path,
+    /// deletion) and drop its stack entries; the rest of the stack stays.
+    pub fn revert_doc(&mut self, id: DocId) -> Result<(), String> {
+        let Some(d) = self.doc(id) else {
+            return Err("unknown file".to_string());
+        };
+        let Some(base) = d.base.clone() else {
+            return Err("a draft has no base".to_string());
+        };
+        if self.docs.iter().any(|o| o.id != id && o.path == base.path) {
+            return Err("name already taken".to_string());
+        }
+        if let Some(d) = self.doc_mut(id) {
+            d.path = base.path;
+            d.raw = base.raw;
+            d.deleted = false;
+        }
+        self.stack.retain(|c| {
+            !matches!(c,
+                Change::Renamed { id: cid, .. }
+                | Change::Moved { id: cid, .. }
+                | Change::DeletedDoc { id: cid, .. }
+                | Change::Edited { id: cid, .. } if *cid == id)
+        });
+        Ok(())
+    }
+
+    /// Folder names in display order (test seam).
+    #[cfg(test)]
+    pub fn folders_named(&self) -> Vec<String> {
+        self.folders.iter().map(|f| f.name.clone()).collect()
+    }
+
+    /// The NET change summary the panel shows.
+    pub fn changeset_counts(&self) -> ChangesetCounts {
+        let mut c = ChangesetCounts::default();
+        for d in &self.docs {
+            match (&d.base, d.deleted) {
+                (None, _) => c.added += 1,
+                (Some(_), true) => c.deleted += 1,
+                (Some(b), false) => {
+                    if b.path != d.path {
+                        c.moved += 1;
+                    }
+                    if b.raw != d.raw {
+                        c.lines += touched_lines(&b.raw, &d.raw);
+                    }
+                }
+            }
+        }
+        c
+    }
+
+    /// The net changeset as ONE git-format patch (unified diffs + git
+    /// rename/new/deleted headers), files sorted by display path.
+    /// `None` when nothing net-changed.
+    pub fn build_patch(&self) -> Option<String> {
+        let mut changed: Vec<&Doc> = self
+            .docs
+            .iter()
+            .filter(|d| d.status() != Status::Unchanged)
+            .collect();
+        if changed.is_empty() {
+            return None;
+        }
+        changed.sort_by_key(|d| match (&d.base, d.deleted) {
+            (Some(b), true) => b.path.clone(),
+            _ => d.path.clone(),
+        });
+        let mut out = String::new();
+        for d in changed {
+            match (&d.base, d.deleted) {
+                (None, _) => {
+                    out.push_str(&format!(
+                        "diff --git a/{p} b/{p}\nnew file mode 100644\n",
+                        p = d.path
+                    ));
+                    out.push_str(&unified("", &d.raw, "/dev/null", &format!("b/{}", d.path)));
+                }
+                (Some(b), true) => {
+                    out.push_str(&format!(
+                        "diff --git a/{p} b/{p}\ndeleted file mode 100644\n",
+                        p = b.path
+                    ));
+                    out.push_str(&unified(&b.raw, "", &format!("a/{}", b.path), "/dev/null"));
+                }
+                (Some(b), false) => {
+                    let renamed = b.path != d.path;
+                    let edited = b.raw != d.raw;
+                    if renamed {
+                        out.push_str(&format!("diff --git a/{} b/{}\n", b.path, d.path));
+                        if !edited {
+                            // pure rename — git's exact no-content idiom
+                            out.push_str("similarity index 100%\n");
+                        }
+                        out.push_str(&format!(
+                            "rename from {}\nrename to {}\n",
+                            b.path, d.path
+                        ));
+                    } else {
+                        out.push_str(&format!("diff --git a/{p} b/{p}\n", p = d.path));
+                    }
+                    if edited {
+                        out.push_str(&unified(
+                            &b.raw,
+                            &d.raw,
+                            &format!("a/{}", b.path),
+                            &format!("b/{}", d.path),
+                        ));
+                    }
+                }
+            }
+        }
+        Some(out)
+    }
+
+    /// Markdown link markup for a doc: `[name](path)` (copy-link).
+    pub fn link_markup(&self, id: DocId) -> Option<String> {
+        self.doc(id).map(|d| {
+            let stem = d.name().trim_end_matches(".md").to_string();
+            format!("[{stem}]({})", d.path)
+        })
+    }
+}
+
+/// Touched content lines between two texts: inserted + removed, a replaced
+/// run counted once at its wider side.
+fn touched_lines(old: &str, new: &str) -> usize {
+    TextDiff::from_lines(old, new)
+        .ops()
+        .iter()
+        .map(|op| match op {
+            DiffOp::Insert { new_len, .. } => *new_len,
+            DiffOp::Delete { old_len, .. } => *old_len,
+            DiffOp::Replace {
+                old_len, new_len, ..
+            } => (*old_len).max(*new_len),
+            DiffOp::Equal { .. } => 0,
+        })
+        .sum()
+}
+
+/// One file's unified diff with `---`/`+++` names, git hunk format.
+fn unified(old: &str, new: &str, a: &str, b: &str) -> String {
+    TextDiff::from_lines(old, new)
+        .unified_diff()
+        .context_radius(3)
+        .header(a, b)
+        .to_string()
 }
 
 // ---- markdown → blocks ----------------------------------------------------
@@ -1146,6 +1521,295 @@ mod tests {
         // past the list end → root
         w.drop_on_row(glossary, 999).expect("drop past end");
         assert_eq!(w.doc(glossary).expect("doc").path, "glossary.md");
+    }
+
+    // ---- the changeset stack (panel, undo, reverts) ------------------------
+
+    #[test]
+    fn keystrokes_coalesce_into_one_stack_entry_per_edit_run() {
+        let mut w = Wiki::sample();
+        let glossary = id_of(&w, "glossary.md");
+        let charter = id_of(&w, "charter.md");
+        let base = w.doc(glossary).expect("doc").raw.clone();
+        // echoing the current buffer back is not a change
+        w.set_raw(glossary, &base);
+        assert_eq!(w.stack_len(), 0);
+        w.set_raw(glossary, &format!("{base}x"));
+        w.set_raw(glossary, &format!("{base}xy"));
+        assert_eq!(w.stack_len(), 1, "one run of keystrokes, one entry");
+        w.set_raw(charter, "# Charter\n\nshorter.");
+        assert_eq!(w.stack_len(), 2);
+        // returning to the same doc starts a NEW run
+        w.set_raw(glossary, &format!("{base}xyz"));
+        assert_eq!(w.stack_len(), 3);
+        // undo of that run lands on the state BEFORE it, not on base
+        w.undo().expect("undo");
+        assert_eq!(w.doc(glossary).expect("doc").raw, format!("{base}xy"));
+    }
+
+    #[test]
+    fn undo_walks_the_stack_in_lifo_order() {
+        let mut w = Wiki::sample();
+        let glossary = id_of(&w, "glossary.md");
+        let relay = id_of(&w, "2026-06-14-relay.md");
+        let charter = id_of(&w, "charter.md");
+        let base = w.doc(glossary).expect("doc").raw.clone();
+        w.set_raw(glossary, &format!("{base}\n\nMore."));
+        w.rename_commit(relay, "relay-decision").expect("rename");
+        w.delete(charter);
+        assert_eq!(w.stack_len(), 3);
+        w.undo().expect("undo delete");
+        assert_eq!(w.doc(charter).expect("doc").status(), Status::Unchanged);
+        w.undo().expect("undo rename");
+        assert_eq!(w.doc(relay).expect("doc").path, "decisions/2026-06-14-relay.md");
+        w.undo().expect("undo edit");
+        assert_eq!(w.doc(glossary).expect("doc").status(), Status::Unchanged);
+        assert_eq!(w.stack_len(), 0);
+    }
+
+    #[test]
+    fn undo_brings_a_deleted_draft_back_and_a_second_undo_removes_it() {
+        let mut w = Wiki::sample();
+        let id = w.new_file();
+        assert_eq!(w.stack_len(), 1);
+        w.delete(id); // an added doc vanishes from the tree …
+        assert!(w.nav_rows().iter().all(|r| r.id != id));
+        assert_eq!(w.stack_len(), 2, "… but the action is on the stack");
+        w.undo().expect("undo the delete");
+        let row = w
+            .nav_rows()
+            .into_iter()
+            .find(|r| r.id == id)
+            .expect("draft is back");
+        assert_eq!(row.status, Status::Added);
+        w.undo().expect("undo the create");
+        assert!(w.nav_rows().iter().all(|r| r.id != id));
+        assert_eq!(w.stack_len(), 0);
+        assert!(w.tab_rows().iter().all(|t| t.id != id));
+    }
+
+    #[test]
+    fn revert_all_restores_the_base_snapshot_and_empties_the_stack() {
+        let mut w = Wiki::sample();
+        let glossary = id_of(&w, "glossary.md");
+        let charter = id_of(&w, "charter.md");
+        w.set_raw(glossary, "# Glossary\n\ngutted.");
+        w.delete(charter);
+        let draft = w.new_file();
+        w.new_folder();
+        w.move_to(glossary, Some("decisions")).expect("move");
+        assert!(w.stack_len() > 0);
+        w.revert_all();
+        assert_eq!(w.stack_len(), 0);
+        assert_eq!(w.change_counts(), (0, 0, 0));
+        assert_eq!(w.changeset_counts(), ChangesetCounts::default());
+        assert!(w.nav_rows().iter().all(|r| r.id != draft));
+        assert!(w.folders_named().iter().all(|f| f != "new-folder-1"));
+        assert_eq!(w.doc(glossary).expect("doc").path, "glossary.md");
+        assert_eq!(w.doc(charter).expect("doc").status(), Status::Unchanged);
+    }
+
+    #[test]
+    fn revert_doc_restores_one_file_and_drops_only_its_entries() {
+        let mut w = Wiki::sample();
+        let glossary = id_of(&w, "glossary.md");
+        let charter = id_of(&w, "charter.md");
+        w.set_raw(glossary, "# Glossary\n\ngutted.");
+        w.rename_commit(glossary, "words").expect("rename");
+        w.set_raw(charter, "# Charter\n\nshorter.");
+        assert_eq!(w.stack_len(), 3);
+        w.revert_doc(glossary).expect("revert");
+        assert_eq!(w.doc(glossary).expect("doc").status(), Status::Unchanged);
+        assert_eq!(w.doc(glossary).expect("doc").path, "glossary.md");
+        assert_eq!(w.stack_len(), 1, "the charter edit survives");
+        // a pending deletion is revertable the same way
+        w.delete(charter);
+        w.revert_doc(charter).expect("revert deletion");
+        assert_eq!(w.doc(charter).expect("doc").status(), Status::Unchanged);
+        assert_eq!(w.stack_len(), 0);
+    }
+
+    #[test]
+    fn revert_doc_refuses_when_the_base_path_is_taken() {
+        let mut w = Wiki::sample();
+        let glossary = id_of(&w, "glossary.md");
+        w.rename_commit(glossary, "words").expect("rename away");
+        let draft = w.new_file();
+        w.rename_commit(draft, "glossary").expect("squat the base name");
+        assert!(w.revert_doc(glossary).is_err());
+        assert_eq!(w.doc(glossary).expect("doc").path, "words.md");
+        assert_eq!(w.stack_len(), 3, "nothing was dropped");
+    }
+
+    #[test]
+    fn undo_refuses_when_the_inverse_path_is_taken() {
+        let mut w = Wiki::sample();
+        let glossary = id_of(&w, "glossary.md");
+        w.rename_commit(glossary, "words").expect("rename away");
+        let draft = w.new_file();
+        w.rename_commit(draft, "glossary").expect("squat the base name");
+        w.delete(draft); // draft (at glossary.md) leaves, snapshot on stack
+        w.revert_doc(glossary).expect("glossary back at its base path");
+        // undoing the draft's deletion would reinsert it at glossary.md,
+        // which glossary holds again — refused, stack intact
+        let before = w.stack_len();
+        assert!(w.undo().is_err());
+        assert_eq!(w.stack_len(), before);
+    }
+
+    #[test]
+    fn stack_rows_narrate_the_actions_with_record_time_labels() {
+        let mut w = Wiki::sample();
+        let glossary = id_of(&w, "glossary.md");
+        w.set_raw(glossary, "# Glossary\n\ngutted.");
+        let id = w.new_file();
+        w.rename_commit(id, "notes").expect("rename");
+        w.move_to(glossary, Some("decisions")).expect("move");
+        w.new_folder();
+        let treasury = id_of(&w, "2026-07-02-treasury.md");
+        w.delete(treasury);
+        let rows = w.stack_rows();
+        let got: Vec<(ChangeKind, String)> =
+            rows.into_iter().map(|r| (r.kind, r.label)).collect();
+        assert_eq!(
+            got,
+            vec![
+                (ChangeKind::Edited, "glossary.md".to_string()),
+                (ChangeKind::Created, "untitled-1.md".to_string()),
+                (ChangeKind::Renamed, "untitled-1.md → notes.md".to_string()),
+                (ChangeKind::Moved, "glossary.md → decisions/".to_string()),
+                (ChangeKind::CreatedFolder, "new-folder-1/".to_string()),
+                (ChangeKind::Deleted, "2026-07-02-treasury.md".to_string()),
+            ]
+        );
+    }
+
+    // ---- the changeset summary + the git patch -----------------------------
+
+    #[test]
+    fn changeset_counts_split_new_deleted_moved_and_touched_lines() {
+        let mut w = Wiki::sample();
+        let treasury = id_of(&w, "2026-07-02-treasury.md");
+        let glossary = id_of(&w, "glossary.md");
+        let onboarding = id_of(&w, "onboarding-guide.md");
+        w.new_file();
+        w.delete(treasury);
+        w.move_to(glossary, Some("decisions")).expect("move");
+        let base = w.doc(onboarding).expect("doc").raw.clone();
+        w.set_raw(
+            onboarding,
+            &base.replace(
+                "- Work through the MLS & SMP reading list, messaging layer first.",
+                "- Work through the reading list.",
+            ),
+        );
+        assert_eq!(
+            w.changeset_counts(),
+            ChangesetCounts { added: 1, deleted: 1, moved: 1, lines: 1 }
+        );
+    }
+
+    #[test]
+    fn the_patch_covers_add_edit_rename_and_delete_sorted_by_path() {
+        let mut w = Wiki::sample();
+        let glossary = id_of(&w, "glossary.md");
+        let relay = id_of(&w, "2026-06-14-relay.md");
+        let charter = id_of(&w, "charter.md");
+        let base = w.doc(glossary).expect("doc").raw.clone();
+        w.set_raw(
+            glossary,
+            &base.replace(
+                "- Seal - the moment a proposal reaches the threshold and becomes canon.",
+                "- Seal - the m-of-n moment.",
+            ),
+        );
+        w.rename_commit(relay, "relay-decision").expect("pure rename");
+        w.delete(charter);
+        let draft = w.new_file();
+        w.rename_commit(draft, "todo").expect("rename");
+        w.set_raw(draft, "# Todo\n\n- first");
+        let patch = w.build_patch().expect("patch");
+        // edited file: plain hunks
+        assert!(patch.contains("diff --git a/glossary.md b/glossary.md"));
+        assert!(patch.contains("+- Seal - the m-of-n moment."));
+        // pure rename: headers only, no hunks against the old path
+        assert!(patch.contains(
+            "diff --git a/decisions/2026-06-14-relay.md b/decisions/relay-decision.md"
+        ));
+        assert!(patch.contains("similarity index 100%"));
+        assert!(patch.contains("rename from decisions/2026-06-14-relay.md"));
+        assert!(patch.contains("rename to decisions/relay-decision.md"));
+        assert!(!patch.contains("--- a/decisions/2026-06-14-relay.md"));
+        // deletion
+        assert!(patch.contains("deleted file mode 100644"));
+        assert!(patch.contains("--- a/charter.md"));
+        assert!(patch.contains("+++ /dev/null"));
+        assert!(patch.contains("-# Charter"));
+        // addition
+        assert!(patch.contains("new file mode 100644"));
+        assert!(patch.contains("--- /dev/null"));
+        assert!(patch.contains("+++ b/todo.md"));
+        assert!(patch.contains("@@ -0,0 +1,3 @@"));
+        assert!(patch.contains("+# Todo"));
+        // deterministic order: sorted by display path
+        let order: Vec<usize> = [
+            "diff --git a/charter.md",
+            "diff --git a/decisions/2026-06-14-relay.md",
+            "diff --git a/glossary.md",
+            "diff --git a/todo.md",
+        ]
+        .iter()
+        .map(|n| patch.find(n).expect("present"))
+        .collect();
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "sorted: {order:?}");
+    }
+
+    #[test]
+    fn a_rename_with_edits_carries_its_hunks_under_the_rename_header() {
+        let mut w = Wiki::sample();
+        let glossary = id_of(&w, "glossary.md");
+        w.rename_commit(glossary, "words").expect("rename");
+        w.set_raw(glossary, "# Words\n\nshort now.");
+        let patch = w.build_patch().expect("patch");
+        assert!(patch.contains("diff --git a/glossary.md b/words.md"));
+        assert!(patch.contains("rename from glossary.md"));
+        assert!(patch.contains("rename to words.md"));
+        assert!(patch.contains("--- a/glossary.md"));
+        assert!(patch.contains("+++ b/words.md"));
+        assert!(!patch.contains("similarity index"));
+    }
+
+    #[test]
+    fn a_changeset_that_nets_out_builds_no_patch() {
+        let mut w = Wiki::sample();
+        assert!(w.build_patch().is_none(), "clean tree, no patch");
+        let glossary = id_of(&w, "glossary.md");
+        let base = w.doc(glossary).expect("doc").raw.clone();
+        w.set_raw(glossary, &format!("{base}\n\nMore."));
+        w.set_raw(glossary, &base);
+        assert!(w.stack_len() > 0, "the actions happened");
+        assert!(w.build_patch().is_none(), "… but nothing net-changed");
+        // an added empty folder is not patch content either
+        w.new_folder();
+        assert!(w.build_patch().is_none());
+    }
+
+    // ---- link markup (copy link) -------------------------------------------
+
+    #[test]
+    fn link_markup_names_the_file_and_keeps_the_full_path() {
+        let w = Wiki::sample();
+        let glossary = id_of(&w, "glossary.md");
+        let recovery = id_of(&w, "node-recovery.md");
+        assert_eq!(
+            w.link_markup(glossary).expect("markup"),
+            "[glossary](glossary.md)"
+        );
+        assert_eq!(
+            w.link_markup(recovery).expect("markup"),
+            "[node-recovery](runbooks/node-recovery.md)"
+        );
+        assert!(w.link_markup(9999).is_none());
     }
 
     // ---- reveal (🎯) -------------------------------------------------------

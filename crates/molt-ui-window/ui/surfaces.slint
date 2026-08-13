@@ -443,6 +443,9 @@ export component MemoryPane inherits VerticalLayout {
     callback copy-path(string);
     // the ⚙️ gear routes to the app-level settings screen
     callback open-settings();
+    // "discard all" asks first — the modal lives at the app root (a
+    // layout child here could not overlay the pane)
+    callback confirm-revert();
     spacing: 8px;
 
     // Everything the wiki KNOWS lives in the Rust model behind WikiState
@@ -473,8 +476,153 @@ export component MemoryPane inherits VerticalLayout {
             : idle;
     }
 
+    // changeset stack rows: kind → glyph / tone
+    // (0 created · 1 folder · 2 renamed · 3 moved · 4 deleted · 5 edited)
+    pure function cs-glyph(kind: int) -> string {
+        return kind == 0 ? "➕"
+            : kind == 1 ? "📁"
+            : kind == 2 ? "🏷️"
+            : kind == 3 ? "➡️"
+            : kind == 4 ? "🗑️"
+            : "✏️";
+    }
+    pure function cs-tone(kind: int) -> color {
+        return kind == 4 ? Theme.bad
+            : (kind == 0 || kind == 1) ? Theme.good
+            : Theme.warn;
+    }
+
     if root.view == "brain": VerticalLayout {
         spacing: 8px;
+
+        // ---- the changeset panel: every local action, and what the
+        // next vote would bundle. Visible only while changes exist. ----
+        if WikiState.cs-rows.length > 0: Rectangle {
+            background: Theme.panel;
+            border-radius: Theme.win95 ? 0px : 8px;
+            border-width: Theme.border-w;
+            border-color: Theme.line;
+            property <length> list-h: min(WikiState.cs-rows.length, 4) * 24px;
+            height: 18px + 28px + 6px + self.list-h;
+            VerticalLayout {
+                padding: 9px;
+                spacing: 6px;
+                HorizontalLayout {
+                    height: 28px;
+                    spacing: 10px;
+                    Text {
+                        text: Strings.mem-cs-title;
+                        color: Theme.text;
+                        font-size: Theme.fs-body;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    // the NET summary: only non-zero parts speak
+                    if WikiState.cs-added > 0: Text {
+                        text: "+\{WikiState.cs-added} \{Strings.mem-cs-new}";
+                        color: Theme.good;
+                        font-size: Theme.fs-cap;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                    if WikiState.cs-deleted > 0: Text {
+                        text: "-\{WikiState.cs-deleted} \{Strings.mem-cs-deleted}";
+                        color: Theme.bad;
+                        font-size: Theme.fs-cap;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                    if WikiState.cs-moved > 0: Text {
+                        text: "→\{WikiState.cs-moved} \{Strings.mem-cs-moved}";
+                        color: Theme.warn;
+                        font-size: Theme.fs-cap;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                    if WikiState.cs-lines > 0: Text {
+                        text: "~\{WikiState.cs-lines} \{Strings.mem-cs-lines}";
+                        color: Theme.warn;
+                        font-size: Theme.fs-cap;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+                    AppButton {
+                        height: 28px;
+                        pad: 10px;
+                        label: Strings.mem-cs-undo;
+                        clicked => {
+                            WikiState.cs-undo();
+                        }
+                    }
+                    AppButton {
+                        height: 28px;
+                        pad: 10px;
+                        label: Strings.mem-cs-revert;
+                        clicked => {
+                            root.confirm-revert();
+                        }
+                    }
+                    AppButton {
+                        height: 28px;
+                        pad: 10px;
+                        label: Strings.mem-cs-vote;
+                        emoji: "🗳️";
+                        primary: true;
+                        clicked => {
+                            WikiState.cs-vote();
+                        }
+                    }
+                }
+                // the action stack, oldest first (capped, scrolls)
+                Rectangle {
+                    clip: true;
+                    csl := Flickable {
+                        width: 100%;
+                        height: 100%;
+                        viewport-width: self.width;
+                        viewport-height: WikiState.cs-rows.length * 24px;
+                        VerticalLayout {
+                            alignment: start;
+                            for r in WikiState.cs-rows: HorizontalLayout {
+                                height: 24px;
+                                spacing: 6px;
+                                Rectangle {
+                                    width: 16px;
+                                    height: 100%;
+                                    clip: true;
+                                    Text {
+                                        text: root.cs-glyph(r.kind);
+                                        font-family: "Twemoji Mozilla";
+                                        font-size: 11px;
+                                        width: 100%;
+                                        height: 100%;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                Text {
+                                    text: r.label;
+                                    color: root.cs-tone(r.kind);
+                                    font-size: Theme.fs-cap;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    horizontal-stretch: 1;
+                                }
+                            }
+                        }
+                    }
+                    ScrollHint {
+                        x: parent.width - 5px;
+                        view-h: csl.height;
+                        content-h: csl.viewport-height;
+                        scroll-y: csl.viewport-y;
+                    }
+                }
+            }
+        }
         // no PaneHeader here: the Multisig-Wiki title (with the mock
         // badge) sits in the app's top bar, left of the republic name —
         // the full pane height belongs to navigator + document.
@@ -655,6 +803,24 @@ export component MemoryPane inherits VerticalLayout {
                                             enabled: r.status != 3;
                                             activated => {
                                                 WikiState.nav-rename-start(r.id);
+                                            }
+                                        }
+                                        // pending rename/edit (2) or pending
+                                        // deletion (3): back to the base state
+                                        MenuItem {
+                                            title: Strings.mem-menu-revert;
+                                            enabled: r.status == 2 || r.status == 3;
+                                            activated => {
+                                                WikiState.nav-revert(r.id);
+                                            }
+                                        }
+                                        // link markup to the clipboard, ready
+                                        // to paste into any open editor
+                                        MenuItem {
+                                            title: Strings.mem-menu-copy-link;
+                                            enabled: r.status != 3;
+                                            activated => {
+                                                WikiState.copy-link(r.id);
                                             }
                                         }
                                         MenuSeparator { }
@@ -980,14 +1146,23 @@ export component MemoryPane inherits VerticalLayout {
                                 WikiState.edit-toggle();
                             }
                         }
-                        // the pending-change chip: what the future patch
-                        // vote will bundle
-                        if WikiState.change-chip != "": Text {
-                            text: WikiState.change-chip;
+                        // the open file changed vs base: a plain hint plus
+                        // its own revert — the numeric summary lives in the
+                        // changeset panel, not here
+                        if WikiState.doc-status == 2: Text {
+                            text: Strings.mem-changed-hint;
                             color: Theme.warn;
                             font-size: Theme.fs-cap;
                             font-weight: 600;
                             vertical-alignment: center;
+                        }
+                        if WikiState.doc-status == 2: ToolBtn {
+                            glyph: "↩️";
+                            name: Strings.mem-tb-revert-doc;
+                            enabled: true;
+                            clicked => {
+                                WikiState.revert-active();
+                            }
                         }
                         Rectangle {
                             horizontal-stretch: 1;
@@ -1030,8 +1205,20 @@ export component MemoryPane inherits VerticalLayout {
                             color: Theme.faint;
                             font-size: 11px;
                         }
-                        for b in WikiState.blocks: BrainBlockView {
-                            b: b;
+                        // a click on the document body opens the markdown
+                        // editor — the preview reads, one click writes
+                        for b in WikiState.blocks: Rectangle {
+                            height: bv.preferred-height;
+                            bv := BrainBlockView {
+                                width: 100%;
+                                b: b;
+                            }
+                            TouchArea {
+                                mouse-cursor: MouseCursor.text;
+                                clicked => {
+                                    WikiState.edit-toggle();
+                                }
+                            }
                         }
                         // cross-links — what makes the tree a wiki. One
                         // chip per line: paths are long and the chips

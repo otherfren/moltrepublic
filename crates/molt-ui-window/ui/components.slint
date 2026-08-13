@@ -795,28 +795,53 @@ export component AppArea inherits Rectangle {
     border-width: Theme.border-w;
     border-color: input.has-focus ? Theme.accent : Theme.line;
     clip: true;
-    fl := Flickable {
-        x: 12px;
-        y: 8px;
-        width: parent.width - 24px;
-        height: parent.height - 16px;
-        viewport-width: self.width;
-        viewport-height: max(self.height, input.preferred-height);
-        if root.text == "": Text {
-            width: 100%;
-            text: root.placeholder;
-            color: Theme.faint;
-            font-size: root.font-size;
-            wrap: word-wrap;
+    // right-click edit menu. The TextInput ignores right-clicks (its
+    // pointer handling is left/middle only), so the wrapping area
+    // receives them natively — no explicit show() dance needed here.
+    ContextMenuArea {
+        Menu {
+            MenuItem {
+                title: Strings.ed-cut;
+                activated => {
+                    input.cut();
+                }
+            }
+            MenuItem {
+                title: Strings.ed-copy;
+                activated => {
+                    input.copy();
+                }
+            }
+            MenuItem {
+                title: Strings.ed-paste;
+                activated => {
+                    input.paste();
+                }
+            }
         }
-        input := TextInput {
-            width: 100%;
-            height: fl.viewport-height;
-            text <=> root.text;
-            color: Theme.text;
-            font-size: root.font-size;
-            single-line: false;
-            wrap: word-wrap;
+        fl := Flickable {
+            x: 12px;
+            y: 8px;
+            width: parent.width - 24px;
+            height: parent.height - 16px;
+            viewport-width: self.width;
+            viewport-height: max(self.height, input.preferred-height);
+            if root.text == "": Text {
+                width: 100%;
+                text: root.placeholder;
+                color: Theme.faint;
+                font-size: root.font-size;
+                wrap: word-wrap;
+            }
+            input := TextInput {
+                width: 100%;
+                height: fl.viewport-height;
+                text <=> root.text;
+                color: Theme.text;
+                font-size: root.font-size;
+                single-line: false;
+                wrap: word-wrap;
+            }
         }
     }
     ScrollHint {

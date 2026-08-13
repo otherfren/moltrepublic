@@ -53,6 +53,7 @@ use tokio::sync::broadcast::error::RecvError;
 // if the module were still injected here.
 pub use molt_ui_window::*;
 
+mod patchview;
 mod wiki;
 
 /// Open the GUI and run the Slint event loop on the calling (main) thread.
@@ -268,8 +269,11 @@ pub fn run_app(
     let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
 
     // The Multisig-Wiki mock's state machine + its WikiState bridge —
-    // UI-local by design (a badged mock never touches the engine).
-    wire_wiki(&ui);
+    // UI-local by design, EXCEPT the changeset vote: that one proposes on
+    // the real gated Memory surface, so it is wired with the handles.
+    let (wiki_model, wiki_last) = wire_wiki(&ui);
+    wire_wiki_vote(&ui, &rt, &wallet, &wiki_model, &wiki_last);
+    wire_patch_view(&ui);
 
     // --- actions: each becomes a Command on the shared engine ---
     {
@@ -3692,6 +3696,9 @@ struct ProposalRowData {
     img_b64: String,
     /// set_charter: long Ist/Soll texts render capped + scrollable.
     charter_op: bool,
+    /// wiki_patch: the proposed value IS a raw git patch — monospace,
+    /// capped + scrollable.
+    patch_op: bool,
     /// set_relays: the vote card renders the pool DIFF instead of the
     /// generic Ist/Soll pair — one row per union member, marked
     /// kept/added/removed (`RELAY_ROW_*`). Empty = not a relay op.
@@ -4318,7 +4325,18 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     ui.set_selected_channel_label(b.selected_label.as_str().into());
     ui.set_selected_channel_closed(b.selected_closed);
     ui.set_selected_channel_org(b.selected_org);
+    // the wiki-patch diff viewer follows the selected decision: (re)parse
+    // on a CHANGE of decision only, so the user's file selection survives
+    // the mirror ticks while the same decision stays open
+    let decision_changed = ui.get_selected_decision().id != b.selected_decision.id;
     ui.set_selected_decision(to_proposal_row(&b.selected_decision));
+    if decision_changed {
+        if b.selected_decision.patch_op {
+            patch_view_sync(ui, &b.selected_decision.proposed, 0);
+        } else {
+            patch_view_sync(ui, "", 0);
+        }
+    }
 
     // the Organization tables (Members / Uploads)
     let members: Vec<MemberRow> = b
@@ -4690,6 +4708,7 @@ fn to_proposal_row(p: &ProposalRowData) -> ProposalRow {
         image_op: p.image_op,
         img_b64: p.img_b64.as_str().into(),
         charter_op: p.charter_op,
+        patch_op: p.patch_op,
         relay_op: !p.relay_changes.is_empty(),
         relay_changes: ModelRc::new(VecModel::from(
             p.relay_changes
@@ -4790,6 +4809,7 @@ fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRowData {
             .unwrap_or_default()
             .to_string(),
         charter_op: op == "set_charter",
+        patch_op: op == "wiki_patch",
         relay_changes: match op {
             "set_relays" => relay_pool_diff(&p.current, &p.proposed),
             // the feature vote reuses the set-diff rows; keys render as
@@ -5599,6 +5619,17 @@ fn display_title(lang: i32, v: &serde_json::Value) -> String {
             (_, _) => format!("Add seat: {member}"),
         };
     }
+    // a wiki changeset vote: localized label + the language-neutral
+    // count summary the proposer's bridge baked in ("+2 -1 →1 ~34")
+    if op == Some("wiki_patch") {
+        let label = if lang == 1 { "Wiki-Patch" } else { "Wiki patch" };
+        let summary = v.get("summary").and_then(serde_json::Value::as_str).unwrap_or("");
+        return if summary.is_empty() {
+            label.to_string()
+        } else {
+            format!("{label} ({summary})")
+        };
+    }
     op.and_then(|o| org_op_label(lang, o))
         .map(str::to_string)
         .unwrap_or_else(|| summarize(v))
@@ -6178,18 +6209,31 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
     s.set_has_marked(w.marked().is_some());
     s.set_editing(w.editing);
     s.set_can_reveal(w.active_id().is_some() && w.active_id() != w.marked());
-    let (added, modified, deleted) = w.change_counts();
-    let mut chip = String::new();
-    for (n, sign) in [(added, '+'), (modified, '~'), (deleted, '-')] {
-        if n > 0 {
-            if !chip.is_empty() {
-                chip.push(' ');
-            }
-            chip.push(sign);
-            chip.push_str(&n.to_string());
-        }
+    // the changeset panel: NET counts + the action stack (visibility is
+    // the stack's non-emptiness, .slint-side)
+    let c = w.changeset_counts();
+    s.set_cs_added(i32::try_from(c.added).unwrap_or(0));
+    s.set_cs_deleted(i32::try_from(c.deleted).unwrap_or(0));
+    s.set_cs_moved(i32::try_from(c.moved).unwrap_or(0));
+    s.set_cs_lines(i32::try_from(c.lines).unwrap_or(0));
+    let cs_rows: Vec<WikiChangeRow> = w
+        .stack_rows()
+        .into_iter()
+        .map(|r| WikiChangeRow {
+            kind: match r.kind {
+                wiki::ChangeKind::Created => 0,
+                wiki::ChangeKind::CreatedFolder => 1,
+                wiki::ChangeKind::Renamed => 2,
+                wiki::ChangeKind::Moved => 3,
+                wiki::ChangeKind::Deleted => 4,
+                wiki::ChangeKind::Edited => 5,
+            },
+            label: r.label.into(),
+        })
+        .collect();
+    if let Some(fresh) = sync_vec_model(&s.get_cs_rows(), cs_rows) {
+        s.set_cs_rows(fresh);
     }
-    s.set_change_chip(chip.into());
     if let Some(doc) = w.active() {
         let id = doc.id;
         s.set_doc_open(true);
@@ -6238,9 +6282,17 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
 
 /// Wire the Multisig-Wiki's Rust state machine ([`wiki`]) to the
 /// `WikiState` global: every action callback mutates the model, then
-/// re-syncs the whole face. UI-local by design — the badged mock never
-/// touches the engine.
-fn wire_wiki(ui: &AppWindow) {
+/// re-syncs the whole face. UI-local by design — of the wiki verbs only
+/// the changeset VOTE talks to the engine, and that one is wired
+/// separately ([`wire_wiki_vote`]) where the handles live. Returns the
+/// shared model + raw-guard for that wiring.
+#[allow(clippy::type_complexity)]
+fn wire_wiki(
+    ui: &AppWindow,
+) -> (
+    Rc<RefCell<wiki::Wiki>>,
+    Rc<RefCell<Option<(wiki::DocId, bool)>>>,
+) {
     let model = Rc::new(RefCell::new(wiki::Wiki::sample()));
     let last: Rc<RefCell<Option<(wiki::DocId, bool)>>> = Rc::new(RefCell::new(None));
     sync_wiki(ui, &model.borrow(), &mut last.borrow_mut());
@@ -6345,6 +6397,215 @@ fn wire_wiki(ui: &AppWindow) {
             sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
         });
     }
+
+    // the changeset verbs rewrite doc content UNDER an open editor, so
+    // each drops the raw-guard before syncing (a kept guard would leave
+    // the TextInput on the pre-revert bytes and the next keystroke would
+    // faithfully re-record them)
+    {
+        let m = model.clone();
+        let la = last.clone();
+        let weak = ui.as_weak();
+        g.on_cs_undo(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if let Err(e) = m.borrow_mut().undo() {
+                ui.invoke_show_toast_error(e.into());
+            }
+            *la.borrow_mut() = None;
+            sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+        });
+    }
+    {
+        let m = model.clone();
+        let la = last.clone();
+        let weak = ui.as_weak();
+        g.on_cs_revert(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            m.borrow_mut().revert_all();
+            *la.borrow_mut() = None;
+            sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+        });
+    }
+    {
+        let m = model.clone();
+        let la = last.clone();
+        let weak = ui.as_weak();
+        g.on_nav_revert(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            if let Err(e) = m.borrow_mut().revert_doc(wiki_doc_id(id)) {
+                ui.invoke_show_toast_error(e.into());
+            }
+            *la.borrow_mut() = None;
+            sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+        });
+    }
+    {
+        let m = model.clone();
+        let la = last.clone();
+        let weak = ui.as_weak();
+        g.on_revert_active(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let active = m.borrow().active_id();
+            if let Some(id) = active {
+                if let Err(e) = m.borrow_mut().revert_doc(id) {
+                    ui.invoke_show_toast_error(e.into());
+                }
+            }
+            *la.borrow_mut() = None;
+            sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+        });
+    }
+    // copy-link: markdown link markup for the file, ready to paste into
+    // the editor (goes through the window's one clipboard route)
+    {
+        let m = model.clone();
+        let weak = ui.as_weak();
+        g.on_copy_link(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            let markup = m.borrow().link_markup(wiki_doc_id(id));
+            if let Some(markup) = markup {
+                ui.invoke_copy_text(markup.into());
+                let msg = ui.global::<Strings>().get_mem_toast_link_md();
+                ui.invoke_show_toast(msg);
+            }
+        });
+    }
+
+    (model, last)
+}
+
+/// Push one wiki patch into the `PatchView` global: the file navigator
+/// (markers included) and the `sel`ected file's rendered diff rows. An
+/// empty patch clears the viewer.
+fn patch_view_sync(ui: &AppWindow, patch: &str, sel: usize) {
+    let g = ui.global::<PatchView>();
+    let files = patchview::parse_patch(patch);
+    let sel = sel.min(files.len().saturating_sub(1));
+    let nav: Vec<PatchNavRow> = files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| PatchNavRow {
+            label: f.display_path().into(),
+            marker: f.marker().into(),
+            status: i32::from(f.status()),
+            selected: i == sel,
+        })
+        .collect();
+    let rows: Vec<DiffRow> = files
+        .get(sel)
+        .map(|f| {
+            patchview::file_rows(f)
+                .into_iter()
+                .map(|r| DiffRow {
+                    segs: ModelRc::new(VecModel::from(
+                        r.segs
+                            .into_iter()
+                            .map(|s| DiffSeg {
+                                text: s.text.into(),
+                                tone: match s.tone {
+                                    patchview::SegTone::Plain => 0,
+                                    patchview::SegTone::Added => 1,
+                                    patchview::SegTone::Removed => 2,
+                                    patchview::SegTone::Meta => 3,
+                                },
+                            })
+                            .collect::<Vec<_>>(),
+                    )),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    g.set_nav_rows(ModelRc::new(VecModel::from(nav)));
+    g.set_rows(ModelRc::new(VecModel::from(rows)));
+}
+
+/// Wire the diff viewer's file navigator: a click re-fills the details
+/// pane from the SELECTED DECISION's patch (the viewer renders only while
+/// a wiki_patch decision is open, so that is the one source of truth).
+fn wire_patch_view(ui: &AppWindow) {
+    let weak = ui.as_weak();
+    ui.global::<PatchView>().on_select(move |idx| {
+        let Some(ui) = weak.upgrade() else { return };
+        let patch = ui.get_selected_decision().proposed.to_string();
+        patch_view_sync(&ui, &patch, usize::try_from(idx).unwrap_or(0));
+    });
+}
+
+/// Wire the changeset panel's "start vote" — the one wiki verb that talks
+/// to the engine. The stack is reprocessed into the NET patch; a net-empty
+/// changeset just clears (every action cancelled out). Otherwise the patch
+/// rides a REAL gated proposal on the Memory surface — the same threshold
+/// governance every surface runs — and the working copy resets to base:
+/// the proposal carries the changes now.
+fn wire_wiki_vote(
+    ui: &AppWindow,
+    rt: &Handle,
+    wallet: &WalletHandle,
+    model: &Rc<RefCell<wiki::Wiki>>,
+    last: &Rc<RefCell<Option<(wiki::DocId, bool)>>>,
+) {
+    let m = model.clone();
+    let la = last.clone();
+    let weak = ui.as_weak();
+    let rt = rt.clone();
+    let wh = wallet.clone();
+    ui.global::<WikiState>().on_cs_vote(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let Some(patch) = m.borrow().build_patch() else {
+            m.borrow_mut().revert_all();
+            *la.borrow_mut() = None;
+            sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            let msg = ui.global::<Strings>().get_mem_toast_net_empty();
+            ui.invoke_show_toast(msg);
+            return;
+        };
+        // language-neutral summary for the proposal title, "+2 -1 →1 ~34"
+        let c = m.borrow().changeset_counts();
+        let mut summary = String::new();
+        for (n, sign) in [
+            (c.added, '+'),
+            (c.deleted, '-'),
+            (c.moved, '→'),
+            (c.lines, '~'),
+        ] {
+            if n > 0 {
+                if !summary.is_empty() {
+                    summary.push(' ');
+                }
+                summary.push(sign);
+                summary.push_str(&n.to_string());
+            }
+        }
+        let payload = serde_json::json!({
+            "op": "wiki_patch",
+            "summary": summary,
+            "value": patch,
+        });
+        // the completion must not carry the UI-thread Rc model into the
+        // task — clearing the changeset goes through the same WikiState
+        // door the panel button uses, back on the UI thread
+        let weak2 = ui.as_weak();
+        let wh = wh.clone();
+        rt.spawn(async move {
+            let outcome = wh
+                .execute(Command::Propose {
+                    surface: Surface::Memory,
+                    payload,
+                })
+                .await;
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = weak2.upgrade() else { return };
+                match outcome {
+                    Ok(_) => {
+                        ui.global::<WikiState>().invoke_cs_revert();
+                        let msg = ui.global::<Strings>().get_toast_proposed();
+                        ui.invoke_show_toast(msg);
+                    }
+                    Err(e) => ui.invoke_show_toast_error(format!("\u{26a0} {e}").into()),
+                }
+            });
+        });
+    });
 }
 
 /// Declare the whole localized string table in ONE place: the macro
@@ -6903,6 +7164,29 @@ lexicon! {
     mem_linked: "Linked", "Verknüpft";
     mem_title_archive: "Archived notes", "Archivierte Notizen";
     mem_hint_archive: "Retired from the wiki - still readable, no longer linked.", "Aus dem Wiki zurückgezogen - weiter lesbar, nicht mehr verknüpft.";
+    mem_cs_title: "Changeset", "Changeset";
+    mem_cs_new: "new", "neu";
+    mem_cs_deleted: "deleted", "gelöscht";
+    mem_cs_moved: "moved", "verschoben";
+    mem_cs_lines: "lines", "Zeilen";
+    mem_cs_undo: "Undo", "Rückgängig";
+    mem_cs_revert: "Discard all", "Alles verwerfen";
+    mem_cs_vote: "Start vote", "Vote starten";
+    mem_cs_confirm_title: "Discard all changes?", "Alle Änderungen verwerfen?";
+    mem_cs_confirm_body: "Every local change is lost - this cannot be undone.", "Alle lokalen Änderungen gehen verloren - nicht rückgängig zu machen.";
+    mem_toast_net_empty: "Changes cancel out - changeset cleared", "Änderungen heben sich auf - Changeset geleert";
+    mem_menu_revert: "Discard changes", "Änderungen verwerfen";
+    mem_menu_copy_link: "Copy link", "Link kopieren";
+    mem_toast_link_md: "Link markup copied", "Link-Markup kopiert";
+    mem_changed_hint: "changed", "geändert";
+    mem_tb_revert_doc: "Discard this file's changes", "Änderungen dieser Datei verwerfen";
+    ed_copy: "Copy", "Kopieren";
+    ed_cut: "Cut", "Ausschneiden";
+    ed_paste: "Paste", "Einfügen";
+    pc_show_patch: "Raw patch", "Roher Patch";
+    pv_title: "Wiki patch", "Wiki-Patch";
+    pv_copy: "Copy patch", "Patch kopieren";
+    pv_copied: "Patch copied", "Patch kopiert";
     qb_title_board: "Quest board", "Quest-Board";
     qb_hint_board: "Tasks put forward, claimed and completed. Putting one forward and reporting it done are gated proposals.", "Aufgaben - ausgeschrieben, übernommen, erledigt. Ausschreiben und Erledigt-Melden sind geschützte Vorschläge.";
     qb_col_open: "Open", "Offen";
@@ -8978,13 +9262,13 @@ mod gui_tests {
     fn wiki_bridge_opens_edits_closes_and_deletes_headless() {
         i_slint_backend_testing::init_no_event_loop();
         let ui = AppWindow::new().expect("headless window");
-        wire_wiki(&ui);
+        let _wiki = wire_wiki(&ui);
         let g = ui.global::<WikiState>();
         // the sample opens with the charter as the only tab
         assert_eq!(g.get_tabs().row_count(), 1);
         assert!(g.get_doc_open());
         assert_eq!(g.get_doc_path().as_str(), "charter.md");
-        assert_eq!(g.get_change_chip().as_str(), "", "a clean tree has no chip");
+        assert_eq!(g.get_cs_rows().row_count(), 0, "a clean tree has no panel");
         // open glossary.md via the open route
         let rows = g.get_nav_rows();
         let glossary = (0..rows.row_count())
@@ -9011,11 +9295,16 @@ mod gui_tests {
         g.invoke_nav_open(glossary.id);
         assert_eq!(g.get_tabs().row_count(), 2);
         assert_eq!(g.get_doc_path().as_str(), "glossary.md");
-        // an edit turns up in the chip, the tab status and the preview diff
+        // an edit turns up on the changeset stack, the tab status and the
+        // preview diff
         g.invoke_edit_toggle();
         let edited = format!("{}\n\nA new closing thought.", g.get_raw());
         g.invoke_edited(edited.into());
-        assert_eq!(g.get_change_chip().as_str(), "~1");
+        assert_eq!(g.get_cs_rows().row_count(), 1);
+        let row = g.get_cs_rows().row_data(0).expect("stack row");
+        assert_eq!(row.kind, 5, "an edit row");
+        assert_eq!(row.label.as_str(), "glossary.md");
+        assert!(g.get_cs_lines() > 0, "touched lines are counted");
         let tabs = g.get_tabs();
         let gtab = (0..tabs.row_count())
             .filter_map(|i| tabs.row_data(i))
@@ -9043,7 +9332,26 @@ mod gui_tests {
             .find(|r| r.label.as_str() == "glossary.md")
             .expect("the deleted row stays listed");
         assert_eq!(struck.status, 3);
-        assert_eq!(g.get_change_chip().as_str(), "-1", "delete replaced the edit");
+        // the stack narrates both actions, the NET counts only the delete
+        assert_eq!(g.get_cs_rows().row_count(), 2);
+        assert_eq!(g.get_cs_deleted(), 1);
+        assert_eq!(g.get_cs_lines(), 0, "a deleted file's edits are not lines");
+        // undo takes back the deletion (the edit stays pending) …
+        g.invoke_cs_undo();
+        assert_eq!(g.get_cs_rows().row_count(), 1);
+        assert_eq!(g.get_cs_deleted(), 0);
+        assert!(g.get_cs_lines() > 0);
+        // … a per-file revert clears the file without touching others …
+        g.invoke_nav_revert(struck.id);
+        assert_eq!(g.get_cs_rows().row_count(), 0, "the panel is gone");
+        // … and after fresh changes, revert-all clears everything at once
+        g.invoke_new_file();
+        g.invoke_new_folder();
+        assert_eq!(g.get_cs_rows().row_count(), 2);
+        assert_eq!(g.get_cs_added(), 1);
+        g.invoke_cs_revert();
+        assert_eq!(g.get_cs_rows().row_count(), 0);
+        assert_eq!(g.get_cs_added(), 0);
     }
 
     /// A node with storage, a founded workspace, and chat in it — the state

@@ -41,6 +41,32 @@ zur Abstimmung"-Schritt. Dazu app-weit einstellbare Schriftgrößen
 `set_fonts`-Command + `[ui]`-Keys in config.toml, alte Configs behalten
 Defaults). Story 14 (echtes Backend + Patch-Vote) bleibt offen.
 
+**Changeset-Runde (2026-08-14, Nutzer-Punchlist):** der Patch-Vote-Schritt ist
+gebaut. Jede Wiki-Aktion (Edit koalesziert pro Datei, Neu, Ordner, Rename,
+Move, Delete) landet als Eintrag auf einem Änderungs-Stack
+(`crates/molt-ui/src/wiki.rs`); das Changeset-Panel über Navigator+Editor
+zeigt Stack + Netto-Zählung (neu/gelöscht/verschoben/Zeilen) mit Undo
+(LIFO, kollisions-ehrlich), Verwerfen (bestätigt) und „Vote starten".
+Der Vote verarbeitet den Stack neu zum NETTO-git-Patch (`build_patch`:
+unified diff + rename/new/deleted-Header via `similar`; hebt sich alles auf
+→ Panel geleert + Toast) und fährt als ECHTES gated Proposal
+`{op:"wiki_patch", summary, value}` auf der Memory-Surface — dieselbe
+Threshold-Governance wie überall, per MCP `propose` co-equal erreichbar.
+Die Proposal-Karte zeigt den rohen Patch nur noch hinter einem
+👁️-Knopf (read-only-Modal + Copy, Charter-Idiom); die Decision-Discussion
+eines wiki_patch trägt zwischen Karte und Chat den DIFF-VIEWER
+(`crates/molt-ui/src/patchview.rs` + `PatchView`-Global): links die Dateien
+des Patches (`<moved>`/`<deleted>` markiert), rechts der zeichen-genaue
+Diff (grün hinzugefügt, rot entfernt, gepaarte Zeilen char-gediffed).
+Dazu: Kontextmenü „Änderungen verwerfen" (Modified/Deleted) und „Link
+kopieren" (Markdown-Markup in die Zwischenablage), Editor-Kontextmenü
+Ausschneiden/Kopieren/Einfügen, Klick auf die Preview öffnet den Editor,
+Editor-Header zeigt statt „~1" einen „geändert"-Hinweis + Datei-Revert.
+Nach erfolgreichem Vote-Start wird die Arbeitskopie auf die Basis
+zurückgesetzt (das Proposal trägt die Änderungen). Offen für den echten
+Bau (Story 14): Patch-APPLY bei Threshold (Basis nachziehen), Draft-Rettung
+bei Decline.
+
 **Abschluss-Review + Security-Analyse:** adversariales Multi-Agenten-Review über den
 gesamten Session-Diff (`86b72db..`, ~15,7k Zeilen, 10 Dimensionen, jedes Finding von
 3 perspektiv-diversen Skeptikern verifiziert). Ergebnis: **keine kritischen Bugs**;

@@ -121,6 +121,7 @@ export struct ProposalRow {
     image-op: bool, // set_image / remove_image → picture + preview link
     img-b64: string, // a pending set_image's embedded bytes (base64; "" else)
     charter-op: bool, // set_charter → long text, capped + scrollable
+    patch-op: bool, // wiki_patch → the raw git patch, monospace + scrollable
     relay-op: bool, // set_relays → the card renders the pool diff rows
     relay-changes: [RelayChange], // union of current+proposed pool, marked
     votes: [MemberVoteMark], // per-member stance, roster order
@@ -310,6 +311,43 @@ export struct WikiBlock {
     status: int, // 0 same · 1 added · 2 changed · 3 removed ghost
 }
 
+// One changeset-panel stack row: the action log, oldest first.
+export struct WikiChangeRow {
+    kind: int, // 0 created · 1 folder · 2 renamed · 3 moved · 4 deleted · 5 edited
+    label: string,
+}
+
+// ---- the wiki-patch diff viewer's model face ----------------------------
+// A wiki_patch proposal's parsed patch (crates/molt-ui/src/patchview.rs):
+// left the changed files, right the selected file's rendered diff.
+
+// One file of the patch in the viewer's navigator.
+export struct PatchNavRow {
+    label: string,
+    marker: string, // "<moved>" / "<deleted>" / ""
+    status: int, // 1 added · 2 modified · 3 deleted (the wiki tones)
+    selected: bool,
+}
+
+// One colored run of a diff row.
+export struct DiffSeg {
+    text: string,
+    tone: int, // 0 plain · 1 added (green) · 2 removed (red) · 3 meta
+}
+
+// One display row of the details pane.
+export struct DiffRow {
+    segs: [DiffSeg],
+}
+
+// The diff viewer's shared state: filled by the Rust bridge whenever a
+// wiki_patch decision is selected; `select` re-fills `rows` for a file.
+export global PatchView {
+    in-out property <[PatchNavRow]> nav-rows;
+    in-out property <[DiffRow]> rows;
+    callback select(int); // navigator row index
+}
+
 // The wiki pane's shared state + action bus: properties are pushed by the
 // Rust bridge after every mutation, callbacks are implemented there. The
 // app root also drives it (Ctrl+W / Del / Enter routing).
@@ -326,8 +364,14 @@ export global WikiState {
     in-out property <string> raw; // the raw editor's buffer (two-way)
     in-out property <bool> editing;
     in-out property <bool> can-reveal;
-    in-out property <string> change-chip; // "+a ~m -d", empty when clean
     in-out property <bool> has-marked;
+    // the changeset panel: NET counts + the action stack. The panel is
+    // visible while the stack is non-empty.
+    in-out property <int> cs-added;
+    in-out property <int> cs-deleted;
+    in-out property <int> cs-moved;
+    in-out property <int> cs-lines;
+    in-out property <[WikiChangeRow]> cs-rows;
     callback nav-mark(int);
     callback nav-open(int);
     callback nav-toggle-folder(string);
@@ -351,6 +395,12 @@ export global WikiState {
     callback reveal();
     callback open-marked(); // Enter on the marked row
     callback delete-marked(); // Del on the marked row
+    callback cs-undo(); // take back the latest action
+    callback cs-revert(); // discard ALL local changes (pane confirms first)
+    callback cs-vote(); // bundle the net changes into a patch proposal
+    callback nav-revert(int); // context menu: discard one file's changes
+    callback copy-link(int); // context menu: link markup to the clipboard
+    callback revert-active(); // editor header: discard the open file's changes
 }
 
 // A full theme palette. Three are defined in `Palettes`; `Theme.active` picks one.
@@ -1040,6 +1090,30 @@ export global Strings {
     in property <string> mem-linked;
     in property <string> mem-title-archive;
     in property <string> mem-hint-archive;
+    // Memory: changeset panel + per-file revert + link markup + editor menu
+    in property <string> mem-cs-title;
+    in property <string> mem-cs-new;
+    in property <string> mem-cs-deleted;
+    in property <string> mem-cs-moved;
+    in property <string> mem-cs-lines;
+    in property <string> mem-cs-undo;
+    in property <string> mem-cs-revert;
+    in property <string> mem-cs-vote;
+    in property <string> mem-cs-confirm-title;
+    in property <string> mem-cs-confirm-body;
+    in property <string> mem-toast-net-empty;
+    in property <string> mem-menu-revert;
+    in property <string> mem-menu-copy-link;
+    in property <string> mem-toast-link-md;
+    in property <string> mem-changed-hint;
+    in property <string> mem-tb-revert-doc;
+    in property <string> ed-copy;
+    in property <string> ed-cut;
+    in property <string> ed-paste;
+    in property <string> pc-show-patch;
+    in property <string> pv-title;
+    in property <string> pv-copy;
+    in property <string> pv-copied;
     // Quests (quest board)
     in property <string> qb-title-board;
     in property <string> qb-hint-board;

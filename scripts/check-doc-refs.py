@@ -47,6 +47,15 @@ FOREIGN_PATHS = {
 # `.slint` carries mock document names for the UI mockups, never references.
 NO_BARE_SCAN = {".slint"}
 
+# Rust files whose bare `*.md` strings are the Multisig-Wiki mock's SAMPLE
+# DOCUMENTS (the same names the .slint mockups carried before the state
+# machine moved into Rust, 2026-08-12) — wiki paths, never repo docs.
+NO_BARE_SCAN_FILES = {
+    "crates/molt-ui/src/wiki.rs": "wiki mock sample tree + its tests",
+    "crates/molt-ui/src/patchview.rs": "diff-viewer tests over the sample tree",
+    "crates/molt-ui/src/lib.rs": "gui_tests drive the sample tree by name",
+}
+
 PATH_RE = re.compile(r"(?<![\w/-])((?:docs|docs_archive)/[A-Za-z0-9_./-]+\.md)")
 # A bare name starts at a true boundary — a leading `-` would split
 # `concept-config-bidirection.md` into a phantom `config-bidirection.md`.
@@ -81,7 +90,7 @@ def main() -> int:
                 resolved += 1
             else:
                 broken.append((str(f), target, "PATH"))
-        if f.suffix in NO_BARE_SCAN:
+        if f.suffix in NO_BARE_SCAN or str(f) in NO_BARE_SCAN_FILES:
             continue
         for m in BARE_RE.finditer(text):
             name = m.group(1)
