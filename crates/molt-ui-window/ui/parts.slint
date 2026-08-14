@@ -2107,8 +2107,15 @@ export component DiffViewer inherits Rectangle {
     border-radius: Theme.win95 ? 0px : 10px;
     border-width: Theme.border-w;
     border-color: Theme.line;
-    height: 300px;
+    height: 320px;
     clip: true;
+    // ONE tone vocabulary with the wiki: added good · modified warn ·
+    // deleted bad; segments plain/green/red/faint-meta
+    pure function file-color(status: int) -> color {
+        return status == 1 ? Theme.good
+            : status == 3 ? Theme.bad
+            : Theme.warn;
+    }
     pure function seg-color(tone: int) -> color {
         return tone == 1 ? Theme.good
             : tone == 2 ? Theme.bad
@@ -2118,7 +2125,7 @@ export component DiffViewer inherits Rectangle {
     HorizontalLayout {
         padding: 8px;
         spacing: 8px;
-        // ---- the patch's files ----
+        // ---- left: the patch's files, wiki-navigator look ----
         Rectangle {
             width: 220px;
             background: Theme.panel;
@@ -2130,26 +2137,46 @@ export component DiffViewer inherits Rectangle {
                 width: 100%;
                 height: 100%;
                 viewport-width: self.width;
-                viewport-height: max(self.height, PatchView.nav-rows.length * 26px + 8px);
+                viewport-height: max(self.height, PatchView.nav-rows.length * 28px + 8px);
                 VerticalLayout {
                     padding: 4px;
                     spacing: 2px;
                     alignment: start;
                     for r[idx] in PatchView.nav-rows: Rectangle {
-                        height: 24px;
+                        height: 26px;
                         border-radius: Theme.win95 ? 0px : 5px;
                         background: r.selected ? Theme.accent-soft
                             : (nta.has-hover ? Theme.zebra : transparent);
+                        if r.selected: Rectangle {
+                            x: 0;
+                            y: 0;
+                            width: 3px;
+                            height: parent.height;
+                            background: Theme.accent;
+                        }
                         HorizontalLayout {
-                            padding-left: 6px;
+                            padding-left: 8px;
                             padding-right: 6px;
                             spacing: 6px;
+                            Rectangle {
+                                width: 16px;
+                                height: 100%;
+                                clip: true;
+                                Text {
+                                    text: "📄";
+                                    font-family: "Twemoji Mozilla";
+                                    font-size: 11px;
+                                    width: 100%;
+                                    height: 100%;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    opacity: r.status == 3 ? 0.5 : 1.0;
+                                }
+                            }
                             Text {
                                 text: r.label;
-                                color: r.status == 1 ? Theme.good
-                                    : r.status == 3 ? Theme.bad
-                                    : Theme.warn;
-                                font-size: Theme.fs-cap;
+                                color: root.file-color(r.status);
+                                font-size: Theme.fs-nav;
                                 font-weight: r.selected ? 600 : 400;
                                 vertical-alignment: center;
                                 overflow: elide;
@@ -2159,6 +2186,7 @@ export component DiffViewer inherits Rectangle {
                                 text: r.marker;
                                 color: Theme.faint;
                                 font-size: Theme.fs-cap;
+                                font-italic: true;
                                 vertical-alignment: center;
                             }
                         }
@@ -2178,8 +2206,7 @@ export component DiffViewer inherits Rectangle {
                 scroll-y: nav-fl.viewport-y;
             }
         }
-        // ---- the selected file's diff (scrolls both ways: char-level
-        // rows must not wrap, a wrapped diff line reads as two) ----
+        // ---- right: the selected file's diff, headed by its path ----
         Rectangle {
             horizontal-stretch: 1;
             background: Theme.panel;
@@ -2187,41 +2214,85 @@ export component DiffViewer inherits Rectangle {
             border-width: Theme.border-w;
             border-color: Theme.line;
             clip: true;
-            df := Flickable {
-                width: 100%;
-                height: 100%;
-                viewport-width: max(self.width, dcol.preferred-width + 16px);
-                viewport-height: max(self.height, dcol.preferred-height + 16px);
-                dcol := VerticalLayout {
-                    x: 8px;
-                    y: 8px;
-                    width: max(df.width, self.preferred-width) - 16px;
-                    alignment: start;
-                    for r in PatchView.rows: HorizontalLayout {
-                        alignment: start;
-                        height: 18px;
-                        for s in r.segs: Rectangle {
-                            width: st.preferred-width;
-                            background: s.tone == 1 ? Theme.good.transparentize(0.82)
-                                : s.tone == 2 ? Theme.bad.transparentize(0.82)
-                                : transparent;
-                            st := Text {
-                                text: s.text;
-                                color: root.seg-color(s.tone);
-                                font-family: "monospace";
-                                font-size: Theme.fs-cap;
-                                vertical-alignment: center;
-                                height: 100%;
+            VerticalLayout {
+                // the breadcrumb strip: which file, in its change tone
+                Rectangle {
+                    height: 30px;
+                    background: Theme.panel-2;
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 8px;
+                        Text {
+                            text: PatchView.sel-label;
+                            color: root.file-color(PatchView.sel-status);
+                            font-size: Theme.fs-cap;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        if PatchView.sel-marker != "": Text {
+                            text: PatchView.sel-marker;
+                            color: Theme.faint;
+                            font-size: Theme.fs-cap;
+                            font-italic: true;
+                            vertical-alignment: center;
+                        }
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+                    }
+                    Rectangle {
+                        x: 0;
+                        y: parent.height - Theme.border-w;
+                        width: parent.width;
+                        height: Theme.border-w;
+                        background: Theme.line;
+                    }
+                }
+                // the diff rows (scrolls both ways: char-level rows must
+                // not wrap, a wrapped diff line reads as two)
+                Rectangle {
+                    vertical-stretch: 1;
+                    clip: true;
+                    df := Flickable {
+                        width: 100%;
+                        height: 100%;
+                        viewport-width: max(self.width, dcol.preferred-width + 20px);
+                        viewport-height: max(self.height, dcol.preferred-height + 16px);
+                        dcol := VerticalLayout {
+                            x: 10px;
+                            y: 8px;
+                            width: max(df.width, self.preferred-width) - 20px;
+                            alignment: start;
+                            for r in PatchView.rows: HorizontalLayout {
+                                alignment: start;
+                                height: 20px;
+                                for s in r.segs: Rectangle {
+                                    width: st.preferred-width;
+                                    border-radius: Theme.win95 ? 0px : 3px;
+                                    background: s.tone == 1 ? Theme.good.transparentize(0.82)
+                                        : s.tone == 2 ? Theme.bad.transparentize(0.82)
+                                        : transparent;
+                                    st := Text {
+                                        text: s.text;
+                                        color: root.seg-color(s.tone);
+                                        font-family: "monospace";
+                                        font-size: Theme.fs-cap;
+                                        vertical-alignment: center;
+                                        height: 100%;
+                                    }
+                                }
                             }
                         }
                     }
+                    ScrollHint {
+                        x: parent.width - 5px;
+                        view-h: df.height;
+                        content-h: df.viewport-height;
+                        scroll-y: df.viewport-y;
+                    }
                 }
-            }
-            ScrollHint {
-                x: parent.width - 5px;
-                view-h: df.height;
-                content-h: df.viewport-height;
-                scroll-y: df.viewport-y;
             }
         }
     }

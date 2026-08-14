@@ -343,8 +343,15 @@ export struct DiffRow {
 // The diff viewer's shared state: filled by the Rust bridge whenever a
 // wiki_patch decision is selected; `select` re-fills `rows` for a file.
 export global PatchView {
+    // which proposal id the parse belongs to (0 = none) — the pending
+    // list renders its inline viewer only under exactly that card
+    in-out property <int> for-id;
     in-out property <[PatchNavRow]> nav-rows;
     in-out property <[DiffRow]> rows;
+    // the selected file, for the details pane's header strip
+    in-out property <string> sel-label;
+    in-out property <string> sel-marker;
+    in-out property <int> sel-status;
     callback select(int); // navigator row index
 }
 

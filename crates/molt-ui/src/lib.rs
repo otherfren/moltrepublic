@@ -4325,16 +4325,33 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     ui.set_selected_channel_label(b.selected_label.as_str().into());
     ui.set_selected_channel_closed(b.selected_closed);
     ui.set_selected_channel_org(b.selected_org);
-    // the wiki-patch diff viewer follows the selected decision: (re)parse
-    // on a CHANGE of decision only, so the user's file selection survives
-    // the mirror ticks while the same decision stays open
+    // the wiki-patch diff viewer: a SELECTED patch decision owns the
+    // global; otherwise the first pending wiki patch on Shared Memory
+    // does (its card in the proposals view carries the inline viewer).
+    // Either way the parse refreshes only when the OWNING id changes, so
+    // the user's file selection survives the mirror ticks.
     let decision_changed = ui.get_selected_decision().id != b.selected_decision.id;
     ui.set_selected_decision(to_proposal_row(&b.selected_decision));
-    if decision_changed {
-        if b.selected_decision.patch_op {
-            patch_view_sync(ui, &b.selected_decision.proposed, 0);
-        } else {
-            patch_view_sync(ui, "", 0);
+    if b.selected_decision.patch_op {
+        if decision_changed {
+            patch_view_sync(
+                ui,
+                &b.selected_decision.proposed,
+                0,
+                b.selected_decision.id,
+            );
+        }
+    } else {
+        let mem_patch = b
+            .surfaces
+            .iter()
+            .find(|s| s.key == "memory")
+            .and_then(|s| s.pending.iter().find(|p| p.patch_op));
+        let held = ui.global::<PatchView>().get_for_id();
+        match mem_patch {
+            Some(p) if held != p.id => patch_view_sync(ui, &p.proposed, 0, p.id),
+            None if held != 0 => patch_view_sync(ui, "", 0, 0),
+            _ => {}
         }
     }
 
@@ -6475,12 +6492,25 @@ fn wire_wiki(
 }
 
 /// Push one wiki patch into the `PatchView` global: the file navigator
-/// (markers included) and the `sel`ected file's rendered diff rows. An
-/// empty patch clears the viewer.
-fn patch_view_sync(ui: &AppWindow, patch: &str, sel: usize) {
+/// (markers included) and the `sel`ected file's rendered diff rows.
+/// `for_id` stamps which proposal the parse belongs to (0 clears).
+fn patch_view_sync(ui: &AppWindow, patch: &str, sel: usize, for_id: i32) {
     let g = ui.global::<PatchView>();
+    g.set_for_id(for_id);
     let files = patchview::parse_patch(patch);
     let sel = sel.min(files.len().saturating_sub(1));
+    match files.get(sel) {
+        Some(f) => {
+            g.set_sel_label(f.display_path().into());
+            g.set_sel_marker(f.marker().into());
+            g.set_sel_status(i32::from(f.status()));
+        }
+        None => {
+            g.set_sel_label("".into());
+            g.set_sel_marker("".into());
+            g.set_sel_status(0);
+        }
+    }
     let nav: Vec<PatchNavRow> = files
         .iter()
         .enumerate()
@@ -6519,15 +6549,31 @@ fn patch_view_sync(ui: &AppWindow, patch: &str, sel: usize) {
     g.set_rows(ModelRc::new(VecModel::from(rows)));
 }
 
+/// The patch text of proposal `id`, wherever its card lives right now:
+/// the selected decision, or a surface's pending list.
+fn patch_text_for(ui: &AppWindow, id: i32) -> Option<String> {
+    let dec = ui.get_selected_decision();
+    if dec.id == id && dec.patch_op {
+        return Some(dec.proposed.to_string());
+    }
+    ui.get_surfaces().iter().find_map(|s| {
+        s.pending
+            .iter()
+            .find(|p| p.id == id && p.patch_op)
+            .map(|p| p.proposed.to_string())
+    })
+}
+
 /// Wire the diff viewer's file navigator: a click re-fills the details
-/// pane from the SELECTED DECISION's patch (the viewer renders only while
-/// a wiki_patch decision is open, so that is the one source of truth).
+/// pane for the proposal the global currently holds (`for-id`).
 fn wire_patch_view(ui: &AppWindow) {
     let weak = ui.as_weak();
     ui.global::<PatchView>().on_select(move |idx| {
         let Some(ui) = weak.upgrade() else { return };
-        let patch = ui.get_selected_decision().proposed.to_string();
-        patch_view_sync(&ui, &patch, usize::try_from(idx).unwrap_or(0));
+        let id = ui.global::<PatchView>().get_for_id();
+        if let Some(patch) = patch_text_for(&ui, id) {
+            patch_view_sync(&ui, &patch, usize::try_from(idx).unwrap_or(0), id);
+        }
     });
 }
 

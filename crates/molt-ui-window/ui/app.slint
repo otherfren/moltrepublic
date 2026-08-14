@@ -6495,34 +6495,42 @@ export component AppWindow inherits Window {
                                         color: Theme.faint;
                                         font-size: Theme.fs-cap;
                                     }
-                                    for p in s.pending: ProposalCard {
-                                        p: p;
-                                        approve => {
-                                            root.approve(p.id);
+                                    for p in s.pending: VerticalLayout {
+                                        spacing: 8px;
+                                        ProposalCard {
+                                            p: p;
+                                            approve => {
+                                                root.approve(p.id);
+                                            }
+                                            decline => {
+                                                root.decline(p.id);
+                                            }
+                                            discuss => {
+                                                // the proposal's discussion is
+                                                // its patch channel on the chat
+                                                // bus — engine-side filter, like
+                                                // the sidebar channel rows
+                                                root.select-view("chat", "today");
+                                                root.select-channel("patch:\{p.id}");
+                                            }
+                                            inline-open: root.img-inline-id == p.id;
+                                            inline-img: root.img-inline-src;
+                                            view-image => {
+                                                root.view-proposal-image(p.id, p.img-b64);
+                                            }
+                                            save-image => {
+                                                root.save-proposal-image(p.img-b64, p.proposed);
+                                            }
+                                            view-patch => {
+                                                root.patch-view-text = p.proposed;
+                                                root.patch-view-open = true;
+                                            }
                                         }
-                                        decline => {
-                                            root.decline(p.id);
-                                        }
-                                        discuss => {
-                                            // the proposal's discussion is
-                                            // its patch channel on the chat
-                                            // bus — engine-side filter, like
-                                            // the sidebar channel rows
-                                            root.select-view("chat", "today");
-                                            root.select-channel("patch:\{p.id}");
-                                        }
-                                        inline-open: root.img-inline-id == p.id;
-                                        inline-img: root.img-inline-src;
-                                        view-image => {
-                                            root.view-proposal-image(p.id, p.img-b64);
-                                        }
-                                        save-image => {
-                                            root.save-proposal-image(p.img-b64, p.proposed);
-                                        }
-                                        view-patch => {
-                                            root.patch-view-text = p.proposed;
-                                            root.patch-view-open = true;
-                                        }
+                                        // a wiki-patch card carries its content
+                                        // right below: the read-only diff viewer
+                                        // (file browser left, char-level colored
+                                        // details right)
+                                        if p.patch-op && p.id == PatchView.for-id: DiffViewer { }
                                     }
                                 }
                             }
@@ -6667,7 +6675,10 @@ export component AppWindow inherits Window {
                                     root.page-list(s.key, "declined", delta);
                                 }
                             }
-                            if root.selected-view != "accepted" && root.selected-view != "denied": HorizontalLayout {
+                            // no free-text composer on Shared Memory: its
+                            // proposals ARE wiki changesets, minted by the
+                            // wiki's own vote button
+                            if s.key != "memory" && root.selected-view != "accepted" && root.selected-view != "denied": HorizontalLayout {
                                 spacing: 8px;
                                 AppField {
                                     horizontal-stretch: 1;
