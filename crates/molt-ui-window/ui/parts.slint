@@ -1697,7 +1697,7 @@ export component ProposalCard inherits Rectangle {
             }
             // a retired patch's way back: its changeset returns as
             // LOCAL drafts (best-effort, honest toast)
-            if root.p.patch-op && root.p.proposed != ""
+            if root.p.patch-op && root.p.proposed != "" && !root.p.applied
                 && (root.read-only || root.p.superseded): AppButton {
                 emoji: "⤵️";
                 label: Strings.mem-rescue;

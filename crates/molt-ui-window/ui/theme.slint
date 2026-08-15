@@ -136,6 +136,9 @@ export struct ProposalRow {
     // the supersede walk retired it (base moved) — "superseded", never
     // "declined by"
     superseded: bool,
+    // the vote ended by APPLYING — its changes live in the base, so the
+    // card never offers the rescue
+    applied: bool,
 }
 
 // One member of a republic with its last-sync info (mock data).
@@ -419,6 +422,13 @@ export global WikiState {
     callback nav-rename-cancel();
     callback nav-delete(int);
     callback nav-drop(int, int); // dragged doc id, target row index
+    // folder verbs (folders have no DocId — they go by name)
+    callback nav-folder-rename-start(string);
+    callback nav-folder-rename-commit(string, string); // old, typed name
+    callback nav-folder-delete(string);
+    callback nav-folder-drop(string, int); // dragged folder, target row index
+    callback new-file-in(string); // folder menu: create inside
+    callback nav-move-root(int); // file menu: out of its folder
     callback tab-focus(int);
     callback tab-close(int);
     callback tab-close-all();
@@ -1129,6 +1139,7 @@ export global Strings {
     in property <string> mem-toast-link;
     in property <string> mem-menu-open;
     in property <string> mem-menu-rename;
+    in property <string> mem-menu-move-root;
     in property <string> mem-menu-delete;
     in property <string> mem-menu-close-all;
     in property <string> mem-menu-close-right;

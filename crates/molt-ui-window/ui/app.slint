@@ -2538,7 +2538,17 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                if root.cw-step == 0: VerticalLayout {
+                // scrollable: at raised font sizes the form outgrows the
+                // window - the Flickable + hint keep every field reachable
+                if root.cw-step == 0: Rectangle {
+                    vertical-stretch: 1;
+                    clip: true;
+                    cwsfl := Flickable {
+                        width: 100%;
+                        height: 100%;
+                        viewport-width: self.width;
+                        viewport-height: cws0.preferred-height;
+                    cws0 := VerticalLayout {
                     spacing: 12px;
                     // pack to the top: leftover height stays blank instead of
                     // inflating the last panel
@@ -2823,9 +2833,14 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
-                }
-                if root.cw-step == 0: Rectangle {
-                    vertical-stretch: 1;
+                    }
+                    }
+                    ScrollHint {
+                        x: parent.width - 7px;
+                        view-h: cwsfl.height;
+                        content-h: cwsfl.viewport-height;
+                        scroll-y: cwsfl.viewport-y;
+                    }
                 }
 
                 // step 2 AND the seed step share this branch: the founding
@@ -3942,7 +3957,17 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                if root.jw-step == 0: VerticalLayout {
+                // scrollable: at raised font sizes the form outgrows the
+                // window - the Flickable + hint keep every field reachable
+                if root.jw-step == 0: Rectangle {
+                    vertical-stretch: 1;
+                    clip: true;
+                    jwsfl := Flickable {
+                        width: 100%;
+                        height: 100%;
+                        viewport-width: self.width;
+                        viewport-height: jws0.preferred-height;
+                    jws0 := VerticalLayout {
                     spacing: 12px;
                     // pack to the top: leftover height stays blank instead of
                     // inflating the last panel
@@ -4036,20 +4061,25 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                }
-                if root.jw-step == 0: Rectangle {
-                    vertical-stretch: 1;
+                    }
+                    }
+                    ScrollHint {
+                        x: parent.width - 7px;
+                        view-h: jwsfl.height;
+                        content-h: jwsfl.viewport-height;
+                        scroll-y: jwsfl.viewport-y;
+                    }
                 }
 
                 // step 2: the real join run — the live log while it waits for
                 // every member to seal. The recovery phrase is NOT shown here
                 // (2026-08-08): a failed founding needs no phrase, and a
                 // sealed one gates entry on the backup step below.
-                if root.jw-step == 1 && !root.jw-sealed: VerticalLayout {
+                if root.jw-step == 1: VerticalLayout {
                     vertical-stretch: 1;
                     spacing: 12px;
                     // ---- ratification: confirm the founder's proposed charter
-                    if root.jw-awaiting-ratify: Rectangle {
+                    if root.jw-awaiting-ratify && !root.jw-sealed: Rectangle {
                         border-radius: Theme.win95 ? 0px : 8px;
                         background: Theme.panel;
                         border-width: Theme.border-w;
@@ -4140,6 +4170,26 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
+                    // the join SEALED - the way in sits ABOVE the run view,
+                    // which stays: the joiner keeps the same ritual log the
+                    // founder keeps (hiding it read as a dead node)
+                    if root.jw-sealed: HorizontalLayout {
+                        vertical-stretch: 0;
+                        spacing: 10px;
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+                        AppButton {
+                            height: 38px;
+                            primary: true;
+                            icon: @image-url("assets/join.svg");
+                            icon-set: true;
+                            label: Strings.enter-republic;
+                            clicked => {
+                                root.join-finish();
+                            }
+                        }
+                    }
                     RunView {
                         vertical-stretch: 1;
                         title: root.jw-republic;
@@ -4191,26 +4241,6 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // step 3: the join SEALED — the backup was confirmed during
-                // the ritual (❻½); this is just the way in. The restore-link
-                // flow lands here too, because a running join always owns
-                // the Join screen (engine-set).
-                if root.jw-sealed: HorizontalLayout {
-                    spacing: 10px;
-                    Rectangle {
-                        horizontal-stretch: 1;
-                    }
-                    AppButton {
-                        height: 38px;
-                        primary: true;
-                        icon: @image-url("assets/join.svg");
-                        icon-set: true;
-                        label: Strings.enter-republic;
-                        clicked => {
-                            root.join-finish();
-                        }
-                    }
-                }
             }
 
             // ---- the two wizards that share this screen (`rw-mode`):

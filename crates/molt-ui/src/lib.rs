@@ -3792,6 +3792,9 @@ struct ProposalRowData {
     /// The supersede walk retired it (base moved) — labeled "superseded",
     /// never "declined by" (no vote was cast).
     superseded: bool,
+    /// The vote ended by APPLYING — an applied patch's changes live in
+    /// the base, so the card never offers the rescue.
+    applied: bool,
 }
 
 /// Read status + every surface snapshot into a bundle the window can apply.
@@ -4866,6 +4869,7 @@ fn to_proposal_row(p: &ProposalRowData) -> ProposalRow {
         my_vote: p.my_vote,
         mine: p.mine,
         superseded: p.superseded,
+        applied: p.applied,
     }
 }
 
@@ -4991,6 +4995,7 @@ fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRowData {
         },
         mine: p.mine,
         superseded: p.superseded,
+        applied: p.state == molt_core::ProposalState::Applied,
     }
 }
 
@@ -6683,6 +6688,120 @@ fn wire_wiki(
         });
     }
 
+    // the folder verbs — all deferred (slint#6426 class: each fires from
+    // the folder row's own menu/input/drag and restructures that row)
+    {
+        let m = model.clone();
+        let la = last.clone();
+        let weak = ui.as_weak();
+        g.on_new_file_in(move |folder| {
+            let m = m.clone();
+            let la = la.clone();
+            let weak = weak.clone();
+            slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+                let Some(ui) = weak.upgrade() else { return };
+                m.borrow_mut().new_file_in(&folder);
+                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            });
+        });
+    }
+    {
+        let m = model.clone();
+        let la = last.clone();
+        let weak = ui.as_weak();
+        g.on_nav_folder_rename_start(move |folder| {
+            let m = m.clone();
+            let la = la.clone();
+            let weak = weak.clone();
+            slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+                let Some(ui) = weak.upgrade() else { return };
+                m.borrow_mut().rename_folder_start(&folder);
+                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            });
+        });
+    }
+    {
+        let m = model.clone();
+        let la = last.clone();
+        let weak = ui.as_weak();
+        g.on_nav_folder_rename_commit(move |old, name| {
+            let m = m.clone();
+            let la = la.clone();
+            let weak = weak.clone();
+            slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+                let Some(ui) = weak.upgrade() else { return };
+                {
+                    let mut w = m.borrow_mut();
+                    // Enter races the teardown after an Escape cancel —
+                    // only act while the model still renames this folder
+                    if w.renaming_folder() == Some(old.as_str()) {
+                        if let Err(e) = w.rename_folder_commit(&old, &name) {
+                            ui.invoke_show_toast_error(e.into());
+                        }
+                    }
+                }
+                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            });
+        });
+    }
+    {
+        let m = model.clone();
+        let la = last.clone();
+        let weak = ui.as_weak();
+        g.on_nav_folder_delete(move |folder| {
+            let m = m.clone();
+            let la = la.clone();
+            let weak = weak.clone();
+            slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+                let Some(ui) = weak.upgrade() else { return };
+                m.borrow_mut().delete_folder(&folder);
+                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            });
+        });
+    }
+    {
+        let m = model.clone();
+        let la = last.clone();
+        let weak = ui.as_weak();
+        g.on_nav_folder_drop(move |folder, row| {
+            let m = m.clone();
+            let la = la.clone();
+            let weak = weak.clone();
+            slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+                let Some(ui) = weak.upgrade() else { return };
+                {
+                    let mut w = m.borrow_mut();
+                    let row = usize::try_from(row).unwrap_or(usize::MAX);
+                    if let Err(e) = w.drop_folder_on_row(&folder, row) {
+                        ui.invoke_show_toast_error(e.into());
+                    }
+                }
+                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            });
+        });
+    }
+
+    {
+        let m = model.clone();
+        let la = last.clone();
+        let weak = ui.as_weak();
+        g.on_nav_move_root(move |id| {
+            let m = m.clone();
+            let la = la.clone();
+            let weak = weak.clone();
+            slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+                let Some(ui) = weak.upgrade() else { return };
+                {
+                    let mut w = m.borrow_mut();
+                    if let Err(e) = w.move_to(wiki_doc_id(id), None) {
+                        ui.invoke_show_toast_error(e.into());
+                    }
+                }
+                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            });
+        });
+    }
+
     // rename commit + drag drop carry a refusal the user must see
     {
         let m = model.clone();
@@ -7535,6 +7654,7 @@ lexicon! {
     mem_menu_open: "Open", "Öffnen";
     mem_menu_rename: "Rename", "Umbenennen";
     mem_menu_delete: "Delete", "Löschen";
+    mem_menu_move_root: "Move to root", "In die oberste Ebene";
     mem_menu_close_all: "Close all", "Alle schließen";
     mem_menu_close_right: "Close all to the right", "Alle rechts schließen";
     mem_menu_close_left: "Close all to the left", "Alle links schließen";

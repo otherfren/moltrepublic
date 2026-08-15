@@ -563,6 +563,8 @@ export component MemoryPane inherits VerticalLayout {
     // payload, which only exists behind private_unstable_api — hence
     // this small pane-local gesture instead.)
     property <int> drag-id: -1;
+    // a dragged FOLDER goes by name (folders have no DocId); "" = none
+    property <string> drag-folder: "";
     property <int> drag-to: -1;
     property <bool> drag-live: false;
     // swallows the click that ends a drag (clicked fires after the
@@ -828,7 +830,8 @@ export component MemoryPane inherits VerticalLayout {
                             // would paint over a border set out here)
                             property <bool> drop-target: root.drag-live && root.drag-to == idx;
 
-                            // ---- a folder row: click folds/unfolds ----
+                            // ---- a folder row: click folds/unfolds,
+                            // right-click menu, drag to merge elsewhere ----
                             if r.is-folder: frow := Rectangle {
                                 width: 100%;
                                 height: 100%;
@@ -836,52 +839,139 @@ export component MemoryPane inherits VerticalLayout {
                                 border-width: parent.drop-target ? Theme.border-w : 0px;
                                 border-color: Theme.accent;
                                 background: fta.has-hover ? Theme.zebra : transparent;
-                                HorizontalLayout {
-                                    padding-left: 6px;
-                                    padding-right: 6px;
-                                    spacing: 6px;
-                                    Rectangle {
-                                        width: 18px;
-                                        height: 100%;
-                                        clip: true;
-                                        Text {
-                                            text: r.open ? "📂" : "📁";
-                                            font-family: "Twemoji Mozilla";
-                                            font-size: 12px;
-                                            width: 100%;
-                                            height: 100%;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
+                                fomenu := ContextMenuArea {
+                                    Menu {
+                                        MenuItem {
+                                            title: Strings.mem-tb-new-file;
+                                            activated => {
+                                                WikiState.new-file-in(r.label);
+                                            }
                                         }
-                                    }
-                                    Text {
-                                        text: r.label + "/";
-                                        color: root.tone(r.status, Theme.dim);
-                                        font-size: Theme.fs-nav;
-                                        font-weight: 600;
-                                        vertical-alignment: center;
-                                        overflow: elide;
-                                        horizontal-stretch: 1;
-                                        // a cut name shows in full beside the
-                                        // row (window-topmost HintTip overlay)
-                                        property <bool> tip-on: fta.has-hover && self.width < self.preferred-width;
-                                        changed tip-on => {
-                                            if (self.tip-on) {
-                                                HintTip.label = r.label + "/";
-                                                HintTip.ax = frow.absolute-position.x + frow.width + 8px;
-                                                HintTip.ay = frow.absolute-position.y + (frow.height - 23px) / 2;
-                                            } else if (HintTip.ax == frow.absolute-position.x + frow.width + 8px
-                                                && HintTip.ay == frow.absolute-position.y + (frow.height - 23px) / 2) {
-                                                HintTip.label = "";
+                                        MenuItem {
+                                            title: Strings.mem-menu-rename;
+                                            activated => {
+                                                WikiState.nav-folder-rename-start(r.label);
+                                            }
+                                        }
+                                        MenuSeparator { }
+                                        MenuItem {
+                                            title: Strings.mem-menu-delete;
+                                            activated => {
+                                                WikiState.nav-folder-delete(r.label);
                                             }
                                         }
                                     }
-                                }
-                                fta := TouchArea {
-                                    mouse-cursor: MouseCursor.pointer;
-                                    clicked => {
-                                        nav-scope.focus();
-                                        WikiState.nav-toggle-folder(r.label);
+                                    HorizontalLayout {
+                                        padding-left: 6px;
+                                        padding-right: 6px;
+                                        spacing: 6px;
+                                        Rectangle {
+                                            width: 18px;
+                                            height: 100%;
+                                            clip: true;
+                                            Text {
+                                                text: r.open ? "📂" : "📁";
+                                                font-family: "Twemoji Mozilla";
+                                                font-size: 12px;
+                                                width: 100%;
+                                                height: 100%;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                        if !r.renaming: Rectangle {
+                                            horizontal-stretch: 1;
+                                            Text {
+                                                width: 100%;
+                                                height: 100%;
+                                                text: r.label + "/";
+                                                color: root.tone(r.status, Theme.dim);
+                                                font-size: Theme.fs-nav;
+                                                font-weight: 600;
+                                                vertical-alignment: center;
+                                                overflow: elide;
+                                                // a cut name shows in full beside the
+                                                // row (window-topmost HintTip overlay)
+                                                property <bool> tip-on: fta.has-hover && !root.drag-live && self.width < self.preferred-width;
+                                                changed tip-on => {
+                                                    if (self.tip-on) {
+                                                        HintTip.label = r.label + "/";
+                                                        HintTip.ax = frow.absolute-position.x + frow.width + 8px;
+                                                        HintTip.ay = frow.absolute-position.y + (frow.height - 23px) / 2;
+                                                    } else if (HintTip.ax == frow.absolute-position.x + frow.width + 8px
+                                                        && HintTip.ay == frow.absolute-position.y + (frow.height - 23px) / 2) {
+                                                        HintTip.label = "";
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        // inline rename: Enter commits, Escape
+                                        // cancels (a fresh folder starts here)
+                                        if r.renaming: FocusScope {
+                                            horizontal-stretch: 1;
+                                            key-pressed(event) => {
+                                                if (event.text == Key.Escape) {
+                                                    WikiState.nav-rename-cancel();
+                                                    return accept;
+                                                }
+                                                reject
+                                            }
+                                            TextInput {
+                                                width: 100%;
+                                                height: 100%;
+                                                text: r.label;
+                                                color: Theme.text;
+                                                font-size: Theme.fs-nav;
+                                                single-line: true;
+                                                vertical-alignment: center;
+                                                accepted => {
+                                                    WikiState.nav-folder-rename-commit(r.label, self.text);
+                                                }
+                                                init => {
+                                                    self.focus();
+                                                    self.select-all();
+                                                }
+                                            }
+                                        }
+                                    }
+                                    fta := TouchArea {
+                                        mouse-cursor: MouseCursor.pointer;
+                                        clicked => {
+                                            // a click that ended a drag is the
+                                            // drop, not a fold toggle
+                                            nav-scope.focus();
+                                            if (!root.drag-was) {
+                                                WikiState.nav-toggle-folder(r.label);
+                                            }
+                                            root.drag-was = false;
+                                        }
+                                        moved => {
+                                            if (self.pressed && (root.drag-live || Math.abs((self.mouse-y - self.pressed-y) / 1px) > 6)) {
+                                                root.drag-live = true;
+                                                root.drag-was = true;
+                                                root.drag-folder = r.label;
+                                                root.drag-to = max(0, idx + Math.floor(self.mouse-y / 28px));
+                                            }
+                                        }
+                                        pointer-event(ev) => {
+                                            // the TouchArea sits ABOVE the
+                                            // ContextMenuArea and eats the right
+                                            // click - open the menu explicitly
+                                            if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right && !root.drag-live) {
+                                                fomenu.show({ x: self.mouse-x, y: self.mouse-y });
+                                            }
+                                            if (ev.kind == PointerEventKind.up && root.drag-live && root.drag-folder == r.label) {
+                                                WikiState.nav-folder-drop(root.drag-folder, root.drag-to);
+                                                root.drag-live = false;
+                                                root.drag-folder = "";
+                                                root.drag-to = -1;
+                                            }
+                                            if (ev.kind == PointerEventKind.cancel) {
+                                                root.drag-live = false;
+                                                root.drag-folder = "";
+                                                root.drag-to = -1;
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -918,6 +1008,16 @@ export component MemoryPane inherits VerticalLayout {
                                             enabled: r.status != 3;
                                             activated => {
                                                 WikiState.nav-rename-start(r.id);
+                                            }
+                                        }
+                                        // out of its folder - the drag can
+                                        // only target folders, so root needs
+                                        // an explicit verb
+                                        if r.nested: MenuItem {
+                                            title: Strings.mem-menu-move-root;
+                                            enabled: r.status != 3;
+                                            activated => {
+                                                WikiState.nav-move-root(r.id);
                                             }
                                         }
                                         // pending rename/edit (2) or pending

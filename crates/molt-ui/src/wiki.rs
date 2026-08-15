@@ -191,6 +191,14 @@ enum Change {
     DeletedAdded { doc: Doc, label: String },
     /// One coalesced run of keystrokes on a doc.
     Edited { id: DocId, before: String, label: String },
+    /// A folder rename — every file under it moved along.
+    RenamedFolder { from: String, to: String, label: String },
+    /// A folder dragged into another folder (or root): its files merged
+    /// over and the folder entry ceased. `to: None` means root.
+    MovedFolder { from: String, to: Option<String>, ids: Vec<DocId>, was_added: bool, label: String },
+    /// A folder entry removed because its delete left nothing referencing
+    /// it (base-backed rows survive as pending deletions instead).
+    DeletedFolder { name: String, was_added: bool, label: String },
 }
 
 /// The kind tag of a [`StackRow`] (drives the panel row's glyph + tone).
@@ -234,6 +242,8 @@ pub struct Wiki {
     marked: Option<DocId>,
     pub editing: bool,
     renaming: Option<DocId>,
+    /// A folder row's inline rename (folders have no DocId).
+    renaming_folder: Option<String>,
     next_id: DocId,
     /// The changeset stack: every user action, oldest first.
     stack: Vec<Change>,
@@ -284,6 +294,7 @@ impl Wiki {
             marked: first,
             editing: false,
             renaming: None,
+            renaming_folder: None,
             next_id,
             stack: Vec::new(),
             base_rev: 0,
@@ -303,6 +314,7 @@ impl Wiki {
             marked: None,
             editing: false,
             renaming: None,
+            renaming_folder: None,
             next_id: 1,
             stack: Vec::new(),
             base_rev: 0,
@@ -476,7 +488,7 @@ impl Wiki {
                 open: f.open,
                 marked: false,
                 status: if f.added { Status::Added } else { Status::Unchanged },
-                renaming: false,
+                renaming: self.renaming_folder.as_deref() == Some(f.name.as_str()),
             });
             if f.open {
                 for d in self.files_in(Some(&f.name)) {
@@ -838,6 +850,20 @@ impl Wiki {
             .marked
             .and_then(|m| self.doc(m))
             .and_then(|d| d.folder().map(String::from));
+        self.new_file_at(folder)
+    }
+
+    /// New file directly inside `folder` (the folder row's menu); the
+    /// folder unfolds so the rename row is visible.
+    pub fn new_file_in(&mut self, folder: &str) -> DocId {
+        let known = self.folders.iter().any(|f| f.name == folder);
+        if let Some(f) = self.folders.iter_mut().find(|f| f.name == folder) {
+            f.open = true;
+        }
+        self.new_file_at(known.then(|| folder.to_string()))
+    }
+
+    fn new_file_at(&mut self, folder: Option<String>) -> DocId {
         let mut n = 1;
         let name = loop {
             let candidate = format!("untitled-{n}.md");
@@ -872,6 +898,7 @@ impl Wiki {
         self.stack.push(Change::Created { id, label });
         self.open(id);
         self.renaming = Some(id);
+        self.renaming_folder = None;
         id
     }
 
@@ -891,6 +918,8 @@ impl Wiki {
             added: true,
         });
         self.stack.push(Change::CreatedFolder { name: name.clone() });
+        self.renaming = None;
+        self.renaming_folder = Some(name.clone());
         name
     }
 
@@ -907,6 +936,56 @@ impl Wiki {
 
     pub fn rename_cancel(&mut self) {
         self.renaming = None;
+        self.renaming_folder = None;
+    }
+
+    pub fn renaming_folder(&self) -> Option<&str> {
+        self.renaming_folder.as_deref()
+    }
+
+    pub fn rename_folder_start(&mut self, name: &str) {
+        if self.folders.iter().any(|f| f.name == name) {
+            self.renaming = None;
+            self.renaming_folder = Some(name.to_string());
+        }
+    }
+
+    /// Commit a folder rename: every file under it moves along (their
+    /// statuses turn Modified — the rename IS the pending change).
+    pub fn rename_folder_commit(&mut self, old: &str, new_name: &str) -> Result<(), String> {
+        self.renaming_folder = None;
+        let name = new_name.trim().trim_matches('/').to_string();
+        if name.is_empty() {
+            return Err("empty name".to_string());
+        }
+        if name.contains('/') {
+            return Err("no nested folders".to_string());
+        }
+        if name == old {
+            return Ok(());
+        }
+        if !self.folders.iter().any(|f| f.name == old) {
+            return Err("unknown folder".to_string());
+        }
+        if self.folders.iter().any(|f| f.name == name) {
+            return Err("name already taken".to_string());
+        }
+        let prefix = format!("{old}/");
+        for d in &mut self.docs {
+            let rest = d.path.strip_prefix(&prefix).map(String::from);
+            if let Some(rest) = rest {
+                d.path = format!("{name}/{rest}");
+            }
+        }
+        if let Some(f) = self.folders.iter_mut().find(|f| f.name == old) {
+            f.name = name.clone();
+        }
+        self.stack.push(Change::RenamedFolder {
+            from: old.to_string(),
+            label: format!("{old}/ → {name}/"),
+            to: name,
+        });
+        Ok(())
     }
 
     /// Commit a rename of the file's NAME (folder stays). Empty names and
@@ -1004,6 +1083,80 @@ impl Wiki {
         self.move_to(id, folder.as_deref())
     }
 
+    /// Drop a dragged FOLDER onto navigator row `row_idx`: its files merge
+    /// into the target folder (a file row targets its folder, past the end
+    /// means root) and the folder entry ceases. All-or-nothing on name
+    /// collisions. Depth stays 1 — a folder never nests INTO another.
+    pub fn drop_folder_on_row(&mut self, name: &str, row_idx: usize) -> Result<(), String> {
+        let rows = self.nav_rows();
+        let folder = match rows.get(row_idx) {
+            Some(r) if r.kind == RowKind::Folder => Some(r.label.clone()),
+            Some(r) => self.doc(r.id).and_then(|d| d.folder().map(String::from)),
+            None => None,
+        };
+        self.move_folder(name, folder.as_deref())
+    }
+
+    fn move_folder(&mut self, name: &str, target: Option<&str>) -> Result<(), String> {
+        if target == Some(name) {
+            return Ok(()); // dropped on itself / one of its own files
+        }
+        let Some(pos) = self.folders.iter().position(|f| f.name == name) else {
+            return Err("unknown folder".to_string());
+        };
+        if let Some(t) = target {
+            if !self.folders.iter().any(|f| f.name == t) {
+                return Err("unknown folder".to_string());
+            }
+        }
+        let prefix = format!("{name}/");
+        let moves: Vec<(DocId, String)> = self
+            .docs
+            .iter()
+            .filter_map(|d| d.path.strip_prefix(&prefix).map(|rest| (d.id, rest.to_string())))
+            .collect();
+        for (_, rest) in &moves {
+            let to = match target {
+                Some(t) => format!("{t}/{rest}"),
+                None => rest.clone(),
+            };
+            if self
+                .docs
+                .iter()
+                .any(|o| !o.path.starts_with(&prefix) && o.path == to)
+            {
+                return Err("name already taken".to_string());
+            }
+        }
+        let ids: Vec<DocId> = moves.iter().map(|(id, _)| *id).collect();
+        for (id, rest) in &moves {
+            let to = match target {
+                Some(t) => format!("{t}/{rest}"),
+                None => rest.clone(),
+            };
+            if let Some(d) = self.doc_mut(*id) {
+                d.path = to;
+            }
+        }
+        let was_added = self.folders[pos].added;
+        self.folders.remove(pos);
+        if self.renaming_folder.as_deref() == Some(name) {
+            self.renaming_folder = None;
+        }
+        let tlabel = match target {
+            Some(t) => format!("{t}/"),
+            None => "/".to_string(),
+        };
+        self.stack.push(Change::MovedFolder {
+            from: name.to_string(),
+            to: target.map(String::from),
+            ids,
+            was_added,
+            label: format!("{name}/ → {tlabel}"),
+        });
+        Ok(())
+    }
+
     /// Delete (toolbar 🗑️ / Del / menu): a base-backed doc becomes a RED
     /// pending deletion (visible, struck, tab closed); a locally added doc
     /// vanishes entirely — there is nothing to vote on.
@@ -1030,6 +1183,36 @@ impl Wiki {
         }
         if self.renaming == Some(id) {
             self.renaming = None;
+        }
+    }
+
+    /// Delete a folder: every file in it is deleted (base-backed ones stay
+    /// as struck pending deletions — the folder row then stays with them);
+    /// the folder entry itself ceases only when nothing references it.
+    pub fn delete_folder(&mut self, name: &str) {
+        let prefix = format!("{name}/");
+        let ids: Vec<DocId> = self
+            .docs
+            .iter()
+            .filter(|d| d.path.starts_with(&prefix) && !d.deleted)
+            .map(|d| d.id)
+            .collect();
+        for id in ids {
+            self.delete(id);
+        }
+        if !self.docs.iter().any(|d| d.path.starts_with(&prefix)) {
+            if let Some(pos) = self.folders.iter().position(|f| f.name == name) {
+                let was_added = self.folders[pos].added;
+                self.folders.remove(pos);
+                if self.renaming_folder.as_deref() == Some(name) {
+                    self.renaming_folder = None;
+                }
+                self.stack.push(Change::DeletedFolder {
+                    name: name.to_string(),
+                    was_added,
+                    label: format!("{name}/"),
+                });
+            }
         }
     }
 
@@ -1160,6 +1343,18 @@ impl Wiki {
                     kind: ChangeKind::Edited,
                     label: label.clone(),
                 },
+                Change::RenamedFolder { label, .. } => StackRow {
+                    kind: ChangeKind::Renamed,
+                    label: label.clone(),
+                },
+                Change::MovedFolder { label, .. } => StackRow {
+                    kind: ChangeKind::Moved,
+                    label: label.clone(),
+                },
+                Change::DeletedFolder { label, .. } => StackRow {
+                    kind: ChangeKind::Deleted,
+                    label: label.clone(),
+                },
             })
             .collect()
     }
@@ -1212,6 +1407,53 @@ impl Wiki {
                     d.raw = before.clone();
                 }
             }
+            Change::RenamedFolder { ref from, ref to, .. } => {
+                if self.folders.iter().any(|f| f.name == *from) {
+                    return Err("name already taken".to_string());
+                }
+                let prefix = format!("{to}/");
+                for d in &mut self.docs {
+                    let rest = d.path.strip_prefix(&prefix).map(String::from);
+                    if let Some(rest) = rest {
+                        d.path = format!("{from}/{rest}");
+                    }
+                }
+                if let Some(f) = self.folders.iter_mut().find(|f| f.name == *to) {
+                    f.name = from.clone();
+                }
+            }
+            Change::MovedFolder { ref from, ref ids, was_added, .. } => {
+                for id in ids {
+                    if let Some(d) = self.doc(*id) {
+                        let back = format!("{from}/{}", d.name());
+                        if self.docs.iter().any(|o| o.id != *id && o.path == back) {
+                            return Err("name already taken".to_string());
+                        }
+                    }
+                }
+                if !self.folders.iter().any(|f| f.name == *from) {
+                    self.folders.push(Folder {
+                        name: from.clone(),
+                        open: true,
+                        added: was_added,
+                    });
+                }
+                for id in ids {
+                    let name = self.doc(*id).map(|d| d.name().to_string());
+                    if let (Some(name), Some(d)) = (name, self.doc_mut(*id)) {
+                        d.path = format!("{from}/{name}");
+                    }
+                }
+            }
+            Change::DeletedFolder { ref name, was_added, .. } => {
+                if !self.folders.iter().any(|f| f.name == *name) {
+                    self.folders.push(Folder {
+                        name: name.clone(),
+                        open: true,
+                        added: was_added,
+                    });
+                }
+            }
         }
         self.stack.pop();
         Ok(())
@@ -1243,7 +1485,24 @@ impl Wiki {
             }
             d.deleted = false;
         }
-        self.folders.retain(|f| !f.added);
+        // folders follow the reverted docs: a renamed or merged base folder
+        // returns under its base name, empty added ones go
+        self.renaming_folder = None;
+        let referenced: Vec<String> = self
+            .docs
+            .iter()
+            .filter_map(|d| d.folder().map(String::from))
+            .collect();
+        self.folders.retain(|f| referenced.contains(&f.name));
+        for r in referenced {
+            if !self.folders.iter().any(|f| f.name == r) {
+                self.folders.push(Folder {
+                    name: r,
+                    open: true,
+                    added: false,
+                });
+            }
+        }
         self.stack.clear();
     }
 
@@ -2432,5 +2691,165 @@ diff --git a/gone.md b/gone.md\n--- a/gone.md\n+++ b/gone.md\n@@ -1,1 +1,1 @@\n-
             w.nav_rows().iter().any(|r| r.id == recovery),
             "the folder unfolded so the row is visible"
         );
+    }
+
+    // ---- folder verbs (rename / move / delete / new-file-in) --------------
+
+    /// The 2026-08-15 live-crash sequence, pinned at the model level:
+    /// empty wiki → new folder → new file beside it → drag it in.
+    #[test]
+    fn the_crash_sequence_folder_then_file_then_drop_nests_the_file() {
+        let mut w = Wiki::empty();
+        let folder = w.new_folder();
+        w.rename_cancel();
+        let id = w.new_file();
+        w.rename_cancel();
+        // row 0 is the folder (folders sort before root files)
+        w.drop_on_row(id, 0).expect("drop into the folder");
+        let d = w.nav_rows();
+        assert_eq!(d[0].label, folder);
+        assert!(d[1].nested, "the file row nests under the folder");
+    }
+
+    #[test]
+    fn a_new_folder_starts_in_rename_mode() {
+        let mut w = Wiki::empty();
+        let name = w.new_folder();
+        assert_eq!(w.renaming_folder(), Some(name.as_str()));
+        assert!(
+            w.nav_rows()[0].renaming,
+            "the folder row renders the rename input"
+        );
+        w.rename_cancel();
+        assert_eq!(w.renaming_folder(), None);
+    }
+
+    #[test]
+    fn renaming_a_folder_rewrites_its_files_and_undo_restores() {
+        let mut w = Wiki::sample();
+        w.rename_folder_commit("decisions", "archive")
+            .expect("rename");
+        assert!(w.folders_named().contains(&"archive".to_string()));
+        assert!(!w.folders_named().contains(&"decisions".to_string()));
+        let relay = id_of(&w, "2026-06-14-relay.md");
+        assert!(w
+            .nav_rows()
+            .iter()
+            .any(|r| r.id == relay && r.status == Status::Modified));
+        let rows = w.stack_rows();
+        assert_eq!(rows.last().expect("entry").kind, ChangeKind::Renamed);
+        w.undo().expect("undo");
+        assert!(w.folders_named().contains(&"decisions".to_string()));
+        assert!(w
+            .nav_rows()
+            .iter()
+            .any(|r| r.id == relay && r.status == Status::Unchanged));
+    }
+
+    #[test]
+    fn folder_rename_refuses_collisions_and_bad_names() {
+        let mut w = Wiki::sample();
+        assert!(w.rename_folder_commit("decisions", "runbooks").is_err());
+        assert!(w.rename_folder_commit("decisions", "").is_err());
+        assert!(w.rename_folder_commit("decisions", "a/b").is_err());
+        // renaming to itself is a silent no-op
+        w.rename_folder_commit("decisions", "decisions")
+            .expect("no-op");
+        assert_eq!(w.stack_len(), 0);
+    }
+
+    #[test]
+    fn dragging_a_folder_onto_another_merges_its_files() {
+        let mut w = Wiki::sample();
+        // row 0 is the "decisions" folder row
+        w.drop_folder_on_row("runbooks", 0).expect("merge");
+        assert!(!w.folders_named().contains(&"runbooks".to_string()));
+        let recovery = id_of(&w, "node-recovery.md");
+        let rows = w.nav_rows();
+        let row = rows
+            .iter()
+            .find(|r| r.id == recovery)
+            .expect("moved file row");
+        assert!(row.nested);
+        assert_eq!(
+            w.stack_rows().last().expect("entry").kind,
+            ChangeKind::Moved
+        );
+        w.undo().expect("undo");
+        assert!(w.folders_named().contains(&"runbooks".to_string()));
+        assert_eq!(w.change_counts(), (0, 0, 0));
+    }
+
+    #[test]
+    fn dragging_a_folder_past_the_end_dissolves_it_to_root() {
+        let mut w = Wiki::sample();
+        let rows = w.nav_rows().len();
+        w.drop_folder_on_row("runbooks", rows + 5).expect("to root");
+        assert!(!w.folders_named().contains(&"runbooks".to_string()));
+        let recovery = id_of(&w, "node-recovery.md");
+        let rows = w.nav_rows();
+        let row = rows.iter().find(|r| r.id == recovery).expect("root row");
+        assert!(!row.nested);
+    }
+
+    #[test]
+    fn a_folder_move_with_a_name_collision_changes_nothing() {
+        let mut w = Wiki::sample();
+        // plant a root file colliding with a runbooks file name
+        let id = w.new_file();
+        w.rename_cancel();
+        w.rename_commit(id, "node-recovery.md").expect("rename");
+        let before: Vec<String> = w.nav_rows().iter().map(|r| r.label.clone()).collect();
+        let rows = w.nav_rows().len();
+        assert!(w.drop_folder_on_row("runbooks", rows + 5).is_err());
+        let after: Vec<String> = w.nav_rows().iter().map(|r| r.label.clone()).collect();
+        assert_eq!(before, after, "all-or-nothing: nothing moved");
+    }
+
+    #[test]
+    fn deleting_an_added_folder_removes_it_and_undo_brings_it_back() {
+        let mut w = Wiki::empty();
+        let folder = w.new_folder();
+        w.rename_cancel();
+        let id = w.new_file();
+        w.rename_cancel();
+        w.drop_on_row(id, 0).expect("into folder");
+        w.delete_folder(&folder);
+        assert!(w.nav_rows().is_empty(), "folder and draft file both gone");
+        w.undo().expect("undo folder");
+        w.undo().expect("undo file");
+        assert_eq!(w.nav_rows().len(), 2, "folder row and file row are back");
+    }
+
+    #[test]
+    fn deleting_a_base_folder_keeps_struck_rows_under_it() {
+        let mut w = Wiki::sample();
+        w.delete_folder("runbooks");
+        assert!(w.folders_named().contains(&"runbooks".to_string()));
+        let recovery = id_of(&w, "node-recovery.md");
+        assert!(w
+            .nav_rows()
+            .iter()
+            .any(|r| r.id == recovery && r.status == Status::Deleted));
+    }
+
+    #[test]
+    fn new_file_in_creates_inside_the_folder() {
+        let mut w = Wiki::sample();
+        let id = w.new_file_in("runbooks");
+        w.rename_cancel();
+        let rows = w.nav_rows();
+        let row = rows.iter().find(|r| r.id == id).expect("new row");
+        assert!(row.nested, "created inside the folder");
+    }
+
+    #[test]
+    fn revert_all_restores_base_folder_names_after_a_folder_rename() {
+        let mut w = Wiki::sample();
+        w.rename_folder_commit("decisions", "archive")
+            .expect("rename");
+        w.revert_all();
+        assert!(w.folders_named().contains(&"decisions".to_string()));
+        assert!(!w.folders_named().contains(&"archive".to_string()));
     }
 }
