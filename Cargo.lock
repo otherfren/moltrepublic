@@ -4756,6 +4756,7 @@ dependencies = [
  "paste",
  "pulldown-cmark",
  "rfd",
+ "serde",
  "serde_json",
  "similar",
  "slint",

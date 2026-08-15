@@ -6528,8 +6528,40 @@ fn wire_wiki(
     act!(on_nav_toggle_folder, |w, name: slint::SharedString| w
         .toggle_folder(&name));
     act!(on_nav_rename_start, |w, id: i32| w.rename_start(wiki_doc_id(id)));
-    act!(on_nav_rename_cancel, |w| w.rename_cancel());
-    act!(on_nav_delete, |w, id: i32| w.delete(wiki_doc_id(id)));
+    // deferred (slint#6426 class): Escape fires from the rename row's own
+    // FocusScope, and the cancel tears that row variant down
+    {
+        let m = model.clone();
+        let la = last.clone();
+        let weak = ui.as_weak();
+        g.on_nav_rename_cancel(move || {
+            let m = m.clone();
+            let la = la.clone();
+            let weak = weak.clone();
+            slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+                let Some(ui) = weak.upgrade() else { return };
+                m.borrow_mut().rename_cancel();
+                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            });
+        });
+    }
+    // deferred (slint#6426 class): fired from the row's own context menu,
+    // and the delete restructures that row
+    {
+        let m = model.clone();
+        let la = last.clone();
+        let weak = ui.as_weak();
+        g.on_nav_delete(move |id| {
+            let m = m.clone();
+            let la = la.clone();
+            let weak = weak.clone();
+            slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+                let Some(ui) = weak.upgrade() else { return };
+                m.borrow_mut().delete(wiki_doc_id(id));
+                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            });
+        });
+    }
     act!(on_tab_focus, |w, id: i32| w.focus(wiki_doc_id(id)));
     act!(on_tab_close, |w, id: i32| w.close_tab(wiki_doc_id(id)));
     act!(on_tab_close_all, |w| w.close_all());
@@ -6657,19 +6689,26 @@ fn wire_wiki(
         let la = last.clone();
         let weak = ui.as_weak();
         g.on_nav_rename_commit(move |id, name| {
-            let Some(ui) = weak.upgrade() else { return };
-            {
-                let mut w = m.borrow_mut();
-                let id = wiki_doc_id(id);
-                // Enter-commit races the row teardown after an Escape
-                // cancel — only act while the model still renames this id
-                if w.renaming() == Some(id) {
-                    if let Err(e) = w.rename_commit(id, &name) {
-                        ui.invoke_show_toast_error(e.into());
+            // deferred (slint#6426 class): Enter fires from the rename
+            // row's own FocusScope, and the commit swaps that row variant
+            let m = m.clone();
+            let la = la.clone();
+            let weak = weak.clone();
+            slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+                let Some(ui) = weak.upgrade() else { return };
+                {
+                    let mut w = m.borrow_mut();
+                    let id = wiki_doc_id(id);
+                    // Enter-commit races the row teardown after an Escape
+                    // cancel — only act while the model still renames this id
+                    if w.renaming() == Some(id) {
+                        if let Err(e) = w.rename_commit(id, &name) {
+                            ui.invoke_show_toast_error(e.into());
+                        }
                     }
                 }
-            }
-            sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            });
         });
     }
     {
@@ -6677,15 +6716,26 @@ fn wire_wiki(
         let la = last.clone();
         let weak = ui.as_weak();
         g.on_nav_drop(move |id, row| {
-            let Some(ui) = weak.upgrade() else { return };
-            {
-                let mut w = m.borrow_mut();
-                let row = usize::try_from(row).unwrap_or(usize::MAX);
-                if let Err(e) = w.drop_on_row(wiki_doc_id(id), row) {
-                    ui.invoke_show_toast_error(e.into());
+            // DEFERRED out of the pointer callback: a drop restructures
+            // the nav rows, and tearing row elements down while their
+            // TouchArea's pointer-event is still on the stack panics the
+            // slint interpreter ("accessing deleted parent", slint#6426 —
+            // live crash 2026-08-15: file dragged into a fresh folder).
+            // A zero timer runs on the same loop, one tick later.
+            let m = m.clone();
+            let la = la.clone();
+            let weak = weak.clone();
+            slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+                let Some(ui) = weak.upgrade() else { return };
+                {
+                    let mut w = m.borrow_mut();
+                    let row = usize::try_from(row).unwrap_or(usize::MAX);
+                    if let Err(e) = w.drop_on_row(wiki_doc_id(id), row) {
+                        ui.invoke_show_toast_error(e.into());
+                    }
                 }
-            }
-            sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            });
         });
     }
 
