@@ -761,6 +761,8 @@ impl SeenCiphertexts {
     }
 }
 
+// (content, created_at) travel as one pair: they are the FRAME, everything
+// else is the channel the frame lands in
 async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
     mls: &MlsChannel,
     log: &L,
@@ -768,9 +770,9 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
     sink: &K,
     me: &MemberId,
     seen: &mut SeenCiphertexts,
-    content: &str,
-    created_at: u64,
+    frame: (&str, u64),
 ) -> Ingest {
+    let (content, created_at) = frame;
     // an exact re-delivery of a frame this node already consumed: turn
     // around before the ratchet is asked (a second decrypt is at best a
     // SecretReuseError logged at ERROR by openmls, at worst wasted work)
@@ -862,7 +864,7 @@ async fn retry_epoch_hold<L: OutboxLog, S: StateStore, K: EngineSink>(
         let mut progress = false;
         let mut still = Vec::new();
         for (content, at) in std::mem::take(hold) {
-            match ingest_one(mls, log, store, sink, me, seen, &content, at).await {
+            match ingest_one(mls, log, store, sink, me, seen, (&content, at)).await {
                 Ingest::EngineGone => return Err(()),
                 Ingest::FutureEpoch => still.push((content, at)),
                 Ingest::Opaque => lost += 1,
@@ -923,7 +925,7 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
                 if state.deaf.take().is_some() {
                     let _ = health.send(state.clone());
                 }
-                match ingest_one(&mls, &log, &store, &sink, &me, &mut seen, &content, created_at).await {
+                match ingest_one(&mls, &log, &store, &sink, &me, &mut seen, (&content, created_at)).await {
                     Ingest::EngineGone => return,
                     // NOT counted yet, and not dropped. On 445 the epoch shows
                     // up at the OUTER layer, not at the MLS decode: a frame
