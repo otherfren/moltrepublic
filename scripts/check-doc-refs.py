@@ -54,6 +54,11 @@ NO_BARE_SCAN_FILES = {
     "crates/molt-ui/src/wiki.rs": "wiki mock sample tree + its tests",
     "crates/molt-ui/src/patchview.rs": "diff-viewer tests over the sample tree",
     "crates/molt-ui/src/lib.rs": "gui_tests drive the sample tree by name",
+    # the strict fold's fixtures + doc examples are WIKI paths (a.md, b.md,
+    # folder/file.md), never repo docs — same class as the sample tree
+    "crates/molt-core/src/wiki_fold.rs": "fold keystone fixtures",
+    "crates/molt-core/src/lib.rs": "WikiDoc doc-comment path examples",
+    "crates/molt-engine/src/chain.rs": "supersede-walk keystone fixtures",
 }
 
 PATH_RE = re.compile(r"(?<![\w/-])((?:docs|docs_archive)/[A-Za-z0-9_./-]+\.md)")

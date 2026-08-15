@@ -928,6 +928,28 @@ pub fn write_prefs(ws_dir: &Path, p: &WorkspacePrefs) -> Result<(), StorageError
     write_atomic(ws_dir, "prefs.toml", text.as_bytes(), false)
 }
 
+/// Read a workspace's local wiki DRAFT ("" = none): the member's unvoted
+/// working copy (`shared_memory_real.md` WP-D). Local convenience like
+/// prefs — never history, never exported (the export allowlist does not
+/// carry it), sealed at rest with the directory.
+pub fn read_wiki_draft(ws_dir: &Path) -> String {
+    fs::read_to_string(ws_dir.join("wiki_draft.json")).unwrap_or_default()
+}
+
+/// Rewrite the local wiki draft (atomic via `tmp/`); an empty draft
+/// removes the file.
+pub fn write_wiki_draft(ws_dir: &Path, draft: &str) -> Result<(), StorageError> {
+    if draft.is_empty() {
+        match fs::remove_file(ws_dir.join("wiki_draft.json")) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    } else {
+        write_atomic(ws_dir, "wiki_draft.json", draft.as_bytes(), false)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The LOCK
 // ---------------------------------------------------------------------------

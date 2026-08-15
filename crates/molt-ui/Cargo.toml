@@ -26,6 +26,7 @@ molt-storage.workspace = true
 molt-engine.workspace = true
 tokio.workspace = true
 slint.workspace = true
+serde.workspace = true # the local wiki draft round-trips (WP-D)
 serde_json.workspace = true
 tracing.workspace = true
 # clipboard for the seed copy button (X11: contents live as long as the app)

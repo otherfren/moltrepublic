@@ -83,13 +83,13 @@ pub enum BlockStatus {
 
 /// The ratified counterpart of a working doc (mock sample data stands in
 /// for the chain-backed base until story 14 lands).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct BaseDoc {
     path: String,
     raw: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Doc {
     pub id: DocId,
     /// Current path, `folder/file.md` or `file.md` (single-level tree).
@@ -124,7 +124,7 @@ impl Doc {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Folder {
     pub name: String,
     pub open: bool,
@@ -165,7 +165,21 @@ pub struct TabRow {
 /// One recorded user action — the changeset stack's unit. Carries the
 /// before-state its LIFO inverse needs and a display label frozen at
 /// record time (an action log narrates what happened, not what is).
-#[derive(Clone, Debug)]
+/// The on-disk draft (`wiki_draft.json` via the engine — WP-D): the
+/// whole local layer, so tabs and undo survive a restart too.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Draft {
+    docs: Vec<Doc>,
+    folders: Vec<Folder>,
+    tabs: Vec<DocId>,
+    active: Option<DocId>,
+    marked: Option<DocId>,
+    next_id: DocId,
+    stack: Vec<Change>,
+    base_rev: u64,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 enum Change {
     Created { id: DocId, label: String },
     CreatedFolder { name: String },
@@ -618,6 +632,53 @@ impl Wiki {
         self.active = Some(id);
         self.editing = false;
         self.renaming = None;
+    }
+
+    /// Serialize the LOCAL state worth surviving a restart
+    /// (`shared_memory_real.md` WP-D): docs, folders, tabs/selection, the
+    /// undo stack and the base revision. Returns "" when there is nothing
+    /// local (clean tree, no tabs) — the caller then REMOVES the file.
+    pub fn to_draft(&self) -> String {
+        let clean = self.stack.is_empty()
+            && self.tabs.is_empty()
+            && self.docs.iter().all(|d| d.status() == Status::Unchanged);
+        if clean {
+            return String::new();
+        }
+        let draft = Draft {
+            docs: self.docs.clone(),
+            folders: self.folders.clone(),
+            tabs: self.tabs.clone(),
+            active: self.active,
+            marked: self.marked,
+            next_id: self.next_id,
+            stack: self.stack.clone(),
+            base_rev: self.base_rev,
+        };
+        serde_json::to_string(&draft).unwrap_or_default()
+    }
+
+    /// Restore a stored draft ("" or unparseable = no-op, `false`). The
+    /// caller rebases with [`Wiki::set_base`] right after, so a base that
+    /// moved while the app was closed reconciles exactly like a live move.
+    pub fn restore_draft(&mut self, draft: &str) -> bool {
+        if draft.is_empty() {
+            return false;
+        }
+        let Ok(d) = serde_json::from_str::<Draft>(draft) else {
+            return false;
+        };
+        self.docs = d.docs;
+        self.folders = d.folders;
+        self.tabs = d.tabs;
+        self.active = d.active;
+        self.marked = d.marked;
+        self.next_id = d.next_id;
+        self.stack = d.stack;
+        self.base_rev = d.base_rev;
+        self.editing = false;
+        self.renaming = None;
+        true
     }
 
     /// RESCUE a declined/superseded proposal's patch into the local
@@ -1849,6 +1910,42 @@ mod tests {
             w.tab_rows().iter().all(|t| t.label != "dir/b.md"),
             "…and its tab closes"
         );
+    }
+
+    // ---- the draft survives a restart (shared_memory_real.md WP-D) ---------
+
+    /// Local work round-trips through the serialized draft — edits, the
+    /// undo stack, open tabs; a clean tree serializes to "" (the stored
+    /// file is then removed); the rebase after restore reconciles a base
+    /// that moved while the app was closed.
+    #[test]
+    fn a_draft_round_trips_and_a_clean_tree_is_empty() {
+        let mut w = Wiki::empty();
+        let base = vec![("a.md".to_string(), "alpha\n".to_string())];
+        w.set_base(&base, 1);
+        assert_eq!(w.to_draft(), "", "clean + no tabs = nothing to store");
+        let a_id = w.docs.iter().find(|d| d.path == "a.md").expect("a").id;
+        w.open(a_id);
+        w.set_raw(a_id, "alpha local");
+        let draft = w.to_draft();
+        assert!(!draft.is_empty());
+
+        let mut w2 = Wiki::empty();
+        assert!(w2.restore_draft(&draft));
+        w2.set_base(&base, 1);
+        let a = w2.docs.iter().find(|d| d.path == "a.md").expect("a");
+        assert_eq!(a.raw, "alpha local");
+        assert_eq!(a.status(), Status::Modified);
+        assert_eq!(w2.tab_rows().len(), 1, "the open tab survives");
+        assert!(!w2.stack_rows().is_empty(), "the undo stack survives");
+        // …and a base that moved while closed reconciles like a live move
+        let base2 = vec![("a.md".to_string(), "alpha v2\n".to_string())];
+        let mut w3 = Wiki::empty();
+        assert!(w3.restore_draft(&draft));
+        w3.set_base(&base2, 2);
+        let a = w3.docs.iter().find(|d| d.path == "a.md").expect("a");
+        assert_eq!(a.raw, "alpha local", "local work is kept");
+        assert!(!w3.restore_draft(""), "an empty draft is a no-op");
     }
 
     // ---- the rescue (shared_memory_real.md §4: declined/superseded) --------

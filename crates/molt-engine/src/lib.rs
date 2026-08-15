@@ -1386,6 +1386,8 @@ impl State {
                 generation,
             } => self.cmd_net_seal_signed(seat, sig, from, generation),
             Command::ConfirmSeedBackup { phrase } => self.cmd_confirm_seed_backup(&phrase),
+            Command::WikiDraftSave { draft } => self.cmd_wiki_draft_save(&draft),
+            Command::WikiDraftLoad => self.cmd_wiki_draft_load(),
             Command::NetBackupConfirmed {
                 seat,
                 sig,

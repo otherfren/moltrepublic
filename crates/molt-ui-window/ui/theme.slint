@@ -387,6 +387,11 @@ export global WikiState {
     in-out property <[WikiBase]> base-docs;
     in-out property <int> base-rev;
     callback base-arrived();
+    // the ACTIVE workspace id (drafts are per workspace): a change resets
+    // the model and loads that workspace's stored draft (WP-D)
+    in-out property <string> ws-id;
+    callback workspace-changed();
+    callback draft-loaded(string);
     in-out property <[WikiTabRow]> tabs;
     // the active doc (empty state when doc-open is false)
     in-out property <bool> doc-open;

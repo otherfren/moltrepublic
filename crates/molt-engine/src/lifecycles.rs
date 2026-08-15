@@ -1171,6 +1171,39 @@ impl State {
         ))
     }
 
+    /// Persist the operator's LOCAL wiki draft for the open workspace
+    /// (`shared_memory_real.md` WP-D): an opaque frontend blob beside the
+    /// prefs — sealed at rest with the directory, excluded from the
+    /// backup export by its allowlist. No open workspace = a quiet Ack
+    /// (the debounced auto-save races closes; nothing to persist is not
+    /// an error).
+    pub(crate) fn cmd_wiki_draft_save(&mut self, draft: &str) -> Result<Reply, MoltError> {
+        let id = self.session.active_workspace.clone();
+        if id.is_empty() {
+            return Ok(Reply::Ack);
+        }
+        let Some(dir) = molt_storage::find_workspace_dir(&self.workspace_root(), &id) else {
+            return Ok(Reply::Ack); // session-only workspace: nothing to hold it
+        };
+        if let Err(e) = molt_storage::write_wiki_draft(&dir, draft) {
+            tracing::warn!(error = %e, "wiki draft not persisted");
+        }
+        Ok(Reply::Ack)
+    }
+
+    /// Read the open workspace's stored wiki draft ("" = none).
+    pub(crate) fn cmd_wiki_draft_load(&mut self) -> Result<Reply, MoltError> {
+        let id = self.session.active_workspace.clone();
+        let draft = if id.is_empty() {
+            String::new()
+        } else {
+            molt_storage::find_workspace_dir(&self.workspace_root(), &id)
+                .map(|dir| molt_storage::read_wiki_draft(&dir))
+                .unwrap_or_default()
+        };
+        Ok(Reply::WikiDraft { draft })
+    }
+
     pub(crate) fn cmd_create_finish(&mut self) -> Result<Reply, MoltError> {
         // "Enter republic" is refused until the ritual sealed a workspace
         // — the engine enforces it for every operator, not just the GUI

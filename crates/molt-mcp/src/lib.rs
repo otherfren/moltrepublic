@@ -1406,6 +1406,28 @@ pub fn tools() -> Vec<ToolDef> {
             build: |_| Ok(Command::CreateFinish),
         },
         ToolDef {
+            name: "wiki_draft_save",
+            command: "wiki_draft_save",
+            description: "Persist the LOCAL wiki draft (unvoted working copy) for the open workspace: an opaque blob that survives restarts, sealed at rest, never in backup exports. Empty removes it. The shared wiki base changes only through wiki_patch proposals - a draft is one member's scratch.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "draft": { "type": "string", "description": "the serialized draft (opaque; \"\" removes it)" }
+                },
+                "required": ["draft"]
+            }),
+            build: |args| Ok(Command::WikiDraftSave {
+                draft: str_arg(args, "draft")?,
+            }),
+        },
+        ToolDef {
+            name: "wiki_draft_load",
+            command: "wiki_draft_load",
+            description: "Read the open workspace's stored local wiki draft (\"\" = none).",
+            schema: || json!({ "type": "object", "properties": {} }),
+            build: |_| Ok(Command::WikiDraftLoad),
+        },
+        ToolDef {
             name: "confirm_seed_backup",
             command: "confirm_seed_backup",
             description: "Confirm the operator's recovery-phrase backup during a RUNNING founding or join ritual by re-typing the phrase (create.seed / join.seed). The engine matches it; the ritual seals - and touches disk - only once EVERY participant confirmed (founder included). Founder side: any time before the seal. Joiner side: after ratifying (join.awaiting_backup).",

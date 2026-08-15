@@ -63,9 +63,14 @@ kopieren" (Markdown-Markup in die Zwischenablage), Editor-Kontextmenü
 Ausschneiden/Kopieren/Einfügen, Klick auf die Preview öffnet den Editor,
 Editor-Header zeigt statt „~1" einen „geändert"-Hinweis + Datei-Revert.
 Nach erfolgreichem Vote-Start wird die Arbeitskopie auf die Basis
-zurückgesetzt (das Proposal trägt die Änderungen). Offen für den echten
-Bau (Story 14): Patch-APPLY bei Threshold (Basis nachziehen), Draft-Rettung
-bei Decline.
+zurückgesetzt (das Proposal trägt die Änderungen). GEBAUT (2026-08-15,
+`docs/memory/shared_memory_real.md`): Patch-APPLY bei Threshold ist der
+deterministische FOLD (molt-core `wiki_fold`, strikt, All-or-Nothing),
+die Basis kommt aus dem Engine-Read, der Supersede-Walk räumt überholte
+Pending-Patches terminal ab, Draft-Rettung (Decline UND Superseded) holt
+den Patch best-effort ins Working Set, lokale Drafts persistieren
+versiegelt pro Workspace (`wiki_draft.json`, nie im Export). Damit ist
+die MEMORY-Hälfte von Story 14 real; Quests/Vault/Wallet bleiben offen.
 
 **Abschluss-Review + Security-Analyse:** adversariales Multi-Agenten-Review über den
 gesamten Session-Diff (`86b72db..`, ~15,7k Zeilen, 10 Dimensionen, jedes Finding von

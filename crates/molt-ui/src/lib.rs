@@ -1069,6 +1069,44 @@ pub fn run_app(
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
+        // the debounced wiki-draft persist (WP-D) — an opaque blob hop
+        ui.on_wiki_draft_save(move |draft| {
+            issue(
+                &rt,
+                &w,
+                &weak,
+                Command::WikiDraftSave {
+                    draft: draft.to_string(),
+                },
+            );
+        });
+    }
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        // workspace entry: fetch the stored draft, hand it to the wiki
+        // model over the WikiState bridge (the completion is Send-bound)
+        ui.on_wiki_draft_load(move || {
+            let w = w.clone();
+            let weak2 = weak.clone();
+            rt.spawn(async move {
+                let draft = match w.execute(Command::WikiDraftLoad).await {
+                    Ok(Reply::WikiDraft { draft }) => draft,
+                    _ => String::new(),
+                };
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak2.upgrade() {
+                        ui.global::<WikiState>().invoke_draft_loaded(draft.into());
+                    }
+                });
+            });
+        });
+    }
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
         // the ❻½ phrase-backup confirmation — founder or joiner, the
         // engine routes by the running ritual (a mismatch surfaces as an
         // honest error toast)
@@ -2634,6 +2672,16 @@ fn apply_session(
     // `active_workspace` is an id; the header wants the display name.
     let active = sv.workspaces.iter().find(|w| w.id == sv.active_workspace);
     ui.set_active_workspace(active.map(|w| w.name.as_str()).unwrap_or_default().into());
+    // drafts are PER WORKSPACE: entering another republic resets the wiki
+    // model and loads that workspace's stored draft (WP-D)
+    {
+        let g = ui.global::<WikiState>();
+        let ws: slint::SharedString = sv.active_workspace.as_str().into();
+        if g.get_ws_id() != ws {
+            g.set_ws_id(ws);
+            g.invoke_workspace_changed();
+        }
+    }
     let (a_state, a_status) = active
         .map(|w| {
             (
@@ -6293,12 +6341,36 @@ fn sync_wiki_blocks(rc: &ModelRc<WikiBlock>, new: Vec<WikiBlock>) -> Option<Mode
     None
 }
 
+thread_local! {
+    /// The wiki auto-save guard: the last draft handed to the engine and
+    /// when — `sync_wiki` saves only what CHANGED, at most every 2 s (a
+    /// hard kill loses at most that window; WP-D).
+    static DRAFT_SAVE_GUARD: std::cell::RefCell<(String, std::time::Instant)> =
+        std::cell::RefCell::new((String::new(), std::time::Instant::now()));
+}
+
 /// Push the wiki model into the `WikiState` global — the whole face, after
 /// every mutation (the models are small, and rows patch in place). EXCEPT
 /// the editor buffer: `raw` is rewritten only when the active doc or the
 /// edit mode changes (`last`), never on the keystroke echo — a mid-typing
 /// rewrite fights the caret.
 fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, bool)>) {
+    // the debounced draft persist rides every sync (every model mutation
+    // lands here) — cheap: serialize, compare, at most one engine hop/2 s
+    let draft = w.to_draft();
+    let due = DRAFT_SAVE_GUARD.with(|g| {
+        let mut g = g.borrow_mut();
+        if g.0 != draft && g.1.elapsed() >= std::time::Duration::from_secs(2) {
+            g.0 = draft.clone();
+            g.1 = std::time::Instant::now();
+            true
+        } else {
+            false
+        }
+    });
+    if due {
+        ui.invoke_wiki_draft_save(draft.into());
+    }
     let s = ui.global::<WikiState>();
     let nav: Vec<WikiNavRow> = w
         .nav_rows()
@@ -6498,6 +6570,46 @@ fn wire_wiki(
         // a dead link is a no-op — the preview stays put
         let _ = w.open_link(&target);
     });
+    // workspace switch: the wiki model is per republic — reset, then load
+    // the stored draft; the base follows over the normal bridge
+    {
+        let m = model.clone();
+        let la = last.clone();
+        let weak = ui.as_weak();
+        g.on_workspace_changed(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            *m.borrow_mut() = wiki::Wiki::empty();
+            *la.borrow_mut() = None;
+            sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            ui.invoke_wiki_draft_load();
+        });
+    }
+    // the stored draft arrived: restore it, then rebase on the current
+    // bridge properties (a base that moved while closed reconciles like a
+    // live move); seed the auto-save guard so the load does not re-save
+    {
+        let m = model.clone();
+        let la = last.clone();
+        let weak = ui.as_weak();
+        g.on_draft_loaded(move |draft| {
+            let Some(ui) = weak.upgrade() else { return };
+            {
+                let mut w = m.borrow_mut();
+                let _ = w.restore_draft(&draft);
+                let gs = ui.global::<WikiState>();
+                let base: Vec<(String, String)> = gs
+                    .get_base_docs()
+                    .iter()
+                    .map(|d| (d.path.to_string(), d.content.to_string()))
+                    .collect();
+                let rev = u64::try_from(gs.get_base_rev()).unwrap_or(0);
+                w.set_base(&base, rev);
+                DRAFT_SAVE_GUARD.with(|g| *g.borrow_mut() = (w.to_draft(), std::time::Instant::now()));
+            }
+            sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+        });
+    }
+
     // rescue: a retired patch's changeset returns as local drafts —
     // best-effort per file, honest toast, and the wiki opens so the
     // rescued work is on screen

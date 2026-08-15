@@ -3773,6 +3773,18 @@ pub enum Command {
         /// The re-typed recovery phrase (whitespace-normalized compare).
         phrase: String,
     },
+    /// Persist the operator's LOCAL wiki draft (unvoted working copy +
+    /// changeset stack) for the open workspace
+    /// (`shared_memory_real.md` WP-D): survives a restart, sealed at
+    /// rest with the directory, never part of the backup export. The
+    /// draft is an opaque frontend blob — the engine stores bytes.
+    WikiDraftSave {
+        /// The serialized draft ("" removes it).
+        draft: String,
+    },
+    /// Read the open workspace's stored wiki draft
+    /// (`Reply::WikiDraft`; "" = none).
+    WikiDraftLoad,
 
     // --- founding-ritual transport events (engine-internal) ---
     /// A member activated their invite link: their JoinRequest arrived on
@@ -4558,6 +4570,11 @@ pub enum Reply {
     },
     /// A status summary.
     Status(StatusView),
+    /// The open workspace's stored local wiki draft ("" = none).
+    WikiDraft {
+        /// The serialized draft blob, exactly as saved.
+        draft: String,
+    },
     /// The member table (Organization → Members). A struct variant on
     /// purpose: the internally-tagged `reply` repr cannot serialize a bare
     /// sequence (the MCP surface renders replies as JSON).

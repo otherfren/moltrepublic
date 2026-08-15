@@ -967,6 +967,10 @@ export component AppWindow inherits Window {
     callback confirm-seed-backup(string);
     // rescue a retired wiki patch into the local working set
     callback wiki-rescue(string);
+    // the local wiki draft's persistence hops (WP-D): save is debounced
+    // from the model sync, load runs on workspace entry
+    callback wiki-draft-save(string);
+    callback wiki-draft-load();
     // deliberation step: the founder proposes the final name + charter (agenda)
     // once every member has joined; every member then ratifies it
     callback create-propose(string, string);

@@ -1,6 +1,14 @@
 # Shared Memory leaves design-mock — the plan
 
-**Status: DECIDED 2026-08-15 — ready to implement, not built yet.** The ask:
+**Status: BUILT 2026-08-15** — WP-A through WP-F landed the same day the
+forks were decided (WP-G folded into `read_state`: the Memory snapshot
+carries the tree, so GUI and MCP share ONE read and no extra tool was
+needed; drafts additionally got `wiki_draft_save`/`load` tools). Deltas
+against the plan, all recorded in place: the transport size caps stay at
+propose/ingest (never in the fold), the fold recomputes on read (cache
+deferred until measurable), superseded entries carry no timestamp and thus
+do not age out of the Denied view (they are the rescue's entry point).
+The ask:
 the Shared Memory surface (Multisig-Wiki) stops being a design mock and
 becomes the real product. This document is the exhaustive, execution-ready
 plan; the §9 forks were discussed and decided with the user on 2026-08-15.

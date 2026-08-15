@@ -6742,6 +6742,48 @@ mod tests {
         );
     }
 
+    /// shared_memory_real.md WP-B keystone: memory's applied entries are
+    /// ACCUMULATING at a checkpoint cut (`applied_lww_slot` = None), so
+    /// the fold over the summarized state is byte-identical to the fold
+    /// over the full chain — a cut can never fork the wiki.
+    #[test]
+    fn a_checkpoint_cut_keeps_the_wiki_fold_identical() {
+        const ADD_A: &str = "diff --git a/a.md b/a.md\nnew file mode 100644\n--- /dev/null\n+++ b/a.md\n@@ -0,0 +1,2 @@\n+hello\n+world\n";
+        const EDIT_A: &str = "diff --git a/a.md b/a.md\n--- a/a.md\n+++ b/a.md\n@@ -1,2 +1,2 @@\n-hello\n+hallo\n world\n";
+        let pool = vec!["wss://relay.one".to_string()];
+        let mut b = Builder::new_on_relays(&["petra", "walter"], 2, pool);
+        for (h, id, patch) in [(1u64, 10u64, ADD_A), (2, 11, EDIT_A)] {
+            let block = b.seal(
+                h,
+                ChainChange::Applied {
+                    proposal_id: id,
+                    surface: Surface::Memory,
+                    payload: serde_json::json!({ "op": "wiki_patch", "value": patch }),
+                },
+                &["petra", "walter"],
+            );
+            b.push(block);
+        }
+        let full = chain_signer("walter", &b, b.blocks.clone());
+        let full_tree = full.wiki_tree();
+        assert_eq!(
+            full_tree.get("a.md").map(String::as_str),
+            Some("hallo\nworld\n")
+        );
+        let state = checkpoint_state(&b.blocks, 2).expect("summary");
+        let mem: Vec<serde_json::Value> = state
+            .applied
+            .iter()
+            .find(|(s, _)| *s == Surface::Memory)
+            .map(|(_, entries)| entries.iter().map(|(_, p)| p.clone()).collect())
+            .expect("memory summary");
+        assert_eq!(
+            molt_core::wiki_fold::wiki_fold(&mem),
+            full_tree,
+            "a cut keeps the fold byte-identical"
+        );
+    }
+
     /// Two racing enables both survive a compaction cut: `set_features`
     /// entries ACCUMULATE in the checkpoint summary (deliberately no
     /// `applied_lww_slot` — an LWW summary would keep only the later value
