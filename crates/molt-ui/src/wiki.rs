@@ -1567,6 +1567,54 @@ mod tests {
         assert!(links.contains(&"glossary.md".to_string()));
     }
 
+    // ---- the fold round-trip (shared_memory_real.md WP-A keystone) ---------
+
+    /// THE contract between the proposer and every folder: the net patch
+    /// `build_patch` emits, applied strictly by `molt_core::wiki_fold`
+    /// onto the BASE tree, reproduces the proposer's working docs
+    /// byte-exactly — add, edit, rename and delete included. If this
+    /// breaks, members would ratify one content and fold another.
+    #[test]
+    fn a_built_patch_folds_byte_exactly_onto_the_base_tree() {
+        let mut w = Wiki::sample();
+        let base_tree: std::collections::BTreeMap<String, String> = w
+            .docs
+            .iter()
+            .filter_map(|d| d.base.as_ref().map(|b| (b.path.clone(), b.raw.clone())))
+            .collect();
+        let id_of = |w: &Wiki, name: &str| {
+            w.docs
+                .iter()
+                .find(|d| d.name() == name)
+                .map(|d| d.id)
+                .expect("doc")
+        };
+        // one of each kind: edit, rename+edit, delete, new file
+        let glossary = id_of(&w, "glossary.md");
+        w.set_raw(glossary, "# Words\n\nnew and short.");
+        let relay = id_of(&w, "2026-06-14-relay.md");
+        w.rename_commit(relay, "relay-decision").expect("rename");
+        w.set_raw(relay, "# Relay\n\nmoved and edited");
+        let charter = id_of(&w, "charter.md");
+        w.delete(charter);
+        let draft = w.new_file();
+        w.rename_commit(draft, "todo").expect("rename");
+        w.set_raw(draft, "# Todo\n\n- first\n- second");
+
+        let patch = w.build_patch().expect("patch");
+        let mut tree = base_tree;
+        molt_core::wiki_fold::apply_patch(&mut tree, &molt_core::wiki_fold::parse_patch(&patch))
+            .expect("the built patch applies strictly");
+
+        let want: std::collections::BTreeMap<String, String> = w
+            .docs
+            .iter()
+            .filter(|d| d.status() != Status::Deleted)
+            .map(|d| (d.path.clone(), d.raw.clone()))
+            .collect();
+        assert_eq!(tree, want, "fold(base, build_patch) == working docs");
+    }
+
     // ---- in-preview links --------------------------------------------------
 
     #[test]

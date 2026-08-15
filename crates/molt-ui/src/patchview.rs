@@ -10,72 +10,13 @@
 
 use similar::{ChangeTag, TextDiff};
 
-/// One file of a parsed patch.
-#[derive(Clone, Debug, Default)]
-pub struct PatchFile {
-    pub old_path: String,
-    pub new_path: String,
-    pub added: bool,
-    pub deleted: bool,
-    pub renamed: bool,
-    pub hunks: Vec<Hunk>,
-}
-
-impl PatchFile {
-    /// The navigator label: the file as the patch would leave it (the
-    /// old path for deletions).
-    pub fn display_path(&self) -> &str {
-        if self.deleted {
-            &self.old_path
-        } else {
-            &self.new_path
-        }
-    }
-
-    /// The navigator's extra marker: moved / deleted files say so.
-    pub fn marker(&self) -> &'static str {
-        if self.deleted {
-            "<deleted>"
-        } else if self.renamed {
-            "<moved>"
-        } else {
-            ""
-        }
-    }
-
-    /// The details-pane header's marker: a move also names where from
-    /// and where to (the navigator column stays short).
-    pub fn header_marker(&self) -> String {
-        if !self.deleted && self.renamed {
-            format!("<moved> {} → {}", self.old_path, self.new_path)
-        } else {
-            self.marker().to_string()
-        }
-    }
-
-    /// Status code in the wiki tone vocabulary plus the viewer's own
-    /// move tone: 1 added · 2 modified · 3 deleted · 4 moved (a renamed
-    /// file colors as a move even when it also carries edits — the diff
-    /// itself shows those).
-    pub fn status(&self) -> u8 {
-        if self.deleted {
-            3
-        } else if self.renamed {
-            4
-        } else if self.added {
-            1
-        } else {
-            2
-        }
-    }
-}
-
-/// One `@@` hunk: its content lines with their op char.
-#[derive(Clone, Debug, Default)]
-pub struct Hunk {
-    /// `' '` context · `'+'` added · `'-'` removed.
-    pub lines: Vec<(char, String)>,
-}
+// The parser and the file/hunk types moved DOWN to molt-core
+// (shared_memory_real.md WP-A): the strict fold applies exactly what this
+// viewer renders, so both must read one parse. This module keeps the
+// RENDERING half (rows of colored segments).
+pub use molt_core::wiki_fold::{parse_patch, PatchFile};
+#[cfg(test)]
+use molt_core::wiki_fold::{Hunk, HunkLine};
 
 /// A rendered segment's tone: 0 plain · 1 added (green) · 2 removed
 /// (red) · 3 meta (hunk separator).
@@ -99,53 +40,6 @@ pub struct Row {
     pub segs: Vec<Seg>,
 }
 
-/// Parse a git-format patch into files. Tolerant reader for the shape
-/// `wiki::build_patch` emits (`diff --git`, `new/deleted file mode`,
-/// `similarity index`, `rename from/to`, `---`/`+++`, `@@`, content
-/// lines, `\ No newline` hints); anything unrecognized is skipped.
-pub fn parse_patch(patch: &str) -> Vec<PatchFile> {
-    let mut files: Vec<PatchFile> = Vec::new();
-    for line in patch.lines() {
-        if let Some(rest) = line.strip_prefix("diff --git a/") {
-            let mut f = PatchFile::default();
-            // paths may contain spaces — split at the LAST " b/", the
-            // only separator both sides agree on
-            if let Some(pos) = rest.rfind(" b/") {
-                f.old_path = rest[..pos].to_string();
-                f.new_path = rest[pos + 3..].to_string();
-            }
-            files.push(f);
-            continue;
-        }
-        let Some(f) = files.last_mut() else { continue };
-        if line.starts_with("new file mode") {
-            f.added = true;
-        } else if line.starts_with("deleted file mode") {
-            f.deleted = true;
-        } else if let Some(p) = line.strip_prefix("rename from ") {
-            f.renamed = true;
-            f.old_path = p.to_string();
-        } else if let Some(p) = line.strip_prefix("rename to ") {
-            f.renamed = true;
-            f.new_path = p.to_string();
-        } else if line.starts_with("@@") {
-            f.hunks.push(Hunk::default());
-        } else if line.starts_with("similarity index")
-            || line.starts_with("--- ")
-            || line.starts_with("+++ ")
-            || line.starts_with('\\')
-        {
-            // header noise / no-newline hint — nothing to keep
-        } else if let Some(h) = f.hunks.last_mut() {
-            let mut chars = line.chars();
-            if let Some(op @ ('+' | '-' | ' ')) = chars.next() {
-                h.lines.push((op, chars.collect()));
-            }
-        }
-    }
-    files
-}
-
 /// A file's details rows: context stays plain, paired -/+ runs render as
 /// ONE merged row char-diffed green/{red}, unpaired lines color whole,
 /// hunk boundaries separate with a meta "⋯" row.
@@ -163,30 +57,30 @@ pub fn file_rows(f: &PatchFile) -> Vec<Row> {
         let lines = &h.lines;
         let mut i = 0;
         while i < lines.len() {
-            match lines[i].0 {
+            match lines[i].op {
                 ' ' => {
-                    out.push(plain_row(&lines[i].1, SegTone::Plain));
+                    out.push(plain_row(&lines[i].text, SegTone::Plain));
                     i += 1;
                 }
                 '+' => {
-                    out.push(plain_row(&lines[i].1, SegTone::Added));
+                    out.push(plain_row(&lines[i].text, SegTone::Added));
                     i += 1;
                 }
                 '-' => {
                     // the whole removal run, then the addition run that
                     // follows — pairs char-diff, excess colors whole lines
                     let start = i;
-                    while i < lines.len() && lines[i].0 == '-' {
+                    while i < lines.len() && lines[i].op == '-' {
                         i += 1;
                     }
                     let removed: Vec<&str> =
-                        lines[start..i].iter().map(|(_, t)| t.as_str()).collect();
+                        lines[start..i].iter().map(|l| l.text.as_str()).collect();
                     let astart = i;
-                    while i < lines.len() && lines[i].0 == '+' {
+                    while i < lines.len() && lines[i].op == '+' {
                         i += 1;
                     }
                     let added: Vec<&str> =
-                        lines[astart..i].iter().map(|(_, t)| t.as_str()).collect();
+                        lines[astart..i].iter().map(|l| l.text.as_str()).collect();
                     let pairs = removed.len().min(added.len());
                     for k in 0..removed.len().max(added.len()) {
                         if k < pairs {
@@ -243,6 +137,14 @@ fn char_diff_row(old: &str, new: &str) -> Row {
 mod tests {
     use super::*;
     use crate::wiki::Wiki;
+
+    fn hl(op: char, text: &str) -> HunkLine {
+        HunkLine {
+            op,
+            text: text.to_string(),
+            newline: true,
+        }
+    }
 
     /// The real thing end to end: a changeset built in the wiki model,
     /// emitted as a patch, parsed back — the viewer must see exactly the
@@ -314,10 +216,11 @@ mod tests {
         let f = PatchFile {
             hunks: vec![Hunk {
                 lines: vec![
-                    (' ', "context".to_string()),
-                    ('-', "the old word".to_string()),
-                    ('+', "the new word".to_string()),
+                    hl(' ', "context"),
+                    hl('-', "the old word"),
+                    hl('+', "the new word"),
                 ],
+                ..Hunk::default()
             }],
             ..PatchFile::default()
         };
@@ -343,13 +246,15 @@ mod tests {
             hunks: vec![
                 Hunk {
                     lines: vec![
-                        ('-', "gone entirely".to_string()),
-                        ('-', "also gone".to_string()),
-                        ('+', "replacement".to_string()),
+                        hl('-', "gone entirely"),
+                        hl('-', "also gone"),
+                        hl('+', "replacement"),
                     ],
+                    ..Hunk::default()
                 },
                 Hunk {
-                    lines: vec![('+', "fresh line".to_string())],
+                    lines: vec![hl('+', "fresh line")],
+                    ..Hunk::default()
                 },
             ],
             ..PatchFile::default()

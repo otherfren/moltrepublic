@@ -23,6 +23,7 @@ use serde_json::Value;
 /// sequence of commit blocks (the founding is block 0). See [`chain`].
 pub mod chain;
 pub mod relay;
+pub mod wiki_fold;
 pub use chain::{
     applied_lww_slot, approval_bytes, block_link_bytes, checkpoint_canonical_bytes, ChainBlock,
     ChainChange, CheckpointState, MembershipOp, GENESIS_PREV,

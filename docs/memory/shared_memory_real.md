@@ -76,15 +76,22 @@ reaches the base only through the existing threshold vote. Invariants:
   into molt-core (pure, no I/O; the UI keeps its rendering half and
   re-uses the moved parser). Layering demands it: the engine folds, and
   engine must not depend on ui.
-- **Search-first (dont-handroll):** evaluate `diffy` (parse/apply/merge of
-  unified diffs, MIT/Apache, pure Rust) for the per-file APPLY before
-  writing one. Criteria, in order: (1) STRICTNESS — the fold needs
-  exact-context apply with a deterministic reject; any fuzz/offset
-  tolerance is a liability here; (2) multi-file git headers (rename/new/
-  delete) — likely stays our parser either way; (3) dependency posture.
-  Verdict goes into this doc before WP-A lands. If diffy's apply is
-  tolerant, write the strict hunk-apply over our parsed hunks (small,
-  keystone-pinned) and record why.
+- **Search-first (dont-handroll) — VERDICT 2026-08-15:** `diffy`
+  (MIT/Apache, pure Rust) was evaluated against the real API: its `apply`
+  deliberately mirrors GNU patch — "will attempt to find the correct
+  place to apply each hunk by iterating forward and backward from the
+  given position until all context lines match". That offset tolerance is
+  exactly the disqualifier from the decided criterion: with repeated
+  markdown patterns a hunk could bind deterministically but SEMANTICALLY
+  WRONG to a duplicate region — and members ratified a diff shown at a
+  specific location. Decision: the STRICT own hunk-apply over our parsed
+  hunks (exact position AND exact context, else the whole patch is void),
+  keystone-pinned. The multi-file git-header parser was ours already
+  (`patchview.rs`) and moves down to molt-core.
+- **Refinement (found at build time):** the transport size caps stay at
+  propose/wire-ingest ONLY and are NOT part of the fold — a fold that
+  re-checked a version-dependent budget would void honest chain-recorded
+  patches differently across versions, breaking determinism.
 - `molt_core::wiki_fold(applied: &[Value]) -> BTreeMap<String, String>`:
   parse each wiki_patch payload, apply ALL-OR-NOTHING per patch (a half
   applied patch would fork trees), path-normalize, enforce the same size
