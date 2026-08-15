@@ -89,12 +89,14 @@ EVIDENCE-driven heal. When the recovered incarnation's first claim sheets
 arrived (proof: a listening, still-lagging peer — its floor cannot advance
 past what the old incarnation proved, so they land in `apply_group_ack`'s
 no-progress arm), the outbox held the tail for up to the rest of the hour,
-which the user reads as permanent deafness. Fix on master: an applied
-claim sheet latches `GroupCursor.heal_evidence`; a spent budget then still
-grants ONE `consume_heal_round` per hour window (bounded — a blind stall
-loop buys nothing, a normal round clears the latch because it just served
-it). Keystones: `group_runtime::tests::a_claim_sheet_grants_one_heal_round_past_a_spent_budget`,
-`an_applied_claim_sheet_latches_heal_evidence`,
+which the user reads as permanent deafness. Fix on master: a claim sheet
+from a peer that still TRAILS the publish cursor latches
+`GroupCursor.heal_evidence` (a caught-up peer's sheet proves nothing to
+heal — review finding); a spent budget then still grants ONE
+`consume_heal_round` per hour window (bounded — a blind stall loop buys
+nothing, a normal round clears the latch because it just served it).
+Keystones: `group_runtime::tests::a_claim_sheet_grants_one_heal_round_past_a_spent_budget`,
+`only_a_lagging_peers_sheet_latches_heal_evidence`,
 `a_normal_resend_round_clears_the_heal_evidence`.
 
 ## 3. OPEN — survivors' outboxes churn; chat between HEALTHY nodes stalls

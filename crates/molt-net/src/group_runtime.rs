@@ -305,25 +305,38 @@ async fn apply_group_ack<L: OutboxLog, S: StateStore>(
         window_high = window.high,
         "group ack applied"
     );
-    // either way the peer SPOKE about our events: latch the heal evidence —
-    // it buys the outbox one budget-free round when the hourly allowance is
-    // already burned (a recovered incarnation must not wait out the refill:
-    // live incident 2026-08-09 §2)
+    // a peer that spoke about our events AND still trails our publish
+    // cursor is a proven lagging LISTENER: latch the heal evidence — it
+    // buys the outbox one budget-free round when the hourly allowance is
+    // already burned (a recovered incarnation must not wait out the
+    // refill: live incident 2026-08-09 §2). A caught-up peer's sheet
+    // proves nothing to heal, and saving is conditional — most sheets in
+    // steady state change nothing worth a state write.
+    let mut changed = false;
     let mut group = state.group.unwrap_or_default();
-    group.heal_evidence = true;
+    if floor < group.log_seq && !group.heal_evidence {
+        group.heal_evidence = true;
+        changed = true;
+    }
     state.group = Some(group);
     if floor > old {
         let cursor = state.outbound.entry(from.clone()).or_default();
         cursor.acked_floor = floor;
         cursor.ack_seen = true;
+        changed = true;
     } else {
         // no progress — but the peer is listening. Latch without moving the
         // floor; the floor stays honest (0 = nothing proven) and the rewind
         // can now reach back to what this peer is actually missing.
         let cursor = state.outbound.entry(from.clone()).or_default();
-        cursor.ack_seen = true;
+        if !cursor.ack_seen {
+            cursor.ack_seen = true;
+            changed = true;
+        }
     }
-    store.save(state).await;
+    if changed {
+        store.save(state).await;
+    }
 }
 
 /// Publish claim sheets as they are handed over.
@@ -825,8 +838,11 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
     // concurrent same-epoch commit race
     let outcome = mls.decode_at(&wire, created_at);
     // consumed outcomes enter the dedup ring — their re-delivery can never
-    // decode again; transitional ones (FutureEpoch/EpochAdvanced/Opaque)
-    // must stay retryable and do NOT
+    // decode again. Held ones (FutureEpoch/Opaque) must stay retryable and
+    // do NOT. Commit outcomes (EpochAdvanced) stay out DELIBERATELY even
+    // though their decrypt is spent: the concurrent-commit tiebreak (N3 §1)
+    // may rewind one epoch and must be able to re-see the winning commit —
+    // a ring hit there would swallow it.
     if matches!(
         outcome,
         MlsDecode::Deliver(..) | MlsDecode::Ack(..) | MlsDecode::GroupAck(..) | MlsDecode::Discard
@@ -1764,21 +1780,35 @@ mod tests {
         assert!(!cur.heal_evidence, "the round just republished the tail");
     }
 
-    /// `apply_group_ack` latches the heal evidence on ANY sheet that speaks
-    /// about us — including the no-progress arm, which is exactly what a
-    /// re-recovered incarnation's sheets look like (its floor cannot
-    /// advance past what the old incarnation already proved).
+    /// `apply_group_ack` latches the heal evidence only for a sheet whose
+    /// peer still TRAILS our publish cursor — that is what a re-recovered
+    /// incarnation's sheets look like (their floor cannot advance past
+    /// what the old incarnation already proved). A caught-up peer's sheet
+    /// and silence about us both latch nothing (review 2026-08-15: an
+    /// over-eager latch let a healthy peer's ack re-arm the heal round
+    /// against a peer that provably is not listening).
     #[tokio::test]
-    async fn an_applied_claim_sheet_latches_heal_evidence() {
+    async fn only_a_lagging_peers_sheet_latches_heal_evidence() {
         let log = crate::MemLog::default();
         let store = crate::MemStateStore::default();
-        // a peer whose floor is already latched — the no-progress arm
+        for seq in 1..=3u64 {
+            log.push(molt_core::EventEnvelope {
+                prev_seq: seq.saturating_sub(1),
+                seq,
+                ts: 1_751_000_000 + seq,
+                by: "walter".to_string(),
+                body: molt_core::WorkspaceEvent::Chat(molt_core::ChatMessage::text(
+                    molt_core::MessageId([u8::try_from(seq).unwrap_or(0); 16]),
+                    "walter",
+                    "x",
+                    1_751_000_000,
+                )),
+            });
+        }
+        // the publish cursor stands at 3; petra's window proves only seq 1
         {
             let mut st = <crate::MemStateStore as StateStore>::load(&store).await;
-            st.outbound.insert(
-                "petra".into(),
-                OutboundCursor { acked_floor: 0, ack_seen: true, ..Default::default() },
-            );
+            st.group = Some(molt_core::GroupCursor { log_seq: 3, ..Default::default() });
             <crate::MemStateStore as StateStore>::save(&store, st).await;
         }
         let mut window = molt_core::AcceptedWindow::default();
@@ -1791,22 +1821,44 @@ mod tests {
         let state = <crate::MemStateStore as StateStore>::load(&store).await;
         assert!(
             state.group.unwrap_or_default().heal_evidence,
-            "a speaking sheet is heal evidence even without floor progress"
+            "a lagging listener's sheet is heal evidence"
+        );
+
+        // a CAUGHT-UP peer's sheet proves nothing to heal
+        let store2 = crate::MemStateStore::default();
+        {
+            let mut st = <crate::MemStateStore as StateStore>::load(&store2).await;
+            st.group = Some(molt_core::GroupCursor { log_seq: 3, ..Default::default() });
+            <crate::MemStateStore as StateStore>::save(&store2, st).await;
+        }
+        let mut caught_up = molt_core::AcceptedWindow::default();
+        for seq in 1..=3u64 {
+            assert!(caught_up.accept(seq));
+        }
+        let ack2 = crate::group_ack::GroupAck::new(
+            "petra".to_string(),
+            std::collections::BTreeMap::from([("walter".to_string(), caught_up)]),
+        );
+        apply_group_ack(&log, &store2, &"walter".to_string(), &"petra".to_string(), &ack2).await;
+        let state2 = <crate::MemStateStore as StateStore>::load(&store2).await;
+        assert!(
+            !state2.group.unwrap_or_default().heal_evidence,
+            "a caught-up peer buys no heal round"
         );
 
         // silence (a sheet about OTHER members only) latches nothing
-        let store2 = crate::MemStateStore::default();
-        let ack2 = crate::group_ack::GroupAck::new(
+        let store3 = crate::MemStateStore::default();
+        let ack3 = crate::group_ack::GroupAck::new(
             "petra".to_string(),
             std::collections::BTreeMap::from([(
                 "zoe".to_string(),
                 molt_core::AcceptedWindow::default(),
             )]),
         );
-        apply_group_ack(&log, &store2, &"walter".to_string(), &"petra".to_string(), &ack2).await;
-        let state2 = <crate::MemStateStore as StateStore>::load(&store2).await;
+        apply_group_ack(&log, &store3, &"walter".to_string(), &"petra".to_string(), &ack3).await;
+        let state3 = <crate::MemStateStore as StateStore>::load(&store3).await;
         assert!(
-            !state2.group.unwrap_or_default().heal_evidence,
+            !state3.group.unwrap_or_default().heal_evidence,
             "silence about us proves nothing and buys nothing"
         );
     }
