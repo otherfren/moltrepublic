@@ -275,38 +275,8 @@ impl RelayRuntime {
                 Err(e) => report.failed.push((url, e.to_string())),
             }
         }
-        // the per-relay reasons belong in the LOG (one greppable line each),
-        // not stuffed into an error string the GUI has to render — a `{:?}`
-        // dump of every failure is exactly the wall of text nobody reads
-        for (url, e) in &report.failed {
-            tracing::warn!(relay = %url, error = %e, "publish rejected");
-        }
-        if report.accepted.is_empty() {
-            // the WHY belongs in the message — it is the one important thing.
-            // What does not belong is a `{:?}` dump of (url, reason) tuples:
-            // collapse to the DISTINCT reasons, which for the common case
-            // (every relay refusing for the same cause) is a single clause.
-            let mut reasons: Vec<&str> = Vec::new();
-            for (_, e) in &report.failed {
-                let r = e.as_str();
-                if !reasons.contains(&r) {
-                    reasons.push(r);
-                }
-            }
-            return Err(NetError::Unreachable(format!(
-                "no relay accepted the event ({} tried): {}",
-                report.failed.len(),
-                reasons.join("; ")
-            )));
-        }
-        if !report.failed.is_empty() {
-            tracing::warn!(
-                accepted = report.accepted.len(),
-                failed = report.failed.len(),
-                "event landed on some relays only"
-            );
-        }
-        Ok(report)
+        // the shared ≥1-OK reduction (the persistent pool uses it too)
+        finish_publish_report(report)
     }
 }
 
@@ -1105,6 +1075,193 @@ pub async fn probe_nip11_max_message(
     Ok(doc
         .pointer("/limitation/max_message_length")
         .and_then(serde_json::Value::as_u64))
+}
+
+/// A PERSISTENT, UNAUTHENTICATED publish channel (live incident
+/// 2026-08-09 §3): one long-lived connection per relay, reused across
+/// publishes, redialed only when it broke — the per-frame fresh dial
+/// (Tor circuit + WS + TLS ≈ 2 s) is what let resend rounds starve fresh
+/// sends. Deliberately NOT the NIP-42-authenticated subscribe session:
+/// an authenticated publish channel would link every ephemeral-key event
+/// to the member (§7.5). A relay can already group the frames by their
+/// `h` tag; what this channel must never leak is WHO.
+///
+/// Concurrency: publishers (outbox, ack task, file plane) serialize PER
+/// RELAY — the slot lock is held across one send→OK round-trip so
+/// interleaved OKs can never be attributed to the wrong event; distinct
+/// relays still publish in parallel.
+#[derive(Clone)]
+pub struct PublishPool {
+    dialer: Dialer,
+    /// (url, its connection slot) — urls are fixed at construction; a pool
+    /// change builds a new channel and thereby a new pool.
+    conns: Arc<Vec<(String, tokio::sync::Mutex<Option<RelayWs>>)>>,
+    size_budget: Option<u64>,
+}
+
+// manual: RelayWs holds no secrets, but Debug on a live socket is noise
+impl std::fmt::Debug for PublishPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PublishPool")
+            .field("relays", &self.conns.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PublishPool {
+    /// A pool over `urls`. Connections are dialed lazily on the first
+    /// publish and kept until they break.
+    pub fn new(dialer: Dialer, urls: Vec<String>) -> Self {
+        if !urls.is_empty() {
+            tracing::info!(
+                relays = urls.len(),
+                via = %dialer.route(),
+                "persistent publish channel"
+            );
+        }
+        Self {
+            dialer,
+            conns: Arc::new(
+                urls.into_iter()
+                    .map(|u| (u, tokio::sync::Mutex::new(None)))
+                    .collect(),
+            ),
+            size_budget: None,
+        }
+    }
+
+    /// Publish one signed event to EVERY relay concurrently over the kept
+    /// connections — the same ≥1-OK semantics and size gate as
+    /// [`RelayRuntime::publish`].
+    pub async fn publish(&self, event: &Event) -> Result<PublishReport, NetError> {
+        if self.conns.is_empty() {
+            return Err(NetError::Unreachable(
+                "no dialable relay — the pool is empty or gated".into(),
+            ));
+        }
+        let budget = self.size_budget.unwrap_or(DEFAULT_SIZE_BUDGET);
+        let size = u64::try_from(ClientMessage::event(event.clone()).as_json().len())
+            .unwrap_or(u64::MAX);
+        if size > budget {
+            return Err(NetError::Framing(format!(
+                "event of {size} bytes exceeds the smallest relay cap ({budget} bytes) — refused before publish"
+            )));
+        }
+        let attempts = self.conns.iter().map(|(url, slot)| {
+            let dialer = self.dialer.clone();
+            let event = event.clone();
+            async move {
+                let outcome = Self::publish_pooled(&dialer, url, slot, &event).await;
+                (url.clone(), outcome)
+            }
+        });
+        let mut report = PublishReport::default();
+        for (url, outcome) in futures_util::future::join_all(attempts).await {
+            match outcome {
+                Ok(()) => report.accepted.push(url),
+                Err(e) => report.failed.push((url, e.to_string())),
+            }
+        }
+        finish_publish_report(report)
+    }
+
+    /// One relay: try the kept connection; if the TRANSPORT broke (send or
+    /// recv failed — an idle-closed socket looks like this), drop it and
+    /// dial fresh exactly once. A relay's VERDICT (refusal, auth demand)
+    /// is a real answer over a live socket — it never redials.
+    async fn publish_pooled(
+        dialer: &Dialer,
+        url: &str,
+        slot: &tokio::sync::Mutex<Option<RelayWs>>,
+        event: &Event,
+    ) -> Result<(), NetError> {
+        let mut guard = slot.lock().await;
+        if let Some(ws) = guard.as_mut() {
+            match tokio::time::timeout(PUBLISH_TIMEOUT, send_and_await_ok(ws, event)).await {
+                Ok(Ok(verdict)) => return verdict,
+                // transport broke or the OK never came — the socket is not
+                // trustworthy any more either way
+                Ok(Err(_)) | Err(_) => {
+                    *guard = None;
+                }
+            }
+        }
+        let attempt = async {
+            let mut ws = RelayWs::connect(dialer, url).await?;
+            let verdict = send_and_await_ok(&mut ws, event)
+                .await
+                .map_err(RecvFail::into_error)?;
+            Ok::<(RelayWs, Result<(), NetError>), NetError>((ws, verdict))
+        };
+        let (ws, verdict) = tokio::time::timeout(PUBLISH_TIMEOUT, attempt)
+            .await
+            .unwrap_or_else(|_| Err(NetError::Unreachable("publish timed out".into())))?;
+        // keep the live socket — a refusal verdict still proves it works
+        *guard = Some(ws);
+        verdict
+    }
+}
+
+/// Send EVENT and await the OK for THIS event id on an already-connected
+/// socket. `Err` = the transport broke (caller drops the socket); `Ok`
+/// carries the relay's verdict (accepted / refused — a live answer).
+async fn send_and_await_ok(
+    ws: &mut RelayWs,
+    event: &Event,
+) -> Result<Result<(), NetError>, RecvFail> {
+    if let Err(e) = ws.send(ClientMessage::event(event.clone())).await {
+        return Err(RecvFail::Dead(e));
+    }
+    loop {
+        match ws.recv(PUBLISH_TIMEOUT).await? {
+            RelayMessage::Ok { event_id, status, message } if event_id == event.id => {
+                return Ok(if counts_as_published(status, &message) {
+                    Ok(())
+                } else if message.starts_with("auth-required:") {
+                    // deliberate: the publish path NEVER authenticates —
+                    // an authed publish channel would link every
+                    // ephemeral-key event to the member (§7.5)
+                    Err(NetError::Unreachable(format!(
+                        "relay requires AUTH to publish — refused to link the publish key: {message}"
+                    )))
+                } else {
+                    Err(NetError::Unreachable(format!("relay refused: {message}")))
+                });
+            }
+            // frames for other events / notices are not our OK
+            _ => {}
+        }
+    }
+}
+
+/// The shared ≥1-OK reduction: log per-relay failures, fail typed when
+/// NOTHING accepted, warn on a partial landing.
+fn finish_publish_report(report: PublishReport) -> Result<PublishReport, NetError> {
+    for (url, e) in &report.failed {
+        tracing::warn!(relay = %url, error = %e, "publish rejected");
+    }
+    if report.accepted.is_empty() {
+        let mut reasons: Vec<&str> = Vec::new();
+        for (_, e) in &report.failed {
+            let r = e.as_str();
+            if !reasons.contains(&r) {
+                reasons.push(r);
+            }
+        }
+        return Err(NetError::Unreachable(format!(
+            "no relay accepted the event ({} tried): {}",
+            report.failed.len(),
+            reasons.join("; ")
+        )));
+    }
+    if !report.failed.is_empty() {
+        tracing::warn!(
+            accepted = report.accepted.len(),
+            failed = report.failed.len(),
+            "publish landed on part of the pool"
+        );
+    }
+    Ok(report)
 }
 
 /// One relay, one publish: connect, EVENT, await the OK for THIS event id.

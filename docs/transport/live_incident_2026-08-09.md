@@ -1,9 +1,10 @@
 # Live incident 2026-08-09 — three-node Nostr test, post-recovery divergence
 
-Status: **five defects fixed on master** (proposal-card resurrect, chat-nav
-pin deadlock, pool edit lost on reopen, declines never converged, applied
-cards lost their voters), **two open** (each with evidence
-below). Source: the user's real three-node setup (Albert =
+Status: **all defects addressed on master** — five fixed on 2026-08-09
+(proposal-card resurrect, chat-nav pin deadlock, pool edit lost on reopen,
+declines never converged, applied cards lost their voters), §2 and §3
+closed on 2026-08-15 (see their sections); field verification of the
+2026-08-15 fixes on the live three-node setup is pending. Source: the user's real three-node setup (Albert =
 `config.toml`, Eduard = `config2.toml`, Veronica = `config3.toml`; republic
 "Our Software Company", 2-of-3, relays `wss://nos.lol` + one onion, via local
 Tor). All findings were taken from the LIVE engines over MCP and from headless
@@ -38,7 +39,7 @@ below a checkpoint cut, membership blocks by content), plus a
 `receive_proposed` guard refusing ids the walk already consumed (the live
 resend twin). Keystone: `chain::tests::adopting_a_chain_settles_replayed_proposal_cards`.
 
-## 2. OPEN — the rejoiner is inbound-deaf after a double recovery
+## 2. ADDRESSED (field verification pending) — the rejoiner was inbound-deaf after a double recovery
 
 **Symptom:** Eduard's node receives nothing from the survivors since his
 15:37 recovery (missing: 3 group messages, the 4th patch-2 message, his own
@@ -99,7 +100,7 @@ Keystones: `group_runtime::tests::a_claim_sheet_grants_one_heal_round_past_a_spe
 `only_a_lagging_peers_sheet_latches_heal_evidence`,
 `a_normal_resend_round_clears_the_heal_evidence`.
 
-## 3. OPEN — survivors' outboxes churn; chat between HEALTHY nodes stalls
+## 3. FIXED — survivors' outboxes churned; chat between HEALTHY nodes stalled
 
 **Symptom:** a fresh chat message between the two healthy nodes did not
 arrive within tens of seconds; the user experiences "chat kaputt" on nodes
@@ -111,10 +112,19 @@ circuit + WS + TLS each, ~2s), and the resend rounds against Eduard's dead
 acks saturate that path; new sends queue behind the resend cursor. Healthy
 Eduard-side count in the same window: 1.
 
-**Direction:** (a) reuse one persistent publish channel for the outbox
-instead of a fresh runtime per publish, or (b) at least de-prioritize resend
-rounds behind fresh sends; plus the §2 budget fix so a deaf peer cannot
-starve the group.
+**Fix (master, 2026-08-15 — direction (a), user decision):**
+`relay_runtime::PublishPool` — one persistent, deliberately UNAUTHENTICATED
+connection per relay (the §7.5 rule stands: an authed publish channel would
+link every ephemeral-key event to the member), shared by every clone of the
+`GroupChannel`, so outbox, ack task and file plane ride kept sockets. A
+broken/idle-closed socket redials exactly once on the next publish; a
+relay's verdict (refusal, auth demand) never redials — it is a live answer.
+≥1-OK semantics, the size gate and the report shape are the shared
+`finish_publish_report` reduction, byte-compatible with the per-dial path
+(which remains for ritual sends and probes). Keystones:
+`tests/publish_pool.rs` (three publishes = ONE connection, red-verified at
+3; a cut connection redials exactly once), plus both delivery suites and
+the recovery capstone over the pooled path.
 
 ## 4. FIXED — the "GUI freeze" was a chat-nav pin deadlock
 

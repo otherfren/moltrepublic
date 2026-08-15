@@ -379,6 +379,10 @@ pub struct GroupChannel {
     dialer: Dialer,
     relays: Vec<String>,
     rotation_seed: [u8; 32],
+    /// The persistent publish connections (incident 2026-08-09 §3): shared
+    /// by every clone of this channel — outbox, ack task and file plane
+    /// ride the same kept sockets instead of dialing per frame.
+    pool: crate::relay_runtime::PublishPool,
 }
 
 // manual: the rotation seed is secret-class (plan §6) — never in Debug
@@ -394,7 +398,8 @@ impl GroupChannel {
     /// A channel over `relays` for the group whose h tags derive from
     /// `rotation_seed` (minted at founding, learned from the Welcome).
     pub fn new(dialer: Dialer, relays: Vec<String>, rotation_seed: [u8; 32]) -> Self {
-        Self { dialer, relays, rotation_seed }
+        let pool = crate::relay_runtime::PublishPool::new(dialer.clone(), relays.clone());
+        Self { dialer, relays, rotation_seed, pool }
     }
 
     /// Seal `mls_ciphertext` under `exporter` and publish it as a kind-445
@@ -468,9 +473,7 @@ impl GroupChannel {
             .sign_with_keys(&Keys::generate())
             .map_err(|e| NetError::Crypto(format!("signing the {kind} frame: {e}")))?;
         let stamp = event.created_at.as_secs();
-        let report = RelayRuntime::new(self.dialer.clone(), self.relays.clone())
-            .publish(&event)
-            .await?;
+        let report = self.pool.publish(&event).await?;
         Ok((stamp, report))
     }
 
