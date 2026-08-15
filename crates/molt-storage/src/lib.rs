@@ -290,7 +290,7 @@ pub fn derive_identity_key(seed: &[u8], id: &str) -> (SigningKey, String) {
 }
 
 /// What a member signs to attest its recovery-phrase BACKUP during the
-/// founding (`docs/ritual/seed_backup_confirmation.md` ❻½): a domain tag
+/// founding (`docs_archive/ritual/seed_backup_confirmation.md` ❻½): a domain tag
 /// followed by the sha256 of the RATIFIED canonical table, so the
 /// attestation is bound to exactly this ritual's charter and cannot
 /// replay into another founding. It deliberately claims no key

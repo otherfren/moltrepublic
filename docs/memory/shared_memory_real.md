@@ -13,7 +13,7 @@ the Shared Memory surface (Multisig-Wiki) stops being a design mock and
 becomes the real product. This document is the exhaustive, execution-ready
 plan; the §9 forks were discussed and decided with the user on 2026-08-15.
 Build order relative to other open work: the ritual seed-backup round
-(`../ritual/seed_backup_confirmation.md`) lands first.
+(`docs_archive/ritual/seed_backup_confirmation.md`) lands first.
 
 Read first: `docs/ui/mock_todo.md` (story 14 + the 2026-08-12/14 rounds),
 `docs/chain/persistent_chain.md` (the state model this builds on),
