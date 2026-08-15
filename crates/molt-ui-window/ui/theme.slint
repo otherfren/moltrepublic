@@ -133,6 +133,9 @@ export struct ProposalRow {
     my-vote: int,
     // the READING member proposed it — shows the "pull back" button
     mine: bool,
+    // the supersede walk retired it (base moved) — "superseded", never
+    // "declined by"
+    superseded: bool,
 }
 
 // One member of a republic with its last-sync info (mock data).
@@ -370,8 +373,20 @@ export global PatchView {
 // The wiki pane's shared state + action bus: properties are pushed by the
 // Rust bridge after every mutation, callbacks are implemented there. The
 // app root also drives it (Ctrl+W / Del / Enter routing).
+// One doc of the folded engine base (the shared wiki's truth).
+export struct WikiBase {
+    path: string,
+    content: string,
+}
+
 export global WikiState {
     in-out property <[WikiNavRow]> nav-rows;
+    // the engine-folded BASE + its revision, written by the surfaces
+    // mirror; base-arrived hands them to the Rust wiki model (the
+    // Send-bound bundle closure cannot hold the model directly)
+    in-out property <[WikiBase]> base-docs;
+    in-out property <int> base-rev;
+    callback base-arrived();
     in-out property <[WikiTabRow]> tabs;
     // the active doc (empty state when doc-open is false)
     in-out property <bool> doc-open;
@@ -1140,6 +1155,9 @@ export global Strings {
     in property <string> pc-show-patch;
     in property <string> pc-withdraw;
     in property <string> cw-backup-confirm;
+    in property <string> pc-superseded;
+    in property <string> mem-rescue;
+    in property <string> mem-toast-rescued;
     in property <string> cw-backup-wait;
     in property <string> pv-title;
     in property <string> pv-copy;

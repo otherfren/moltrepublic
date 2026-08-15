@@ -965,6 +965,8 @@ export component AppWindow inherits Window {
     callback create-finish();
     // ❻½: re-typed phrase → engine match → attestation/finalize
     callback confirm-seed-backup(string);
+    // rescue a retired wiki patch into the local working set
+    callback wiki-rescue(string);
     // deliberation step: the founder proposes the final name + charter (agenda)
     // once every member has joined; every member then ratifies it
     callback create-propose(string, string);
@@ -4605,7 +4607,7 @@ export component AppWindow inherits Window {
                         padding-left: 16px;
                         padding-right: 12px;
                         spacing: 8px;
-                        // the Multisig-Wiki mock hoists its pane title up
+                        // the Multisig-Wiki hoists its pane title up
                         // here, left of the republic name — the pane keeps
                         // its full height for navigator + document
                         if root.selected-surface == "memory" && root.selected-view == "brain": HorizontalLayout {
@@ -4629,10 +4631,6 @@ export component AppWindow inherits Window {
                                 font-size: Theme.fs-h2;
                                 font-weight: 700;
                                 vertical-alignment: center;
-                            }
-                            VerticalLayout {
-                                alignment: center;
-                                MockBadge { }
                             }
                             Rectangle {
                                 width: 1px;
@@ -4831,6 +4829,9 @@ export component AppWindow inherits Window {
                                 view-patch => {
                                     root.patch-view-text = root.selected-decision.proposed;
                                     root.patch-view-open = true;
+                                }
+                                rescue-patch => {
+                                    root.wiki-rescue(root.selected-decision.proposed);
                                 }
                             }
 
@@ -6804,6 +6805,9 @@ export component AppWindow inherits Window {
                                             discuss(id) => {
                                                 root.select-view("chat", "today");
                                                 root.select-channel("patch:\{id}");
+                                            }
+                                            rescue(patch) => {
+                                                root.wiki-rescue(patch);
                                             }
                                         }
                                     }

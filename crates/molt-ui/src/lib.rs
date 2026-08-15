@@ -3645,6 +3645,10 @@ struct SurfaceData {
     /// table — proposal-backed rows carry their sealed block's voters,
     /// legacy rows (id -1) only their title. Parallel to the gated `log`.
     accepted: Vec<ProposalRowData>,
+    /// Memory only: the engine-folded wiki base + its revision (the
+    /// shared truth the Wiki model rebases on — shared_memory_real.md).
+    wiki_tree: Vec<(String, String)>,
+    wiki_rev: u64,
 }
 struct LogLineData {
     /// Stable message id, 32-char hex ("" on legacy entries without one —
@@ -3737,6 +3741,9 @@ struct ProposalRowData {
     /// Whether the READING member proposed it (engine `ProposalView.mine`)
     /// — the "pull back" button's visibility gate.
     mine: bool,
+    /// The supersede walk retired it (base moved) — labeled "superseded",
+    /// never "declined by" (no vote was cast).
+    superseded: bool,
 }
 
 /// Read status + every surface snapshot into a bundle the window can apply.
@@ -4335,6 +4342,26 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         .collect();
     sync_rows(&ui.get_surfaces(), tabs, |m| ui.set_surfaces(m));
 
+    // the Shared-Memory base: hand the folded tree to the wiki model over
+    // the WikiState bridge (this apply runs from a Send-bound closure that
+    // cannot hold the UI-thread Rc model; the base-arrived handler can)
+    if let Some(mem) = b.surfaces.iter().find(|s| s.key == "memory") {
+        let g = ui.global::<WikiState>();
+        let docs: Vec<WikiBase> = mem
+            .wiki_tree
+            .iter()
+            .map(|(p, c)| WikiBase {
+                path: p.as_str().into(),
+                content: c.as_str().into(),
+            })
+            .collect();
+        if let Some(fresh) = sync_vec_model(&g.get_base_docs(), docs) {
+            g.set_base_docs(fresh);
+        }
+        g.set_base_rev(i32::try_from(mem.wiki_rev).unwrap_or(i32::MAX));
+        g.invoke_base_arrived();
+    }
+
     // the chat sidebar's channel rows + the canonical selection echo (so
     // the highlight always names the channel the engine filtered by)
     let channels: Vec<ChannelItem> = b
@@ -4688,6 +4715,12 @@ fn surface_data(
         denied: snap.denied,
         declined,
         accepted,
+        wiki_tree: snap
+            .wiki_tree
+            .iter()
+            .map(|d| (d.path.clone(), d.content.clone()))
+            .collect(),
+        wiki_rev: snap.wiki_rev,
     }
 }
 
@@ -4784,6 +4817,7 @@ fn to_proposal_row(p: &ProposalRowData) -> ProposalRow {
         declined_when: p.declined_when.clone().into(),
         my_vote: p.my_vote,
         mine: p.mine,
+        superseded: p.superseded,
     }
 }
 
@@ -4908,6 +4942,7 @@ fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRowData {
             0
         },
         mine: p.mine,
+        superseded: p.superseded,
     }
 }
 
@@ -6391,7 +6426,9 @@ fn wire_wiki(
     Rc<RefCell<wiki::Wiki>>,
     Rc<RefCell<Option<(wiki::DocId, bool)>>>,
 ) {
-    let model = Rc::new(RefCell::new(wiki::Wiki::sample()));
+    // the REAL base arrives from the engine read (set_base) — until then
+    // the honest empty state shows; the sample stays a test fixture
+    let model = Rc::new(RefCell::new(wiki::Wiki::empty()));
     let last: Rc<RefCell<Option<(wiki::DocId, bool)>>> = Rc::new(RefCell::new(None));
     sync_wiki(ui, &model.borrow(), &mut last.borrow_mut());
     let g = ui.global::<WikiState>();
@@ -6461,6 +6498,46 @@ fn wire_wiki(
         // a dead link is a no-op — the preview stays put
         let _ = w.open_link(&target);
     });
+    // rescue: a retired patch's changeset returns as local drafts —
+    // best-effort per file, honest toast, and the wiki opens so the
+    // rescued work is on screen
+    {
+        let m = model.clone();
+        let la = last.clone();
+        let weak = ui.as_weak();
+        ui.on_wiki_rescue(move |patch| {
+            let Some(ui) = weak.upgrade() else { return };
+            let (applied, skipped) = m.borrow_mut().rescue_patch(&patch);
+            sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            let word = ui.global::<Strings>().get_mem_toast_rescued();
+            ui.invoke_show_toast(format!("⤵ {word} {applied}/{}", applied + skipped).into());
+            ui.invoke_select_view("memory".into(), "brain".into());
+        });
+    }
+
+    // the surfaces mirror just wrote the folded base to the bridge
+    // properties — rebase the model on it (local work is kept). Hand-wired
+    // (not act!): the handler must read the WikiState global through the
+    // UPGRADED window, which the macro's hygiene cannot name.
+    {
+        let m = model.clone();
+        let la = last.clone();
+        let weak = ui.as_weak();
+        g.on_base_arrived(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            {
+                let gs = ui.global::<WikiState>();
+                let base: Vec<(String, String)> = gs
+                    .get_base_docs()
+                    .iter()
+                    .map(|d| (d.path.to_string(), d.content.to_string()))
+                    .collect();
+                let rev = u64::try_from(gs.get_base_rev()).unwrap_or(0);
+                m.borrow_mut().set_base(&base, rev);
+            }
+            sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+        });
+    }
 
     // rename commit + drag drop carry a refusal the user must see
     {
@@ -6712,6 +6789,10 @@ fn wire_wiki_vote(
         let payload = serde_json::json!({
             "op": "wiki_patch",
             "summary": summary,
+            // display-only staleness hint (shared_memory_real.md §9.1):
+            // the card warns when the base moved past this — the fold's
+            // verdict NEVER reads it
+            "base_rev": m.borrow().base_rev,
             "value": patch,
         });
         // the completion must not carry the UI-thread Rc model into the
@@ -7320,6 +7401,9 @@ lexicon! {
     ed_paste: "Paste", "Einfügen";
     pc_show_patch: "Raw patch", "Roher Patch";
     pc_withdraw: "Pull back", "Zurückziehen";
+    pc_superseded: "superseded - base moved", "überholt - Basis hat sich bewegt";
+    mem_rescue: "Rescue into working set", "Ins Working Set retten";
+    mem_toast_rescued: "rescued", "gerettet";
     pv_title: "Wiki patch", "Wiki-Patch";
     pv_copy: "Copy patch", "Patch kopieren";
     pv_copied: "Patch copied", "Patch kopiert";
@@ -7412,6 +7496,7 @@ mod tests {
             declined_by: String::new(),
             by: String::new(),
             mine: false,
+            superseded: false,
         };
         let row = proposal_row(0, &pv);
         assert!(
@@ -7891,9 +7976,12 @@ mod tests {
                 declined_by: String::new(),
                 by: String::new(),
                 mine: false,
+                superseded: false,
             }],
             channels: Vec::new(),
             has_archive: false,
+            wiki_tree: Vec::new(),
+            wiki_rev: 0,
         };
         let data = surface_data(0, Surface::Memory, &snap, "petra", None);
         assert_eq!(data.log.len(), 2);
@@ -7925,6 +8013,7 @@ mod tests {
             declined_by: String::new(),
             by: String::new(),
             mine: false,
+            superseded: false,
         };
         let first_seen = HashMap::from([(4u64, 150u64)]);
         let sys = patch_system_lines(0, 4, &[pv], &HashMap::new(), &first_seen);
@@ -7986,6 +8075,7 @@ mod tests {
             declined_by: String::new(),
             by: String::new(),
             mine: false,
+            superseded: false,
         };
         let mut known = HashMap::new();
         // while pending: cached with title + progress
@@ -8075,6 +8165,7 @@ mod tests {
             },
             by: String::new(),
             mine: false,
+            superseded: false,
         }
     }
 
@@ -9410,11 +9501,35 @@ mod gui_tests {
         let ui = AppWindow::new().expect("headless window");
         let _wiki = wire_wiki(&ui);
         let g = ui.global::<WikiState>();
-        // the sample opens with the charter as the only tab
+        // production starts EMPTY; the engine base arrives over the real
+        // bridge (base-docs + base-arrived), exactly like the surfaces
+        // mirror delivers it
+        assert_eq!(g.get_tabs().row_count(), 0);
+        assert!(!g.get_doc_open());
+        g.set_base_docs(ModelRc::new(VecModel::from(vec![
+            WikiBase {
+                path: "charter.md".into(),
+                content: "# Charter\n\nWhat we agreed to.".into(),
+            },
+            WikiBase {
+                path: "glossary.md".into(),
+                content: "# Glossary\n\nThe words we keep using.".into(),
+            },
+        ])));
+        g.set_base_rev(1);
+        g.invoke_base_arrived();
+        assert_eq!(g.get_nav_rows().row_count(), 2, "the folded base lands");
+        assert_eq!(g.get_cs_rows().row_count(), 0, "a clean tree has no panel");
+        // open the charter via the open route so a tab exists
+        let rows = g.get_nav_rows();
+        let charter = (0..rows.row_count())
+            .filter_map(|i| rows.row_data(i))
+            .find(|r| r.label.as_str() == "charter.md")
+            .expect("charter row");
+        g.invoke_nav_open(charter.id);
         assert_eq!(g.get_tabs().row_count(), 1);
         assert!(g.get_doc_open());
         assert_eq!(g.get_doc_path().as_str(), "charter.md");
-        assert_eq!(g.get_cs_rows().row_count(), 0, "a clean tree has no panel");
         // open glossary.md via the open route
         let rows = g.get_nav_rows();
         let glossary = (0..rows.row_count())
@@ -9439,6 +9554,10 @@ mod gui_tests {
             "the nav model must survive a mark (rows patch in place)"
         );
         g.invoke_nav_open(glossary.id);
+        assert_eq!(g.get_tabs().row_count(), 2);
+        assert_eq!(g.get_doc_path().as_str(), "glossary.md");
+        // a base refresh with the SAME content is a no-op for the models
+        g.invoke_base_arrived();
         assert_eq!(g.get_tabs().row_count(), 2);
         assert_eq!(g.get_doc_path().as_str(), "glossary.md");
         // an edit turns up on the changeset stack, the tab status and the

@@ -1312,6 +1312,12 @@ impl State {
                 if payload.get("op").and_then(serde_json::Value::as_str) == Some("set_relays") {
                     self.adopt_pool_change();
                 }
+                // the Memory base moved — the supersede walk retires
+                // pending wiki patches it left behind (deterministic:
+                // this runs on append, catch-up and rebuild alike)
+                if *surface == Surface::Memory {
+                    self.supersede_stale_wiki();
+                }
             }
             // the LAST Restored block for a seat wins, and an append is the
             // last; an empty anchor leaves the previous one standing, exactly
@@ -1436,6 +1442,9 @@ impl State {
         // against the verified truth or every restart resurrects decided
         // votes as open cards
         self.settle_cards_against_chain();
+        // …and the supersede walk reaches the same terminal states a live
+        // node reached (shared_memory_real.md §4 replay determinism)
+        self.supersede_stale_wiki();
         // …and the working transport anchors. A pruned holder SEEDS them from
         // the blob: the `Restored` blocks that established them were dropped
         // at the cut, and the roster keeps each seat's founding anchor by
@@ -2737,8 +2746,15 @@ impl State {
                 declined_by: String::new(),
                 decliners: Vec::new(),
                 by: by.to_string(),
+                superseded: false,
             }
         });
+        if inserted && surface == Surface::Memory {
+            // registration-time check (shared_memory_real.md §4): a patch
+            // learned LATE against an already-moved base registers
+            // superseded right away — no zombie pending cards on rejoiners
+            self.supersede_stale_wiki();
+        }
         inserted
     }
 
@@ -4432,6 +4448,7 @@ mod tests {
                 declined_by: String::new(),
                 decliners: Vec::new(),
                 by: String::new(),
+                superseded: false,
             },
         );
         let p = peer.proposals.get(&4).cloned().expect("card");
@@ -5265,6 +5282,110 @@ mod tests {
             Some(ChainChange::Membership { .. })
         ));
         assert!(!walter2.proposals.contains_key(&6), "surface proposal refused");
+    }
+
+    /// The supersede walk (shared_memory_real.md §4): sealing one wiki
+    /// patch deterministically retires every OVERLAPPING pending patch —
+    /// terminal and unattributed (no vote forged: `declined_by` stays
+    /// empty) — keeps the DISJOINT one approvable and applying, and a
+    /// stale patch learned late (catch-up) registers superseded right
+    /// away. Approving a superseded card is refused honestly.
+    #[test]
+    fn a_sealed_wiki_patch_supersedes_overlapping_pending_patches() {
+        const ADD_A: &str = "diff --git a/a.md b/a.md\nnew file mode 100644\n--- /dev/null\n+++ b/a.md\n@@ -0,0 +1,2 @@\n+hello\n+world\n";
+        const EDIT_A_1: &str = "diff --git a/a.md b/a.md\n--- a/a.md\n+++ b/a.md\n@@ -1,2 +1,2 @@\n-hello\n+hallo\n world\n";
+        const EDIT_A_2: &str = "diff --git a/a.md b/a.md\n--- a/a.md\n+++ b/a.md\n@@ -1,2 +1,2 @@\n-hello\n+servus\n world\n";
+        const ADD_B: &str = "diff --git a/b.md b/b.md\nnew file mode 100644\n--- /dev/null\n+++ b/b.md\n@@ -0,0 +1,1 @@\n+disjoint\n";
+        let wp = |p: &str| json!({"op": "wiki_patch", "summary": "x", "value": p});
+
+        let b = Builder::new(&["petra", "walter"], 2);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        seal_wiki(&mut walter, &b, "petra", 10, wp(ADD_A));
+        assert_eq!(
+            walter.wiki_tree().get("a.md").map(String::as_str),
+            Some("hello\nworld\n"),
+            "the fold serves the sealed base"
+        );
+
+        // two pending edits of the SAME region, one disjoint add
+        walter.receive_proposed(11, Surface::Memory, wp(EDIT_A_1), "petra");
+        walter.receive_proposed(12, Surface::Memory, wp(EDIT_A_2), "petra");
+        walter.receive_proposed(13, Surface::Memory, wp(ADD_B), "petra");
+
+        seal_wiki(&mut walter, &b, "petra", 11, wp(EDIT_A_1));
+        let p12 = walter.proposals.get(&12).cloned().expect("card 12");
+        assert_eq!(p12.state, ProposalState::Rejected, "overlap retires");
+        assert!(p12.superseded, "…as SUPERSEDED, not declined");
+        assert!(p12.declined_by.is_empty(), "no vote is forged");
+        assert!(walter.view(12, &p12).superseded);
+        assert!(
+            matches!(
+                walter.cmd_approve(molt_core::ProposalId(12)),
+                Err(molt_core::MoltError::AlreadyTerminal(_, _))
+            ),
+            "approving a superseded card is refused"
+        );
+        let p13 = walter.proposals.get(&13).cloned().expect("card 13");
+        assert_eq!(p13.state, ProposalState::Proposed, "disjoint stays open");
+        assert!(!p13.superseded);
+
+        // …and the disjoint one still seals and folds
+        seal_wiki(&mut walter, &b, "petra", 13, wp(ADD_B));
+        assert_eq!(
+            walter.wiki_tree().get("b.md").map(String::as_str),
+            Some("disjoint\n")
+        );
+        assert_eq!(
+            walter.wiki_tree().get("a.md").map(String::as_str),
+            Some("hallo\nworld\n")
+        );
+
+        // a stale patch learned LATE registers superseded immediately
+        walter.receive_proposed(14, Surface::Memory, wp(EDIT_A_2), "petra");
+        let p14 = walter.proposals.get(&14).cloned().expect("card 14");
+        assert_eq!(p14.state, ProposalState::Rejected);
+        assert!(p14.superseded);
+
+        // …and the READ serves the same base to GUI and MCP alike
+        // (co-equality: one projection, shared_memory_real.md WP-B)
+        let snap = walter.snapshot(Surface::Memory, None, None);
+        assert_eq!(snap.wiki_rev, 3, "ADD_A + EDIT_A_1 + ADD_B applied");
+        assert_eq!(
+            snap.wiki_tree,
+            vec![
+                molt_core::WikiDoc {
+                    path: "a.md".to_string(),
+                    content: "hallo\nworld\n".to_string()
+                },
+                molt_core::WikiDoc {
+                    path: "b.md".to_string(),
+                    content: "disjoint\n".to_string()
+                },
+            ]
+        );
+    }
+
+    /// `seal_one`'s wiki twin: drive `payload` through the real chain
+    /// machinery to a sealed Applied block.
+    fn seal_wiki(
+        s: &mut crate::State,
+        b: &Builder,
+        peer: &str,
+        id: u64,
+        payload: serde_json::Value,
+    ) {
+        let target = s.chain_head.as_ref().expect("head").height + 1;
+        s.receive_proposed(id, Surface::Memory, payload.clone(), "peer");
+        let change = ChainChange::Applied {
+            proposal_id: id,
+            surface: Surface::Memory,
+            payload,
+        };
+        let bytes = approval_bytes(&b.republic_id, target, &change);
+        let sig = identity_sign(b.key(peer), &bytes);
+        s.receive_approval(id, peer, target, &sig);
+        s.chain_sign_and_gossip_approval(id);
+        assert_eq!(s.chain_head.as_ref().expect("head").height, target, "sealed");
     }
 
     /// The pull-back visibility gate: a record remembers who proposed it,

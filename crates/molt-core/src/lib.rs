@@ -157,7 +157,9 @@ impl Surface {
                 ("proposals", "Proposals"),
                 ("accepted", "Accepted"),
                 ("denied", "Denied"),
-                ("archive", "Archive"),
+                // "archive" was a design mock and is REMOVED until a real
+                // per-doc history design exists (shared_memory_real.md
+                // WP-E) — the Accepted table is the decision history
             ],
             Surface::Quests => &[
                 ("board", "Board"),
@@ -2442,6 +2444,14 @@ pub struct ProposalRecord {
     /// dumps stay byte-identical.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub by: MemberId,
+    /// The supersede walk's terminal verdict
+    /// (`docs/memory/shared_memory_real.md` §4): a pending wiki patch the
+    /// moved base can no longer apply — mechanical and UNATTRIBUTED (the
+    /// state is `Rejected` for old readers, but no decline vote is
+    /// forged: `declined_by` stays empty). Additive, skipped when false
+    /// so pre-field dumps stay byte-identical.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub superseded: bool,
 }
 
 /// Exactly what the engine actor holds for one workspace — the snapshot
@@ -4670,6 +4680,11 @@ pub struct ProposalView {
     /// only: a withdraw execution must re-check the authenticated sender.
     #[serde(default)]
     pub mine: bool,
+    /// Whether the base moved past this wiki patch and the supersede walk
+    /// retired it (see [`ProposalRecord::superseded`]) — the Denied view
+    /// labels it "superseded", never "declined by".
+    #[serde(default)]
+    pub superseded: bool,
 }
 
 /// One chat channel as the engine enumerates it for the read contract
@@ -4826,6 +4841,26 @@ pub struct SurfaceSnapshot {
     /// deserializable. `false` on other surfaces.
     #[serde(default)]
     pub has_archive: bool,
+    /// Memory only: the shared wiki BASE — the deterministic fold of the
+    /// applied wiki patches in chain order (`shared_memory_real.md`). The
+    /// SAME projection the GUI renders and an MCP `read_state` serves
+    /// (co-equality). Empty on other surfaces; additive with a default.
+    #[serde(default)]
+    pub wiki_tree: Vec<WikiDoc>,
+    /// Memory only: the base REVISION (count of patches that actually
+    /// applied) — the display-only staleness currency a pending card's
+    /// `base_rev` compares against. Additive with a default.
+    #[serde(default)]
+    pub wiki_rev: u64,
+}
+
+/// One document of the folded Shared-Memory base.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiDoc {
+    /// Normalized relative path (`file.md` or `folder/file.md`).
+    pub path: String,
+    /// The full markdown content.
+    pub content: String,
 }
 
 /// One block of the persistent chain as display data — the row a

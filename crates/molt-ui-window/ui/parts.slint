@@ -1103,14 +1103,18 @@ export component DecisionTable inherits Rectangle {
     // Declined shows the veto stamp column; Accepted hides it
     in property <bool> with-when: false;
     callback discuss(int);
+    // Denied only: pull a patch row's changeset back into the local
+    // working set (rescue — shared_memory_real.md §4)
+    callback rescue(string);
     // column geometry, shared by header and rows so the cells align; the
     // value column takes the surplus and elides — the window never has to
     // scroll horizontally
     property <length> col-title: max(120px, self.width * 0.24);
     property <length> col-votes: 110px;
     property <length> col-when: 108px;
-    // emoji-only jump button (a localized label overflowed the cell)
-    property <length> col-jump: 48px;
+    // emoji-only jump button (a localized label overflowed the cell);
+    // the Denied table fits a second one (the patch rescue)
+    property <length> col-jump: root.with-when ? 88px : 48px;
     background: Theme.panel-2;
     border-radius: Theme.win95 ? 0px : 8px;
     border-width: Theme.border-w;
@@ -1189,10 +1193,12 @@ export component DecisionTable inherits Rectangle {
                     // charter is a whole document — as an index cell both
                     // are unreadable noise. The title names the decision
                     // (a patch title carries its count summary); the
-                    // content lives behind the discussion jump.
-                    text: r.patch-op || r.charter-op ? "" : (r.proposed != "" ? r.proposed : r.current);
+                    // content lives behind the discussion jump. A
+                    // superseded patch says so here (the base moved).
+                    text: r.superseded ? Strings.pc-superseded
+                        : (r.patch-op || r.charter-op ? "" : (r.proposed != "" ? r.proposed : r.current));
                     horizontal-stretch: 1;
-                    color: Theme.dim;
+                    color: r.superseded ? Theme.moved : Theme.dim;
                     font-size: Theme.fs-body;
                     vertical-alignment: center;
                     overflow: elide;
@@ -1247,15 +1253,31 @@ export component DecisionTable inherits Rectangle {
                     width: root.col-jump;
                     // emoji-only: any localized label is wider than a table
                     // cell wants to be — the hover tip names the action
-                    if r.id >= 0: AppButton {
-                        height: 28px;
-                        y: 6px;
-                        pad: 8px;
-                        emoji: "💬";
-                        tooltip: Strings.pc-discuss;
-                        tooltip-left: true;
-                        clicked => {
-                            root.discuss(r.id);
+                    HorizontalLayout {
+                        spacing: 4px;
+                        alignment: start;
+                        if r.id >= 0: AppButton {
+                            height: 28px;
+                            y: 6px;
+                            pad: 8px;
+                            emoji: "💬";
+                            tooltip: Strings.pc-discuss;
+                            tooltip-left: true;
+                            clicked => {
+                                root.discuss(r.id);
+                            }
+                        }
+                        // rescue: the patch comes back as local drafts
+                        if root.with-when && r.patch-op && r.proposed != "": AppButton {
+                            height: 28px;
+                            y: 6px;
+                            pad: 8px;
+                            emoji: "⤵️";
+                            tooltip: Strings.mem-rescue;
+                            tooltip-left: true;
+                            clicked => {
+                                root.rescue(r.proposed);
+                            }
                         }
                     }
                 }
@@ -1296,6 +1318,9 @@ export component ProposalCard inherits Rectangle {
     callback save-image();
     // wiki_patch only: open the raw-patch modal (read-only, copyable)
     callback view-patch();
+    // wiki_patch only, retired cards: pull the changeset back into the
+    // local working set (rescue — shared_memory_real.md §4)
+    callback rescue-patch();
     background: Theme.panel-2;
     border-radius: Theme.win95 ? 0px : 10px;
     border-width: Theme.border-w;
@@ -1355,21 +1380,23 @@ export component ProposalCard inherits Rectangle {
                 font-size: Theme.fs-cap;
             }
         }
-        // the verdict line of a declined proposal: who vetoed it, and when
-        if root.p.declined-by != "": HorizontalLayout {
+        // the verdict line of a retired proposal: a decline names its
+        // vetoer; a SUPERSEDE is mechanical — the base moved, nobody voted
+        if root.p.declined-by != "" || root.p.superseded: HorizontalLayout {
             spacing: 8px;
             alignment: start;
-            Text {
+            if !root.p.superseded: Text {
                 text: "👎";
                 font-family: "Twemoji Mozilla";
                 font-size: 22px;
                 vertical-alignment: center;
             }
             Text {
-                text: root.p.declined-when == ""
-                    ? "\{Strings.pc-declined-by} \{root.p.declined-by}"
-                    : "\{Strings.pc-declined-by} \{root.p.declined-by} · \{root.p.declined-when}";
-                color: Theme.bad;
+                text: root.p.superseded ? Strings.pc-superseded
+                    : (root.p.declined-when == ""
+                        ? "\{Strings.pc-declined-by} \{root.p.declined-by}"
+                        : "\{Strings.pc-declined-by} \{root.p.declined-by} · \{root.p.declined-when}");
+                color: root.p.superseded ? Theme.moved : Theme.bad;
                 font-size: Theme.fs-body;
                 font-weight: 700;
                 vertical-alignment: center;
@@ -1666,6 +1693,16 @@ export component ProposalCard inherits Rectangle {
                 enabled: root.p.my-vote != 2;
                 clicked => {
                     root.decline();
+                }
+            }
+            // a retired patch's way back: its changeset returns as
+            // LOCAL drafts (best-effort, honest toast)
+            if root.p.patch-op && root.p.proposed != ""
+                && (root.read-only || root.p.superseded): AppButton {
+                emoji: "⤵️";
+                label: Strings.mem-rescue;
+                clicked => {
+                    root.rescue-patch();
                 }
             }
             // pull back — the proposer's first-class exit, own proposals

@@ -1024,6 +1024,7 @@ impl State {
             // reader-relative ownership (the "pull back" visibility gate);
             // "" never matches — an unknown proposer is nobody's
             mine: !p.by.is_empty() && p.by == me,
+            superseded: p.superseded,
         }
     }
 
@@ -1190,6 +1191,73 @@ impl State {
     /// an addressing scheme. Each value rides with the proposal id it came
     /// from (`None` = no proposal origin: chat rows, pre-id dumps) — the
     /// snapshot splits the pairs into its `applied` / `applied_ids` tracks.
+    /// THE Shared-Memory base (shared_memory_real.md): the deterministic
+    /// fold of the applied wiki_patch payloads in chain order over the
+    /// empty founding tree. Recomputed on demand — wiki content is small
+    /// text and one code path (live, replay, snapshot+tail) is what the
+    /// convergence keystones pin; a cache comes only if a real history
+    /// ever makes this measurable (plan decision 6).
+    pub(crate) fn wiki_tree(&self) -> std::collections::BTreeMap<String, String> {
+        let payloads: Vec<Value> = self
+            .applied_values(Surface::Memory, None, None)
+            .into_iter()
+            .map(|(_, v)| v)
+            .collect();
+        molt_core::wiki_fold::wiki_fold(&payloads)
+    }
+
+    /// Whether a pending record's wiki patch still applies to `tree` —
+    /// with THE fold's own strict apply (one function, walk == fold).
+    /// Non-wiki payloads never supersede.
+    fn wiki_patch_applies(
+        tree: &std::collections::BTreeMap<String, String>,
+        p: &ProposalRecord,
+    ) -> bool {
+        if p.payload.get("op").and_then(Value::as_str) != Some("wiki_patch") {
+            return true;
+        }
+        let Some(patch) = p.payload.get("value").and_then(Value::as_str) else {
+            return true; // unparseable payloads are gated at ingest
+        };
+        let mut clone = tree.clone();
+        molt_core::wiki_fold::apply_patch(&mut clone, &molt_core::wiki_fold::parse_patch(patch))
+            .is_ok()
+    }
+
+    /// The SUPERSEDE WALK (shared_memory_real.md §4): after the Memory
+    /// applied projection moved — and when a proposal registers late —
+    /// every pending wiki patch re-checks against the NEW base;
+    /// incompatible ones transition to the terminal superseded outcome:
+    /// mechanical, UNATTRIBUTED (no decline vote is forged), and
+    /// deterministic on every node (a pure function of chain-ordered
+    /// data), so live state, replay and snapshot+tail converge. Runs
+    /// inside the deterministic apply paths; it never rings frontends —
+    /// the mirror tick picks the change up.
+    pub(crate) fn supersede_stale_wiki(&mut self) {
+        let has_wiki_pending = self.proposals.values().any(|p| {
+            p.surface == Surface::Memory
+                && p.state == ProposalState::Proposed
+                && p.payload.get("op").and_then(Value::as_str) == Some("wiki_patch")
+        });
+        if !has_wiki_pending {
+            return;
+        }
+        let tree = self.wiki_tree();
+        let stale: Vec<u64> = self
+            .proposals
+            .iter()
+            .filter(|(_, p)| p.surface == Surface::Memory && p.state == ProposalState::Proposed)
+            .filter(|(_, p)| !Self::wiki_patch_applies(&tree, p))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in stale {
+            if let Some(p) = self.proposals.get_mut(&id) {
+                p.state = ProposalState::Rejected;
+                p.superseded = true;
+            }
+        }
+    }
+
     pub(crate) fn applied_values(
         &self,
         surface: Surface,
@@ -1304,6 +1372,24 @@ impl State {
             .applied_values(surface, channel.as_ref(), view)
             .into_iter()
             .unzip();
+        // Memory serves the folded BASE with every read — the one
+        // projection GUI and MCP share (shared_memory_real.md WP-B)
+        let (wiki_tree, wiki_rev) = if surface == Surface::Memory {
+            let payloads: Vec<Value> = self
+                .applied_values(Surface::Memory, None, None)
+                .into_iter()
+                .map(|(_, v)| v)
+                .collect();
+            let (tree, rev) = molt_core::wiki_fold::wiki_fold_with_rev(&payloads);
+            (
+                tree.into_iter()
+                    .map(|(path, content)| molt_core::WikiDoc { path, content })
+                    .collect(),
+                rev,
+            )
+        } else {
+            (Vec::new(), 0)
+        };
         SurfaceSnapshot {
             surface,
             gated: surface.is_gated(),
@@ -1318,6 +1404,8 @@ impl State {
             } else {
                 Vec::new()
             },
+            wiki_tree,
+            wiki_rev,
             // the chat is one window now — nothing is filed away, so there
             // is no second view to offer or hide. Kept on the wire (always
             // false) rather than removed, so an older reader that still asks

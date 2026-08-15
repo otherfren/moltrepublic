@@ -3068,6 +3068,7 @@ mod tests {
             declined_by: String::new(),
             decliners: Vec::new(),
             by: String::new(),
+            superseded: false,
         };
         assert_eq!(
             proposals::change_summary(
@@ -5266,14 +5267,16 @@ mod tests {
             let w = spawn(GroupConfig::demo(), SessionView::default());
             w.execute(Command::SelectView {
                 surface: Surface::Memory,
-                view: "archive".to_string(),
+                // "archive" left the memory vocabulary with the design
+                // mock (shared_memory_real.md WP-E) — denied is real
+                view: "denied".to_string(),
             })
             .await
             .expect("select");
             match w.execute(Command::ReadSession).await.expect("read") {
                 Reply::Session(s) => {
                     assert_eq!(s.surface, Surface::Memory);
-                    assert_eq!(s.view, "archive");
+                    assert_eq!(s.view, "denied");
                 }
                 other => panic!("unexpected: {other:?}"),
             }

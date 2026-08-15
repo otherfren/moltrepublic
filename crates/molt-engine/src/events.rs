@@ -303,9 +303,15 @@ impl State {
                     // the serving peer, so both paths agree and replay
                     // stays deterministic)
                     by: env.by.clone(),
+                    superseded: false,
                 });
                 self.next_id = self.next_id.max(id.0.saturating_add(1));
                 let _ = self.register_parked_declines(id.0);
+                if *surface == Surface::Memory {
+                    // registration-time supersede check (replay twin of
+                    // receive_proposed — shared_memory_real.md §4)
+                    self.supersede_stale_wiki();
+                }
             }
             WorkspaceEvent::Approved { id, .. } => {
                 // Replay projection, deliberately a plain count: live
@@ -339,6 +345,11 @@ impl State {
                         let payload = p.payload.clone();
                         let surface = p.surface;
                         self.applied.entry(surface).or_default().push((Some(id.0), payload));
+                        if surface == Surface::Memory {
+                            // the base moved — the supersede walk runs in
+                            // the legacy apply path too (§4 determinism)
+                            self.supersede_stale_wiki();
+                        }
                     }
                 }
             }
@@ -371,6 +382,7 @@ impl State {
                     declined_by: MemberId::new(),
                     decliners: Vec::new(),
                     by: env.by.clone(),
+                    superseded: false,
                 });
                 self.next_id = self.next_id.max(id.0.saturating_add(1));
                 let _ = self.register_parked_declines(id.0);

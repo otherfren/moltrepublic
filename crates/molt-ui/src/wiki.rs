@@ -223,11 +223,16 @@ pub struct Wiki {
     next_id: DocId,
     /// The changeset stack: every user action, oldest first.
     stack: Vec<Change>,
+    /// The engine base's revision (count of applied patches) — rides the
+    /// vote payload as the display-only staleness hint
+    /// (`shared_memory_real.md` §9.1).
+    pub base_rev: u64,
 }
 
 impl Wiki {
     // ---- construction -----------------------------------------------------
 
+    #[cfg(test)]
     fn from_base(base: &[(&str, &str, &str, &str, &str)]) -> Self {
         let mut docs = Vec::new();
         let mut folders: Vec<Folder> = Vec::new();
@@ -267,11 +272,123 @@ impl Wiki {
             renaming: None,
             next_id,
             stack: Vec::new(),
+            base_rev: 0,
         }
     }
 
-    /// The design-mock base snapshot (the .slint sample data, single source:
-    /// raw markdown — blocks derive from it).
+    /// The production start: NOTHING — the real base arrives from the
+    /// engine read ([`Wiki::set_base`]); until then the honest empty
+    /// state shows (`shared_memory_real.md`: the founding baseline is the
+    /// empty tree).
+    pub fn empty() -> Self {
+        Wiki {
+            docs: Vec::new(),
+            folders: Vec::new(),
+            tabs: Vec::new(),
+            active: None,
+            marked: None,
+            editing: false,
+            renaming: None,
+            next_id: 1,
+            stack: Vec::new(),
+            base_rev: 0,
+        }
+    }
+
+    /// The folded engine base lands (`shared_memory_real.md` WP-C): every
+    /// base doc updates or appears, docs whose base vanished leave —
+    /// UNLESS local work sits on them. Local edits are the member's and
+    /// are never dropped: an edited doc keeps its raw (recolored against
+    /// the new base), an edited doc whose base vanished turns Added. Ids
+    /// stay stable (nav marks, tabs and the undo stack hang off them).
+    pub fn set_base(&mut self, base: &[(String, String)], rev: u64) {
+        self.base_rev = rev;
+        for (path, content) in base {
+            if let Some(d) = self
+                .docs
+                .iter_mut()
+                .find(|d| d.base.as_ref().is_some_and(|b| &b.path == path))
+            {
+                let unedited = d.status() == Status::Unchanged;
+                d.base = Some(BaseDoc {
+                    path: path.clone(),
+                    raw: content.clone(),
+                });
+                if unedited {
+                    // no local work — follow the base (path and content)
+                    d.path = path.clone();
+                    d.raw = content.clone();
+                    d.deleted = false;
+                }
+                continue;
+            }
+            // hands off a LOCAL draft occupying the same path: the draft
+            // stays visible as Added next to nothing — the member decides
+            // (rescue/rework), the base doc appears once the paths differ.
+            // Deliberately NOT a silent overwrite of local work.
+            if self.docs.iter().any(|d| d.path == *path && d.base.is_none()) {
+                continue;
+            }
+            let id = self.next_id;
+            self.next_id += 1;
+            self.docs.push(Doc {
+                id,
+                path: path.clone(),
+                raw: content.clone(),
+                author: String::new(),
+                ver: String::new(),
+                when: String::new(),
+                base: Some(BaseDoc {
+                    path: path.clone(),
+                    raw: content.clone(),
+                }),
+                deleted: false,
+            });
+        }
+        // docs whose base vanished: unedited ones leave (tabs closed),
+        // edited ones stay as ADDED — their content is new against this
+        // base and must not be lost
+        let gone: Vec<(DocId, bool)> = self
+            .docs
+            .iter()
+            .filter(|d| {
+                d.base
+                    .as_ref()
+                    .is_some_and(|b| !base.iter().any(|(p, _)| p == &b.path))
+            })
+            .map(|d| (d.id, d.status() == Status::Unchanged || d.deleted))
+            .collect();
+        for (id, remove) in gone {
+            if remove {
+                self.close_tab(id);
+                if self.marked == Some(id) {
+                    self.marked = None;
+                }
+                self.docs.retain(|d| d.id != id);
+            } else if let Some(d) = self.doc_mut(id) {
+                d.base = None; // edited content survives as Added
+            }
+        }
+        // folders follow the surviving docs
+        for (path, _) in base {
+            if let Some((folder, _)) = path.rsplit_once('/') {
+                if !self.folders.iter().any(|f| f.name == folder) {
+                    self.folders.push(Folder {
+                        name: folder.to_string(),
+                        open: true,
+                        added: false,
+                    });
+                }
+            }
+        }
+        self.folders.retain(|f| {
+            f.added || self.docs.iter().any(|d| d.path.starts_with(&format!("{}/", f.name)))
+        });
+    }
+
+    /// The sample base — a TEST FIXTURE only since the real fold landed
+    /// (production starts [`Wiki::empty`] and rebases on the engine read).
+    #[cfg(test)]
     pub fn sample() -> Self {
         Wiki::from_base(&[
             ("charter.md", "petra", "v12", "3 d",
@@ -501,6 +618,106 @@ impl Wiki {
         self.active = Some(id);
         self.editing = false;
         self.renaming = None;
+    }
+
+    /// RESCUE a declined/superseded proposal's patch into the local
+    /// working copy (`shared_memory_real.md` §4): best-effort PER FILE —
+    /// strict within each file (local work is never clobbered; a file
+    /// whose base diverged is skipped), honest about the rest. Records
+    /// real stack entries via the normal verbs, so the changeset panel
+    /// shows and the next vote carries the rescued work. Returns
+    /// `(applied, skipped)` file counts.
+    pub fn rescue_patch(&mut self, patch: &str) -> (usize, usize) {
+        let files = molt_core::wiki_fold::parse_patch(patch);
+        let mut applied = 0usize;
+        let mut skipped = 0usize;
+        for f in &files {
+            if self.rescue_file(f) {
+                applied += 1;
+            } else {
+                skipped += 1;
+            }
+        }
+        (applied, skipped)
+    }
+
+    fn rescue_file(&mut self, f: &molt_core::wiki_fold::PatchFile) -> bool {
+        use molt_core::wiki_fold::apply_hunks;
+        if f.added {
+            // a fresh file: only onto a free path
+            if self.docs.iter().any(|d| d.path == f.new_path && !d.deleted) {
+                return false;
+            }
+            let Ok(content) = apply_hunks("", &f.hunks) else {
+                return false;
+            };
+            let id = self.next_id;
+            self.next_id += 1;
+            let label = f.new_path.rsplit('/').next().unwrap_or(&f.new_path).to_string();
+            if let Some((folder, _)) = f.new_path.rsplit_once('/') {
+                if !self.folders.iter().any(|fl| fl.name == folder) {
+                    self.folders.push(Folder {
+                        name: folder.to_string(),
+                        open: true,
+                        added: true,
+                    });
+                }
+            }
+            self.docs.push(Doc {
+                id,
+                path: f.new_path.clone(),
+                raw: content,
+                author: "you".to_string(),
+                ver: "draft".to_string(),
+                when: "now".to_string(),
+                base: None,
+                deleted: false,
+            });
+            self.stack.push(Change::Created { id, label });
+            return true;
+        }
+        let Some(d) = self
+            .docs
+            .iter()
+            .find(|d| d.path == f.old_path && !d.deleted)
+        else {
+            return false;
+        };
+        let id = d.id;
+        if f.deleted {
+            // delete only what matches the patch exactly — a diverged or
+            // edited file is the member's, not the patch's, to remove
+            let matches = apply_hunks(&d.raw, &f.hunks).is_ok_and(|left| left.is_empty());
+            if !matches {
+                return false;
+            }
+            self.delete(id);
+            return true;
+        }
+        let Ok(content) = apply_hunks(&d.raw, &f.hunks) else {
+            return false;
+        };
+        if content != d.raw {
+            self.set_raw(id, &content);
+        }
+        if f.renamed && f.new_path != f.old_path {
+            // renames go through the normal verb (same-folder only — the
+            // wiki's rename edits the basename; a cross-folder move that
+            // no longer fits is the member's call to redo by hand)
+            let same_folder = f.old_path.rsplit_once('/').map(|(a, _)| a)
+                == f.new_path.rsplit_once('/').map(|(a, _)| a);
+            let free = !self.docs.iter().any(|d| d.path == f.new_path && !d.deleted);
+            if same_folder && free {
+                let name = f
+                    .new_path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&f.new_path)
+                    .trim_end_matches(".md");
+                let _ = self.rename_commit(id, name);
+            }
+        }
+        true
     }
 
     /// Open the doc a preview link names: exact path first, then the
@@ -1565,6 +1782,125 @@ mod tests {
         let links = w.links(charter);
         assert!(links.contains(&"decisions/2026-07-02-treasury.md".to_string()));
         assert!(links.contains(&"glossary.md".to_string()));
+    }
+
+    // ---- the engine base lands (shared_memory_real.md WP-C) ----------------
+
+    /// The folded base replaces the sample: an empty wiki fills from the
+    /// engine read, a moved base recolors local work instead of dropping
+    /// it, and ids stay stable across refreshes (the nav/tab state hangs
+    /// off them).
+    #[test]
+    fn set_base_fills_updates_and_keeps_local_work() {
+        let mut w = Wiki::empty();
+        assert!(w.nav_rows().is_empty(), "an empty wiki starts with nothing");
+        let base = vec![
+            ("a.md".to_string(), "alpha\n".to_string()),
+            ("dir/b.md".to_string(), "beta\n".to_string()),
+        ];
+        w.set_base(&base, 1);
+        assert_eq!(w.base_rev, 1);
+        let a = w.docs.iter().find(|d| d.path == "a.md").expect("a.md");
+        assert_eq!(a.raw, "alpha\n");
+        assert_eq!(a.status(), Status::Unchanged);
+        let a_id = a.id;
+
+        // local edit survives a base refresh of the OTHER file
+        w.set_raw(a_id, "alpha local");
+        let base2 = vec![
+            ("a.md".to_string(), "alpha\n".to_string()),
+            ("dir/b.md".to_string(), "beta v2\n".to_string()),
+        ];
+        w.set_base(&base2, 2);
+        let a = w.docs.iter().find(|d| d.path == "a.md").expect("a.md");
+        assert_eq!(a.id, a_id, "ids are stable across refreshes");
+        assert_eq!(a.raw, "alpha local", "local work is kept");
+        assert_eq!(a.status(), Status::Modified);
+        let b = w.docs.iter().find(|d| d.path == "dir/b.md").expect("b");
+        assert_eq!(b.raw, "beta v2\n", "an unedited doc follows the base");
+
+        // the base moves UNDER the local edit: still kept, still Modified
+        let base3 = vec![
+            ("a.md".to_string(), "alpha v3\n".to_string()),
+            ("dir/b.md".to_string(), "beta v2\n".to_string()),
+        ];
+        w.set_base(&base3, 3);
+        let a = w.docs.iter().find(|d| d.path == "a.md").expect("a.md");
+        assert_eq!(a.raw, "alpha local");
+        assert_eq!(a.status(), Status::Modified);
+
+        // a doc leaving the base: unedited vanishes (tab closed too),
+        // edited stays as ADDED (your content is new against this base)
+        w.open(a.id);
+        let base4 = vec![("dir/b.md".to_string(), "beta v2\n".to_string())];
+        w.set_base(&base4, 4);
+        let a = w.docs.iter().find(|d| d.path == "a.md").expect("edited stays");
+        assert_eq!(a.status(), Status::Added);
+        assert!(w.docs.iter().all(|d| d.path != "x.md"));
+        let base5: Vec<(String, String)> = Vec::new();
+        let b_id = w.docs.iter().find(|d| d.path == "dir/b.md").expect("b").id;
+        w.open(b_id);
+        w.set_base(&base5, 5);
+        assert!(
+            w.docs.iter().all(|d| d.path != "dir/b.md"),
+            "an unedited doc leaves with its base"
+        );
+        assert!(
+            w.tab_rows().iter().all(|t| t.label != "dir/b.md"),
+            "…and its tab closes"
+        );
+    }
+
+    // ---- the rescue (shared_memory_real.md §4: declined/superseded) --------
+
+    /// A declined or superseded proposal's patch comes back as LOCAL
+    /// drafts: best-effort per file against the CURRENT working copy,
+    /// with real stack entries (the changeset panel must show and the
+    /// next vote must carry the rescued work); what no longer fits is
+    /// skipped and counted honestly.
+    #[test]
+    fn rescue_restores_what_fits_and_reports_what_does_not() {
+        let mut w = Wiki::empty();
+        w.set_base(
+            &[("a.md".to_string(), "hello\nworld\n".to_string())],
+            1,
+        );
+        // the patch: edits a.md AND adds new.md AND edits a file that is
+        // gone from this base
+        let patch = "diff --git a/a.md b/a.md\n--- a/a.md\n+++ b/a.md\n@@ -1,2 +1,2 @@\n hello\n-world\n+welt\n\
+diff --git a/new.md b/new.md\nnew file mode 100644\n--- /dev/null\n+++ b/new.md\n@@ -0,0 +1,1 @@\n+fresh\n\
+diff --git a/gone.md b/gone.md\n--- a/gone.md\n+++ b/gone.md\n@@ -1,1 +1,1 @@\n-x\n+y\n";
+        let (applied, skipped) = w.rescue_patch(patch);
+        assert_eq!((applied, skipped), (2, 1));
+        let a = w.docs.iter().find(|d| d.path == "a.md").expect("a.md");
+        assert_eq!(a.raw, "hello\nwelt\n");
+        assert_eq!(a.status(), Status::Modified);
+        let n = w.docs.iter().find(|d| d.path == "new.md").expect("new.md");
+        assert_eq!(n.raw, "fresh\n");
+        assert_eq!(n.status(), Status::Added);
+        assert!(
+            !w.stack_rows().is_empty(),
+            "the rescue records stack entries - the panel must show"
+        );
+        // …and the rescued changeset votes: the built patch folds cleanly
+        let built = w.build_patch().expect("patch");
+        let mut tree = std::collections::BTreeMap::from([(
+            "a.md".to_string(),
+            "hello\nworld\n".to_string(),
+        )]);
+        molt_core::wiki_fold::apply_patch(
+            &mut tree,
+            &molt_core::wiki_fold::parse_patch(&built),
+        )
+        .expect("the rescued changeset applies");
+        // a rescue onto DIRTY local work never overwrites it
+        let a_id = w.docs.iter().find(|d| d.path == "a.md").expect("a").id;
+        w.set_raw(a_id, "my own words");
+        let (applied2, skipped2) = w.rescue_patch(patch);
+        assert_eq!(applied2, 0, "nothing fits a diverged working copy");
+        assert_eq!(skipped2, 3);
+        let a = w.docs.iter().find(|d| d.path == "a.md").expect("a.md");
+        assert_eq!(a.raw, "my own words", "local work is never clobbered");
     }
 
     // ---- the fold round-trip (shared_memory_real.md WP-A keystone) ---------

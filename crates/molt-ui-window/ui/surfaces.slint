@@ -240,13 +240,7 @@ component GlyphCaption inherits HorizontalLayout {
 // Memory — the Multisig-Wiki (the shared brain)
 // ---------------------------------------------------------------------------
 
-// A retired note in the Archive sub-view's list.
-struct MockNote {
-    title: string,
-    author: string,
-    ver: string,
-    when: string,
-}
+
 
 // The slim toolbar strip on top of the navigator / content panes.
 component ToolStrip inherits Rectangle {
@@ -1436,48 +1430,6 @@ export component MemoryPane inherits VerticalLayout {
         }
     }
 
-    property <[MockNote]> archived: [
-        { title: "Old relay migration plan", author: "walter", ver: "v4", when: "Mar 2026" },
-        { title: "Logo drafts, round 1", author: "mara", ver: "v2", when: "Feb 2026" },
-        { title: "Bootstrapping diary", author: "petra", ver: "v8", when: "Jan 2026" },
-    ];
-
-    if root.view == "archive": VerticalLayout {
-        spacing: 8px;
-        PaneHeader {
-            glyph: "🗄️";
-            title: Strings.mem-title-archive;
-            hint: Strings.mem-hint-archive;
-        }
-        PanePanel {
-            for n in root.archived: Rectangle {
-                background: Theme.panel-2;
-                border-radius: Theme.win95 ? 0px : 8px;
-                border-width: Theme.border-w;
-                border-color: Theme.line;
-                height: 44px;
-                HorizontalLayout {
-                    padding-left: 12px;
-                    padding-right: 12px;
-                    spacing: 10px;
-                    Text {
-                        text: n.title;
-                        color: Theme.dim;
-                        font-size: Theme.fs-body;
-                        vertical-alignment: center;
-                        overflow: elide;
-                        horizontal-stretch: 1;
-                    }
-                    Text {
-                        text: "\{n.author} · \{n.ver} · \{n.when}";
-                        color: Theme.faint;
-                        font-size: Theme.fs-cap;
-                        vertical-alignment: center;
-                    }
-                }
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

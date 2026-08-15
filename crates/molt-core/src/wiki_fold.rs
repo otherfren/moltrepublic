@@ -248,7 +248,9 @@ fn line_element(l: &HunkLine) -> String {
 
 /// Apply one file's hunks STRICTLY to `old` (exact position, exact
 /// context/removal match — byte-for-byte including the newline shape).
-fn apply_hunks(old: &str, hunks: &[Hunk]) -> Result<String, VoidReason> {
+/// Public for the wiki's RESCUE (best-effort per file into the local
+/// working copy); the consensus fold goes through [`apply_patch`].
+pub fn apply_hunks(old: &str, hunks: &[Hunk]) -> Result<String, VoidReason> {
     let old: Vec<String> = to_elements(old);
     let mut out: Vec<String> = Vec::new();
     let mut cursor = 0usize; // 0-based into `old`
@@ -370,11 +372,22 @@ pub fn fold_one(tree: &mut BTreeMap<String, String>, payload: &serde_json::Value
 /// verdict derives only from chain-ordered bytes, so live state, replay
 /// and snapshot+tail all reach the same tree.
 pub fn wiki_fold(applied: &[serde_json::Value]) -> BTreeMap<String, String> {
+    wiki_fold_with_rev(applied).0
+}
+
+/// [`wiki_fold`] plus the base REVISION: how many patches actually
+/// APPLIED (void ones do not move the base, so they do not bump it).
+/// The revision is the display-only staleness hint's currency
+/// (`shared_memory_real.md` §9.1) — never consensus input.
+pub fn wiki_fold_with_rev(applied: &[serde_json::Value]) -> (BTreeMap<String, String>, u64) {
     let mut tree = BTreeMap::new();
+    let mut rev = 0u64;
     for payload in applied {
-        let _ = fold_one(&mut tree, payload);
+        if fold_one(&mut tree, payload) {
+            rev += 1;
+        }
     }
-    tree
+    (tree, rev)
 }
 
 #[cfg(test)]
