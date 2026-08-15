@@ -200,10 +200,25 @@ async fn handle_rpc(
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "moltrepublic", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "MoltRepublic node. Every tool maps to one Command on the shared engine; \
-                                 the GUI (when present) drives the same commands. Chat is ungated; \
-                                 organization, memory, quests, vault and wallet change only via \
-                                 propose + threshold approve."
+                "instructions": "MoltRepublic seat operator: you drive ONE member seat of an encrypted \
+republic; a human GUI may drive the same seat concurrently. Operating loop: \
+1) read_session - workspaces, settings, async outcomes (notices). \
+2) open_workspace - REQUIRED before chat or governance; without it you run a \
+solo local context (member \"me\", threshold 1) where calls succeed but reach \
+nobody. 3) observe: read_state {surface}, list_proposals, status, read_members. \
+4) act: chat_send is ungated; everything else changes only via propose -> \
+approve/decline by the members (threshold m-of-n, one stance per member); \
+withdraw pulls back an OWN pending proposal. 5) any *_start/backup/test call \
+returns immediately - poll read_session for the outcome. propose payloads \
+{\"op\": ...}: organization set_name/set_charter/set_chat_retention {value}, \
+set_image {value,bytes_b64}, remove_image, set_relays {value: \"wss://a wss://b\"}, \
+set_features {value: \"memory quests\"}; memory add_note {title}, wiki_patch \
+{value: git-format patch, summary}; quests/vault/wallet add_quest/seal_secret/ \
+transfer {title}. Traps: founding/join/recovery need a confirmed relay \
+(relay_add, then confirm); mark_channel_read moves your PRIVATE cursor while \
+mark_read broadcasts read receipts; restore_start = offline knowledge from a \
+backup blob, recover_start = rejoin the live republic; navigate/select_* only \
+move the human's GUI and are never required before other tools."
             }),
         ));
     }
@@ -535,7 +550,7 @@ fn surface_enum() -> Value {
 }
 
 fn gated_enum() -> Value {
-    json!(["memory", "quests", "vault", "wallet"])
+    json!(["organization", "memory", "quests", "vault", "wallet"])
 }
 
 /// One MCP tool: name, wire schema and command builder side by side — a
@@ -707,7 +722,7 @@ pub fn tools() -> Vec<ToolDef> {
                 "type": "object",
                 "properties": {
                     "surface": { "type": "string", "enum": gated_enum() },
-                    "payload": { "type": "object", "description": "surface-specific transition, e.g. {\"op\":\"add_note\",\"title\":\"…\"}" }
+                    "payload": { "type": "object", "description": "surface-specific transition {\"op\": ...}: organization set_name/set_charter/set_chat_retention {value}, set_image {value, bytes_b64}, remove_image, set_relays {value: \"wss://a wss://b\"}, set_features {value: \"memory quests\"}; memory add_note {title}, wiki_patch {value: git-format patch, summary}; quests add_quest {title}; vault seal_secret {title}; wallet transfer {title}" }
                 },
                 "required": ["surface", "payload"]
             }),
@@ -732,13 +747,26 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "decline",
             command: "decline",
-            description: "Decline a pending proposal.",
+            description: "Cast this seat's vote AGAINST a pending proposal - ONE voice, not a veto: the proposal turns rejected for everyone only once approval can no longer reach the threshold (declines > n-m). One stance per member; declining after your own approve is allowed and is how a proposer signals retraction when withdraw is unavailable.",
             schema: || json!({
                 "type": "object",
                 "properties": { "proposal_id": { "type": "integer" } },
                 "required": ["proposal_id"]
             }),
             build: |args| Ok(Command::Decline {
+                proposal: ProposalId(u64_arg(args, "proposal_id")?),
+            }),
+        },
+        ToolDef {
+            name: "withdraw",
+            command: "withdraw",
+            description: "Pull back a proposal THIS seat proposed (proposer only - anyone else is refused): it turns terminal on every node without forging any vote, and the card reads \"pulled back\". Only works while the vote is still pending.",
+            schema: || json!({
+                "type": "object",
+                "properties": { "proposal_id": { "type": "integer" } },
+                "required": ["proposal_id"]
+            }),
+            build: |args| Ok(Command::Withdraw {
                 proposal: ProposalId(u64_arg(args, "proposal_id")?),
             }),
         },
@@ -1304,7 +1332,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "create_start",
             command: "create_start",
-            description: "Begin founding a new republic: the engine derives the founder's identity, mints one-time invite links per member, and runs the real founding ritual with a live log; read_session shows the seed, the joinable links, and each seat filling in. Once every member has joined, propose the charter with create_propose. NOTE: this build has no network transport yet (the Nostr transport lands with N4), so create_start currently fails honestly with exactly that message instead of starting a run.",
+            description: "Begin founding a new republic: the engine derives the founder's identity, mints one-time invite links per member, and runs the real founding ritual with a live log; read_session shows the seed, the joinable links, and each seat filling in. Once every member has joined, propose the charter with create_propose. Needs a CONFIRMED relay first (relay_add, then confirm) - without one it refuses with \"cannot found: no relay configured\". The threshold must be at least 2.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1348,7 +1376,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "recover_start",
             command: "recover_start",
-            description: "As a member who lost their device, rejoin a republic from a coordinator-minted molt://recover/… link using your recovery phrase (a fresh device with only the phrase). The engine re-derives the seat identity, proves it to the coordinator, waits for the group's threshold re-admission, re-enters the encrypted group from the Welcome, verifies the served chain from its genesis, and materializes the recovered workspace locally. NOTE: this build has no network transport yet (the Nostr transport lands with N4) — the link parses and the context arms, then the run fails honestly with exactly that reason.",
+            description: "As a member who lost their device, rejoin a republic from a coordinator-minted molt://recover/… link using your recovery phrase (a fresh device with only the phrase). The engine re-derives the seat identity, proves it to the coordinator, waits for the group's threshold re-admission, re-enters the encrypted group from the Welcome, verifies the served chain from its genesis, and materializes the recovered workspace locally. Runs over the republic's relays - the link carries them; adopt missing ones when refused.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1445,7 +1473,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "join_start",
             command: "join_start",
-            description: "Begin joining a republic from a real molt://invite/… link (must carry the transport handover — a bare preview link is rejected). The engine shows the joiner's own recovery phrase and runs the join off the actor; when the founder proposes the charter it is surfaced for join_confirm_charter. NOTE: this build has no network transport yet (the Nostr transport lands with N4), so the join run currently fails honestly with exactly that message in its log.",
+            description: "Begin joining a republic from a real molt://invite/… link (must carry the transport handover — a bare preview link is rejected). The engine shows the joiner's own recovery phrase and runs the join off the actor; when the founder proposes the charter it is surfaced for join_confirm_charter. Runs over the invite's relays; a refusal names what is missing (adopt the invite's relays, then retry).",
             schema: || json!({
                 "type": "object",
                 "properties": {

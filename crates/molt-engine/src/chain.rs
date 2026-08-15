@@ -2747,6 +2747,7 @@ impl State {
                 decliners: Vec::new(),
                 by: by.to_string(),
                 superseded: false,
+                withdrawn: false,
             }
         });
         if inserted && surface == Surface::Memory {
@@ -3149,8 +3150,24 @@ impl State {
         // missed the vote would keep it open forever) and for parked voices
         // (the own log replayed a decline whose proposal is not back yet).
         // A receiver without the card parks the voice symmetrically.
+        // the OWN withdraw re-serves like the own declines below: a peer
+        // that was closed while the proposer pulled back must still learn
+        // the verdict (same retention gate as the rejected declines)
         let me = self.member();
         let cutoff = self.chat_retention_cutoff();
+        let mut own_withdrawn: Vec<u64> = self
+            .proposals
+            .iter()
+            .filter(|(_, p)| p.withdrawn && p.by == me && p.declined_at >= cutoff)
+            .map(|(id, _)| *id)
+            .collect();
+        own_withdrawn.sort_unstable();
+        for id in own_withdrawn {
+            events.push(WorkspaceEvent::Withdrawn {
+                id: ProposalId(id),
+                by: me.clone(),
+            });
+        }
         let mut declined: Vec<u64> = self
             .proposals
             .iter()
@@ -4097,6 +4114,161 @@ mod tests {
             .expect("a wire delivery acks, never errors");
     }
 
+    /// **The proposer pulls a proposal back** (the ProposalCard's "pull
+    /// back"): terminal like a rejection, but no vote is forged — the
+    /// verdict is `withdrawn`, never "declined by".
+    #[test]
+    fn a_withdraw_turns_the_card_terminal_without_forging_a_vote() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let mut peer = chain_peer_3("walter", &b);
+        let id = match peer
+            .cmd_propose(
+                Surface::Organization,
+                json!({ "op": "set_name", "value": "Mine" }),
+            )
+            .expect("propose")
+        {
+            molt_core::Reply::Proposed { id } => id,
+            other => panic!("unexpected reply {other:?}"),
+        };
+        peer.cmd_withdraw(id).expect("withdraw");
+        let p = peer.proposals.get(&id.0).expect("card");
+        assert_eq!(p.state, ProposalState::Rejected);
+        assert!(p.withdrawn, "the verdict is its own, not a decline");
+        assert!(p.decliners.is_empty(), "no vote forged");
+        assert_eq!(p.declined_by, "", "no decliner named");
+        assert!(
+            !peer.pending_sigs.contains_key(&id.0),
+            "collected signatures are cleared"
+        );
+        // terminal: a second withdraw refuses
+        assert!(peer.cmd_withdraw(id).is_err());
+    }
+
+    /// Only the proposer withdraws: the local command refuses a foreign
+    /// card, and the wire arm counts a withdraw only when the link
+    /// identity IS the recorded proposer (no signature — same posture as
+    /// declines, plus the proposer check).
+    #[test]
+    fn only_the_proposer_may_withdraw() {
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let mut peer = chain_peer_3("walter", &b);
+        wire(
+            &mut peer,
+            "petra",
+            1,
+            WorkspaceEvent::Proposed {
+                id: ProposalId(9),
+                surface: Surface::Organization,
+                payload: json!({ "op": "set_name", "value": "Petras" }),
+            },
+        );
+        // walter is not the proposer — the command refuses
+        assert!(matches!(
+            peer.cmd_withdraw(ProposalId(9)),
+            Err(molt_core::MoltError::NotTheProposer(_))
+        ));
+        // forgery: dora's link carries petra's withdraw — dropped
+        wire(
+            &mut peer,
+            "dora",
+            1,
+            WorkspaceEvent::Withdrawn { id: ProposalId(9), by: "petra".to_string() },
+        );
+        assert_eq!(
+            peer.proposals.get(&9).expect("card").state,
+            ProposalState::Proposed
+        );
+        // dora withdrawing petra's card as herself — not the proposer, dropped
+        wire(
+            &mut peer,
+            "dora",
+            2,
+            WorkspaceEvent::Withdrawn { id: ProposalId(9), by: "dora".to_string() },
+        );
+        assert_eq!(
+            peer.proposals.get(&9).expect("card").state,
+            ProposalState::Proposed
+        );
+        // the real proposer pulls it back
+        wire(
+            &mut peer,
+            "petra",
+            2,
+            WorkspaceEvent::Withdrawn { id: ProposalId(9), by: "petra".to_string() },
+        );
+        let p = peer.proposals.get(&9).expect("card");
+        assert_eq!(p.state, ProposalState::Rejected);
+        assert!(p.withdrawn);
+    }
+
+    /// A withdraw ahead of its proposal parks (G7 orders per sender only)
+    /// and lands the moment the card arrives — the verdict must never be
+    /// lost to arrival order, exactly like a parked decline.
+    #[test]
+    fn a_withdraw_ahead_of_its_proposal_parks_and_registers() {
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let mut peer = chain_peer_3("walter", &b);
+        wire(
+            &mut peer,
+            "petra",
+            1,
+            WorkspaceEvent::Withdrawn { id: ProposalId(9), by: "petra".to_string() },
+        );
+        wire(
+            &mut peer,
+            "petra",
+            2,
+            WorkspaceEvent::Proposed {
+                id: ProposalId(9),
+                surface: Surface::Organization,
+                payload: json!({ "op": "set_name", "value": "Gone" }),
+            },
+        );
+        let p = peer.proposals.get(&9).expect("card");
+        assert_eq!(p.state, ProposalState::Rejected);
+        assert!(p.withdrawn, "the parked withdraw registered on arrival");
+    }
+
+    /// The own withdraw re-serves with the open governance — a peer that
+    /// was closed while the card died must still learn the verdict.
+    #[test]
+    fn open_governance_reserves_the_own_withdraw() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let mut peer = chain_peer_3("walter", &b);
+        let id = match peer
+            .cmd_propose(
+                Surface::Organization,
+                json!({ "op": "set_name", "value": "Short-lived" }),
+            )
+            .expect("propose")
+        {
+            molt_core::Reply::Proposed { id } => id,
+            other => panic!("unexpected reply {other:?}"),
+        };
+        peer.cmd_withdraw(id).expect("withdraw");
+        // keep the card inside the display retention (fixture ts is historic)
+        peer.proposals.get_mut(&id.0).expect("card").declined_at = crate::now_secs();
+        let events = peer.open_governance_events();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                WorkspaceEvent::Withdrawn { id: wid, by } if *wid == id && by == "walter"
+            )),
+            "the own withdraw re-serves"
+        );
+    }
+
     /// Live incident 2026-08-09 (defect 6): a decline is a VOTE — it must
     /// converge like an approval. Two wire declines in a 2-of-3 kill the
     /// proposal on every node; before the receive arm existed they were
@@ -4449,6 +4621,7 @@ mod tests {
                 decliners: Vec::new(),
                 by: String::new(),
                 superseded: false,
+                withdrawn: false,
             },
         );
         let p = peer.proposals.get(&4).cloned().expect("card");

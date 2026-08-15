@@ -398,6 +398,7 @@ pub(crate) fn crosses_wire(event: &WorkspaceEvent) -> bool {
             // replicas would show Rejected while everyone else keeps the
             // proposal pending forever — votes must converge like approvals
             | WorkspaceEvent::Declined { .. }
+            | WorkspaceEvent::Withdrawn { .. }
             | WorkspaceEvent::Committed(_)
             | WorkspaceEvent::ChainRequest { .. }
             | WorkspaceEvent::MembershipProposed { .. }
@@ -1404,6 +1405,13 @@ impl State {
                 // an id-collision refusal must not (re-)ring frontends
                 if self.receive_proposed(id.0, surface, payload, &from) {
                     self.emit(molt_core::Event::Proposed { id, surface, by: from });
+                    // a retraction that outran the card stands now
+                    if matches!(
+                        self.register_parked_withdrawal(id.0),
+                        crate::proposals::WithdrawOutcome::Withdrawn
+                    ) {
+                        self.emit(molt_core::Event::Withdrawn { id });
+                    }
                     // votes that outran the card (parked declines) stand now
                     match self.register_parked_declines(id.0) {
                         crate::proposals::DeclineOutcome::Rejected => {
@@ -1452,6 +1460,22 @@ impl State {
                         self.emit(molt_core::Event::Declined { id, by: from });
                     }
                     _ => {}
+                }
+            }
+            // the proposer's retraction crosses like a decline: no
+            // signature, so the link identity is the only proof — it must
+            // BE the claimed author, and the register checks the recorded
+            // proposer on top (a withdraw is proposer-only)
+            WorkspaceEvent::Withdrawn { id, by } if self.is_chain_governed() => {
+                if by != from {
+                    tracing::warn!(%from, claimed = %by, "dropping a withdraw claiming another member");
+                    return Ok(Reply::Ack);
+                }
+                if matches!(
+                    self.register_withdraw(id.0, &from, envelope.ts),
+                    crate::proposals::WithdrawOutcome::Withdrawn
+                ) {
+                    self.emit(molt_core::Event::Withdrawn { id });
                 }
             }
             WorkspaceEvent::Committed(block) if self.is_chain_governed() => {

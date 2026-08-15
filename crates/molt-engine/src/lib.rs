@@ -609,6 +609,10 @@ pub(crate) struct State {
     /// the moment the proposal is known ([`State::register_decline`]).
     /// Ephemeral and bounded, like the signature collection above.
     pub(crate) pending_declines: HashMap<u64, Vec<(MemberId, u64)>>,
+    /// Parked withdraws whose proposal is not known yet (one slot per id —
+    /// a withdraw has exactly one legitimate author), the decline park's
+    /// sibling. Drained by `receive_proposed`.
+    pub(crate) pending_withdrawals: HashMap<u64, (MemberId, u64)>,
     /// RELAY file plane (`file_transfer_nostr.md`): the known publish stamp
     /// per share — what a fetch names the series' h-tag window with.
     /// Runtime-only; re-learned from `FileServed` announcements (a fetch
@@ -947,6 +951,7 @@ impl State {
             split_noted: std::collections::HashSet::new(),
             pending_sigs: HashMap::new(),
             pending_declines: HashMap::new(),
+            pending_withdrawals: HashMap::new(),
             file_series: HashMap::new(),
             file_pending: HashMap::new(),
             file_serving: std::collections::HashSet::new(),
@@ -1195,6 +1200,7 @@ impl State {
             Command::Propose { surface, payload } => self.cmd_propose(surface, payload),
             Command::Approve { proposal } => self.cmd_approve(proposal),
             Command::Decline { proposal } => self.cmd_decline(proposal),
+            Command::Withdraw { proposal } => self.cmd_withdraw(proposal),
             Command::ReadState { surface, channel, view } => {
                 // the view key is shared vocabulary (`Surface::views`, the
                 // same list `select_view` validates against) PLUS chat's
@@ -3071,6 +3077,7 @@ mod tests {
             decliners: Vec::new(),
             by: String::new(),
             superseded: false,
+            withdrawn: false,
         };
         assert_eq!(
             proposals::change_summary(

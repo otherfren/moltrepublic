@@ -54,6 +54,17 @@ pub(crate) enum DeclineOutcome {
     Parked,
 }
 
+/// What one withdraw registration did.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum WithdrawOutcome {
+    /// The card turned terminal (withdrawn).
+    Withdrawn,
+    /// The proposal is unknown here — the verdict parked.
+    Parked,
+    /// Duplicate, terminal already, or not the proposer — nothing changed.
+    Ignored,
+}
+
 /// The republic's EFFECTIVE display state: the ratified genesis folded
 /// with the applied Organization ops (last write wins per op). This is
 /// what every reader shows — the genesis itself stays immutable history,
@@ -625,6 +636,103 @@ impl State {
     //   same class of guard as `chain_walk.seen` in `receive_proposed`.
     // - Chain: never a block (ephemeral governance gossip, like declines).
     //   Snapshot/dump: additive fields only.
+    /// Pull an OWN pending proposal back (the ProposalCard's "pull back",
+    /// designed above): terminal on every node, converging like a decline
+    /// — but no vote is forged. Proposer-gated twice: here against the own
+    /// record, and on every receiver against ITS record + link identity.
+    pub(crate) fn cmd_withdraw(&mut self, proposal: ProposalId) -> Result<Reply, MoltError> {
+        let me = self.member();
+        {
+            let p = self
+                .proposals
+                .get(&proposal.0)
+                .ok_or(MoltError::UnknownProposal(proposal))?;
+            if p.state != ProposalState::Proposed {
+                return Err(MoltError::AlreadyTerminal(proposal, p.state));
+            }
+            if p.by != me {
+                return Err(MoltError::NotTheProposer(proposal));
+            }
+        }
+        let env = self.make_env(
+            me.clone(),
+            WorkspaceEvent::Withdrawn {
+                id: proposal,
+                by: me.clone(),
+            },
+        );
+        self.record(env);
+        self.emit(Event::Withdrawn { id: proposal });
+        // the decided-vote summary, minted exactly once — on the proposer
+        if let Some(payload) = self.proposals.get(&proposal.0).map(|p| p.payload.clone()) {
+            let body = format!(
+                "⚖ #{} ↩ {}",
+                proposal.0,
+                Self::decision_summary(proposal.0, &payload, None)
+                    .split_once(' ')
+                    .map(|(_, rest)| rest.to_string())
+                    .unwrap_or_default()
+            );
+            let who = me;
+            if let Err(e) = self.post_message_with_kind(
+                who,
+                body,
+                None,
+                molt_core::ChannelRef::Patch { id: proposal },
+                molt_core::ChatKind::System,
+            ) {
+                tracing::warn!(error = %e, id = proposal.0, "could not post the withdraw summary");
+            }
+        }
+        Ok(Reply::Ack)
+    }
+
+    /// The withdraw choke point (log applier, wire ingest, park drain) —
+    /// emit-free like [`State::register_decline`]. Registers ONLY when
+    /// `by` matches the record's proposer (first-sighting); a proposal
+    /// this node does not know yet PARKS the verdict (bounded, one slot
+    /// per id — a withdraw has exactly one legitimate author).
+    pub(crate) fn register_withdraw(&mut self, id: u64, by: &str, ts: u64) -> WithdrawOutcome {
+        let Some(p) = self.proposals.get_mut(&id) else {
+            if id > self.next_id.saturating_add(PARKED_DECLINE_ID_WINDOW) {
+                tracing::warn!(%id, %by, "dropping a withdraw for an implausible proposal id");
+                return WithdrawOutcome::Ignored;
+            }
+            self.next_id = self.next_id.max(id.saturating_add(1));
+            if !self.pending_withdrawals.contains_key(&id)
+                && self.pending_withdrawals.len() >= PARKED_DECLINE_IDS_MAX
+            {
+                tracing::warn!(%id, %by, "withdraw park full — dropping");
+                return WithdrawOutcome::Ignored;
+            }
+            self.pending_withdrawals
+                .entry(id)
+                .or_insert((by.to_string(), ts));
+            return WithdrawOutcome::Parked;
+        };
+        if p.state != ProposalState::Proposed {
+            return WithdrawOutcome::Ignored;
+        }
+        if p.by != by {
+            tracing::warn!(%id, %by, recorded = %p.by, "dropping a withdraw not from the recorded proposer");
+            return WithdrawOutcome::Ignored;
+        }
+        p.state = ProposalState::Rejected;
+        p.withdrawn = true;
+        p.declined_at = ts; // retention + the "when" label; declined_by stays empty
+        self.pending_sigs.remove(&id);
+        self.pending_declines.remove(&id);
+        WithdrawOutcome::Withdrawn
+    }
+
+    /// Register a parked withdraw for a proposal that just became known.
+    pub(crate) fn register_parked_withdrawal(&mut self, id: u64) -> WithdrawOutcome {
+        let Some((by, ts)) = self.pending_withdrawals.remove(&id) else {
+            return WithdrawOutcome::Ignored;
+        };
+        self.register_withdraw(id, &by, ts)
+    }
+
     pub(crate) fn cmd_decline(&mut self, proposal: ProposalId) -> Result<Reply, MoltError> {
         let me = self.member();
         {
@@ -781,12 +889,21 @@ impl State {
             "remove_image" => "Logo removed",
             "set_relays" => "Relay pool",
             "set_features" => "Features",
+            "wiki_patch" => "Wiki",
             other => other,
         };
-        // the decided content, capped — a charter is long, and the image
-        // ops carry base64 that must never reach a chat line
+        // the decided content, capped — a charter is long, the image ops
+        // carry base64 and a wiki patch carries a raw diff; none of those
+        // belongs in a chat line (the card's raw-patch button shows it)
         let content = match op {
             "set_image" | "remove_image" => String::new(),
+            "wiki_patch" => payload
+                .get("summary")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .chars()
+                .take(160)
+                .collect(),
             _ => {
                 let v = payload.get("value").and_then(Value::as_str).unwrap_or("");
                 let mut c: String = v.chars().take(160).collect();
@@ -1025,6 +1142,7 @@ impl State {
             // "" never matches — an unknown proposer is nobody's
             mine: !p.by.is_empty() && p.by == me,
             superseded: p.superseded,
+            withdrawn: p.withdrawn,
         }
     }
 

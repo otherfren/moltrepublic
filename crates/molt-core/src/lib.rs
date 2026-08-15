@@ -2397,6 +2397,18 @@ pub enum WorkspaceEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         nonce: Option<u64>,
     },
+    /// The proposer pulled a pending proposal back ("pull back"): terminal
+    /// on every node, converging like a decline — but no vote is forged
+    /// and the verdict renders as "pulled back". Only the PROPOSER'S link
+    /// identity may carry it (`by` must equal the authenticated wire
+    /// sender AND the receiver's recorded proposer). Additive: an old
+    /// reader ignores it and simply keeps the card open.
+    Withdrawn {
+        /// The proposal.
+        id: ProposalId,
+        /// The withdrawing proposer.
+        by: MemberId,
+    },
 }
 
 /// The lenient twin of [`EventEnvelope`]: serde fails the whole envelope on
@@ -2461,6 +2473,12 @@ pub struct ProposalRecord {
     /// so pre-field dumps stay byte-identical.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub superseded: bool,
+    /// The proposer pulled the proposal back ("pull back"): terminal like
+    /// a rejection but its OWN verdict — no decline vote is forged, and
+    /// the card renders "pulled back", never "declined by". Additive,
+    /// skipped when false so pre-field dumps stay byte-identical.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub withdrawn: bool,
 }
 
 /// Exactly what the engine actor holds for one workspace — the snapshot
@@ -3248,6 +3266,12 @@ pub enum Command {
     /// Decline a pending proposal.
     Decline {
         /// The proposal to decline.
+        proposal: ProposalId,
+    },
+    /// Pull an OWN pending proposal back (proposer only): it turns
+    /// terminal on every node without forging any vote.
+    Withdraw {
+        /// The proposal to pull back.
         proposal: ProposalId,
     },
     /// Delete a chat message: its text is wiped for everyone and replaced
@@ -4711,6 +4735,10 @@ pub struct ProposalView {
     /// labels it "superseded", never "declined by".
     #[serde(default)]
     pub superseded: bool,
+    /// Whether the proposer pulled it back (see
+    /// [`ProposalRecord::withdrawn`]) — labelled "pulled back".
+    #[serde(default)]
+    pub withdrawn: bool,
 }
 
 /// One chat channel as the engine enumerates it for the read contract
@@ -5269,6 +5297,11 @@ pub enum Event {
         /// Who declined.
         by: MemberId,
     },
+    /// The proposer pulled the proposal back — terminal, no vote forged.
+    Withdrawn {
+        /// The proposal id.
+        id: ProposalId,
+    },
     /// A proposal was rejected for good: enough members declined that
     /// approval can no longer reach the threshold (declines > n − m).
     Rejected {
@@ -5319,6 +5352,9 @@ pub enum MoltError {
     /// The proposal is already in a terminal state.
     #[error("proposal {0:?} is already {1:?}")]
     AlreadyTerminal(ProposalId, ProposalState),
+    /// A withdraw by someone other than the recorded proposer.
+    #[error("proposal {0:?}: only the proposer pulls back")]
+    NotTheProposer(ProposalId),
     /// A repeated `Approve` in a context without chain governance. This
     /// node contributes exactly ONE real approval — its own; it never
     /// counts invented approvals on behalf of other members. The missing

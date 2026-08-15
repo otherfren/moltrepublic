@@ -304,9 +304,11 @@ impl State {
                     // stays deterministic)
                     by: env.by.clone(),
                     superseded: false,
+                    withdrawn: false,
                 });
                 self.next_id = self.next_id.max(id.0.saturating_add(1));
                 let _ = self.register_parked_declines(id.0);
+                let _ = self.register_parked_withdrawal(id.0);
                 if *surface == Surface::Memory {
                     // registration-time supersede check (replay twin of
                     // receive_proposed — shared_memory_real.md §4)
@@ -325,6 +327,11 @@ impl State {
                         p.approvals += 1;
                     }
                 }
+            }
+            WorkspaceEvent::Withdrawn { id, by } => {
+                // the proposer's retraction — all rules in
+                // [`State::register_withdraw`]; emit-free on replay
+                let _ = self.register_withdraw(id.0, by, env.ts);
             }
             WorkspaceEvent::Declined { id, by } => {
                 // a decline is ONE member's voice, not a veto: the proposal
@@ -383,9 +390,11 @@ impl State {
                     decliners: Vec::new(),
                     by: env.by.clone(),
                     superseded: false,
+                    withdrawn: false,
                 });
                 self.next_id = self.next_id.max(id.0.saturating_add(1));
                 let _ = self.register_parked_declines(id.0);
+                let _ = self.register_parked_withdrawal(id.0);
             }
             WorkspaceEvent::Committed(_)
             | WorkspaceEvent::ChainRequest { .. }
@@ -679,6 +688,7 @@ impl State {
         self.chain_applied.clear();
         self.pending_sigs.clear();
         self.pending_declines.clear();
+        self.pending_withdrawals.clear();
         self.file_series.clear();
         self.file_pending.clear();
         self.file_serving.clear();
