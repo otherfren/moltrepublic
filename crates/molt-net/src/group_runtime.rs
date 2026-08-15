@@ -717,15 +717,67 @@ enum Ingest {
 /// unbounded hold's contents would have to come from anyway.
 const EPOCH_HOLD_MAX: usize = 512;
 
+/// A bounded ring of recently CONSUMED ciphertext hashes (live-incident
+/// 2026-08-15): relays re-deliver frames across subscription overlaps and
+/// resend rounds, the envelope seq sits INSIDE the ciphertext, and a
+/// second MLS decrypt of a consumed frame can only ever end in openmls's
+/// SecretReuseError storm — so exact duplicates turn around BEFORE the
+/// ratchet is asked. Only consumed outcomes enter the ring: a held
+/// FutureEpoch/Opaque frame must stay retryable.
+pub(crate) struct SeenCiphertexts {
+    order: std::collections::VecDeque<[u8; 32]>,
+    set: std::collections::HashSet<[u8; 32]>,
+}
+
+impl SeenCiphertexts {
+    const CAP: usize = 4096;
+
+    pub(crate) fn new() -> Self {
+        SeenCiphertexts {
+            order: std::collections::VecDeque::new(),
+            set: std::collections::HashSet::new(),
+        }
+    }
+
+    fn hash(content: &str) -> [u8; 32] {
+        use sha2::Digest;
+        sha2::Sha256::digest(content.as_bytes()).into()
+    }
+
+    pub(crate) fn seen(&self, content: &str) -> bool {
+        self.set.contains(&Self::hash(content))
+    }
+
+    pub(crate) fn note(&mut self, content: &str) {
+        let h = Self::hash(content);
+        if self.set.insert(h) {
+            self.order.push_back(h);
+            if self.order.len() > Self::CAP {
+                if let Some(old) = self.order.pop_front() {
+                    self.set.remove(&old);
+                }
+            }
+        }
+    }
+}
+
 async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
     mls: &MlsChannel,
     log: &L,
     store: &S,
     sink: &K,
     me: &MemberId,
+    seen: &mut SeenCiphertexts,
     content: &str,
     created_at: u64,
 ) -> Ingest {
+    // an exact re-delivery of a frame this node already consumed: turn
+    // around before the ratchet is asked (a second decrypt is at best a
+    // SecretReuseError logged at ERROR by openmls, at worst wasted work)
+    if seen.seen(content) {
+        tracing::debug!(me = %me, "dropping an exact re-delivery of a consumed frame");
+        return Ingest::Nothing;
+    }
     let secrets = mls.exporter_secrets();
     let Ok(wire) = crate::envelope::open_outer(&secrets, content) else {
         return Ingest::Opaque;
@@ -733,7 +785,17 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
     // the CARRIER stamp, never NO_CARRIER_STAMP: 445 is the first transport
     // that carries one, and it is half of the CommitKey that breaks a
     // concurrent same-epoch commit race
-    match mls.decode_at(&wire, created_at) {
+    let outcome = mls.decode_at(&wire, created_at);
+    // consumed outcomes enter the dedup ring — their re-delivery can never
+    // decode again; transitional ones (FutureEpoch/EpochAdvanced/Opaque)
+    // must stay retryable and do NOT
+    if matches!(
+        outcome,
+        MlsDecode::Deliver(..) | MlsDecode::Ack(..) | MlsDecode::GroupAck(..) | MlsDecode::Discard
+    ) {
+        seen.note(content);
+    }
+    match outcome {
         MlsDecode::Deliver(from, env) => {
             sink.peer_seen(&from).await;
             tracing::debug!(me = %me, %from, seq = env.seq, "group frame delivered to engine");
@@ -792,6 +854,7 @@ async fn retry_epoch_hold<L: OutboxLog, S: StateStore, K: EngineSink>(
     store: &S,
     sink: &K,
     me: &MemberId,
+    seen: &mut SeenCiphertexts,
     hold: &mut Vec<(String, u64)>,
 ) -> Result<u64, ()> {
     let mut lost = 0u64;
@@ -799,7 +862,7 @@ async fn retry_epoch_hold<L: OutboxLog, S: StateStore, K: EngineSink>(
         let mut progress = false;
         let mut still = Vec::new();
         for (content, at) in std::mem::take(hold) {
-            match ingest_one(mls, log, store, sink, me, &content, at).await {
+            match ingest_one(mls, log, store, sink, me, seen, &content, at).await {
                 Ingest::EngineGone => return Err(()),
                 Ingest::FutureEpoch => still.push((content, at)),
                 Ingest::Opaque => lost += 1,
@@ -848,6 +911,8 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
     let _ = health.send(state.clone());
     // frames whose commit has not arrived yet — see `retry_epoch_hold`
     let mut hold: Vec<(String, u64)> = Vec::new();
+    // exact-duplicate turnaround (relay re-deliveries) — runtime-only
+    let mut seen = SeenCiphertexts::new();
     loop {
         let recv = tokio::select! {
             r = sub.recv(RECV_SLICE) => r,
@@ -858,7 +923,7 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
                 if state.deaf.take().is_some() {
                     let _ = health.send(state.clone());
                 }
-                match ingest_one(&mls, &log, &store, &sink, &me, &content, created_at).await {
+                match ingest_one(&mls, &log, &store, &sink, &me, &mut seen, &content, created_at).await {
                     Ingest::EngineGone => return,
                     // NOT counted yet, and not dropped. On 445 the epoch shows
                     // up at the OUTER layer, not at the MLS decode: a frame
@@ -882,7 +947,7 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
                         }
                     }
                     Ingest::EpochAdvanced => {
-                        match retry_epoch_hold(&mls, &log, &store, &sink, &me, &mut hold).await {
+                        match retry_epoch_hold(&mls, &log, &store, &sink, &me, &mut seen, &mut hold).await {
                             Err(()) => return,
                             Ok(0) => {}
                             Ok(lost) => {
@@ -916,6 +981,27 @@ mod tests {
 
     fn cfg() -> GroupNetConfig {
         GroupNetConfig::fast("walter".into(), vec!["petra".into(), "zoe".into()])
+    }
+
+    /// The exact-duplicate turnaround (live-incident 2026-08-15): a
+    /// CONSUMED frame's re-delivery is seen, an un-noted frame is not,
+    /// and the ring evicts oldest-first at its cap — so a re-delivery
+    /// storm can never reach the ratchet, while held (never-noted)
+    /// frames stay retryable by construction.
+    #[test]
+    fn seen_ciphertexts_dedup_consumed_frames_and_evict_oldest() {
+        let mut seen = SeenCiphertexts::new();
+        assert!(!seen.seen("frame-1"));
+        seen.note("frame-1");
+        assert!(seen.seen("frame-1"), "a consumed frame turns around");
+        assert!(!seen.seen("frame-2"), "an unseen frame passes");
+        seen.note("frame-1");
+        // fill past the cap: the oldest leaves, the newest stays
+        for i in 0..SeenCiphertexts::CAP {
+            seen.note(&format!("bulk-{i}"));
+        }
+        assert!(!seen.seen("frame-1"), "the oldest evicts at the cap");
+        assert!(seen.seen(&format!("bulk-{}", SeenCiphertexts::CAP - 1)));
     }
 
     /// **A publish that can never succeed is not retried, and says so.**

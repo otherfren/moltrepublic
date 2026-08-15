@@ -515,6 +515,149 @@ async fn a_lost_seat_rejoins_the_republic_over_relays() {
     .await;
 }
 
+/// **Live-incident 2026-08-09 §2/§3 repro:** TWO recoveries of the same
+/// seat, back to back, must leave BOTH chat directions converging. The
+/// field evidence (SecretReuseError storms on consumed ratchet
+/// generations, an inbound-deaf rejoiner, churning survivor outboxes)
+/// points at MLS divergence out of the SECOND re-key — this drives the
+/// whole flow through the public command surface and then insists on
+/// bidirectional chat, which is exactly what the live republic lost.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_double_recovery_of_the_same_seat_still_converges_both_ways() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .try_init();
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, petra_phrase) = found_republic(tmp.path(), &url, 2).await;
+    drop(b);
+
+    // ---- recovery ONE ----
+    a.execute(Command::RecoverInviteStart {
+        member: "petra".to_string(),
+    })
+    .await
+    .expect("mint 1");
+    let s = wait_for(&a, "link 1", |s| {
+        s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")
+    })
+    .await;
+    let link1 = s
+        .notice
+        .strip_prefix("recovery-link:")
+        .unwrap_or_else(|| panic!("mint 1 must succeed: {:?}", s.notice))
+        .to_string();
+    let c1 = engine(&tmp.path().join("rejoiner-1"));
+    adopt_relay(&c1, &url).await;
+    c1.execute(Command::RecoverStart {
+        link: link1,
+        phrase: petra_phrase.clone(),
+    })
+    .await
+    .expect("recover 1 start");
+    let s = wait_for(&c1, "recovery 1 to open", |s| {
+        (s.screen == molt_core::Screen::Main && !s.workspaces.is_empty())
+            || s.notice.starts_with("recover-failed:")
+    })
+    .await;
+    assert!(!s.notice.starts_with("recover-failed:"), "recovery 1: {:?}", s.notice);
+    wait_for(&a, "walter to record return 1", |s| {
+        s.workspaces.iter().any(|w| w.members.len() == 2)
+    })
+    .await;
+
+    // …and petra's replacement device dies TOO (the live sequence)
+    drop(c1);
+
+    // ---- recovery TWO, fresh link, fresh device ----
+    a.execute(Command::RecoverInviteStart {
+        member: "petra".to_string(),
+    })
+    .await
+    .expect("mint 2");
+    let s = wait_for(&a, "link 2", |s| {
+        s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")
+    })
+    .await;
+    let link2 = s
+        .notice
+        .strip_prefix("recovery-link:")
+        .unwrap_or_else(|| panic!("mint 2 must succeed: {:?}", s.notice))
+        .to_string();
+    let c2 = engine(&tmp.path().join("rejoiner-2"));
+    adopt_relay(&c2, &url).await;
+    c2.execute(Command::RecoverStart {
+        link: link2,
+        phrase: petra_phrase,
+    })
+    .await
+    .expect("recover 2 start");
+    let s = wait_for(&c2, "recovery 2 to open", |s| {
+        (s.screen == molt_core::Screen::Main && !s.workspaces.is_empty())
+            || s.notice.starts_with("recover-failed:")
+    })
+    .await;
+    assert!(!s.notice.starts_with("recover-failed:"), "recovery 2: {:?}", s.notice);
+
+    // ---- BOTH directions converge (what the live republic lost) ----
+    a.execute(Command::Chat {
+        body: "from walter after the double recovery".to_string(),
+        quote: None,
+        channel: molt_core::ChannelRef::default(),
+    })
+    .await
+    .expect("walter sends");
+    c2.execute(Command::Chat {
+        body: "from petra's second comeback".to_string(),
+        quote: None,
+        channel: molt_core::ChannelRef::default(),
+    })
+    .await
+    .expect("petra sends");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let a_sees = read_chat_bodies(&a).await;
+        let c_sees = read_chat_bodies(&c2).await;
+        let a_ok = a_sees.iter().any(|b| b.contains("second comeback"));
+        let c_ok = c_sees.iter().any(|b| b.contains("after the double recovery"));
+        if a_ok && c_ok {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "chat did not converge after the double recovery — \
+             walter sees {a_sees:?}, petra sees {c_sees:?} \
+             (the live incident's §2 deafness)"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// The chat bodies a node currently reads (public surface).
+async fn read_chat_bodies(w: &WalletHandle) -> Vec<String> {
+    match w
+        .execute(Command::ReadState {
+            surface: molt_core::Surface::Chat,
+            channel: None,
+            view: None,
+        })
+        .await
+        .expect("read chat")
+    {
+        Reply::State(s) => s
+            .applied
+            .iter()
+            .filter_map(|v| v.get("body").and_then(serde_json::Value::as_str))
+            .map(str::to_string)
+            .collect(),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
 /// **N4b step 6f: the wrap-author gate, finally pinnable** (the test step 5
 /// owed).
 ///

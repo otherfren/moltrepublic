@@ -64,6 +64,24 @@ Next step: reproduce a double recovery of the same seat in
 `nostr_recovery.rs` (recover, then recover again, then assert both directions
 of chat converge) and audit the resend-budget accounting.
 
+**2026-08-15 progress.** The field storm recurred (generations 28..36 —
+same signature, same never-healed state). The repro landed:
+`nostr_recovery.rs::a_double_recovery_of_the_same_seat_still_converges_both_ways`
+drives found → recover → device dies again → recover again → chat BOTH
+ways, all through the public surface. Verdict: the clean double recovery
+REPRODUCES the SecretReuseError signature and the "re-offering the tail"
+round, but CONVERGES — so the storm's benign half is relay RE-DELIVERY of
+already-consumed frames (the envelope seq sits inside the ciphertext, so
+the seq-dedup can only run after a decrypt that must fail). Shipped
+mitigation: `group_runtime::SeenCiphertexts` — a bounded ring of consumed
+ciphertext hashes turns exact re-deliveries around BEFORE the ratchet is
+asked (held FutureEpoch/Opaque frames never enter the ring and stay
+retryable). What the clean repro does NOT show is the field's permanent
+deafness — the remaining suspect is the resend BUDGET holding the healing
+tail (field: "budget spent — holding the tail floor=51" 18 s after start)
+plus whatever the two Restored blocks did to the sender ratchets; the
+budget audit is still the open next step.
+
 ## 3. OPEN — survivors' outboxes churn; chat between HEALTHY nodes stalls
 
 **Symptom:** a fresh chat message between the two healthy nodes did not
