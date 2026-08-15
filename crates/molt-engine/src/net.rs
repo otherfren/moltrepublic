@@ -1402,7 +1402,7 @@ impl State {
                 }
                 // announce only a genuinely NEW proposal: a WP2 re-serve or
                 // an id-collision refusal must not (re-)ring frontends
-                if self.receive_proposed(id.0, surface, payload) {
+                if self.receive_proposed(id.0, surface, payload, &from) {
                     self.emit(molt_core::Event::Proposed { id, surface, by: from });
                     // votes that outran the card (parked declines) stand now
                     match self.register_parked_declines(id.0) {

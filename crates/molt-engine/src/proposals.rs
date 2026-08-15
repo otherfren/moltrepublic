@@ -603,6 +603,28 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    // WITHDRAW ("pull back", not built yet — the ProposalCard shows the
+    // disabled button on own proposals). The later implementation, so it
+    // converges like decline does:
+    // - `Command::Withdraw { proposal }`, a HUMAN decision → an MCP tool
+    //   AND a GUI button (co-equality test will demand one of the two
+    //   lists; this is a tool, not INTERNAL).
+    // - Gate: only the proposer withdraws. `ProposalRecord.by` is a
+    //   DISPLAY hint (a WP2 re-serve re-wraps envelopes under the serving
+    //   peer, and env.by is a claim) — the executing node checks `by ==
+    //   self.member()` locally, and every RECEIVER checks the withdraw's
+    //   authenticated wire sender against its own record/first-sighting.
+    //   A mismatch drops the event (log a warn, never apply).
+    // - Wire: additive `WorkspaceEvent::Withdrawn { id, by }` in
+    //   `crosses_wire` (like Declined). Old readers must ignore it safely
+    //   (additive-only rule); an old node simply keeps the card open.
+    // - State: terminal like Rejected but its OWN state (a withdrawn card
+    //   must not render as "declined by"), cleared from `pending_sigs`,
+    //   parked declines dropped, and REMEMBERED (tombstone) so a WP2
+    //   re-serve of the withdrawn Proposed cannot resurrect the card —
+    //   same class of guard as `chain_walk.seen` in `receive_proposed`.
+    // - Chain: never a block (ephemeral governance gossip, like declines).
+    //   Snapshot/dump: additive fields only.
     pub(crate) fn cmd_decline(&mut self, proposal: ProposalId) -> Result<Reply, MoltError> {
         let me = self.member();
         {
@@ -998,6 +1020,10 @@ impl State {
             votes,
             declined_at: p.declined_at,
             declined_by: p.declined_by.clone(),
+            by: p.by.clone(),
+            // reader-relative ownership (the "pull back" visibility gate);
+            // "" never matches — an unknown proposer is nobody's
+            mine: !p.by.is_empty() && p.by == me,
         }
     }
 

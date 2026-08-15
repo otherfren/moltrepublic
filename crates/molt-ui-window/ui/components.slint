@@ -656,14 +656,20 @@ export component ScrollHint inherits Rectangle {
     in property <length> view-h; // the flickable's visible height
     in property <length> content-h; // the flickable's viewport-height
     in property <length> scroll-y; // the flickable's viewport-y (<= 0)
+    // always-visible mode (long card lists): when the content fits, the
+    // thumb spans the full track instead of hiding
+    in property <bool> always: false;
 
-    visible: root.content-h > root.view-h + 1px;
+    property <bool> scrollable: root.content-h > root.view-h + 1px;
+    visible: root.always || root.scrollable;
     width: 4px;
     border-radius: 2px;
     background: Theme.faint;
     opacity: 0.4;
-    height: root.visible ? max(24px, root.view-h * (root.view-h / root.content-h)) : 0px;
-    y: 4px + (root.visible
+    height: root.scrollable
+        ? max(24px, root.view-h * (root.view-h / root.content-h))
+        : (root.visible ? max(0px, root.view-h - 8px) : 0px);
+    y: 4px + (root.scrollable
         ? (root.view-h - self.height - 8px) * ((-root.scroll-y) / (root.content-h - root.view-h))
         : 0px);
 }
@@ -789,6 +795,10 @@ export component AppArea inherits Rectangle {
     in-out property <string> text;
     in property <string> placeholder;
     in property <length> font-size: Theme.fs-body;
+    // hand the caret to the inner input (e.g. right after click-to-edit)
+    public function focus-input() {
+        input.focus();
+    }
     height: 240px;
     background: Theme.panel;
     border-radius: Theme.radius;

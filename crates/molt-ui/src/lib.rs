@@ -3712,6 +3712,9 @@ struct ProposalRowData {
     /// a cast stance grays the vote buttons — clickable OR grayed, never
     /// click-then-refusal (story 2026-08-09).
     my_vote: i32,
+    /// Whether the READING member proposed it (engine `ProposalView.mine`)
+    /// — the "pull back" button's visibility gate.
+    mine: bool,
 }
 
 /// Read status + every surface snapshot into a bundle the window can apply.
@@ -4243,9 +4246,17 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                 })
                 .collect();
             let to_row = to_proposal_row;
-            // pending stays complete — an open vote must never hide behind
-            // a page; the declined (outcome) list pages like the applied log
-            let pending: Vec<ProposalRow> = s.pending.iter().map(to_row).collect();
+            // pending pages too (ask 2026-08-15: proposal cards are tall,
+            // a long list needs pages) — the nav badges and
+            // `pending-my-vote` alerts stay full-list, so an open vote on
+            // a later page still alarms
+            let p_page = page_of(&b.list_pages, &s.key, "pending");
+            let (p_start, p_end, p_page, p_pages) = if s.gated {
+                page_slice(s.pending.len(), p_page, LIST_PAGE_SIZE)
+            } else {
+                (0, s.pending.len(), 0, 1)
+            };
+            let pending: Vec<ProposalRow> = s.pending[p_start..p_end].iter().map(to_row).collect();
             let d_page = page_of(&b.list_pages, &s.key, "declined");
             let (d_start, d_end, d_page, d_pages) =
                 page_slice(s.declined.len(), d_page, LIST_PAGE_SIZE);
@@ -4290,6 +4301,8 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                 applied_pages: a_pages as i32,
                 declined_page: (d_page + 1) as i32,
                 declined_pages: d_pages as i32,
+                pending_page: (p_page + 1) as i32,
+                pending_pages: p_pages as i32,
                 log: ModelRc::new(VecModel::from(log)),
                 pending: ModelRc::new(VecModel::from(pending)),
                 declined: ModelRc::new(VecModel::from(declined)),
@@ -4748,6 +4761,7 @@ fn to_proposal_row(p: &ProposalRowData) -> ProposalRow {
         declined_by: p.declined_by.clone().into(),
         declined_when: p.declined_when.clone().into(),
         my_vote: p.my_vote,
+        mine: p.mine,
     }
 }
 
@@ -4871,6 +4885,7 @@ fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRowData {
         } else {
             0
         },
+        mine: p.mine,
     }
 }
 
@@ -6186,6 +6201,41 @@ fn sync_vec_model<T: Clone + PartialEq + 'static>(rc: &ModelRc<T>, new: Vec<T>) 
     None
 }
 
+/// `sync_vec_model` for the preview blocks: `WikiBlock.spans` is a nested
+/// model whose derived equality is POINTER identity, and every sync builds
+/// fresh span models — the generic compare would therefore rewrite (and
+/// re-create) every block row on every sync. Compare spans by content.
+fn wiki_block_eq(a: &WikiBlock, b: &WikiBlock) -> bool {
+    a.kind == b.kind
+        && a.status == b.status
+        && a.text == b.text
+        && a.spans.row_count() == b.spans.row_count()
+        && (0..a.spans.row_count()).all(|i| a.spans.row_data(i) == b.spans.row_data(i))
+}
+
+fn sync_wiki_blocks(rc: &ModelRc<WikiBlock>, new: Vec<WikiBlock>) -> Option<ModelRc<WikiBlock>> {
+    let Some(vm) = rc.as_any().downcast_ref::<VecModel<WikiBlock>>() else {
+        return Some(ModelRc::new(VecModel::from(new)));
+    };
+    while vm.row_count() > new.len() {
+        vm.remove(vm.row_count() - 1);
+    }
+    for (i, row) in new.into_iter().enumerate() {
+        if i < vm.row_count() {
+            let same = vm
+                .row_data(i)
+                .as_ref()
+                .is_some_and(|old| wiki_block_eq(old, &row));
+            if !same {
+                vm.set_row_data(i, row);
+            }
+        } else {
+            vm.push(row);
+        }
+    }
+    None
+}
+
 /// Push the wiki model into the `WikiState` global — the whole face, after
 /// every mutation (the models are small, and rows patch in place). EXCEPT
 /// the editor buffer: `raw` is rewritten only when the active doc or the
@@ -6269,9 +6319,18 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
                     wiki::BlockStatus::Changed => 2,
                     wiki::BlockStatus::Removed => 3,
                 },
+                spans: ModelRc::new(VecModel::from(
+                    b.spans
+                        .into_iter()
+                        .map(|sp| WikiSpan {
+                            text: sp.text.into(),
+                            link: sp.link.into(),
+                        })
+                        .collect::<Vec<_>>(),
+                )),
             })
             .collect();
-        if let Some(fresh) = sync_vec_model(&s.get_blocks(), blocks) {
+        if let Some(fresh) = sync_wiki_blocks(&s.get_blocks(), blocks) {
             s.set_blocks(fresh);
         }
         let links: Vec<slint::SharedString> = w.links(id).into_iter().map(Into::into).collect();
@@ -6287,7 +6346,7 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
         s.set_doc_path("".into());
         s.set_doc_meta("".into());
         s.set_doc_status(0);
-        if let Some(fresh) = sync_vec_model(&s.get_blocks(), Vec::new()) {
+        if let Some(fresh) = sync_wiki_blocks(&s.get_blocks(), Vec::new()) {
             s.set_blocks(fresh);
         }
         if let Some(fresh) = sync_vec_model(&s.get_links(), Vec::new()) {
@@ -6375,6 +6434,10 @@ fn wire_wiki(
         if let Some(id) = w.active_id() {
             w.set_raw(id, &text);
         }
+    });
+    act!(on_open_link, |w, target: slint::SharedString| {
+        // a dead link is a no-op — the preview stays put
+        let _ = w.open_link(&target);
     });
 
     // rename commit + drag drop carry a refusal the user must see
@@ -6502,7 +6565,9 @@ fn patch_view_sync(ui: &AppWindow, patch: &str, sel: usize, for_id: i32) {
     match files.get(sel) {
         Some(f) => {
             g.set_sel_label(f.display_path().into());
-            g.set_sel_marker(f.marker().into());
+            // the header names the whole move (from → to); the nav rows
+            // keep the short marker
+            g.set_sel_marker(f.header_marker().into());
             g.set_sel_status(i32::from(f.status()));
         }
         None => {
@@ -7230,6 +7295,7 @@ lexicon! {
     ed_cut: "Cut", "Ausschneiden";
     ed_paste: "Paste", "Einfügen";
     pc_show_patch: "Raw patch", "Roher Patch";
+    pc_withdraw: "Pull back", "Zurückziehen";
     pv_title: "Wiki patch", "Wiki-Patch";
     pv_copy: "Copy patch", "Patch kopieren";
     pv_copied: "Patch copied", "Patch kopiert";
@@ -7320,6 +7386,8 @@ mod tests {
             votes: Vec::new(),
             declined_at: 0,
             declined_by: String::new(),
+            by: String::new(),
+            mine: false,
         };
         let row = proposal_row(0, &pv);
         assert!(
@@ -7797,6 +7865,8 @@ mod tests {
                 ],
                 declined_at: 0,
                 declined_by: String::new(),
+                by: String::new(),
+                mine: false,
             }],
             channels: Vec::new(),
             has_archive: false,
@@ -7829,6 +7899,8 @@ mod tests {
             votes: Vec::new(),
             declined_at: 0,
             declined_by: String::new(),
+            by: String::new(),
+            mine: false,
         };
         let first_seen = HashMap::from([(4u64, 150u64)]);
         let sys = patch_system_lines(0, 4, &[pv], &HashMap::new(), &first_seen);
@@ -7888,6 +7960,8 @@ mod tests {
             votes: Vec::new(),
             declined_at: 0,
             declined_by: String::new(),
+            by: String::new(),
+            mine: false,
         };
         let mut known = HashMap::new();
         // while pending: cached with title + progress
@@ -7975,6 +8049,8 @@ mod tests {
             } else {
                 String::new()
             },
+            by: String::new(),
+            mine: false,
         }
     }
 

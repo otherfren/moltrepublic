@@ -2693,7 +2693,9 @@ impl State {
     }
 
     /// Inbound: a peer proposed something (gossip). Record it as pending so it
-    /// shows up and can be approved here.
+    /// shows up and can be approved here. `by` is the authenticated wire
+    /// sender — the proposer on a direct delivery, the serving peer on a
+    /// WP2 re-serve (a display hint, never an authorization input).
     /// Returns `true` only when the proposal was genuinely NEW here — a
     /// refused id collision or a deduplicated re-serve (WP2 catch-up
     /// re-wraps open proposals under the serving peer's name) returns
@@ -2703,6 +2705,7 @@ impl State {
         id: u64,
         surface: Surface,
         payload: serde_json::Value,
+        by: &str,
     ) -> bool {
         self.next_id = self.next_id.max(id.saturating_add(1));
         // SECURITY (symmetric to receive_membership_proposal): an id already
@@ -2733,6 +2736,7 @@ impl State {
                 declined_at: 0,
                 declined_by: String::new(),
                 decliners: Vec::new(),
+                by: by.to_string(),
             }
         });
         inserted
@@ -4427,6 +4431,7 @@ mod tests {
                 declined_at: 0,
                 declined_by: String::new(),
                 decliners: Vec::new(),
+                by: String::new(),
             },
         );
         let p = peer.proposals.get(&4).cloned().expect("card");
@@ -4720,7 +4725,7 @@ mod tests {
         // the pruned holder keeps governing: a fresh applied change seals
         // on top of the suffix (verify runs the suffix rules)
         let payload = json!({"op": "add_note", "title": "post-cut"});
-        walter.receive_proposed(41, Surface::Memory, payload.clone());
+        walter.receive_proposed(41, Surface::Memory, payload.clone(), "peer");
         let post = ChainChange::Applied {
             proposal_id: 41,
             surface: Surface::Memory,
@@ -4770,11 +4775,12 @@ mod tests {
 
         // the reopen shape: gossip-replayed cards, THEN the chain
         let mut reopened = chain_peer("walter", &b, genesis);
-        reopened.receive_proposed(7, Surface::Memory, json!({ "op": "add_note", "id": 7 }));
+        reopened.receive_proposed(7, Surface::Memory, json!({ "op": "add_note", "id": 7 }), "peer");
         reopened.receive_proposed(
             8,
             Surface::Organization,
             json!({ "op": "restore_member", "member": "petra" }),
+            "peer",
         );
         reopened.adopt_chain(b.blocks.clone());
 
@@ -4791,7 +4797,7 @@ mod tests {
         // open a fresh card either
         let mut live = chain_peer("walter", &b, b.blocks.clone());
         assert!(
-            !live.receive_proposed(7, Surface::Memory, json!({ "op": "add_note", "id": 7 })),
+            !live.receive_proposed(7, Surface::Memory, json!({ "op": "add_note", "id": 7 }), "peer"),
             "a consumed id must not open a fresh card"
         );
         assert!(!live.proposals.contains_key(&7), "no resurrected card");
@@ -5047,7 +5053,7 @@ mod tests {
     fn seal_one(s: &mut crate::State, b: &Builder, peer: &str, id: u64) {
         let target = s.chain_head.as_ref().expect("head").height + 1;
         let payload = json!({"op": "add_note", "id": id});
-        s.receive_proposed(id, Surface::Memory, payload.clone());
+        s.receive_proposed(id, Surface::Memory, payload.clone(), "peer");
         let change = ChainChange::Applied {
             proposal_id: id,
             surface: Surface::Memory,
@@ -5140,7 +5146,7 @@ mod tests {
         let b = grown_chain(AUTO_CHECKPOINT_MIN_LEN - 1);
         let mut petra = chain_signer("petra", &b, b.blocks.clone());
         // a second, still-open vote holds the cut back
-        petra.receive_proposed(91, Surface::Memory, json!({"op": "add_note", "id": 91}));
+        petra.receive_proposed(91, Surface::Memory, json!({"op": "add_note", "id": 91}), "peer");
         seal_one(&mut petra, &b, "walter", 90);
         assert_eq!(
             pending_cut(&petra),
@@ -5241,7 +5247,7 @@ mod tests {
         let b = Builder::new(&["petra", "walter"], 2);
         let mut walter = chain_signer("walter", &b, b.blocks.clone());
         // honest surface proposal id 5, awaiting approvals
-        walter.receive_proposed(5, Surface::Memory, json!({"op": "add_note"}));
+        walter.receive_proposed(5, Surface::Memory, json!({"op": "add_note"}), "peer");
         // attacker gossips a membership change under the SAME id
         walter.receive_membership_proposal(5, MembershipOp::Joined, "mallory", &"ab".repeat(32), None, Vec::new(), None);
         // the id still resolves to the SURFACE proposal — approving it can
@@ -5253,12 +5259,33 @@ mod tests {
         // the reverse: a surface proposal cannot shadow a pending membership
         let mut walter2 = chain_signer("walter", &b, b.blocks.clone());
         walter2.receive_membership_proposal(6, MembershipOp::Joined, "dora", &"cd".repeat(32), None, Vec::new(), None);
-        walter2.receive_proposed(6, Surface::Memory, json!({"op": "add_note"}));
+        walter2.receive_proposed(6, Surface::Memory, json!({"op": "add_note"}), "peer");
         assert!(matches!(
             walter2.proposal_change(6),
             Some(ChainChange::Membership { .. })
         ));
         assert!(!walter2.proposals.contains_key(&6), "surface proposal refused");
+    }
+
+    /// The pull-back visibility gate: a record remembers who proposed it,
+    /// and `mine` is reader-relative — true only when the reader IS that
+    /// member ("" matches nobody).
+    #[test]
+    fn proposal_views_know_their_proposer_and_mine_is_reader_relative() {
+        let b = Builder::new(&["petra", "walter"], 2);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        walter.receive_proposed(5, Surface::Memory, json!({"op": "add_note"}), "petra");
+        let p = walter.proposals.get(&5).cloned().expect("record");
+        assert_eq!(p.by, "petra");
+        assert!(!walter.view(5, &p).mine, "petra's proposal is not walter's");
+        // walter's own: the record carries his name, the view says mine
+        walter.receive_proposed(6, Surface::Memory, json!({"op": "add_note"}), "walter");
+        let own = walter.proposals.get(&6).cloned().expect("record");
+        assert!(walter.view(6, &own).mine);
+        // a pre-field record ("" proposer) is nobody's
+        let mut blank = walter.proposals.get(&5).cloned().expect("record");
+        blank.by = String::new();
+        assert!(!walter.view(5, &blank).mine);
     }
 
     /// SECURITY: attacker-served checkpoint data with a height-0 anchor or
@@ -5312,7 +5339,7 @@ mod tests {
             Some(ChainChange::Membership { .. })
         ));
         // id already names a SURFACE proposal → refused too
-        walter.receive_proposed(6, Surface::Memory, json!({"op": "add_note"}));
+        walter.receive_proposed(6, Surface::Memory, json!({"op": "add_note"}), "peer");
         walter.receive_checkpoint_proposal(6, 1, &hash);
         assert!(!walter.pending_sigs.contains_key(&6));
         // a replayed valid frame does not amplify into more signatures
@@ -5869,8 +5896,8 @@ mod tests {
         let payload = json!({ "op": "add_note", "title": "minutes" });
 
         // a re-gossiped Proposed lands once
-        walter.receive_proposed(1, Surface::Memory, payload.clone());
-        walter.receive_proposed(1, Surface::Memory, payload.clone());
+        walter.receive_proposed(1, Surface::Memory, payload.clone(), "peer");
+        walter.receive_proposed(1, Surface::Memory, payload.clone(), "peer");
         let pending: Vec<_> = walter
             .proposals
             .iter()
@@ -5900,7 +5927,7 @@ mod tests {
         );
 
         // LATE re-gossip (another answering peer) must not resurrect it
-        walter.receive_proposed(1, Surface::Memory, payload);
+        walter.receive_proposed(1, Surface::Memory, payload, "peer");
         walter.receive_approval(1, "petra", 1, &petra_sig);
         assert!(
             matches!(walter.proposals.get(&1), Some(p) if p.state == ProposalState::Applied),
@@ -5952,7 +5979,7 @@ mod tests {
         // only the genesis. The re-gossip restores proposal + count, then
         // his own co-signature seals the block (2-of-2).
         let mut walter = chain_signer("walter", &b, b.blocks.clone());
-        walter.receive_proposed(1, Surface::Memory, payload);
+        walter.receive_proposed(1, Surface::Memory, payload, "peer");
         walter.receive_approval(1, "petra", 1, &relayed_sig);
         assert_eq!(
             walter.pending_sigs.get(&1).map(|s| s.sigs.len()),
@@ -6290,7 +6317,7 @@ mod tests {
             "below threshold the pool must not move"
         );
         // petra learns the proposal + walter's signature, then co-signs
-        petra.receive_proposed(id, surface, payload);
+        petra.receive_proposed(id, surface, payload, "peer");
         let walter_sig = walter
             .pending_sigs
             .get(&id)
@@ -6373,7 +6400,7 @@ mod tests {
             let (id, rec) = walter.proposals.iter().next().expect("open proposal");
             (*id, rec.surface, rec.payload.clone())
         };
-        petra.receive_proposed(id, surface, payload);
+        petra.receive_proposed(id, surface, payload, "peer");
         let walter_sig = walter
             .pending_sigs
             .get(&id)
@@ -6521,7 +6548,7 @@ mod tests {
             vec!["memory".to_string()],
             "below threshold the set must not move"
         );
-        petra.receive_proposed(id, surface, payload);
+        petra.receive_proposed(id, surface, payload, "peer");
         let walter_sig = walter
             .pending_sigs
             .get(&id)
@@ -6697,6 +6724,7 @@ mod tests {
             9,
             Surface::Quests,
             serde_json::json!({ "op": "add_quest", "title": "t" }),
+            "peer",
         );
         let err = walter
             .cmd_approve(molt_core::ProposalId(9))
@@ -6718,6 +6746,7 @@ mod tests {
             9,
             Surface::Quests,
             serde_json::json!({ "op": "add_quest", "title": "t" }),
+            "peer",
         );
         walter
             .cmd_approve(molt_core::ProposalId(9))
@@ -6761,7 +6790,7 @@ mod tests {
             (*id, rec.surface, rec.payload.clone())
         };
         let mut petra = chain_signer("petra", &b, b.blocks.clone());
-        petra.receive_proposed(id, surface, payload);
+        petra.receive_proposed(id, surface, payload, "peer");
         let walter_sig = walter
             .pending_sigs
             .get(&id)
@@ -6817,7 +6846,7 @@ mod tests {
         // and a peer registers it instead of refusing a "stale resend"
         let mut petra = chain_signer("petra", &b, b.blocks.clone());
         assert!(
-            petra.receive_proposed(*id, rec.surface, rec.payload.clone()),
+            petra.receive_proposed(*id, rec.surface, rec.payload.clone(), "peer"),
             "the peer registers the freshly minted id"
         );
     }

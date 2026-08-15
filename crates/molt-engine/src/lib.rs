@@ -2976,6 +2976,7 @@ mod tests {
             declined_at: 0,
             declined_by: String::new(),
             decliners: Vec::new(),
+            by: String::new(),
         };
         assert_eq!(
             proposals::change_summary(

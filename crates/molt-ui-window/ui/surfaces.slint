@@ -20,7 +20,7 @@
 // Each pane is one component taking only the selected sub-view key, so the
 // panes stay independently editable under scripts/dev-ui.sh hot-reload.
 
-import { Theme, Strings, HintTip, WikiState, WikiNavRow, WikiTabRow, WikiBlock } from "theme.slint";
+import { Theme, Strings, HintTip, WikiState, WikiNavRow, WikiTabRow, WikiBlock, WikiSpan } from "theme.slint";
 import { AppButton, AppField, AppArea, ScrollHint, DotLabel } from "components.slint";
 
 // ---------------------------------------------------------------------------
@@ -302,14 +302,17 @@ component ToolBtn inherits Rectangle {
         }
     }
     // the TouchArea stays enabled either way — a disabled button still
-    // owes its hover the honest "not yet" hint; only clicked() gates.
+    // names itself on hover; only clicked() gates. Every disabled ToolBtn
+    // today is STATE-disabled (no tab, nothing to act on), so the hint is
+    // the plain name — the dimmed glyph already says "inactive", and a
+    // "not yet" suffix here would wrongly claim the feature is unbuilt.
     // The hint renders through the window-topmost HintTip overlay (never
     // clipped, grabs no input — a PopupWindow here strobed the hover).
     ta := TouchArea {
         mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
         changed has-hover => {
             if (self.has-hover) {
-                HintTip.label = root.enabled ? root.name : "\{root.name} - \{Strings.not-implemented-yet}";
+                HintTip.label = root.name;
                 HintTip.ax = root.absolute-position.x;
                 HintTip.ay = root.absolute-position.y + root.height + 6px;
             } else if (HintTip.ax == root.absolute-position.x
@@ -360,6 +363,95 @@ component ScrollBody inherits Rectangle {
 // verdict: a colored bar marks added (good) / changed (warn) / removed
 // (bad) blocks; a removed GHOST keeps the dropped base content visible,
 // dimmed in the bad tone (Slint Text has no strikethrough).
+// One clickable .md-link run in the preview: accent + underline, a soft
+// pill while hovered; a click navigates to the linked document.
+component LinkRun inherits Rectangle {
+    in property <string> label;
+    in property <string> target;
+    in property <length> fsize: Theme.fs-editor;
+    width: lt.preferred-width + 4px;
+    height: lt.preferred-height;
+    border-radius: 3px;
+    background: lta.has-hover ? Theme.accent-soft : transparent;
+    lt := Text {
+        x: 2px;
+        text: root.label;
+        color: Theme.accent;
+        font-size: root.fsize;
+    }
+    // Text has no underline — the link affordance is drawn
+    Rectangle {
+        x: 2px;
+        y: parent.height - 1px;
+        width: parent.width - 4px;
+        height: 1px;
+        background: Theme.accent;
+    }
+    lta := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            WikiState.open-link(root.target);
+        }
+    }
+}
+
+// A block's inline runs with clickable .md links. While the whole line
+// fits unwrapped it renders as a true inline row; a longer link-bearing
+// block falls back to stacked runs (Slint has no wrapping rich text) —
+// plain runs wrap there and each link sits on its own line.
+component SpanFlow inherits Rectangle {
+    in property <[WikiSpan]> spans;
+    in property <string> flat; // the flattened text — the fits-measure
+    in property <color> ink;
+    in property <length> fsize: Theme.fs-editor;
+    property <bool> fits: m.preferred-width <= root.width - 8px;
+    height: root.fits ? one.preferred-height : many.preferred-height;
+    m := Text {
+        text: root.flat;
+        font-size: root.fsize;
+        visible: false;
+    }
+    one := HorizontalLayout {
+        visible: root.fits;
+        alignment: start;
+        spacing: 0;
+        for sp in root.spans: HorizontalLayout {
+            if sp.link == "": Text {
+                text: sp.text;
+                color: root.ink;
+                font-size: root.fsize;
+            }
+            if sp.link != "": LinkRun {
+                label: sp.text;
+                target: sp.link;
+                fsize: root.fsize;
+            }
+        }
+    }
+    many := VerticalLayout {
+        visible: !root.fits;
+        spacing: 2px;
+        for sp in root.spans: VerticalLayout {
+            // a plain run fills the width and wraps; a link keeps its
+            // natural width (alignment: start) so the pill hugs the text
+            if sp.link == "": Text {
+                text: sp.text;
+                color: root.ink;
+                font-size: root.fsize;
+                wrap: word-wrap;
+            }
+            if sp.link != "": HorizontalLayout {
+                alignment: start;
+                LinkRun {
+                    label: sp.text;
+                    target: sp.link;
+                    fsize: root.fsize;
+                }
+            }
+        }
+    }
+}
+
 component BrainBlockView inherits HorizontalLayout {
     in property <WikiBlock> b;
     // an h2 gets extra air above — the one spacing exception a doc needs
@@ -367,6 +459,11 @@ component BrainBlockView inherits HorizontalLayout {
     spacing: 8px;
     property <bool> ghost: root.b.status == 3;
     property <color> ink: root.ghost ? Theme.bad.mix(Theme.dim, 0.6) : Theme.text;
+    // link-bearing paragraphs/bullets render their spans (clickable);
+    // ghosts stay flat text — a removed block is history, not navigation
+    property <bool> linked: !root.ghost
+        && (root.b.spans.length > 1
+            || (root.b.spans.length == 1 && root.b.spans[0].link != ""));
     Rectangle {
         width: 3px;
         border-radius: 1.5px;
@@ -392,12 +489,17 @@ component BrainBlockView inherits HorizontalLayout {
             font-italic: root.ghost;
             wrap: word-wrap;
         }
-        if root.b.kind == 2: Text {
+        if root.b.kind == 2 && !root.linked: Text {
             text: root.b.text;
             color: root.ink;
             font-size: Theme.fs-editor;
             font-italic: root.ghost;
             wrap: word-wrap;
+        }
+        if root.b.kind == 2 && root.linked: SpanFlow {
+            spans: root.b.spans;
+            flat: root.b.text;
+            ink: root.ink;
         }
         if root.b.kind == 3: HorizontalLayout {
             spacing: 7px;
@@ -407,12 +509,18 @@ component BrainBlockView inherits HorizontalLayout {
                 font-size: Theme.fs-editor;
                 vertical-alignment: top;
             }
-            Text {
+            if !root.linked: Text {
                 text: root.b.text;
                 color: root.ink;
                 font-size: Theme.fs-editor;
                 font-italic: root.ghost;
                 wrap: word-wrap;
+                horizontal-stretch: 1;
+            }
+            if root.linked: SpanFlow {
+                spans: root.b.spans;
+                flat: root.b.text;
+                ink: root.ink;
                 horizontal-stretch: 1;
             }
         }
@@ -727,7 +835,7 @@ export component MemoryPane inherits VerticalLayout {
                             property <bool> drop-target: root.drag-live && root.drag-to == idx;
 
                             // ---- a folder row: click folds/unfolds ----
-                            if r.is-folder: Rectangle {
+                            if r.is-folder: frow := Rectangle {
                                 width: 100%;
                                 height: 100%;
                                 border-radius: parent.border-radius;
@@ -760,6 +868,19 @@ export component MemoryPane inherits VerticalLayout {
                                         vertical-alignment: center;
                                         overflow: elide;
                                         horizontal-stretch: 1;
+                                        // a cut name shows in full beside the
+                                        // row (window-topmost HintTip overlay)
+                                        property <bool> tip-on: fta.has-hover && self.width < self.preferred-width;
+                                        changed tip-on => {
+                                            if (self.tip-on) {
+                                                HintTip.label = r.label + "/";
+                                                HintTip.ax = frow.absolute-position.x + frow.width + 8px;
+                                                HintTip.ay = frow.absolute-position.y + (frow.height - 23px) / 2;
+                                            } else if (HintTip.ax == frow.absolute-position.x + frow.width + 8px
+                                                && HintTip.ay == frow.absolute-position.y + (frow.height - 23px) / 2) {
+                                                HintTip.label = "";
+                                            }
+                                        }
                                     }
                                 }
                                 fta := TouchArea {
@@ -774,7 +895,7 @@ export component MemoryPane inherits VerticalLayout {
                             // ---- a file row: mark on click, open on
                             // double-click / Enter / menu, right-click menu,
                             // drag to move ----
-                            if !r.is-folder: Rectangle {
+                            if !r.is-folder: filerow := Rectangle {
                                 width: 100%;
                                 height: 100%;
                                 border-radius: parent.border-radius;
@@ -905,6 +1026,20 @@ export component MemoryPane inherits VerticalLayout {
                                                 font-weight: r.marked ? 600 : 400;
                                                 vertical-alignment: center;
                                                 overflow: elide;
+                                                // a cut name shows in full
+                                                // beside the row — but never
+                                                // while a drag is live
+                                                property <bool> tip-on: ta.has-hover && !root.drag-live && self.width < self.preferred-width;
+                                                changed tip-on => {
+                                                    if (self.tip-on) {
+                                                        HintTip.label = r.label;
+                                                        HintTip.ax = filerow.absolute-position.x + filerow.width + 8px;
+                                                        HintTip.ay = filerow.absolute-position.y + (filerow.height - 23px) / 2;
+                                                    } else if (HintTip.ax == filerow.absolute-position.x + filerow.width + 8px
+                                                        && HintTip.ay == filerow.absolute-position.y + (filerow.height - 23px) / 2) {
+                                                        HintTip.label = "";
+                                                    }
+                                                }
                                             }
                                             // a deleted file stays visible as a
                                             // pending change: struck in the bad
@@ -1206,18 +1341,20 @@ export component MemoryPane inherits VerticalLayout {
                             font-size: 11px;
                         }
                         // a click on the document body opens the markdown
-                        // editor — the preview reads, one click writes
+                        // editor — the preview reads, one click writes.
+                        // The edit TouchArea sits UNDER the block view so
+                        // a link's own TouchArea wins its click.
                         for b in WikiState.blocks: Rectangle {
                             height: bv.preferred-height;
-                            bv := BrainBlockView {
-                                width: 100%;
-                                b: b;
-                            }
                             TouchArea {
                                 mouse-cursor: MouseCursor.text;
                                 clicked => {
                                     WikiState.edit-toggle();
                                 }
+                            }
+                            bv := BrainBlockView {
+                                width: 100%;
+                                b: b;
                             }
                         }
                         // cross-links — what makes the tree a wiki. One
@@ -1252,15 +1389,34 @@ export component MemoryPane inherits VerticalLayout {
                     // change set (that is what the colors track).
                     if WikiState.doc-open && WikiState.editing: Rectangle {
                         vertical-stretch: 1;
-                        AppArea {
+                        // Escape leaves the raw editor back to the preview:
+                        // the inner TextInput rejects the key, so it
+                        // bubbles up here (the inline-rename pattern)
+                        FocusScope {
                             x: 8px;
                             y: 8px;
                             width: parent.width - 16px;
                             height: parent.height - 16px;
-                            font-size: Theme.fs-editor;
-                            text <=> WikiState.raw;
-                            changed text => {
-                                WikiState.edited(self.text);
+                            key-pressed(event) => {
+                                if (event.text == Key.Escape) {
+                                    WikiState.edit-toggle();
+                                    return accept;
+                                }
+                                reject
+                            }
+                            AppArea {
+                                width: 100%;
+                                height: 100%;
+                                font-size: Theme.fs-editor;
+                                text <=> WikiState.raw;
+                                changed text => {
+                                    WikiState.edited(self.text);
+                                }
+                                init => {
+                                    // click-to-edit lands typing-ready —
+                                    // and focused, Escape reaches us
+                                    self.focus-input();
+                                }
                             }
                         }
                     }

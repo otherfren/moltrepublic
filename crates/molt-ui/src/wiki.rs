@@ -31,6 +31,44 @@ pub enum Status {
 pub struct Block {
     pub kind: u8,
     pub text: String,
+    /// The same content as inline runs: plain text, or a `.md`-link run
+    /// (target kept) — what makes preview links clickable. Concatenated
+    /// span text equals `text`.
+    pub spans: Vec<Span>,
+}
+
+/// One inline run of a block: `link` is empty for plain text, else the
+/// `.md` target the run points at.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub struct Span {
+    pub text: String,
+    pub link: String,
+}
+
+impl Block {
+    fn new(kind: u8) -> Self {
+        Block {
+            kind,
+            text: String::new(),
+            spans: Vec::new(),
+        }
+    }
+
+    /// Append a run, merging into the previous span when the link target
+    /// matches (keeps plain prose as ONE span).
+    fn push_run(&mut self, text: &str, link: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.text.push_str(text);
+        match self.spans.last_mut() {
+            Some(s) if s.link == link => s.text.push_str(text),
+            _ => self.spans.push(Span {
+                text: text.to_string(),
+                link: link.to_string(),
+            }),
+        }
+    }
 }
 
 /// A block's diff verdict in the preview.
@@ -463,6 +501,27 @@ impl Wiki {
         self.active = Some(id);
         self.editing = false;
         self.renaming = None;
+    }
+
+    /// Open the doc a preview link names: exact path first, then the
+    /// unique basename (hand-written links often skip the folder).
+    /// Deleted docs and unknown or ambiguous targets stay put; `false`
+    /// reports the miss.
+    pub fn open_link(&mut self, target: &str) -> bool {
+        let t = target.trim_start_matches("./");
+        let id = match self.docs.iter().find(|d| !d.deleted && d.path == t) {
+            Some(d) => Some(d.id),
+            None => {
+                let mut hits = self.docs.iter().filter(|d| !d.deleted && d.name() == t);
+                match (hits.next(), hits.next()) {
+                    (Some(d), None) => Some(d.id),
+                    _ => None,
+                }
+            }
+        };
+        let Some(id) = id else { return false };
+        self.open(id);
+        true
     }
 
     /// 🎯 — re-align the navigator with the active tab: mark it and unfold
@@ -1070,34 +1129,33 @@ pub fn parse_blocks(raw: &str) -> Vec<Block> {
     let mut out = Vec::new();
     let mut cur: Option<Block> = None;
     let mut in_item = false;
+    // the `.md` target while inside a link — non-.md links stay plain runs
+    let mut link = String::new();
     for ev in Parser::new(raw) {
         match ev {
             Event::Start(Tag::Heading { level, .. }) => {
-                cur = Some(Block {
-                    kind: u8::from(level != HeadingLevel::H1),
-                    text: String::new(),
-                });
+                cur = Some(Block::new(u8::from(level != HeadingLevel::H1)));
             }
             Event::Start(Tag::Item) => {
                 in_item = true;
-                cur = Some(Block {
-                    kind: 3,
-                    text: String::new(),
-                });
+                cur = Some(Block::new(3));
             }
             // a loose list item wraps its text in a paragraph — the bullet
             // block in progress keeps collecting, so no new block there
             Event::Start(Tag::Paragraph) if !in_item => {
-                cur = Some(Block {
-                    kind: 2,
-                    text: String::new(),
-                });
+                cur = Some(Block::new(2));
             }
             Event::Start(Tag::CodeBlock(_)) => {
-                cur = Some(Block {
-                    kind: 4,
-                    text: String::new(),
-                });
+                cur = Some(Block::new(4));
+            }
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                let dest = dest_url.to_string();
+                if dest.ends_with(".md") {
+                    link = dest;
+                }
+            }
+            Event::End(TagEnd::Link) => {
+                link.clear();
             }
             Event::End(TagEnd::Heading(_) | TagEnd::CodeBlock | TagEnd::Item)
             | Event::End(TagEnd::Paragraph) => {
@@ -1110,18 +1168,26 @@ pub fn parse_blocks(raw: &str) -> Vec<Block> {
                 if let Some(mut b) = cur.take() {
                     if b.kind == 4 {
                         b.text = b.text.trim_end_matches('\n').to_string();
+                        b.spans = if b.text.is_empty() {
+                            Vec::new()
+                        } else {
+                            vec![Span {
+                                text: b.text.clone(),
+                                link: String::new(),
+                            }]
+                        };
                     }
                     out.push(b);
                 }
             }
             Event::Text(t) | Event::Code(t) => {
                 if let Some(b) = &mut cur {
-                    b.text.push_str(&t);
+                    b.push_run(&t, &link);
                 }
             }
             Event::SoftBreak | Event::HardBreak => {
                 if let Some(b) = &mut cur {
-                    b.text.push(' ');
+                    b.push_run(" ", &link);
                 }
             }
             _ => {}
@@ -1499,6 +1565,63 @@ mod tests {
         let links = w.links(charter);
         assert!(links.contains(&"decisions/2026-07-02-treasury.md".to_string()));
         assert!(links.contains(&"glossary.md".to_string()));
+    }
+
+    // ---- in-preview links --------------------------------------------------
+
+    #[test]
+    fn blocks_carry_link_spans_for_md_targets_only() {
+        let blocks = parse_blocks("Read [charter](charter.md) and [web](https://x.example) now.");
+        assert_eq!(blocks.len(), 1);
+        // flat text stays what it was — the diff layer keys on it
+        assert_eq!(blocks[0].text, "Read charter and web now.");
+        let spans: Vec<(&str, &str)> = blocks[0]
+            .spans
+            .iter()
+            .map(|s| (s.text.as_str(), s.link.as_str()))
+            .collect();
+        assert_eq!(
+            spans,
+            vec![
+                ("Read ", ""),
+                ("charter", "charter.md"),
+                (" and web now.", ""),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_plain_block_is_one_plain_span() {
+        let blocks = parse_blocks("No links here, `just code`.");
+        assert_eq!(blocks.len(), 1);
+        let spans = &blocks[0].spans;
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].text, blocks[0].text);
+        assert_eq!(spans[0].link, "");
+    }
+
+    #[test]
+    fn open_link_resolves_exact_path_then_unique_basename() {
+        let mut w = Wiki::sample();
+        assert!(w.open_link("glossary.md"));
+        assert_eq!(w.active().expect("open").path, "glossary.md");
+        assert!(w.open_link("runbooks/node-recovery.md"));
+        assert_eq!(w.active().expect("open").path, "runbooks/node-recovery.md");
+        // a hand-written link often skips the folder — the unique basename
+        assert!(w.open_link("node-recovery.md"));
+        assert_eq!(w.active().expect("open").path, "runbooks/node-recovery.md");
+        // a miss changes nothing
+        let before = w.active_id();
+        assert!(!w.open_link("missing.md"));
+        assert_eq!(w.active_id(), before);
+    }
+
+    #[test]
+    fn open_link_skips_deleted_docs() {
+        let mut w = Wiki::sample();
+        let glossary = id_of(&w, "glossary.md");
+        w.delete(glossary);
+        assert!(!w.open_link("glossary.md"));
     }
 
     // ---- drag-move (item 7) -----------------------------------------------

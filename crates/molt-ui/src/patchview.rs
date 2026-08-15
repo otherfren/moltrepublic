@@ -43,11 +43,25 @@ impl PatchFile {
         }
     }
 
-    /// Status code in the wiki tone vocabulary: 1 added · 2 modified ·
-    /// 3 deleted.
+    /// The details-pane header's marker: a move also names where from
+    /// and where to (the navigator column stays short).
+    pub fn header_marker(&self) -> String {
+        if !self.deleted && self.renamed {
+            format!("<moved> {} → {}", self.old_path, self.new_path)
+        } else {
+            self.marker().to_string()
+        }
+    }
+
+    /// Status code in the wiki tone vocabulary plus the viewer's own
+    /// move tone: 1 added · 2 modified · 3 deleted · 4 moved (a renamed
+    /// file colors as a move even when it also carries edits — the diff
+    /// itself shows those).
     pub fn status(&self) -> u8 {
         if self.deleted {
             3
+        } else if self.renamed {
+            4
         } else if self.added {
             1
         } else {
@@ -270,16 +284,25 @@ mod tests {
         let deleted = by_path("charter.md");
         assert!(deleted.deleted);
         assert_eq!(deleted.marker(), "<deleted>");
+        assert_eq!(deleted.header_marker(), "<deleted>");
         assert_eq!(deleted.status(), 3);
         assert!(!deleted.hunks.is_empty(), "the deletion carries its lines");
         let renamed = by_path("decisions/relay-decision.md");
         assert!(renamed.renamed && !renamed.deleted);
         assert_eq!(renamed.marker(), "<moved>");
+        // the details-pane header names the whole move
+        assert_eq!(
+            renamed.header_marker(),
+            "<moved> decisions/2026-06-14-relay.md → decisions/relay-decision.md"
+        );
+        // moves carry their own tone (4), distinct from edits
+        assert_eq!(renamed.status(), 4);
         assert_eq!(renamed.old_path, "decisions/2026-06-14-relay.md");
         assert!(renamed.hunks.is_empty(), "a pure rename has no hunks");
         let added = by_path("todo.md");
         assert!(added.added);
         assert_eq!(added.marker(), "");
+        assert_eq!(added.header_marker(), "");
         assert_eq!(added.status(), 1);
         let modified = by_path("glossary.md");
         assert_eq!(modified.status(), 2);

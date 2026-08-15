@@ -131,6 +131,8 @@ export struct ProposalRow {
     // a cast stance grays the vote buttons (clickable OR grayed, never
     // click-then-refusal)
     my-vote: int,
+    // the READING member proposed it — shows the "pull back" button
+    mine: bool,
 }
 
 // One member of a republic with its last-sync info (mock data).
@@ -270,6 +272,8 @@ export struct SurfaceTab {
     applied-pages: int,
     declined-page: int,
     declined-pages: int,
+    pending-page: int,
+    pending-pages: int,
     log: [LogLine],
     pending: [ProposalRow],
     declined: [ProposalRow], // the retained declines (Declined view)
@@ -305,10 +309,18 @@ export struct WikiTabRow {
 }
 
 // One pseudo-rendered block of the active doc, with its diff verdict.
+// One inline run of a block: `link` is empty for plain text, else the
+// .md target the run points at (clickable in the preview).
+export struct WikiSpan {
+    text: string,
+    link: string,
+}
+
 export struct WikiBlock {
     kind: int, // 0 h1 · 1 h2 · 2 paragraph · 3 bullet · 4 code
     text: string,
     status: int, // 0 same · 1 added · 2 changed · 3 removed ghost
+    spans: [WikiSpan],
 }
 
 // One changeset-panel stack row: the action log, oldest first.
@@ -408,6 +420,7 @@ export global WikiState {
     callback nav-revert(int); // context menu: discard one file's changes
     callback copy-link(int); // context menu: link markup to the clipboard
     callback revert-active(); // editor header: discard the open file's changes
+    callback open-link(string); // a preview link's .md target
 }
 
 // A full theme palette. Three are defined in `Palettes`; `Theme.active` picks one.
@@ -425,6 +438,9 @@ export struct Palette {
     accent-good: color,
     accent-warn: color,
     accent-bad: color,
+    // the diff viewer's move tone (a renamed file is neither an edit
+    // nor a delete)
+    accent-moved: color,
 }
 
 // Window-topmost hover-hint channel: a hovered control writes its label and
@@ -457,6 +473,7 @@ export global Palettes {
         accent-good: #1f9e73,
         accent-warn: #d99400,
         accent-bad: #cf4433,
+        accent-moved: #7048c8,
     };
     // Dark — neutral graphite surfaces with the brand teal as the only hue
     // (reworked 2026-07-18: the old teal-on-teal near-black scheme blurred).
@@ -480,6 +497,7 @@ export global Palettes {
         accent-good: #3fb950,
         accent-warn: #d29922,
         accent-bad: #f85149,
+        accent-moved: #b197fc,
     };
     // Brutalism — an earnest, slightly-clumsy homemade theme ("gewollt aber nicht
     // gekonnt"): a light warm-concrete desktop, off-white beveled chrome, and a
@@ -500,6 +518,7 @@ export global Palettes {
         accent-good: #2f7a5f,
         accent-warn: #b7830f,
         accent-bad: #b0402f,
+        accent-moved: #6d4d94,
     };
 }
 
@@ -532,6 +551,7 @@ export global Theme {
     out property <color> good: active.accent-good;
     out property <color> warn: active.accent-warn;
     out property <color> bad: active.accent-bad;
+    out property <color> moved: active.accent-moved;
 
     // Win95 chrome bevel (3D raised look); neutral on the other themes.
     out property <color> bevel-light: win95 ? #ffffff : active.border-subtle;
@@ -1118,6 +1138,7 @@ export global Strings {
     in property <string> ed-cut;
     in property <string> ed-paste;
     in property <string> pc-show-patch;
+    in property <string> pc-withdraw;
     in property <string> pv-title;
     in property <string> pv-copy;
     in property <string> pv-copied;

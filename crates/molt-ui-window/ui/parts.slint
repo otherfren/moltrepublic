@@ -192,6 +192,20 @@ export component SurfaceRow inherits Rectangle {
             vertical-alignment: center;
             horizontal-stretch: 1;
             overflow: elide;
+            // a cut label (big fonts) shows its full name beside the row,
+            // through the window-topmost HintTip overlay — a local bubble
+            // would paint under the main pane
+            property <bool> tip-on: ta.has-hover && self.width < self.preferred-width;
+            changed tip-on => {
+                if (self.tip-on) {
+                    HintTip.label = root.s.name;
+                    HintTip.ax = root.absolute-position.x + root.width + 8px;
+                    HintTip.ay = root.absolute-position.y + (root.height - 23px) / 2;
+                } else if (HintTip.ax == root.absolute-position.x + root.width + 8px
+                    && HintTip.ay == root.absolute-position.y + (root.height - 23px) / 2) {
+                    HintTip.label = "";
+                }
+            }
         }
         if root.s.pending-count > 0: PendingBadge {
             count: root.s.pending-count;
@@ -209,12 +223,20 @@ export component SurfaceRow inherits Rectangle {
         clicked => {
             root.chosen();
         }
-    }
-    if root.compact: HoverTip {
-        label: root.s.pending-count > 0 ? "\{root.s.name} · \{root.s.pending-count}" : root.s.name;
-        shown: ta.has-hover;
-        x: parent.width + 8px;
-        y: (parent.height - self.height) / 2;
+        // collapsed icon rail: every row names itself beside the rail
+        // (same overlay — the old local HoverTip painted under the pane)
+        changed has-hover => {
+            if (root.compact) {
+                if (self.has-hover) {
+                    HintTip.label = root.s.pending-count > 0 ? "\{root.s.name} · \{root.s.pending-count}" : root.s.name;
+                    HintTip.ax = root.absolute-position.x + root.width + 8px;
+                    HintTip.ay = root.absolute-position.y + (root.height - 23px) / 2;
+                } else if (HintTip.ax == root.absolute-position.x + root.width + 8px
+                    && HintTip.ay == root.absolute-position.y + (root.height - 23px) / 2) {
+                    HintTip.label = "";
+                }
+            }
+        }
     }
 }
 
@@ -272,6 +294,19 @@ export component ViewRow inherits Rectangle {
             vertical-alignment: center;
             horizontal-stretch: 1;
             overflow: elide;
+            // a cut label (long decision titles, big fonts) shows in full
+            // beside the row via the window-topmost HintTip overlay
+            property <bool> tip-on: ta.has-hover && self.width < self.preferred-width;
+            changed tip-on => {
+                if (self.tip-on) {
+                    HintTip.label = root.label;
+                    HintTip.ax = root.absolute-position.x + root.width + 8px;
+                    HintTip.ay = root.absolute-position.y + (root.height - 23px) / 2;
+                } else if (HintTip.ax == root.absolute-position.x + root.width + 8px
+                    && HintTip.ay == root.absolute-position.y + (root.height - 23px) / 2) {
+                    HintTip.label = "";
+                }
+            }
         }
         if root.quorum != "": Text {
             text: root.quorum;
@@ -1150,7 +1185,12 @@ export component DecisionTable inherits Rectangle {
                     overflow: elide;
                 }
                 Text {
-                    text: r.proposed != "" ? r.proposed : r.current;
+                    // a patch's value IS a multi-line git patch and a
+                    // charter is a whole document — as an index cell both
+                    // are unreadable noise. The title names the decision
+                    // (a patch title carries its count summary); the
+                    // content lives behind the discussion jump.
+                    text: r.patch-op || r.charter-op ? "" : (r.proposed != "" ? r.proposed : r.current);
                     horizontal-stretch: 1;
                     color: Theme.dim;
                     font-size: Theme.fs-body;
@@ -1277,9 +1317,12 @@ export component ProposalCard inherits Rectangle {
         }
     }
     VerticalLayout {
-        padding: 14px;
-        spacing: 10px;
-        // title row: "Vorschlag: <human title>", the id tucked at the end
+        padding: 12px;
+        spacing: 8px;
+        // title row: "Vorschlag: <human title>", the raw-patch button and
+        // the id tucked at the end (wiki_patch: the diff viewer is the
+        // readable form, the raw patch hides behind this one button — a
+        // read-only modal, like the charter view)
         HorizontalLayout {
             spacing: 6px;
             Text {
@@ -1295,6 +1338,16 @@ export component ProposalCard inherits Rectangle {
                 font-weight: 600;
                 wrap: word-wrap;
                 horizontal-stretch: 1;
+            }
+            if root.p.patch-op && root.p.proposed != "": AppButton {
+                height: 26px;
+                y: 0px;
+                pad: 8px;
+                emoji: "👁️";
+                label: Strings.pc-show-patch;
+                clicked => {
+                    root.view-patch();
+                }
             }
             Text {
                 text: "#\{root.p.id}";
@@ -1390,21 +1443,6 @@ export component ProposalCard inherits Rectangle {
             label: Strings.pc-proposed;
             value: root.p.proposed;
             emphasized: true;
-        }
-        // wiki_patch: the diff viewer heading the decision's discussion is
-        // the readable form — the raw patch hides behind one button (a
-        // read-only modal, like the charter view)
-        if root.p.patch-op && root.p.proposed != "": HorizontalLayout {
-            alignment: start;
-            AppButton {
-                height: 28px;
-                pad: 10px;
-                emoji: "👁️";
-                label: Strings.pc-show-patch;
-                clicked => {
-                    root.view-patch();
-                }
-            }
         }
         if root.p.image-op && root.p.current != "": HorizontalLayout {
             spacing: 8px;
@@ -1629,6 +1667,18 @@ export component ProposalCard inherits Rectangle {
                 clicked => {
                     root.decline();
                 }
+            }
+            // pull back — the proposer's first-class exit, own proposals
+            // only (`p.mine`). NOT armed yet: the engine withdraw (wire
+            // event + convergence) is designed in molt-engine
+            // proposals.rs at cmd_decline — until it lands, the honest
+            // state is a grayed button, not a fake one.
+            if !root.read-only && root.p.mine: AppButton {
+                emoji: "↩️";
+                label: Strings.pc-withdraw;
+                enabled: false;
+                tooltip: Strings.not-implemented-yet;
+                clicked => { }
             }
             if !root.compact: AppButton {
                 emoji: "💬";
@@ -2109,11 +2159,13 @@ export component DiffViewer inherits Rectangle {
     border-color: Theme.line;
     height: 320px;
     clip: true;
-    // ONE tone vocabulary with the wiki: added good · modified warn ·
-    // deleted bad; segments plain/green/red/faint-meta
+    // ONE tone vocabulary with the wiki, plus the viewer's own move tone:
+    // added good · modified warn · deleted bad · moved purple; segments
+    // plain/green/red/faint-meta
     pure function file-color(status: int) -> color {
         return status == 1 ? Theme.good
             : status == 3 ? Theme.bad
+            : status == 4 ? Theme.moved
             : Theme.warn;
     }
     pure function seg-color(tone: int) -> color {

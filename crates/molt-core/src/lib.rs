@@ -2432,6 +2432,15 @@ pub struct ProposalRecord {
     /// reach the threshold). Additive — an older snapshot reads as empty.
     #[serde(default)]
     pub decliners: Vec<MemberId>,
+    /// Who proposed it ("" = unknown: a pre-field record, or a WP2
+    /// catch-up re-serve — those arrive re-wrapped under the SERVING
+    /// peer's name, so this field is an ownership DISPLAY hint (the
+    /// "pull back" button's visibility), never an authorization input:
+    /// a future withdraw must gate on the authenticated wire sender at
+    /// execution time. Additive, and skipped when empty so pre-field
+    /// dumps stay byte-identical.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub by: MemberId,
 }
 
 /// Exactly what the engine actor holds for one workspace — the snapshot
@@ -4611,6 +4620,14 @@ pub struct ProposalView {
     /// Who declined it ("" = not declined).
     #[serde(default)]
     pub declined_by: MemberId,
+    /// Who proposed it ("" = unknown — see [`ProposalRecord::by`]).
+    #[serde(default)]
+    pub by: MemberId,
+    /// Whether the READING node proposed it — the frontends' "pull back"
+    /// visibility gate (reader-relative like `approved_by_me`). Display
+    /// only: a withdraw execution must re-check the authenticated sender.
+    #[serde(default)]
+    pub mine: bool,
 }
 
 /// One chat channel as the engine enumerates it for the read contract

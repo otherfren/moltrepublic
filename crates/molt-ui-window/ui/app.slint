@@ -1033,10 +1033,17 @@ export component AppWindow inherits Window {
     // collapsed rail; entering/leaving a workspace re-applies the default
     // (a manual toggle holds within the current screen).
     property <bool> nav-collapsed: root.screen != AppScreen.main;
+    // diff-viewer share of the decision chat's height (wiki-patch
+    // discussions) — dragged via the handle below the viewer; the default
+    // leaves the chat the larger share
+    property <float> patch-split: 0.35;
     // last screen the default was applied for: `screen` is re-pushed with
     // every session snapshot, so only a REAL change may reset a manual toggle
     property <AppScreen> nav-default-screen: AppScreen.choice;
     changed screen => {
+        // a view switch can unmount a hovered HintTip writer without a
+        // hover-out — never carry a hint across screens
+        HintTip.label = "";
         if (root.screen != root.nav-default-screen) {
             root.nav-default-screen = root.screen;
             root.nav-collapsed = root.screen != AppScreen.main;
@@ -2301,12 +2308,18 @@ export component AppWindow inherits Window {
                                 }
                                 root.navigate(AppScreen.settings);
                             }
-                        }
-                        HoverTip {
-                            label: Strings.tip-settings;
-                            shown: gear-ta.has-hover;
-                            x: parent.width + 8px;
-                            y: (parent.height - self.height) / 2;
+                            // through the HintTip overlay — a local bubble
+                            // beside the rail paints under the main pane
+                            changed has-hover => {
+                                if (self.has-hover) {
+                                    HintTip.label = Strings.tip-settings;
+                                    HintTip.ax = parent.absolute-position.x + parent.width + 8px;
+                                    HintTip.ay = parent.absolute-position.y + (parent.height - 23px) / 2;
+                                } else if (HintTip.ax == parent.absolute-position.x + parent.width + 8px
+                                    && HintTip.ay == parent.absolute-position.y + (parent.height - 23px) / 2) {
+                                    HintTip.label = "";
+                                }
+                            }
                         }
                     }
                 }
@@ -4678,7 +4691,7 @@ export component AppWindow inherits Window {
                 }
                 Rectangle {
                     vertical-stretch: 1;
-                    for s in root.surfaces: Rectangle {
+                    for s in root.surfaces: surf-rect := Rectangle {
                     width: 100%;
                     height: 100%;
                     visible: s.key == root.selected-surface;
@@ -4737,10 +4750,16 @@ export component AppWindow inherits Window {
                             // shows, compact. Opening a decision's chat then
                             // always says which decision, and what it is
                             // waiting for, without scrolling anywhere.
+                            // Organization decisions AND wiki-patch decisions
+                            // (Shared Memory) — a patch vote needs its card
+                            // and diff right over the discussion (2026-08-15);
+                            // the nav-pin stays org-only, so the flag itself
+                            // is untouched.
                             // id > 0 = the card is real: a default row (id 0)
                             // must never render — an empty card here was the
                             // reported half-page "Proposal:" wreck
-                            if root.selected-channel-org && root.selected-decision.id > 0: ProposalCard {
+                            if (root.selected-channel-org || root.selected-decision.patch-op)
+                                && root.selected-decision.id > 0: ProposalCard {
                                 p: root.selected-decision;
                                 compact: true;
                                 org-img: root.org-img;
@@ -4763,9 +4782,50 @@ export component AppWindow inherits Window {
                             // a wiki-patch decision is voted on its CONTENT:
                             // the diff viewer sits between the card and the
                             // discussion, so browsing the changes and talking
-                            // about them share one screen
-                            if root.selected-channel-org && root.selected-decision.id > 0
-                                && root.selected-decision.patch-op: DiffViewer { }
+                            // about them share one screen (any surface — the
+                            // org gate had kept memory patches viewerless).
+                            // RESIZABLE against the chat below: the stored
+                            // FRACTION keeps the proportion on window resize
+                            // (the wiki splitter idiom), the chat keeps the
+                            // larger share by default, both sides keep a
+                            // floor. Same pane = same splitter for a DECIDED
+                            // vote's archived discussion (Accepted/Denied).
+                            if root.selected-decision.id > 0
+                                && root.selected-decision.patch-op: dv-wrap := VerticalLayout {
+                                spacing: 2px;
+                                // the SURFACE rect's height (parent-fixed) —
+                                // reading the chat layout's own height here
+                                // is a binding loop
+                                property <length> avail: surf-rect.height;
+                                pure function clamp-dv(h: length) -> length {
+                                    return max(140px, min(self.avail * 0.6, h));
+                                }
+                                cdv := DiffViewer {
+                                    height: dv-wrap.clamp-dv(root.patch-split * dv-wrap.avail);
+                                }
+                                // the grab handle between diff and chat
+                                Rectangle {
+                                    height: 8px;
+                                    Rectangle {
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                        width: 120px;
+                                        height: 4px;
+                                        border-radius: Theme.win95 ? 0px : 2px;
+                                        background: dvta.pressed || dvta.has-hover ? Theme.accent : Theme.line;
+                                    }
+                                    dvta := TouchArea {
+                                        mouse-cursor: MouseCursor.row-resize;
+                                        moved => {
+                                            // current height + pointer drift —
+                                            // a size frozen at press time
+                                            // oscillates (the wiki splitter's
+                                            // lesson)
+                                            root.patch-split = dv-wrap.clamp-dv(cdv.height + (self.mouse-y - self.pressed-y)) / max(dv-wrap.avail, 1px);
+                                        }
+                                    }
+                                }
+                            }
 
                             // A free topic names itself HERE, under the member
                             // pills — the user must see which channel they are
@@ -6288,9 +6348,17 @@ export component AppWindow inherits Window {
                                 }
                                 ScrollHint {
                                     x: parent.width - 7px;
+                                    always: true;
                                     view-h: op-fl.height;
                                     content-h: op-fl.viewport-height;
                                     scroll-y: op-fl.viewport-y;
+                                }
+                            }
+                            if s.pending-pages > 1: PagerRow {
+                                page: s.pending-page;
+                                pages: s.pending-pages;
+                                paged(delta) => {
+                                    root.page-list(s.key, "pending", delta);
                                 }
                             }
                         }
@@ -6486,8 +6554,14 @@ export component AppWindow inherits Window {
                             if root.selected-view != "accepted" && root.selected-view != "denied": Rectangle {
                                 vertical-stretch: 1;
                                 clip: true;
-                                VerticalLayout {
+                                gp-fl := Flickable {
+                                    width: 100%;
+                                    height: 100%;
+                                    viewport-width: self.width;
+                                    viewport-height: gp-list.preferred-height + 8px;
+                                    gp-list := VerticalLayout {
                                     padding: 2px;
+                                    padding-right: 14px;
                                     spacing: 8px;
                                     alignment: start;
                                     if s.pending-count == 0: Text {
@@ -6532,6 +6606,24 @@ export component AppWindow inherits Window {
                                         // details right)
                                         if p.patch-op && p.id == PatchView.for-id: DiffViewer { }
                                     }
+                                    }
+                                }
+                                // always-on scrollbar: tall proposal cards
+                                // need the position cue even mid-page
+                                ScrollHint {
+                                    x: parent.width - 7px;
+                                    always: true;
+                                    view-h: gp-fl.height;
+                                    content-h: gp-fl.viewport-height;
+                                    scroll-y: gp-fl.viewport-y;
+                                }
+                            }
+                            if root.selected-view != "accepted" && root.selected-view != "denied"
+                                && s.pending-pages > 1: PagerRow {
+                                page: s.pending-page;
+                                pages: s.pending-pages;
+                                paged(delta) => {
+                                    root.page-list(s.key, "pending", delta);
                                 }
                             }
                             // the applied log: memory shows it under its own
@@ -8604,10 +8696,9 @@ export component AppWindow inherits Window {
     // panel — and without a TouchArea, so it never grabs the pointer
     // (the PopupWindow tooltips it replaces strobed the hover).
     // =================================================================
-    // main-screen only: every HintTip writer lives there, and a view
-    // switch can unmount a hovered control without a hover-out event —
-    // the guard keeps such an orphaned hint off other screens
-    if HintTip.label != "" && root.screen == AppScreen.main: Rectangle {
+    // every screen: the collapsed nav rail writes hints outside main too;
+    // orphaned hints are cleared by the root's screen-change handler
+    if HintTip.label != "": Rectangle {
         x: max(4px, min(HintTip.ax, root.width - self.width - 4px));
         y: HintTip.ay;
         width: hint-tt.preferred-width + 16px;
