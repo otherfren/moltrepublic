@@ -65,12 +65,20 @@ async fn founding_seals_a_verifiable_roster_on_disk() {
     })
     .await
     .expect("create start");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&w).await.create.seed.clone();
+        w.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
     await_founding(&w).await;
 
     // every seat is green and named
     let s = read_session(&w).await;
     assert_eq!(s.create.seats.len(), 3);
-    assert!(s.create.seats.iter().all(|seat| seat.state == 2));
+    // 4 = sealed AND backup-confirmed (the ritual finalizes only there)
+    assert!(s.create.seats.iter().all(|seat| seat.state == 4));
     assert!(s.create.seats.iter().all(|seat| !seat.member.is_empty()));
 
     w.execute(Command::CreateFinish).await.expect("enter");

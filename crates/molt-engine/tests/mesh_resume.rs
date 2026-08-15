@@ -133,6 +133,13 @@ async fn found_with_mesh(
     })
     .await
     .expect("founder proposes the charter");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {

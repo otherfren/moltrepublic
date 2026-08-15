@@ -227,7 +227,20 @@ async fn a_deaf_group_channel_is_surfaced_to_both_wizards_and_heals() {
     })
     .await
     .expect("proposed");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
     wait_for(&b, "petra to see the charter", 60, |s| s.join.awaiting_ratify).await;
     b.execute(Command::JoinConfirmCharter).await.expect("ratify");
+    {
+        let seed_ = read_session(&b).await.join.seed.clone();
+        b.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("joiner backup confirm");
+    }
     wait_for(&a, "the founding to seal", 60, |s| s.create.run.outcome == 1).await;
 }

@@ -171,9 +171,22 @@ async fn found_republic(
     })
     .await
     .expect("charter proposed");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
 
     wait_for(&b, "petra to see the proposed charter", |s| s.join.awaiting_ratify).await;
     b.execute(Command::JoinConfirmCharter).await.expect("ratify");
+    {
+        let seed_ = read_session(&b).await.join.seed.clone();
+        b.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("joiner backup confirm");
+    }
 
     wait_for(&a, "the founding to seal on the founder", |s| s.create.run.outcome == 1).await;
     // entering is gated on the phrase-backup step now (2026-08-08) — both ends

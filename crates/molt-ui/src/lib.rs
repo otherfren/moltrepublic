@@ -1069,6 +1069,24 @@ pub fn run_app(
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
+        // the ❻½ phrase-backup confirmation — founder or joiner, the
+        // engine routes by the running ritual (a mismatch surfaces as an
+        // honest error toast)
+        ui.on_confirm_seed_backup(move |phrase| {
+            issue(
+                &rt,
+                &w,
+                &weak,
+                Command::ConfirmSeedBackup {
+                    phrase: phrase.to_string(),
+                },
+            );
+        });
+    }
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
         ui.on_create_propose(move |name, agenda| {
             // the wizard's checkbox selection; the engine canonicalizes
             let features = weak
@@ -3009,11 +3027,13 @@ fn strings_founder(lang: i32) -> &'static str {
 /// A ritual seat's status line once the member activated (state 1/2).
 fn seat_state_label(lang: i32, state: u8) -> String {
     match (lang, state) {
+        (1, 4) => "versiegelt · Schlüssel gesichert",
         (1, 3) => "hat die Satzung abgelehnt",
-        (1, 2) => "versiegelt",
+        (1, 2) => "versiegelt · sichert den Schlüssel…",
         (1, _) => "Schlüssel erhalten · signiert…",
+        (_, 4) => "sealed · key secured",
         (_, 3) => "declined the charter",
-        (_, 2) => "sealed",
+        (_, 2) => "sealed · securing the key…",
         (_, _) => "key received · signing…",
     }
     .to_string()
@@ -3036,6 +3056,7 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     ui.set_cw_step(i32::from(sv.create.run.step));
     ui.set_cw_outcome(i32::from(sv.create.run.outcome));
     ui.set_cw_seed(sv.create.seed.clone().into());
+    ui.set_cw_backup_confirmed(sv.create.backup_confirmed);
     ui.set_cw_run_name(sv.create.name.clone().into());
     ui.set_cw_run_detail(
         format!(
@@ -3115,6 +3136,7 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     // the ratification step: the founder's proposed charter, which the joiner
     // must confirm before its signature is released and the workspace opens
     ui.set_jw_awaiting_ratify(sv.join.awaiting_ratify);
+    ui.set_jw_awaiting_backup(sv.join.awaiting_backup);
     ui.set_jw_sealed(!sv.join.sealed_id.is_empty());
     ui.set_jw_proposed_name(sv.join.proposed_name.clone().into());
     ui.set_jw_proposed_agenda(sv.join.proposed_agenda.clone().into());
@@ -6840,6 +6862,8 @@ lexicon! {
     cw_charter_title: "Agree on the charter", "Auf die Satzung einigen";
     cw_charter_step: "Agree on the charter", "Einigt euch auf die Satzung";
     cw_seed_confirm_title: "Save your recovery phrase", "Sichere deine Wiederherstellungs-Phrase";
+    cw_backup_confirm: "Confirm backup", "Backup bestätigen";
+    cw_backup_wait: "Backup confirmed - waiting for every member's confirmation", "Backup bestätigt - warte auf die Bestätigung aller Mitglieder";
     cw_seed_confirm_hint: "It is the only way back to this seat. Re-type it to continue.", "Sie ist der einzige Weg zurück zu deinem Sitz. Gib sie zur Bestätigung erneut ein.";
     cw_seed_confirm_ph: "Re-type the phrase", "Phrase erneut eingeben";
     cw_ratify_wait: "The charter is with the members - waiting for their signatures…", "Die Satzung liegt bei den Mitgliedern - warte auf ihre Unterschriften…";

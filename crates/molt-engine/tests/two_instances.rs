@@ -122,6 +122,13 @@ async fn founding_ritual_completes_across_two_instances() {
     })
     .await
     .expect("founder proposes the charter");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
     let b_out = b_task.await.expect("B task");
     let b_pk = b_out.pk.clone();
 
@@ -145,7 +152,7 @@ async fn founding_ritual_completes_across_two_instances() {
     let s = read_session(&a).await;
     assert_eq!(s.create.seats.len(), 1);
     assert_eq!(s.create.seats[0].member, "member-b");
-    assert_eq!(s.create.seats[0].state, 2, "sealed");
+    assert_eq!(s.create.seats[0].state, 4, "sealed + backup-confirmed");
     // sealed ≠ entered (2026-08-08): the founder backs its phrase up on the
     // wizard's last step first — CreateFinish enters, like the joiner's
     // JoinFinish
@@ -309,10 +316,12 @@ async fn founding_gates_on_the_joiners_charter_ratification() {
     let (acc_tx, mut acc_rx) = tokio::sync::mpsc::channel::<()>(1);
     let (prop_tx, mut prop_rx) = tokio::sync::mpsc::channel::<(String, String, Option<Vec<String>>)>(1);
     let (conf_tx, conf_rx) = tokio::sync::mpsc::channel::<bool>(1);
+    let (bak_tx, bak_rx) = tokio::sync::mpsc::channel::<bool>(1);
     let ratifier = molt_engine::Ratifier {
         accepted: acc_tx,
         proposal: prop_tx,
         confirm: conf_rx,
+        backup: bak_rx,
     };
     let b_phrase = molt_storage::generate_seed_phrase().expect("b phrase");
     let b_task = tokio::spawn(async move {
@@ -375,8 +384,50 @@ async fn founding_gates_on_the_joiners_charter_ratification() {
         "nothing seals until the joiner ratifies"
     );
 
-    // the human confirms → B signs → the ritual seals
+    // the human confirms → B signs. The founding STILL must not seal:
+    // the ❻½ backup round is open (seed_backup_confirmation.md keystone —
+    // the founder distributes no genesis while a seat is unconfirmed)
     conf_tx.send(true).await.expect("confirm");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let s = read_session(&a).await;
+        if s.create.seats.iter().all(|x| x.state >= 2) {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "B's signature never landed");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        read_session(&a).await.create.run.outcome,
+        0,
+        "nothing seals while the backup round is open"
+    );
+
+    // B's human proves the phrase backup → the attestation goes out; the
+    // founder's OWN confirmation is still missing, so the gate holds
+    bak_tx.send(true).await.expect("backup confirm");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let s = read_session(&a).await;
+        if s.create.seats.iter().all(|x| x.state == 4) {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "B's attestation never landed");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        read_session(&a).await.create.run.outcome,
+        0,
+        "n-of-n includes the founder: no seal before the founder's own confirmation"
+    );
+
+    // the founder re-types its phrase → the ritual seals, B gets the genesis
+    let a_seed = read_session(&a).await.create.seed.clone();
+    a.execute(Command::ConfirmSeedBackup { phrase: a_seed })
+        .await
+        .expect("founder backup confirm");
     let b_out = b_task.await.expect("B task");
     let sealed = b_out.sealed.expect("B received the sealed roster");
     assert_eq!(sealed.agenda, "the pact: tend the commons, share the harvest");
@@ -443,10 +494,14 @@ async fn a_declined_charter_aborts_the_member_without_sealing() {
     let (acc_tx, _acc_rx) = tokio::sync::mpsc::channel::<()>(1);
     let (prop_tx, mut prop_rx) = tokio::sync::mpsc::channel::<(String, String, Option<Vec<String>>)>(1);
     let (conf_tx, conf_rx) = tokio::sync::mpsc::channel::<bool>(1);
+    // the decline happens at ratify — the backup gate is never reached,
+    // but the channel must exist (held open so an accidental reach waits)
+    let (_bak_tx, bak_rx) = tokio::sync::mpsc::channel::<bool>(1);
     let ratifier = molt_engine::Ratifier {
         accepted: acc_tx,
         proposal: prop_tx,
         confirm: conf_rx,
+        backup: bak_rx,
     };
     let b_phrase = molt_storage::generate_seed_phrase().expect("b phrase");
     // return the raw Result — we expect an Err here
@@ -469,6 +524,13 @@ async fn a_declined_charter_aborts_the_member_without_sealing() {
     })
     .await
     .expect("propose");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
 
     // B surfaces the charter, the human DECLINES
     let _ = prop_rx.recv().await.expect("charter surfaced");
@@ -580,6 +642,13 @@ async fn founding_establishes_a_real_mls_group_across_two_instances() {
     })
     .await
     .expect("founder proposes the charter");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
 
     // A seals; the workspace comes into being and A distributes the Welcome
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
@@ -700,6 +769,13 @@ async fn founding_bootstraps_a_direct_mesh_across_two_instances() {
     })
     .await
     .expect("founder proposes the charter");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
 
     // the founder seals, then its off-actor bootstrap runs and logs the direct
     // mesh — wait for that line (still on the founding log until CreateFinish)
@@ -850,6 +926,13 @@ async fn founding_chats_over_the_direct_mesh() {
     })
     .await
     .expect("founder proposes the charter");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
 
     // wait until the founder's real supervisor is up (the "direct mesh
     // established" line is logged right after it is built)
@@ -991,6 +1074,13 @@ async fn reactions_and_deletes_converge_across_two_instances() {
     })
     .await
     .expect("founder proposes the charter");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
@@ -1383,6 +1473,13 @@ async fn founding_governs_over_the_direct_mesh() {
     })
     .await
     .expect("founder proposes the charter");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
@@ -1588,6 +1685,13 @@ async fn a_reopened_member_recovers_open_proposals_from_the_mesh() {
     })
     .await
     .expect("founder proposes the charter");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
@@ -1828,6 +1932,13 @@ async fn a_set_image_proposal_carries_its_bytes_across_the_mesh() {
     })
     .await
     .expect("founder proposes the charter");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
@@ -2115,6 +2226,13 @@ async fn recovery_flows_over_a_coordinator_minted_link() {
     })
     .await
     .expect("founder proposes the charter");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
@@ -2307,6 +2425,13 @@ async fn recovery_completes_end_to_end_and_the_rejoiner_materializes() {
     })
     .await
     .expect("founder proposes the charter");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         let s = read_session(&a).await;
@@ -2641,6 +2766,13 @@ async fn a_second_recovery_round_after_a_dead_first_attempt_succeeds() {
     })
     .await
     .expect("founder proposes the charter");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         let s = read_session(&a).await;
@@ -2916,6 +3048,13 @@ async fn recovery_distributes_the_rekey_commit_to_a_live_survivor() {
     })
     .await
     .expect("founder proposes the charter");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         let s = read_session(&a).await;
@@ -3154,6 +3293,13 @@ async fn a_survivor_folds_a_relayed_mesh_announce_into_its_running_mesh() {
     })
     .await
     .expect("founder proposes the charter");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         let s = read_session(&a).await;
@@ -3985,6 +4131,13 @@ async fn a_malformed_announce_does_not_burn_the_recovery_window() {
     })
     .await
     .expect("founder proposes the charter");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         let s = read_session(&a).await;
@@ -4163,6 +4316,13 @@ async fn a_mesh_rebuild_does_not_kill_an_outstanding_recovery() {
     })
     .await
     .expect("founder proposes the charter");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         let s = read_session(&a).await;
@@ -4662,6 +4822,13 @@ async fn a_link_mint_without_a_running_mesh_reports_calmly_instead_of_erroring()
     })
     .await
     .expect("founder proposes the charter");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         let s = read_session(&a).await;

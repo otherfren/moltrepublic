@@ -156,6 +156,13 @@ async fn a_shared_file_downloads_peer_to_peer_across_the_mesh() {
     })
     .await
     .expect("propose charter");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         let s = read_session(&a).await;

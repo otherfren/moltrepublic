@@ -76,12 +76,24 @@ pub async fn read_chat(w: &WalletHandle) -> Vec<serde_json::Value> {
 /// members asynchronously.
 pub async fn await_founding(w: &WalletHandle) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    // ❻½: the founder's own phrase-backup confirmation gates the seal
+    // (the sim members attest automatically) — played once, like a human
+    let mut confirmed = false;
     loop {
         match w.execute(Command::ReadSession).await.expect("read session") {
             Reply::Session(s) => match s.create.run.outcome {
                 1 => return,
                 2 => panic!("founding failed: {:?}", s.create.run.log),
-                _ => {}
+                _ => {
+                    if !confirmed && !s.create.seed.is_empty() {
+                        w.execute(Command::ConfirmSeedBackup {
+                            phrase: s.create.seed.clone(),
+                        })
+                        .await
+                        .expect("founder backup confirm");
+                        confirmed = true;
+                    }
+                }
             },
             other => panic!("unexpected: {other:?}"),
         }
@@ -213,6 +225,14 @@ pub async fn found_with_mesh(
     })
     .await
     .expect("founder proposes the charter");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate; the
+    // None-ratifier member attests automatically)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {

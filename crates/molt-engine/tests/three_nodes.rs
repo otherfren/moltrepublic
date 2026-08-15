@@ -107,6 +107,13 @@ async fn a_2_of_3_republic_founds_and_applies_a_rename_at_threshold() {
     })
     .await
     .expect("propose charter");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let s = read_session(&a).await;

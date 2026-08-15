@@ -60,6 +60,13 @@ async fn founded_source(
     })
     .await
     .expect("create start");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = session(&w).await.create.seed.clone();
+        w.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
     let sv = poll_session(&w, "founding", |sv| sv.create.run.outcome != 0).await;
     assert_eq!(sv.create.run.outcome, 1, "founding sealed: {:?}", sv.create.run.log);
     w.execute(Command::CreateFinish).await.expect("create finish");

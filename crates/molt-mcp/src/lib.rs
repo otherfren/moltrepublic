@@ -1401,9 +1401,24 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "create_finish",
             command: "create_finish",
-            description: "Enter the republic a successful founding sealed (read_session shows create.run.outcome == 1). The founding deliberately does not auto-enter: the founder first confirms it backed up its recovery phrase (create.seed) - entering is that confirmation, the founder twin of join_finish.",
+            description: "Enter the republic a successful founding sealed (read_session shows create.run.outcome == 1). The phrase backup was already confirmed DURING the ritual (confirm_seed_backup) - this just enters, the founder twin of join_finish.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::CreateFinish),
+        },
+        ToolDef {
+            name: "confirm_seed_backup",
+            command: "confirm_seed_backup",
+            description: "Confirm the operator's recovery-phrase backup during a RUNNING founding or join ritual by re-typing the phrase (create.seed / join.seed). The engine matches it; the ritual seals - and touches disk - only once EVERY participant confirmed (founder included). Founder side: any time before the seal. Joiner side: after ratifying (join.awaiting_backup).",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "phrase": { "type": "string", "description": "the re-typed recovery phrase (whitespace-normalized compare)" }
+                },
+                "required": ["phrase"]
+            }),
+            build: |args| Ok(Command::ConfirmSeedBackup {
+                phrase: str_arg(args, "phrase")?,
+            }),
         },
         ToolDef {
             name: "join_start",
@@ -1439,7 +1454,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "join_finish",
             command: "join_finish",
-            description: "Enter the republic a completed join sealed (read_session shows join.run.outcome == 1 with join.sealed_id). The join deliberately does not auto-enter: the joiner first confirms it backed up its recovery phrase (join.seed) - entering is that confirmation, the joiner twin of create_finish.",
+            description: "Enter the republic a completed join sealed (read_session shows join.run.outcome == 1 with join.sealed_id). The phrase backup was already confirmed DURING the ritual (confirm_seed_backup) - this just enters, the joiner twin of create_finish.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::JoinFinish),
         },
@@ -1524,7 +1539,7 @@ mod tests {
         // chain, so even a forged internal command cannot materialize an
         // unverified workspace). RestoreTick is gone: there is no simulated
         // restore progress anymore.
-        const INTERNAL: [&str; 53] = [
+        const INTERNAL: [&str; 54] = [
             "net_test_s3_result",
             // net_test_tor_result is the off-actor Tor probe reporting its
             // real verdict (net_test_tor is the tool; an agent must not be
@@ -1561,6 +1576,10 @@ mod tests {
             "net_send_ok",
             "net_join_requested",
             "net_seal_signed",
+            // a member's ❻½ backup attestation (founder ingest) — an agent
+            // must not be able to forge another seat's confirmation
+            "net_backup_confirmed",
+
             "net_recover_requested",
             "net_recover_link_ready",
             "net_recover_link_failed",

@@ -258,6 +258,13 @@ async fn enforcement_survives_close_and_reopen() {
     })
     .await
     .expect("create start");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&w).await.create.seed.clone();
+        w.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
     await_founding(&w).await;
     w.execute(Command::CreateFinish).await.expect("finish");
     let ws = read_session(&w).await.active_workspace.clone();

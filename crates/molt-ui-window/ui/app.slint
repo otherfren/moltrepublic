@@ -963,6 +963,8 @@ export component AppWindow inherits Window {
     callback create-start(string, string, int, int);
     callback create-cancel();
     callback create-finish();
+    // ❻½: re-typed phrase → engine match → attestation/finalize
+    callback confirm-seed-backup(string);
     // deliberation step: the founder proposes the final name + charter (agenda)
     // once every member has joined; every member then ratifies it
     callback create-propose(string, string);
@@ -1241,6 +1243,8 @@ export component AppWindow inherits Window {
     in property <int> cw-step: 0;
     in property <int> cw-outcome: 0;
     in property <string> cw-seed;
+    // the founder's own ❻½ backup confirmation already landed
+    in property <bool> cw-backup-confirmed;
     // the member list: founder + one row per seat, rows turn green as
     // members activate their link and sign the roster
     in property <[RitualSeat]> cw-seats;
@@ -1306,6 +1310,8 @@ export component AppWindow inherits Window {
     // the join sealed a workspace (join.sealed_id) — entry now waits on the
     // wizard's phrase-backup step and its join-finish()
     in property <bool> jw-sealed;
+    // the join awaits the joiner's ❻½ phrase-backup confirmation
+    in property <bool> jw-awaiting-backup;
     out property <bool> jw-running: root.jw-step == 1 && root.jw-outcome == 0;
 
     // recovery (total-loss rejoin over a molt://recover/… link):
@@ -2902,7 +2908,7 @@ export component AppWindow inherits Window {
                                 y: (parent.height - self.height) / 2;
                             }
                             Text {
-                                text: Strings.cw-ratify-wait;
+                                text: root.cw-backup-confirmed ? Strings.cw-backup-wait : Strings.cw-ratify-wait;
                                 color: Theme.text;
                                 font-size: Theme.fs-body;
                                 font-weight: 700;
@@ -2910,6 +2916,28 @@ export component AppWindow inherits Window {
                                 wrap: word-wrap;
                                 horizontal-stretch: 1;
                             }
+                        }
+                    }
+
+                    // ❻½ (seed_backup_confirmation.md): the founder's OWN
+                    // phrase-backup proof — the ritual seals, and the disk
+                    // is touched, only once EVERY participant confirmed
+                    // (n-of-n includes this seat)
+                    if root.cw-proposed && root.cw-outcome == 0
+                        && !root.cw-backup-confirmed: SeedConfirmStep {
+                        vertical-stretch: 0;
+                        seed: root.cw-seed;
+                        icon: @image-url("assets/create.svg");
+                        action-label: Strings.cw-backup-confirm;
+                        armed: root.seed-matches(root.cw-seed-check, root.cw-seed);
+                        check <=> root.cw-seed-check;
+                        enter => {
+                            root.confirm-seed-backup(root.cw-seed-check);
+                            root.cw-seed-check = "";
+                        }
+                        copy-requested => {
+                            root.copy-text(root.cw-seed);
+                            root.show-toast(Strings.toast-copied);
                         }
                     }
 
@@ -2984,8 +3012,12 @@ export component AppWindow inherits Window {
                                             border-radius: Theme.win95 ? 0px : 8px;
                                             background: Theme.panel;
                                             border-width: Theme.border-w;
-                                            border-color: seat.state == 2 ? Theme.good
-                                                : (seat.state == 3 ? Theme.bad : Theme.line);
+                                            // fully green only at 4 (sealed AND
+                                            // key secured, ❻½); a sealed seat
+                                            // still securing shows in-progress
+                                            border-color: seat.state == 4 ? Theme.good
+                                                : (seat.state == 2 ? Theme.warn
+                                                : (seat.state == 3 ? Theme.bad : Theme.line));
                                             HorizontalLayout {
                                                 padding-left: 12px;
                                                 padding-right: 6px;
@@ -2997,9 +3029,9 @@ export component AppWindow inherits Window {
                                                     height: 11px;
                                                     border-radius: 5.5px;
                                                     y: (parent.height - self.height) / 2;
-                                                    background: seat.state == 2 ? Theme.good
+                                                    background: seat.state == 4 ? Theme.good
                                                         : (seat.state == 3 ? Theme.bad
-                                                        : (seat.state == 1 ? Theme.warn : Theme.line));
+                                                        : (seat.state == 1 || seat.state == 2 ? Theme.warn : Theme.line));
                                                 }
                                                 VerticalLayout {
                                                     alignment: center;
@@ -3190,23 +3222,25 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // the seed step (outcome 1): the republic EXISTS — the
-                    // phrase, its re-typed backup proof, and below it the
-                    // still-live ritual log. Compact (stretch 0): the log
-                    // keeps the leftover height.
-                    if root.cw-outcome == 1: SeedConfirmStep {
+                    // outcome 1: the republic EXISTS — the phrase backup was
+                    // already confirmed DURING the ritual (❻½), so this is
+                    // just the way in. Compact (stretch 0): the log keeps
+                    // the leftover height.
+                    if root.cw-outcome == 1: HorizontalLayout {
                         vertical-stretch: 0;
-                        seed: root.cw-seed;
-                        icon: @image-url("assets/create.svg");
-                        armed: root.seed-matches(root.cw-seed-check, root.cw-seed);
-                        check <=> root.cw-seed-check;
-                        enter => {
-                            root.cw-seed-check = "";
-                            root.create-finish();
+                        spacing: 10px;
+                        Rectangle {
+                            horizontal-stretch: 1;
                         }
-                        copy-requested => {
-                            root.copy-text(root.cw-seed);
-                            root.show-toast(Strings.toast-copied);
+                        AppButton {
+                            height: 38px;
+                            primary: true;
+                            icon: @image-url("assets/create.svg");
+                            icon-set: true;
+                            label: Strings.enter-republic;
+                            clicked => {
+                                root.create-finish();
+                            }
                         }
                     }
 
@@ -4132,22 +4166,43 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // step 3: the join SEALED — the phrase-backup step, the exact
-                // twin of the founder's. Entering IS the backup confirmation
-                // (JoinFinish); the restore-link flow lands here too, because
-                // a running join always owns the Join screen (engine-set).
-                if root.jw-sealed: SeedConfirmStep {
+                // step 2½ (❻½): the phrase-backup confirmation — BEFORE the
+                // seal, the exact twin of the founder's. Confirming releases
+                // the signed attestation; the ritual then waits for everyone.
+                if root.jw-awaiting-backup && !root.jw-sealed: SeedConfirmStep {
                     seed: root.jw-seed;
                     icon: @image-url("assets/join.svg");
+                    action-label: Strings.cw-backup-confirm;
                     armed: root.seed-matches(root.jw-seed-check, root.jw-seed);
                     check <=> root.jw-seed-check;
                     enter => {
+                        root.confirm-seed-backup(root.jw-seed-check);
                         root.jw-seed-check = "";
-                        root.join-finish();
                     }
                     copy-requested => {
                         root.copy-text(root.jw-seed);
                         root.show-toast(Strings.toast-copied);
+                    }
+                }
+
+                // step 3: the join SEALED — the backup was confirmed during
+                // the ritual (❻½); this is just the way in. The restore-link
+                // flow lands here too, because a running join always owns
+                // the Join screen (engine-set).
+                if root.jw-sealed: HorizontalLayout {
+                    spacing: 10px;
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+                    AppButton {
+                        height: 38px;
+                        primary: true;
+                        icon: @image-url("assets/join.svg");
+                        icon-set: true;
+                        label: Strings.enter-republic;
+                        clicked => {
+                            root.join-finish();
+                        }
                     }
                 }
             }
@@ -8237,7 +8292,7 @@ export component AppWindow inherits Window {
     // …but NOT while the charter awaits ratification: that step is still
     // "running" and needs the joiner's decision, so blocking the screen there
     // would hang the join on a panel the operator cannot reach.
-    if root.jw-running && !root.jw-awaiting-ratify && !root.jw-sealed: BusyModal {
+    if root.jw-running && !root.jw-awaiting-ratify && !root.jw-awaiting-backup && !root.jw-sealed: BusyModal {
         title: root.jw-republic == "" ? Strings.jw-busy-title : root.jw-republic;
         detail: root.jw-progress < 0.3 ? Strings.jw-ph1
             : (root.jw-progress < 0.5 ? Strings.jw-ph-founder

@@ -1820,6 +1820,9 @@ export component SeedConfirmStep inherits VerticalLayout {
     in property <image> icon;
     // the re-typed phrase matches — computed by the caller (engine rule)
     in property <bool> armed;
+    // the action button's label: "Enter republic" post-seal (legacy),
+    // "Confirm backup" during the ❻½ ritual round
+    in property <string> action-label: Strings.enter-republic;
     in-out property <string> check;
     callback enter();
     callback copy-requested();
@@ -1865,7 +1868,7 @@ export component SeedConfirmStep inherits VerticalLayout {
             primary: true;
             icon: root.icon;
             icon-set: true;
-            label: Strings.enter-republic;
+            label: root.action-label;
             enabled: root.armed;
             clicked => {
                 root.enter();

@@ -374,6 +374,13 @@ async fn a_1059_frame_from_anyone_but_the_link_founder_cannot_kill_a_join() {
     })
     .await
     .expect("charter proposed");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
 
     let s = wait_for(&b, "petra to reach the charter despite the imposter", |s| {
         s.join.awaiting_ratify || s.join.run.outcome == 2

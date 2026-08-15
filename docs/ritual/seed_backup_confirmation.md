@@ -1,6 +1,9 @@
 # Seed-backup confirmation round (founding ritual)
 
-**Status: DECIDED 2026-08-15 — ready to implement, not built yet.** Ask of
+**Status: BUILT 2026-08-15** (engine round ❻½ + both wizards + MCP tool
+`confirm_seed_backup`; keystones in `molt-engine/src/lib.rs`
+`founding_waits_for_the_backup_confirmation_before_writing` and the
+two-instances gate test). Ask of
 2026-08-15: the founding wizard needs a step that **waits until every member
 has backed up their recovery phrase and confirmed it**; only then is the
 ritual complete and the workspace written to disk. Without that last step
@@ -112,8 +115,15 @@ an agent-driven seat has the same proof obligation as a human.
    machine — a different situation; no analogy here.)
 2. **Strict order: ratify, then confirm.** The attestation signs the
    ratified table's hash, so a `BackupConfirmed` from a seat that has not
-   ratified means nothing — the founder ignores it (no buffering of
-   early confirms).
+   ratified means nothing. The MEMBER always sends Signed before
+   BackupConfirmed; the human cannot confirm before ratifying.
+   Implementation nuance (found by the two-instances suite): the
+   transports do not order separate messages (the loopback hub reorders
+   under load, relays reorder 445s), so an attestation that OUTRAN its
+   own seat's seal signature on the wire parks in the seat's one bounded
+   slot and applies when the seal signature lands (the parked-decline
+   idiom). A seat that never ratifies never applies it — the semantic
+   rule is untouched; only honest wire reorder is tolerated.
 3. **n-of-n includes the founder.** The founder's own re-type gates the
    seal exactly like every other seat's; sealing is NOT an implicit
    confirmation.

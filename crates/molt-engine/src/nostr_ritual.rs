@@ -731,6 +731,15 @@ pub(crate) fn spawn_founder_group_recv(
                     from: from.clone(),
                     generation: Some(generation),
                 },
+                // the backup attestation (❻½): verified against the anchored
+                // key on the actor, authenticated author rides along like
+                // `Signed`
+                RitualMsg::BackupConfirmed { seat, sig } => Command::NetBackupConfirmed {
+                    seat,
+                    sig,
+                    from: from.clone(),
+                    generation: Some(generation),
+                },
                 // a decline carries NO signature, so the MLS author is its
                 // only authentication: without it any member could abort the
                 // founding and frame another seat for it
@@ -1068,12 +1077,14 @@ pub(crate) fn spawn_member_join(
     dialer: molt_net::dial::Dialer,
     ctx: JoinCtx,
     confirm: mpsc::Receiver<bool>,
+    backup: mpsc::Receiver<bool>,
     tx: mpsc::WeakSender<Envelope>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let generation = Some(ctx.generation);
         let mut confirm = confirm;
-        if let Err(error) = member_join(dialer, ctx, &mut confirm, &tx).await {
+        let mut backup = backup;
+        if let Err(error) = member_join(dialer, ctx, &mut confirm, &mut backup, &tx).await {
             let _ = send_cmd(&tx, Command::NetJoinFailed { error, generation }).await;
         }
     })
@@ -1089,6 +1100,7 @@ async fn member_join(
     dialer: molt_net::dial::Dialer,
     ctx: JoinCtx,
     confirm: &mut mpsc::Receiver<bool>,
+    backup: &mut mpsc::Receiver<bool>,
     tx: &mpsc::WeakSender<Envelope>,
 ) -> Result<(), String> {
     let h = ctx.invite.handover;
@@ -1348,6 +1360,20 @@ async fn member_join(
     publish_frame_now(&chan, &group, &RitualMsg::Signed(invite::SealSigned { seat, sig }))
         .await
         .map_err(|e| format!("seal signature did not publish: {e}"))?;
+
+    // ❻½ (seed_backup_confirmation.md): wait for the HUMAN's phrase-backup
+    // proof, then publish the signed attestation. Sequential on this path
+    // (no early-Genesis peek — the loopback twin carries that defensive
+    // check; an honest founder cannot reach ❼ before this attestation).
+    match backup.recv().await {
+        Some(true) => {}
+        _ => return Err("the ritual was cancelled before the backup confirmation".to_string()),
+    }
+    let att = molt_storage::backup_confirm_bytes(&table);
+    let att_sig = molt_storage::identity_sign(&sk, &att);
+    publish_frame_now(&chan, &group, &RitualMsg::BackupConfirmed { seat, sig: att_sig })
+        .await
+        .map_err(|e| format!("backup attestation did not publish: {e}"))?;
 
     let mut was_deaf = false;
     // The wait below is deliberately UNBOUNDED: the genesis lands only after

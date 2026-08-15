@@ -133,6 +133,15 @@ off-band invite links) is shared.
   ❻ verify sigᵢ against pkᵢ over T
     …wait until every seat has ratified…
 
+  ❻½ CONFIRM BACKUP (seed_backup_confirmation.md — all n,
+     founder included; the FIRST disk write waits for the last)
+                                                    Mᵢ: re-type own phrase
+                                                        (local proof, arms send)
+                          ◀── BackupConfirmed{ attᵢ } on Qinv ──
+     verify attᵢ = sign(skᵢ, tag ‖ sha256(T)) against pkᵢ
+     founder's own re-type sets its flag
+     …wait until every seat (and the founder) confirmed…
+
   ❼ sign T itself, assemble all n attestations
     build MLS group, add every kpᵢ → one Welcome W
     write OWN Founded genesis (own seed) + persist own MLS state
@@ -206,7 +215,22 @@ seals: the workspace opens only after *everyone* has ratified. The seat handler
 is idempotent — a second, distinct signature for a seat is ignored, so one
 member cannot inflate the roster.
 
-**❼ Finalize & distribute.** When every seat has ratified, `F` adds its own
+**❻½ Confirm backup.** After ratifying, each participant — founder included —
+proves locally that its recovery phrase is backed up (the re-typed phrase must
+match) and sends `BackupConfirmed{att}`, an Ed25519 signature over
+`"molt-backup-confirmed-v1" ‖ sha256(T)` — self-authenticating like `Signed`,
+bound to exactly this ritual. `F` verifies each against the anchored `pkᵢ`
+and finalizes only at **n-of-n** confirmations: without the last confirmation
+the ritual never seals and **no machine writes anything to disk**. Strict
+order (a confirmation from an unratified seat means nothing) holds
+semantically; an attestation that merely OUTRAN its own seal signature on the
+wire parks per seat and applies when the signature lands (transports do not
+order separate messages). No timeout: the founder sees per-seat confirm state
+and can cancel, like every earlier wait. Full design + decided forks:
+`seed_backup_confirmation.md`.
+
+**❼ Finalize & distribute.** When every seat has ratified **and everyone
+confirmed its backup (❻½)**, `F` adds its own
 signature, assembles all *n* attestations, **builds the MLS group** by adding
 every `kpᵢ` in one commit (producing a single `Welcome`), **writes its own
 `Founded` genesis first** and persists its own MLS state (so a founder disk
@@ -362,10 +386,12 @@ credential identities are exactly the anchored keys.
 
 ## 9. Lifecycle & failure
 
-- **Ephemeral.** No disk write happens before the final seal. Cancelling the
-  ritual, navigating away from it, or crashing **voids** every distributed link
-  and leaves the disk untouched; the founding is abandoned and its background
-  work torn down so it can never seal and hijack the session later.
+- **Ephemeral.** No disk write happens before the final seal — and since ❻½
+  the seal itself waits behind every participant's phrase-backup
+  confirmation, so the first write sits behind the last human act. Cancelling
+  the ritual, navigating away from it, or crashing **voids** every distributed
+  link and leaves the disk untouched; the founding is abandoned and its
+  background work torn down so it can never seal and hijack the session later.
 - **Provisioning failure** (the founder cannot reach the transport) fails the
   founding with a surfaced error rather than waiting forever for links that
   never appear.
@@ -387,6 +413,7 @@ per-queue wrap; inside MLS ciphertext once MLS lands):
 | `JoinRequest` | member → founder | seat, name, identity pk, nostr pk, **MLS KeyPackage**, ticket MAC (v2), reply-queue handover |
 | `Seal{ name, agenda, features, table }` | founder → member | the proposed charter (name + agenda + feature selection) to review, and the canonical bytes to sign (hex) |
 | `Signed{ sig }` | member → founder | the member's signature over the table (its ratification) |
+| `BackupConfirmed{ seat, sig }` | member → founder | the member's phrase-backup attestation (❻½): signature over the tagged sha256 of the ratified table |
 | `Genesis{ sealed, welcome }` | founder → member | the complete sealed roster (name, republic id, *m*/*n*, roster, identities, all attestations, **agenda**, **feature selection**) and the **MLS `Welcome`** |
 
 The invite link's transport handover carries `{ server, invite-queue id,

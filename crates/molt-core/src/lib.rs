@@ -2717,7 +2717,9 @@ pub struct RitualSeatView {
     /// The member's display name; empty until they activated the link.
     pub member: String,
     /// 0 = waiting for activation, 1 = key received (awaiting seal),
-    /// 2 = sealed (signature verified).
+    /// 2 = sealed (signature verified), 3 = declined the charter,
+    /// 4 = backup confirmed (the seat's `BackupConfirmed` attestation
+    /// verified — `seed_backup_confirmation.md` ❻½).
     pub state: u8,
 }
 
@@ -2757,6 +2759,11 @@ pub struct CreateState {
     pub net: String,
     /// The founder's recovery phrase (shown during the ritual, then gone).
     pub seed: String,
+    /// Whether the FOUNDER's own phrase backup is confirmed (the re-typed
+    /// phrase matched — `seed_backup_confirmation.md` ❻½). The ritual
+    /// finalizes only once every seat AND this flag confirm.
+    #[serde(default)]
+    pub backup_confirmed: bool,
     /// The ritual's member list: one row per future member.
     pub seats: Vec<RitualSeatView>,
     /// The members are in-process simulations (no real network yet, T3):
@@ -2808,6 +2815,12 @@ pub struct JoinState {
     /// and the workspace opens only once confirmed.
     #[serde(default)]
     pub awaiting_ratify: bool,
+    /// Whether the join is paused awaiting the joiner's own phrase-backup
+    /// confirmation (after ratifying — `seed_backup_confirmation.md` ❻½):
+    /// the wizard shows the phrase + re-type; the confirmation releases the
+    /// signed attestation to the founder, and the ritual waits for everyone.
+    #[serde(default)]
+    pub awaiting_backup: bool,
     /// The sealed workspace's id, set when the join completes (run outcome 1).
     /// The joiner does NOT enter automatically (2026-08-08): the wizard's
     /// final step shows the recovery phrase and requires re-typing it —
@@ -3738,6 +3751,17 @@ pub enum Command {
     /// founder back its recovery phrase up first — entering is that
     /// confirmation (the founder twin of [`Command::JoinFinish`]).
     CreateFinish,
+    /// Confirm the operator's recovery-phrase BACKUP during a running
+    /// founding or join ritual (`seed_backup_confirmation.md` ❻½): the
+    /// engine matches the re-typed phrase against the ritual's minted one;
+    /// on the member side the signed `BackupConfirmed` attestation then
+    /// goes to the founder, on the founder side the own seat is marked.
+    /// The ritual finalizes — and touches disk — only at n-of-n
+    /// confirmations. A human decision: an MCP tool AND a GUI action.
+    ConfirmSeedBackup {
+        /// The re-typed recovery phrase (whitespace-normalized compare).
+        phrase: String,
+    },
 
     // --- founding-ritual transport events (engine-internal) ---
     /// A member activated their invite link: their JoinRequest arrived on
@@ -3872,6 +3896,23 @@ pub enum Command {
         /// anchored key anyway, so this is defence in depth — it refuses a
         /// signature attributed to a seat its author does not hold. Empty
         /// on the loopback path (a private queue authenticated it instead).
+        #[serde(default)]
+        from: String,
+        /// Ritual incarnation (stale ritual commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// A member's seed-backup attestation arrived on the founder
+    /// (engine-internal; verified against the seat's anchored key over
+    /// `molt_storage::backup_confirm_bytes` of the ratified table —
+    /// `seed_backup_confirmation.md` ❻½).
+    NetBackupConfirmed {
+        /// Which invite (0-based index into the ritual's seat list).
+        seat: u32,
+        /// The Ed25519 signature over the attestation bytes, lowercase hex.
+        sig: String,
+        /// The authenticated wire author (defence in depth, like
+        /// `NetSealSigned.from`); empty on the loopback path.
         #[serde(default)]
         from: String,
         /// Ritual incarnation (stale ritual commands are dropped).

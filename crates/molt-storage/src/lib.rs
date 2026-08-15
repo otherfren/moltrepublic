@@ -289,6 +289,20 @@ pub fn derive_identity_key(seed: &[u8], id: &str) -> (SigningKey, String) {
     (sk, pk)
 }
 
+/// What a member signs to attest its recovery-phrase BACKUP during the
+/// founding (`docs/ritual/seed_backup_confirmation.md` ❻½): a domain tag
+/// followed by the sha256 of the RATIFIED canonical table, so the
+/// attestation is bound to exactly this ritual's charter and cannot
+/// replay into another founding. It deliberately claims no key
+/// possession beyond what the ratify signature already proved — it is
+/// the second, separate human act ("my phrase is stored").
+pub fn backup_confirm_bytes(table: &[u8]) -> Vec<u8> {
+    use sha2::Digest;
+    let mut out = b"molt-backup-confirmed-v1".to_vec();
+    out.extend_from_slice(&Sha256::digest(table));
+    out
+}
+
 /// Sign `msg` with a member's identity key; returns the signature as
 /// lowercase hex (64 bytes).
 pub fn identity_sign(sk: &SigningKey, msg: &[u8]) -> String {

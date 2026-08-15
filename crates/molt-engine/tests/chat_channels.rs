@@ -124,6 +124,13 @@ async fn channels_govern_chat_and_filter_coequally_across_instances() {
     })
     .await
     .expect("founder proposes the charter");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         let s = read_session(&a).await;

@@ -554,6 +554,19 @@ pub enum RitualMsg {
         #[serde(default)]
         chain: String,
     },
+    /// member → founder: the member confirmed its recovery-phrase BACKUP
+    /// (`seed_backup_confirmation.md` ❻½) — an Ed25519 signature (hex)
+    /// over the backup-attestation bytes of the RATIFIED table, verified
+    /// against the seat's anchored identity key. The founder finalizes
+    /// only at n-of-n confirmations. Additive: an older founder fails to
+    /// parse it (a mixed-version founding is accepted-incompatible per
+    /// the design doc) — like `LinkSpent`/`Aborted`.
+    BackupConfirmed {
+        /// Which invite this answers (0-based seat index).
+        seat: u32,
+        /// Signature hex over the attestation bytes.
+        sig: String,
+    },
 }
 
 #[cfg(test)]

@@ -157,6 +157,13 @@ async fn founded_engine(
     })
     .await
     .expect("create start");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = session(&w).await.create.seed.clone();
+        w.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
     for _ in 0..600 {
         let s = session(&w).await;
         match s.create.run.outcome {

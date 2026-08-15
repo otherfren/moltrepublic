@@ -105,6 +105,17 @@ struct SeatRuntime {
     /// Whether this seat's seal signature was already accepted — a second
     /// (distinct) `SealSigned` must not push a duplicate attestation.
     sealed: bool,
+    /// Whether this seat's seed-backup attestation was already accepted
+    /// (`seed_backup_confirmation.md` ❻½) — idempotent like `sealed`, and
+    /// only ever set AFTER `sealed` (strict ratify-then-confirm).
+    backup_confirmed: bool,
+    /// An attestation that ARRIVED before this seat's seal signature —
+    /// the transports do not order separate messages (the loopback hub
+    /// reorders under load, relays reorder 445s), so the member's honest
+    /// Signed→BackupConfirmed sequence can invert on the wire. Parked
+    /// like an outrun decline and verified when the seat seals; a seat
+    /// that never ratifies never applies it (one bounded slot).
+    parked_backup: Option<String>,
 }
 
 /// The founder-side ritual runtime: the transport, the founder's own
@@ -462,6 +473,8 @@ impl State {
                 identity: None,
                 key_package: None,
                 sealed: false,
+                backup_confirmed: false,
+                parked_backup: None,
             });
         }
 
@@ -771,6 +784,13 @@ fn spawn_founder_recv(
                 invite::RitualMsg::Signed(s) => Command::NetSealSigned {
                     seat,
                     sig: s.sig,
+                    // the private reply queue authenticated this
+                    from: String::new(),
+                    generation: Some(generation),
+                },
+                invite::RitualMsg::BackupConfirmed { sig, .. } => Command::NetBackupConfirmed {
+                    seat,
+                    sig,
                     // the private reply queue authenticated this
                     from: String::new(),
                     generation: Some(generation),
@@ -1426,6 +1446,11 @@ pub struct Ratifier {
     /// The human's decision: `true` ratifies (sign); `false` or a closed
     /// channel declines and aborts the join.
     pub confirm: mpsc::Receiver<bool>,
+    /// The human's phrase-backup proof (`seed_backup_confirmation.md` ❻½),
+    /// AFTER ratifying: `true` releases the signed attestation; a closed
+    /// channel cancels the join. Sim/CLI paths (a `None` ratifier) attest
+    /// automatically.
+    pub backup: mpsc::Receiver<bool>,
 }
 
 /// Run the member side of the post-founding **mesh bootstrap** over the star:
@@ -1629,7 +1654,7 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
     phrase: String,
     collect_genesis: bool,
     bootstrap: bool,
-    ratify: Option<Ratifier>,
+    mut ratify: Option<Ratifier>,
     mut cancel: Option<mpsc::Receiver<()>>,
 ) -> Result<JoinOutcome, String> {
     // per-workspace identity, deterministic from the member's own phrase —
@@ -1762,7 +1787,7 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
     // human ratification gate: surface the charter and wait for the confirm
     // before signing. The non-interactive paths (sim members, CLI) pass None
     // and ratify once the proposal verified.
-    if let Some(mut r) = ratify {
+    if let Some(r) = ratify.as_mut() {
         let _ = r
             .proposal
             .send((
@@ -1805,8 +1830,58 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
     .await
     .map_err(|e| e.to_string())?;
 
+    // ❻½ (seed_backup_confirmation.md): the phrase-backup round. The
+    // interactive path waits for the HUMAN's re-typed proof before the
+    // attestation goes out — and, defensively, a Genesis arriving DURING
+    // that wait is a founder that sealed without us (protocol violation:
+    // an honest founder cannot reach ❼ before our confirmation). The
+    // non-interactive paths (sim members, CLI) attest right away, exactly
+    // as they auto-ratify. A `MeshAnnounce` racing in here is buffered
+    // like in the genesis wait below.
+    let mut early_mesh: Vec<Vec<u8>> = Vec::new();
+    if let Some(r) = ratify.as_mut() {
+        loop {
+            tokio::select! {
+                confirmed = r.backup.recv() => match confirmed {
+                    Some(true) => break,
+                    _ => return Err("the ritual was cancelled before the backup confirmation".to_string()),
+                },
+                msg = next_ritual_msg(&mut rx, &mut cancel, &reply_wrap, &mut reasm) => match msg? {
+                    invite::RitualMsg::Genesis { .. } => {
+                        return Err(
+                            "the founder sealed before our backup confirmation — protocol violation"
+                                .to_string(),
+                        );
+                    }
+                    invite::RitualMsg::Aborted { reason } => {
+                        return Err(format!("the founding was aborted: {reason}"));
+                    }
+                    invite::RitualMsg::MeshAnnounce { ct } => {
+                        if let Ok(b) = hex::decode(&ct) {
+                            early_mesh.push(b);
+                        }
+                    }
+                    _ => {}
+                },
+            }
+        }
+    }
+    let att = molt_storage::backup_confirm_bytes(&table);
+    let att_sig = molt_storage::identity_sign(&sk, &att);
+    let confirmed = invite::RitualMsg::BackupConfirmed { seat: m.seat, sig: att_sig };
+    let out = serde_json::to_vec(&confirmed).map_err(|e| e.to_string())?;
+    supervisor::send_framed(
+        &m.transport,
+        &m.invite_snd,
+        &m.invite_wrap,
+        msg_id(&name, "founder", 4),
+        &out,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
     if !collect_genesis {
-        // sim members stop at their seal signature; their KeyPackage still
+        // sim members stop at their attestation; their KeyPackage still
         // joined the founder's group, they just never process the Welcome
         return Ok(JoinOutcome {
             pk,
@@ -1822,7 +1897,6 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
     // workspace and enter the group. A `MeshAnnounce` that races ahead of the
     // genesis (the founder starts its bootstrap right after distributing) is
     // *buffered* here, not dropped, so the member's own bootstrap still sees it.
-    let mut early_mesh: Vec<Vec<u8>> = Vec::new();
     loop {
         match next_ritual_msg(&mut rx, &mut cancel, &reply_wrap, &mut reasm).await? {
             invite::RitualMsg::MeshAnnounce { ct } => {
@@ -3179,12 +3253,127 @@ mod ritual_ops {
                 .log
                 .push(format!("✓ {member} signed the roster · seat sealed"));
 
+            // an attestation that outran this seal signature on the wire
+            // was parked — it stands now (❻½ reorder tolerance)
+            let parked = self
+                .net_ritual
+                .as_mut()
+                .and_then(|r| r.seats.get_mut(idx))
+                .and_then(|s| s.parked_backup.take());
+            if let Some(sig) = parked {
+                self.apply_backup_attestation(idx, &sig);
+            }
             self.maybe_finalize();
             // maybe_finalize may have sealed the workspace (active id + entry
             // list change), so mirror the FULL session, not just the create
             // sub-state
             self.emit_session(molt_core::SessionScope::Full);
             Ok(molt_core::Reply::Ack)
+        }
+
+        /// A member's seed-backup attestation (`seed_backup_confirmation.md`
+        /// ❻½): verified against the seat's ANCHORED key over the
+        /// attestation bytes of the ratified table. Strict order — a
+        /// confirmation from a seat that has not ratified is ignored.
+        /// Idempotent per seat, like the seal handler.
+        pub(crate) fn cmd_net_backup_confirmed(
+            &mut self,
+            seat: u32,
+            sig: String,
+            from: String,
+            generation: Option<u64>,
+        ) -> Result<molt_core::Reply, molt_core::MoltError> {
+            if !self.ritual_generation_current(generation) {
+                return Ok(molt_core::Reply::Ack);
+            }
+            let idx = usize::try_from(seat).unwrap_or(usize::MAX);
+            // defence in depth, the seal handler's twin: refuse an
+            // attestation attributed to a seat its author does not hold.
+            // Empty `from` = loopback.
+            if !from.is_empty() {
+                let owner = self
+                    .net_ritual
+                    .as_ref()
+                    .and_then(|r| r.seats.get(idx))
+                    .and_then(|s| s.identity.as_ref())
+                    .map(|i| i.member.clone());
+                if owner.as_deref() != Some(from.as_str()) {
+                    tracing::warn!(seat, %from, "backup confirmation refused: not that seat's member");
+                    return Ok(molt_core::Reply::Ack);
+                }
+            }
+            {
+                let Some(ritual) = &mut self.net_ritual else {
+                    return Ok(molt_core::Reply::Ack);
+                };
+                let Some(s) = ritual.seats.get_mut(idx) else {
+                    return Ok(molt_core::Reply::Ack);
+                };
+                if s.backup_confirmed {
+                    return Ok(molt_core::Reply::Ack); // idempotent
+                }
+                // strict ratify-then-confirm holds SEMANTICALLY, but the
+                // wire does not order separate messages (loopback reorders
+                // under load, relays reorder 445s) — an attestation that
+                // outran its seat's seal signature PARKS and is applied
+                // when the seat seals (the parked-decline idiom). A seat
+                // that never ratifies never applies it.
+                if !s.sealed {
+                    s.parked_backup = Some(sig);
+                    return Ok(molt_core::Reply::Ack);
+                }
+            }
+            self.apply_backup_attestation(idx, &sig);
+            self.emit_session(molt_core::SessionScope::Full);
+            Ok(molt_core::Reply::Ack)
+        }
+
+        /// Verify + apply one SEALED seat's backup attestation against the
+        /// anchored key over the ratified table's attestation bytes; on
+        /// success the seat advances to state 3 and the ritual may
+        /// finalize. Shared by the live ingest and the parked drain.
+        fn apply_backup_attestation(&mut self, idx: usize, sig: &str) {
+            let (ok, member) = {
+                let Some(ritual) = &self.net_ritual else {
+                    return;
+                };
+                let Some(identities) = ritual.full_identities() else {
+                    return;
+                };
+                let Some(s) = ritual.seats.get(idx) else {
+                    return;
+                };
+                if !s.sealed || s.backup_confirmed {
+                    return;
+                }
+                let Some(who) = &s.identity else {
+                    return;
+                };
+                let table = ritual.canonical(&identities);
+                let att = molt_storage::backup_confirm_bytes(&table);
+                (
+                    molt_storage::identity_verify(&who.identity_pk, &att, sig),
+                    who.member.clone(),
+                )
+            };
+            if !ok {
+                tracing::warn!(seat = idx, "backup confirmation refused: signature invalid");
+                return;
+            }
+            if let Some(ritual) = &mut self.net_ritual {
+                if let Some(s) = ritual.seats.get_mut(idx) {
+                    s.backup_confirmed = true;
+                }
+            }
+            if let Some(view) = self.session.create.seats.get_mut(idx) {
+                view.state = 4;
+            }
+            self.session
+                .create
+                .run
+                .log
+                .push(format!("✓ {member} secured their key"));
+            self.maybe_finalize();
         }
     }
 }
@@ -3746,6 +3935,8 @@ mod tests {
             identity: None,
             key_package: None,
             sealed: false,
+            backup_confirmed: false,
+            parked_backup: None,
         }
     }
 

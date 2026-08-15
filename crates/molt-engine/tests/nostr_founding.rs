@@ -179,6 +179,13 @@ async fn a_republic_founds_and_a_member_joins_over_one_relay() {
     })
     .await
     .expect("charter proposed");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
 
     // the joiner sees the charter (over the freshly born 445 group) and
     // ratifies it — the human gate
@@ -186,6 +193,12 @@ async fn a_republic_founds_and_a_member_joins_over_one_relay() {
     assert_eq!(s.join.proposed_name, "Chess Club");
     assert_eq!(s.join.proposed_agenda, "play chess, decide together");
     b.execute(Command::JoinConfirmCharter).await.expect("ratify");
+    {
+        let seed_ = read_session(&b).await.join.seed.clone();
+        b.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("joiner backup confirm");
+    }
 
     // both sides seal; entering is gated on the phrase-backup step
     // (2026-08-08) — the founder finishes exactly like the joiner
@@ -437,8 +450,21 @@ async fn a_join_needs_only_one_relay_in_common_with_the_invite() {
     })
     .await
     .expect("proposed");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
     wait_for(&b, "petra to see the charter", |s| s.join.awaiting_ratify).await;
     b.execute(Command::JoinConfirmCharter).await.expect("ratify");
+    {
+        let seed_ = read_session(&b).await.join.seed.clone();
+        b.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("joiner backup confirm");
+    }
     wait_for(&a, "the founding to seal", |s| s.create.run.outcome == 1).await;
     wait_for(&b, "the join to seal", |s| {
         s.join.run.outcome == 1 && !s.join.sealed_id.is_empty()
@@ -723,6 +749,13 @@ async fn a_declined_charter_aborts_both_sides() {
     })
     .await
     .expect("proposed");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
 
     wait_for(&b, "petra to see the charter", |s| s.join.awaiting_ratify).await;
     b.execute(Command::JoinDeclineCharter).await.expect("decline");
@@ -796,10 +829,23 @@ async fn a_decline_ends_the_founding_for_the_waiting_co_member_too() {
     })
     .await
     .expect("proposed");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
 
     // petra RATIFIES and settles into the waiting posture…
     wait_for(&b, "petra to see the charter", |s| s.join.awaiting_ratify).await;
     b.execute(Command::JoinConfirmCharter).await.expect("petra ratifies");
+    {
+        let seed_ = read_session(&b).await.join.seed.clone();
+        b.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("joiner backup confirm");
+    }
     // …then dora declines
     wait_for(&c, "dora to see the charter", |s| s.join.awaiting_ratify).await;
     c.execute(Command::JoinDeclineCharter).await.expect("dora declines");
@@ -908,8 +954,21 @@ async fn a_founder_pool_over_the_link_cap_still_founds_over_its_first_eight() {
     })
     .await
     .expect("proposed");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
     wait_for(&b, "petra to see the charter", |s| s.join.awaiting_ratify).await;
     b.execute(Command::JoinConfirmCharter).await.expect("ratify");
+    {
+        let seed_ = read_session(&b).await.join.seed.clone();
+        b.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("joiner backup confirm");
+    }
     wait_for(&a, "the founding to seal", |s| s.create.run.outcome == 1).await;
     wait_for(&b, "the join to seal", |s| s.join.run.outcome == 1 && !s.join.sealed_id.is_empty())
         .await;
@@ -1226,6 +1285,13 @@ async fn a_seal_that_no_relay_accepts_fails_the_founding_instead_of_hanging() {
     })
     .await
     .expect("proposed");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
 
     // the Seal publish is refused by the only relay: the founding must FAIL,
     // visibly, instead of sitting on "charter proposed" forever
@@ -1376,10 +1442,29 @@ async fn a_retry_of_the_same_link_by_the_same_joiner_keeps_the_seat() {
     })
     .await
     .expect("proposed");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
     wait_for(&b, "petra to see the charter", |s| s.join.awaiting_ratify).await;
     b.execute(Command::JoinConfirmCharter).await.expect("petra ratifies");
+    {
+        let seed_ = read_session(&b).await.join.seed.clone();
+        b.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("joiner backup confirm");
+    }
     wait_for(&c, "carol to see the charter", |s| s.join.awaiting_ratify).await;
     c.execute(Command::JoinConfirmCharter).await.expect("carol ratifies");
+    {
+        let seed_ = read_session(&c).await.join.seed.clone();
+        c.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("joiner backup confirm");
+    }
     wait_for(&a, "the founding to seal", |s| s.create.run.outcome == 1).await;
 }
 
@@ -1809,8 +1894,21 @@ async fn the_relay_pool_is_bound_into_what_every_member_signs() {
     })
     .await
     .expect("charter");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
     wait_for(&b, "the charter", |s| s.join.awaiting_ratify).await;
     b.execute(Command::JoinConfirmCharter).await.expect("ratify");
+    {
+        let seed_ = read_session(&b).await.join.seed.clone();
+        b.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("joiner backup confirm");
+    }
     let s = wait_for(&a, "the seal", |s| s.create.run.outcome == 1).await;
     let ws_id = s.active_workspace.clone();
     // entering is gated on the phrase-backup step now (2026-08-08)
@@ -1922,6 +2020,13 @@ async fn the_feature_set_is_bound_into_what_every_member_signs() {
     })
     .await
     .expect("charter");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
     let s = wait_for(&b, "the charter", |s| s.join.awaiting_ratify).await;
     assert_eq!(
         s.join.proposed_features.as_deref(),
@@ -1929,6 +2034,12 @@ async fn the_feature_set_is_bound_into_what_every_member_signs() {
         "the joiner reviews the canonicalized selection it will sign"
     );
     b.execute(Command::JoinConfirmCharter).await.expect("ratify");
+    {
+        let seed_ = read_session(&b).await.join.seed.clone();
+        b.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("joiner backup confirm");
+    }
     let s = wait_for(&a, "the seal", |s| s.create.run.outcome == 1).await;
     let ws_id = s.active_workspace.clone();
     a.execute(Command::CreateFinish).await.expect("create finish");

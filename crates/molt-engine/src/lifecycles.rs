@@ -797,6 +797,7 @@ impl State {
             agenda: String::new(),
             features: Vec::new(),
             can_propose: false,
+            backup_confirmed: false,
             member: member.clone(),
             threshold,
             members,
@@ -853,8 +854,14 @@ impl State {
         if self.session.create.run.outcome == 1 {
             return; // already finalized
         }
-        // every seat must be sealed (state 2)
-        if self.session.create.seats.iter().any(|s| s.state != 2) {
+        // every seat must be sealed AND backup-confirmed (state 4), and the
+        // founder's own phrase must be re-typed too — the ritual's FIRST
+        // disk write waits for the last confirmation
+        // (seed_backup_confirmation.md ❻½, n-of-n incl. the founder)
+        if self.session.create.seats.iter().any(|s| s.state != 4) {
+            return;
+        }
+        if !self.session.create.backup_confirmed {
             return;
         }
         let Some(ritual) = self.net_ritual.take() else {
@@ -1110,6 +1117,60 @@ impl State {
         Ok(id)
     }
 
+    /// The operator's phrase-backup confirmation during a RUNNING ritual
+    /// (`seed_backup_confirmation.md` ❻½) — founder or joiner, co-equal
+    /// (MCP tool + GUI). The engine matches the re-typed phrase; a
+    /// mismatch is refused with an honest error, never silently accepted.
+    pub(crate) fn cmd_confirm_seed_backup(&mut self, phrase: &str) -> Result<Reply, MoltError> {
+        fn matches(typed: &str, seed: &str) -> bool {
+            !seed.is_empty() && typed.split_whitespace().eq(seed.split_whitespace())
+        }
+        // founder side: an open founding awaiting its own confirmation
+        if self.net_ritual.is_some() && self.session.create.run.outcome == 0 {
+            if self.session.create.backup_confirmed {
+                return Ok(Reply::Ack); // idempotent
+            }
+            if !matches(phrase, &self.session.create.seed) {
+                return Err(MoltError::Create(
+                    "the re-typed phrase does not match".to_string(),
+                ));
+            }
+            self.session.create.backup_confirmed = true;
+            self.session
+                .create
+                .run
+                .log
+                .push("✓ recovery phrase backed up".to_string());
+            self.maybe_finalize();
+            self.emit_session(SessionScope::Full);
+            return Ok(Reply::Ack);
+        }
+        // joiner side: paused awaiting the backup confirmation
+        if self.session.join.awaiting_backup {
+            if !matches(phrase, &self.session.join.seed) {
+                return Err(MoltError::Join(
+                    "the re-typed phrase does not match".to_string(),
+                ));
+            }
+            if let Some(tx) = self.join_backup.take() {
+                // the paused ritual task waits on this; closed = it moved on
+                let _ = tx.try_send(true);
+            }
+            self.session.join.awaiting_backup = false;
+            self.session.join.run.progress_pct = 92;
+            self.session
+                .join
+                .run
+                .log
+                .push("✓ recovery phrase backed up · waiting for the others".to_string());
+            self.emit_session(SessionScope::Full);
+            return Ok(Reply::Ack);
+        }
+        Err(MoltError::Create(
+            "no ritual awaits a backup confirmation".to_string(),
+        ))
+    }
+
     pub(crate) fn cmd_create_finish(&mut self) -> Result<Reply, MoltError> {
         // "Enter republic" is refused until the ritual sealed a workspace
         // — the engine enforces it for every operator, not just the GUI
@@ -1162,6 +1223,7 @@ impl State {
             run: RunCore::started(),
             invite,
             member,
+            awaiting_backup: false,
             republic: inv.info.republic.clone(),
             rule_m: inv.info.threshold,
             rule_n: inv.info.members,
@@ -1232,6 +1294,9 @@ impl State {
         // cmd_join_confirm_charter / cmd_join_decline_charter releases it
         let (confirm_tx, confirm_rx) = tokio::sync::mpsc::channel(1);
         self.join_confirm = Some(confirm_tx);
+        // …and the phrase-backup gate right after it (❻½)
+        let (backup_tx, backup_rx) = tokio::sync::mpsc::channel(1);
+        self.join_backup = Some(backup_tx);
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return self.cmd_net_join_failed("engine stopped".to_string(), Some(generation));
         };
@@ -1251,6 +1316,7 @@ impl State {
                 generation,
             },
             confirm_rx,
+            backup_rx,
             cmd_tx.downgrade(),
         ));
         Ok(Reply::Ack)
@@ -1412,6 +1478,7 @@ impl State {
         // (finished) join task can't retroactively touch the reset run
         self.join_generation += 1;
         self.join_confirm = None;
+        self.join_backup = None;
         // every roster member just took part in the join ritual's seal —
         // a real sighting for each of them
         let now = self.presence_now();
@@ -1899,6 +1966,7 @@ impl State {
         self.session.join.run.outcome = 2;
         self.session.join.awaiting_ratify = false;
         self.join_confirm = None;
+        self.join_backup = None;
         self.session.join.run.log.push(format!("✗ join failed: {error}"));
         // the headline is what the operator READS: a few words, large, in the
         // signal colour. The sentence above stays in the log for the detail.
@@ -1942,6 +2010,7 @@ impl State {
     pub(crate) fn invalidate_join(&mut self) {
         self.join_generation += 1;
         self.join_confirm = None;
+        self.join_backup = None;
         if let Some(task) = self.join_task.take() {
             task.abort();
         }
@@ -2077,12 +2146,20 @@ impl State {
             let _ = tx.try_send(true);
         }
         self.session.join.awaiting_ratify = false;
+        // straight into the backup step (❻½): the signature is on its way,
+        // the ritual now waits for THIS member's phrase proof
+        self.session.join.awaiting_backup = true;
         self.session.join.run.progress_pct = 88;
         self.session
             .join
             .run
             .log
             .push("✓ you ratified the charter · sealing your signature".to_string());
+        self.session
+            .join
+            .run
+            .log
+            .push("→ save your recovery phrase - re-type it to confirm".to_string());
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }

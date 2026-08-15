@@ -110,8 +110,21 @@ async fn found_pair(root: &std::path::Path, url: &str) -> (WalletHandle, WalletH
     })
     .await
     .expect("charter proposed");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
     wait_for(&b, "walter to see the charter", |s| s.join.awaiting_ratify).await;
     b.execute(Command::JoinConfirmCharter).await.expect("ratify");
+    {
+        let seed_ = read_session(&b).await.join.seed.clone();
+        b.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("joiner backup confirm");
+    }
     wait_for(&a, "the founding to seal", |s| s.create.run.outcome == 1).await;
     a.execute(Command::CreateFinish).await.expect("create finish");
     wait_for(&b, "the join to seal", |s| {

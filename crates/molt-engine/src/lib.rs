@@ -879,6 +879,11 @@ pub(crate) struct State {
     /// ratification (`JoinConfirmCharter` sends `true`; cancel drops it). Set
     /// while a join is paused at the ratification step, else `None`.
     pub(crate) join_confirm: Option<mpsc::Sender<bool>>,
+    /// The joiner's phrase-backup gate (`seed_backup_confirmation.md` ❻½):
+    /// the member task blocks on the paired receiver after ratifying;
+    /// `cmd_confirm_seed_backup` releases it. Dropped on invalidation, so a
+    /// torn-down join ends the wait.
+    pub(crate) join_backup: Option<mpsc::Sender<bool>>,
     /// Whether workspaces persist to disk at all ([`spawn`] = false).
     pub(crate) persist: bool,
     /// The shared app/session state (screen, language, settings, …).
@@ -1001,6 +1006,7 @@ impl State {
             recover_ctx: None,
             recover_transport: std::sync::Arc::new(std::sync::Mutex::new(None)),
             join_confirm: None,
+            join_backup: None,
             persist,
             session,
             store,
@@ -1379,6 +1385,13 @@ impl State {
                 from,
                 generation,
             } => self.cmd_net_seal_signed(seat, sig, from, generation),
+            Command::ConfirmSeedBackup { phrase } => self.cmd_confirm_seed_backup(&phrase),
+            Command::NetBackupConfirmed {
+                seat,
+                sig,
+                from,
+                generation,
+            } => self.cmd_net_backup_confirmed(seat, sig, from, generation),
             Command::RecoverInviteStart { member } => self.cmd_recover_invite_start(member),
             Command::RecoverStart { link, phrase } => self.cmd_recover_start(link, phrase),
             Command::NetRecoverSealed {
@@ -1567,6 +1580,10 @@ mod tests {
     /// members asynchronously (activate → key → seal), so we poll the
     /// session until the workspace is sealed (`create.run.outcome == 1`).
     async fn await_founding(w: &WalletHandle) {
+        // the ❻½ gate: the sim members attest automatically, but the
+        // FOUNDER's own phrase backup must be confirmed before anything
+        // seals — the helper plays that human once the seed is visible
+        let mut confirmed = false;
         for _ in 0..600 {
             let s = read_session(w).await;
             if s.create.run.outcome == 1 {
@@ -1574,6 +1591,12 @@ mod tests {
             }
             if s.create.run.outcome == 2 {
                 panic!("founding failed: {:?}", s.create.run.log);
+            }
+            if !confirmed && !s.create.seed.is_empty() {
+                w.execute(Command::ConfirmSeedBackup { phrase: s.create.seed.clone() })
+                    .await
+                    .expect("confirm backup");
+                confirmed = true;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
@@ -1653,6 +1676,74 @@ mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
+    }
+
+    /// seed_backup_confirmation.md keystone (❻½): an all-ratified founding
+    /// does NOT finalize — nothing lands on disk — until the founder's own
+    /// recovery-phrase backup is confirmed (sim members auto-confirm
+    /// theirs). A wrong re-typed phrase is refused; the right one seals.
+    #[test]
+    fn founding_waits_for_the_backup_confirmation_before_writing() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        rt().block_on(async {
+            let ws_dir = tmp.path().join("workspaces");
+            let session = SessionView {
+                workspaces: Vec::new(),
+                settings: SessionSettings {
+                    workspace_dir: ws_dir.display().to_string(),
+                    ..SessionSettings::default()
+                },
+                ..SessionView::default()
+            };
+            let w = __spawn_sim_founding(GroupConfig::demo(), session, true);
+            w.execute(Command::CreateStart {
+                name: "Backup".to_string(),
+                member: "petra".to_string(),
+                threshold: 2,
+                members: 3,
+                relays: Vec::new(),
+            })
+            .await
+            .expect("create start");
+            // every sim seat ratifies AND auto-confirms its backup…
+            let mut seen_all = false;
+            for _ in 0..600 {
+                let s = read_session(&w).await;
+                assert_ne!(s.create.run.outcome, 2, "founding failed: {:?}", s.create.run.log);
+                if s.create.seats.iter().all(|x| x.state >= 2) && !s.create.seats.is_empty() {
+                    seen_all = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            assert!(seen_all, "sim seats never ratified");
+            // …but WITHOUT the founder's own confirmation nothing seals and
+            // nothing is written (grace window, then re-check)
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let s = read_session(&w).await;
+            assert_eq!(
+                s.create.run.outcome, 0,
+                "the founding sealed without the founder's backup confirmation: {:?}",
+                s.create.run.log
+            );
+            let disk_empty = !ws_dir.exists()
+                || std::fs::read_dir(&ws_dir).map(|d| d.count() == 0).unwrap_or(true);
+            assert!(disk_empty, "the ritual wrote to disk before the last confirmation");
+            // a wrong re-typed phrase is refused, the ritual keeps waiting
+            let wrong = w
+                .execute(Command::ConfirmSeedBackup { phrase: "wrong words entirely".to_string() })
+                .await;
+            assert!(wrong.is_err(), "a wrong phrase must be refused");
+            assert_eq!(read_session(&w).await.create.run.outcome, 0);
+            // the right phrase confirms, the founding finalizes, disk exists
+            let seed = read_session(&w).await.create.seed.clone();
+            w.execute(Command::ConfirmSeedBackup { phrase: seed })
+                .await
+                .expect("confirm backup");
+            await_founding(&w).await;
+            let s = read_session(&w).await;
+            assert_eq!(s.active_workspace.len(), 64);
+        });
     }
 
     /// The "it survives a restart" keystone: found a republic on a storage
@@ -4051,7 +4142,9 @@ mod tests {
                     assert_eq!(s.create.seed.split(' ').count(), 24);
                     assert_eq!(s.create.seats.len(), 2);
                     for seat in &s.create.seats {
-                        assert_eq!(seat.state, 2, "every seat sealed");
+                        // 3 = sealed AND backup-confirmed (❻½): a finalized
+                        // founding implies every seat attested its backup
+                        assert_eq!(seat.state, 4, "every seat sealed + backup-confirmed");
                         assert!(!seat.member.is_empty(), "the member named itself");
                         // a SIMULATED founding mints preview-only links (the
                         // path shape, no handover) — the preview parser is
