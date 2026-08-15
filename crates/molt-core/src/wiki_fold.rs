@@ -210,7 +210,8 @@ fn void(msg: impl Into<String>) -> VoidReason {
 
 /// A path the tree accepts: non-empty, relative, nested up to eight
 /// segments (folders nest since 2026-08-15), no empty / dot segments.
-fn valid_path(p: &str) -> bool {
+/// Public: the UI's rescue refuses up front what the fold would refuse.
+pub fn valid_path(p: &str) -> bool {
     if p.is_empty() || p.starts_with('/') || p.ends_with('/') {
         return false;
     }

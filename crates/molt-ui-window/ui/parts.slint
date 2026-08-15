@@ -1195,10 +1195,11 @@ export component DecisionTable inherits Rectangle {
                     // (a patch title carries its count summary); the
                     // content lives behind the discussion jump. A
                     // superseded patch says so here (the base moved).
-                    text: r.superseded ? Strings.pc-superseded
-                        : (r.patch-op || r.charter-op ? "" : (r.proposed != "" ? r.proposed : r.current));
+                    text: r.withdrawn ? "↩ \{Strings.pc-withdrawn}"
+                        : (r.superseded ? Strings.pc-superseded
+                        : (r.patch-op || r.charter-op ? "" : (r.proposed != "" ? r.proposed : r.current)));
                     horizontal-stretch: 1;
-                    color: r.superseded ? Theme.moved : Theme.dim;
+                    color: r.superseded || r.withdrawn ? Theme.moved : Theme.dim;
                     font-size: Theme.fs-body;
                     vertical-alignment: center;
                     overflow: elide;
@@ -1304,6 +1305,8 @@ export component ProposalCard inherits Rectangle {
     in property <bool> compact: false;
     callback approve();
     callback decline();
+    // pull back an OWN pending proposal (proposer only)
+    callback withdraw();
     // jump into the proposal's discussion — its patch channel on the chat
     // bus (channels are views over the ONE log, chat_bus.md)
     callback discuss();
@@ -1382,21 +1385,24 @@ export component ProposalCard inherits Rectangle {
         }
         // the verdict line of a retired proposal: a decline names its
         // vetoer; a SUPERSEDE is mechanical — the base moved, nobody voted
-        if root.p.declined-by != "" || root.p.superseded: HorizontalLayout {
+        if root.p.declined-by != "" || root.p.superseded || root.p.withdrawn: HorizontalLayout {
             spacing: 8px;
             alignment: start;
-            if !root.p.superseded: Text {
+            if !root.p.superseded && !root.p.withdrawn: Text {
                 text: "👎";
                 font-family: "Twemoji Mozilla";
                 font-size: 22px;
                 vertical-alignment: center;
             }
             Text {
-                text: root.p.superseded ? Strings.pc-superseded
+                text: root.p.withdrawn
+                    ? (root.p.declined-when == "" ? "↩ \{Strings.pc-withdrawn}"
+                        : "↩ \{Strings.pc-withdrawn} · \{root.p.declined-when}")
+                    : (root.p.superseded ? Strings.pc-superseded
                     : (root.p.declined-when == ""
                         ? "\{Strings.pc-declined-by} \{root.p.declined-by}"
-                        : "\{Strings.pc-declined-by} \{root.p.declined-by} · \{root.p.declined-when}");
-                color: root.p.superseded ? Theme.moved : Theme.bad;
+                        : "\{Strings.pc-declined-by} \{root.p.declined-by} · \{root.p.declined-when}"));
+                color: root.p.withdrawn || root.p.superseded ? Theme.moved : Theme.bad;
                 font-size: Theme.fs-body;
                 font-weight: 700;
                 vertical-alignment: center;
@@ -1706,20 +1712,17 @@ export component ProposalCard inherits Rectangle {
                 }
             }
             // pull back — the proposer's first-class exit, own proposals
-            // only (`p.mine`). NOT armed yet: the engine withdraw (wire
-            // event + convergence) is designed in molt-engine
-            // proposals.rs at cmd_decline — until it lands, the honest
-            // state is a grayed button, not a fake one.
+            // only (`p.mine`; the engine refuses anyone else)
             if !root.read-only && root.p.mine: AppButton {
                 emoji: "↩️";
                 label: Strings.pc-withdraw;
-                enabled: false;
-                tooltip: Strings.not-implemented-yet;
-                clicked => { }
+                clicked => {
+                    root.withdraw();
+                }
             }
             if !root.compact: AppButton {
                 emoji: "💬";
-                label: Strings.pc-discuss;
+                label: root.p.unread > 0 ? "\{Strings.pc-discuss} (\{root.p.unread})" : Strings.pc-discuss;
                 clicked => {
                     root.discuss();
                 }

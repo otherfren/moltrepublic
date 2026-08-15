@@ -139,6 +139,10 @@ export struct ProposalRow {
     // the vote ended by APPLYING — its changes live in the base, so the
     // card never offers the rescue
     applied: bool,
+    // the proposer pulled it back — "pulled back", never "declined by"
+    withdrawn: bool,
+    // unread entries in the vote's discussion channel (💬 badge; 0 = none)
+    unread: int,
 }
 
 // One member of a republic with its last-sync info (mock data).
@@ -432,6 +436,8 @@ export global WikiState {
     callback nav-move-root(int); // file menu: out of its folder
     callback new-folder-in(string); // folder menu: subfolder inside
     callback nav-folder-move-root(string); // folder menu: back to root
+    callback nav-mark-folder(string); // folder click: mark (keyboard target)
+    callback rename-marked(); // F2 on the marked file or folder
     callback tab-focus(int);
     callback tab-close(int);
     callback tab-close-all();
@@ -1173,6 +1179,7 @@ export global Strings {
     in property <string> ed-paste;
     in property <string> pc-show-patch;
     in property <string> pc-withdraw;
+    in property <string> pc-withdrawn;
     in property <string> cw-backup-confirm;
     in property <string> pc-superseded;
     in property <string> mem-rescue;

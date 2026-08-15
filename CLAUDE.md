@@ -370,8 +370,12 @@ both verified red-without/green-with).
   survive a save; an *incompatible* interface change panics the running app —
   restart it, still no recompile). The script uses its own `target/dev-ui`
   cache so the feature set never thrashes the normal build's cache (first fill
-  is a one-time full-stack build, but RAM-light). Dev-only: never enable the
-  feature by default in a Cargo.toml. The .slint compiler still runs fully, so
+  is a one-time full-stack build, but RAM-light). The SAME mechanism runs the
+  GUI-logic TESTS in seconds: `CARGO_TARGET_DIR=target/dev-ui
+  SLINT_LIVE_PREVIEW=1 cargo test -p molt-ui --lib --features
+  molt-ui/live-preview` (verified 2026-08-15: 129 tests in ~11 s incl. build)
+  — iterate there, and run the expensive window build ONCE per change-set.
+  Dev-only: never enable the feature by default in a Cargo.toml. The .slint compiler still runs fully, so
   `dev-ui.sh build` catches .slint errors and API breaks in molt-ui; the
   authoritative pre-commit check remains one normal
   `cargo build -p molt-ui-window -p molt-ui` (once per change-set, not per

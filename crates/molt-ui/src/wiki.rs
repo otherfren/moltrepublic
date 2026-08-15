@@ -253,6 +253,9 @@ pub struct Wiki {
     tabs: Vec<DocId>,
     active: Option<DocId>,
     marked: Option<DocId>,
+    /// A marked FOLDER row (exclusive with `marked`) — the target of the
+    /// keyboard verbs F2/Enter/Del when a folder was clicked last.
+    marked_folder: Option<String>,
     pub editing: bool,
     renaming: Option<DocId>,
     /// A folder row's inline rename (folders have no DocId).
@@ -312,6 +315,7 @@ impl Wiki {
             tabs: first.into_iter().collect(),
             active: first,
             marked: first,
+            marked_folder: None,
             editing: false,
             renaming: None,
             renaming_folder: None,
@@ -332,6 +336,7 @@ impl Wiki {
             tabs: Vec::new(),
             active: None,
             marked: None,
+            marked_folder: None,
             editing: false,
             renaming: None,
             renaming_folder: None,
@@ -423,13 +428,27 @@ impl Wiki {
         for folder in parents {
             self.ensure_folder_chain(&folder, false);
         }
-        self.folders.retain(|f| {
-            f.added
-                || self
-                    .docs
-                    .iter()
-                    .any(|d| d.path.starts_with(&format!("{}/", f.name)))
-        });
+        let keep: Vec<String> = self
+            .folders
+            .iter()
+            .filter(|f| {
+                let prefix = format!("{}/", f.name);
+                f.added
+                    || self.docs.iter().any(|d| d.path.starts_with(&prefix))
+                    // an added EMPTY subfolder keeps its ancestors alive too
+                    || self
+                        .folders
+                        .iter()
+                        .any(|g| g.added && g.name.starts_with(&prefix))
+            })
+            .map(|f| f.name.clone())
+            .collect();
+        self.folders.retain(|f| keep.contains(&f.name));
+        if let Some(m) = &self.marked_folder {
+            if !self.folders.iter().any(|f| f.name == *m) {
+                self.marked_folder = None;
+            }
+        }
     }
 
     /// The sample base — a TEST FIXTURE only since the real fold landed
@@ -509,7 +528,13 @@ impl Wiki {
         let mut children: Vec<&Folder> = self
             .folders
             .iter()
-            .filter(|f| folder_parent(&f.name) == parent)
+            .filter(|f| match folder_parent(&f.name) {
+                p if p == parent => true,
+                // an ORPHAN (its parent entry vanished) surfaces at root —
+                // invisible rows that still occupy their name are worse
+                Some(p) if parent.is_none() => !self.folders.iter().any(|o| o.name == p),
+                _ => false,
+            })
             .collect();
         children.sort_by(|a, b| a.name.cmp(&b.name));
         for f in children {
@@ -526,7 +551,7 @@ impl Wiki {
                 path: f.name.clone(),
                 depth,
                 open: f.open,
-                marked: false,
+                marked: self.marked_folder.as_deref() == Some(f.name.as_str()),
                 status: if f.added { Status::Added } else { Status::Unchanged },
                 renaming: self.renaming_folder.as_deref() == Some(f.name.as_str()),
             });
@@ -664,8 +689,50 @@ impl Wiki {
     pub fn mark(&mut self, id: DocId) {
         if self.doc(id).is_some() {
             self.marked = Some(id);
+            self.marked_folder = None;
             self.renaming = None;
         }
+    }
+
+    /// A folder row's click marks it — exclusively with the file mark, so
+    /// the keyboard verbs have ONE target.
+    pub fn mark_folder(&mut self, path: &str) {
+        if self.folders.iter().any(|f| f.name == path) {
+            self.marked_folder = Some(path.to_string());
+            self.marked = None;
+        }
+    }
+
+    /// F2: inline-rename whatever is marked.
+    pub fn rename_marked(&mut self) {
+        if let Some(f) = self.marked_folder.clone() {
+            self.rename_folder_start(&f);
+        } else if let Some(id) = self.marked {
+            self.rename_start(id);
+        }
+    }
+
+    /// Enter: open the marked file, or fold/unfold the marked folder.
+    pub fn open_marked(&mut self) {
+        if let Some(f) = self.marked_folder.clone() {
+            self.toggle_folder(&f);
+        } else if let Some(id) = self.marked {
+            self.open(id);
+        }
+    }
+
+    /// Del / toolbar 🗑️: delete the marked file or folder (subtree).
+    pub fn delete_marked(&mut self) {
+        if let Some(f) = self.marked_folder.clone() {
+            self.delete_folder(&f);
+        } else if let Some(id) = self.marked {
+            self.delete(id);
+        }
+    }
+
+    /// Any mark set — arms the keyboard verbs and the toolbar delete.
+    pub fn has_marked(&self) -> bool {
+        self.marked.is_some() || self.marked_folder.is_some()
     }
 
     /// Open route (double-click / Enter / menu-Open): mark + open as tab +
@@ -755,7 +822,11 @@ impl Wiki {
     fn rescue_file(&mut self, f: &molt_core::wiki_fold::PatchFile) -> bool {
         use molt_core::wiki_fold::apply_hunks;
         if f.added {
-            // a fresh file: only onto a free path
+            // a fresh file: only onto a free path the FOLD would accept —
+            // a deeper/hostile path would re-propose straight into VOID
+            if !molt_core::wiki_fold::valid_path(&f.new_path) {
+                return false;
+            }
             if self.docs.iter().any(|d| d.path == f.new_path && !d.deleted) {
                 return false;
             }
@@ -767,7 +838,9 @@ impl Wiki {
             let label = f.new_path.rsplit('/').next().unwrap_or(&f.new_path).to_string();
             if let Some((folder, _)) = f.new_path.rsplit_once('/') {
                 let folder = folder.to_string();
-                self.ensure_folder_chain(&folder, true);
+                for name in self.ensure_folder_chain(&folder, true) {
+                    self.stack.push(Change::CreatedFolder { name });
+                }
             }
             self.docs.push(Doc {
                 id,
@@ -859,8 +932,11 @@ impl Wiki {
     }
 
     /// Insert every missing ancestor of `folder` (a deep path needs its
-    /// whole chain of rows, not only the direct parent).
-    fn ensure_folder_chain(&mut self, folder: &str, added: bool) {
+    /// whole chain of rows, not only the direct parent). Returns the paths
+    /// it actually created, shallowest first — a rescue records them as
+    /// stack entries so undo can take them back.
+    fn ensure_folder_chain(&mut self, folder: &str, added: bool) -> Vec<String> {
+        let mut created = Vec::new();
         let mut path = String::new();
         for seg in folder.split('/') {
             if !path.is_empty() {
@@ -873,8 +949,10 @@ impl Wiki {
                     open: true,
                     added,
                 });
+                created.push(path.clone());
             }
         }
+        created
     }
 
     pub fn toggle_folder(&mut self, name: &str) {
@@ -1118,6 +1196,13 @@ impl Wiki {
         if self.renaming_folder.as_deref() == Some(old) {
             self.renaming_folder = None;
         }
+        if let Some(m) = &self.marked_folder {
+            if m == old {
+                self.marked_folder = Some(new.to_string());
+            } else if let Some(rest) = m.strip_prefix(&prefix) {
+                self.marked_folder = Some(format!("{new}/{rest}"));
+            }
+        }
         Ok(())
     }
 
@@ -1204,29 +1289,35 @@ impl Wiki {
     /// target): a folder row moves the file INTO that folder, a file row
     /// moves it NEXT TO that file, past the list end means root. The
     /// pane's drag only measures rows; the semantics live here.
+    /// Test seam: resolve + move in one step (the live UI resolves the
+    /// target synchronously and defers only the mutation — slint#6426).
+    #[cfg(test)]
     pub fn drop_on_row(&mut self, id: DocId, row_idx: usize) -> Result<(), String> {
-        let rows = self.nav_rows();
-        let folder = match rows.get(row_idx) {
-            Some(r) if r.kind == RowKind::Folder => Some(r.path.clone()),
-            Some(r) => self
-                .doc(r.id)
-                .and_then(|d| d.folder().map(String::from)),
-            None => None,
-        };
+        let folder = self.drop_target(row_idx);
         self.move_to(id, folder.as_deref())
+    }
+
+    /// The folder a drop on navigator row `row_idx` addresses (`None` =
+    /// root). Public so the UI can resolve the target SYNCHRONOUSLY in the
+    /// pointer callback — the mutation is deferred one tick (slint#6426),
+    /// and a model re-sync in that gap must not re-point the index.
+    pub fn drop_target(&self, row_idx: usize) -> Option<String> {
+        let rows = self.nav_rows();
+        match rows.get(row_idx) {
+            Some(r) if r.kind == RowKind::Folder => Some(r.path.clone()),
+            Some(r) => self.doc(r.id).and_then(|d| d.folder().map(String::from)),
+            None => None,
+        }
     }
 
     /// Drop a dragged FOLDER onto navigator row `row_idx`: it moves UNDER
     /// the target folder with its whole subtree (a file row targets its
     /// folder, past the end means root). Onto itself or a descendant
     /// refuses — that would be a cycle.
+    /// Test seam — see [`Wiki::drop_on_row`].
+    #[cfg(test)]
     pub fn drop_folder_on_row(&mut self, name: &str, row_idx: usize) -> Result<(), String> {
-        let rows = self.nav_rows();
-        let folder = match rows.get(row_idx) {
-            Some(r) if r.kind == RowKind::Folder => Some(r.path.clone()),
-            Some(r) => self.doc(r.id).and_then(|d| d.folder().map(String::from)),
-            None => None,
-        };
+        let folder = self.drop_target(row_idx);
         self.move_folder_under(name, folder.as_deref())
     }
 
@@ -1236,7 +1327,8 @@ impl Wiki {
         self.move_folder_under(name, None)
     }
 
-    fn move_folder_under(&mut self, name: &str, target: Option<&str>) -> Result<(), String> {
+    /// Public twin of the drop: the UI calls it with a PRE-RESOLVED target.
+    pub fn move_folder_under(&mut self, name: &str, target: Option<&str>) -> Result<(), String> {
         if !self.folders.iter().any(|f| f.name == name) {
             return Err("unknown folder".to_string());
         }
@@ -1314,7 +1406,9 @@ impl Wiki {
         for id in ids {
             self.delete(id);
         }
-        // deepest-first, so undo re-adds parents before children
+        // pushed deepest-FIRST (parent last), so LIFO undo re-adds the
+        // parent before its children — the other order restores an
+        // invisible orphan on a single undo (review 2026-08-15)
         let mut removable: Vec<(String, bool)> = self
             .folders
             .iter()
@@ -1325,11 +1419,14 @@ impl Wiki {
             })
             .map(|f| (f.name.clone(), f.added))
             .collect();
-        removable.sort_by_key(|(n, _)| n.split('/').count());
+        removable.sort_by_key(|(n, _)| std::cmp::Reverse(n.split('/').count()));
         for (n, was_added) in removable {
             self.folders.retain(|f| f.name != n);
             if self.renaming_folder.as_deref() == Some(n.as_str()) {
                 self.renaming_folder = None;
+            }
+            if self.marked_folder.as_deref() == Some(n.as_str()) {
+                self.marked_folder = None;
             }
             self.stack.push(Change::DeletedFolder {
                 label: format!("{n}/"),
@@ -1501,7 +1598,10 @@ impl Wiki {
                 }
             }
             Change::CreatedFolder { ref name } => {
-                if self.docs.iter().any(|d| d.folder() == Some(name.as_str())) {
+                let prefix = format!("{name}/");
+                if self.docs.iter().any(|d| d.path.starts_with(&prefix))
+                    || self.folders.iter().any(|f| f.name.starts_with(&prefix))
+                {
                     return Err("folder not empty".to_string());
                 }
                 self.folders.retain(|f| !(f.added && f.name == *name));
@@ -1599,6 +1699,7 @@ impl Wiki {
         // folders follow the reverted docs: a renamed or merged base folder
         // returns under its base name, empty added ones go
         self.renaming_folder = None;
+        self.marked_folder = None;
         let referenced: Vec<String> = self
             .docs
             .iter()
@@ -3047,6 +3148,35 @@ diff --git a/gone.md b/gone.md\n--- a/gone.md\n+++ b/gone.md\n@@ -1,1 +1,1 @@\n-
         assert_eq!(rows[2].depth, 2);
     }
 
+    /// F2 renames whatever is marked — a file or a folder; clicking a
+    /// folder marks it (exclusively with the file mark).
+    #[test]
+    fn f2_renames_the_marked_file_or_folder() {
+        let mut w = Wiki::sample();
+        let glossary = id_of(&w, "glossary.md");
+        w.mark(glossary);
+        w.rename_marked();
+        assert_eq!(w.renaming(), Some(glossary));
+        w.rename_cancel();
+        w.mark_folder("decisions");
+        assert_eq!(w.marked(), None, "folder mark clears the file mark");
+        assert!(w.nav_rows().iter().any(|r| r.path == "decisions" && r.marked));
+        w.rename_marked();
+        assert_eq!(w.renaming_folder(), Some("decisions"));
+        w.rename_cancel();
+        // Enter toggles a marked folder shut; Del deletes it
+        w.open_marked();
+        assert!(
+            !w.nav_rows().iter().any(|r| r.id == id_of(&w, "2026-06-14-relay.md")),
+            "enter folded the marked folder shut"
+        );
+        w.delete_marked();
+        assert!(w
+            .nav_rows()
+            .iter()
+            .all(|r| r.path != "decisions" || r.status == Status::Unchanged));
+    }
+
     /// Deleting a folder with a subtree of drafts removes everything;
     /// undo walks it back.
     #[test]
@@ -3060,6 +3190,12 @@ diff --git a/gone.md b/gone.md\n--- a/gone.md\n+++ b/gone.md\n@@ -1,1 +1,1 @@\n-
         w.delete_folder("a");
         assert!(w.nav_rows().is_empty());
         w.undo().expect("undo folders");
+        // the FIRST undo must restore the PARENT — the other order re-adds
+        // an invisible orphaned child (review 2026-08-15 finding 1)
+        assert!(
+            w.nav_rows().iter().any(|r| r.path == "a"),
+            "the first undo restores a visible row"
+        );
         w.undo().expect("undo folders 2");
         w.undo().expect("undo file");
         assert!(

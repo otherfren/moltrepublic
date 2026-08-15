@@ -915,6 +915,7 @@ export component AppWindow inherits Window {
     callback relays-draft-remove(int);
     callback approve(int);
     callback decline(int);
+    callback withdraw(int); // pull back an OWN pending proposal
     // select the main-view surface (routed to a SelectSurface command; the
     // sub-view resets to the surface's default)
     callback select-surface(string);
@@ -4847,6 +4848,11 @@ export component AppWindow inherits Window {
                             // reported half-page "Proposal:" wreck
                             if (root.selected-channel-org || root.selected-decision.patch-op)
                                 && root.selected-decision.id > 0: ProposalCard {
+                                // content-sized: a Rectangle's implicit
+                                // stretch is 1 and would split the leftover
+                                // height with the chat (the half-page
+                                // "Proposal:" header, 2026-08-15)
+                                vertical-stretch: 0;
                                 p: root.selected-decision;
                                 compact: true;
                                 org-img: root.org-img;
@@ -4859,6 +4865,9 @@ export component AppWindow inherits Window {
                                 }
                                 decline => {
                                     root.decline(root.selected-decision.id);
+                                }
+                                withdraw => {
+                                    root.withdraw(root.selected-decision.id);
                                 }
                                 view-patch => {
                                     root.patch-view-text = root.selected-decision.proposed;
@@ -5132,7 +5141,9 @@ export component AppWindow inherits Window {
                                     }
                                     // a discussion is vote-bound: jump back
                                     // to the ballot this channel belongs to
-                                    if root.selected-channel-votable: Rectangle {
+                                    // - while it is OPEN; a decided vote
+                                    // has no ballot to jump to (2026-08-15)
+                                    if root.selected-channel-votable && !root.selected-channel-closed: Rectangle {
                                         width: jv-t.width + 14px;
                                         height: 20px;
                                         y: (parent.height - self.height) / 2;
@@ -6414,6 +6425,9 @@ export component AppWindow inherits Window {
                                             approve => {
                                                 root.approve(p.id);
                                             }
+                                            withdraw => {
+                                                root.withdraw(p.id);
+                                            }
                                             decline => {
                                                 root.decline(p.id);
                                             }
@@ -6665,6 +6679,9 @@ export component AppWindow inherits Window {
                                             p: p;
                                             approve => {
                                                 root.approve(p.id);
+                                            }
+                                            withdraw => {
+                                                root.withdraw(p.id);
                                             }
                                             decline => {
                                                 root.decline(p.id);

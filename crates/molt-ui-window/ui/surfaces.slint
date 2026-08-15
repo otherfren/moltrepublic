@@ -769,6 +769,10 @@ export component MemoryPane inherits VerticalLayout {
                             WikiState.delete-marked();
                             return accept;
                         }
+                        if (event.text == Key.F2 && WikiState.has-marked) {
+                            WikiState.rename-marked();
+                            return accept;
+                        }
                         reject
                     }
                 VerticalLayout {
@@ -838,7 +842,14 @@ export component MemoryPane inherits VerticalLayout {
                                 border-radius: parent.border-radius;
                                 border-width: parent.drop-target ? Theme.border-w : 0px;
                                 border-color: Theme.accent;
-                                background: fta.has-hover ? Theme.zebra : transparent;
+                                background: r.marked ? Theme.accent-soft : (fta.has-hover ? Theme.zebra : transparent);
+                                if r.marked: Rectangle {
+                                    x: 0;
+                                    y: 0;
+                                    width: 3px;
+                                    height: parent.height;
+                                    background: Theme.accent;
+                                }
                                 fomenu := ContextMenuArea {
                                     Menu {
                                         MenuItem {
@@ -953,6 +964,7 @@ export component MemoryPane inherits VerticalLayout {
                                             // drop, not a fold toggle
                                             nav-scope.focus();
                                             if (!root.drag-was) {
+                                                WikiState.nav-mark-folder(r.path);
                                                 WikiState.nav-toggle-folder(r.path);
                                             }
                                             root.drag-was = false;

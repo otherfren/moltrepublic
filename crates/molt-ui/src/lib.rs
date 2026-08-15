@@ -1866,6 +1866,21 @@ pub fn run_app(
             );
         });
     }
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        ui.on_withdraw(move |id| {
+            issue(
+                &rt,
+                &w,
+                &weak,
+                Command::Withdraw {
+                    proposal: ProposalId(id as u64),
+                },
+            );
+        });
+    }
 
     // --- live-mirror: re-read and re-render on every engine change ---
     {
@@ -3795,6 +3810,11 @@ struct ProposalRowData {
     /// The vote ended by APPLYING — an applied patch's changes live in
     /// the base, so the card never offers the rescue.
     applied: bool,
+    /// The proposer pulled it back — "pulled back", never "declined by".
+    withdrawn: bool,
+    /// Unread messages in this proposal's discussion channel (the 💬
+    /// button's badge); 0 = caught up.
+    unread: i32,
 }
 
 /// Read status + every surface snapshot into a bundle the window can apply.
@@ -4162,7 +4182,14 @@ async fn gather_surfaces(
     let surfaces: Vec<SurfaceData> = snaps
         .iter()
         .map(|(sf, snap)| {
-            surface_data(lang, *sf, snap, &member, (*sf == Surface::Chat).then_some(&ctx))
+            surface_data(
+                lang,
+                *sf,
+                snap,
+                &member,
+                (*sf == Surface::Chat).then_some(&ctx),
+                &unread,
+            )
         })
         .collect();
     let bundle = SurfacesBundle {
@@ -4661,7 +4688,19 @@ fn surface_data(
     snap: &SurfaceSnapshot,
     me: &str,
     chat_ctx: Option<&ChatViewCtx>,
+    unread: &HashMap<String, usize>,
 ) -> SurfaceData {
+    // the 💬 badge: unread entries in a proposal's discussion channel
+    let badge = |row: ProposalRowData| -> ProposalRowData {
+        let n = unread
+            .get(&format!("patch:{}", row.id))
+            .copied()
+            .unwrap_or(0);
+        ProposalRowData {
+            unread: i32::try_from(n).unwrap_or(i32::MAX),
+            ..row
+        }
+    };
     let mut log: Vec<LogLineData> = if sf == Surface::Chat {
         let msgs = chat_messages(snap);
         // the retention window ("delete chat after N days") is ENGINE
@@ -4713,12 +4752,18 @@ fn surface_data(
     };
     let no_quotes = HashMap::new();
     annotate_chat_log(&mut log, chat_ctx.map_or(&no_quotes, |c| &c.quotes));
-    let pending: Vec<ProposalRowData> =
-        snap.pending.iter().map(|p| proposal_row(lang, p)).collect();
+    let pending: Vec<ProposalRowData> = snap
+        .pending
+        .iter()
+        .map(|p| badge(proposal_row(lang, p)))
+        .collect();
     // the Declined view empties on the chat-retention rhythm — engine
     // semantics too (the read arrives pre-filtered on declined_at)
-    let declined: Vec<ProposalRowData> =
-        snap.declined.iter().map(|p| proposal_row(lang, p)).collect();
+    let declined: Vec<ProposalRowData> = snap
+        .declined
+        .iter()
+        .map(|p| badge(proposal_row(lang, p)))
+        .collect();
     // the Accepted table: the applied history in apply order (newest
     // first), each proposal-backed row carrying the voters its sealed
     // block proves; a row of unknown origin (legacy dump) still shows,
@@ -4870,6 +4915,8 @@ fn to_proposal_row(p: &ProposalRowData) -> ProposalRow {
         mine: p.mine,
         superseded: p.superseded,
         applied: p.applied,
+        withdrawn: p.withdrawn,
+        unread: p.unread,
     }
 }
 
@@ -4996,6 +5043,8 @@ fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRowData {
         mine: p.mine,
         superseded: p.superseded,
         applied: p.state == molt_core::ProposalState::Applied,
+        withdrawn: p.withdrawn,
+        unread: 0, // filled by the caller where the unread map is at hand
     }
 }
 
@@ -5066,7 +5115,13 @@ fn chat_line(lang: i32, m: &ChatMessage, me: &str, roster: &[String]) -> LogLine
             m.id.to_string()
         },
         lead: m.from.clone(),
-        text: m.body.clone(),
+        // system lines drop an embedded raw diff (legacy decision
+        // summaries carried one; the card's raw-patch button shows it)
+        text: if m.kind.is_user() {
+            m.body.clone()
+        } else {
+            strip_diff_body(&m.body)
+        },
         when: if m.ts > 0 {
             when_label(lang, m.ts)
         } else {
@@ -5612,6 +5667,16 @@ fn quote_sources(msgs: &[ChatMessage]) -> HashMap<String, QuoteSrc> {
 /// legacy rows — rendered quiet via the `system` flag. The text is
 /// deliberately symbols + numbers + user content ("⚖ #4 · title — 2/3"),
 /// so it reads the same in every language and needs no lexicon entry.
+/// Legacy decision summaries embedded the raw diff (the cap kept 160
+/// chars of "diff --git …"); the chat renders the head only — the card's
+/// raw-patch button is the place for the patch.
+fn strip_diff_body(text: &str) -> String {
+    match text.find("diff --git") {
+        Some(pos) => text[..pos].trim_end().to_string(),
+        None => text.to_string(),
+    }
+}
+
 fn system_line_data(text: String) -> LogLineData {
     LogLineData {
         id: String::new(),
@@ -6408,7 +6473,7 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
     if let Some(fresh) = sync_vec_model(&s.get_tabs(), tabs) {
         s.set_tabs(fresh);
     }
-    s.set_has_marked(w.marked().is_some());
+    s.set_has_marked(w.has_marked());
     s.set_editing(w.editing);
     s.set_can_reveal(w.active_id().is_some() && w.active_id() != w.marked());
     // the changeset panel: NET counts + the action stack (visibility is
@@ -6584,16 +6649,11 @@ fn wire_wiki(
     });
     act!(on_fold_all, |w, open: bool| w.set_all_folders(open));
     act!(on_reveal, |w| w.reveal());
-    act!(on_open_marked, |w| {
-        if let Some(id) = w.marked() {
-            w.open(id);
-        }
-    });
-    act!(on_delete_marked, |w| {
-        if let Some(id) = w.marked() {
-            w.delete(id);
-        }
-    });
+    act!(on_open_marked, |w| w.open_marked());
+    act!(on_delete_marked, |w| w.delete_marked());
+    act!(on_rename_marked, |w| w.rename_marked());
+    act!(on_nav_mark_folder, |w, path: slint::SharedString| w
+        .mark_folder(&path));
     act!(on_edit_toggle, |w| {
         if w.active_id().is_some() {
             w.editing = !w.editing;
@@ -6765,6 +6825,9 @@ fn wire_wiki(
         let la = last.clone();
         let weak = ui.as_weak();
         g.on_nav_folder_drop(move |folder, row| {
+            // target resolved synchronously, mutation deferred — see nav-drop
+            let row = usize::try_from(row).unwrap_or(usize::MAX);
+            let target = m.borrow().drop_target(row);
             let m = m.clone();
             let la = la.clone();
             let weak = weak.clone();
@@ -6772,8 +6835,7 @@ fn wire_wiki(
                 let Some(ui) = weak.upgrade() else { return };
                 {
                     let mut w = m.borrow_mut();
-                    let row = usize::try_from(row).unwrap_or(usize::MAX);
-                    if let Err(e) = w.drop_folder_on_row(&folder, row) {
+                    if let Err(e) = w.move_folder_under(&folder, target.as_deref()) {
                         ui.invoke_show_toast_error(e.into());
                     }
                 }
@@ -6877,12 +6939,13 @@ fn wire_wiki(
         let la = last.clone();
         let weak = ui.as_weak();
         g.on_nav_drop(move |id, row| {
-            // DEFERRED out of the pointer callback: a drop restructures
-            // the nav rows, and tearing row elements down while their
-            // TouchArea's pointer-event is still on the stack panics the
-            // slint interpreter ("accessing deleted parent", slint#6426 —
-            // live crash 2026-08-15: file dragged into a fresh folder).
-            // A zero timer runs on the same loop, one tick later.
+            // the TARGET resolves NOW — the row index addresses what the
+            // user saw; a model re-sync inside the deferral gap must not
+            // re-point it. Only the MUTATION defers (slint#6426: tearing
+            // rows down inside their own pointer callback panics the
+            // interpreter — live crash 2026-08-15).
+            let row = usize::try_from(row).unwrap_or(usize::MAX);
+            let target = m.borrow().drop_target(row);
             let m = m.clone();
             let la = la.clone();
             let weak = weak.clone();
@@ -6890,8 +6953,7 @@ fn wire_wiki(
                 let Some(ui) = weak.upgrade() else { return };
                 {
                     let mut w = m.borrow_mut();
-                    let row = usize::try_from(row).unwrap_or(usize::MAX);
-                    if let Err(e) = w.drop_on_row(wiki_doc_id(id), row) {
+                    if let Err(e) = w.move_to(wiki_doc_id(id), target.as_deref()) {
                         ui.invoke_show_toast_error(e.into());
                     }
                 }
@@ -7697,6 +7759,7 @@ lexicon! {
     mem_menu_rename: "Rename", "Umbenennen";
     mem_menu_delete: "Delete", "Löschen";
     mem_menu_move_root: "Move to root", "In die oberste Ebene";
+    pc_withdrawn: "pulled back", "zurückgezogen";
     mem_menu_close_all: "Close all", "Alle schließen";
     mem_menu_close_right: "Close all to the right", "Alle rechts schließen";
     mem_menu_close_left: "Close all to the left", "Alle links schließen";
@@ -7821,6 +7884,7 @@ mod tests {
             by: String::new(),
             mine: false,
             superseded: false,
+            withdrawn: false,
         };
         let row = proposal_row(0, &pv);
         assert!(
@@ -8301,13 +8365,14 @@ mod tests {
                 by: String::new(),
                 mine: false,
                 superseded: false,
+                withdrawn: false,
             }],
             channels: Vec::new(),
             has_archive: false,
             wiki_tree: Vec::new(),
             wiki_rev: 0,
         };
-        let data = surface_data(0, Surface::Memory, &snap, "petra", None);
+        let data = surface_data(0, Surface::Memory, &snap, "petra", None, &HashMap::new());
         assert_eq!(data.log.len(), 2);
         assert_eq!(data.log[0].proposal_id, Some(7));
         assert_eq!(data.log[1].proposal_id, None);
@@ -8338,6 +8403,7 @@ mod tests {
             by: String::new(),
             mine: false,
             superseded: false,
+            withdrawn: false,
         };
         let first_seen = HashMap::from([(4u64, 150u64)]);
         let sys = patch_system_lines(0, 4, &[pv], &HashMap::new(), &first_seen);
@@ -8400,6 +8466,7 @@ mod tests {
             by: String::new(),
             mine: false,
             superseded: false,
+            withdrawn: false,
         };
         let mut known = HashMap::new();
         // while pending: cached with title + progress
@@ -8490,6 +8557,7 @@ mod tests {
             by: String::new(),
             mine: false,
             superseded: false,
+            withdrawn: false,
         }
     }
 
