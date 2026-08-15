@@ -305,22 +305,25 @@ async fn apply_group_ack<L: OutboxLog, S: StateStore>(
         window_high = window.high,
         "group ack applied"
     );
+    // either way the peer SPOKE about our events: latch the heal evidence —
+    // it buys the outbox one budget-free round when the hourly allowance is
+    // already burned (a recovered incarnation must not wait out the refill:
+    // live incident 2026-08-09 §2)
+    let mut group = state.group.unwrap_or_default();
+    group.heal_evidence = true;
+    state.group = Some(group);
     if floor > old {
         let cursor = state.outbound.entry(from.clone()).or_default();
         cursor.acked_floor = floor;
         cursor.ack_seen = true;
-        store.save(state).await;
     } else {
-        // no progress — but the peer spoke about US, so it is listening.
-        // Latch the evidence without moving the floor; the floor stays
-        // honest (0 = nothing proven) and the rewind can now reach back
-        // to what this peer is actually missing.
+        // no progress — but the peer is listening. Latch without moving the
+        // floor; the floor stays honest (0 = nothing proven) and the rewind
+        // can now reach back to what this peer is actually missing.
         let cursor = state.outbound.entry(from.clone()).or_default();
-        if !cursor.ack_seen {
-            cursor.ack_seen = true;
-            store.save(state).await;
-        }
+        cursor.ack_seen = true;
     }
+    store.save(state).await;
 }
 
 /// Publish claim sheets as they are handed over.
@@ -618,12 +621,21 @@ async fn outbox_loop<L, S, K>(
         };
         let mut cur = state.group.unwrap_or_default();
         if !consume_resend_round(&mut cur, wall_secs()) {
-            tracing::warn!(
-                floor = f,
-                "the resend budget for this hour is spent — holding the tail"
-            );
-            backoff_secs = backoff_secs.saturating_mul(2).min(RESEND_MAX_BACKOFF_SECS);
-            continue;
+            // spent — but fresh evidence of a lagging listener (a claim
+            // sheet since the last round) buys the one heal round
+            if consume_heal_round(&mut cur, wall_secs()) {
+                tracing::info!(
+                    floor = f,
+                    "budget spent, but a listener proved itself lagging — heal round"
+                );
+            } else {
+                tracing::warn!(
+                    floor = f,
+                    "the resend budget for this hour is spent — holding the tail"
+                );
+                backoff_secs = backoff_secs.saturating_mul(2).min(RESEND_MAX_BACKOFF_SECS);
+                continue;
+            }
         }
         // rewind to the proven floor and re-offer the tail. Every group frame
         // is a FRESH encryption (`group_frame` bypasses the fan-out cache), so
@@ -676,15 +688,39 @@ fn wall_secs() -> u64 {
 /// loop a fresh allowance on every start, and the thing being rationed is a
 /// publish that every member of the republic then re-reads.
 pub(crate) fn consume_resend_round(cur: &mut molt_core::GroupCursor, now: u64) -> bool {
-    if now.saturating_sub(cur.resend_window_start) >= 3_600 {
-        cur.resend_window_start = now;
-        cur.resend_rounds = 0;
-    }
+    roll_resend_window(cur, now);
     if cur.resend_rounds >= RESEND_ROUNDS_PER_HOUR {
         return false;
     }
     cur.resend_rounds = cur.resend_rounds.saturating_add(1);
+    // the round republishes the whole tail — whatever evidence prompted it
+    // is served by it
+    cur.heal_evidence = false;
     true
+}
+
+/// Take the ONE evidence-driven round this hour grants past a spent budget
+/// (live incident 2026-08-09 §2): a claim sheet that spoke about our events
+/// proved a listening, still-lagging peer — typically a recovered
+/// incarnation — and holding its heal behind the hourly refill read as
+/// permanent deafness in the field. Bounded: the sheet latch buys at most
+/// one extra round per window, a blind stall loop buys nothing.
+pub(crate) fn consume_heal_round(cur: &mut molt_core::GroupCursor, now: u64) -> bool {
+    roll_resend_window(cur, now);
+    if !cur.heal_evidence || cur.heal_rounds > 0 {
+        return false;
+    }
+    cur.heal_evidence = false;
+    cur.heal_rounds = 1;
+    true
+}
+
+fn roll_resend_window(cur: &mut molt_core::GroupCursor, now: u64) {
+    if now.saturating_sub(cur.resend_window_start) >= 3_600 {
+        cur.resend_window_start = now;
+        cur.resend_rounds = 0;
+        cur.heal_rounds = 0;
+    }
 }
 
 /// What one inbound frame turned into.
@@ -1681,6 +1717,98 @@ mod tests {
         // the clock does
         assert!(consume_resend_round(&mut reloaded, t0 + 3_600));
         assert_eq!(reloaded.resend_rounds, 1, "a fresh window starts at one");
+    }
+
+    /// **Evidence of a lagging listener grants ONE heal round past a spent
+    /// budget** (live incident 2026-08-09 §2, the budget audit).
+    ///
+    /// The field sequence: a dead peer burns all 12 rounds; the peer then
+    /// RECOVERS and its fresh incarnation sends claim sheets that prove it
+    /// is alive and still missing the tail — but the budget is spent, so
+    /// the healing resend waits out the hour and the user reads the node
+    /// as permanently deaf. A sheet is EVIDENCE, not a blind retry; it
+    /// buys exactly one extra round per hour window.
+    #[test]
+    fn a_claim_sheet_grants_one_heal_round_past_a_spent_budget() {
+        let mut cur = molt_core::GroupCursor::default();
+        let t0 = 1_700_000_000;
+        for _ in 0..RESEND_ROUNDS_PER_HOUR {
+            assert!(consume_resend_round(&mut cur, t0));
+        }
+        assert!(!consume_resend_round(&mut cur, t0), "the budget is spent");
+        // no evidence -> no heal round
+        assert!(!consume_heal_round(&mut cur, t0));
+        // a claim sheet arrived (apply_group_ack latches this)
+        cur.heal_evidence = true;
+        assert!(consume_heal_round(&mut cur, t0), "evidence buys ONE round");
+        // …and only one: fresh evidence inside the same window is held
+        cur.heal_evidence = true;
+        assert!(!consume_heal_round(&mut cur, t0));
+        // the clock refills everything, heal allowance included: burn the
+        // fresh window, then a NEW sheet arrives (a normal round clears the
+        // latch on purpose - it just served the evidence)
+        for _ in 0..RESEND_ROUNDS_PER_HOUR {
+            assert!(consume_resend_round(&mut cur, t0 + 3_600));
+        }
+        cur.heal_evidence = true;
+        assert!(consume_heal_round(&mut cur, t0 + 3_600), "a fresh window heals again");
+    }
+
+    /// A round the normal budget still covers SERVES the evidence — the
+    /// heal allowance stays in reserve for the spent case only.
+    #[test]
+    fn a_normal_resend_round_clears_the_heal_evidence() {
+        let mut cur =
+            molt_core::GroupCursor { heal_evidence: true, ..Default::default() };
+        assert!(consume_resend_round(&mut cur, 1_700_000_000));
+        assert!(!cur.heal_evidence, "the round just republished the tail");
+    }
+
+    /// `apply_group_ack` latches the heal evidence on ANY sheet that speaks
+    /// about us — including the no-progress arm, which is exactly what a
+    /// re-recovered incarnation's sheets look like (its floor cannot
+    /// advance past what the old incarnation already proved).
+    #[tokio::test]
+    async fn an_applied_claim_sheet_latches_heal_evidence() {
+        let log = crate::MemLog::default();
+        let store = crate::MemStateStore::default();
+        // a peer whose floor is already latched — the no-progress arm
+        {
+            let mut st = <crate::MemStateStore as StateStore>::load(&store).await;
+            st.outbound.insert(
+                "petra".into(),
+                OutboundCursor { acked_floor: 0, ack_seen: true, ..Default::default() },
+            );
+            <crate::MemStateStore as StateStore>::save(&store, st).await;
+        }
+        let mut window = molt_core::AcceptedWindow::default();
+        assert!(window.accept(1));
+        let ack = crate::group_ack::GroupAck::new(
+            "petra".to_string(),
+            std::collections::BTreeMap::from([("walter".to_string(), window)]),
+        );
+        apply_group_ack(&log, &store, &"walter".to_string(), &"petra".to_string(), &ack).await;
+        let state = <crate::MemStateStore as StateStore>::load(&store).await;
+        assert!(
+            state.group.unwrap_or_default().heal_evidence,
+            "a speaking sheet is heal evidence even without floor progress"
+        );
+
+        // silence (a sheet about OTHER members only) latches nothing
+        let store2 = crate::MemStateStore::default();
+        let ack2 = crate::group_ack::GroupAck::new(
+            "petra".to_string(),
+            std::collections::BTreeMap::from([(
+                "zoe".to_string(),
+                molt_core::AcceptedWindow::default(),
+            )]),
+        );
+        apply_group_ack(&log, &store2, &"walter".to_string(), &"petra".to_string(), &ack2).await;
+        let state2 = <crate::MemStateStore as StateStore>::load(&store2).await;
+        assert!(
+            !state2.group.unwrap_or_default().heal_evidence,
+            "silence about us proves nothing and buys nothing"
+        );
     }
 
     /// A floor at or above the cursor never pushes it forward.

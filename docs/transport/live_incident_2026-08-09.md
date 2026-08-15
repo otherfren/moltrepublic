@@ -79,8 +79,23 @@ asked (held FutureEpoch/Opaque frames never enter the ring and stay
 retryable). What the clean repro does NOT show is the field's permanent
 deafness — the remaining suspect is the resend BUDGET holding the healing
 tail (field: "budget spent — holding the tail floor=51" 18 s after start)
-plus whatever the two Restored blocks did to the sender ratchets; the
-budget audit is still the open next step.
+plus whatever the two Restored blocks did to the sender ratchets.
+
+**Budget audit (2026-08-15, done).** The "spent 18 s after start" line is
+the budget's PERSISTENCE working as designed (a crash loop must not buy a
+fresh allowance per start) — the previous churny hour had burned all 12
+rounds against the dead peer. The real defect: the budget also gated the
+EVIDENCE-driven heal. When the recovered incarnation's first claim sheets
+arrived (proof: a listening, still-lagging peer — its floor cannot advance
+past what the old incarnation proved, so they land in `apply_group_ack`'s
+no-progress arm), the outbox held the tail for up to the rest of the hour,
+which the user reads as permanent deafness. Fix on master: an applied
+claim sheet latches `GroupCursor.heal_evidence`; a spent budget then still
+grants ONE `consume_heal_round` per hour window (bounded — a blind stall
+loop buys nothing, a normal round clears the latch because it just served
+it). Keystones: `group_runtime::tests::a_claim_sheet_grants_one_heal_round_past_a_spent_budget`,
+`an_applied_claim_sheet_latches_heal_evidence`,
+`a_normal_resend_round_clears_the_heal_evidence`.
 
 ## 3. OPEN — survivors' outboxes churn; chat between HEALTHY nodes stalls
 

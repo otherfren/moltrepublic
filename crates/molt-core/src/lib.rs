@@ -1839,6 +1839,15 @@ pub struct GroupCursor {
     /// Unix second the current resend hour began.
     #[serde(default)]
     pub resend_window_start: u64,
+    /// A claim sheet spoke about this node's events since the last resend
+    /// round — a listening, still-lagging peer is PROVEN. Grants the one
+    /// budget-free heal round below (live incident 2026-08-09 §2).
+    #[serde(default)]
+    pub heal_evidence: bool,
+    /// Evidence-driven rounds taken past a spent budget this hour (cap 1;
+    /// resets with the window).
+    #[serde(default)]
+    pub heal_rounds: u32,
 }
 
 /// One event in a workspace's append-only history: the envelope every log
