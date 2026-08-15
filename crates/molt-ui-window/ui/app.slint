@@ -2851,8 +2851,20 @@ export component AppWindow inherits Window {
                 // (outcome 1) the phrase step replaces the lobby panels but
                 // KEEPS the log: the post-seal lines (mesh bootstrap) land
                 // there, and hiding them looked like a dead node.
-                if root.cw-step == 1: VerticalLayout {
+                // scrollable like step 0: at raised font sizes the charter
+                // step outgrows the window - the buttons must stay reachable
+                if root.cw-step == 1: Rectangle {
                     vertical-stretch: 1;
+                    clip: true;
+                    cwrfl := Flickable {
+                        width: 100%;
+                        height: 100%;
+                        viewport-width: self.width;
+                        // fills the window while everything fits (the log
+                        // keeps the leftover height); grows and scrolls when
+                        // a panel outgrows it
+                        viewport-height: max(self.height, cws1.preferred-height);
+                    cws1 := VerticalLayout {
                     spacing: 12px;
 
                     // the founding failed: say so loudly, right where the
@@ -3272,6 +3284,9 @@ export component AppWindow inherits Window {
                     // carries real contrast.
                     Rectangle {
                         vertical-stretch: 1;
+                        // in the scrolled (overflowing) state the log keeps a
+                        // readable slice instead of collapsing
+                        preferred-height: 200px;
                         background: Theme.panel;
                         border-radius: Theme.win95 ? 0px : 8px;
                         border-width: Theme.border-w;
@@ -3338,6 +3353,14 @@ export component AppWindow inherits Window {
                         }
                     }
 
+                    }
+                    }
+                    ScrollHint {
+                        x: parent.width - 7px;
+                        view-h: cwrfl.height;
+                        content-h: cwrfl.viewport-height;
+                        scroll-y: cwrfl.viewport-y;
+                    }
                 }
 
             }
@@ -4076,8 +4099,20 @@ export component AppWindow inherits Window {
                 // every member to seal. The recovery phrase is NOT shown here
                 // (2026-08-08): a failed founding needs no phrase, and a
                 // sealed one gates entry on the backup step below.
-                if root.jw-step == 1: VerticalLayout {
+                // scrollable like step 0: the ratify panel grows with the
+                // charter, and the decision buttons must stay reachable
+                if root.jw-step == 1: Rectangle {
                     vertical-stretch: 1;
+                    clip: true;
+                    jwrfl := Flickable {
+                        width: 100%;
+                        height: 100%;
+                        viewport-width: self.width;
+                        // fills the window while everything fits (the run view
+                        // keeps the leftover height); grows and scrolls when a
+                        // panel outgrows it
+                        viewport-height: max(self.height, jws1.preferred-height);
+                    jws1 := VerticalLayout {
                     spacing: 12px;
                     // ---- ratification: confirm the founder's proposed charter
                     if root.jw-awaiting-ratify && !root.jw-sealed: Rectangle {
@@ -4099,12 +4134,38 @@ export component AppWindow inherits Window {
                                 color: Theme.text;
                                 font-size: Theme.fs-body;
                             }
-                            Text {
-                                text: root.jw-proposed-agenda == "" ? Strings.jw-ratify-agenda-empty
-                                    : root.jw-proposed-agenda;
-                                color: Theme.dim;
-                                font-size: Theme.fs-cap;
-                                wrap: word-wrap;
+                            // the charter itself: its own bounded panel with
+                            // its own scroll - a long charter must never push
+                            // the decision buttons out of the window
+                            Rectangle {
+                                height: min(10 * 1.4 * Theme.fs-cap + 20px, agfl.viewport-height + 20px);
+                                background: Theme.panel-2;
+                                border-radius: Theme.win95 ? 0px : 8px;
+                                border-width: Theme.border-w;
+                                border-color: Theme.line;
+                                clip: true;
+                                agfl := Flickable {
+                                    x: 10px;
+                                    y: 10px;
+                                    width: parent.width - 20px;
+                                    height: parent.height - 20px;
+                                    viewport-width: self.width;
+                                    viewport-height: agtxt.preferred-height;
+                                    agtxt := Text {
+                                        width: 100%;
+                                        text: root.jw-proposed-agenda == "" ? Strings.jw-ratify-agenda-empty
+                                            : root.jw-proposed-agenda;
+                                        color: Theme.dim;
+                                        font-size: Theme.fs-cap;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                                ScrollHint {
+                                    x: parent.width - 7px;
+                                    view-h: agfl.height;
+                                    content-h: agfl.viewport-height;
+                                    scroll-y: agfl.viewport-y;
+                                }
                             }
                             // the proposed feature selection, exactly as it
                             // will be signed - read-only, off rows dimmed;
@@ -4171,6 +4232,27 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
+                    // step 2½ (❻½): the phrase-backup confirmation — BEFORE
+                    // the seal, the exact twin of the founder's. Confirming
+                    // releases the signed attestation; the ritual then waits
+                    // for everyone. Lives in the scrollable column so the
+                    // confirm button stays reachable.
+                    if root.jw-awaiting-backup && !root.jw-sealed: SeedConfirmStep {
+                        vertical-stretch: 0;
+                        seed: root.jw-seed;
+                        icon: @image-url("assets/join.svg");
+                        action-label: Strings.cw-backup-confirm;
+                        armed: root.seed-matches(root.jw-seed-check, root.jw-seed);
+                        check <=> root.jw-seed-check;
+                        enter => {
+                            root.confirm-seed-backup(root.jw-seed-check);
+                            root.jw-seed-check = "";
+                        }
+                        copy-requested => {
+                            root.copy-text(root.jw-seed);
+                            root.show-toast(Strings.toast-copied);
+                        }
+                    }
                     // the join SEALED - the way in sits ABOVE the run view,
                     // which stays: the joiner keeps the same ritual log the
                     // founder keeps (hiding it read as a dead node)
@@ -4193,6 +4275,9 @@ export component AppWindow inherits Window {
                     }
                     RunView {
                         vertical-stretch: 1;
+                        // in the scrolled (overflowing) state the run view
+                        // keeps a readable slice instead of collapsing
+                        preferred-height: 240px;
                         title: root.jw-republic;
                         hint: root.jw-inviter == "" ? root.jw-rule
                             : "\{root.jw-rule} · \{Strings.jw-invited-by} \{root.jw-inviter}";
@@ -4221,24 +4306,13 @@ export component AppWindow inherits Window {
                             root.show-toast(Strings.toast-copied);
                         }
                     }
-                }
-
-                // step 2½ (❻½): the phrase-backup confirmation — BEFORE the
-                // seal, the exact twin of the founder's. Confirming releases
-                // the signed attestation; the ritual then waits for everyone.
-                if root.jw-awaiting-backup && !root.jw-sealed: SeedConfirmStep {
-                    seed: root.jw-seed;
-                    icon: @image-url("assets/join.svg");
-                    action-label: Strings.cw-backup-confirm;
-                    armed: root.seed-matches(root.jw-seed-check, root.jw-seed);
-                    check <=> root.jw-seed-check;
-                    enter => {
-                        root.confirm-seed-backup(root.jw-seed-check);
-                        root.jw-seed-check = "";
                     }
-                    copy-requested => {
-                        root.copy-text(root.jw-seed);
-                        root.show-toast(Strings.toast-copied);
+                    }
+                    ScrollHint {
+                        x: parent.width - 7px;
+                        view-h: jwrfl.height;
+                        content-h: jwrfl.viewport-height;
+                        scroll-y: jwrfl.viewport-y;
                     }
                 }
 
@@ -4296,8 +4370,19 @@ export component AppWindow inherits Window {
 
                 // STEP 2 - the recovery phrase, asked only once we know a
                 // way in that needs it. A join never lands here.
-                if root.rw-step == 0 && root.rw-phase == 1: VerticalLayout {
+                // scrollable: at raised font sizes the step outgrows the
+                // window - the buttons must stay reachable
+                if root.rw-step == 0 && root.rw-phase == 1: Rectangle {
+                    vertical-stretch: 1;
+                    clip: true;
+                    rwpfl := Flickable {
+                        width: 100%;
+                        height: 100%;
+                        viewport-width: self.width;
+                        viewport-height: rwp1.preferred-height;
+                    rwp1 := VerticalLayout {
                     spacing: 12px;
+                    alignment: start;
                     RestoreWay {
                         title: Strings.rw-seed;
                         hint: root.rw-pending == "s3" ? Strings.rw-seed-hint-s3 : Strings.rw-seed-hint;
@@ -4392,12 +4477,30 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
-                    Rectangle { vertical-stretch: 1; }
+                    }
+                    }
+                    ScrollHint {
+                        x: parent.width - 7px;
+                        view-h: rwpfl.height;
+                        content-h: rwpfl.viewport-height;
+                        scroll-y: rwpfl.viewport-y;
+                    }
                 }
 
-                // STEP 1 - which way in
-                if root.rw-step == 0 && root.rw-phase == 0: VerticalLayout {
+                // STEP 1 - which way in. Scrollable: at raised font sizes
+                // the step outgrows the window - the buttons must stay
+                // reachable
+                if root.rw-step == 0 && root.rw-phase == 0: Rectangle {
+                    vertical-stretch: 1;
+                    clip: true;
+                    rwwfl := Flickable {
+                        width: 100%;
+                        height: 100%;
+                        viewport-width: self.width;
+                        viewport-height: rww0.preferred-height;
+                    rww0 := VerticalLayout {
                 spacing: 12px;
+                alignment: start;
 
                 // The one way in that starts from a link somebody sent you.
                 // BOTH shapes land here (welcome_rework.md): a founding
@@ -4590,6 +4693,14 @@ export component AppWindow inherits Window {
                 }
 
                 }
+                    }
+                    ScrollHint {
+                        x: parent.width - 7px;
+                        view-h: rwwfl.height;
+                        content-h: rwwfl.viewport-height;
+                        scroll-y: rwwfl.viewport-y;
+                    }
+                }
 
                 // step 2: the running restore (shared RunView: progress bar,
                 // live log, outcome-gated Back/Finish)
@@ -4624,9 +4735,6 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                if root.rw-step == 0 && root.rw-phase == 0: Rectangle {
-                    vertical-stretch: 1;
-                }
             }
 
             // ---- main view: the selected surface (surfaces live in the sidebar) ----
