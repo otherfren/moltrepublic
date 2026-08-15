@@ -6384,7 +6384,8 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
             is_folder: r.kind == wiki::RowKind::Folder,
             id: i32::try_from(r.id).unwrap_or(0),
             label: r.label.into(),
-            nested: r.nested,
+            path: r.path.into(),
+            depth: i32::try_from(r.depth).unwrap_or(0),
             open: r.open,
             marked: r.marked,
             status: wiki_status_code(r.status),
@@ -6794,6 +6795,47 @@ fn wire_wiki(
                 {
                     let mut w = m.borrow_mut();
                     if let Err(e) = w.move_to(wiki_doc_id(id), None) {
+                        ui.invoke_show_toast_error(e.into());
+                    }
+                }
+                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            });
+        });
+    }
+
+    {
+        let m = model.clone();
+        let la = last.clone();
+        let weak = ui.as_weak();
+        g.on_new_folder_in(move |parent| {
+            let m = m.clone();
+            let la = la.clone();
+            let weak = weak.clone();
+            slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+                let Some(ui) = weak.upgrade() else { return };
+                {
+                    let mut w = m.borrow_mut();
+                    if let Err(e) = w.new_folder_in(&parent) {
+                        ui.invoke_show_toast_error(e.into());
+                    }
+                }
+                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            });
+        });
+    }
+    {
+        let m = model.clone();
+        let la = last.clone();
+        let weak = ui.as_weak();
+        g.on_nav_folder_move_root(move |folder| {
+            let m = m.clone();
+            let la = la.clone();
+            let weak = weak.clone();
+            slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+                let Some(ui) = weak.upgrade() else { return };
+                {
+                    let mut w = m.borrow_mut();
+                    if let Err(e) = w.move_folder_to_root(&folder) {
                         ui.invoke_show_toast_error(e.into());
                     }
                 }

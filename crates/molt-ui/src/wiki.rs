@@ -132,6 +132,15 @@ pub struct Folder {
     pub added: bool,
 }
 
+/// Deepest folder path the tree accepts (files may sit one deeper — the
+/// fold's `valid_path` caps full paths at 8 segments).
+const MAX_FOLDER_DEPTH: usize = 7;
+
+/// The parent folder path of a folder path (`a/b` → `a`; `a` → root).
+fn folder_parent(path: &str) -> Option<&str> {
+    path.rsplit_once('/').map(|(p, _)| p)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RowKind {
     Folder,
@@ -144,9 +153,13 @@ pub struct NavRow {
     pub kind: RowKind,
     /// File rows only; 0 for folders.
     pub id: DocId,
-    /// The folder's name (folder rows), or the file's display name.
+    /// The folder's LAST path segment (folder rows), or the file's name.
     pub label: String,
-    pub nested: bool,
+    /// Folder rows: the full folder path — the identity every folder verb
+    /// addresses. Empty on file rows (their identity is `id`).
+    pub path: String,
+    /// Tree depth (0 = root level) — drives the indent.
+    pub depth: usize,
     pub open: bool,
     pub marked: bool,
     pub status: Status,
@@ -275,12 +288,19 @@ impl Wiki {
                 deleted: false,
             });
             if let Some((folder, _)) = path.rsplit_once('/') {
-                if !folders.iter().any(|f| f.name == folder) {
-                    folders.push(Folder {
-                        name: folder.to_string(),
-                        open: true,
-                        added: false,
-                    });
+                let mut chain = String::new();
+                for seg in folder.split('/') {
+                    if !chain.is_empty() {
+                        chain.push('/');
+                    }
+                    chain.push_str(seg);
+                    if !folders.iter().any(|f| f.name == chain) {
+                        folders.push(Folder {
+                            name: chain.clone(),
+                            open: true,
+                            added: false,
+                        });
+                    }
                 }
             }
         }
@@ -395,20 +415,20 @@ impl Wiki {
                 d.base = None; // edited content survives as Added
             }
         }
-        // folders follow the surviving docs
-        for (path, _) in base {
-            if let Some((folder, _)) = path.rsplit_once('/') {
-                if !self.folders.iter().any(|f| f.name == folder) {
-                    self.folders.push(Folder {
-                        name: folder.to_string(),
-                        open: true,
-                        added: false,
-                    });
-                }
-            }
+        // folders follow the surviving docs — the whole ancestor chain
+        let parents: Vec<String> = base
+            .iter()
+            .filter_map(|(path, _)| path.rsplit_once('/').map(|(f, _)| f.to_string()))
+            .collect();
+        for folder in parents {
+            self.ensure_folder_chain(&folder, false);
         }
         self.folders.retain(|f| {
-            f.added || self.docs.iter().any(|d| d.path.starts_with(&format!("{}/", f.name)))
+            f.added
+                || self
+                    .docs
+                    .iter()
+                    .any(|d| d.path.starts_with(&format!("{}/", f.name)))
         });
     }
 
@@ -472,34 +492,51 @@ impl Wiki {
 
     // ---- navigator rows ---------------------------------------------------
 
-    /// Display order: folders alphabetically, each with its files
-    /// alphabetically (when open), then root files alphabetically. Deleted
-    /// files stay listed (struck) — they are pending changes, not gone.
+    /// Display order, recursively per level: subfolders alphabetically
+    /// (each with its subtree when open), then the level's files
+    /// alphabetically. Deleted files stay listed (struck) — they are
+    /// pending changes, not gone. A closed folder hides its whole subtree.
     pub fn nav_rows(&self) -> Vec<NavRow> {
         let mut rows = Vec::new();
-        let mut folders: Vec<&Folder> = self.folders.iter().collect();
-        folders.sort_by(|a, b| a.name.cmp(&b.name));
-        for f in folders {
+        self.push_level(None, 0, &mut rows);
+        for d in self.files_in(None) {
+            rows.push(self.file_row(d, 0));
+        }
+        rows
+    }
+
+    fn push_level(&self, parent: Option<&str>, depth: usize, rows: &mut Vec<NavRow>) {
+        let mut children: Vec<&Folder> = self
+            .folders
+            .iter()
+            .filter(|f| folder_parent(&f.name) == parent)
+            .collect();
+        children.sort_by(|a, b| a.name.cmp(&b.name));
+        for f in children {
+            let label = f
+                .name
+                .rsplit('/')
+                .next()
+                .unwrap_or(&f.name)
+                .to_string();
             rows.push(NavRow {
                 kind: RowKind::Folder,
                 id: 0,
-                label: f.name.clone(),
-                nested: false,
+                label,
+                path: f.name.clone(),
+                depth,
                 open: f.open,
                 marked: false,
                 status: if f.added { Status::Added } else { Status::Unchanged },
                 renaming: self.renaming_folder.as_deref() == Some(f.name.as_str()),
             });
             if f.open {
+                self.push_level(Some(&f.name), depth + 1, rows);
                 for d in self.files_in(Some(&f.name)) {
-                    rows.push(self.file_row(d, true));
+                    rows.push(self.file_row(d, depth + 1));
                 }
             }
         }
-        for d in self.files_in(None) {
-            rows.push(self.file_row(d, false));
-        }
-        rows
     }
 
     fn files_in(&self, folder: Option<&str>) -> Vec<&Doc> {
@@ -512,12 +549,13 @@ impl Wiki {
         files
     }
 
-    fn file_row(&self, d: &Doc, nested: bool) -> NavRow {
+    fn file_row(&self, d: &Doc, depth: usize) -> NavRow {
         NavRow {
             kind: RowKind::File,
             id: d.id,
             label: d.name().to_string(),
-            nested,
+            path: String::new(),
+            depth,
             open: false,
             marked: self.marked == Some(d.id),
             status: d.status(),
@@ -728,13 +766,8 @@ impl Wiki {
             self.next_id += 1;
             let label = f.new_path.rsplit('/').next().unwrap_or(&f.new_path).to_string();
             if let Some((folder, _)) = f.new_path.rsplit_once('/') {
-                if !self.folders.iter().any(|fl| fl.name == folder) {
-                    self.folders.push(Folder {
-                        name: folder.to_string(),
-                        open: true,
-                        added: true,
-                    });
-                }
+                let folder = folder.to_string();
+                self.ensure_folder_chain(&folder, true);
             }
             self.docs.push(Doc {
                 id,
@@ -820,20 +853,33 @@ impl Wiki {
         let Some(a) = self.active else { return };
         let folder = self.doc(a).and_then(|d| d.folder().map(String::from));
         if let Some(f) = folder {
-            self.set_folder_open(&f, true);
+            self.open_chain(&f); // ancestors too, or the row stays hidden
         }
         self.marked = Some(a);
+    }
+
+    /// Insert every missing ancestor of `folder` (a deep path needs its
+    /// whole chain of rows, not only the direct parent).
+    fn ensure_folder_chain(&mut self, folder: &str, added: bool) {
+        let mut path = String::new();
+        for seg in folder.split('/') {
+            if !path.is_empty() {
+                path.push('/');
+            }
+            path.push_str(seg);
+            if !self.folders.iter().any(|f| f.name == path) {
+                self.folders.push(Folder {
+                    name: path.clone(),
+                    open: true,
+                    added,
+                });
+            }
+        }
     }
 
     pub fn toggle_folder(&mut self, name: &str) {
         if let Some(f) = self.folders.iter_mut().find(|f| f.name == name) {
             f.open = !f.open;
-        }
-    }
-
-    fn set_folder_open(&mut self, name: &str, open: bool) {
-        if let Some(f) = self.folders.iter_mut().find(|f| f.name == name) {
-            f.open = open;
         }
     }
 
@@ -857,10 +903,24 @@ impl Wiki {
     /// folder unfolds so the rename row is visible.
     pub fn new_file_in(&mut self, folder: &str) -> DocId {
         let known = self.folders.iter().any(|f| f.name == folder);
-        if let Some(f) = self.folders.iter_mut().find(|f| f.name == folder) {
-            f.open = true;
+        if known {
+            self.open_chain(folder);
         }
         self.new_file_at(known.then(|| folder.to_string()))
+    }
+
+    /// Unfold `path` and every ancestor — a rename/new row must be visible.
+    fn open_chain(&mut self, path: &str) {
+        let mut chain = String::new();
+        for seg in path.split('/') {
+            if !chain.is_empty() {
+                chain.push('/');
+            }
+            chain.push_str(seg);
+            if let Some(f) = self.folders.iter_mut().find(|f| f.name == chain) {
+                f.open = true;
+            }
+        }
     }
 
     fn new_file_at(&mut self, folder: Option<String>) -> DocId {
@@ -923,6 +983,35 @@ impl Wiki {
         name
     }
 
+    /// New folder INSIDE `parent` (the folder row's menu) — same naming,
+    /// rename mode, and stack entry as the toolbar's root variant.
+    pub fn new_folder_in(&mut self, parent: &str) -> Result<String, String> {
+        if !self.folders.iter().any(|f| f.name == parent) {
+            return Err("unknown folder".to_string());
+        }
+        if parent.split('/').count() >= MAX_FOLDER_DEPTH {
+            return Err("too deep".to_string());
+        }
+        let mut n = 1;
+        let name = loop {
+            let candidate = format!("{parent}/new-folder-{n}");
+            if !self.folders.iter().any(|f| f.name == candidate) {
+                break candidate;
+            }
+            n += 1;
+        };
+        self.folders.push(Folder {
+            name: name.clone(),
+            open: true,
+            added: true,
+        });
+        self.open_chain(parent);
+        self.stack.push(Change::CreatedFolder { name: name.clone() });
+        self.renaming = None;
+        self.renaming_folder = Some(name.clone());
+        Ok(name)
+    }
+
     pub fn renaming(&self) -> Option<DocId> {
         self.renaming
     }
@@ -950,41 +1039,85 @@ impl Wiki {
         }
     }
 
-    /// Commit a folder rename: every file under it moves along (their
-    /// statuses turn Modified — the rename IS the pending change).
+    /// Commit a folder rename: the typed name replaces the LAST segment;
+    /// every file and child folder under it moves along (doc statuses turn
+    /// Modified — the rename IS the pending change).
     pub fn rename_folder_commit(&mut self, old: &str, new_name: &str) -> Result<(), String> {
         self.renaming_folder = None;
-        let name = new_name.trim().trim_matches('/').to_string();
-        if name.is_empty() {
+        let seg = new_name.trim().trim_matches('/').to_string();
+        if seg.is_empty() {
             return Err("empty name".to_string());
         }
-        if name.contains('/') {
-            return Err("no nested folders".to_string());
+        if seg.contains('/') {
+            return Err("no path separators".to_string());
         }
+        let name = match folder_parent(old) {
+            Some(parent) => format!("{parent}/{seg}"),
+            None => seg,
+        };
         if name == old {
             return Ok(());
         }
         if !self.folders.iter().any(|f| f.name == old) {
             return Err("unknown folder".to_string());
         }
-        if self.folders.iter().any(|f| f.name == name) {
-            return Err("name already taken".to_string());
-        }
-        let prefix = format!("{old}/");
-        for d in &mut self.docs {
-            let rest = d.path.strip_prefix(&prefix).map(String::from);
-            if let Some(rest) = rest {
-                d.path = format!("{name}/{rest}");
-            }
-        }
-        if let Some(f) = self.folders.iter_mut().find(|f| f.name == old) {
-            f.name = name.clone();
-        }
+        self.rewrite_folder_path(old, &name)?;
         self.stack.push(Change::RenamedFolder {
             from: old.to_string(),
             label: format!("{old}/ → {name}/"),
             to: name,
         });
+        Ok(())
+    }
+
+    /// Move a whole folder (subtree included) to `new` — the shared core of
+    /// rename, drag-under and move-to-root. All-or-nothing on collisions.
+    fn rewrite_folder_path(&mut self, old: &str, new: &str) -> Result<(), String> {
+        if self.folders.iter().any(|f| f.name == new) {
+            return Err("name already taken".to_string());
+        }
+        let prefix = format!("{old}/");
+        // depth guard: the deepest moved element must stay inside the cap
+        let deepest_folder = self
+            .folders
+            .iter()
+            .filter(|f| f.name == old || f.name.starts_with(&prefix))
+            .map(|f| f.name.split('/').count())
+            .max()
+            .unwrap_or(0);
+        let moved_depth = deepest_folder - old.split('/').count() + new.split('/').count();
+        if moved_depth > MAX_FOLDER_DEPTH {
+            return Err("too deep".to_string());
+        }
+        // doc collision check (all-or-nothing)
+        for d in &self.docs {
+            if let Some(rest) = d.path.strip_prefix(&prefix) {
+                let to = format!("{new}/{rest}");
+                if self
+                    .docs
+                    .iter()
+                    .any(|o| !o.path.starts_with(&prefix) && o.path == to)
+                {
+                    return Err("name already taken".to_string());
+                }
+            }
+        }
+        for d in &mut self.docs {
+            let rest = d.path.strip_prefix(&prefix).map(String::from);
+            if let Some(rest) = rest {
+                d.path = format!("{new}/{rest}");
+            }
+        }
+        for f in &mut self.folders {
+            if f.name == old {
+                f.name = new.to_string();
+            } else if let Some(rest) = f.name.strip_prefix(&prefix).map(String::from) {
+                f.name = format!("{new}/{rest}");
+            }
+        }
+        if self.renaming_folder.as_deref() == Some(old) {
+            self.renaming_folder = None;
+        }
         Ok(())
     }
 
@@ -1074,7 +1207,7 @@ impl Wiki {
     pub fn drop_on_row(&mut self, id: DocId, row_idx: usize) -> Result<(), String> {
         let rows = self.nav_rows();
         let folder = match rows.get(row_idx) {
-            Some(r) if r.kind == RowKind::Folder => Some(r.label.clone()),
+            Some(r) if r.kind == RowKind::Folder => Some(r.path.clone()),
             Some(r) => self
                 .doc(r.id)
                 .and_then(|d| d.folder().map(String::from)),
@@ -1083,76 +1216,56 @@ impl Wiki {
         self.move_to(id, folder.as_deref())
     }
 
-    /// Drop a dragged FOLDER onto navigator row `row_idx`: its files merge
-    /// into the target folder (a file row targets its folder, past the end
-    /// means root) and the folder entry ceases. All-or-nothing on name
-    /// collisions. Depth stays 1 — a folder never nests INTO another.
+    /// Drop a dragged FOLDER onto navigator row `row_idx`: it moves UNDER
+    /// the target folder with its whole subtree (a file row targets its
+    /// folder, past the end means root). Onto itself or a descendant
+    /// refuses — that would be a cycle.
     pub fn drop_folder_on_row(&mut self, name: &str, row_idx: usize) -> Result<(), String> {
         let rows = self.nav_rows();
         let folder = match rows.get(row_idx) {
-            Some(r) if r.kind == RowKind::Folder => Some(r.label.clone()),
+            Some(r) if r.kind == RowKind::Folder => Some(r.path.clone()),
             Some(r) => self.doc(r.id).and_then(|d| d.folder().map(String::from)),
             None => None,
         };
-        self.move_folder(name, folder.as_deref())
+        self.move_folder_under(name, folder.as_deref())
     }
 
-    fn move_folder(&mut self, name: &str, target: Option<&str>) -> Result<(), String> {
-        if target == Some(name) {
-            return Ok(()); // dropped on itself / one of its own files
-        }
-        let Some(pos) = self.folders.iter().position(|f| f.name == name) else {
+    /// The folder menu's explicit way out of its parent (the drag cannot
+    /// target root when the list fills the pane).
+    pub fn move_folder_to_root(&mut self, name: &str) -> Result<(), String> {
+        self.move_folder_under(name, None)
+    }
+
+    fn move_folder_under(&mut self, name: &str, target: Option<&str>) -> Result<(), String> {
+        if !self.folders.iter().any(|f| f.name == name) {
             return Err("unknown folder".to_string());
+        }
+        let seg = name.rsplit('/').next().unwrap_or(name).to_string();
+        let new = match target {
+            Some(t) => {
+                if t == name || t.starts_with(&format!("{name}/")) {
+                    // itself / a descendant: a cycle — except the no-op
+                    // "dropped where it already sits"
+                    if t == name {
+                        return Ok(());
+                    }
+                    return Err("into itself".to_string());
+                }
+                if !self.folders.iter().any(|f| f.name == t) {
+                    return Err("unknown folder".to_string());
+                }
+                format!("{t}/{seg}")
+            }
+            None => seg,
         };
-        if let Some(t) = target {
-            if !self.folders.iter().any(|f| f.name == t) {
-                return Err("unknown folder".to_string());
-            }
+        if new == name {
+            return Ok(()); // already there (its own parent level)
         }
-        let prefix = format!("{name}/");
-        let moves: Vec<(DocId, String)> = self
-            .docs
-            .iter()
-            .filter_map(|d| d.path.strip_prefix(&prefix).map(|rest| (d.id, rest.to_string())))
-            .collect();
-        for (_, rest) in &moves {
-            let to = match target {
-                Some(t) => format!("{t}/{rest}"),
-                None => rest.clone(),
-            };
-            if self
-                .docs
-                .iter()
-                .any(|o| !o.path.starts_with(&prefix) && o.path == to)
-            {
-                return Err("name already taken".to_string());
-            }
-        }
-        let ids: Vec<DocId> = moves.iter().map(|(id, _)| *id).collect();
-        for (id, rest) in &moves {
-            let to = match target {
-                Some(t) => format!("{t}/{rest}"),
-                None => rest.clone(),
-            };
-            if let Some(d) = self.doc_mut(*id) {
-                d.path = to;
-            }
-        }
-        let was_added = self.folders[pos].added;
-        self.folders.remove(pos);
-        if self.renaming_folder.as_deref() == Some(name) {
-            self.renaming_folder = None;
-        }
-        let tlabel = match target {
-            Some(t) => format!("{t}/"),
-            None => "/".to_string(),
-        };
-        self.stack.push(Change::MovedFolder {
+        self.rewrite_folder_path(name, &new)?;
+        self.stack.push(Change::RenamedFolder {
             from: name.to_string(),
-            to: target.map(String::from),
-            ids,
-            was_added,
-            label: format!("{name}/ → {tlabel}"),
+            label: format!("{name}/ → {new}/"),
+            to: new,
         });
         Ok(())
     }
@@ -1186,9 +1299,10 @@ impl Wiki {
         }
     }
 
-    /// Delete a folder: every file in it is deleted (base-backed ones stay
-    /// as struck pending deletions — the folder row then stays with them);
-    /// the folder entry itself ceases only when nothing references it.
+    /// Delete a folder and its subtree: every file under it is deleted
+    /// (base-backed ones stay as struck pending deletions — their folder
+    /// rows stay with them); folder entries cease only where nothing
+    /// references them any more.
     pub fn delete_folder(&mut self, name: &str) {
         let prefix = format!("{name}/");
         let ids: Vec<DocId> = self
@@ -1200,19 +1314,28 @@ impl Wiki {
         for id in ids {
             self.delete(id);
         }
-        if !self.docs.iter().any(|d| d.path.starts_with(&prefix)) {
-            if let Some(pos) = self.folders.iter().position(|f| f.name == name) {
-                let was_added = self.folders[pos].added;
-                self.folders.remove(pos);
-                if self.renaming_folder.as_deref() == Some(name) {
-                    self.renaming_folder = None;
-                }
-                self.stack.push(Change::DeletedFolder {
-                    name: name.to_string(),
-                    was_added,
-                    label: format!("{name}/"),
-                });
+        // deepest-first, so undo re-adds parents before children
+        let mut removable: Vec<(String, bool)> = self
+            .folders
+            .iter()
+            .filter(|f| f.name == name || f.name.starts_with(&prefix))
+            .filter(|f| {
+                let sub = format!("{}/", f.name);
+                !self.docs.iter().any(|d| d.path.starts_with(&sub))
+            })
+            .map(|f| (f.name.clone(), f.added))
+            .collect();
+        removable.sort_by_key(|(n, _)| n.split('/').count());
+        for (n, was_added) in removable {
+            self.folders.retain(|f| f.name != n);
+            if self.renaming_folder.as_deref() == Some(n.as_str()) {
+                self.renaming_folder = None;
             }
+            self.stack.push(Change::DeletedFolder {
+                label: format!("{n}/"),
+                name: n,
+                was_added,
+            });
         }
     }
 
@@ -1408,19 +1531,7 @@ impl Wiki {
                 }
             }
             Change::RenamedFolder { ref from, ref to, .. } => {
-                if self.folders.iter().any(|f| f.name == *from) {
-                    return Err("name already taken".to_string());
-                }
-                let prefix = format!("{to}/");
-                for d in &mut self.docs {
-                    let rest = d.path.strip_prefix(&prefix).map(String::from);
-                    if let Some(rest) = rest {
-                        d.path = format!("{from}/{rest}");
-                    }
-                }
-                if let Some(f) = self.folders.iter_mut().find(|f| f.name == *to) {
-                    f.name = from.clone();
-                }
+                self.rewrite_folder_path(to, from)?;
             }
             Change::MovedFolder { ref from, ref ids, was_added, .. } => {
                 for id in ids {
@@ -1493,15 +1604,10 @@ impl Wiki {
             .iter()
             .filter_map(|d| d.folder().map(String::from))
             .collect();
-        self.folders.retain(|f| referenced.contains(&f.name));
+        self.folders
+            .retain(|f| referenced.iter().any(|r| *r == f.name || r.starts_with(&format!("{}/", f.name))));
         for r in referenced {
-            if !self.folders.iter().any(|f| f.name == r) {
-                self.folders.push(Folder {
-                    name: r,
-                    open: true,
-                    added: false,
-                });
-            }
+            self.ensure_folder_chain(&r, false);
         }
         self.stack.clear();
     }
@@ -2708,7 +2814,7 @@ diff --git a/gone.md b/gone.md\n--- a/gone.md\n+++ b/gone.md\n@@ -1,1 +1,1 @@\n-
         w.drop_on_row(id, 0).expect("drop into the folder");
         let d = w.nav_rows();
         assert_eq!(d[0].label, folder);
-        assert!(d[1].nested, "the file row nests under the folder");
+        assert_eq!(d[1].depth, 1, "the file row nests under the folder");
     }
 
     #[test]
@@ -2759,49 +2865,14 @@ diff --git a/gone.md b/gone.md\n--- a/gone.md\n+++ b/gone.md\n@@ -1,1 +1,1 @@\n-
     }
 
     #[test]
-    fn dragging_a_folder_onto_another_merges_its_files() {
-        let mut w = Wiki::sample();
-        // row 0 is the "decisions" folder row
-        w.drop_folder_on_row("runbooks", 0).expect("merge");
-        assert!(!w.folders_named().contains(&"runbooks".to_string()));
-        let recovery = id_of(&w, "node-recovery.md");
-        let rows = w.nav_rows();
-        let row = rows
-            .iter()
-            .find(|r| r.id == recovery)
-            .expect("moved file row");
-        assert!(row.nested);
-        assert_eq!(
-            w.stack_rows().last().expect("entry").kind,
-            ChangeKind::Moved
-        );
-        w.undo().expect("undo");
-        assert!(w.folders_named().contains(&"runbooks".to_string()));
-        assert_eq!(w.change_counts(), (0, 0, 0));
-    }
-
-    #[test]
-    fn dragging_a_folder_past_the_end_dissolves_it_to_root() {
-        let mut w = Wiki::sample();
-        let rows = w.nav_rows().len();
-        w.drop_folder_on_row("runbooks", rows + 5).expect("to root");
-        assert!(!w.folders_named().contains(&"runbooks".to_string()));
-        let recovery = id_of(&w, "node-recovery.md");
-        let rows = w.nav_rows();
-        let row = rows.iter().find(|r| r.id == recovery).expect("root row");
-        assert!(!row.nested);
-    }
-
-    #[test]
     fn a_folder_move_with_a_name_collision_changes_nothing() {
         let mut w = Wiki::sample();
-        // plant a root file colliding with a runbooks file name
-        let id = w.new_file();
-        w.rename_cancel();
-        w.rename_commit(id, "node-recovery.md").expect("rename");
+        // plant decisions/runbooks so the drag target is taken
+        w.new_folder_in("decisions").expect("subfolder");
+        w.rename_folder_commit("decisions/new-folder-1", "runbooks")
+            .expect("rename");
         let before: Vec<String> = w.nav_rows().iter().map(|r| r.label.clone()).collect();
-        let rows = w.nav_rows().len();
-        assert!(w.drop_folder_on_row("runbooks", rows + 5).is_err());
+        assert!(w.drop_folder_on_row("runbooks", 0).is_err());
         let after: Vec<String> = w.nav_rows().iter().map(|r| r.label.clone()).collect();
         assert_eq!(before, after, "all-or-nothing: nothing moved");
     }
@@ -2840,7 +2911,7 @@ diff --git a/gone.md b/gone.md\n--- a/gone.md\n+++ b/gone.md\n@@ -1,1 +1,1 @@\n-
         w.rename_cancel();
         let rows = w.nav_rows();
         let row = rows.iter().find(|r| r.id == id).expect("new row");
-        assert!(row.nested, "created inside the folder");
+        assert_eq!(row.depth, 1, "created inside the folder");
     }
 
     #[test]
@@ -2851,5 +2922,149 @@ diff --git a/gone.md b/gone.md\n--- a/gone.md\n+++ b/gone.md\n@@ -1,1 +1,1 @@\n-
         w.revert_all();
         assert!(w.folders_named().contains(&"decisions".to_string()));
         assert!(!w.folders_named().contains(&"archive".to_string()));
+    }
+
+    // ---- nested folders (2026-08-15: folders move INTO folders) -----------
+
+    /// Two nested folders with a file each: the navigator recurses in
+    /// order, with depth per row, and a closed parent hides the subtree.
+    #[test]
+    fn nested_nav_rows_carry_depth_and_fold_whole_subtrees() {
+        let mut w = Wiki::empty();
+        w.new_folder();
+        w.rename_folder_commit("new-folder-1", "a").expect("rename");
+        let sub = w.new_folder_in("a").expect("subfolder");
+        assert_eq!(sub, "a/new-folder-1");
+        w.rename_folder_commit("a/new-folder-1", "b").expect("rename");
+        let id = w.new_file_in("a/b");
+        w.rename_cancel();
+        let rows = w.nav_rows();
+        let labels: Vec<(String, usize)> =
+            rows.iter().map(|r| (r.label.clone(), r.depth)).collect();
+        assert_eq!(
+            labels,
+            vec![
+                ("a".to_string(), 0),
+                ("b".to_string(), 1),
+                ("untitled-1.md".to_string(), 2),
+            ]
+        );
+        // folder rows carry their full path as identity
+        assert_eq!(rows[1].path, "a/b");
+        assert_eq!(rows.iter().find(|r| r.id == id).map(|r| r.depth), Some(2));
+        // closing the ROOT folder hides the whole subtree
+        w.toggle_folder("a");
+        assert_eq!(w.nav_rows().len(), 1);
+    }
+
+    /// Dragging a folder onto another folder moves it UNDER it — subtree
+    /// (files and child folders) travels along; onto itself/descendant
+    /// refuses.
+    #[test]
+    fn a_folder_drag_moves_it_under_the_target_with_its_subtree() {
+        let mut w = Wiki::sample();
+        // runbooks (row index of the decisions folder row is 0)
+        w.drop_folder_on_row("runbooks", 0).expect("move under");
+        assert!(w.folders_named().contains(&"decisions/runbooks".to_string()));
+        assert!(!w.folders_named().contains(&"runbooks".to_string()));
+        let recovery = id_of(&w, "node-recovery.md");
+        let rows = w.nav_rows();
+        let row = rows.iter().find(|r| r.id == recovery).expect("moved file");
+        assert_eq!(row.depth, 2);
+        // cycles refuse: "decisions" cannot move under its own child
+        let sub_row = rows
+            .iter()
+            .position(|r| r.path == "decisions/runbooks")
+            .expect("subfolder row");
+        assert!(w.drop_folder_on_row("decisions", sub_row).is_err());
+        // undo restores the top-level shape
+        w.undo().expect("undo");
+        assert!(w.folders_named().contains(&"runbooks".to_string()));
+        assert_eq!(w.change_counts(), (0, 0, 0));
+    }
+
+    /// A nested folder moves back to the root via the explicit verb.
+    #[test]
+    fn a_nested_folder_moves_to_root() {
+        let mut w = Wiki::sample();
+        w.drop_folder_on_row("runbooks", 0).expect("move under");
+        w.move_folder_to_root("decisions/runbooks").expect("to root");
+        assert!(w.folders_named().contains(&"runbooks".to_string()));
+        let recovery = id_of(&w, "node-recovery.md");
+        let rows = w.nav_rows();
+        assert_eq!(
+            rows.iter().find(|r| r.id == recovery).map(|r| r.depth),
+            Some(1)
+        );
+    }
+
+    /// Renaming a folder with a subtree rewrites child folder entries and
+    /// every doc path under it.
+    #[test]
+    fn renaming_a_parent_folder_rewrites_the_subtree() {
+        let mut w = Wiki::sample();
+        w.drop_folder_on_row("runbooks", 0).expect("move under");
+        w.rename_folder_commit("decisions", "archive").expect("rename");
+        assert!(w.folders_named().contains(&"archive/runbooks".to_string()));
+        let recovery = id_of(&w, "node-recovery.md");
+        let rows = w.nav_rows();
+        assert!(rows.iter().any(|r| r.id == recovery), "file still visible");
+        w.undo().expect("undo rename");
+        assert!(w.folders_named().contains(&"decisions/runbooks".to_string()));
+    }
+
+    /// A file dropped on a NESTED folder row lands under its full path
+    /// (the row's label is only the last segment).
+    #[test]
+    fn a_file_drops_into_a_nested_folder_by_full_path() {
+        let mut w = Wiki::sample();
+        w.drop_folder_on_row("runbooks", 0).expect("nest runbooks");
+        let glossary = id_of(&w, "glossary.md");
+        let rows = w.nav_rows();
+        let target = rows
+            .iter()
+            .position(|r| r.path == "decisions/runbooks")
+            .expect("nested folder row");
+        w.drop_on_row(glossary, target).expect("drop");
+        let rows = w.nav_rows();
+        assert_eq!(
+            rows.iter().find(|r| r.id == glossary).map(|r| r.depth),
+            Some(2),
+            "the file landed under decisions/runbooks"
+        );
+    }
+
+    /// A base with a deep path grows the WHOLE ancestor chain of folder
+    /// rows, not only the direct parent.
+    #[test]
+    fn set_base_creates_the_full_ancestor_chain() {
+        let mut w = Wiki::empty();
+        w.set_base(&[("a/b/c.md".to_string(), "x\n".to_string())], 1);
+        assert!(w.folders_named().contains(&"a".to_string()));
+        assert!(w.folders_named().contains(&"a/b".to_string()));
+        let rows = w.nav_rows();
+        assert_eq!(rows.len(), 3, "a/, a/b/, c.md");
+        assert_eq!(rows[2].depth, 2);
+    }
+
+    /// Deleting a folder with a subtree of drafts removes everything;
+    /// undo walks it back.
+    #[test]
+    fn deleting_a_nested_added_folder_removes_the_subtree() {
+        let mut w = Wiki::empty();
+        w.new_folder();
+        w.rename_folder_commit("new-folder-1", "a").expect("rename");
+        w.new_folder_in("a").expect("subfolder");
+        let id = w.new_file_in("a/new-folder-1");
+        w.rename_cancel();
+        w.delete_folder("a");
+        assert!(w.nav_rows().is_empty());
+        w.undo().expect("undo folders");
+        w.undo().expect("undo folders 2");
+        w.undo().expect("undo file");
+        assert!(
+            w.nav_rows().iter().any(|r| r.id == id),
+            "the draft file is back under its chain"
+        );
     }
 }

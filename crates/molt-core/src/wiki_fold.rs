@@ -208,14 +208,14 @@ fn void(msg: impl Into<String>) -> VoidReason {
     VoidReason(msg.into())
 }
 
-/// A path the tree accepts: non-empty, relative, at most ONE folder
-/// level (the wiki's single-level tree), no empty / dot segments.
+/// A path the tree accepts: non-empty, relative, nested up to eight
+/// segments (folders nest since 2026-08-15), no empty / dot segments.
 fn valid_path(p: &str) -> bool {
     if p.is_empty() || p.starts_with('/') || p.ends_with('/') {
         return false;
     }
     let segments: Vec<&str> = p.split('/').collect();
-    if segments.len() > 2 {
+    if segments.len() > 8 {
         return false;
     }
     segments
@@ -469,7 +469,8 @@ mod tests {
         let mut tree = BTreeMap::new();
         for bad in [
             ADD_A.replace("a.md", "../a.md"),
-            ADD_A.replace("a.md", "x/y/z.md"),
+            // depth 9 — one past the nested-tree cap
+            ADD_A.replace("a.md", "a/b/c/d/e/f/g/h/i.md"),
             ADD_A.replace("a.md", "/abs.md"),
             // header claims 1 old line, body has none
             "diff --git a/a.md b/a.md\nnew file mode 100644\n@@ -1,1 +1,1 @@\n+x\n".to_string(),
@@ -477,6 +478,16 @@ mod tests {
             assert!(apply_patch(&mut tree, &patch_of(&bad)).is_err(), "{bad}");
             assert!(tree.is_empty());
         }
+    }
+
+    /// Folders nest (2026-08-15, user request): a path may carry up to
+    /// eight segments; the hostile shapes above stay refused per segment.
+    #[test]
+    fn nested_folder_paths_apply_up_to_the_depth_cap() {
+        let mut tree = BTreeMap::new();
+        let deep = ADD_A.replace("a.md", "x/y/z.md");
+        assert!(apply_patch(&mut tree, &patch_of(&deep)).is_ok());
+        assert_eq!(tree.get("x/y/z.md").map(String::as_str), Some("hello\nworld\n"));
     }
 
     #[test]

@@ -844,25 +844,37 @@ export component MemoryPane inherits VerticalLayout {
                                         MenuItem {
                                             title: Strings.mem-tb-new-file;
                                             activated => {
-                                                WikiState.new-file-in(r.label);
+                                                WikiState.new-file-in(r.path);
+                                            }
+                                        }
+                                        MenuItem {
+                                            title: Strings.mem-tb-new-folder;
+                                            activated => {
+                                                WikiState.new-folder-in(r.path);
                                             }
                                         }
                                         MenuItem {
                                             title: Strings.mem-menu-rename;
                                             activated => {
-                                                WikiState.nav-folder-rename-start(r.label);
+                                                WikiState.nav-folder-rename-start(r.path);
+                                            }
+                                        }
+                                        if r.depth > 0: MenuItem {
+                                            title: Strings.mem-menu-move-root;
+                                            activated => {
+                                                WikiState.nav-folder-move-root(r.path);
                                             }
                                         }
                                         MenuSeparator { }
                                         MenuItem {
                                             title: Strings.mem-menu-delete;
                                             activated => {
-                                                WikiState.nav-folder-delete(r.label);
+                                                WikiState.nav-folder-delete(r.path);
                                             }
                                         }
                                     }
                                     HorizontalLayout {
-                                        padding-left: 6px;
+                                        padding-left: 6px + r.depth * 16px;
                                         padding-right: 6px;
                                         spacing: 6px;
                                         Rectangle {
@@ -925,7 +937,7 @@ export component MemoryPane inherits VerticalLayout {
                                                 single-line: true;
                                                 vertical-alignment: center;
                                                 accepted => {
-                                                    WikiState.nav-folder-rename-commit(r.label, self.text);
+                                                    WikiState.nav-folder-rename-commit(r.path, self.text);
                                                 }
                                                 init => {
                                                     self.focus();
@@ -941,7 +953,7 @@ export component MemoryPane inherits VerticalLayout {
                                             // drop, not a fold toggle
                                             nav-scope.focus();
                                             if (!root.drag-was) {
-                                                WikiState.nav-toggle-folder(r.label);
+                                                WikiState.nav-toggle-folder(r.path);
                                             }
                                             root.drag-was = false;
                                         }
@@ -949,7 +961,7 @@ export component MemoryPane inherits VerticalLayout {
                                             if (self.pressed && (root.drag-live || Math.abs((self.mouse-y - self.pressed-y) / 1px) > 6)) {
                                                 root.drag-live = true;
                                                 root.drag-was = true;
-                                                root.drag-folder = r.label;
+                                                root.drag-folder = r.path;
                                                 root.drag-to = max(0, idx + Math.floor(self.mouse-y / 28px));
                                             }
                                         }
@@ -960,7 +972,7 @@ export component MemoryPane inherits VerticalLayout {
                                             if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right && !root.drag-live) {
                                                 fomenu.show({ x: self.mouse-x, y: self.mouse-y });
                                             }
-                                            if (ev.kind == PointerEventKind.up && root.drag-live && root.drag-folder == r.label) {
+                                            if (ev.kind == PointerEventKind.up && root.drag-live && root.drag-folder == r.path) {
                                                 WikiState.nav-folder-drop(root.drag-folder, root.drag-to);
                                                 root.drag-live = false;
                                                 root.drag-folder = "";
@@ -1013,7 +1025,7 @@ export component MemoryPane inherits VerticalLayout {
                                         // out of its folder - the drag can
                                         // only target folders, so root needs
                                         // an explicit verb
-                                        if r.nested: MenuItem {
+                                        if r.depth > 0: MenuItem {
                                             title: Strings.mem-menu-move-root;
                                             enabled: r.status != 3;
                                             activated => {
@@ -1091,7 +1103,7 @@ export component MemoryPane inherits VerticalLayout {
                                         }
                                     }
                                     HorizontalLayout {
-                                        padding-left: r.nested ? 24px : 8px;
+                                        padding-left: 8px + r.depth * 16px;
                                         padding-right: 6px;
                                         spacing: 6px;
                                         Rectangle {

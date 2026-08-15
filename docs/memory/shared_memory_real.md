@@ -225,8 +225,12 @@ beats keeping it badged. Delete `MockNote`.
   moved since proposed" (compare the payload's base revision hint, §9.1),
   so members can decline instead of approving a doomed patch. The fold's
   verdict never depends on the hint.
-- Path rules: normalized relative paths, single-level folders (the
-  existing tree model), collisions within one patch → void.
+- Path rules: normalized relative paths, collisions within one patch →
+  void. Folder depth: originally single-level; lifted to a NESTED tree
+  (depth cap 8) on 2026-08-15 by user request (folders move into folders
+  with their subtree). Fold-rule note: a pre-lift client folds a deep-path
+  patch to VOID where a lifted client applies it — acceptable while every
+  node runs the same build; ship both sides together.
 
 **The pending pool after every Applied — the SUPERSEDE WALK** (decided
 with the user, 2026-08-15):

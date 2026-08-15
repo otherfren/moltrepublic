@@ -298,8 +298,9 @@ export struct SurfaceTab {
 export struct WikiNavRow {
     is-folder: bool,
     id: int, // file rows only; 0 for folders
-    label: string,
-    nested: bool,
+    label: string, // last path segment (display)
+    path: string, // folder rows: the FULL folder path (the verbs' identity)
+    depth: int, // tree depth, 0 = root level (drives the indent)
     open: bool, // folder fold state
     marked: bool,
     status: int, // 0 unchanged · 1 added · 2 modified · 3 deleted
@@ -429,6 +430,8 @@ export global WikiState {
     callback nav-folder-drop(string, int); // dragged folder, target row index
     callback new-file-in(string); // folder menu: create inside
     callback nav-move-root(int); // file menu: out of its folder
+    callback new-folder-in(string); // folder menu: subfolder inside
+    callback nav-folder-move-root(string); // folder menu: back to root
     callback tab-focus(int);
     callback tab-close(int);
     callback tab-close-all();
