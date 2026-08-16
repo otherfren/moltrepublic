@@ -1,6 +1,6 @@
 //! The Multisig-Wiki design mock's client state machine.
 //!
-//! UX iteration in front of the real build (`docs/ui/mock_todo.md` story 14):
+//! UX iteration in front of the real build (`docs_archive/ui/mock_todo.md` story 14):
 //! the pane's state — doc tree, open tabs, marked row, edit buffers and the
 //! base-vs-working CHANGE SET — lives here instead of fixed `.slint` slots,
 //! so rename / drag-move / delete-as-pending-change / per-block diffs are

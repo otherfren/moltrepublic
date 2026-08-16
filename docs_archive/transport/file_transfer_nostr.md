@@ -1,20 +1,13 @@
 # File transfer over the Nostr transport — the 445-chunk data plane
 
-Status: **F1–F3 BUILT (2026-08-09/10); F4 partial.** The chunk plane
-(kind 447, `molt-net/src/file_plane.rs`) and the engine wiring
-(`FileWanted`/`FileServed` lazy round, share admitted on relays, GUI
-un-dimmed) are on master — keystones
-`molt-net/tests/file_plane.rs` and
-`molt-engine/tests/file_over_relays.rs::a_shared_file_downloads_over_the_relay`.
-Of F4, the re-publish loop ships (a failed fetch invalidates the cached
-stamp, the next request re-publishes; a removed share stops serving via
-`available`), and the cap is the `[storage] file_cap_bytes` config key
-(keep-live on wholesale saves; default 4 MiB). The 2026-08-10 review's
-correctness findings are fixed (sharer-only `FileServed` trust, share-time
-cap, park watchdog, fetch deadline + count bound, current-epoch sealing).
-STILL OPEN: §5.4's publish-budget metering (chunk publishes are unmetered
-today), the §5.5 share-card status word, and a real transport-vs-miss
-signal in the fetch (Idle conflates both; the miss message says so).
+Status: **SPEC of shipping behaviour — F1–F4 COMPLETE (2026-08-16).**
+The chunk plane (kind 447), the engine wiring, the re-publish loop, the
+`file_cap_bytes` key (0 = sharing off since FP4), §5.4's publish-budget
+metering (one series = one round of the shared hourly allowance), the
+§5.5 availability word (relay-held / sharer-only / gone, on the card and
+over MCP) and the transport-vs-miss split (a dead pool reports deaf,
+never a miss) are all on master. Keystones: `molt-net/tests/file_plane.rs`,
+`molt-engine/tests/file_over_relays.rs`.
 
 ## 1. What exists, and what the gate is
 

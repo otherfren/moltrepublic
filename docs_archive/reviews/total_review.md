@@ -8,6 +8,18 @@ Schweregrad sortiert**. Jeder Eintrag ist als **✅ GEFIXT** (in diesem Review),
 später festgehalten) oder **ℹ️ AKZEPTIERT** (kein echter Defekt / durch eine
 höhere Schicht abgedeckt) markiert.
 
+**Nachtrag 2026-08-16 — auch der LOW-Rest ist abgearbeitet.** L1 (SVG
+wird abgelehnt, User-Entscheid), L2 (Anzeige zählt nur verifizierte
+Signaturen), L3 (Wire-Puffer gedeckelt; der Fund war schwerer als LOW —
+ein `id + 1`-Remote-Abort in receive_checkpoint_proposal, gefixt),
+L7 (korrupt ≠ abwesend, Open verweigert), L8 (read_capped über alle
+~22 Lesestellen + Guard), L10 (Retention als Maschinenwert), L12
+(mockrand doc(hidden), lcg gelöscht, CSPRNG-Jitter), L14 (Guard-Test
+Surface::ALL↔Tag), L15 (kanonische Writer paniken statt leer zu framen,
+inkl. molt-storage republic_id). Offen bleibt EINZIG die zweite Hälfte
+von H3 (Broadcast wartet nicht auf bestätigte Persistenz) — extrahiert
+nach `known_debt.md`; dieses Dokument ist damit Archivmaterial.
+
 **Nachtrag 2026-08-07 — die zurückgestellte Liste ist abgearbeitet.** Beide
 HIGH (H3, H5), alle offenen MEDIUM (M5, M6, M7, M8, M9, M11, M12, M13) und
 die drei sicherheitsnahen LOW (L5, L6, L11) sind gefixt oder als

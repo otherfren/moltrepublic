@@ -15,7 +15,7 @@ plan; the §9 forks were discussed and decided with the user on 2026-08-15.
 Build order relative to other open work: the ritual seed-backup round
 (`docs_archive/ritual/seed_backup_confirmation.md`) lands first.
 
-Read first: `docs/ui/mock_todo.md` (story 14 + the 2026-08-12/14 rounds),
+Read first: `docs_archive/ui/mock_todo.md` (story 14 + the 2026-08-12/14 rounds),
 `docs_archive/chain/persistent_chain.md` (the state model this builds on),
 `docs_archive/ritual/charter_features.md` (how the surface is gated).
 
@@ -179,7 +179,7 @@ beats keeping it badged. Delete `MockNote`.
   badge on the wiki title go away (the badge component stays for the
   other staged surfaces).
 - Strings: empty-state/i18n audit for the new lines; compact-text rule.
-- Status lines: `docs/ui/mock_todo.md` story 14 (memory part) flips to
+- Status lines: `docs_archive/ui/mock_todo.md` story 14 (memory part) flips to
   done; this doc's status flips to BUILT with the landing commit.
 
 ### WP-G — MCP surface

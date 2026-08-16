@@ -2,7 +2,7 @@
 #![allow(missing_docs)]
 
 //! **F3 keystone — file sharing over relays**
-//! (`docs/transport/file_transfer_nostr.md`): the share is metadata-only,
+//! (`docs_archive/transport/file_transfer_nostr.md`): the share is metadata-only,
 //! the bytes publish LAZILY on the first download request (kind-447 chunk
 //! series), and the downloader ends with the verified file on disk — over
 //! a real 2-of-2 republic on an in-process relay.

@@ -798,7 +798,7 @@ Sicherheitskritischer Flow ⇒ erst Design-Doc, erst diskutieren
 9. [ ] `cargo clippy --all-targets` = 0; volle Testsuite grün;
    `#[ignore]`d-Tests einmal manuell gegen regtest-monerod.
 10. [ ] Code-Review über den Gesamt-Diff (/code-review), Findings fixen,
-    grün auf master landen. `docs/ui/mock_todo.md` Punkt 14:
+    grün auf master landen. `docs_archive/ui/mock_todo.md` Punkt 14:
     Wallet-Zeile auf „Etappe 1 done" aktualisieren.
 
 ## 16. Bekannte Fallen (für die Implementierung)

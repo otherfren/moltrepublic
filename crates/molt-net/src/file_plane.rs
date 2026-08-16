@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! The file data plane over relays (F2 of
-//! `docs/transport/file_transfer_nostr.md`): a shared file travels as a
+//! `docs_archive/transport/file_transfer_nostr.md`): a shared file travels as a
 //! series of kind-447 chunk events, each sealed exactly like a 445 group
 //! frame (exporter-secret AEAD, h-tag of the series' one publish stamp).
 //! The share's chat message stays metadata-only; the bytes never touch the

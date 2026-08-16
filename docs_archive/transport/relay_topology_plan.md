@@ -1,8 +1,16 @@
 # Relay topology — the group shares its relays, and says so
 
-**Status: R2b, R3, R3b, R4, R5 and R6 are BUILT (landed 2026-08-02..04; the
-R6 make-before-break rule and the pool-edit UI 2026-08-09); R1, R2 and R2c
-are still open.** Rules ratified by the user 2026-08-02; recorded in
+**Status: EXECUTED — every step is BUILT.** R2b, R3, R3b, R4, R5, R6
+landed 2026-08-02..09; R2c arrived de-facto with the wizard rework
+(the create wizard's relay PICKER, `cw-relay-picks`); R1's rule copy was
+corrected 2026-08-16 (the hint claimed "identical pool", the engine's
+gate runs over the INTERSECTION — now stated correctly and pinned by
+`the_create_wizard_states_the_one_shared_relay_rule`); R2's residual
+holes closed the same day (the recover leg now serves the per-relay
+diagnosis; the mixed-fault headline names an action). §7's NIP-11 bounds
+are `sane_relay_cap` (pinned); §7's NIP-42 line was SUPERSEDED by the
+cluster-G decision of 2026-08-01 (inbox = roster anchor by design, 445 =
+ephemeral) and is struck. Rules ratified by the user 2026-08-02; recorded in
 `nostr_transport_marmot.md` §10.15. This document is the execution plan.
 
 Read first: `relay_pool.md` (relays do not federate; the confirmation gate),

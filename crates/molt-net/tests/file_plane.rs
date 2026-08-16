@@ -2,7 +2,7 @@
 #![allow(missing_docs)]
 
 //! **F2 keystones — the file data plane over relays**
-//! (`docs/transport/file_transfer_nostr.md`): a chunk series published
+//! (`docs_archive/transport/file_transfer_nostr.md`): a chunk series published
 //! once is fetched and verified by a member that shares nothing with the
 //! sharer but the group's rotation seed and exporter ring — and every
 //! refusal (cap, checksum, absent series) is honest, never silence.

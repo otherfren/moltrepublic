@@ -1,5 +1,14 @@
 # Review follow-ups: decline convergence (2026-08-09) + file plane (2026-08-10)
 
+Status: **EXECUTED — every deferred item landed on master (2026-08-16).**
+FP1 (budget metering), FP2 (deaf vs miss), FP3 (close ends the fetch),
+FP4 (0 = sharing off, user-decided) and §5.5's availability word; D1
+(payload-hash binding), D2 (last vote counts, user-decided), D3 (wire
+membership mints the receiver's card), D4 (every drained voice speaks),
+D5 (deterministic decision line), D6 (over-subscribed voters keep their
+pill), D7 (a shed decline stays unacked). Each with its keystone,
+red-verified; commit trail 2026-08-16 on master.
+
 ## File-plane review, deferred (2026-08-10)
 
 The correctness findings of the file-plane review were fixed in-session

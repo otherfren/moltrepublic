@@ -1,10 +1,10 @@
 # Live incident 2026-08-09 — three-node Nostr test, post-recovery divergence
 
-Status: **all defects addressed on master** — five fixed on 2026-08-09
-(proposal-card resurrect, chat-nav pin deadlock, pool edit lost on reopen,
-declines never converged, applied cards lost their voters), §2 and §3
-closed on 2026-08-15 (see their sections); field verification of the
-2026-08-15 fixes on the live three-node setup is pending. Source: the user's real three-node setup (Albert =
+Status: **one item open — FIELD VERIFICATION of the 2026-08-15 fixes
+(§2 heal round, §3 PublishPool) on the live three-node setup with a new
+binary; everything else in this document is addressed on master** (five
+defects fixed 2026-08-09, §2/§3 closed 2026-08-15, the §4 footnote
+answered 2026-08-16 — rayon/openmls, see below). Source: the user's real three-node setup (Albert =
 `config.toml`, Eduard = `config2.toml`, Veronica = `config3.toml`; republic
 "Our Software Company", 2-of-3, relays `wss://nos.lol` + one onion, via local
 Tor). All findings were taken from the LIVE engines over MCP and from headless
@@ -147,10 +147,15 @@ filter — the click IS the way out of the pin. Slint-side handler; not
 reachable from a Rust test (inline .slint), validated by the compile plus
 the live setup.
 
-**Open footnote:** the accepting node's GUI process grows a second, idle
-4-worker tokio runtime at approval time (0 CPU forever, seen twice on
-`config.toml`'s node, absent on the others). Harmless so far but
-unexplained — worth identifying the spawner when next in that code path.
+**Footnote RESOLVED (2026-08-16):** the "second 4-worker tokio runtime"
+is rayon's global thread pool, lazily spawned by openmls's parallel MLS
+path derivation on the recovery re-key commit (both SURVIVORS at the
+first recovery — committer via `restore_member`, bystander via
+`process_message`; the rejoiner never processed that commit, hence had
+none). rayon is a non-optional openmls dependency; the pool is one per
+process, unnamed (why it read as "a runtime"), parks forever at 0 CPU.
+Harmless. Field check if wanted: rayon threads are unnamed vs tokio's
+`tokio-rt-worker`, and `RAYON_NUM_THREADS=1` collapses the count.
 
 ## 5. FIXED — a sealed pool edit did not survive the reopen
 

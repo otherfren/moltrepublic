@@ -773,7 +773,7 @@ impl State {
             // (the auto-cosign would otherwise lock every proposal open),
             // and the sealed-summary test pins it. The signature itself
             // still stands — retraction semantics are the D2 follow-up
-            // (docs/reviews/decline_convergence_review_followups.md).
+            // (docs_archive/reviews/decline_convergence_review_followups.md).
         }
         // D1: the voice binds the payload the decliner SAW — a receiver
         // registers it only against a record hashing identically

@@ -1,6 +1,6 @@
 # N4a follow-ups — verified execution plans
 
-Status: **WORKING DOCUMENT.** Companion to `nostr_n4a_review_followups.md`,
+Status: **EXECUTED — archive material (2026-08-16).** Kept as the reasoning behind the landed clusters. Companion to `nostr_n4a_review_followups.md`,
 which says WHAT is broken and why. This one says HOW to fix it: per cluster,
 the verified anchors, the red test to write first, the ordered steps, the
 files touched and the risks.
@@ -188,7 +188,7 @@ ladder, so silence and progress stop looking identical.
 
 ### Fix steps
 
-1. STEP 0 (design, no code): record the genesis decision in docs/transport/nostr_n4a_review_followups.md §C — recommended: bounded retry + surfaced notice, NOT an ack round (rationale: relays STORE the 445, so one accepted relay is durable for any member subscribing inside the h window; an ack round would force the founder's ritual/group/445-recv to stay alive past maybe_finalize's take()). See open_questions — get the user's yes before step 6.
+1. STEP 0 (design, no code): record the genesis decision in docs_archive/transport/nostr_n4a_review_followups.md §C — recommended: bounded retry + surfaced notice, NOT an ack round (rationale: relays STORE the 445, so one accepted relay is durable for any member subscribing inside the h window; an ack round would force the founder's ritual/group/445-recv to stay alive past maybe_finalize's take()). See open_questions — get the user's yes before step 6.
 2. STEP 1 (molt-net, mechanical): stop discarding the report. `RitualNet::publish` returns `PublishReport` (drop the `.map(|_report| ())` at ritual_net.rs:179); `send_ritual` (184) and `send_welcome` (195) return `Result<PublishReport, NetError>`; `GroupChannel::publish_frame` (328) returns `Result<(u64, PublishReport), NetError>`. Fix the two molt-net test call sites (nostr_ritual_net.rs:170, 196) and add the red test `publish_frame_reports_the_relay_that_refused`.
 3. STEP 2 (molt-core): add ONE engine-internal command `Command::NetRitualPublished { what: String, accepted: Vec<String>, failed: Vec<String>, #[serde(default)] generation: Option<u64> }` with a doc comment saying it is the publish task reporting its REAL per-relay outcome and is never a tool. Keep `failed` pre-formatted ("url: reason") so the actor owns the wording.
 4. STEP 3 (molt-mcp): INTERNAL 45 → 46, add "net_ritual_published" plus a comment paragraph in the block above the array (an MCP agent must not be able to forge a relay outcome). This is what keeps co_equality_every_command_is_a_tool_or_documented_internal green.
@@ -197,7 +197,7 @@ ladder, so silence and progress stop looking identical.
 7. STEP 6 (molt-engine/lifecycles.rs 938-956): route the genesis through the same helper with `FramePayload::Sealed`, the genesis retry policy (e.g. 4 attempts, 2 s → 8 s backoff), and `generation: None` — the ritual is already `take()`n at 773, so a generation-gated report would be dropped. Delete the false comment at 940-944.
 8. STEP 7 (molt-engine/founding.rs): new handler `cmd_net_ritual_published(what, accepted, failed, generation)` + the dispatch arm in molt-engine/src/lib.rs (next to NetRitualFailed at 1266). Branches: (a) accepted empty && pre-seal leg → delegate to `cmd_net_ritual_failed(format!("{what} did not publish: …"), generation)` (existing outcome=2 + teardown); (b) accepted empty && what == "genesis" → `session.notice = format!("genesis-undelivered:{detail}")`, a ✗ create.run.log line saying the members were NOT told, `tracing::error!`; (c) accepted non-empty && !failed.is_empty() → a ⚠ create.run.log line "landed on k of n relays" naming each failed relay; (d) clean success → `tracing::debug!` only. Gate (a)/(c) on `ritual_generation_current`; (b) must not be so gated.
 9. STEP 8 (molt-ui, no .slint edit): toast the new notice in the edge-triggered notice block (crates/molt-ui/src/lib.rs ~2360-2370, next to the backup-failed/detached toasts) using a Rust-side localized copy fn (the `tor_verdict_copy_for` precedent) so no Strings entry and no 6-GiB molt-ui-window rebuild is needed. Without this the notice is itself an inert seam — the exact sin this cluster is about.
-10. STEP 9 (docs): docs_archive/transport/nostr_n4_plan.md §8b — strike the false "the member's own wait surfaces it" claim and record the genesis story that was chosen; mark cluster C DONE in docs/transport/nostr_n4a_review_followups.md, noting that the Welcome fan-out and the member's Signed publish were already wired (finding partially retired).
+10. STEP 9 (docs): docs_archive/transport/nostr_n4_plan.md §8b — strike the false "the member's own wait surfaces it" claim and record the genesis story that was chosen; mark cluster C DONE in docs_archive/transport/nostr_n4a_review_followups.md, noting that the Welcome fan-out and the member's Signed publish were already wired (finding partially retired).
 11. STEP 10: `cargo clippy --all-targets` at 0 and the four new tests green; then the code review over the diff and land on master.
 
 ### Files edited
@@ -213,7 +213,7 @@ ladder, so silence and progress stop looking identical.
 - `crates/molt-engine/tests/nostr_founding.rs`
 - `crates/molt-ui/src/lib.rs`
 - `docs_archive/transport/nostr_n4_plan.md`
-- `docs/transport/nostr_n4a_review_followups.md`
+- `docs_archive/transport/nostr_n4a_review_followups.md`
 
 ### Risks
 
@@ -282,7 +282,7 @@ ladder, so silence and progress stop looking identical.
 8. 7. Dispatch + handlers: arms in `molt-engine/src/lib.rs` next to the `NetRitualFailed` arm (line 1266); `cmd_net_ritual_note` in `founding.rs` beside `cmd_net_ritual_failed` (gate on `ritual_generation_current(generation)` and `run.outcome == 0`, push into `session.create.run.log`, `emit_session(SessionScope::Create)`); `cmd_net_join_note` in `lifecycles.rs` beside `cmd_net_join_failed` (gate on `generation == Some(self.join_generation)` and `run.outcome == 0`, push into `session.join.run.log`, `emit_session(SessionScope::Full)`). BOTH must reuse the `cmd_net_join_accepted` dedup (`if log.last() == Some(&line) { return Ok(Reply::Ack) }`) so a 30 s-repeating deaf note cannot stack lines. Neither handler ever sets `outcome = 2`.
 9. 8. Grow `INTERNAL` in `crates/molt-mcp/src/lib.rs:1319` from `[&str; 45]` to `[&str; 47]` with `net_ritual_note` / `net_join_note` and a comment in the block above explaining why they are internal (a task reporting a transport condition, not an operator decision).
 10. 9. Wire the three call sites in `nostr_ritual.rs`: on `GroupRecv::Deaf(why)` send the scope's note ('⚠ cannot hear the group channel — {why} · still retrying' — founder: NetRitualNote, joiner: NetJoinNote) and `continue`; track a local `was_deaf` flag and, on the first `Frame` after a deaf spell, send '✓ the group channel is back'. Keep the existing frame handling byte-identical otherwise. Test 2 goes green.
-11. 10. `cargo clippy --all-targets -p molt-net -p molt-core -p molt-engine -p molt-mcp` at zero (`.expect("…")` in the new tests, never `.unwrap()`), run `-p molt-net --test nostr_ritual_net --test nostr_window_roll --test nostr_relay_runtime` and `-p molt-engine --test nostr_founding --test nostr_window_roll`, then mark cluster E done in `docs/transport/nostr_n4a_review_followups.md` and add one line to `docs_archive/transport/nostr_n4_plan.md` §4.4 recording that the roll now retries on a backoff and reports deafness. One commit, on master.
+11. 10. `cargo clippy --all-targets -p molt-net -p molt-core -p molt-engine -p molt-mcp` at zero (`.expect("…")` in the new tests, never `.unwrap()`), run `-p molt-net --test nostr_ritual_net --test nostr_window_roll --test nostr_relay_runtime` and `-p molt-engine --test nostr_founding --test nostr_window_roll`, then mark cluster E done in `docs_archive/transport/nostr_n4a_review_followups.md` and add one line to `docs_archive/transport/nostr_n4_plan.md` §4.4 recording that the roll now retries on a backoff and reports deafness. One commit, on master.
 
 ### Files edited
 
@@ -295,7 +295,7 @@ ladder, so silence and progress stop looking identical.
 - `crates/molt-mcp/src/lib.rs`
 - `crates/molt-net/tests/nostr_window_roll.rs`
 - `crates/molt-engine/tests/nostr_window_roll.rs`
-- `docs/transport/nostr_n4a_review_followups.md`
+- `docs_archive/transport/nostr_n4a_review_followups.md`
 - `docs_archive/transport/nostr_n4_plan.md`
 
 ### Risks
@@ -376,7 +376,7 @@ ladder, so silence and progress stop looking identical.
 11. F3-b: else, if the MAC verifies AND `anchored_member == member` AND the seat is not sealed AND the group is not born (`nostr.group.is_none()`): RE-ANCHOR — clear seat.identity/key_package/reply_snd/reply_wrap and let control fall through into the existing verification ladder (PoP → MAC → canonical anchor → cross-seat uniqueness → KeyPackage binding) so the retry is re-checked in full, not fast-pathed; log `· invite N re-activated by {member} — the earlier attempt is replaced`; send LinkSpent to the DISPLACED anchor (not to the new one).
 12. F3-c: else (different handle, or sealed, or group already born): keep LinkSpent to the new activator, but split the wording — a different handle keeps today's 'that link is spent, ask for your own'; a same-handle post-birth retry gets the true reason ('this founding has already formed its group around the first activation — the founder must cancel and re-mint'). Mirror the split in the joiner's error text (nostr_ritual.rs:474 and 500).
 13. F3-d: log the currently-silent case too — a re-activation whose MAC does NOT verify appends a refusal line instead of returning Ack in silence.
-14. Docs: add the `Aborted` row to the wire-mapping table in docs_archive/transport/nostr_n4_plan.md §2 (line ~124); record the abort frame + the re-activation rule in docs_archive/ritual/founding_ritual.md; in docs/transport/nostr_n4a_review_followups.md mark F done AND correct the F3 diagnosis in place (the retry does not re-derive the same identity — cmd_join_start mints a fresh phrase; the comparison was never the bug).
+14. Docs: add the `Aborted` row to the wire-mapping table in docs_archive/transport/nostr_n4_plan.md §2 (line ~124); record the abort frame + the re-activation rule in docs_archive/ritual/founding_ritual.md; in docs_archive/transport/nostr_n4a_review_followups.md mark F done AND correct the F3 diagnosis in place (the retry does not re-derive the same identity — cmd_join_start mints a fresh phrase; the comparison was never the bug).
 
 ### Files edited
 
@@ -390,7 +390,7 @@ ladder, so silence and progress stop looking identical.
 - `crates/molt-engine/src/lib.rs`
 - `crates/molt-engine/tests/nostr_founding.rs`
 - `docs_archive/transport/nostr_n4_plan.md`
-- `docs/transport/nostr_n4a_review_followups.md`
+- `docs_archive/transport/nostr_n4a_review_followups.md`
 - `docs_archive/ritual/founding_ritual.md`
 
 ### Risks
@@ -468,7 +468,7 @@ ladder, so silence and progress stop looking identical.
 10. Step 9 — crates/molt-engine/src/nostr_ritual.rs:330 (spawn_founder_group_recv): add the MISSING gate — after `chan.subscribe()` succeeds, `let st = sub.live_state(LIVE_WAIT).await;` and on `!st.any()` send NetRitualFailed naming the group channel, then return.
 11. Step 10 — the ≥1 rule, stated once in the module doc: `synced == 0` is a provisioning failure (no relay is proven readable); `0 < synced < connected` is a warning, not a failure. This mirrors the pool's ≥1-OK publish and ≥1-accepted-REQ semantics; failing on ANY unsynced relay would let one lagging relay in a healthy pool kill every founding.
 12. Step 11 — regression GUARD (green today, cheap, and the thing most likely to be broken by step 2): in crates/molt-net/tests/nostr_ritual_net.rs, against a `RelayBuilderNip42Mode::Both` relay, `RitualNet::send_ritual` must fail with an error containing "refused to link the publish key". Verify it is a real guard by temporarily adding `.with_auth_keys(...)` to ritual_net.rs:176 and watching it go red.
-13. Step 12 — docs: mark §G done in docs/transport/nostr_n4a_review_followups.md, and update the NIP-42 bullet in docs_archive/transport/nostr_n4_plan.md §10 to record what actually shipped (anchor AUTH on the 1059 inboxes, ephemeral-per-subscription on 445, and the remaining whitelist-relay limitation).
+13. Step 12 — docs: mark §G done in docs_archive/transport/nostr_n4a_review_followups.md, and update the NIP-42 bullet in docs_archive/transport/nostr_n4_plan.md §10 to record what actually shipped (anchor AUTH on the 1059 inboxes, ephemeral-per-subscription on 445, and the remaining whitelist-relay limitation).
 14. Step 13 — `cargo clippy --all-targets -p molt-net -p molt-engine` at zero (`.expect("…")` in tests, never `.unwrap()`), then the four tests green, then commit on master.
 
 ### Files edited
@@ -478,7 +478,7 @@ ladder, so silence and progress stop looking identical.
 - `crates/molt-engine/src/nostr_ritual.rs`
 - `crates/molt-net/tests/nostr_ritual_net.rs`
 - `crates/molt-engine/tests/nostr_founding.rs`
-- `docs/transport/nostr_n4a_review_followups.md`
+- `docs_archive/transport/nostr_n4a_review_followups.md`
 - `docs_archive/transport/nostr_n4_plan.md`
 
 ### Risks
@@ -544,7 +544,7 @@ ladder, so silence and progress stop looking identical.
 7. STEP 6 (H3 test). Same file, harness path: joiner engine executes JoinStart; the harness waits for the JoinRequest, then an `imposter` RitualNet (unrelated key) sends `LinkSpent{seat:0}` to `j.nostr_pk`; then the genuine JoinAccepted + Welcome; then, after `wait_for(join.run.progress_pct == 45)`, the imposter sends a WelcomePayload{welcome: b"garbage", rotation_seed: [9u8;32], relays: <the invite's list>}. Publish the Seal in a retry loop (every 300 ms until `join.awaiting_ratify`) so the test never depends on relay backlog replay. Assert the join reaches awaiting_ratify with the genuine charter. Prove red by deleting each guard pair (475/499, then 483/497).
 8. STEP 7 (H2b test). Same file, same harness: after `JoinConfirmCharter`, read the joiner's `Signed` off the 445 channel, then publish `Genesis{sealed: <P with agenda swapped>, welcome: String::new()}` in a retry loop until `join.run.outcome != 0`. Assert outcome == 2, the log contains "not the table we ratified", and `workspaces.is_empty()`. Add a comment stating WHY the assertion names the message (lifecycles.rs:1185 would refuse the swap anyway — the message is what proves the joiner's own gate fired). Prove red by deleting nostr_ritual.rs:616-622.
 9. STEP 8. `cargo clippy --all-targets -p molt-net -p molt-engine` at zero (`.expect("…")` everywhere, no `as` casts), then `cargo test -p molt-net --test nostr_ritual_net` and `cargo test -p molt-engine --test nostr_ritual_adversarial --test nostr_founding -- --test-threads=2` (per-crate, -j 1 if RAM is tight; never alongside a molt-ui-window build). One commit per item is fine; land green on master.
-10. STEP 9. Update docs/transport/nostr_n4a_review_followups.md §H: mark the four items DONE with the test names, and record the two verification findings — (a) the loopback keystone was semi-inert and why, (b) the malformed refusal strings. Add the `SealedRoster.roster` gap as a NEW open item (see open_questions) rather than silently fixing it here.
+10. STEP 9. Update docs_archive/transport/nostr_n4a_review_followups.md §H: mark the four items DONE with the test names, and record the two verification findings — (a) the loopback keystone was semi-inert and why, (b) the malformed refusal strings. Add the `SealedRoster.roster` gap as a NEW open item (see open_questions) rather than silently fixing it here.
 
 ### Files edited
 
@@ -552,7 +552,7 @@ ladder, so silence and progress stop looking identical.
 - `crates/molt-net/tests/nostr_ritual_net.rs`
 - `crates/molt-engine/src/founding.rs`
 - `crates/molt-engine/tests/nostr_ritual_adversarial.rs`
-- `docs/transport/nostr_n4a_review_followups.md`
+- `docs_archive/transport/nostr_n4a_review_followups.md`
 
 ### Risks
 
@@ -680,7 +680,7 @@ ladder, so silence and progress stop looking identical.
 3. GREEN step 2 — carry the honesty note out of start_ritual. `self.session.create` is wholly replaced in cmd_create_start (lifecycles.rs:713), so a log line pushed inside start_ritual is discarded. Change `start_ritual`'s return from `Result<Vec<String>, String>` to a small pub(crate) struct `RitualStart { links: Vec<String>, notes: Vec<String> }` (declared next to `NostrRitual` in founding.rs). When `dropped > 0`, push one note: `"→ this node's pool has {n} dialable relays; the invite and the Welcome carry the first {MAX} (the pool order is the priority — reorder in Settings to change which)"` using the run log's `→ ` tone prefix.
 4. GREEN step 3 — apply the notes. In crates/molt-engine/src/lifecycles.rs::cmd_create_start, destructure the new return (`let RitualStart { links, notes } = self.start_ritual(...)`), build `seats` from `links` unchanged, and AFTER the `self.session.create = CreateState { .. }` assignment (line 713) do `self.session.create.run.log.extend(notes);` — before the existing `emit_session`. Verify no other caller of `start_ritual` exists (grep: lifecycles.rs:698 is the only one).
 5. Run the new test green, then the neighbours that share this path: `cargo test -p molt-engine --test nostr_founding` and `cargo test -p molt-engine --test two_instances` (the loopback seam path takes the `else` branch and must be untouched), plus `cargo test -p molt-net invite`.
-6. clippy + docs: `cargo clippy --all-targets` at zero (`.expect("…")` only in the new test, no `.unwrap()`, no index panics when generating the 8 onion URLs). Then update docs_archive/transport/nostr_n4_plan.md §3 (the `≤8 relays` bullet, line ~168) with one sentence: the founder takes the first MAX_PAYLOAD_RELAYS of `relay::dialable` in priority order, and the SAME capped list feeds invite, Welcome, group channel and TransportState. Tick cluster I in docs/transport/nostr_n4a_review_followups.md.
+6. clippy + docs: `cargo clippy --all-targets` at zero (`.expect("…")` only in the new test, no `.unwrap()`, no index panics when generating the 8 onion URLs). Then update docs_archive/transport/nostr_n4_plan.md §3 (the `≤8 relays` bullet, line ~168) with one sentence: the founder takes the first MAX_PAYLOAD_RELAYS of `relay::dialable` in priority order, and the SAME capped list feeds invite, Welcome, group channel and TransportState. Tick cluster I in docs_archive/transport/nostr_n4a_review_followups.md.
 7. One commit on master, code-review the diff, land green.
 
 ### Files edited
@@ -689,7 +689,7 @@ ladder, so silence and progress stop looking identical.
 - `crates/molt-engine/src/lifecycles.rs`
 - `crates/molt-engine/tests/nostr_founding.rs`
 - `docs_archive/transport/nostr_n4_plan.md`
-- `docs/transport/nostr_n4a_review_followups.md`
+- `docs_archive/transport/nostr_n4a_review_followups.md`
 
 ### Risks
 

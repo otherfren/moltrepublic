@@ -1,6 +1,6 @@
 # N4a review follow-ups — the fix plan
 
-Status: **IN PROGRESS.** Two independent adversarial review passes ran over
+Status: **EXECUTED (2026-08-16) — archive material.** Every cluster ✅; the section-B debts landed 2026-08-16 (TargetGap threaded into the Tor verdict; the duplicated run-log blocks were unified by the wizard rework; `TargetGap` has real callers now). Two independent adversarial review passes ran over
 the N4a change-set on 2026-08-01 (round 1: six code-dimension lenses +
 per-finding refutation; round 2: inert-keystone hunt, loopback differential,
 malicious-relay model, regression sweep + a 3-lens judge panel). 25 + 16 raw
@@ -108,11 +108,9 @@ longer exists, and never told about the switch that is actually off.
   own (never overwriting one the operator wrote), and both pool-load paths
   `tracing::warn!` when the confirmed-but-switched-off state is loaded.
 
-**Left as debt (not this change-set):** `tor_probe::verdict` still cannot name
-the real cause for `ProxyOnly` — it has no pool to inspect, so it now claims
-only what it observed; threading `TargetGap` in is the real fix. The two
-run-log blocks should become one component. `TargetGap` itself is still
-uncalled.
+**Debt CLOSED (2026-08-16):** `TargetGap` is threaded through the probe
+into the verdict (four named causes, pairwise-distinct, pinned); the two
+run-log blocks became one `RitualLog` component with the wizard rework.
 
 ## C. The inert publish-failure seam — ✅ DONE
 

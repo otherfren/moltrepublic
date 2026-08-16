@@ -14,7 +14,7 @@ template is the Shared Memory build
 applied payloads on the persistent chain, drafts local, one co-equal
 command surface.
 
-Read first: `docs/ui/mock_todo.md` story 14 (Quests is one of its four
+Read first: `docs_archive/ui/mock_todo.md` story 14 (Quests is one of its four
 surfaces), `docs_archive/memory/shared_memory_real.md` (the template this
 follows), `docs_archive/chain/persistent_chain.md` (the state model),
 `docs_archive/ritual/charter_features.md` (how the surface is gated).
