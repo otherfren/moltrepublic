@@ -6,7 +6,9 @@ actors, the keys, the messages, and the guarantees that hold when each phase
 is over. The concrete crates and the build order live in
 `docs/chain/multi-sig-wallet-plan.md`; the code is pointed to at the end.
 
-Status: DRAFT for discussion (2026-07-18). Nothing below is implemented yet.
+Status: DRAFT for discussion (2026-07-18; revised 2026-08-16 against the
+current code: charter-feature gate, Nostr transport, at-least-once
+delivery). Nothing below is implemented yet.
 
 ---
 
@@ -30,6 +32,12 @@ What falls out of this: no signer-set configuration surface, no key
 ceremonies beyond the one DKG, no resharing protocol (none exists in the
 chosen stack, and none is needed — membership is fixed for life, a deliberate
 match).
+
+One precondition sits in front of everything below: the Wallet surface is an
+**optional charter feature** (`docs_archive/ritual/charter_features.md`) —
+enabled at founding or by a later `set_features` threshold vote, never
+disabled again. A republic that never enabled it has no treasury surface and
+`WalletInit` is refused; the ritual of §3 presumes the feature is on.
 
 ## 2. Actors and their keys
 
@@ -90,8 +98,9 @@ initiator            every member                       chain
 
 Phase by phase:
 
-1. **Intent.** Any member issues `WalletInit`. The engine refuses if a
-   wallet already exists or an init is in flight (one-shot). It probes the
+1. **Intent.** Any member issues `WalletInit`. The engine refuses if the
+   wallet charter feature is not enabled, if a wallet already exists, or if
+   an init is in flight (one-shot). It probes the
    configured daemon for the current height and mints a normal pending
    proposal on the Wallet surface carrying `birthday_height` (probe height
    minus a safety margin). Binding the birthday into the ratified intent
@@ -162,6 +171,13 @@ public-by-design (commitments, proofs of possession) or protocol-encrypted
 founded and *by which members* — which the terminal block states anyway. A
 log-free side channel remains listed future work for the chain in general;
 the treasury does not need it sooner.
+
+Transport notes (post-N4/N5): the gossip rides the production Nostr
+transport as MLS-encrypted group traffic — the same path as all wire
+events — and delivery is **at-least-once** end-to-end
+(`docs_archive/transport/delivery_guarantee.md`). Duplicate round messages
+arrive by design (rewind-resend), so round ingestion is idempotent by
+construction, not as a defensive nicety.
 
 ## 5. Persistence, backup, recovery
 
@@ -294,6 +310,7 @@ should overlap in time. These get their own design pass before Etappe 2.
 
 | failure | behavior |
 |---|---|
+| wallet feature not enabled | `WalletInit` refused (feature-disabled); enable it via a `set_features` vote first |
 | a member declines the intent | ritual aborts before any round; proposal declined |
 | timeout (member offline during rounds) | abort event (no blame), no disk trace, re-mintable |
 | invalid share / bad commitment | PedPoP blame machine attributes the sender; abort event names the member — visible in the republic, same social contract as a failed founding |

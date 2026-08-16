@@ -1,6 +1,10 @@
 # Multisig-Wallet-Surface: vollständiger Implementierungsplan
 
-Stand 2026-07-18. Dieses Dokument ist der **ausführungsreife Bauplan** für
+Stand 2026-07-18; **Revision 2026-08-16**: alle Code-Anker gegen master
+verifiziert und die seit Juli gelandeten Umbauten eingearbeitet
+(Charter-Features, SMP-Entfernung/Nostr-Transport, Zustellgarantie,
+WP4a-Segmente, Storage-API-Umbenennungen). Dieses Dokument ist der
+**ausführungsreife Bauplan** für
 `Surface::Wallet` (die Monero-Multisig-Schatzkammer der Republik). Es ist so
 geschrieben, dass die Implementierung ohne weiteren Kontext daraus erfolgen
 kann: exakte Dateien, Symbole, Typen, Testnamen, Reihenfolge. Grundlage sind
@@ -9,7 +13,7 @@ monero-oxide sowie die am 2026-07-18 vom User ratifizierten
 Produktentscheidungen.
 
 **Für die Implementierung gilt zwingend:**
-- Zeilennummern in diesem Doc sind Stand 2026-07-18 — **immer per Symbolname
+- Zeilennummern in diesem Doc sind Stand 2026-08-16 — **immer per Symbolname
   greppen**, nie blind an Zeilen editieren.
 - **Keine upstream-API erfinden.** Die exakten Signaturen von `dkg-pedpop`,
   `modular-frost`, `monero-wallet` werden in Schritt 2 (Dep-Spike) gegen den
@@ -39,6 +43,17 @@ Eine Republik erhält eine gemeinsame Monero-Kasse:
   Seat-Adding, für immer). Es gibt EINEN Threshold-Begriff im System.
 - **Scope: nur XMR.** (`bitcoin-serai` — FROST/Taproot über dasselbe
   `modular-frost` — bleibt dokumentierte spätere Option.)
+- **Wallet ist ein Charter-Feature** (seit 2026-08-11,
+  `docs_archive/ritual/charter_features.md`): `Surface::Wallet` ist optional —
+  aktiviert bei der Gründung (Wizard Schritt 3) oder später per
+  `set_features`-Vote, nie deaktivierbar. Die Legacy-Baseline
+  (`features: None`) ist nur `["memory"]`. `require_feature`
+  (`crates/molt-engine/src/chain.rs:1219`) weist Proposals auf einem
+  deaktivierten Surface mit `MoltError::FeatureDisabled` ab; der Fold kann
+  `["wallet"]` bereits (grüner Test `chain.rs:7493`). Für diesen Plan:
+  `WalletInit` setzt das aktivierte Feature voraus (§7.1), und §11 baut
+  auf der feature-getriebenen Nav-Sichtbarkeit auf statt auf einem
+  hartkodierten Gate.
 - **Gestufter Ausbau:**
   - **Etappe 1:** DKG-Ritual „Kasse einrichten" + gemeinsame Adresse +
     Shared-View-Key-Scanning → die Views `balance`, `history`, `receive`,
@@ -118,8 +133,8 @@ Key rekonstruiert — für eine dauerhafte Kasse unbrauchbar).
 2. **clippy = 0, auch Tests;** `.expect("…")` statt `.unwrap()` überall.
    `cargo clippy --all-targets` vor jedem Commit.
 3. **Co-Equality-Test:** jede neue `Command`-Variante MUSS entweder
-   MCP-Tool werden (`crates/molt-mcp/src/lib.rs::tools()`) oder auf die
-   dokumentierte `INTERNAL`-Liste (derzeit `[&str; 32]`, ebenda ~Z.1098) —
+   MCP-Tool werden (`crates/molt-mcp/src/lib.rs::tools()`, ~Z.580) oder auf
+   die dokumentierte `INTERNAL`-Liste (derzeit `[&str; 54]`, ebenda ~Z.1592) —
    sonst wird `co_equality_every_command_is_a_tool_or_documented_internal`
    rot. Netz-/Ritual-Feedback = INTERNAL; menschliche Verben = Tool.
 4. **Events additiv:** neue `WorkspaceEvent`-Varianten sind erlaubt, neue
@@ -142,30 +157,34 @@ Key rekonstruiert — für eine dauerhafte Kasse unbrauchbar).
 
 ## 4. Verifizierte Anker im Repo (Symboltabelle)
 
-| Anker | Ort (Stand 2026-07-18) | Rolle für dieses Projekt |
+| Anker | Ort (Stand 2026-08-16) | Rolle für dieses Projekt |
 |---|---|---|
-| `Surface::Wallet`, Views `balance/history/send/receive/status/settings` | `crates/molt-core/src/lib.rs` ~Z.59, ~Z.142 (`Surface::views`) | existiert schon; Views nicht umbenennen |
-| `SurfaceSnapshot` | ebenda ~Z.2952 | bekommt additives Feld `wallet` (§8.4) |
-| `Command`-Enum + `Net*`-Muster | ebenda ~Z.2046ff | neue Varianten §8.1 |
-| `WorkspaceEvent` | ebenda ~Z.1373ff | neue Varianten §8.2 |
-| `crosses_wire(event)` | `crates/molt-engine/src/net.rs:328` | Wallet-Rundenevents hier aufnehmen |
-| `cmd_net_delivered` | `crates/molt-engine/src/net.rs:767` | Empfangs-Dispatch: neue Arme |
-| `persist_crypto_blocking`-Callsite (Clean-Close) | `crates/molt-engine/src/net.rs:522` | daneben `wallet.state`-Final-Write |
-| `is_chain_governed` / `chain_sign_and_gossip_approval` / `collect_sig` / `try_commit` | `crates/molt-engine/src/chain.rs:732/889/917/936` | unverändert wiederverwenden; `try_commit` sealt bei m niedrigst-benannten gültigen Signierern |
-| Checkpoint-Muster (Engine rechnet Inhalt selbst nach, Auto-Co-Sign nur bei exaktem Match) | `crates/molt-engine/src/chain.rs::cmd_propose_checkpoint` / `receive_checkpoint_proposal` | Vorbild für den Terminal-Block §7.5 |
-| `State.net_ritual: Option<founding::RitualRuntime>` | `crates/molt-engine/src/lib.rs:471` | Vorbild für `wallet_ritual` |
-| `State::threshold()` | `crates/molt-engine/src/lib.rs` ~Z.685 | = `rule_m` |
-| `cmd_propose` / `cmd_approve` | `crates/molt-engine/src/proposals.rs:179/232` | Konsens-Wiederverwendung; Sonderfall alle-n §7.2 |
-| Ticker-Muster | `crates/molt-engine/src/lifecycles.rs::spawn_ticker` ~Z.1349 | Vorbild Timeout-/Scanner-Task-Anbindung |
-| `transport_key`/`chain_key` + `read/write_transport_state`, `read/write_chain_state` | `crates/molt-storage/src/lib.rs` ~Z.882–1040 | 1:1-Vorbild für `wallet_state` (§9) |
-| Segment-Konstanten `TRANSPORT_SEGMENT = u64::MAX-1`, `CHAIN_SEGMENT = u64::MAX-2` | `crates/molt-storage/src/lib.rs:77/80` | neu: `WALLET_SEGMENT = u64::MAX - 3` |
-| Backup-Include-Tabelle + Import-Allowlist | `docs_archive/storage/backup_restore_design.md` §3.2 (Tabelle ~Z.100) und §-Import (~Z.328, Allowlist `manifest.toml, prefs.toml, chain.state, …`) | `wallet.state` ergänzen (Doc + Code) |
-| E2E-Vorbilder | `crates/molt-engine/tests/two_instances.rs::founding_governs_over_the_direct_mesh`, `tests/three_nodes.rs` | Stil für den DKG-E2E-Test |
-| `#[ignore]`-Netztest-Präzedenz | `crates/molt-engine/tests/ritual_engine_over_smp.rs` | Stil für den monerod-Test |
-| Mock-`WalletPane` | `crates/molt-ui-window/ui/surfaces.slint:1098`; eingebunden `app.slint:33` und ~Z.4806; Nav-Gate `app.slint` ~Z.1234 (`enabled: s.key == "organization" \|\| s.key == "chat"`) | wird echt (§11) |
-| GUI-Logik | `crates/molt-ui/src/lib.rs` (`apply_surfaces` ~Z.2917, `issue` ~Z.1841, toter „transfer"-Mock in `default_op` ~Z.4094) | §11 |
-| MCP `tools()` / `INTERNAL` | `crates/molt-mcp/src/lib.rs:457/1098` | §8.5 |
-| **Namensfalle:** `WalletHandle` in molt-engine | `crates/molt-engine/src/lib.rs:78` | ist der ENGINE-AKTOR-Handle (konkinwallet-Erbe), NICHT die Schatzkammer. Nicht umbenennen, nicht verwechseln. |
+| `Surface::Wallet`, Views `balance/history/send/receive/status/settings` | `crates/molt-core/src/lib.rs:62`, `:127` (`Surface::views`) | existiert schon; Views nicht umbenennen |
+| `Surface::is_charter_feature` / `canonical_features` / `LEGACY_FEATURES` | ebenda ~Z.104/195/110 | Wallet ist optionales Feature (§1, §7.1) |
+| `SurfaceSnapshot` | ebenda ~Z.4852 | bekommt additives Feld `wallet` (§8.4) |
+| `Command`-Enum + `Net*`-Muster | ebenda ~Z.3162ff | neue Varianten §8.1 |
+| `WorkspaceEvent` | ebenda ~Z.2108ff | neue Varianten §8.2 |
+| `crosses_wire(event)` | `crates/molt-engine/src/net.rs:387` | Wallet-Rundenevents hier aufnehmen |
+| `cmd_net_delivered` | `crates/molt-engine/src/net.rs:1075` | Empfangs-Dispatch: neue Arme |
+| `persist_crypto_blocking`-Callsites (Clean-Close) | `crates/molt-engine/src/net.rs:621/632` | daneben `wallet.state`-Final-Write |
+| `is_chain_governed` / `chain_sign_and_gossip_approval` / `collect_sig` / `try_commit` | `crates/molt-engine/src/chain.rs:1562/1843/1871/1890` | unverändert wiederverwenden; `try_commit` sealt bei m niedrigst-benannten gültigen Signierern und trägt seit 2026-08-08 den Restored-Consent-Sonderfall — der `wallet_init`-Guard (§7.2) wird sein Nachbar |
+| `require_feature` / `effective_features` | `crates/molt-engine/src/chain.rs:1219/1197` | Feature-Gate für `WalletInit` (§7.1) |
+| Checkpoint-Muster (Engine rechnet Inhalt selbst nach, Auto-Co-Sign nur bei exaktem Match) | `crates/molt-engine/src/chain.rs::cmd_propose_checkpoint` (~Z.2661) / `receive_checkpoint_proposal` (~Z.2709) | Vorbild für den Terminal-Block §7.5 |
+| `State.net_ritual: Option<founding::RitualRuntime>` | `crates/molt-engine/src/lib.rs:792` | Vorbild für `wallet_ritual` |
+| `State::threshold()` | `crates/molt-engine/src/lib.rs:1115` | = `rule_m` |
+| `cmd_propose` / `cmd_approve` | `crates/molt-engine/src/proposals.rs:373/550` | Konsens-Wiederverwendung; Sonderfall alle-n §7.2 |
+| Ticker-Muster | `crates/molt-engine/src/lifecycles.rs::spawn_ticker_every` (~Z.2267; hieß früher `spawn_ticker`) | Vorbild Timeout-/Scanner-Task-Anbindung |
+| `transport_key`/`chain_key` + `read/write_transport_state`, `read_chain`/`write_chain` (frühere Namen `read/write_chain_state`) | `crates/molt-storage/src/lib.rs` ~Z.1380–1500, `persist_chain_blocking` ~Z.2604 | 1:1-Vorbild für `wallet_state` (§9) |
+| Segment-Konstanten `TRANSPORT_SEGMENT = u64::MAX-1`, `CHAIN_SEGMENT = u64::MAX-2`, `KEYS_SEGMENT = u64::MAX-3` (WP4a) | `crates/molt-storage/src/lib.rs:84–92` | neu: `WALLET_SEGMENT = u64::MAX - 4` (−3 ist seit WP4a BELEGT) |
+| Export/Import-Module | `crates/molt-storage/src/export.rs` / `import.rs` | dort `wallet.state` in Include + Allowlist (§9) |
+| Backup-Include-Tabelle + Import-Allowlist | `docs_archive/storage/backup_restore_design.md` §3.2 (Tabelle ~Z.105) und §-Import (~Z.332, Allowlist `manifest.toml, prefs.toml, chain.state, …`) | `wallet.state` ergänzen (Doc + Code) |
+| E2E-Vorbilder | `crates/molt-engine/tests/two_instances.rs::founding_governs_over_the_direct_mesh` (~Z.1421), `tests/three_nodes.rs` | Stil für den DKG-E2E-Test (Loopback bleibt DER Test-Transport) |
+| `#[ignore]`-Netztest-Präzedenz | `crates/molt-net/tests/nostr_relay_poc.rs` (das frühere Vorbild `ritual_engine_over_smp.rs` fiel mit dem SMP-Transport) | Stil für den monerod-Test |
+| Mock-`WalletPane` | `crates/molt-ui-window/ui/surfaces.slint:2248`; eingebunden `app.slint:33`, Routing ~Z.6353 | vollständiger Design-Mock aller sechs Views; wird echt (§11) |
+| Nav-Sichtbarkeit | feature-getrieben: molt-ui filtert auf `org_stats.features` (`crates/molt-ui/src/lib.rs:3991`); ein aktiviertes-aber-ungebautes Surface öffnet die gebadgte Mock-Pane | KEIN hartkodiertes Gate mehr (§11.1) |
+| GUI-Logik | `crates/molt-ui/src/lib.rs` (`apply_surfaces` ~Z.4294, `issue` ~Z.2553, toter „transfer"-Mock in `default_op` ~Z.5942) | §11 |
+| MCP `tools()` / `INTERNAL` | `crates/molt-mcp/src/lib.rs:580/1592` | §8.5 |
+| **Namensfalle:** `WalletHandle` in molt-engine | `crates/molt-engine/src/lib.rs:103` | ist der ENGINE-AKTOR-Handle (konkinwallet-Erbe), NICHT die Schatzkammer. Nicht umbenennen, nicht verwechseln. |
 
 ## 5. Architektur
 
@@ -280,10 +299,16 @@ nach und co-signt nur bei exaktem Match). Ablauf:
 
 `Command::WalletInit` (neues menschliches Verb; MCP-Tool + GUI-Button).
 Der Handler:
-- lehnt ab, wenn die Republik nicht chain-governed ist, ein Wallet bereits
-  existiert (ein `wallet_created`-Applied in der Chain) oder ein Init
-  in-flight ist (`state.wallet_ritual.is_some()` oder ein offenes
-  `wallet_init`-Proposal) → `MoltError`-Varianten analog CreatePropose.
+- lehnt ab, wenn das Charter-Feature „wallet" nicht aktiviert ist
+  (`require_feature(Surface::Wallet)` → `MoltError::FeatureDisabled`;
+  aktivieren per Gründungs-Wizard oder `set_features`-Vote — §1), wenn die
+  Republik nicht chain-governed ist, ein Wallet bereits existiert (ein
+  `wallet_created`-Applied in der Chain) oder ein Init in-flight ist
+  (`state.wallet_ritual.is_some()` oder ein offenes `wallet_init`-Proposal)
+  → `MoltError`-Varianten analog CreatePropose. Das Propose-Gate ist lokale
+  Höflichkeit (Kommentar bei `require_feature`: ein Peer auf anderem Build
+  umgeht es) — deshalb prüfen AUCH die Empfangs-Arme (§7.3) und der
+  Ritual-Start das Feature, bevor sie ein DKG beginnen.
 - spawnt einen Kurz-Task (Engine-Handler awaiten nie), der die
   Daemon-Höhe holt und `Command::NetWalletInitReady { height, generation }`
   zurücksendet (via `net::CmdSink`-Muster).
@@ -323,7 +348,11 @@ Net*-Commands für Wire-Verkehr.
 - `cmd_net_delivered`-Arm für `WalletRound1`: an
   `wallet_ritual.receive_round1(member, bytes)` füttern (idempotent —
   Duplikate droppen; unbekannte `init_id` oder kein Ritual → defensiver
-  Drop mit `tracing::warn`, wie beim Governance-Gossip). Sobald alle n−1
+  Drop mit `tracing::warn`, wie beim Governance-Gossip). Idempotenz ist
+  hier PFLICHT, nicht Defensive: die Zustellgarantie (2026-07-28,
+  `docs_archive/transport/delivery_guarantee.md`) liefert jedes Wire-Event
+  at-least-once — Duplikate kommen konstruktionsbedingt (Rewind-Resend),
+  nicht nur im Fehlerfall. Sobald alle n−1
   Peer-Commitments da sind, erzeugt das Ritual die Runde-2-Nachricht:
   `WorkspaceEvent::WalletRound2 { init_id, member, shares_hex }`.
   Die per-Empfänger-Shares sind PedPoP-eigen verschlüsselt; MLS liefert
@@ -426,7 +455,8 @@ WalletRound2 { init_id: u64, member: String, shares_hex: String },
 WalletAbort { init_id: u64, blamed: Option<String>, reason: String },
 ```
 
-Empfangs-Arme in `cmd_net_delivered` (idempotent, defensive Drops).
+Empfangs-Arme in `cmd_net_delivered` (idempotent — at-least-once-Duplikate
+sind der Normalfall, §7.3 — plus defensive Drops).
 Ältere Leser: unbekannte Variante ⇒ nicht schreiben (Regel existiert).
 
 ### 8.3 Broadcast-`Event` (molt-core, Frontend-Stream)
@@ -458,7 +488,7 @@ Befüllung in `State::snapshot` (proposals.rs), nur bei
   `Command::WalletInit`. (Konsens läuft über die bestehenden
   `approve`/`decline`-Tools; `read_state` mit `surface=wallet` liefert die
   Views — keine weiteren Tools nötig.)
-- `INTERNAL` erweitern (32 → 36): `"net_wallet_init_ready"`,
+- `INTERNAL` erweitern (54 → 58): `"net_wallet_init_ready"`,
   `"net_wallet_scanned"`, `"net_wallet_status"`, `"net_wallet_dkg_timeout"`
   mit dem üblichen Begründungskommentar (Netz-Feedback; ein MCP-Agent darf
   keine Scanner-/Ritual-Ergebnisse fälschen).
@@ -498,11 +528,14 @@ Config-Datei. `ConfigNotice`/Reload-Muster existiert bereits.)
 ## 9. Persistenz: `wallet.state` (molt-storage)
 
 Exakt das `chain.state`-Muster kopieren
-(`crates/molt-storage/src/lib.rs`, Funktionen ~Z.882–1040):
+(`crates/molt-storage/src/lib.rs`, `chain_key`/`read_chain`/`write_chain`
+~Z.1371–1500 — die Funktionen hießen zur Planungszeit
+`read/write_chain_state`):
 
 - Sub-Key: `fn wallet_key(&self) -> [u8;32] {
   hkdf32(&self.key, "molt-wallet-state", &self.id) }`
-- Segment: `const WALLET_SEGMENT: u64 = u64::MAX - 3;`
+- Segment: `const WALLET_SEGMENT: u64 = u64::MAX - 4;` — **NICHT −3**:
+  den Slot hält seit WP4a `KEYS_SEGMENT` (`log/keys.state`, ~Z.92).
 - `pub fn read_wallet_state(&self) -> Option<WalletState>` /
   `pub fn write_wallet_state(&self, st: &WalletState)` — atomisch via
   `write_atomic(&self.dir, "wallet.state", &frame, true)` (tmp + rename,
@@ -527,15 +560,15 @@ pub struct WalletState {
 Schreibpunkte: (a) einmal bei DKG-Abschluss (VOR dem Co-Sign, §7.5);
 (b) gedrosselt beim Cursor-Fortschritt (alle 1000 gescannte Blöcke ODER
 wenn neue Outputs gefunden wurden — read-modify-write); (c) beim
-Clean-Close neben der `persist_crypto_blocking`-Callsite
-(`net.rs:522`-Umgebung).
+Clean-Close neben den `persist_crypto_blocking`-Callsites
+(`net.rs:621/632`-Umgebung).
 
 **Backup:** `wallet.state` in die Export-Include-Liste und die
-Import-**Allowlist** aufnehmen (Code-Stellen per Grep nach
-`"chain.state"` in molt-storage/molt-engine finden — überall, wo
-chain.state als „verbatim ciphertext" exportiert/importiert/allowlisted
-wird, wallet.state daneben stellen; portabel, weil der Sub-Key aus
-`workspace_key` abgeleitet ist). **Die Tabelle in
+Import-**Allowlist** aufnehmen — die Code-Stellen leben heute in
+`crates/molt-storage/src/export.rs` und `import.rs` (per Grep nach
+`"chain.state"` finden): überall, wo chain.state als „verbatim
+ciphertext" exportiert/importiert/allowlisted wird, wallet.state daneben
+stellen (portabel, weil der Sub-Key aus `workspace_key` abgeleitet ist). **Die Tabelle in
 `docs_archive/storage/backup_restore_design.md` §3.2 mit aktualisieren** (Zeile
 `wallet.state | yes, verbatim ciphertext | DKG-Share + View-Scalar —
 ohne ihn ist das wiederhergestellte Mitglied watch-only`). NICHT in
@@ -571,7 +604,12 @@ implementieren → grün → clippy 0 → Commit.
    (Byte kippen → `None` + warn), `backup_includes_wallet_state`
    (Export→Import-Roundtrip trägt die Datei).
 6. **Engine-E2E** (`crates/molt-engine/tests/wallet_dkg.rs`, Stil
-   `founding_governs_over_the_direct_mesh`, Loopback, n=3/m=2):
+   `founding_governs_over_the_direct_mesh`, Loopback, n=3/m=2; die
+   Gründung muss das Feature „wallet" ratifizieren — Wizard-/Features-Pfad
+   der Test-Harness):
+   - `wallet_init_refused_without_feature` — Republik ohne „wallet" im
+     Feature-Set: `WalletInit` → `FeatureDisabled`; nach einem
+     `set_features`-Vote läuft es durch.
    - `wallet_init_seals_identical_block_on_all_nodes` — Init → 3 Approvals
      → Runden → alle sealen byte-identischen `wallet_created`-Block,
      gleiche Adresse in allen Snapshots, `wallet.state` auf allen Disks.
@@ -586,7 +624,7 @@ implementieren → grün → clippy 0 → Commit.
    `wallet_init_tool_builds_command`.
 8. **`#[ignore]`d Integration** (`crates/molt-engine/tests/wallet_scan.rs`):
    gegen echten regtest-monerod hinter env `MOLT_TEST_MONEROD`
-   (Repo-Präzedenz `ritual_engine_over_smp.rs`; Referenz-Image
+   (Repo-Präzedenz `crates/molt-net/tests/nostr_relay_poc.rs`; Referenz-Image
    `ghcr.io/sethforprivacy/simple-monerod`): DKG über Loopback, Mining auf
    die Gruppenadresse, Scanner findet Outputs, Balance/History im
    Snapshot, Cursor überlebt Close/Reopen.
@@ -596,13 +634,18 @@ implementieren → grün → clippy 0 → Commit.
 Iteration über `scripts/dev-ui.sh`; finale Validierung einmal:
 `cargo build -p molt-ui-window -p molt-ui`.
 
-1. **Nav freischalten:** in `app.slint` das Gate
-   `enabled: s.key == "organization" || s.key == "chat"` um
-   `|| s.key == "wallet"` erweitern (per Grep nach `"organization"` im
-   Nav-Block finden, ~Z.1234).
-2. **`WalletPane` echt machen** (`surfaces.slint:1098`): die Mock-Pane
-   durch eine datengetriebene ersetzen — Struktur nach dem Vorbild der
-   Organization-Panes in `app.slint` (status/members-Panes):
+1. **Nav: nichts freischalten — sie ist schon feature-getrieben.** Das
+   hartkodierte Gate von 2026-07 existiert nicht mehr: molt-ui filtert die
+   Surface-Liste auf das effektive Feature-Set (`lib.rs:3991`), und ein
+   aktiviertes-aber-ungebautes Surface öffnet die als Design-Mock
+   gebadgte Pane. Reale Aufgabe hier: wenn die WalletPane echt wird, ihr
+   Mock-Badging entfernen (Vorbild: wie das Memory-Surface real wurde).
+2. **`WalletPane` echt machen** (`surfaces.slint:2248`): die Pane ist
+   inzwischen ein VOLLSTÄNDIGER Design-Mock aller sechs Views (Balance,
+   History, Send-Formular, Receive mit Pseudo-QR, Status, Settings) —
+   die Aufgabe ist also „echte Daten in die bestehende Struktur
+   verdrahten und die Sample-Properties (`transfers`, `pending-tx`, …)
+   entfernen", nicht Pane-Design. Für die Etappe-1-Views gilt:
    - `balance`-View: Balance-Karte (bestätigt + pending, XMR-formatiert
      aus Piconero: 12 Nachkommastellen, führende Nullen trimmen),
      Scan-Fortschritt (scan_height/daemon_height), Verbindungs-Indikator.
@@ -620,13 +663,13 @@ Iteration über `scripts/dev-ui.sh`; finale Validierung einmal:
    - Neue Structs (`WalletRow` etc.) nach `theme.slint` neben
      `ChainRow`/`ViewItem`; Strings in die `Strings`-Tabelle (de/en);
      Piktogramme als Twemoji.
-3. **molt-ui-Logik** (`crates/molt-ui/src/lib.rs`): in `apply_surfaces`/
-   `surface_data` den `SurfaceSnapshot.wallet` in die Slint-Properties
+3. **molt-ui-Logik** (`crates/molt-ui/src/lib.rs`): in `apply_surfaces`
+   (~Z.4294) den `SurfaceSnapshot.wallet` in die Slint-Properties
    mappen; `WalletInit`-Button über `issue(rt, wallet, weak,
-   Command::WalletInit)`; auf `Event::WalletUpdated`/`WalletDkgProgress`/
-   `WalletReady`/`WalletDkgFailed` einen Snapshot-Refresh triggern (wie
-   bestehende Event-Behandlung); den toten „transfer"-Mock in
-   `default_op` (~Z.4094) entfernen.
+   Command::WalletInit)` (~Z.2553); auf `Event::WalletUpdated`/
+   `WalletDkgProgress`/`WalletReady`/`WalletDkgFailed` einen
+   Snapshot-Refresh triggern (wie bestehende Event-Behandlung); den toten
+   „transfer"-Mock in `default_op` (~Z.5942) entfernen.
 
 ## 12. Recovery- und Fehler-Semantik (per Default entschieden, Veto möglich)
 
@@ -745,8 +788,9 @@ Sicherheitskritischer Flow ⇒ erst Design-Doc, erst diskutieren
   (nicht-chain-governed Workspaces) `WalletInit` sauber ablehnt statt im
   gezählten Simulations-Pfad zu landen (`is_chain_governed`-Guard).
 - Hex-Payloads (`payload_hex`, `shares_hex`) haben Größenordnungen von
-  wenigen KiB — unter dem SMP-Frame-Limit, aber im Log-Outbox-Pfad
-  bleiben (kein Sonderweg nötig).
+  wenigen KiB — der Nostr-Transport chunkt große Frames ohnehin
+  (`CHUNK_PAYLOAD_BUDGET`, `crates/molt-net/src/chunk.rs`), also im
+  normalen Log-Outbox-Pfad bleiben (kein Sonderweg nötig).
 
 ## 17. Verifikation (Definition of Done, Etappe 1)
 
