@@ -1487,6 +1487,26 @@ impl State {
         }
     }
 
+    /// Request one GUI interaction (`gui_over_mcp.md`): announced as an
+    /// event the window's live mirror performs — a REQUEST, never a write
+    /// into another surface's state. Without a published window there is
+    /// nothing that could perform it, and saying so beats a silent ack.
+    pub(crate) fn cmd_ui_action(
+        &mut self,
+        action: molt_core::UiAction,
+    ) -> Result<Reply, MoltError> {
+        if action.verb.is_empty() {
+            return Err(MoltError::BadPayload("the action names no verb".to_string()));
+        }
+        if self.ui_state.is_none() {
+            return Err(MoltError::Engine(
+                "no window is running — nothing can perform the action".to_string(),
+            ));
+        }
+        self.emit(molt_core::Event::UiActionRequested { action });
+        Ok(Reply::Ack)
+    }
+
     pub(crate) fn cmd_close_workspace(&mut self) -> Result<Reply, MoltError> {
         // clean close: persist the running mesh's crypto so a reopen resumes it
         self.persist_net_crypto_on_close();

@@ -3405,6 +3405,25 @@ pub enum Command {
     /// newest first — checkpoint blocks included. A pruned holder appends
     /// summarized pre-cut entries rebuilt from its checkpoint blob.
     ReadChain,
+    /// The GUI publishes what its window currently shows
+    /// (`docs/ui/gui_over_mcp.md`) — the read half of driving the GUI
+    /// from MCP. ENGINE-INTERNAL in spirit: only the window may speak it
+    /// (an agent must not forge what the window claims to show).
+    UiPublish {
+        /// The window's own rendering claim.
+        snapshot: UiSnapshot,
+    },
+    /// Read the GUI's last published [`UiSnapshot`] (empty when no window
+    /// runs, or none was published yet).
+    ReadUiState,
+    /// Request one GUI interaction (`docs/ui/gui_over_mcp.md`): stored by
+    /// the engine, announced as [`Event::UiActionRequested`], performed by
+    /// the window's live mirror — which then publishes again, so the
+    /// caller reads the effect back with [`Command::ReadUiState`].
+    UiAction {
+        /// The requested interaction.
+        action: UiAction,
+    },
 
     // --- session / app-level commands (co-equal with the GUI) ---
     /// Read the whole shared session state (screen, language, settings, …).
@@ -4600,6 +4619,77 @@ impl Command {
 
 /// The synchronous answer to a [`Command`]. Streaming changes arrive separately
 /// as [`Event`]s on the broadcast channel.
+/// What the WINDOW claims to show (`docs/ui/gui_over_mcp.md`): published
+/// by the GUI at the end of every live-mirror pass — so what it publishes
+/// is what it rendered — and read back over MCP so an agent can test the
+/// window the way it already tests the engine. Counts and a few strings,
+/// deliberately: the question is "does the pane hold what the engine
+/// holds", never a widget tree. Additive-only (serde defaults).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct UiSnapshot {
+    /// The screen the window is on (`choice`/`main`/`create`/…).
+    #[serde(default)]
+    pub screen: String,
+    /// Selected surface key.
+    #[serde(default)]
+    pub surface: String,
+    /// Selected sub-view key.
+    #[serde(default)]
+    pub view: String,
+    /// The chat pane's selected channel (storage key form).
+    #[serde(default)]
+    pub channel: String,
+    /// Chat rows the pane's model holds.
+    #[serde(default)]
+    pub chat_rows: u32,
+    /// The last few rendered chat bodies (newest last).
+    #[serde(default)]
+    pub chat_last: Vec<String>,
+    /// The compose row is visible.
+    #[serde(default)]
+    pub compose_visible: bool,
+    /// The chat log is scrolled into view (the empty-chat class was
+    /// invisible without exactly this fact — a 0-height re-pin scrolled
+    /// the whole log out of sight while every model test passed).
+    #[serde(default)]
+    pub chat_in_view: bool,
+    /// Nav rows the window offers, as `surface` keys in order.
+    #[serde(default)]
+    pub nav: Vec<String>,
+    /// Open decisions the window shows.
+    #[serde(default)]
+    pub pending_count: u32,
+    /// Which wizard step/phase is active ("" outside a wizard).
+    #[serde(default)]
+    pub wizard: String,
+    /// The topmost toast, if any.
+    #[serde(default)]
+    pub toast: String,
+    /// The GUI's own monotonically increasing publish counter — lets an
+    /// agent await "the click landed" (`ui_action` bumps it on perform).
+    #[serde(default)]
+    pub generation: u64,
+}
+
+/// One requested GUI interaction (`docs/ui/gui_over_mcp.md`): a domain
+/// VERB naming an affordance a human can reach (never a widget
+/// coordinate), performed by the window's live mirror. `args` shape is
+/// per-verb; unknown verbs are performed as no-ops and reported via the
+/// next snapshot's generation (the request is a REQUEST — the GUI
+/// performs it, MCP never writes into another surface's state).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct UiAction {
+    /// The verb: `select_channel` · `select_view` · `open_workspace` ·
+    /// `close_workspace` · `chat_send` · `set_draft` · `press` · `click`.
+    #[serde(default)]
+    pub verb: String,
+    /// Per-verb parameters (JSON object).
+    #[serde(default)]
+    pub args: serde_json::Value,
+}
+
+/// What a [`Command`] answers with. One enum, so every frontend renders
+/// the same reply surface.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "reply", rename_all = "snake_case")]
 pub enum Reply {
@@ -4630,6 +4720,11 @@ pub enum Reply {
     Members {
         /// One row per roster member.
         members: Vec<MemberView>,
+    },
+    /// The GUI's last published snapshot (`Command::ReadUiState`).
+    UiState {
+        /// `None` while no window published anything.
+        snapshot: Option<UiSnapshot>,
     },
     /// Every file shared into the chat (Organization → Uploads). Struct
     /// variant for the same reason as [`Reply::Members`].
@@ -5214,6 +5309,13 @@ pub enum TransferPhase {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
+    /// The engine stored a GUI interaction request
+    /// (`Command::UiAction`) — the window's live mirror performs it and
+    /// publishes a fresh [`UiSnapshot`].
+    UiActionRequested {
+        /// The requested interaction.
+        action: UiAction,
+    },
     /// WP4b: a checkpoint block sealed — the summarized history below
     /// `upto` was dropped locally; frontends refresh their chain/status
     /// views and a waiting proposer gets closure.

@@ -1,8 +1,19 @@
 # Driving and reading the GUI from MCP
 
-**Status: PLAN (2026-08-07).** User decision, same session: an agent must be
-able to *operate* the GUI and *see* what it shows, so the window can be
-tested the way the engine already is.
+**Status: steps 1, 3 and 4 are BUILT (2026-08-16); steps 2 and 5 are
+open.** Step 1: `Command::UiPublish` (INTERNAL) + `ReadUiState` + the
+`read_ui_state` tool; the GUI publishes at the end of every live-mirror
+pass, pinned by `the_ui_snapshot_claims_what_the_window_holds` (headless)
+and `the_ui_snapshot_roundtrips_and_actions_are_announced` (engine).
+Step 3 resolved itself during the wizard work: the cold-open bug was the
+layout-timing re-pin described below, fixed in the chat Flickable's
+`changed height` handler (`app.slint`, with the explanation in place).
+Step 4: `Command::UiAction` + the `ui_action` tool with the first verb
+set (`select_view` · `select_channel` · `open_workspace` ·
+`close_workspace` · `chat_send`) performed by the live mirror through
+the SAME Slint callbacks a click takes; the snapshot's `generation`
+answers "did it land". Open: step 2 (a dev-only headless `moltd` run on
+the testing backend) and step 5 (the walk script), which depends on 2.
 
 ## Why, concretely
 

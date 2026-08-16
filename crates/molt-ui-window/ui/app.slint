@@ -1034,6 +1034,10 @@ export component AppWindow inherits Window {
     // view shows and which of its sub-views is active; changing them is a
     // SelectSurface / SelectView command
     in property <string> selected-surface: "chat";
+    // gui_over_mcp.md: the chat Flickable reports whether the log is
+    // scrolled into view — the one fact the empty-chat bug class is
+    // invisible without (rows can be IN the model and out of sight)
+    in-out property <bool> chat-log-in-view: false;
     in property <string> selected-view: "today";
     // sidebar mode: expanded (labels) or collapsed to an icon rail. Toggled
     // by clicking the vertical divider on the sidebar's right edge. Off the
@@ -1713,7 +1717,7 @@ export component AppWindow inherits Window {
     // imperatively restart()ed stopped Timer never fires, which left the
     // bubble on screen forever. A re-trigger while shown only swaps the
     // text; the bubble is gone < 3 s after it appeared, always. ----
-    property <string> toast-text;
+    out property <string> toast-text;
     property <bool> toast-open: false;
     // tone of the bubble's dot: errors show RED, everything else green
     property <bool> toast-bad: false;
@@ -4719,6 +4723,11 @@ export component AppWindow inherits Window {
                                     // a new message (own or incoming) always
                                     // scrolls the box to the bottom.
                                     viewport-y: min(0px, self.height - self.viewport-height);
+                                    changed viewport-y => {
+                                        root.chat-log-in-view = self.height > 0
+                                            && self.viewport-y <= 0px
+                                            && self.viewport-y >= self.height - self.viewport-height - 8px;
+                                    }
                                     changed viewport-height => {
                                         self.viewport-y = min(0px, self.height - self.viewport-height);
                                     }

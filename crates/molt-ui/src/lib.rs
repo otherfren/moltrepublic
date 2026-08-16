@@ -1980,6 +1980,21 @@ pub fn run_app(
                         });
                         push_surfaces(&w, &weak, &chat_ui).await;
                     }
+                    Ok(Event::UiActionRequested { action }) => {
+                        // gui_over_mcp.md, the drive half: perform the verb
+                        // through the SAME callbacks a human's click takes,
+                        // then publish — both queue on the event loop, so
+                        // the publish claim is post-perform. A pure view
+                        // change may not ring the engine, hence the
+                        // explicit publish.
+                        let weak2 = weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak2.upgrade() {
+                                perform_ui_action(&ui, &action);
+                            }
+                        });
+                        publish_ui_state(&w, &weak).await;
+                    }
                     Ok(_) => push_surfaces(&w, &weak, &chat_ui).await,
                     Err(RecvError::Lagged(_)) => {
                         push_session(&w, &weak, &last_settings, SessionScope::Full, &chat_ui).await;
@@ -2576,6 +2591,105 @@ fn issue(rt: &Handle, wallet: &WalletHandle, weak: &slint::Weak<AppWindow>, cmd:
 /// Read the shared session and push it into the Slint properties on the UI
 /// thread. `last_settings` remembers the previously applied settings so the
 /// draft form is only refreshed when they really changed.
+/// Perform one requested GUI interaction (`gui_over_mcp.md`): domain
+/// verbs mapped onto the SAME Slint callbacks a human's click invokes,
+/// so the action surface cannot drift from what a person can do. An
+/// unknown verb is a logged no-op — the next snapshot's generation still
+/// answers the caller.
+fn perform_ui_action(ui: &AppWindow, action: &molt_core::UiAction) {
+    let s = |k: &str| {
+        action
+            .args
+            .get(k)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    match action.verb.as_str() {
+        "select_view" => ui.invoke_select_view(s("surface").into(), s("view").into()),
+        "select_channel" => ui.invoke_select_channel(s("channel").into()),
+        "open_workspace" => ui.invoke_open_workspace(s("id").into()),
+        "close_workspace" => ui.invoke_close_workspace(),
+        "chat_send" => ui.invoke_send_chat(s("body").into(), String::new().into()),
+        other => {
+            tracing::warn!(verb = %other, "ui_action: unknown verb — performed as a no-op");
+        }
+    }
+}
+
+/// The GUI's monotone publish counter (`gui_over_mcp.md`): bumped per
+/// snapshot so an agent can await "my action landed" by polling
+/// `read_ui_state` for a larger generation.
+static UI_PUBLISH_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// What the window ACTUALLY holds right now (`gui_over_mcp.md`): read
+/// from the UI models/properties on the UI thread — deliberately not from
+/// the engine bundle, because "does the pane hold what the engine holds"
+/// is exactly the question this exists to answer.
+fn build_ui_snapshot(ui: &AppWindow) -> molt_core::UiSnapshot {
+    use slint::Model as _;
+    let screen = match ui.get_screen() {
+        AppScreen::Choice => "choice",
+        AppScreen::Create => "create",
+        AppScreen::Open => "open",
+        AppScreen::Join => "join",
+        AppScreen::Restore => "restore",
+        AppScreen::Settings => "settings",
+        AppScreen::Main => "main",
+    };
+    let surfaces = ui.get_surfaces();
+    let chat = surfaces.iter().find(|s| s.key == "chat");
+    let (chat_rows, chat_last) = chat
+        .map(|s| {
+            let n = s.log.row_count();
+            let last = (n.saturating_sub(3)..n)
+                .filter_map(|i| s.log.row_data(i))
+                .map(|l| l.text.to_string())
+                .collect();
+            (u32::try_from(n).unwrap_or(u32::MAX), last)
+        })
+        .unwrap_or((0, Vec::new()));
+    let wizard = match screen {
+        "create" => format!("create:{}", ui.get_cw_step()),
+        "join" => format!("join:{}", ui.get_jw_step()),
+        _ => String::new(),
+    };
+    molt_core::UiSnapshot {
+        screen: screen.to_string(),
+        surface: ui.get_selected_surface().to_string(),
+        view: ui.get_selected_view().to_string(),
+        channel: ui.get_selected_channel().to_string(),
+        chat_rows,
+        chat_last,
+        compose_visible: screen == "main" && ui.get_selected_surface() == "chat",
+        chat_in_view: ui.get_chat_log_in_view(),
+        nav: surfaces.iter().map(|s| s.key.to_string()).collect(),
+        pending_count: surfaces
+            .iter()
+            .map(|s| u32::try_from(s.pending_count.max(0)).unwrap_or(0))
+            .sum(),
+        wizard,
+        toast: ui.get_toast_text().to_string(),
+        generation: UI_PUBLISH_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1,
+    }
+}
+
+/// Build the snapshot on the UI thread and hand it to the engine — the
+/// publish half of `gui_over_mcp.md`, run at the end of every mirror pass
+/// (what it publishes is what it just rendered).
+async fn publish_ui_state(wallet: &WalletHandle, weak: &slint::Weak<AppWindow>) {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let weak = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            let _ = tx.send(build_ui_snapshot(&ui));
+        }
+    });
+    if let Ok(snapshot) = rx.await {
+        let _ = wallet.execute(Command::UiPublish { snapshot }).await;
+    }
+}
+
 async fn push_session(
     wallet: &WalletHandle,
     weak: &slint::Weak<AppWindow>,
@@ -2635,6 +2749,7 @@ async fn push_session(
         }
         (changed, prev)
     };
+    let weak2 = weak.clone();
     let weak = weak.clone();
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
@@ -2647,6 +2762,9 @@ async fn push_session(
             apply_session(&ui, &sv, changed && !editing, &chat_ui_for_apply);
         }
     });
+    // gui_over_mcp.md: publish what this pass rendered (queued behind the
+    // apply above on the event loop, so the claim is post-render)
+    publish_ui_state(wallet, &weak2).await;
 }
 
 /// Render one session snapshot into the window: screen, language (and strings),
@@ -9993,6 +10111,52 @@ mod gui_tests {
 
     use super::*;
     use molt_core::{ChannelRef, GroupConfig, SessionView};
+
+    /// `gui_over_mcp.md` step 1's pin: the published snapshot claims what
+    /// the WINDOW's models hold — screen, selection, the chat surface's
+    /// row count and last bodies, the nav keys and the pending sum. The
+    /// snapshot is the read half agents test the window through, so a
+    /// drift here would make every such test lie.
+    #[test]
+    fn the_ui_snapshot_claims_what_the_window_holds() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("headless window");
+        ui.set_screen(AppScreen::Main);
+        ui.set_selected_surface("chat".into());
+        ui.set_selected_view("today".into());
+        ui.set_selected_channel("group".into());
+        let log = ModelRc::new(VecModel::from(vec![
+            LogLine { text: "erste".into(), ..LogLine::default() },
+            LogLine { text: "zweite".into(), ..LogLine::default() },
+            LogLine { text: "dritte".into(), ..LogLine::default() },
+            LogLine { text: "vierte".into(), ..LogLine::default() },
+        ]));
+        ui.set_surfaces(ModelRc::new(VecModel::from(vec![
+            SurfaceTab {
+                key: "chat".into(),
+                log,
+                pending_count: 0,
+                ..SurfaceTab::default()
+            },
+            SurfaceTab { key: "organization".into(), pending_count: 2, ..SurfaceTab::default() },
+        ])));
+        let snap = build_ui_snapshot(&ui);
+        assert_eq!(
+            (snap.screen.as_str(), snap.surface.as_str(), snap.view.as_str(), snap.channel.as_str()),
+            ("main", "chat", "today", "group")
+        );
+        assert_eq!(snap.chat_rows, 4, "the model's row count, not the engine's");
+        assert_eq!(
+            snap.chat_last,
+            vec!["zweite".to_string(), "dritte".to_string(), "vierte".to_string()],
+            "the last three rendered bodies"
+        );
+        assert_eq!(snap.nav, vec!["chat".to_string(), "organization".to_string()]);
+        assert_eq!(snap.pending_count, 2);
+        assert!(snap.compose_visible);
+        let again = build_ui_snapshot(&ui);
+        assert!(again.generation > snap.generation, "every publish bumps");
+    }
 
     /// The wiki bridge drives the REAL generated `WikiState` face headless:
     /// open → edit → close → delete through the same callbacks the pane

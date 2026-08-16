@@ -829,6 +829,38 @@ pub fn tools() -> Vec<ToolDef> {
             build: |_| Ok(Command::ReadUploads),
         },
         ToolDef {
+            name: "read_ui_state",
+            command: "read_ui_state",
+            description: "The GUI's last published rendering claim (gui_over_mcp.md): screen/surface/view, the chat pane's channel + row count + last bodies + whether the log is scrolled into view, the nav rows, pending-decision count, the active wizard step and the topmost toast. `snapshot` is null while no window runs. `generation` increases with every publish - poll it to await a `ui_action` landing.",
+            schema: || json!({ "type": "object", "properties": {} }),
+            build: |_| Ok(Command::ReadUiState),
+        },
+        ToolDef {
+            name: "ui_action",
+            command: "ui_action",
+            description: "Request ONE GUI interaction, by domain verb (never a widget coordinate): select_channel {channel} · select_view {surface, view} · open_workspace {id} · close_workspace · chat_send {body} · set_draft {field, value} · press {key} · click {target}. The window's live mirror performs it and publishes a fresh snapshot - read the effect back with read_ui_state. Refused while no window is running.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "verb": { "type": "string" },
+                    "args": { "type": "object" }
+                },
+                "required": ["verb"]
+            }),
+            build: |args| {
+                Ok(Command::UiAction {
+                    action: molt_core::UiAction {
+                        verb: args
+                            .get("verb")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        args: args.get("args").cloned().unwrap_or(Value::Null),
+                    },
+                })
+            },
+        },
+        ToolDef {
             name: "read_session",
             command: "read_session",
             description: "Read the shared app/session state the GUI mirrors: current screen, surface + sub-view, language, workspaces, run lifecycles, and settings.",
@@ -1586,7 +1618,11 @@ mod tests {
         // chain, so even a forged internal command cannot materialize an
         // unverified workspace). RestoreTick is gone: there is no simulated
         // restore progress anymore.
-        const INTERNAL: [&str; 54] = [
+        const INTERNAL: [&str; 55] = [
+            // ui_publish is the WINDOW reporting what it renders — an
+            // agent must not be able to forge what the GUI claims to show
+            // (gui_over_mcp.md); reads go through read_ui_state.
+            "ui_publish",
             "net_test_s3_result",
             // net_test_tor_result is the off-actor Tor probe reporting its
             // real verdict (net_test_tor is the tool; an agent must not be

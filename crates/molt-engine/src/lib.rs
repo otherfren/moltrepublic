@@ -498,6 +498,10 @@ pub(crate) struct State {
     /// Requester-side live download status per share (runtime-only; feeds
     /// [`molt_core::UploadView::download`]).
     pub(crate) downloads: HashMap<MessageId, molt_core::DownloadView>,
+    /// The GUI's last published rendering claim (`gui_over_mcp.md`):
+    /// written only by `Command::UiPublish` (the window's live mirror),
+    /// read back over `read_ui_state`. `None` = no window published yet.
+    pub(crate) ui_state: Option<molt_core::UiSnapshot>,
     /// Sharer-side serve throttle: at most 2 concurrent uploads; further
     /// requests queue on the semaphore instead of saturating the uplink.
     pub(crate) file_serve_slots: std::sync::Arc<tokio::sync::Semaphore>,
@@ -950,6 +954,7 @@ impl State {
             parked: net::ParkedRefs::new(),
             share_paths: HashMap::new(),
             downloads: HashMap::new(),
+            ui_state: None,
             file_serve_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
             applied,
             proposals: HashMap::new(),
@@ -1260,6 +1265,12 @@ impl State {
             Command::Status => Ok(Reply::Status(self.status())),
             Command::ReadMembers => Ok(Reply::Members { members: self.members_view() }),
             Command::ReadUploads => Ok(Reply::Uploads { uploads: self.uploads_view() }),
+            Command::UiPublish { snapshot } => {
+                self.ui_state = Some(snapshot);
+                Ok(Reply::Ack)
+            }
+            Command::ReadUiState => Ok(Reply::UiState { snapshot: self.ui_state.clone() }),
+            Command::UiAction { action } => self.cmd_ui_action(action),
             Command::ReadChain => self.cmd_read_chain(),
 
             // net.rs (engine-internal, sent by the node's own supervisor)
@@ -4847,6 +4858,58 @@ mod tests {
             notice.contains("coordinator.example"),
             "the refusal names the relay the operator must add: {notice}"
         );
+    }
+
+    /// `gui_over_mcp.md` steps 1+4, the engine half: the window's publish
+    /// is readable back verbatim, an action without a window is REFUSED
+    /// (nothing could perform it — a silent ack would read as "clicked"),
+    /// and with a window it is announced on the event stream the live
+    /// mirror consumes.
+    #[test]
+    fn the_ui_snapshot_roundtrips_and_actions_are_announced() {
+        let mut st = plain_state();
+        let mut ev = st.subscribe_events();
+        // no window yet: read answers None, an action refuses honestly
+        assert!(matches!(
+            st.handle(Command::ReadUiState),
+            Ok(Reply::UiState { snapshot: None })
+        ));
+        assert!(st
+            .cmd_ui_action(molt_core::UiAction {
+                verb: "select_view".to_string(),
+                args: serde_json::json!({ "surface": "chat", "view": "today" }),
+            })
+            .is_err());
+        // the window publishes; the claim reads back verbatim
+        let snap = molt_core::UiSnapshot {
+            screen: "main".to_string(),
+            surface: "chat".to_string(),
+            view: "today".to_string(),
+            chat_rows: 3,
+            chat_in_view: true,
+            generation: 7,
+            ..molt_core::UiSnapshot::default()
+        };
+        st.handle(Command::UiPublish { snapshot: snap.clone() })
+            .expect("publish acks");
+        match st.handle(Command::ReadUiState) {
+            Ok(Reply::UiState { snapshot: Some(got) }) => assert_eq!(got, snap),
+            other => panic!("unexpected: {other:?}"),
+        }
+        // …and the action is announced for the mirror
+        st.cmd_ui_action(molt_core::UiAction {
+            verb: "chat_send".to_string(),
+            args: serde_json::json!({ "body": "hi" }),
+        })
+        .expect("a live window performs it");
+        let mut seen = false;
+        while let Ok(e) = ev.try_recv() {
+            if let Event::UiActionRequested { action } = e {
+                assert_eq!(action.verb, "chat_send");
+                seen = true;
+            }
+        }
+        assert!(seen, "the mirror's event carries the verb");
     }
 
     fn recover_link(member: &str, republic_id: &str) -> String {
