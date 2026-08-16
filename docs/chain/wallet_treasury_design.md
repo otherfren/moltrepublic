@@ -322,20 +322,33 @@ should overlap in time. These get their own design pass before Etappe 2.
 
 ## 10. Dependencies and threat notes
 
-- **Stack:** `dkg` + `dkg-pedpop` + `modular-frost` (crates.io, MIT) and
-  `monero-wallet`/`monero-clsag` with the `multisig` feature +
-  `monero-simple-request-rpc` (git `monero-oxide/monero-oxide`, **exact
-  pinned rev**, MIT). FROSTLASS carries a Cypher Stack security proof
-  (IACR ePrint 2026/589) and a completed implementation audit (May 2025,
-  in monero-oxide's `audits/`). Pure Rust throughout — the posture holds.
-- **Pinning:** the rev is pinned in the workspace manifest; upgrades are a
+- **Stack:** `dkg` + `dkg-pedpop` + `modular-frost` and
+  `monero-wallet` 0.2.0 with the `multisig` feature +
+  `monero-simple-request-rpc` — since monero-oxide's coordinated 0.1.0
+  ecosystem release (2026-07-31) **all published on crates.io**, MIT; no
+  git pinning needed anymore. FROSTLASS carries a Cypher Stack security
+  proof (IACR ePrint 2026/589) and a completed implementation audit (May
+  2025, in monero-oxide's `audits/`). Pure Rust throughout — the posture
+  holds.
+- **Pinning:** versions are pinned in the workspace manifest with the
+  minor held exactly — upstream states the multisig functionality is
+  "not covered by SemVer, except along minor versions". Upgrades are a
   deliberate act: re-run the dep-matrix check (single `modular-frost`/
   `dkg`/dalek versions in `cargo tree`), re-read the upstream diff of the
-  `multisig`-feature code (it is exempt from semver), re-run the full
-  wallet test suite. Never float a branch.
-- **Horizon:** CLSAG will eventually yield to FCMP++; monero-oxide is
-  where that lands. Expect a migration project (new purse + sweep), not a
-  silent upgrade.
+  `multisig`-feature code, re-run the full wallet test suite. Never float
+  a minor.
+- **Horizon — now near:** CLSAG yields to FCMP++, and the fork has moved
+  from "eventually" to "in active integration" (2026-08: mainnet not yet
+  activated, no date fixed, second beta stressnet running since May;
+  the implementation lives in monero-oxide's `fcmp++` branch). FCMP++
+  deliberately migrates no wallets/addresses/outputs, so Etappe 1 —
+  the DKG-born group key, the address, the shares — survives the fork;
+  scanning needs a dependency upgrade at fork time to parse the new
+  transaction format. Etappe 2's signing algorithm is the fork-sensitive
+  part: if the fork is activated or scheduled by then, build the spend
+  flow on the FCMP++ GSP multisig (2-round, FROST-inspired, same author)
+  instead of FROSTLASS/CLSAG — same threshold shares, different signing
+  protocol, its own audit situation to check in that design pass.
 - **What an attacker gets:** compromising one member's device yields that
   member's share (< m: no spend), the view scalar (privacy loss toward
   that attacker — same blast radius as today's chat history on a

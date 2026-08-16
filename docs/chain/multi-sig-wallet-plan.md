@@ -70,10 +70,10 @@ Eine Republik erhält eine gemeinsame Monero-Kasse:
 |---|---|---|---|
 | `dkg` | 0.6.1, crates.io | MIT | Kerntypen: `ThresholdParams`, `ThresholdKeys`, `Participant` (NonZero u16) |
 | `dkg-pedpop` | 0.6.0, crates.io | MIT | Das DKG selbst: PedPoP (Pedersen-VSS + Proofs of Possession), 2 Runden, identifizierbare Aborts (`BlameMachine`) |
-| `modular-frost` | 0.11, crates.io, Feature `ed25519` | MIT | Threshold-Signing: `AlgorithmMachine` → `.preprocess(rng)` → `.sign(HashMap<Participant, Preprocess>, msg)` → `.complete(HashMap<Participant, SignatureShare>)`; ungültige Shares werden dem Signierer attribuiert |
-| `monero-wallet` | git monero-oxide, **gepinnte rev**, `features=["multisig"]` | MIT | `SignableTransaction::multisig(ThresholdKeys<Ed25519>)`, `Scanner`, `GuaranteedViewPair`, Adress-Typen |
-| `monero-clsag` | (kommt transitiv mit `multisig`) | MIT | FROSTLASS `ClsagMultisig`-Algorithmus |
-| `monero-simple-request-rpc` (+ `monero-interface`, `monero-daemon-rpc`) | git monero-oxide, gleiche rev | MIT | monerod-RPC-Client |
+| `modular-frost` | 0.11.1 (2026-07-26), crates.io, Feature `ed25519` | MIT | Threshold-Signing: `AlgorithmMachine` → `.preprocess(rng)` → `.sign(HashMap<Participant, Preprocess>, msg)` → `.complete(HashMap<Participant, SignatureShare>)`; ungültige Shares werden dem Signierer attribuiert |
+| `monero-wallet` | **0.2.0, crates.io** (koordiniertes monero-oxide-0.1.0-Release 2026-07-31), `features=["multisig"]` | MIT | `SignableTransaction::multisig(ThresholdKeys<Ed25519>)`, `Scanner`, `GuaranteedViewPair`, Adress-Typen; `multisig` aktiviert std/transcript/frost + `monero-clsag/multisig` |
+| `monero-clsag` | 0.1.x, crates.io (kommt transitiv mit `multisig`) | MIT | FROSTLASS `ClsagMultisig`-Algorithmus |
+| `monero-simple-request-rpc` (+ `monero-interface`) | 0.1.0, crates.io (gleiches Release) | MIT | monerod-RPC-Client |
 
 Protokoll-Fakten (im Spike gegen den Compiler verifizieren):
 
@@ -97,10 +97,27 @@ Protokoll-Fakten (im Spike gegen den Compiler verifizieren):
   Mitglied hält; gescannt wird mit `GuaranteedViewPair`/`GuaranteedScanner`
   (schützt vor dem Burning-Bug). **Nur Main-Address** — Subaddress +
   Multisig ist upstream unverifiziert.
-- **Vorbehalte:** die Monero-Krates sind auf crates.io nur 0.0.1-Platzhalter
-  → Konsum als git-Dependency mit exakter rev (Serai selbst pinnt so);
-  das `multisig`-Feature ist upstream **explizit außerhalb Semver**;
-  CLSAG-only (die FCMP++-Migration wird ebenfalls in monero-oxide landen).
+- **Vorbehalte (Upstream-Stand 2026-08-16):** die git-rev-Pflicht ist
+  GEFALLEN — monero-oxide hat am 2026-07-31 sein erstes koordiniertes
+  Release (0.1.0-Ökosystem) auf crates.io publiziert; alle benötigten
+  Krates werden als crates.io-Versionen gepinnt (§6). Das
+  `multisig`-Feature bleibt eingeschränkt: laut Wallet-README „not
+  covered by SemVer, **except along minor versions**" → die
+  Minor-Version exakt pinnen (`0.2.x` ok, nie stillschweigend auf 0.3
+  floaten), Upgrade = bewusster Akt mit Diff-Read. CLSAG-only — und der
+  **FCMP++-Horizont ist nah** (Details unten): Mainnet-Fork noch nicht
+  aktiviert (Milestone 66 % per 2026-08-16, kein Datum fixiert, zweites
+  Beta-Stressnet läuft seit 2026-05-06), aber die Implementierung lebt im
+  aktiv gepflegten `fcmp++`-Branch von monero-oxide. Konsequenz für
+  diesen Plan: Etappe 1 ist fork-robust (FCMP++ migriert keine
+  Wallets/Adressen/Outputs — der DKG-Gruppenkey und die Adresse
+  überleben; nur das Tx-Format-Parsing braucht am Fork ein
+  Dependency-Upgrade zum Weiter-Scannen). Etappe 2 trifft die
+  CLSAG-Ablösung: VOR dem Bau von §13 den Fork-Status prüfen und ggf.
+  direkt das FCMP++-GSP-Multisig (2-Runden, FROST-inspiriert, gleicher
+  Autor) statt FROSTLASS bauen — gleiche `ThresholdKeys`, anderer
+  Signier-Algorithmus (im Etappe-2-Design-Pass gegen den Compiler
+  verifizieren).
 
 ### 2.2 Muster aus eigenwallet/core (Referenz, KEINE Dependency)
 
@@ -261,20 +278,23 @@ denken, Feldnamen snake_case, keine floats.)
 
 ## 6. Dependency-Pinning (Schritt 2, „Dep-Lock-Spike")
 
-1. Wähle die monero-oxide-rev: neueste `main`-rev, die gegen die
-   **publizierten** `modular-frost 0.11` / `dkg 0.6.x` baut (Serai pinnt
-   z.B. rev `32e6b5fe…` — neuere ist ok, wenn die Matrix stimmt).
-   In `[workspace.dependencies]` des Workspace-`Cargo.toml` eintragen:
+1. Seit dem koordinierten monero-oxide-Release (2026-07-31) sind ALLE
+   Krates auf crates.io — kein git-Pinning mehr. In
+   `[workspace.dependencies]` des Workspace-`Cargo.toml` eintragen
+   (Minor exakt pinnen, §2.1-Semver-Vorbehalt des multisig-Features):
 
    ```toml
-   monero-wallet = { git = "https://github.com/monero-oxide/monero-oxide", rev = "<REV>", default-features = false, features = ["std", "multisig", "compile-time-generators"] }
-   monero-simple-request-rpc = { git = "https://github.com/monero-oxide/monero-oxide", rev = "<REV>" }
+   monero-wallet = { version = "0.2", default-features = false, features = ["std", "multisig", "compile-time-generators"] }
+   monero-simple-request-rpc = "0.1"
    modular-frost = { version = "0.11", default-features = false, features = ["ed25519"] }
    dkg = "0.6"
    dkg-pedpop = "0.6"
    ```
 
-   (Feature-Namen im Spike gegen die realen Cargo.tomls der rev prüfen.)
+   (Feature-Namen im Spike gegen die realen Cargo.tomls der publizierten
+   Versionen prüfen; monero-wallet 0.2.0 verlangt `modular-frost ^0.11`
+   mit `ed25519` — die Matrix ist konsistent, `dkg-pedpop` steht bei
+   0.6.0, `dkg` bei 0.6.1, `modular-frost` bei 0.11.1.)
 2. Bare `molt-treasury` anlegen, das nur Typen berührt: eine Funktion, die
    `ThresholdParams` baut, eine, die einen `KeyGenMachine`-Rundenzyklus
    in-memory für n=3 durchläuft, eine, die aus `ThresholdKeys<Ed25519>`
@@ -287,7 +307,8 @@ denken, Feldnamen snake_case, keine floats.)
    Onion-Daemon. Falls die RPC-Krate TLS-Features hat, die `ring`/
    `native-tls` ziehen: abschalten (Pure-Rust-Posture; `ring` ist eine
    sanktionierte Ausnahme, keine Einladung).
-5. Die gewählte rev + dieses Prüfprotokoll ins Design-Doc (§14) schreiben.
+5. Die gepinnten Versionen + dieses Prüfprotokoll ins Design-Doc (§14)
+   schreiben.
 
 ## 7. Das „Kasse einrichten"-Ritual (Etappe-1-Kern)
 
@@ -696,6 +717,17 @@ Iteration über `scripts/dev-ui.sh`; finale Validierung einmal:
   (Repo-Präzedenz) statt testcontainers-Abhängigkeit.
 
 ## 13. Etappe 2 (Skizze — NICHT in Etappe 1 bauen)
+
+**Vorab-Entscheidung am Etappe-2-Start (FCMP++-Horizont, §2.1):** Ist der
+FCMP++-Mainnet-Fork aktiviert oder terminiert, wird der Spend-Flow gegen
+das FCMP++-GSP-Multisig (2-Runden, FROST-inspiriert, in monero-oxides
+`fcmp++`-Branch entstehend) gebaut statt gegen FROSTLASS/CLSAG — CLSAG-
+Transaktionen sind nach dem Fork nicht mehr gültig. Der DKG-Gruppenkey
+und die Shares aus Etappe 1 bleiben dieselben; es ändert sich der
+Signier-Algorithmus und dessen Audit-Lage (im Design-Pass prüfen). Die
+Skizze unten beschreibt den CLSAG-Pfad; Struktur (Propose = exakte
+Tx-Bytes, m-of-n-Ratifizierung, deterministische Signierer, Runden über
+Events) gilt für beide.
 
 - `Propose { surface: Wallet, payload: {"op":"transfer","dest":…,
   "amount":…} }`: der Proposer baut die `SignableTransaction` off-actor
