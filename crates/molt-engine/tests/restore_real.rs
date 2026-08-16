@@ -602,7 +602,7 @@ async fn tampered_blob_and_forged_chain_restore_nothing() {
     let src_dir = molt_storage::find_workspace_dir(&src_root, &id).expect("src dir");
     {
         let (ws, _loaded) = molt_storage::open_workspace(&src_dir).expect("open for forgery");
-        let (blob, mut chain) = ws.read_chain();
+        let (blob, mut chain) = ws.read_chain().expect("chain readable");
         assert!(blob.is_none() && !chain.is_empty(), "a real genesis chain");
         let sig = &mut chain[0].sigs[0].sig;
         let flipped = if sig.ends_with('0') { "1" } else { "0" };

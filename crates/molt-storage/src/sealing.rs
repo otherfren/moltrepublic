@@ -152,7 +152,7 @@ pub fn unseal_at_rest(root: &Path, ws_dir: &Path, phrase: &str) -> Result<(), St
 /// Authenticated decrypt of the genesis frame (segment 1, seq 1) with the
 /// phrase-derived key — succeeds iff the phrase is THIS workspace's.
 fn verify_phrase_key(ws_dir: &Path, id: &[u8; 32], key: &[u8; 32]) -> Result<(), StorageError> {
-    let data = fs::read(ws_dir.join("log").join(crate::segment_name(1)))?;
+    let data = crate::read_capped(&ws_dir.join("log").join(crate::segment_name(1)), crate::READ_CAP_SEGMENT, "log segment")?;
     let (frames, _torn) = crate::split_frames(&data);
     let first = frames
         .first()
@@ -178,7 +178,7 @@ fn verify_phrase_key(ws_dir: &Path, id: &[u8; 32], key: &[u8; 32]) -> Result<(),
 ///   exists to hard-stop. Over-describing only costs an old binary a
 ///   polite refusal.
 fn chain_version_floor(ws_dir: &Path, key: &[u8; 32], id: &[u8; 32]) -> u32 {
-    let data = match fs::read(ws_dir.join("chain.state")) {
+    let data = match crate::read_capped(&ws_dir.join("chain.state"), crate::READ_CAP_STATE, "chain.state") {
         Ok(d) => d,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return STORAGE_VERSION,
         Err(_) => return STORAGE_VERSION_PRUNED,
@@ -339,7 +339,7 @@ mod tests {
     fn state_fingerprint(dir: &Path) -> Vec<(String, Vec<u8>)> {
         let mut out = Vec::new();
         for rel in ["manifest.toml", "keys/workspace.key", "keys/seed.sealed", "log/000001.mlog"] {
-            out.push((rel.to_string(), fs::read(dir.join(rel)).unwrap_or_default()));
+            out.push((rel.to_string(), crate::read_capped(&dir.join(rel), crate::READ_CAP_SEGMENT, rel).unwrap_or_default()));
         }
         out
     }

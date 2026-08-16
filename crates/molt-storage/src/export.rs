@@ -335,7 +335,7 @@ pub(crate) fn export_dir_chunked(
     let id_hex = manifest.workspace.id.clone();
     let id = crate::id_bytes(&id_hex)?;
     let device_key = crate::load_or_create_device_key(&crate::device_key_path(root))?;
-    let sealed = fs::read(ws_dir.join(&manifest.crypto.key_file)).map_err(|e| {
+    let sealed = crate::read_capped(&ws_dir.join(&manifest.crypto.key_file), crate::READ_CAP_KEY, "workspace key").map_err(|e| {
         StorageError::BadFile(format!(
             "no device-sealed workspace key ({e}) — cannot export"
         ))
@@ -440,7 +440,9 @@ pub(crate) fn export_dir_chunked(
         let owned;
         let data: &[u8] = match src {
             ExportSource::File(path) => {
-                owned = fs::read(path)?;
+                // the engine's restore plan caps the blob at 512 MiB before
+                // handing it here — mirror that bound (L8)
+                owned = crate::read_capped(path, 512 * 1024 * 1024, "import blob")?;
                 &owned
             }
             ExportSource::Bytes(bytes) => bytes,
@@ -481,7 +483,7 @@ fn read_seed_entropy(
     device_key: &[u8; 32],
     id: &[u8; 32],
 ) -> Result<Option<Zeroizing<Vec<u8>>>, StorageError> {
-    let blob = match fs::read(ws_dir.join("keys").join("seed.sealed")) {
+    let blob = match crate::read_capped(&ws_dir.join("keys").join("seed.sealed"), crate::READ_CAP_KEY, "seed.sealed") {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.into()),
@@ -545,7 +547,7 @@ fn collect_entries(
                     let Some((_, newest)) = crate::list_sorted(&path, ".msnap").pop() else {
                         break;
                     };
-                    match fs::read(&newest) {
+                    match crate::read_capped(&newest, crate::READ_CAP_STATE, "snapshot") {
                         Ok(bytes) => {
                             let rel = format!(
                                 "snapshots/{}",

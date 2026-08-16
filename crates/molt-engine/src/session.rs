@@ -1246,7 +1246,13 @@ impl State {
         // `opened` directly — after start_writer only the async load path
         // remains, which the sync open handler can't await
         let transport_state = opened.read_transport_state();
-        let (checkpoint_blob, chain) = opened.read_chain();
+        // L7: a PRESENT-but-unreadable chain refuses the open — read as
+        // "no chain" it ran a chain republic chainless on the legacy
+        // counted path, and the next governance write overwrote the
+        // damaged file (destroying the evidence). Absent stays quiet.
+        let (checkpoint_blob, chain) = opened.read_chain().map_err(|e| {
+            MoltError::Engine(format!("this workspace's chain is unreadable — {e}"))
+        })?;
         // heal the crash window between a pruned chain write and its
         // manifest bump: a pruned workspace must never sit at v1
         if checkpoint_blob.is_some() {

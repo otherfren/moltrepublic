@@ -144,7 +144,7 @@ pub(crate) fn read_table(
     id: &[u8; 32],
 ) -> Result<Option<SegmentKeyTable>, StorageError> {
     let path = dir.join(KEYS_FILE);
-    let data = match std::fs::read(&path) {
+    let data = match crate::read_capped(&path, crate::READ_CAP_STATE, "keys.state") {
         Ok(d) => d,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.into()),

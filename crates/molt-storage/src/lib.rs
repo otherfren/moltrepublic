@@ -80,6 +80,50 @@ const FRAME_MAX_LEN: u32 = 64 * 1024 * 1024;
 const NONCE_LEN: usize = 24;
 /// Frame header: len(4) + crc(4).
 const FRAME_HEADER_LEN: usize = 8;
+/// L8 read caps, derived from the writers' own bounds — the cap is
+/// checked on METADATA before any allocation, so a sparse, bit-rotted or
+/// hostile file becomes a typed refusal instead of an OOM.
+pub(crate) const READ_CAP_KEY: u64 = 4 * 1024; // sealed key/seed blobs, LOCK pids
+pub(crate) const READ_CAP_TOML: u64 = 64 * 1024; // manifest.toml / prefs.toml scalars
+/// Single-frame state files (chain/transport/keys.state/snapshots): the
+/// writer emits exactly one frame, so header + nonce + max frame is a
+/// structural ceiling it cannot exceed.
+#[allow(clippy::as_conversions)] // usize/u32 → u64 in const context is lossless
+pub(crate) const READ_CAP_STATE: u64 =
+    (FRAME_HEADER_LEN as u64) + (NONCE_LEN as u64) + (FRAME_MAX_LEN as u64);
+/// Log segments rotate BEFORE the append at [`SEGMENT_ROTATE_BYTES`], so
+/// an honest segment is bounded by the threshold plus one max frame.
+#[allow(clippy::as_conversions)] // usize/u32 → u64 in const context is lossless
+pub(crate) const READ_CAP_SEGMENT: u64 =
+    SEGMENT_ROTATE_BYTES + (FRAME_HEADER_LEN as u64) + (NONCE_LEN as u64) + (FRAME_MAX_LEN as u64);
+pub(crate) const READ_CAP_CONTENT: u64 = 16 * 1024 * 1024; // wiki draft / logo files
+
+/// The ONE sanctioned whole-file read (L8): metadata-checked against the
+/// cap before the bytes are touched. An over-cap file surfaces as
+/// `InvalidData` so every existing "unreadable" error path applies.
+pub(crate) fn read_capped(path: &Path, cap: u64, what: &str) -> std::io::Result<Vec<u8>> {
+    let len = fs::metadata(path)?.len();
+    if len > cap {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{what} is {len} bytes - beyond the {cap}-byte cap"),
+        ));
+    }
+    fs::read(path) // READ_CAPPED_HELPER
+}
+
+/// [`read_capped`] for the two small TOML/text files.
+pub(crate) fn read_string_capped(path: &Path, cap: u64, what: &str) -> std::io::Result<String> {
+    let len = fs::metadata(path)?.len();
+    if len > cap {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{what} is {len} bytes - beyond the {cap}-byte cap"),
+        ));
+    }
+    fs::read_to_string(path) // READ_CAPPED_HELPER
+}
+
 /// AAD segment number that marks a snapshot frame (never a real segment).
 const SNAPSHOT_SEGMENT: u64 = u64::MAX;
 /// AAD segment number that marks the `transport.state` frame.
@@ -348,7 +392,7 @@ pub fn device_key_path(workspace_root: &Path) -> PathBuf {
 
 /// Load the device key, creating it (0600) on first use.
 pub fn load_or_create_device_key(path: &Path) -> Result<[u8; 32], StorageError> {
-    match fs::read(path) {
+    match read_capped(path, READ_CAP_KEY, "device.key") {
         Ok(bytes) => <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| {
             StorageError::BadFile(format!("device key {} is not 32 bytes", path.display()))
         }),
@@ -501,7 +545,7 @@ fn unseal_seed_entropy(
 /// (pre-seed-storage workspace), foreign device key, tampered blob —
 /// the Open screen shows an honest "not stored" instead of failing.
 pub fn read_sealed_seed(root: &Path, ws_dir: &Path, id_hex: &str) -> Option<String> {
-    let blob = match fs::read(ws_dir.join("keys").join("seed.sealed")) {
+    let blob = match read_capped(&ws_dir.join("keys").join("seed.sealed"), READ_CAP_KEY, "seed.sealed") {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(e) => {
@@ -534,7 +578,7 @@ pub fn read_sealed_seed(root: &Path, ws_dir: &Path, id_hex: &str) -> Option<Stri
 pub fn peek_genesis(root: &Path, ws_dir: &Path, id_hex: &str) -> Option<EventEnvelope> {
     let id = id_bytes(id_hex).ok()?;
     let manifest = read_manifest(ws_dir).ok()?;
-    let sealed = fs::read(ws_dir.join(&manifest.crypto.key_file)).ok()?;
+    let sealed = read_capped(&ws_dir.join(&manifest.crypto.key_file), READ_CAP_KEY, "workspace key").ok()?;
     let device_key = load_or_create_device_key(&device_key_path(root)).ok()?;
     let key = unseal_workspace_key(&device_key, &id, &sealed).ok()?;
     // the genesis is the log's first frame — while the log still HAS one.
@@ -556,7 +600,7 @@ fn genesis_from_log(ws_dir: &Path, key: &[u8; 32], id: &[u8; 32]) -> Option<Even
         .flatten()
         .and_then(|t| t.dek(1))
         .unwrap_or(*key);
-    let data = fs::read(ws_dir.join("log").join(segment_name(1))).ok()?;
+    let data = read_capped(&ws_dir.join("log").join(segment_name(1)), READ_CAP_SEGMENT, "log segment").ok()?;
     let (frames, _torn) = split_frames(&data);
     let first = frames.first()?;
     let plaintext = decrypt_frame(&seg_key, id, 1, 1, first.nonce, first.ciphertext).ok()?;
@@ -849,7 +893,7 @@ pub fn now_secs() -> u64 {
 /// Read and (leniently) parse a workspace's `manifest.toml`.
 pub fn read_manifest(ws_dir: &Path) -> Result<WorkspaceManifest, StorageError> {
     let path = ws_dir.join("manifest.toml");
-    let text = fs::read_to_string(&path)?;
+    let text = read_string_capped(&path, READ_CAP_TOML, "manifest.toml")?;
     let m: WorkspaceManifest = toml::from_str(&text)
         .map_err(|e| StorageError::BadFile(format!("{}: {e}", path.display())))?;
     if m.format != MANIFEST_FORMAT {
@@ -915,7 +959,7 @@ pub fn write_restored_stub(
 /// defaults (prefs are local convenience, never history).
 pub fn read_prefs(ws_dir: &Path) -> WorkspacePrefs {
     let path = ws_dir.join("prefs.toml");
-    match fs::read_to_string(&path) {
+    match read_string_capped(&path, READ_CAP_TOML, "prefs.toml") {
         Ok(text) => toml::from_str(&text).unwrap_or_default(),
         Err(_) => WorkspacePrefs::default(),
     }
@@ -933,7 +977,7 @@ pub fn write_prefs(ws_dir: &Path, p: &WorkspacePrefs) -> Result<(), StorageError
 /// prefs — never history, never exported (the export allowlist does not
 /// carry it), sealed at rest with the directory.
 pub fn read_wiki_draft(ws_dir: &Path) -> String {
-    fs::read_to_string(ws_dir.join("wiki_draft.json")).unwrap_or_default()
+    read_string_capped(&ws_dir.join("wiki_draft.json"), READ_CAP_CONTENT, "wiki draft").unwrap_or_default()
 }
 
 /// Rewrite the local wiki draft (atomic via `tmp/`); an empty draft
@@ -976,7 +1020,7 @@ fn acquire_lock(ws_dir: &Path) -> Result<WorkspaceLock, StorageError> {
             Ok(WorkspaceLock { _file: file })
         }
         Err(e) if e == rustix::io::Errno::WOULDBLOCK || e == rustix::io::Errno::AGAIN => {
-            let holder = fs::read_to_string(&path).unwrap_or_default();
+            let holder = read_string_capped(&path, READ_CAP_KEY, "LOCK").unwrap_or_default();
             let holder = holder.trim();
             Err(StorageError::Busy(if holder.is_empty() {
                 "unknown".to_string()
@@ -1137,7 +1181,7 @@ impl OpenedWorkspace {
                     dek: segkeys::SegmentKeyTable::fresh_dek()?,
                 });
             }
-            let data = fs::read(path)?;
+            let data = read_capped(path, READ_CAP_SEGMENT, "log segment")?;
             let (frames, _torn) = split_frames(&data);
             seq += u64::try_from(frames.len()).unwrap_or(0);
         }
@@ -1146,7 +1190,7 @@ impl OpenedWorkspace {
 
         // 2) rewrite each segment under its key (skipping ones already done)
         for (no, path) in &segments {
-            let data = fs::read(path)?;
+            let data = read_capped(path, READ_CAP_SEGMENT, "log segment")?;
             let (frames, torn) = split_frames(&data);
             if torn.is_some() {
                 return Err(StorageError::Corrupt(format!(
@@ -1352,7 +1396,7 @@ impl OpenedWorkspace {
         }
         if let (Some(name), Some((_, bytes))) = (want_name, logo) {
             let path = self.dir.join(&name);
-            if fs::read(&path).is_ok_and(|have| have == bytes) {
+            if read_capped(&path, READ_CAP_CONTENT, "logo").is_ok_and(|have| have == bytes) {
                 return Ok(()); // already materialized
             }
             write_atomic(&self.dir, &name, &bytes, false)?;
@@ -1392,25 +1436,31 @@ impl OpenedWorkspace {
     }
 
     /// Read `chain.state`: the republic's persistent commit-block chain
-    /// (`docs_archive/chain/persistent_chain.md`). Absent → empty (a pre-chain or
-    /// freshly-founded-before-write workspace). A damaged file returns empty
-    /// with a loud warning — unlike `transport.state`, the chain is shared
-    /// history the caller must then treat as missing (its `verify_chain` will
-    /// reject an empty chain for a republic that should have a genesis).
-    pub fn read_chain(&self) -> (Option<molt_core::CheckpointState>, Vec<molt_core::ChainBlock>) {
+    /// (`docs_archive/chain/persistent_chain.md`). Absent → `Ok(empty)` (a
+    /// pre-chain or freshly-founded-before-write workspace). PRESENT but
+    /// unreadable → a typed error (L7): a damaged chain read as "no chain"
+    /// made the open run a chain republic CHAINLESS on the legacy counted
+    /// path, and the next governance write then overwrote the damaged
+    /// file — destroying the evidence. Same policy as
+    /// `sealing::chain_version_floor` and the import path: on this file,
+    /// present-but-unreadable is the dangerous case, never "absent".
+    pub fn read_chain(
+        &self,
+    ) -> Result<(Option<molt_core::CheckpointState>, Vec<molt_core::ChainBlock>), StorageError>
+    {
         let path = self.dir.join("chain.state");
-        let data = match fs::read(&path) {
+        let data = match read_capped(&path, READ_CAP_STATE, "chain.state") {
             Ok(d) => d,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (None, Vec::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((None, Vec::new())),
             Err(e) => {
-                tracing::warn!(error = %e, "reading chain.state failed — no chain loaded");
-                return (None, Vec::new());
+                return Err(StorageError::Corrupt(format!("reading chain.state: {e}")));
             }
         };
         let (frames, torn) = split_frames(&data);
         if frames.len() != 1 || torn.is_some() {
-            tracing::warn!("chain.state framing is damaged — no chain loaded");
-            return (None, Vec::new());
+            return Err(StorageError::Corrupt(
+                "chain.state framing is damaged".to_string(),
+            ));
         }
         let plaintext = match decrypt_frame(
             &self.chain_key(),
@@ -1422,20 +1472,18 @@ impl OpenedWorkspace {
         ) {
             Ok(p) => p,
             Err(e) => {
-                tracing::warn!(error = %e, "chain.state does not authenticate — no chain loaded");
-                return (None, Vec::new());
+                return Err(StorageError::Crypto(format!(
+                    "chain.state does not authenticate: {e}"
+                )));
             }
         };
         match serde_json::from_slice::<ChainStateFile>(&plaintext) {
-            Ok(ChainStateFile::Full(chain)) => (None, chain),
+            Ok(ChainStateFile::Full(chain)) => Ok((None, chain)),
             Ok(ChainStateFile::Pruned {
                 checkpoint_blob,
                 blocks,
-            }) => (Some(checkpoint_blob), blocks),
-            Err(e) => {
-                tracing::warn!(error = %e, "chain.state decode failed — no chain loaded");
-                (None, Vec::new())
-            }
+            }) => Ok((Some(checkpoint_blob), blocks)),
+            Err(e) => Err(StorageError::Corrupt(format!("chain.state decode: {e}"))),
         }
     }
 
@@ -1501,7 +1549,7 @@ impl OpenedWorkspace {
                     seq = first.saturating_sub(1);
                 }
             }
-            let data = fs::read(&path)?;
+            let data = read_capped(&path, READ_CAP_SEGMENT, "log segment")?;
             let (frames, _torn) = split_frames(&data);
             for frame in frames {
                 seq += 1;
@@ -1549,7 +1597,7 @@ fn ensure_transport_state_not_newer(
     id: &[u8; 32],
 ) -> Result<(), StorageError> {
     let path = dir.join("transport.state");
-    let Ok(data) = fs::read(&path) else { return Ok(()) };
+    let Ok(data) = read_capped(&path, READ_CAP_STATE, "transport.state") else { return Ok(()) };
     let (frames, torn) = split_frames(&data);
     if frames.len() != 1 || torn.is_some() {
         return Ok(());
@@ -1579,7 +1627,7 @@ fn read_transport_state_at(dir: &Path, ws_key: &[u8; 32], id: &[u8; 32]) -> Tran
                 workspace anchored a nostr transport identity, its non-re-derivable \
                 secret (nostr_sk) was in this file and is now lost until a recovery \
                 ritual re-anchors the seat";
-    let data = match fs::read(&path) {
+    let data = match read_capped(&path, READ_CAP_STATE, "transport.state") {
         Ok(d) => d,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return TransportState::default(),
         Err(e) => {
@@ -1820,7 +1868,7 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
     let root = ws_dir.parent().unwrap_or(ws_dir);
     let device_key = load_or_create_device_key(&device_key_path(root))?;
     let id = id_bytes(&manifest.workspace.id)?;
-    let sealed = match fs::read(ws_dir.join(&manifest.crypto.key_file)) {
+    let sealed = match read_capped(&ws_dir.join(&manifest.crypto.key_file), READ_CAP_KEY, "workspace key") {
         Ok(b) => b,
         // marker and key files disagree (crashed seal?): honest corruption,
         // never a guess — decrypting with the recovery phrase repairs it
@@ -1878,7 +1926,7 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
     let last_idx = segments.len() - 1;
     let mut last_seg = (1u64, 0u64); // (segment number, byte length after recovery)
     for (idx, (seg_no, path)) in segments.iter().enumerate() {
-        let data = fs::read(path)?;
+        let data = read_capped(path, READ_CAP_SEGMENT, "log segment")?;
         let (frames, torn_at) = split_frames(&data);
         if let Some(pos) = torn_at {
             // A torn APPEND leaves a partial frame at the end of the file
@@ -2063,7 +2111,7 @@ fn read_snapshot(
     at_seq: u64,
     path: &Path,
 ) -> Result<WorkspaceSnapshot, StorageError> {
-    let data = fs::read(path)?;
+    let data = read_capped(path, READ_CAP_STATE, "snapshot")?;
     let (frames, torn) = split_frames(&data);
     if frames.len() != 1 || torn.is_some() {
         return Err(StorageError::Corrupt("snapshot framing".to_string()));

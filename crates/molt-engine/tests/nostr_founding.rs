@@ -1932,7 +1932,7 @@ async fn the_relay_pool_is_bound_into_what_every_member_signs() {
     // INCLUDE these relays.
     let dir = molt_storage::find_workspace_dir(&root_a, &ws_id).expect("dir");
     let (ws, _) = molt_storage::open_workspace(&dir).expect("open");
-    let (_blob, chain) = ws.read_chain();
+    let (_blob, chain) = ws.read_chain().expect("chain readable");
     let genesis = chain.first().expect("a genesis block");
     let molt_core::chain::ChainChange::Genesis { relays, .. } = &genesis.change else {
         panic!("block 0 is not a genesis");
@@ -2062,7 +2062,7 @@ async fn the_feature_set_is_bound_into_what_every_member_signs() {
     for (root, ws_id, who) in [(&root_a, &ws_id, "founder"), (&root_b, &b_ws_id, "joiner")] {
         let dir = molt_storage::find_workspace_dir(root, ws_id).expect("dir");
         let (ws, _) = molt_storage::open_workspace(&dir).expect("open");
-        let (_blob, chain) = ws.read_chain();
+        let (_blob, chain) = ws.read_chain().expect("chain readable");
         let genesis = chain.first().expect("a genesis block");
         let molt_core::chain::ChainChange::Genesis { features, .. } = &genesis.change else {
             panic!("block 0 is not a genesis");
@@ -2079,7 +2079,7 @@ async fn the_feature_set_is_bound_into_what_every_member_signs() {
     // is dead on arrival
     let dir = molt_storage::find_workspace_dir(&root_a, &ws_id).expect("dir");
     let (ws, _) = molt_storage::open_workspace(&dir).expect("open");
-    let (_blob, chain) = ws.read_chain();
+    let (_blob, chain) = ws.read_chain().expect("chain readable");
     let mut forged = chain.clone();
     let molt_core::chain::ChainChange::Genesis { features, .. } = &mut forged[0].change else {
         unreachable!()
