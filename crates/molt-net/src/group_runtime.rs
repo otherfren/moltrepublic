@@ -695,12 +695,15 @@ fn wall_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Take one resend round from this hour's budget. `false` = spent.
+/// Take one round from this hour's SHARED publish budget. `false` = spent.
 ///
 /// Persisted with the cursor on purpose: an in-memory budget hands a crash
 /// loop a fresh allowance on every start, and the thing being rationed is a
-/// publish that every member of the republic then re-reads.
-pub(crate) fn consume_resend_round(cur: &mut molt_core::GroupCursor, now: u64) -> bool {
+/// publish that every member of the republic then re-reads. Shared by the
+/// resend rounds AND the file-plane series publishes (`file_transfer_nostr.md`
+/// §5.4: one series = one round — no second budget to reason about), which is
+/// why it is `pub`: [`crate::file_plane::publish_series_metered`] consumes it.
+pub fn consume_resend_round(cur: &mut molt_core::GroupCursor, now: u64) -> bool {
     roll_resend_window(cur, now);
     if cur.resend_rounds >= RESEND_ROUNDS_PER_HOUR {
         return false;

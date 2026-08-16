@@ -977,15 +977,19 @@ pub(crate) fn spawn_nostr_fetch(
 }
 
 /// RELAY file plane, sharer side: read the shared file and publish its
-/// chunk series (lazy — a `FileWanted` triggered this). Reports the stamp
-/// back as the internal `NetFileSeriesPublished` (0 = failed); the ACTOR
-/// records the group-visible `FileServed` announcement.
+/// chunk series (lazy — a `FileWanted` triggered this). Metered on the
+/// hour's shared publish budget (§5.4) — a spent budget holds the upload
+/// with a warn naming it. Reports the stamp back as the internal
+/// `NetFileSeriesPublished` (0 = failed); the ACTOR records the
+/// group-visible `FileServed` announcement.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_series_publish(
     channel: molt_net::ritual_net::GroupChannel,
     exporter: [u8; 32],
     id: MessageId,
     path: PathBuf,
     cap: u64,
+    store: crate::net::FileStateStore,
     scope: u64,
     cmd_tx: mpsc::Sender<Envelope>,
 ) {
@@ -993,12 +997,14 @@ pub(crate) fn spawn_series_publish(
         let read = tokio::task::spawn_blocking(move || std::fs::read(&path)).await;
         let at = match read {
             Ok(Ok(bytes)) => {
-                match molt_net::file_plane::publish_series(
+                match molt_net::file_plane::publish_series_metered(
                     &channel,
                     &exporter,
                     &id.to_string(),
                     &bytes,
                     cap,
+                    &store,
+                    crate::now_secs(),
                 )
                 .await
                 {

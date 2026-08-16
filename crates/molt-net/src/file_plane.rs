@@ -55,6 +55,33 @@ pub fn series_id(share_id: &str) -> MsgId {
     MsgId(id)
 }
 
+/// [`publish_series`], gated on the hour's SHARED publish budget (§5.4):
+/// one series consumes one round of the same persisted allowance the
+/// resend rounds draw from — a spent budget HOLDS the upload with a named
+/// refusal instead of loading the pool. The consumption is written back
+/// through the same [`StateStore`] the group runtime persists through, so
+/// a crash loop cannot buy itself fresh rounds.
+pub async fn publish_series_metered<S: crate::supervisor::StateStore>(
+    chan: &GroupChannel,
+    exporter: &[u8; 32],
+    share_id: &str,
+    bytes: &[u8],
+    cap: u64,
+    store: &S,
+    now: u64,
+) -> Result<(u64, u16), NetError> {
+    let mut state = store.load().await;
+    let mut cur = state.group.unwrap_or_default();
+    if !crate::group_runtime::consume_resend_round(&mut cur, now) {
+        return Err(NetError::Framing(
+            "publish budget spent — upload held until the hour rolls".to_string(),
+        ));
+    }
+    state.group = Some(cur);
+    store.save(state).await;
+    publish_series(chan, exporter, share_id, bytes, cap).await
+}
+
 /// Publish `bytes` as `share_id`'s chunk series: every chunk under ONE
 /// stamp (`created_at` = now), so the whole series sits under one window's
 /// h tag and a fetcher only needs that stamp. Returns `(stamp, chunks)`.

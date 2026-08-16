@@ -248,3 +248,83 @@ async fn a_dead_relay_mid_fetch_is_a_transport_error_not_a_miss() {
         "a dead relay must not read as a miss: {msg}"
     );
 }
+
+/// FP1 (§5.4): a chunk-series publish rides the SAME hourly budget as the
+/// resend rounds — a spent budget holds the upload with a named refusal
+/// (nothing reaches the relays), a fresh one consumes exactly one round.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_spent_publish_budget_holds_the_upload() {
+    use std::sync::Arc;
+
+    #[derive(Clone, Default)]
+    struct MemStore(Arc<tokio::sync::Mutex<molt_core::TransportState>>);
+    impl molt_net::supervisor::StateStore for MemStore {
+        async fn load(&self) -> molt_core::TransportState {
+            self.0.lock().await.clone()
+        }
+        async fn save(&self, state: molt_core::TransportState) {
+            *self.0.lock().await = state;
+        }
+    }
+
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let chan = GroupChannel::new(dialer(), vec![url], SEED);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    let bytes = pattern(64 * 1024);
+
+    // spent: the window is current and every round is consumed
+    let spent = MemStore::default();
+    {
+        let mut s = spent.0.lock().await;
+        s.group = Some(molt_core::GroupCursor {
+            resend_rounds: u32::MAX, // any value >= the hourly cap
+            resend_window_start: now,
+            ..molt_core::GroupCursor::default()
+        });
+    }
+    let err = molt_net::file_plane::publish_series_metered(
+        &chan, &EXPORTER, "aa10", &bytes, FILE_CAP_DEFAULT_BYTES, &spent, now,
+    )
+    .await
+    .expect_err("a spent budget holds the upload");
+    assert!(err.to_string().contains("budget"), "{err}");
+    // …and nothing reached the relay
+    let miss = fetch_series(
+        &chan,
+        &[EXPORTER],
+        "aa10",
+        &sha_hex(&bytes),
+        now,
+        FILE_CAP_DEFAULT_BYTES,
+        Some(Duration::from_secs(2)),
+    )
+    .await;
+    assert!(miss.is_err(), "the held series must not be fetchable");
+
+    // fresh: the publish goes through and consumes exactly one round
+    let fresh = MemStore::default();
+    let (stamp, chunks) = molt_net::file_plane::publish_series_metered(
+        &chan, &EXPORTER, "bb10", &bytes, FILE_CAP_DEFAULT_BYTES, &fresh, now,
+    )
+    .await
+    .expect("a fresh budget publishes");
+    assert!(stamp > 0 && chunks > 0);
+    let cur = fresh.0.lock().await.group.expect("cursor persisted");
+    assert_eq!(cur.resend_rounds, 1, "one series = one round");
+    let got = fetch_series(
+        &chan,
+        &[EXPORTER],
+        "bb10",
+        &sha_hex(&bytes),
+        stamp,
+        FILE_CAP_DEFAULT_BYTES,
+        Some(Duration::from_secs(5)),
+    )
+    .await
+    .expect("the granted series fetches");
+    assert_eq!(got, bytes);
+}

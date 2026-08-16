@@ -1802,6 +1802,16 @@ impl State {
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return;
         };
+        // §5.4: the publish is metered on the SAME persisted hourly budget
+        // the resend rounds draw from — the store is how the consumption
+        // lands in transport.state
+        let Some(store) = self
+            .active
+            .as_ref()
+            .map(|a| crate::net::FileStateStore::new(a.handle.clone()))
+        else {
+            return;
+        };
         self.file_serving.insert(id);
         crate::transfer::spawn_series_publish(
             channel,
@@ -1809,6 +1819,7 @@ impl State {
             id,
             path,
             cap,
+            store,
             self.net_scope,
             cmd_tx,
         );
