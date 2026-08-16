@@ -76,6 +76,11 @@ pub struct RungReport {
     /// `Some(Ok(ms))` = the dial through Tor completed;
     /// `Some(Err(reason))` = it failed; `None` = the rung did not run.
     pub circuit: Option<Result<u32, String>>,
+    /// WHY there was no target to dial (`Some` only when [`Self::target`]
+    /// is empty) — carried in so [`verdict`] can name the actual cause
+    /// instead of hedging. The ACTOR computes it (it holds the pool);
+    /// `probe` only carries it through, staying free of relay plumbing.
+    pub gap: Option<TargetGap>,
 }
 
 /// THE ladder: map what the rungs observed onto the strongest claim that is
@@ -116,19 +121,18 @@ pub fn verdict(r: &RungReport) -> TorTest {
             target: String::new(),
             ms: 0,
         },
-        // a socket answered — and that is ALL that was established.
+        // a socket answered — and that is ALL that was established. With
+        // the actor's gap in hand the detail names the ACTUAL cause; the
+        // old fixed hedge remains only for a report that carries none.
         (Some(Ok(())), None) => TorTest {
             state: TorTestState::ProxyOnly,
-            // states only what this rung observed. It has no pool to look
-            // at, so it must NOT assert "nothing is confirmed" — that was the
-            // same misdiagnosis the join/founding refusals carried (an
-            // operator whose relays ARE confirmed, blocked by the non-onion
-            // switch, told they had confirmed none). TODO: thread
-            // `TargetGap` in so this can name the actual cause.
-            detail: "nothing was routed through the proxy, so no circuit was proven — \
-                     no relay from the pool was reachable through Tor (see the relay \
-                     settings for which of them this node may dial)"
-                .to_string(),
+            detail: match r.gap {
+                Some(g) => format!("no circuit was proven — {}", gap_detail(g)),
+                None => "nothing was routed through the proxy, so no circuit was proven — \
+                         no relay from the pool was reachable through Tor (see the relay \
+                         settings for which of them this node may dial)"
+                    .to_string(),
+            },
             proxy: r.proxy.clone(),
             target: String::new(),
             ms: 0,
@@ -136,9 +140,12 @@ pub fn verdict(r: &RungReport) -> TorTest {
         // no proxy to probe and nothing to dial: not a single rung ran.
         (None, None) => TorTest {
             state: TorTestState::NoTarget,
-            detail: "no SOCKS proxy to probe and no relay this node may dial through Tor \
-                     — nothing about Tor could be established"
-                .to_string(),
+            detail: match r.gap {
+                Some(g) => format!("nothing about Tor could be established — {}", gap_detail(g)),
+                None => "no SOCKS proxy to probe and no relay this node may dial through Tor \
+                         — nothing about Tor could be established"
+                    .to_string(),
+            },
             proxy: r.proxy.clone(),
             target: String::new(),
             ms: 0,
@@ -180,6 +187,18 @@ pub enum TargetGap {
     LocalOnly,
 }
 
+/// The one-clause cause a [`TargetGap`] puts into a verdict detail — four
+/// DISTINCT sentences (pinned pairwise by test), each naming the fix that
+/// helps THAT case.
+fn gap_detail(gap: TargetGap) -> &'static str {
+    match gap {
+        TargetGap::EmptyPool => "no relay is configured",
+        TargetGap::Unconfirmed => "no relay is confirmed yet",
+        TargetGap::SessionLocked => "the confirmed relays need non-onion dialing, which is switched off",
+        TargetGap::LocalOnly => "only local relays are configured, and those bypass Tor",
+    }
+}
+
 /// Classify why [`probe_target`] found nothing. Only called when it did.
 ///
 /// The "why can this node dial nothing" part is [`molt_core::relay::pool_gap`]
@@ -214,7 +233,7 @@ pub fn proxy_of(dialer: &Dialer) -> String {
 /// Fail-closed: a non-Tor dialer makes this send **nothing** and report
 /// [`TorTestState::Off`] — a connectivity test must never be the one place
 /// that opens a clearnet connection.
-pub async fn probe(dialer: &Dialer, target: Option<&str>) -> TorTest {
+pub async fn probe(dialer: &Dialer, target: Option<&str>, gap: Option<TargetGap>) -> TorTest {
     if !dialer.tor_on() {
         return TorTest {
             state: TorTestState::Off,
@@ -229,6 +248,7 @@ pub async fn probe(dialer: &Dialer, target: Option<&str>) -> TorTest {
     let mut report = RungReport {
         proxy: proxy_of(dialer),
         target: target.unwrap_or_default().to_string(),
+        gap: target.is_none().then_some(gap).flatten(),
         ..RungReport::default()
     };
 
@@ -332,6 +352,7 @@ mod tests {
             proxy_answered: Some(Err("refused".to_string())),
             target: "wss://relay.example.test".to_string(),
             circuit: None,
+            gap: None,
         });
         assert_eq!(v.state, TorTestState::NoProxy);
         assert!(v.target.is_empty(), "no relay was dialed: {v:?}");

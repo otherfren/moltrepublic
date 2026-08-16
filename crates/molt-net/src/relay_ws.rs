@@ -26,7 +26,7 @@ const TLS_TIMEOUT: Duration = Duration::from_secs(10);
 /// bounded by the NIP-11 publish budget (≤128 KiB by default); this leaves
 /// headroom for a generous relay without letting a hostile one force a
 /// multi-megabyte allocation per connection.
-const MAX_WS_MESSAGE: usize = 1024 * 1024;
+pub(crate) const MAX_WS_MESSAGE: usize = 1024 * 1024;
 
 /// Why [`RelayWs::recv`] produced no message.
 ///

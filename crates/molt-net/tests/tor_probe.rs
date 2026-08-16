@@ -179,6 +179,7 @@ fn the_verdict_claims_only_what_the_rungs_proved() {
         proxy_answered: Some(Ok(())),
         target: RELAY.to_string(),
         circuit: Some(Err("host unreachable".to_string())),
+        gap: None,
     });
     assert_eq!(v.state, TorTestState::CircuitFailed);
     assert_eq!(v.target, RELAY);
@@ -190,6 +191,7 @@ fn the_verdict_claims_only_what_the_rungs_proved() {
         proxy_answered: Some(Ok(())),
         target: RELAY.to_string(),
         circuit: Some(Ok(1234)),
+        gap: None,
     });
     assert_eq!(v.state, TorTestState::Circuit);
     assert_eq!(v.ms, 1234);
@@ -208,7 +210,7 @@ fn the_verdict_claims_only_what_the_rungs_proved() {
 async fn a_dead_socks_port_is_the_no_daemon_rung() {
     let port = dead_port().await;
     let dialer = Dialer::resolve("tor", "local", port).expect("tor+local");
-    let v = tor_probe::probe(&dialer, Some(RELAY)).await;
+    let v = tor_probe::probe(&dialer, Some(RELAY), None).await;
     assert_eq!(v.state, TorTestState::NoProxy, "{v:?}");
     assert_eq!(v.proxy, format!("127.0.0.1:{port}"));
     assert!(
@@ -224,7 +226,7 @@ async fn a_dead_socks_port_is_the_no_daemon_rung() {
 async fn a_listening_proxy_without_a_relay_stops_at_the_partial_rung() {
     let (port, hits) = blackhole_listener().await;
     let dialer = Dialer::resolve("tor", "local", port).expect("tor+local");
-    let v = tor_probe::probe(&dialer, None).await;
+    let v = tor_probe::probe(&dialer, None, None).await;
     assert_eq!(v.state, TorTestState::ProxyOnly, "{v:?}");
     assert_eq!(v.proxy, format!("127.0.0.1:{port}"));
     assert!(v.target.is_empty(), "{v:?}");
@@ -255,7 +257,7 @@ async fn a_relay_reached_through_tor_proves_a_circuit() {
     // ws:// is legitimate there because the circuit encrypts, the address
     // resolves nowhere but inside Tor, and it is never Local
     let onion = format!("ws://{}.onion", "a".repeat(56));
-    let v = tor_probe::probe(&dialer, Some(&onion)).await;
+    let v = tor_probe::probe(&dialer, Some(&onion), None).await;
     assert_eq!(v.state, TorTestState::Circuit, "{v:?}");
     assert_eq!(v.target, onion);
     assert_eq!(
@@ -271,7 +273,7 @@ async fn a_relay_reached_through_tor_proves_a_circuit() {
 async fn a_proxy_that_answers_but_connects_nowhere_is_not_a_circuit() {
     let (port, _seen) = fake_socks5(0x00).await;
     let dialer = Dialer::resolve("tor", "local", port).expect("tor+local");
-    let v = tor_probe::probe(&dialer, Some(RELAY)).await;
+    let v = tor_probe::probe(&dialer, Some(RELAY), None).await;
     assert_ne!(
         v.state,
         TorTestState::Circuit,
@@ -347,7 +349,7 @@ async fn forwarding_socks5(
 async fn a_socks_refusal_is_reported_as_a_failed_circuit() {
     let (port, _seen) = fake_socks5(0x04).await; // host unreachable
     let dialer = Dialer::resolve("tor", "local", port).expect("tor+local");
-    let v = tor_probe::probe(&dialer, Some(RELAY)).await;
+    let v = tor_probe::probe(&dialer, Some(RELAY), None).await;
     assert_eq!(v.state, TorTestState::CircuitFailed, "{v:?}");
     assert_eq!(v.target, RELAY);
     assert!(!v.detail.is_empty(), "the failure names a real reason: {v:?}");
@@ -360,7 +362,7 @@ async fn without_tor_the_probe_refuses_and_dials_nothing() {
     let (relay_port, relay_hits) = blackhole_listener().await;
     let url = format!("ws://127.0.0.1:{relay_port}");
     let dialer = Dialer::resolve("none", "local", 9050).expect("direct");
-    let v = tor_probe::probe(&dialer, Some(&url)).await;
+    let v = tor_probe::probe(&dialer, Some(&url), None).await;
     assert_eq!(v.state, TorTestState::Off, "{v:?}");
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(
@@ -415,11 +417,49 @@ async fn every_rung_is_deadline_bounded() {
     let port = silent_listener().await;
     let dialer = Dialer::resolve("tor", "local", port).expect("tor+local");
     let started = tokio::time::Instant::now();
-    let v = tor_probe::probe(&dialer, Some(RELAY)).await;
+    let v = tor_probe::probe(&dialer, Some(RELAY), None).await;
     let elapsed = started.elapsed();
     assert_eq!(v.state, TorTestState::CircuitFailed, "{v:?}");
     assert!(
         elapsed <= tor_probe::PROXY_TIMEOUT + tor_probe::CIRCUIT_TIMEOUT,
         "the probe ran {elapsed:?}, past its own deadlines"
+    );
+}
+
+
+/// TARGETGAP: with the actor's gap in hand the no-target verdicts name
+/// the ACTUAL cause — four pairwise-distinct sentences (a future arm must
+/// not silently collapse into the hedge), and a report carrying no gap
+/// keeps the honest hedge.
+#[test]
+fn the_verdict_names_the_actual_no_target_cause() {
+    use tor_probe::TargetGap;
+    let report = |gap: Option<TargetGap>| tor_probe::RungReport {
+        proxy: "127.0.0.1:9050".to_string(),
+        proxy_answered: Some(Ok(())),
+        target: String::new(),
+        circuit: None,
+        gap,
+    };
+    let gaps = [
+        TargetGap::EmptyPool,
+        TargetGap::Unconfirmed,
+        TargetGap::SessionLocked,
+        TargetGap::LocalOnly,
+    ];
+    let details: Vec<String> = gaps
+        .into_iter()
+        .map(|g| tor_probe::verdict(&report(Some(g))).detail)
+        .collect();
+    for (i, a) in details.iter().enumerate() {
+        for b in &details[i + 1..] {
+            assert_ne!(a, b, "every cause reads distinctly");
+        }
+    }
+    assert!(details[2].contains("switched off"), "{}", details[2]);
+    let hedged = tor_probe::verdict(&report(None));
+    assert!(
+        hedged.detail.contains("relay settings"),
+        "no gap carried keeps the honest hedge: {hedged:?}"
     );
 }

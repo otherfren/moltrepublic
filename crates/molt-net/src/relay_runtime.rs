@@ -67,6 +67,27 @@ const CURSOR_OVERLAP: u64 = 172_800;
 /// which is the propose path in molt-engine, and that needs this number.
 pub const DEFAULT_SIZE_BUDGET: u64 = 128 * 1024;
 
+/// Ceiling a relay-advertised frame cap may raise the budget to: this
+/// client's own hard WebSocket read limit — a budget above it would let
+/// the node publish frames it could never read back on subscribe.
+#[allow(clippy::as_conversions)] // usize → u64 is lossless
+pub const MAX_SANE_RELAY_CAP: u64 = crate::relay_ws::MAX_WS_MESSAGE as u64;
+
+/// Sanity-bound a relay-advertised NIP-11 `max_message_length` BEFORE it
+/// may drive any budget (relay_topology_plan §7, carried from N2): a
+/// lying relay must never zero or shrink the publish budget. `None` =
+/// not usable (below the floor the pool already requires for admission —
+/// a probed cap may only ever RAISE the budget); above the ceiling it
+/// clamps (a generous relay is not misbehaving). The probe itself stays
+/// an honest reporter — sanitize at the consumption site, so refusal
+/// messages can still quote the raw number.
+pub fn sane_relay_cap(cap: u64) -> Option<u64> {
+    if cap < DEFAULT_SIZE_BUDGET {
+        return None;
+    }
+    Some(cap.min(MAX_SANE_RELAY_CAP))
+}
+
 /// Bound on a NIP-11 response we are willing to read.
 const NIP11_MAX_RESPONSE: usize = 64 * 1024;
 

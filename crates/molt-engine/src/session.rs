@@ -695,8 +695,19 @@ impl State {
             ms: 0,
         };
         self.emit_session(SessionScope::Full);
+        // the pool lives HERE — compute the no-target cause for the
+        // verdict (TARGETGAP: the fixed hedge told an operator whose
+        // relays ARE confirmed to go confirm them)
+        let gap = target
+            .is_none()
+            .then(|| {
+                molt_net::tor_probe::target_gap(
+                    &self.session.settings.relays,
+                    self.clearnet_session,
+                )
+            });
         tokio::spawn(async move {
-            let result = molt_net::tor_probe::probe(&dialer, target.as_deref()).await;
+            let result = molt_net::tor_probe::probe(&dialer, target.as_deref(), gap).await;
             let (reply, _rx) = tokio::sync::oneshot::channel();
             let _ = cmd_tx
                 .send(crate::Envelope {

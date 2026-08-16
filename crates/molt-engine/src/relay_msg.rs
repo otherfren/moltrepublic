@@ -112,7 +112,9 @@ pub(crate) fn join_relay_refusal(
         // the one case the operator cannot deduce from their own config
         format!("no dialable relay — clearnet/local dialing off ({CLEARNET_KEY})")
     } else {
-        "no dialable relay for this invite".to_string()
+        // the residual mix (unconfirmed and/or unknown): both fixes are
+        // acts on this node's pool — name them once, like the siblings
+        "no dialable relay for this invite — add or confirm one of them".to_string()
     };
     JoinRelayRefusal { detail, headline }
 }
@@ -298,6 +300,26 @@ mod tests {
 
     fn entry(url: &str, confirmed: bool) -> RelayEntry {
         RelayEntry { url: url.to_string(), confirmed }
+    }
+
+    /// R2 residual: the MIXED-fault headline (unconfirmed + unknown, no
+    /// clearnet switch involved) must name an ACTION like its two sibling
+    /// branches — "no dialable relay for this invite" told the operator
+    /// what is wrong and nothing about what helps.
+    #[test]
+    fn a_mixed_fault_headline_names_an_action() {
+        let pool = vec![entry("wss://unconfirmed.example", false)];
+        let offered = vec![
+            "wss://never-heard-of.example".to_string(),
+            "wss://unconfirmed.example".to_string(),
+        ];
+        let verdicts = molt_core::relay::diagnose_invite_relays(&offered, &pool, true);
+        let refusal = join_relay_refusal(&verdicts, &pool, true);
+        assert!(
+            refusal.headline.contains("add") || refusal.headline.contains("confirm"),
+            "the headline names the act, not only the fault: {}",
+            refusal.headline
+        );
     }
 
     /// Each relay gets its own two-word fault, the remedy appears once, and

@@ -3185,13 +3185,15 @@ mod tests {
             proposals::change_summary(&eff(""), &rec(Surface::Memory, "add_note", "")),
             (String::new(), String::new())
         );
-        // the chat-retention setting's Ist-Stand is the effective window
+        // the chat-retention Ist-Stand is a MACHINE value (L10): the unit
+        // renders in the frontends, per language; a legacy "14 days"
+        // payload rides through untouched (the parser eats it)
         assert_eq!(
             proposals::change_summary(
                 &eff(""),
                 &rec(Surface::Organization, "set_chat_retention", "14 days")
             ),
-            ("7 days".to_string(), "14 days".to_string())
+            ("7".to_string(), "14 days".to_string())
         );
         // ops are free-form wire strings, so an older log may carry one this
         // build doesn't know (e.g. the retired plugin vocabulary): tolerated,
@@ -3794,16 +3796,31 @@ mod tests {
                 .encode(tiny_bmp_header(20_000, 20_000));
             let err = propose(bomb).await.expect_err("a dimension bomb is refused");
             assert!(matches!(err, MoltError::BadPayload(_)), "unexpected: {err:?}");
-            // real minimal files (2x2, PIL-generated — the molt-ui preview
-            // fixtures) pass for every picker format, svg by prefix sniff
+            // real minimal raster files (2x2, PIL-generated — the molt-ui
+            // preview fixtures) pass for every remaining picker format
             let png = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGM8ISfHwMDAxMDAwMDAAAANBAEIfXHKZgAAAABJRU5ErkJggg==";
             let webp = "UklGRjoAAABXRUJQVlA4IC4AAACwAQCdASoCAAIAAUAmJaACdLoABDAAAP7x3I/4DdfFtMv/vYL/3YL/3YL/WwAA";
+            for (fmt, b64) in [("png", png.to_string()), ("webp", webp.to_string())] {
+                propose(b64).await.unwrap_or_else(|e| panic!("{fmt} must pass: {e:?}"));
+            }
+            // L1 (decided 2026-08-16): SVG is refused with its OWN reason —
+            // the prefix sniff accepted any <svg/<?xml text unvetted
+            // (billion-laughs class), and a structural vetting would be a
+            // hand-rolled parser gate (the URL-parser lesson). Applied
+            // legacy SVG logos keep rendering; this is propose/wire-only.
             let svg = base64::engine::general_purpose::STANDARD.encode(
                 r##"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="#f00"/></svg>"##,
             );
-            for (fmt, b64) in [("png", png.to_string()), ("webp", webp.to_string()), ("svg", svg)] {
-                propose(b64).await.unwrap_or_else(|e| panic!("{fmt} must pass: {e:?}"));
-            }
+            let err = propose(svg).await.expect_err("svg is refused");
+            assert!(
+                format!("{err:?}").contains("svg is not accepted"),
+                "the refusal names the reason: {err:?}"
+            );
+            let bomb = base64::engine::general_purpose::STANDARD.encode(
+                r#"<?xml version="1.0"?><!DOCTYPE lolz [<!ENTITY lol "lol">]><svg>&lol;</svg>"#,
+            );
+            let err = propose(bomb).await.expect_err("an xml entity bomb is refused");
+            assert!(matches!(err, MoltError::BadPayload(_)), "unexpected: {err:?}");
         });
     }
 
@@ -4780,6 +4797,58 @@ mod tests {
     /// before its honest no-transport failure; the injected
     /// `NetRecoverSealed` then materializes against that context (the same
     /// seam the two-instance tests drive).
+    /// R2's recover leg: the refusal must NAME the relays it diagnosed —
+    /// the join leg extends its run log with one line per invite relay,
+    /// but the recover leg dropped `refusal.detail` and served only the
+    /// headline. Rule 3 makes re-join the routine path for a relay change,
+    /// so this is the leg where the naming matters most (rule 5).
+    #[test]
+    fn a_recover_refusal_names_the_relays_it_diagnosed() {
+        let rt = rt();
+        let _guard = rt.enter();
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (ev_tx, _keep) = broadcast::channel::<Event>(8);
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Envelope>(8);
+        let mut st = State::new(
+            GroupConfig::demo(),
+            SessionView {
+                settings: molt_core::SessionSettings {
+                    workspace_dir: tmp.path().display().to_string(),
+                    ..molt_core::SessionSettings::default()
+                },
+                ..SessionView::default()
+            },
+            ev_tx,
+            cmd_tx,
+            None,
+            true, // persist — the recover path needs storage to recover into
+            None,
+        );
+        let link = crate::recovery::RecoveryInvite {
+            republic: "Guild".to_string(),
+            member: "bob".to_string(),
+            ticket: "ab".repeat(32),
+            server: String::new(),
+            queue_id: String::new(),
+            wrap: String::new(),
+            republic_id: "f00d".to_string(),
+            handover: Some(molt_net::invite::RecoveryHandoverV2 {
+                ticket: "ab".repeat(32),
+                npub: "12".repeat(32),
+                relays: vec!["wss://coordinator.example".to_string()],
+                republic_id: "f00d".to_string(),
+            }),
+        }
+        .render();
+        st.cmd_recover_start(link, "brave mountain".to_string()).expect("acked");
+        let notice = st.session.notice.clone();
+        assert!(notice.starts_with("recover-failed:"), "{notice}");
+        assert!(
+            notice.contains("coordinator.example"),
+            "the refusal names the relay the operator must add: {notice}"
+        );
+    }
+
     fn recover_link(member: &str, republic_id: &str) -> String {
         crate::recovery::RecoveryInvite {
             republic: "Guild".to_string(),

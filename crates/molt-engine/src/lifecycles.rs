@@ -1694,7 +1694,17 @@ impl State {
                 &self.session.settings.relays,
                 self.clearnet_session,
             );
-            return self.cmd_net_recover_failed(refusal.headline, Some(generation));
+            // R2, the recover leg: this surface has no run log, so the
+            // per-relay diagnosis rides the one notice line — a rejoiner
+            // told only "add one of them" cannot know WHICH (rule 5, and
+            // rule 3 makes re-join the routine path for a relay change)
+            let detail = refusal.detail.join(" · ");
+            let error = if detail.is_empty() {
+                refusal.headline
+            } else {
+                format!("{} · {}", refusal.headline, detail)
+            };
+            return self.cmd_net_recover_failed(error, Some(generation));
         }
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return self.cmd_net_recover_failed("engine stopped".to_string(), Some(generation));

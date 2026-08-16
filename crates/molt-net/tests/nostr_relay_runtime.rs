@@ -957,3 +957,32 @@ async fn the_probe_calls_a_dead_relay_unreachable_within_its_bound() {
     );
     assert!(!err.is_empty(), "the reason is never empty");
 }
+
+/// NIP-11 sanity bounds (relay_topology_plan §7): a relay-advertised
+/// frame cap may only ever RAISE the publish budget — never zero or
+/// shrink it — and never past this client's own read limit. Pinned over
+/// the exact boundaries so the wiring (when it lands) is mechanical.
+#[test]
+fn a_lying_relay_cap_cannot_zero_or_shrink_the_budget() {
+    use molt_net::relay_runtime::{sane_relay_cap, DEFAULT_SIZE_BUDGET, MAX_SANE_RELAY_CAP};
+    for hostile in [0, 1, 924, 925, DEFAULT_SIZE_BUDGET - 1] {
+        assert_eq!(sane_relay_cap(hostile), None, "cap {hostile} must not lower the budget");
+    }
+    assert_eq!(sane_relay_cap(DEFAULT_SIZE_BUDGET), Some(DEFAULT_SIZE_BUDGET));
+    assert_eq!(sane_relay_cap(MAX_SANE_RELAY_CAP), Some(MAX_SANE_RELAY_CAP));
+    for generous in [MAX_SANE_RELAY_CAP + 1, u64::MAX] {
+        assert_eq!(
+            sane_relay_cap(generous),
+            Some(MAX_SANE_RELAY_CAP),
+            "a generous relay clamps to what this client can read back"
+        );
+    }
+    // the derived budget is always publishable: the plaintext ceiling
+    // stays positive across the whole sane range
+    for cap in [DEFAULT_SIZE_BUDGET, MAX_SANE_RELAY_CAP] {
+        assert!(
+            molt_net::envelope::max_plaintext_for(sane_relay_cap(cap).expect("sane")) > 0,
+            "a sane budget always leaves room for plaintext"
+        );
+    }
+}

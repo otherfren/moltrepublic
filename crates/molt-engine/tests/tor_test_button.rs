@@ -297,6 +297,15 @@ async fn a_relay_with_clearnet_switched_off_is_not_a_probe_target() {
     let v = run_test(&w, draft("local", blackhole_port().await)).await;
     assert_eq!(v.state, TorTestState::ProxyOnly, "{v:?}");
     assert!(v.target.is_empty(), "{v:?}");
+    // TARGETGAP: the verdict names the ACTUAL cause instead of the old
+    // fixed hedge. In this fixture the confirm probe never lands (no live
+    // relay), so the truthful cause is the unconfirmed pool; the
+    // switched-off and empty-pool causes are pinned pairwise-distinct in
+    // molt-net's the_verdict_names_the_actual_no_target_cause.
+    assert!(
+        v.detail.contains("confirmed") && !v.detail.contains("relay settings"),
+        "the verdict must name the actual cause, not the hedge: {v:?}"
+    );
 }
 
 /// A verdict describes ONE anonymity configuration. Changing the network,

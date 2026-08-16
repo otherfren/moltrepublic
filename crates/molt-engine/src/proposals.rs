@@ -256,14 +256,21 @@ const IMAGE_MAX_DIM: u32 = 8192;
 pub(crate) fn image_decodable(bytes: &[u8]) -> Result<(), MoltError> {
     let refuse = || {
         MoltError::BadPayload(
-            "the image cannot be decoded (png/jpeg/webp/gif/bmp/svg)".into(),
+            "the image cannot be decoded (png/jpeg/webp/gif/bmp)".into(),
         )
     };
-    // an SVG travels as its source text: prefix sniff
+    // L1 (decided 2026-08-16): SVG is REFUSED, not structurally vetted —
+    // the prefix sniff accepted any <svg/<?xml text with no dimension or
+    // nesting check, straight into every member's renderer (a 256 KiB
+    // billion-laughs body passed). Already-applied SVG logos keep
+    // rendering (the read path never re-validates); this gate is
+    // propose/wire-only.
     let head = std::str::from_utf8(&bytes[..bytes.len().min(1024)]).unwrap_or("");
     let trimmed = head.trim_start();
     if trimmed.starts_with("<svg") || trimmed.starts_with("<?xml") {
-        return Ok(());
+        return Err(MoltError::BadPayload(
+            "svg is not accepted — use a raster image (png/jpeg/webp/gif/bmp)".into(),
+        ));
     }
     image::guess_format(bytes).map_err(|_| refuse())?;
     let (w, h) = image::ImageReader::new(std::io::Cursor::new(bytes))
@@ -308,7 +315,9 @@ pub(crate) fn change_summary(eff: &OrgEffective, p: &ProposalRecord) -> (String,
     let current = match op {
         "set_charter" => eff.agenda.clone(),
         "set_name" => eff.name.clone(),
-        "set_chat_retention" => format!("{} days", eff.retention_days),
+        // L10: a MACHINE value — the unit is rendered per-language by the
+        // frontends (the op-placeholder title rule applied to the value)
+        "set_chat_retention" => eff.retention_days.to_string(),
         // the image ops show what they change: the current image reference
         "set_image" | "remove_image" => eff.image.clone(),
         "set_relays" => eff.relays.clone(),
@@ -1869,6 +1878,36 @@ mod size_gate_tests {
     use super::*;
     use base64::Engine as _;
     use serde_json::json;
+
+    /// L10: the retention pair carries MACHINE values — the unit renders
+    /// in the frontends, per language ("7 days → 30 days" leaked English
+    /// into the German card, and the value string is display-only).
+    #[test]
+    fn the_retention_pair_carries_machine_values_not_english() {
+        let eff = OrgEffective {
+            name: String::new(),
+            agenda: String::new(),
+            retention_days: 7,
+            image: String::new(),
+            relays: String::new(),
+            features: String::new(),
+        };
+        let rec = molt_core::ProposalRecord {
+            surface: molt_core::Surface::Organization,
+            payload: json!({ "op": "set_chat_retention", "value": "30" }),
+            approvals: 0,
+            state: molt_core::ProposalState::Proposed,
+            declined_at: 0,
+            declined_by: String::new(),
+            decliners: Vec::new(),
+            voted: Vec::new(),
+            by: String::new(),
+            superseded: false,
+            withdrawn: false,
+        };
+        let (current, proposed) = change_summary(&eff, &rec);
+        assert_eq!((current.as_str(), proposed.as_str()), ("7", "30"));
+    }
 
     fn roster() -> Vec<molt_core::MemberId> {
         ["walter", "petra", "hannelore-von-und-zu"]

@@ -1709,7 +1709,9 @@ pub fn run_app(
             let weak = weak.clone();
             rt.spawn(async move {
                 let picker = rfd::AsyncFileDialog::new()
-                    .add_filter("Image", &["png", "jpg", "jpeg", "webp", "gif", "svg", "bmp"]);
+                    // no "svg" (L1, 2026-08-16): the engine refuses SVG proposals —
+                    // offering a format the vote will bounce is a trap
+                    .add_filter("Image", &["png", "jpg", "jpeg", "webp", "gif", "bmp"]);
                 let Some(file) = picker.pick_file().await else {
                     return; // cancelled
                 };
@@ -5012,6 +5014,21 @@ fn relay_pool_diff(current: &str, proposed: &str) -> Vec<(i32, String)> {
     rows
 }
 
+/// L10: the retention pair travels as a MACHINE value ("30"); the unit
+/// renders here, in the active language — a legacy payload that still
+/// carries "30 days" is normalized by taking its leading number.
+fn retention_value(lang: i32, raw: &str) -> String {
+    let n = raw.split_whitespace().next().unwrap_or(raw);
+    if n.parse::<u64>().is_err() {
+        return raw.to_string();
+    }
+    if lang == 1 {
+        format!("{n} Tage")
+    } else {
+        format!("{n} days")
+    }
+}
+
 fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRowData {
     let op = p
         .payload
@@ -5023,8 +5040,16 @@ fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRowData {
         text: display_title(lang, &p.payload),
         approvals: p.approvals as i32,
         threshold: p.threshold as i32,
-        current: p.current.clone(),
-        proposed: p.proposed.clone(),
+        current: if op == "set_chat_retention" {
+            retention_value(lang, &p.current)
+        } else {
+            p.current.clone()
+        },
+        proposed: if op == "set_chat_retention" {
+            retention_value(lang, &p.proposed)
+        } else {
+            p.proposed.clone()
+        },
         image_op: matches!(op, "set_image" | "remove_image"),
         img_b64: p
             .payload
@@ -7901,6 +7926,18 @@ lexicon! {
 
 #[cfg(test)]
 mod tests {
+    /// L10: the retention pair renders its unit in the ACTIVE language —
+    /// the payload carries the machine value, and a legacy "30 days"
+    /// normalizes by its leading number instead of leaking English into
+    /// the German card.
+    #[test]
+    fn the_retention_pair_renders_its_unit_in_the_active_language() {
+        assert_eq!(super::retention_value(0, "7"), "7 days");
+        assert_eq!(super::retention_value(1, "7"), "7 Tage");
+        assert_eq!(super::retention_value(1, "30 days"), "30 Tage");
+        assert_eq!(super::retention_value(0, ""), "", "unknown stays untouched");
+    }
+
     use super::*;
     use molt_core::ProposalState;
 
