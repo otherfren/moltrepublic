@@ -339,8 +339,8 @@ pub struct SessionSettings {
     pub download_dir: String,
     /// Per-file byte cap for the relay file plane
     /// (`file_transfer_nostr.md` §5.1) — raise deliberately, chunk
-    /// publishes load the relay pool. 0 = "keep the current value" on a
-    /// wholesale settings save (readers fall back to the default).
+    /// publishes load the relay pool. 0 = file sharing OFF; an absent
+    /// key defaults to 4 MiB (FP4, 2026-08-16).
     #[serde(default = "default_file_cap_bytes")]
     pub file_cap_bytes: u64,
     /// Alert sound for an incoming chat message:

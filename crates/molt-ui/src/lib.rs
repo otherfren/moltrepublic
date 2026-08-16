@@ -338,11 +338,12 @@ pub fn run_app(
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
+        let last = last_settings.clone();
         ui.on_save_settings(move || {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
-            let settings = read_settings_draft(&ui);
+            let settings = read_settings_draft(&ui, stored_file_cap(&last));
             issue(&rt, &w, &ui.as_weak(), Command::SaveSettings { settings });
         });
     }
@@ -352,6 +353,7 @@ pub fn run_app(
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
+        let last = last_settings.clone();
         ui.on_rotate_token(move || {
             let Some(ui) = weak.upgrade() else {
                 return;
@@ -363,7 +365,7 @@ pub fn run_app(
                 return;
             };
             ui.set_cfg_mcp_token(token.into());
-            let settings = read_settings_draft(&ui);
+            let settings = read_settings_draft(&ui, stored_file_cap(&last));
             issue(&rt, &w, &ui.as_weak(), Command::SaveSettings { settings });
         });
     }
@@ -608,11 +610,12 @@ pub fn run_app(
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
+        let last = last_settings.clone();
         ui.on_save_and_leave(move || {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
-            let settings = read_settings_draft(&ui);
+            let settings = read_settings_draft(&ui, stored_file_cap(&last));
             let screen = to_screen(ui.get_settings_return());
             let w = w.clone();
             let weak = ui.as_weak();
@@ -2468,16 +2471,20 @@ fn settings_draft_differs(stored: &SessionSettings, ui: &AppWindow) -> bool {
     stored.font_app = d.font_app;
     stored.font_nav = d.font_nav;
     stored.font_editor = d.font_editor;
-    // the cap is not a config-tab field either (the draft carries the
-    // 0 = "keep" sentinel): comparing the stored value against that 0 made
-    // the guard cry "unsaved changes" on EVERY settings exit — right after
-    // a successful save included
-    stored.file_cap_bytes = 0;
-    stored != read_settings_draft(ui)
+    stored != read_settings_draft(ui, stored.file_cap_bytes)
+}
+
+/// The stored file cap out of the settings mirror — echoed into a wholesale
+/// save so it survives (the draft has no field for it; 0 means OFF, FP4).
+fn stored_file_cap(last: &Arc<Mutex<Option<SessionSettings>>>) -> u64 {
+    last.lock()
+        .ok()
+        .and_then(|l| l.as_ref().map(|s| s.file_cap_bytes))
+        .unwrap_or_else(|| SessionSettings::default().file_cap_bytes)
 }
 
 /// Gather the config-tab draft properties into a [`SessionSettings`].
-fn read_settings_draft(ui: &AppWindow) -> SessionSettings {
+fn read_settings_draft(ui: &AppWindow, stored_cap: u64) -> SessionSettings {
     let d = SessionSettings::default();
     SessionSettings {
         headless: ui.get_cfg_headless(),
@@ -2491,9 +2498,9 @@ fn read_settings_draft(ui: &AppWindow) -> SessionSettings {
         font_app: d.font_app,
         font_nav: d.font_nav,
         font_editor: d.font_editor,
-        // not a config-tab field either: 0 = "keep the current cap" (the
-        // engine's keep-live posture) — config.toml is the cap's one door
-        file_cap_bytes: 0,
+        // not a config-tab field: the draft echoes the STORED cap so a
+        // wholesale save keeps it (0 is a VALUE now — sharing off, FP4)
+        file_cap_bytes: stored_cap,
         workspace_dir: ui.get_cfg_workspace_dir().to_string(),
         download_dir: ui.get_cfg_download_dir().to_string(),
         sound_message: sound_name(ui.get_cfg_sound_message_index()),

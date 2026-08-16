@@ -589,6 +589,7 @@ s3_keep_copies = {s3_keep_copies}
 # Where downloaded chat files land ("~" = $HOME).
 download_dir = {download_dir}
 # Per-file byte cap for sharing over relays (chunk publishes load the pool).
+# 0 = file sharing off; removing the key restores the 4 MiB default.
 file_cap_bytes = {file_cap_bytes}
 # Alert sounds: "none" | "bell" | "chime" | "pop".
 sound_message = {sound_message}

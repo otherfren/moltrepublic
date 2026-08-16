@@ -1603,16 +1603,13 @@ impl State {
         Ok(Reply::Ack)
     }
 
-    /// The operative per-file cap: the operator's configured value, or the
-    /// spec default where the setting is 0/unset (`file_transfer_nostr.md`
-    /// §5.1).
-    fn effective_file_cap(&self) -> u64 {
+    /// The operative per-file cap (`file_transfer_nostr.md` §5.1):
+    /// `None` = file sharing is OFF (`file_cap_bytes = 0`, FP4 2026-08-16),
+    /// otherwise the configured value (an absent config key serde-defaults
+    /// to 4 MiB before it ever reaches here).
+    pub(crate) fn effective_file_cap(&self) -> Option<u64> {
         let cap = self.session.settings.file_cap_bytes;
-        if cap == 0 {
-            molt_core::default_file_cap_bytes()
-        } else {
-            cap
-        }
+        (cap != 0).then_some(cap)
     }
 
     /// The RELAY file plane's channel + exporter material, if this
@@ -1731,7 +1728,10 @@ impl State {
             at,
             target,
             dest,
-            self.effective_file_cap(),
+            // sharing-off still allows PULLING a peer's share; the default
+            // bounds what a hostile series claim may allocate
+            self.effective_file_cap()
+                .unwrap_or_else(molt_core::default_file_cap_bytes),
             self.net_scope,
             cmd_tx,
         );
@@ -1757,7 +1757,11 @@ impl State {
         // the size is known here — an over-cap share must not cost a full
         // disk read per request only to be refused inside the publish
         // (review 2026-08-10; the share-time gate makes this an edge)
-        if size > self.effective_file_cap() {
+        let Some(cap) = self.effective_file_cap() else {
+            tracing::warn!(%id, "not serving: file sharing off (file_cap_bytes=0)");
+            return;
+        };
+        if size > cap {
             tracing::warn!(%id, size, "not serving a share beyond the file cap");
             return;
         }
@@ -1802,7 +1806,7 @@ impl State {
             exporter,
             id,
             path,
-            self.effective_file_cap(),
+            cap,
             self.net_scope,
             cmd_tx,
         );

@@ -277,15 +277,17 @@ impl State {
                 "{path:?} has no file name component"
             )));
         }
+        // file_cap_bytes = 0 turns sharing off on every transport (FP4)
+        let Some(cap) = self.effective_file_cap() else {
+            return Err(MoltError::BadPayload(
+                "file sharing is off (file_cap_bytes = 0)".into(),
+            ));
+        };
         // relay plane: an over-cap file is refused where the human who
         // picked it can act — admitting it would mint a share nobody can
         // ever download (the lazy publish refuses on the cap, silently for
         // the group; review 2026-08-10). Metadata only, no read.
         if self.nostr.is_some() {
-            let cap = {
-                let c = self.session.settings.file_cap_bytes;
-                if c == 0 { molt_core::default_file_cap_bytes() } else { c }
-            };
             if let Ok(meta) = std::fs::metadata(&p) {
                 if meta.len() > cap {
                     return Err(MoltError::BadPayload(format!(

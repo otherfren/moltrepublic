@@ -6,9 +6,10 @@ actors, the keys, the messages, and the guarantees that hold when each phase
 is over. The concrete crates and the build order live in
 `docs/chain/multi-sig-wallet-plan.md`; the code is pointed to at the end.
 
-Status: DRAFT for discussion (2026-07-18; revised 2026-08-16 against the
-current code: charter-feature gate, Nostr transport, at-least-once
-delivery). Nothing below is implemented yet.
+Status: RATIFIED 2026-08-16 (drafted 2026-07-18; revised 2026-08-16 against
+the current code: charter-feature gate, Nostr transport, at-least-once
+delivery). Nothing below is implemented yet — build order in
+`multi-sig-wallet-plan.md` §15, next step is the dep-lock spike (§6 there).
 
 ---
 

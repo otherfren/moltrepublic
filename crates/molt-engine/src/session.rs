@@ -451,12 +451,10 @@ impl State {
         // grant non-onion dialing, or silently revoke it, as a side effect of
         // changing an unrelated field).
         settings.clearnet_relays_enabled = self.session.settings.clearnet_relays_enabled;
-        // 0 = "keep the current cap": a wholesale save from a frontend that
-        // does not carry the field must not silently reset an operator's
-        // deliberately raised file cap (the relays-keep-live posture)
-        if settings.file_cap_bytes == 0 {
-            settings.file_cap_bytes = self.session.settings.file_cap_bytes;
-        }
+        // file_cap_bytes carries no keep-current sentinel (FP4, 2026-08-16):
+        // 0 is a VALUE — file sharing off — and "keep" is expressed by not
+        // naming the field (patch_settings) or echoing the stored value
+        // (the GUI draft does).
         // the font sizes have their own door too (`set_fonts`): a wholesale
         // save from a frontend that predates them must not reset the
         // operator's sizes as a side effect
@@ -2130,5 +2128,47 @@ mod patch_tests {
             .await
             .expect_err("the clearnet switch is not a setting patch");
         assert!(format!("{err:?}").contains("relay"), "{err:?}");
+    }
+
+    /// FP4 (2026-08-16): `file_cap_bytes = 0` means file sharing is OFF —
+    /// no longer the "keep the current cap" sentinel. Absent stays covered
+    /// (a patch that does not name the field keeps the value; an absent
+    /// config key serde-defaults to 4 MiB), so 0 is free to be a value.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_zero_file_cap_is_sharing_off_not_keep_current() {
+        let w = node();
+        w.execute(Command::PatchSettings {
+            patch: serde_json::json!({ "file_cap_bytes": 123_456 }),
+        })
+        .await
+        .expect("raise");
+        w.execute(Command::PatchSettings {
+            patch: serde_json::json!({ "s3_interval_min": 15 }),
+        })
+        .await
+        .expect("unrelated patch");
+        assert_eq!(
+            settings(&w).await.file_cap_bytes,
+            123_456,
+            "a patch not naming the cap keeps it"
+        );
+        w.execute(Command::PatchSettings {
+            patch: serde_json::json!({ "file_cap_bytes": 0 }),
+        })
+        .await
+        .expect("off");
+        assert_eq!(
+            settings(&w).await.file_cap_bytes,
+            0,
+            "an explicit 0 lands as 0, not as keep-current"
+        );
+        let err = w
+            .execute(Command::ShareFile {
+                path: "/tmp/anything.txt".to_string(),
+                channel: molt_core::ChannelRef::Group,
+            })
+            .await
+            .expect_err("sharing is off");
+        assert!(err.to_string().contains("off"), "{err}");
     }
 }
