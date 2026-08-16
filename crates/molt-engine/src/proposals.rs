@@ -560,7 +560,6 @@ impl State {
 
     pub(crate) fn cmd_approve(&mut self, proposal: ProposalId) -> Result<Reply, MoltError> {
         let operator_already_voted = {
-            let me = self.member();
             let p = self
                 .proposals
                 .get(&proposal.0)
@@ -575,15 +574,18 @@ impl State {
             // (The nav hides such a surface, so a GUI member could not even
             // SEE the card it would be co-signing.)
             self.require_feature(p.surface)?;
-            // a standing decline is a cast vote: signing on top of it would
-            // let one member hold both stances at once (and a decline does
-            // not retract a collected signature — review 2026-08-09).
-            // Changing one's mind is cancel-and-re-propose territory.
-            if p.decliners.iter().any(|d| d == &me) {
-                return Err(MoltError::AlreadyDeclined(proposal));
-            }
+            // D2 (last vote counts, decided 2026-08-16): an approve over
+            // the own standing decline RETRACTS the decline below — the
+            // newest stance wins, mirroring the decline's signature
+            // retraction in `register_decline`.
             Self::operator_approved(p)
         };
+        {
+            let me = self.member();
+            if let Some(p) = self.proposals.get_mut(&proposal.0) {
+                p.decliners.retain(|d| d != &me);
+            }
+        }
         if self.is_chain_governed() {
             // real threshold: sign + gossip; a block seals once m distinct
             // members have signed (here or over the mesh)
@@ -904,6 +906,12 @@ impl State {
         }
         if p.state != ProposalState::Proposed || p.decliners.iter().any(|d| d == by) {
             return DeclineOutcome::Known;
+        }
+        // D2 (last vote counts, decided 2026-08-16): the decline RETRACTS
+        // this member's collected signature — one member, one stance.
+        // Deterministic on every caller (applier, wire, park drain, replay).
+        if let Some(pending) = self.pending_sigs.get_mut(&id) {
+            pending.sigs.retain(|a| a.member != by);
         }
         p.decliners.push(by.to_string());
         if p.decliners.len() > veto_room {

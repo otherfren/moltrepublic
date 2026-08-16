@@ -1443,6 +1443,17 @@ impl State {
                 }
             }
             WorkspaceEvent::Approved { id, by, height, sig } if self.is_chain_governed() => {
+                // D2: a LINK-AUTHENTICATED approve clears the member's
+                // standing decline (newest stance wins). Gated on by ==
+                // from — receive_approval never verifies the signature, so
+                // an ungated clear would be a forged veto-cancel.
+                if by == from {
+                    if let Some(p) = self.proposals.get_mut(&id.0) {
+                        if p.state == molt_core::ProposalState::Proposed {
+                            p.decliners.retain(|d| d != &by);
+                        }
+                    }
+                }
                 self.receive_approval(id.0, &by, height, &sig);
                 self.emit(molt_core::Event::Approved {
                     id,

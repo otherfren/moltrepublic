@@ -316,7 +316,15 @@ impl State {
                     self.supersede_stale_wiki();
                 }
             }
-            WorkspaceEvent::Approved { id, .. } => {
+            WorkspaceEvent::Approved { id, by, .. } => {
+                // D2 replay twin of the live clears: the newest stance wins
+                // — an own log that recorded decline-then-approve must
+                // reconstruct the approve as the standing one
+                if let Some(p) = self.proposals.get_mut(&id.0) {
+                    if p.state == ProposalState::Proposed {
+                        p.decliners.retain(|d| d != by);
+                    }
+                }
                 // Replay projection, deliberately a plain count: live
                 // approvals are already deduplicated at their source
                 // (`cmd_approve` refuses a second local approval; the chain

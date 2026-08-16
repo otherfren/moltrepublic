@@ -1939,13 +1939,25 @@ impl State {
         if pending.height != target {
             return; // stale set awaiting a re-base
         }
+        // D2 (last vote counts): a CURRENT decliner's signature never
+        // counts toward m — a stale re-served sig from a peer that missed
+        // the decline must not seal a majority-declined proposal here. (A
+        // block sealed elsewhere still wins on arrival; the chain is the
+        // record.)
+        let current_decliners: Vec<molt_core::MemberId> = self
+            .proposals
+            .get(&id)
+            .map(|p| p.decliners.clone())
+            .unwrap_or_default();
         let mut valid: Vec<RosterAttestation> = pending
             .sigs
             .iter()
             .filter(|a| {
-                head.identities.iter().any(|i| {
-                    i.member == a.member && molt_storage::identity_verify(&i.identity_pk, &bytes, &a.sig)
-                })
+                !current_decliners.contains(&a.member)
+                    && head.identities.iter().any(|i| {
+                        i.member == a.member
+                            && molt_storage::identity_verify(&i.identity_pk, &bytes, &a.sig)
+                    })
             })
             .cloned()
             .collect();
@@ -5124,13 +5136,78 @@ mod tests {
         let p = peer.proposals.get(&9).cloned().expect("card");
         let v = peer.view(9, &p);
         assert!(v.declined_by_me, "the stance the frontend grays on");
+        // D2 (last vote counts): the decline RETRACTED the collected
+        // signature — one member holds one stance, never both
+        assert!(
+            !peer
+                .pending_sigs
+                .get(&9)
+                .is_some_and(|s| s.sigs.iter().any(|a| a.member == "walter")),
+            "the own signature is retracted by the decline"
+        );
+        assert!(!v.approved_by_me, "…and the view says so");
     }
 
-    /// A standing decline is a cast vote: approving on top of it would let
-    /// one member hold both stances at once (a decline does not retract a
-    /// collected signature — review 2026-08-09, finding 3).
+    /// D2: `try_commit` excludes CURRENT decliners — a stale re-served
+    /// signature of a member whose standing decline this node holds must
+    /// not count toward m, or a majority-declined proposal seals on
+    /// whichever node collected the leftovers.
     #[test]
-    fn an_own_decline_blocks_a_later_approve() {
+    fn a_current_decliners_stale_signature_does_not_seal() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        let payload = json!({ "op": "set_name", "value": "Contested" });
+        wire(
+            &mut walter,
+            "petra",
+            1,
+            WorkspaceEvent::Proposed {
+                id: ProposalId(1),
+                surface: Surface::Organization,
+                payload: payload.clone(),
+            },
+        );
+        // dora's decline stands…
+        wire(
+            &mut walter,
+            "dora",
+            1,
+            WorkspaceEvent::Declined { id: ProposalId(1), by: "dora".to_string(), hash: String::new() },
+        );
+        // …then her STALE signature arrives (re-served by a peer that
+        // missed the decline) and collects
+        let change = ChainChange::Applied {
+            proposal_id: 1,
+            surface: Surface::Organization,
+            payload: payload.clone(),
+        };
+        let bytes = approval_bytes(&b.republic_id, 1, &change);
+        let dora_sig = identity_sign(b.key("dora"), &bytes);
+        walter.receive_approval(1, "dora", 1, &dora_sig);
+        // walter co-signs: 2 collected — but dora is a CURRENT decliner
+        walter.chain_sign_and_gossip_approval(1);
+        assert_eq!(
+            walter.chain_head.as_ref().expect("head").height,
+            0,
+            "no block seals while a counted signer's decline stands"
+        );
+        assert!(
+            matches!(walter.proposals.get(&1), Some(p) if p.state == ProposalState::Proposed),
+            "the card stays open"
+        );
+    }
+
+    /// D2 (last vote counts, decided 2026-08-16): approving over the own
+    /// standing decline RETRACTS the decline — the newest stance wins,
+    /// mirroring the decline's signature retraction. One member, one
+    /// stance, changeable until the vote seals.
+    #[test]
+    fn an_approve_retracts_the_standing_own_decline() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -5148,18 +5225,21 @@ mod tests {
                 payload: json!({ "op": "set_name", "value": "Beides?" }),
             },
         );
+        peer.identity_sk = b
+            .keys
+            .iter()
+            .find(|(m, _)| m == "walter")
+            .map(|(_, sk)| sk.clone());
         peer.cmd_decline(ProposalId(9)).expect("decline");
-        assert!(
-            matches!(
-                peer.cmd_approve(ProposalId(9)),
-                Err(molt_core::MoltError::AlreadyDeclined(ProposalId(9)))
-            ),
-            "an approve over the own standing decline must refuse"
-        );
-        // …and the view names the own stance, so frontends gray instead
-        // of letting the click run into that refusal
+        peer.cmd_approve(ProposalId(9)).expect("the newest stance wins");
         let p = peer.proposals.get(&9).cloned().expect("card");
-        assert!(peer.view(9, &p).declined_by_me);
+        let v = peer.view(9, &p);
+        assert!(!v.declined_by_me, "the decline is retracted");
+        assert!(v.approved_by_me, "…and the approval stands");
+        assert!(
+            !p.decliners.iter().any(|d| d == "walter"),
+            "the decliner list no longer names the member"
+        );
     }
 
     /// An applied MEMBERSHIP card reads its voters from the sealed block
