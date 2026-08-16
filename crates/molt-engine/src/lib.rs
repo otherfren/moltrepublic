@@ -2935,6 +2935,39 @@ mod tests {
     /// retention deadline. Read-only commands — MCP tools like every read,
     /// so an agent can auto-test the same tables the GUI renders.
     #[test]
+    fn the_share_card_carries_its_availability_word() {
+        // §5.5 (file_transfer_nostr.md): ONE status word, derived — a live
+        // series stamp means the relays hold it (no live sharer needed), no
+        // stamp means the first download wakes the sharer, a withdrawn
+        // share without a stamp is gone.
+        let mut st = plain_state();
+        let id = molt_core::MessageId([3u8; 16]);
+        let mut msg = molt_core::ChatMessage::text(id, "me", "a share", now_secs());
+        msg.file = Some(molt_core::FileMeta {
+            name: "plan.pdf".to_string(),
+            size: 9,
+            kind: "PDF".to_string(),
+            modified: 100,
+            available: true,
+            checksum: String::new(),
+        });
+        let env = st.make_env("me".to_string(), molt_core::WorkspaceEvent::Chat(msg));
+        st.apply(&env);
+
+        let word = |st: &State| st.uploads_view()[0].availability.clone();
+        assert_eq!(word(&st), "sharer-only", "no stamp: the sharer must serve");
+        st.file_series.insert(id, 7);
+        assert_eq!(word(&st), "relay-held", "a live stamp: the relays serve");
+        st.file_series.remove(&id);
+        let rm = st.make_env(
+            "me".to_string(),
+            molt_core::WorkspaceEvent::FileRemoved { index: 0, id: Some(id), by: "me".to_string() },
+        );
+        st.apply(&rm);
+        assert_eq!(word(&st), "gone", "withdrawn and no stamp");
+    }
+
+    #[test]
     fn members_and_uploads_projections_serve_the_org_tables() {
         rt().block_on(async {
             let tmp = tempfile::tempdir().expect("tmp");

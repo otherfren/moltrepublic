@@ -1211,6 +1211,17 @@ impl State {
         from: MemberId,
         envelope: EventEnvelope,
     ) -> Result<Reply, MoltError> {
+        // D7: a decline the FULL park would shed must stay UNACKED — past
+        // the accept below the at-least-once guarantee is spent on it and
+        // the voice is gone for good; left unmarked, the sender's resend
+        // re-earns it once the park has room (successors hold in the G7
+        // ordered park, bounded by its give-up valve).
+        if let WorkspaceEvent::Declined { id, by } = &envelope.body {
+            if by == &from && self.decline_would_shed(id.0, by) {
+                tracing::warn!(%from, id = id.0, "decline park full — leaving the frame unacked for the resend");
+                return Ok(Reply::Ack);
+            }
+        }
         // delivery guarantee G2/G3 (delivery_guarantee.md §4.2): THE accept
         // point. Past the generation + roster gates the envelope counts as
         // engine-accepted — mark it in the sender's window (that mark is what
@@ -1498,6 +1509,28 @@ impl State {
                 relays,
                 consent,
             } if self.is_chain_governed() => {
+                // D3: the applier (events.rs) mints the human-facing card,
+                // but it runs only via record() — the proposer's own log. A
+                // RECEIVER therefore held no card, cmd_approve refused with
+                // UnknownProposal, and an m>=3 recovery stalled. Re-author
+                // and record (the Chat arm's pattern) so the survivor can
+                // vote; `by` stays the link identity, never the body's
+                // claim, and record-first is the order id_free_for was
+                // written for. Membership frames do not cross the wire
+                // (crosses_wire), so this cannot re-gossip.
+                let env = self.make_env(
+                    from.clone(),
+                    WorkspaceEvent::MembershipProposed {
+                        id,
+                        op,
+                        nostr_pk: nostr_pk.clone(),
+                        member: member.clone(),
+                        identity_pk: identity_pk.clone(),
+                        relays: relays.clone(),
+                        consent: consent.clone(),
+                    },
+                );
+                self.record(env);
                 self.receive_membership_proposal(
                     id.0,
                     op,

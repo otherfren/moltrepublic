@@ -32,7 +32,7 @@ const PARKED_DECLINE_IDS_MAX: usize = 1024;
 /// park with invented ids must not evict or block the other members'
 /// honest out-of-order voices (the frames are acked at the accept point,
 /// so a shed voice would be gone for good — review 2026-08-09).
-const PARKED_DECLINES_PER_MEMBER_MAX: usize = 64;
+pub(crate) const PARKED_DECLINES_PER_MEMBER_MAX: usize = 64;
 
 /// How far beyond the highest known proposal id a decline may point and
 /// still park: a real decline references an id some proposer minted and
@@ -797,6 +797,31 @@ impl State {
     /// sender's chain than its proposal (or replays from the own log
     /// before a re-served proposal returns). Emit-free: the applier
     /// replays through here, callers on live paths emit from the outcome.
+    /// D7: would [`Self::register_decline`] SHED this wire voice on a full
+    /// park? Read-only twin of its admission, consulted BEFORE the accept
+    /// point — an accepted-then-shed voice was ACKed, so the at-least-once
+    /// guarantee was already spent and it never comes back. Implausible-id
+    /// garbage stays accept-and-drop (it must not ride resend forever),
+    /// and an id already parked never sheds (the member dedup appends).
+    pub(crate) fn decline_would_shed(&self, id: u64, by: &str) -> bool {
+        if !self.is_chain_governed() || self.proposals.contains_key(&id) {
+            return false;
+        }
+        if id > self.next_id.saturating_add(PARKED_DECLINE_ID_WINDOW) {
+            return false; // garbage — accept and drop
+        }
+        if self.pending_declines.contains_key(&id) {
+            return false;
+        }
+        let member_parked = self
+            .pending_declines
+            .values()
+            .filter(|p| p.iter().any(|(m, _)| m == by))
+            .count();
+        self.pending_declines.len() >= PARKED_DECLINE_IDS_MAX
+            || member_parked >= PARKED_DECLINES_PER_MEMBER_MAX
+    }
+
     pub(crate) fn register_decline(&mut self, id: u64, by: &str, ts: u64) -> DeclineOutcome {
         let veto_room = self
             .replica
@@ -1666,6 +1691,17 @@ impl State {
                     // honestly unknown) — what a download must reproduce
                     checksum: f.checksum.clone(),
                     download: self.downloads.get(&m.id).cloned(),
+                    // §5.5: ONE derived word, no extra state — a live stamp
+                    // outranks `available` (relay copies outlive a removal
+                    // until retention prunes them)
+                    availability: if self.file_series.contains_key(&m.id) {
+                        "relay-held"
+                    } else if f.available {
+                        "sharer-only"
+                    } else {
+                        "gone"
+                    }
+                    .to_string(),
                 })
             })
             .collect()

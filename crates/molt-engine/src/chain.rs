@@ -4578,6 +4578,60 @@ mod tests {
         assert!(p.declined_at > 0, "the decline timestamp is the envelope's");
     }
 
+    /// D7: a decline the FULL park would shed must stay UNACKED — the
+    /// accept point ran before the park admission, so a shed voice was
+    /// ACKed and the at-least-once guarantee was already spent on it: the
+    /// sender trims it and the voice is gone for good. Left unacked, the
+    /// resend machinery re-earns it once the park has room (or the
+    /// proposal lands). The implausible-id garbage case deliberately stays
+    /// accept-and-drop — a u64::MAX decline must not ride resend forever.
+    #[test]
+    fn a_shed_decline_stays_unacked_for_the_resend() {
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        let base = walter.next_id;
+        let per_member = u64::try_from(crate::proposals::PARKED_DECLINES_PER_MEMBER_MAX)
+            .expect("cap fits");
+        // fill petra's whole per-member allowance with plausible unknown ids
+        for i in 0..per_member {
+            wire(
+                &mut walter,
+                "petra",
+                i + 1,
+                WorkspaceEvent::Declined { id: ProposalId(base + i), by: "petra".to_string() },
+            );
+        }
+        let accepted = |st: &crate::State, seq: u64| {
+            st.accepted.get("petra").is_some_and(|w| w.is_accepted(seq))
+        };
+        assert!(accepted(&walter, per_member), "parked voices are accepted and acked");
+        // the voice the park sheds must NOT be marked accepted
+        wire(
+            &mut walter,
+            "petra",
+            per_member + 1,
+            WorkspaceEvent::Declined {
+                id: ProposalId(base + per_member),
+                by: "petra".to_string(),
+            },
+        );
+        assert!(
+            !accepted(&walter, per_member + 1),
+            "a shed voice stays unacked so the resend re-earns it"
+        );
+        // …while garbage far past the mint window stays accept-and-drop
+        wire(
+            &mut walter,
+            "petra",
+            per_member + 2,
+            WorkspaceEvent::Declined { id: ProposalId(u64::MAX), by: "petra".to_string() },
+        );
+        assert!(
+            accepted(&walter, per_member + 2),
+            "implausible-id garbage is accepted and dropped, never resent"
+        );
+    }
+
     /// A decline can outrun its proposal on the wire (G7 orders per sender
     /// only) and it replays from the own log before a re-served proposal
     /// returns: either way it PARKS and registers the moment the proposal
@@ -6768,6 +6822,42 @@ mod tests {
     /// verified request creates a HUMAN-visible proposal record, a survivor
     /// approves it through the PUBLIC `cmd_approve`, and the commit settles
     /// the record to `Applied` with the vote bookkeeping dropped.
+    #[test]
+    fn a_wire_membership_proposal_is_votable_without_hand_applying() {
+        // D3: the applier runs only for the proposer's OWN log, so the wire
+        // arm must create the human-facing record itself — without it a
+        // receiver held no card, cmd_approve said UnknownProposal, and an
+        // m>=3 recovery stalled (coordinator co-sign + rejoiner consent are
+        // only 2 distinct signers).
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let b = Builder::new(&["petra", "walter", "dora", "erika"], 3);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        let consent = consent_for(&b, "dora", "");
+        wire(
+            &mut walter,
+            "petra",
+            1,
+            WorkspaceEvent::MembershipProposed {
+                id: ProposalId(5),
+                op: MembershipOp::Restored,
+                member: "dora".to_string(),
+                identity_pk: b.pk("dora"),
+                nostr_pk: None,
+                relays: Vec::new(),
+                consent: Some(consent),
+            },
+        );
+        assert!(
+            walter.proposals.contains_key(&5),
+            "the receiver holds the votable card"
+        );
+        walter.cmd_approve(ProposalId(5)).expect("the survivor can approve");
+    }
+
     #[test]
     fn a_membership_proposal_is_a_visible_approvable_record() {
         let b = Builder::new(&["petra", "walter", "dora", "erika"], 3);
