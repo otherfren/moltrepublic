@@ -2,7 +2,7 @@
 
 MoltRepublic is a real product (not a demo): a Rust workspace for founding and
 running small encrypted "republics"/DAOs over Nostr relays (NIP-EE/Marmot — in
-build, `docs/transport/nostr_transport_marmot.md`; Nostr is the production
+build, `docs_archive/transport/nostr_transport_marmot.md`; Nostr is the production
 transport since N4/N5, loopback stays the test transport),
 with MLS group encryption and a Slint GUI. Grow the UI/UX stepwise while
 implementing the real thing behind the same contract — never fake behavior a
@@ -74,12 +74,15 @@ user could mistake for real.
 
 ## Where documents live
 
-- **`docs/`** — open work, plus the current specification of shipping
-  behaviour. If it is here, it is either something still to build or the
-  authority for how something works today.
-- **`docs_archive/`** — the record of what was decided and why: superseded
-  designs (everything SMP/mesh), executed plans, and analysis a decision
-  consumed. **Never implement from a document in `docs_archive/`.**
+- **`docs/`** — open work ONLY (rule since 2026-08-16). If it is here, it is
+  a plan (or part of one) that is not built yet. A doc leaves for the archive
+  in the same change that finishes its last open item.
+- **`docs_archive/`** — everything else: the current specifications of
+  shipping behaviour (the "read first" authorities CLAUDE.md points at),
+  ADRs, executed plans, superseded designs (everything SMP/mesh), and
+  analysis a decision consumed. The status line at the top says which of
+  these a document is — **trust a spec's status, and never build new work
+  from a doc marked superseded or executed;** open work lives in `docs/`.
 
 Status lines are load-bearing — a doc claiming "not yet built" for shipped
 work costs a planning session. Correct the status in the same change that
@@ -148,7 +151,7 @@ finding, the same as a bug.
   that recompute the signed table. `roster_canonical_bytes` is versioned
   (v3 bound each member's `nostr_pk` third anchor (N1), v4 the ratified
   relay pool (R3), and `molt-roster-v5` the ratified FEATURE selection
-  (`docs/ritual/charter_features.md`) — **conditionally: `features: None`
+  (`docs_archive/ritual/charter_features.md`) — **conditionally: `features: None`
   emits v4 bytes byte-identically**, which is what keeps live republics
   verifying) — bump the tag if you change the byte layout, and update
   every recompute site (founder canonical, `verify_sealed_roster`,
@@ -179,7 +182,7 @@ finding, the same as a bug.
   boundaries*: exactly one per message, filtering is engine-side on `ReadState`
   (never client-side — co-equality), tags carry no governance meaning, and the
   chat surface's byte-identity fixtures in `molt-core` mod tests pin the legacy
-  wire shape — treat a red one as a design stop. Read `docs/chat/chat_bus.md`
+  wire shape — treat a red one as a design stop. Read `docs_archive/chat/chat_bus.md`
   before touching chat/channel code.
 - **Drain the outbound path, don't `abort()` it.** In the mesh/bootstrap async
   plumbing a node finishes as soon as its *inbound* work is done, but its own
@@ -192,7 +195,7 @@ finding, the same as a bug.
 
 ## The founding ritual is the security-critical core
 
-Read `docs/ritual/founding_ritual.md` before touching `founding.rs`/`lifecycles.rs`.
+Read `docs_archive/ritual/founding_ritual.md` before touching `founding.rs`/`lifecycles.rs`.
 Load-bearing invariants — do not weaken them:
 
 - **Sign-what-you-see.** A member recomputes the canonical table from the
@@ -227,7 +230,7 @@ Load-bearing invariants — do not weaken them:
 
 ## The persistent-change chain is the shared state model
 
-Read `docs/chain/persistent_chain.md` before touching `chain.rs` (in `molt-core`
+Read `docs_archive/chain/persistent_chain.md` before touching `chain.rs` (in `molt-core`
 and `molt-engine`). The republic's persistent state is a **single-branch,
 threshold-signed commit-block chain** ("git patches"); the founding is block 0.
 It is the state-model twin of the founding ritual — load-bearing invariants:
@@ -305,7 +308,7 @@ convergence rule, and the reusable test doubles.
 
 **Since N4/N5 (2026-08) the production transport is Nostr/NIP-EE**: founding,
 join, recovery and the running 445 group runtime all go over relays
-(`docs/transport/nostr_transport_marmot.md`; the governed relay pool is
+(`docs_archive/transport/nostr_transport_marmot.md`; the governed relay pool is
 `relay_topology_plan.md`). The SMP transport and its machinery (the
 permissive-loopback-vs-SMP creds asymmetry, `reopen_transport`, SKEY sender
 seeds, the Stage-B N-queue redundancy, self-heal/rotate/keepalive/probe) were
@@ -317,7 +320,7 @@ single-queue inbound redial loop, and the T4 Tor dialer at
 `crates/molt-net/src/dial.rs` (S3 and the relay WebSockets use it). `LoopbackTransport` is **permissive** — its queues live in the shared hub,
 so any clone can subscribe to any queue; a real transport gates receive on
 credentials, so don't lean on that forgiveness. **The delivery
-guarantee (2026-07-28, `docs/transport/delivery_guarantee.md`) sits on top of
+guarantee (2026-07-28, `docs_archive/transport/delivery_guarantee.md`) sits on top of
 the transport**: every wire event is at-least-once end-to-end within the compaction
 grace. Receivers keep a per-sender `AcceptedWindow` (envelope dedup + the
 payload of `MESH_ACK_TAG` control frames, sent debounced after every delivery

@@ -1,6 +1,11 @@
 # Kompaktierung: WP4a ephemeres Pruning · WP4b Chain-Checkpoint
 
-> **STATUS: ENTSCHIEDEN (2026-07-17, Diskussion mit dem User).**
+> **STATUS: BUILT.** WP4a complete 2026-07-25; WP4b stages landed through
+> 2026-08-03 (checkpoint layout now at `molt-chain-checkpoint-v7`, see
+> CLAUDE.md). The remaining items named in §B.8 are declared v1 limits,
+> not open work. Original decision record below.
+>
+> **ENTSCHIEDEN (2026-07-17, Diskussion mit dem User).**
 > F1–F4 sind beschlossen (§A.2); das Doc ist in zwei Teile gespalten:
 > **WP4a** = physisches Pruning des flüchtigen Logs (lokal, Policy-vollziehend),
 > **WP4b** = threshold-signierter Chain-Checkpoint (m-of-n bestätigen die

@@ -376,7 +376,7 @@ ladder, so silence and progress stop looking identical.
 11. F3-b: else, if the MAC verifies AND `anchored_member == member` AND the seat is not sealed AND the group is not born (`nostr.group.is_none()`): RE-ANCHOR — clear seat.identity/key_package/reply_snd/reply_wrap and let control fall through into the existing verification ladder (PoP → MAC → canonical anchor → cross-seat uniqueness → KeyPackage binding) so the retry is re-checked in full, not fast-pathed; log `· invite N re-activated by {member} — the earlier attempt is replaced`; send LinkSpent to the DISPLACED anchor (not to the new one).
 12. F3-c: else (different handle, or sealed, or group already born): keep LinkSpent to the new activator, but split the wording — a different handle keeps today's 'that link is spent, ask for your own'; a same-handle post-birth retry gets the true reason ('this founding has already formed its group around the first activation — the founder must cancel and re-mint'). Mirror the split in the joiner's error text (nostr_ritual.rs:474 and 500).
 13. F3-d: log the currently-silent case too — a re-activation whose MAC does NOT verify appends a refusal line instead of returning Ack in silence.
-14. Docs: add the `Aborted` row to the wire-mapping table in docs_archive/transport/nostr_n4_plan.md §2 (line ~124); record the abort frame + the re-activation rule in docs/ritual/founding_ritual.md; in docs/transport/nostr_n4a_review_followups.md mark F done AND correct the F3 diagnosis in place (the retry does not re-derive the same identity — cmd_join_start mints a fresh phrase; the comparison was never the bug).
+14. Docs: add the `Aborted` row to the wire-mapping table in docs_archive/transport/nostr_n4_plan.md §2 (line ~124); record the abort frame + the re-activation rule in docs_archive/ritual/founding_ritual.md; in docs/transport/nostr_n4a_review_followups.md mark F done AND correct the F3 diagnosis in place (the retry does not re-derive the same identity — cmd_join_start mints a fresh phrase; the comparison was never the bug).
 
 ### Files edited
 
@@ -391,7 +391,7 @@ ladder, so silence and progress stop looking identical.
 - `crates/molt-engine/tests/nostr_founding.rs`
 - `docs_archive/transport/nostr_n4_plan.md`
 - `docs/transport/nostr_n4a_review_followups.md`
-- `docs/ritual/founding_ritual.md`
+- `docs_archive/ritual/founding_ritual.md`
 
 ### Risks
 

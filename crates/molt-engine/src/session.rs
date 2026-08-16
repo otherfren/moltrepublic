@@ -129,7 +129,7 @@ impl State {
     }
 
     /// Add a relay: validated + normalized, appended at the lowest priority,
-    /// unconfirmed. Adding never connects — see `docs/transport/relay_pool.md`.
+    /// unconfirmed. Adding never connects — see `docs_archive/transport/relay_pool.md`.
     /// A live founding minted its invites from the pool as it was at
     /// `CreateStart` — changing the pool now does NOT retro-fit them.
     ///

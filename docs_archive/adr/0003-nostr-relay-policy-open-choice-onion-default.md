@@ -51,7 +51,7 @@ posture used elsewhere (name the tradeoff, let the operator decide).
   **NIP-42 AUTH handling is in scope** (a relay may require it); on a foreign
   relay AUTH re-identifies the member, which the UI must warn about, while on
   the own onion relay it is harmless.
-- The metadata comparison (`docs/transport/nostr_transport_marmot.md` §7) and
+- The metadata comparison (`docs_archive/transport/nostr_transport_marmot.md` §7) and
   §10.2 are resolved by this ADR + ADR-0001; §7.5 gains the curated-onion-list
   default + the "only self-hosted avoids h-tag correlation" recommendation.
 - The health surface shows the relay set and flags any non-self-hosted /

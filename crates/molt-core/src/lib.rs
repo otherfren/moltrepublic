@@ -97,7 +97,7 @@ impl Surface {
     }
 
     /// Whether this surface is an optional **charter feature**
-    /// (`docs/ritual/charter_features.md` D1): activated at founding or by a
+    /// (`docs_archive/ritual/charter_features.md` D1): activated at founding or by a
     /// later threshold vote, never deactivated. Chat and Organization are
     /// core — always on, never in a feature set.
     pub fn is_charter_feature(self) -> bool {
@@ -368,7 +368,7 @@ pub struct SessionSettings {
     /// **Empty by default — nothing is pre-trusted.** Edited through the
     /// `Relay*` commands (never a free-form text field), because every entry
     /// is URL-validated and a clearnet confirmation is gated;
-    /// `docs/transport/relay_pool.md`.
+    /// `docs_archive/transport/relay_pool.md`.
     #[serde(default)]
     pub relays: Vec<crate::relay::RelayEntry>,
     /// Whether this node may dial relays that are NOT onion services
@@ -1340,7 +1340,7 @@ pub const STORAGE_VERSION: u32 = 1;
 pub const STORAGE_VERSION_PRUNED: u32 = 2;
 
 /// The manifest version a workspace is RAISED to when it is sealed at rest
-/// under its recovery phrase (S6, `docs/storage/backup_restore_design.md` §5.4):
+/// under its recovery phrase (S6, `docs_archive/storage/backup_restore_design.md` §5.4):
 /// an older binary — which would trip over the keyless directory with a raw
 /// I/O error — refuses the whole workspace politely at the manifest gate
 /// instead. Unsealing recomputes the floor (pruned chain present →
@@ -1556,7 +1556,7 @@ pub struct OutboundCursor {
 }
 
 /// The receive-side accept window (delivery guarantee,
-/// `docs/transport/delivery_guarantee.md` §4.2): per SENDER, which of that sender's log seqs
+/// `docs_archive/transport/delivery_guarantee.md` §4.2): per SENDER, which of that sender's log seqs
 /// this node's engine has accepted. It is both the envelope-level dedup (a
 /// resent envelope must never re-apply — G2) and the payload of the mesh ACK
 /// frame the sender trims its resend range with. `high` is the highest
@@ -2003,7 +2003,7 @@ impl SealedRoster {
 /// forged larger founding table collided, and an unframed field in a hash
 /// preimage should not survive a version bump that is already rewriting it.
 ///
-/// **v5 binds the ratified FEATURE SET** (`docs/ritual/charter_features.md`
+/// **v5 binds the ratified FEATURE SET** (`docs_archive/ritual/charter_features.md`
 /// D2, user-decided 2026-08-11) — and it is **conditional on presence**,
 /// the [`ChainChange::Membership`](crate::chain::ChainChange) precedent
 /// lifted to the tag: `features: None` emits bytes **identical to v4** (tag
@@ -2466,7 +2466,7 @@ pub struct ProposalRecord {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub by: MemberId,
     /// The supersede walk's terminal verdict
-    /// (`docs/memory/shared_memory_real.md` §4): a pending wiki patch the
+    /// (`docs_archive/memory/shared_memory_real.md` §4): a pending wiki patch the
     /// moved base can no longer apply — mechanical and UNATTRIBUTED (the
     /// state is `Rejected` for old readers, but no decline vote is
     /// forged: `declined_by` stays empty). Additive, skipped when false
@@ -3084,7 +3084,7 @@ pub struct SessionView {
     /// The editable settings.
     pub settings: SessionSettings,
     /// The Nostr relay pool with its DERIVED state (kind, why a relay is or
-    /// is not dialed), in priority order — see `docs/transport/relay_pool.md`.
+    /// is not dialed), in priority order — see `docs_archive/transport/relay_pool.md`.
     /// Empty on a fresh install: nothing is pre-trusted, so the node connects
     /// to no relay until its operator adds and confirms one.
     #[serde(default)]
@@ -3203,7 +3203,7 @@ pub enum Command {
     /// silent member ages online → stale → offline without any traffic.
     NetPresenceTick,
     /// The delivery-guarantee beat (engine-internal 1 s ticker,
-    /// `docs/transport/delivery_guarantee.md` §4.3/§4.6): flush due delivery
+    /// `docs_archive/transport/delivery_guarantee.md` §4.3/§4.6): flush due delivery
     /// ACKs and run the debounced accept-window / live-ratchet persists.
     /// Fast on purpose — riding the 30 s presence tick alone made the
     /// "3 s" ACK debounce a 33 s latency, losing the race against the
@@ -3372,7 +3372,7 @@ pub enum Command {
     ListProposals,
     /// WP4b: put a chain CHECKPOINT forward for threshold approval — the
     /// compaction cut at the CURRENT head (`upto` = head height, B-F1 in
-    /// `docs/chain/log_compaction.md`). The engine computes the canonical
+    /// `docs_archive/chain/log_compaction.md`). The engine computes the canonical
     /// state hash itself; every receiver recomputes it from its own chain
     /// before co-signing (sign-what-you-see), and the block seals at m.
     ProposeCheckpoint,
@@ -3441,7 +3441,7 @@ pub enum Command {
     },
     /// Add a relay to the pool — validated and normalized, appended at the
     /// LOWEST priority, and **unconfirmed**: adding never connects. See
-    /// `docs/transport/relay_pool.md`.
+    /// `docs_archive/transport/relay_pool.md`.
     RelayAdd {
         /// `wss://…` (or `ws://…` for a `.onion` host).
         url: String,

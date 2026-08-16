@@ -20,7 +20,7 @@ entfernt (11); echtes S3-Auto-Backup (Ticker, ehrliche Stempel nur nach bestäti
 Upload, Retention) (12); echter zweiphasiger Restore aus Datei/S3 — Staging →
 Chain-Verify hard-reject vor Materialisierung → Commit, Öffnen „detached", der Weg
 zurück in die lebende Republik bleibt das Recovery-Ritual (13). Design in
-`docs/storage/backup_restore_design.md`. Story 14 (Memory/Quests/Vault/Wallet als echte
+`docs_archive/storage/backup_restore_design.md`. Story 14 (Memory/Quests/Vault/Wallet als echte
 Produkte) bleibt bewusst offen.
 
 **UI-Arbeiten (Nutzer-Aufträge):** die vier stillgelegten Surfaces (Memory/Quests/Vault/
@@ -64,7 +64,7 @@ Ausschneiden/Kopieren/Einfügen, Klick auf die Preview öffnet den Editor,
 Editor-Header zeigt statt „~1" einen „geändert"-Hinweis + Datei-Revert.
 Nach erfolgreichem Vote-Start wird die Arbeitskopie auf die Basis
 zurückgesetzt (das Proposal trägt die Änderungen). GEBAUT (2026-08-15,
-`docs/memory/shared_memory_real.md`): Patch-APPLY bei Threshold ist der
+`docs_archive/memory/shared_memory_real.md`): Patch-APPLY bei Threshold ist der
 deterministische FOLD (molt-core `wiki_fold`, strikt, All-or-Nothing),
 die Basis kommt aus dem Engine-Read, der Supersede-Walk räumt überholte
 Pending-Patches terminal ab, Draft-Rettung (Decline UND Superseded) holt
@@ -352,7 +352,7 @@ hängt am S3-Client.
 > (Argon2id 64 MiB/t=3/p=1, XChaCha20-Poly1305 in 4-MiB-Chunks, Header über
 > Key-Bindung authentifiziert), atomarer Write mit fsync; MLS-Ratchets und
 > SMP-Queue-Creds werden NIE exportiert; `Command::ExportWorkspace` + MCP-Tool;
-> Design: `docs/storage/backup_restore_design.md`. Import ist Nr. 13.
+> Design: `docs_archive/storage/backup_restore_design.md`. Import ist Nr. 13.
 
 **Fundorte:**
 - `crates/molt-ui-window/ui/app.slint:5766–5795`: das Backup-Modal setzt bei „Bestätigen“ nur `root.export-note = "Exportiert (Mock): <Pfad>"` — kein Command, kein Write

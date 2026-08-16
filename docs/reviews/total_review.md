@@ -185,7 +185,7 @@ Redelivery). Die „loopback kann's nicht fangen"-Klasse aus CLAUDE.md.
 **Gegenstandslos:** der SMP-Transport wurde in Etappe N-demo (2026-07-30)
 ersatzlos entfernt — `crates/molt-net/src/smp/` existiert nicht mehr. Die
 Ack-Disziplin der Nostr-Zustellgarantie ist eine andere Konstruktion
-(`docs/transport/delivery_guarantee.md`).
+(`docs_archive/transport/delivery_guarantee.md`).
 
 ### M5 — Alte transport.state/log werden von neueren Versionen still geklobbert ✅ GEFIXT (2026-08-07)
 `crates/molt-storage/src/lib.rs` `read_transport_state` (Z.930): Version >

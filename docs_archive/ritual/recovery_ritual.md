@@ -2,7 +2,7 @@
 
 > **Scope note (2026-07-30, etappe N-demo; updated 2026-08-09):** the SMP
 > transport was removed in the Nostr transport replacement
-> (`docs/transport/nostr_transport_marmot.md`); the over-SMP drivers named
+> (`docs_archive/transport/nostr_transport_marmot.md`); the over-SMP drivers named
 > in the status sections below were deleted with it. Since N4b (2026-08-04)
 > production `RecoverStart` runs the full rejoin OVER RELAYS — keystone
 > `nostr_recovery.rs::a_lost_seat_rejoins_the_republic_over_relays` — and

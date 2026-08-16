@@ -1,7 +1,7 @@
 # Seed-backup confirmation round (founding ritual)
 
 > **ARCHIVED 2026-08-15 — executed.** The shipping ritual specification
-> (including this round, ❻½) lives in `docs/ritual/founding_ritual.md`;
+> (including this round, ❻½) lives in `docs_archive/ritual/founding_ritual.md`;
 > this document is the design + decisions record.
 
 **Status: BUILT 2026-08-15** (engine round ❻½ + both wizards + MCP tool

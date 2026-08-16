@@ -5,7 +5,7 @@ ritual **abstractly** — the actors, the messages they exchange, the secrets
 that bind them, and the guarantees that hold when it is over. It is transport-
 and language-agnostic; the concrete wire (per-queue wrapping over the loopback
 transport today; Nostr relays in build — etappe N4 of
-`docs/transport/nostr_transport_marmot.md` re-implements the ritual wire) and
+`docs_archive/transport/nostr_transport_marmot.md` re-implements the ritual wire) and
 the code are pointed to at the end.
 
 ---

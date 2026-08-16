@@ -2,7 +2,7 @@
 
 > **Historical (2026-07-30):** the SMP transport this document describes was
 > removed in etappe N-demo of the Nostr transport replacement
-> (`docs/transport/nostr_transport_marmot.md`), and the Track C rotation with
+> (`docs_archive/transport/nostr_transport_marmot.md`), and the Track C rotation with
 > it. Kept as the design record of the deleted machinery; the unlinkability
 > goal lives on as the Nostr h-tag rotation (that document, §4.4).
 

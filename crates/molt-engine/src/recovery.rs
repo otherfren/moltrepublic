@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The **recovery ritual** transport (see `docs/ritual/recovery_ritual.md`): the
+//! The **recovery ritual** transport (see `docs_archive/ritual/recovery_ritual.md`): the
 //! total-loss twin of the founding ritual. The coordinator/crypto half already
 //! lives elsewhere (`Command::NetRecoverRequested`, `cmd_net_recover_requested`,
 //! `verify_and_propose_restore`, `coordinator_rekey`); this module builds the

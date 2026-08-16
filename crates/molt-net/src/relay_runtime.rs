@@ -314,7 +314,7 @@ impl DedupRing {
 /// relay-count copies collapse within that window; a republic with more
 /// events than that inside the 48 h resubscribe overlap can see an evicted
 /// id re-delivered after a reconnect. That is within the at-least-once
-/// contract (`docs/transport/delivery_guarantee.md`) — but the envelope
+/// contract (`docs_archive/transport/delivery_guarantee.md`) — but the envelope
 /// layer above MUST stay idempotent and must not read this stream as
 /// exactly-once.
 ///

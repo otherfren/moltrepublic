@@ -159,7 +159,7 @@ Key rekonstruiert — für eine dauerhafte Kasse unbrauchbar).
 | Ticker-Muster | `crates/molt-engine/src/lifecycles.rs::spawn_ticker` ~Z.1349 | Vorbild Timeout-/Scanner-Task-Anbindung |
 | `transport_key`/`chain_key` + `read/write_transport_state`, `read/write_chain_state` | `crates/molt-storage/src/lib.rs` ~Z.882–1040 | 1:1-Vorbild für `wallet_state` (§9) |
 | Segment-Konstanten `TRANSPORT_SEGMENT = u64::MAX-1`, `CHAIN_SEGMENT = u64::MAX-2` | `crates/molt-storage/src/lib.rs:77/80` | neu: `WALLET_SEGMENT = u64::MAX - 3` |
-| Backup-Include-Tabelle + Import-Allowlist | `docs/storage/backup_restore_design.md` §3.2 (Tabelle ~Z.100) und §-Import (~Z.328, Allowlist `manifest.toml, prefs.toml, chain.state, …`) | `wallet.state` ergänzen (Doc + Code) |
+| Backup-Include-Tabelle + Import-Allowlist | `docs_archive/storage/backup_restore_design.md` §3.2 (Tabelle ~Z.100) und §-Import (~Z.328, Allowlist `manifest.toml, prefs.toml, chain.state, …`) | `wallet.state` ergänzen (Doc + Code) |
 | E2E-Vorbilder | `crates/molt-engine/tests/two_instances.rs::founding_governs_over_the_direct_mesh`, `tests/three_nodes.rs` | Stil für den DKG-E2E-Test |
 | `#[ignore]`-Netztest-Präzedenz | `crates/molt-engine/tests/ritual_engine_over_smp.rs` | Stil für den monerod-Test |
 | Mock-`WalletPane` | `crates/molt-ui-window/ui/surfaces.slint:1098`; eingebunden `app.slint:33` und ~Z.4806; Nav-Gate `app.slint` ~Z.1234 (`enabled: s.key == "organization" \|\| s.key == "chat"`) | wird echt (§11) |
@@ -536,7 +536,7 @@ Import-**Allowlist** aufnehmen (Code-Stellen per Grep nach
 chain.state als „verbatim ciphertext" exportiert/importiert/allowlisted
 wird, wallet.state daneben stellen; portabel, weil der Sub-Key aus
 `workspace_key` abgeleitet ist). **Die Tabelle in
-`docs/storage/backup_restore_design.md` §3.2 mit aktualisieren** (Zeile
+`docs_archive/storage/backup_restore_design.md` §3.2 mit aktualisieren** (Zeile
 `wallet.state | yes, verbatim ciphertext | DKG-Share + View-Scalar —
 ohne ihn ist das wiederhergestellte Mitglied watch-only`). NICHT in
 `transport.state` legen — das ist vom Backup hart ausgeschlossen.

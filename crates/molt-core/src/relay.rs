@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The Nostr relay pool and its dial policy (`docs/transport/relay_pool.md`).
+//! The Nostr relay pool and its dial policy (`docs_archive/transport/relay_pool.md`).
 //!
 //! **Nothing is pre-trusted.** MoltRepublic ships with an empty pool: the app
 //! connects to no relay until its operator has named one and confirmed it. A

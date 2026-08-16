@@ -1,8 +1,8 @@
 # N4b step 6 — the Nostr rejoiner, and where its trust root comes from
 
 **Status: DESIGN, ratified by measurement 2026-08-02.** Read
-`nostr_n4_plan.md` §8.8 (steps 5–7, 10), `docs/chain/persistent_chain.md`
-§6.1, `docs/chain/log_compaction.md` §B.5.
+`nostr_n4_plan.md` §8.8 (steps 5–7, 10), `docs_archive/chain/persistent_chain.md`
+§6.1, `docs_archive/chain/log_compaction.md` §B.5.
 
 Step 6 is the `RecoverStart` twin of N4a's `spawn_member_join`. Everything
 about the ritual leg is mechanical. The one real design question is the one

@@ -154,7 +154,7 @@ pub struct TransportConfig {
 
 /// Nostr transport settings (`[transport.nostr]`) — currently just the relay
 /// pool. **No relay ships with the app**: the node connects to nothing until
-/// its operator adds one and confirms it (`docs/transport/relay_pool.md`).
+/// its operator adds one and confirms it (`docs_archive/transport/relay_pool.md`).
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NostrConfig {

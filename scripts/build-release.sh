@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 # Deterministic Linux release build for MoltRepublic.
-# See docs/build/reproducible-builds.md for the verification recipe and the
+# See docs_archive/build/reproducible-builds.md for the verification recipe and the
 # documented reproducibility envelope.
 set -euo pipefail
 

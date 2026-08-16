@@ -16,8 +16,8 @@ Build order relative to other open work: the ritual seed-backup round
 (`docs_archive/ritual/seed_backup_confirmation.md`) lands first.
 
 Read first: `docs/ui/mock_todo.md` (story 14 + the 2026-08-12/14 rounds),
-`docs/chain/persistent_chain.md` (the state model this builds on),
-`docs/ritual/charter_features.md` (how the surface is gated).
+`docs_archive/chain/persistent_chain.md` (the state model this builds on),
+`docs_archive/ritual/charter_features.md` (how the surface is gated).
 
 ## 1. Where we stand — what is already real, what is mock
 

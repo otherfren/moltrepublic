@@ -1456,7 +1456,7 @@ where
         // across an epoch boundary: a message encrypted at an epoch we have not
         // reached (its re-key commit still in flight) is held, acks unfired,
         // and retried after each merged commit (the cross-epoch retry;
-        // `docs/ritual/recovery_ritual.md` §8). A held message a crash loses is
+        // `docs_archive/ritual/recovery_ritual.md` §8). A held message a crash loses is
         // redelivered by the transport (its acks never fired).
         if let Some(ch) = &mls {
             match ch.decode(&complete) {

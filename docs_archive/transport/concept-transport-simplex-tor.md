@@ -2,7 +2,7 @@
 
 > **Historical (2026-07-30):** the SMP transport this document describes was
 > removed in etappe N-demo of the Nostr transport replacement
-> (`docs/transport/nostr_transport_marmot.md`). Kept as the design record of
+> (`docs_archive/transport/nostr_transport_marmot.md`). Kept as the design record of
 > the SMP era (T1–T5) — the T4 Tor dialer it specified survives at
 > `crates/molt-net/src/dial.rs`.
 

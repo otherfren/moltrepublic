@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Per-segment log keys — WP4a §A.3 (`docs/chain/log_compaction.md`).
+//! Per-segment log keys — WP4a §A.3 (`docs_archive/chain/log_compaction.md`).
 //!
 //! Compaction promises that expired chat content is *really* gone, not merely
 //! unlinked. An unlinked file's blocks survive on the medium; so each log

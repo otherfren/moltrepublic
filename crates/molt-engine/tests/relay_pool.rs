@@ -2,7 +2,7 @@
 #![allow(missing_docs)]
 
 //! The relay pool through the REAL command surface — the same path an MCP
-//! agent drives (`docs/transport/relay_pool.md`). These pin the promises a
+//! agent drives (`docs_archive/transport/relay_pool.md`). These pin the promises a
 //! user relies on: nothing is pre-trusted, adding never connects, and a
 //! clearnet relay needs an explicit acknowledgement of its exposure before a
 //! single packet leaves — an acknowledgement that is then REMEMBERED

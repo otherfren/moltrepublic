@@ -10,7 +10,7 @@ planned: the vote card reuses the existing relay-diff rows verbatim
 struct — same generalization, no window-API churn.
 
 Read first: `founding_ritual.md` (the deliberation step this extends),
-`docs/chain/persistent_chain.md`, `docs/transport/relay_topology_plan.md`
+`docs_archive/chain/persistent_chain.md`, `docs/transport/relay_topology_plan.md`
 (R3/R6 — the two mechanisms this mirrors exactly).
 
 ## 1. The story (user, 2026-08-11)

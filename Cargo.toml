@@ -104,7 +104,7 @@ hex                = "0.4"
 bip39              = "2"      # real recovery-phrase wordlist (replaces mock_seed)
 rustix             = { version = "1", features = ["fs"] }   # flock for the per-workspace LOCK
 
-# Nostr transport (N0+, docs/transport/nostr_transport_marmot.md). rust-nostr
+# Nostr transport (N0+, docs_archive/transport/nostr_transport_marmot.md). rust-nostr
 # with its C libsecp256k1 backend — the sanctioned transport-edge C exception
 # (ADR-0002); nip44/nip59 are the NIP-EE envelope crypto. `nostr` is a REAL
 # molt-net dependency since N1 (the ticket-salted identity anchor), so

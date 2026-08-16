@@ -1,10 +1,10 @@
 ---
-status: proposed
+status: accepted (implemented — T4 fail-closed dialer + the confirmed-pool clearnet gate)
 ---
 
 # Nostr relay reachability: onion by default, clearnet only with a warning
 
-**Context.** The proposed Nostr/NIP-EE transport (`docs/transport/nostr_transport_marmot.md`)
+**Context.** The proposed Nostr/NIP-EE transport (`docs_archive/transport/nostr_transport_marmot.md`)
 replaces the per-pair SMP queue mesh with publish/subscribe to a shared relay
 set. Unlike per-pair queues, a shared relay sees the group's `h`-tag, its
 member count, and — decisively — the subscription IPs that tie those members
@@ -61,4 +61,4 @@ a silent default.
 is built at all, which is itself gated on the go/no-go self-host-SMP experiment
 in the concept's §0. Recorded now so the reachability posture is fixed before,
 not during, implementation. Full reasoning and cross-references:
-`docs/transport/nostr_transport_marmot.md` §7.5.
+`docs_archive/transport/nostr_transport_marmot.md` §7.5.

@@ -8,7 +8,7 @@ status: accepted
 [ADR-0003](0003-nostr-relay-policy-open-choice-onion-default.md). Everything
 else in ADR-0003 (any relay allowed, self-hosting recommended, NIP-42 AUTH in
 scope, honest badges) stands. Full design:
-`docs/transport/relay_pool.md`.
+`docs_archive/transport/relay_pool.md`.
 
 **Context.** ADR-0003 decided the product would ship a *curated set of onion
 relays* as the default pool, to spare founders the onboarding friction. The

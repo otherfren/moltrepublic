@@ -77,7 +77,7 @@ export struct RelayPick {
 // One relay of the Nostr relay pool, as Settings → Nostr relays renders it: the
 // stored facts (url, confirmed) plus what the ENGINE derived from them. The
 // GUI never re-decides the dial policy — `kind` and `blocked` arrive
-// decided (`docs/transport/relay_pool.md`), the panel only labels them.
+// decided (`docs_archive/transport/relay_pool.md`), the panel only labels them.
 export struct RelayItem {
     url: string,
     kind: int, // 0 = onion · 1 = clearnet · 2 = local — derived from the URL, never stored
@@ -1011,7 +1011,7 @@ export global Strings {
     in property <string> tor-v-circuit;
     in property <string> tor-v-timeout;
     in property <string> tor-v-proxy-only-locked;
-    // settings → Nostr relays: the relay pool (docs/transport/relay_pool.md §6)
+    // settings → Nostr relays: the relay pool (docs_archive/transport/relay_pool.md §6)
     in property <string> rp-title;
     in property <string> rp-copy;
     in property <string> rp-in-use;

@@ -2,7 +2,7 @@
 
 Status: **DESIGN + BUILD (2026-07-31)**, decided by the user on 2026-07-31.
 Read with `nostr_transport_marmot.md` §7.5 (reachability) and
-`docs/adr/0003-nostr-relay-policy-open-choice-onion-default.md`, whose
+`docs_archive/adr/0003-nostr-relay-policy-open-choice-onion-default.md`, whose
 "curated onion default list" this document **supersedes**.
 
 ## 0. The decision

@@ -2,7 +2,7 @@
 
 > **Scope note (2026-07-30, etappe N-demo):** the SMP transport this plan
 > targeted was removed in the Nostr transport replacement
-> (`docs/transport/nostr_transport_marmot.md`). The dialer machinery it built
+> (`docs_archive/transport/nostr_transport_marmot.md`). The dialer machinery it built
 > — the `Dialer` modes, socks5h, fail-closed resolve, session isolation,
 > circuit prebuild, opt-in embedded arti — is KEPT and now lives at
 > `crates/molt-net/src/dial.rs` (S3 backup dials through it today; N2 reuses

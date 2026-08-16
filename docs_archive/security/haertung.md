@@ -2,10 +2,10 @@
 
 > **Historical (2026-07-30):** the SMP transport this plan targets was removed
 > in etappe N-demo of the Nostr transport replacement
-> (`docs/transport/nostr_transport_marmot.md`). The CORE it designed — the
+> (`docs_archive/transport/nostr_transport_marmot.md`). The CORE it designed — the
 > live queue-creds/MLS persist at every mesh-up and the honest "detached"
 > offline state — survived and was carried into the delivery guarantee
-> (`docs/transport/delivery_guarantee.md`); the SMP-specific parts
+> (`docs_archive/transport/delivery_guarantee.md`); the SMP-specific parts
 > (`SmpTransport`, `reopen_transport`, SKEY sender keys) are historical.
 
 > **STATUS: AUSFÜHRUNGSREIF (2026-07-19).** Analyse und Design sind fertig und

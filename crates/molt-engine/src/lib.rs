@@ -550,7 +550,7 @@ pub(crate) struct State {
     /// every mint would add another.
     pub(crate) recovery_inboxes: Vec<tokio::task::JoinHandle<()>>,
     /// The republic's persistent commit-block chain — the converged, verified
-    /// governance record (`docs/chain/persistent_chain.md`). Block 0 is the
+    /// governance record (`docs_archive/chain/persistent_chain.md`). Block 0 is the
     /// founding; empty when no chain-aware workspace is open.
     pub(crate) chain: Vec<molt_core::ChainBlock>,
     /// The verified head of [`State::chain`] (`None` = empty chain).
@@ -718,7 +718,7 @@ pub(crate) struct State {
     /// Are clearnet relays activated for THIS session? Runtime-only **on
     /// purpose** — it is never persisted, so every start re-arms the gate and
     /// no clearnet packet leaves before the user acts again
-    /// (`docs/transport/relay_pool.md` §3). Onion relays are unaffected.
+    /// (`docs_archive/transport/relay_pool.md` §3). Onion relays are unaffected.
     pub(crate) clearnet_session: bool,
     /// Presence clock **test seam** (same posture as [`State::demo_mesh`]):
     /// `None` in every production context — presence stamping/aging then

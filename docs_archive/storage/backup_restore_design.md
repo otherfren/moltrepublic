@@ -1,5 +1,9 @@
 # Backup & Restore — design for S4/S5/S6
 
+Status: **EXECUTED** — stories 9, 10, 12 and 13 shipped 2026-07-18/19
+(report: `docs/ui/mock_todo.md`); this document remains the design
+authority for the shipped export/at-rest/S3-backup/restore behaviour.
+
 Design doc for the security-critical storage stories of `docs/ui/mock_todo.md`:
 
 | Story | What | Milestone | Section |

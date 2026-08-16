@@ -2964,7 +2964,7 @@ fn apply_session(
 /// The relay pool as the Network panel renders it: the entries in priority
 /// order, each carrying the ENGINE's derived verdict. The GUI never
 /// re-evaluates the dial policy — it turns `blocked` into words, nothing more
-/// (`docs/transport/relay_pool.md` §3).
+/// (`docs_archive/transport/relay_pool.md` §3).
 fn relay_rows(relays: &[RelayStatus]) -> Vec<RelayItem> {
     let last = relays.len().saturating_sub(1);
     relays
@@ -7634,7 +7634,7 @@ lexicon! {
     tor_v_timeout: "No answer within the time limit. A first embedded-Tor start can take minutes - try again once it has bootstrapped.", "Keine Antwort innerhalb des Zeitlimits. Ein erster embedded-Tor-Start kann Minuten dauern - nach dem Bootstrap erneut versuchen.";
     tor_v_proxy_only_locked: "A Tor SOCKS port answers - but nothing was routed through it, so no circuit is proven. Your confirmed relays are not dialed: connections outside Tor are switched off.", "Ein Tor-SOCKS-Port antwortet - aber es wurde nichts hindurchgeleitet, ein Circuit ist damit nicht bewiesen. Deine bestätigten Relays werden nicht angewählt: Verbindungen außerhalb Tor sind ausgeschaltet.";
     tor_v_circuit: "Tor works: a relay from your own pool was reached end to end through Tor ✓", "Tor funktioniert: Ein Relay aus deinem eigenen Pool wurde Ende-zu-Ende durch Tor erreicht ✓";
-    // settings → Nostr relays: the relay pool (docs/transport/relay_pool.md §6).
+    // settings → Nostr relays: the relay pool (docs_archive/transport/relay_pool.md §6).
     // The copy never promises a connection the policy does not make: an
     // added relay is idle, an onion relay connects by itself, a clearnet one
     // needs the warning AND the (persisted) non-onion dialing switch.

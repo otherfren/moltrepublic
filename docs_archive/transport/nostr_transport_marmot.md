@@ -1,13 +1,17 @@
 # Concept: Nostr/Marmot transport (NIP-EE) as a second transport backend
 
-Status: **DRAFT 2026-07-29, DISCUSSION DOCUMENT — not an execution plan.**
+Status: **BUILT — this IS the production transport.** All etappen
+(N-demo..N6) landed 2026-07-30..2026-08-04; §11 carries the per-etappe
+record. The go/no-go framing below is the original 2026-07-29 discussion
+document, kept as the reasoning; the "run the SMP self-host experiment
+first" gate was resolved GO (§0 gate status).
 Written after the delivery-guarantee live validation (2026-07-27..29) and
 hardened by two adversarial review passes (§13, two ledgers). Read first:
-`docs/transport/delivery_guarantee.md` (the layer this offloads),
+`docs_archive/transport/delivery_guarantee.md` (the layer this offloads),
 `docs_archive/transport/mesh/mesh_selfheal.md` + `mesh_reliability.md` (the machinery this
 removes — and the earlier measurement that partly contradicts §0),
-`docs/ritual/recovery_ritual.md`, `docs/storage/backup_restore_design.md`,
-`docs/ritual/founding_ritual.md` (invariants this must not weaken), and the
+`docs_archive/ritual/recovery_ritual.md`, `docs_archive/storage/backup_restore_design.md`,
+`docs_archive/ritual/founding_ritual.md` (invariants this must not weaken), and the
 CLAUDE.md transport section.
 
 **Read this first — the honest state of the concept (both review passes):**
@@ -771,7 +775,7 @@ decided any time before ship.
   Onion connects automatically; clearnet needs an acknowledgement plus the
   node-level non-onion dialing switch, which the acknowledgement sets and
   which is REMEMBERED (amendment 2026-08-01).
-  BUILT — `docs/transport/relay_pool.md`.
+  BUILT — `docs_archive/transport/relay_pool.md`.
 - **§10.4 — Exporter-ring depth K: DECIDED — K = 3** (§6). Epochs change only on
   membership/recovery (rare); 3 covers recent ones, the resend layer covers the
   rest; small K bounds the leaked-secret window.
@@ -946,13 +950,16 @@ once. So:
   for fast tests. **Keystones:** publish/subscribe/dedup across 2 relays with
   one dying; the +24h-cursor test; the oversized-`CheckpointServed` refusal;
   a WS twin of the T4 no-leak harness (no clearnet dial when Tor is required).
-- **N3 — NIP-EE mapping + commit lifecycle:** 443-free 444/445 build+parse,
+- **N3 — NIP-EE mapping + commit lifecycle — ✅ DONE (2026-07-31, landed
+  with N4a):** 443-free 444/445 build+parse,
   exporter-NIP-44 with the ring, ephemeral keys, gift-wrap; the explicit
   stage→publish→await→merge commit state machine + prior-state slot.
   **Keystones:** roundtrip vectors; exporter rotation with the ring
   (outer-strips/inner-rejects asymmetry); a concurrent-commit tiebreak heals.
 - **N4 — Ritual over Nostr (bigger than it looks, finding II-3).** Split into
-  **N4a (founding+join) — ✅ BUILT 2026-07-31** and **N4b (recovery) — OPEN**;
+  **N4a (founding+join) — ✅ BUILT 2026-07-31** and **N4b (recovery) —
+  ✅ BUILT 2026-08-04** (steps 6a–6f incl. the catch-up-over-the-anchor
+  capstone, `nostr_recovery.rs`);
   execution map + landed-state in `docs_archive/transport/nostr_n4_plan.md`.
   - **N4a:** invite-link v2 (full ticket + founder npub + gated relay list);
     the §4.2 restructured flow (gift-wrapped JoinRequest with nostr-key
@@ -966,12 +973,13 @@ once. So:
     The `NetJoinSealed`-persist branch, spent-link, and declined-charter
     negatives are pinned there; the state-level
     `join_seals_into_the_republic_from_a_valid_roster` stays.
-  - **N4b (OPEN):** recovery-link v2, the total-loss rejoin over an ephemeral
+  - **N4b (✅ BUILT 2026-08-04):** recovery-link v2, the total-loss rejoin over an ephemeral
     recovery-ticket key, the replay-safe window reset moved onto the Restored
     chain block, and the re-anchor product decision (`nostr_n4_plan.md` §8.3
     — ask the user before building). `NO_TRANSPORT_YET` now names recovery
     only.
-- **N5 — Runtime + guarantee + presence:** NostrGroupRuntime on
+- **N5 — Runtime + guarantee + presence — ✅ DONE (2026-08; net_health is
+  the relay verdict since N5.5, see N6):** NostrGroupRuntime on
   EngineSink/OutboxLog; AcceptedWindow/ACK/G7 over it with min-floor
   single-publish resend and amplification counting; traffic-derived presence
   (§6.5); net_health = relay status; the rotation grace. **Keystones:** the

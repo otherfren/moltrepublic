@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Log compaction, engine half — WP4a (`docs/chain/log_compaction.md` Teil A).
+//! Log compaction, engine half — WP4a (`docs_archive/chain/log_compaction.md` Teil A).
 //!
 //! After **expiry + grace**, expired chat content must not merely leave the
 //! read contract: it has to stop existing on this device. The storage half

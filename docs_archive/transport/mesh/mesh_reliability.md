@@ -2,7 +2,7 @@
 
 > **Historical (2026-07-30):** the SMP transport this document describes was
 > removed in etappe N-demo of the Nostr transport replacement
-> (`docs/transport/nostr_transport_marmot.md`). Kept as the record of the
+> (`docs_archive/transport/nostr_transport_marmot.md`). Kept as the record of the
 > per-pair-mesh reliability struggle — the measurements here are a core part
 > of why SMP was left.
 

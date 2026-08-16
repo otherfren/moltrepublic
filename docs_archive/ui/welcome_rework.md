@@ -172,4 +172,4 @@ same three flows, reached through one fewer decision.
 
 The `RecoverStart` re-entrancy question moved to the recovery spec where
 it belongs: see the "Open ritual question" note at the top of
-`docs/ritual/recovery_ritual.md`. Nothing else here is open.
+`docs_archive/ritual/recovery_ritual.md`. Nothing else here is open.

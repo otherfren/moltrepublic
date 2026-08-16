@@ -1,5 +1,5 @@
 //! The Shared-Memory base as a deterministic FOLD
-//! (`docs/memory/shared_memory_real.md` WP-A): parse the git-format patch
+//! (`docs_archive/memory/shared_memory_real.md` WP-A): parse the git-format patch
 //! a `wiki_patch` proposal carries (the exact shape the wiki's
 //! `build_patch` emits) and apply it STRICTLY — exact position AND exact
 //! context, whole patch or nothing — over the tree of applied patches in

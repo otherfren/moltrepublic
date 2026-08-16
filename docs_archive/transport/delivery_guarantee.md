@@ -1,7 +1,7 @@
 # Konzept: Zustellgarantie für Mesh-Nachrichten (at-least-once, Ende-zu-Ende)
 
 > **Scope note (2026-07-30, etappe N-demo):** the SMP transport was removed in
-> the Nostr transport replacement (`docs/transport/nostr_transport_marmot.md`).
+> the Nostr transport replacement (`docs_archive/transport/nostr_transport_marmot.md`).
 > The delivery-guarantee CORE this document designs — `AcceptedWindow` dedup,
 > `MESH_ACK_TAG` frames, the log-position acked floor, rewind-resend with
 > fresh encryptions, the live-ratchet persist, G7 in-order delivery (§3,
@@ -32,7 +32,7 @@ jeweiligen Client geschickt, sobald er wieder erreichbar ist. Das gilt für alle
 Arten von Nachrichten, auch Vote-Proposals, Votes etc. — generell immer für
 alle Nachrichten."* Ausführungsreif, test-first. Vorher lesen:
 `docs_archive/transport/mesh/stage_b.md`, `docs_archive/transport/mesh/mesh_selfheal.md`,
-`docs_archive/transport/mesh/mesh_rotation_trackc.md`, `docs/chain/log_compaction.md` und den
+`docs_archive/transport/mesh/mesh_rotation_trackc.md`, `docs_archive/chain/log_compaction.md` und den
 Transport-Abschnitt in `CLAUDE.md` — dieses Konzept baut direkt auf deren
 Maschinerie und ändert **nichts** an Ritual, Chain oder Roster.
 

@@ -2,7 +2,7 @@
 
 > **Historical (2026-07-30):** the SMP transport this document describes was
 > removed in etappe N-demo of the Nostr transport replacement
-> (`docs/transport/nostr_transport_marmot.md`), and the probe machinery with
+> (`docs_archive/transport/nostr_transport_marmot.md`), and the probe machinery with
 > it. Kept as the record of the deaf-on-reopen diagnosis that drove the
 > mesh-reliability work — part of why SMP was left.
 

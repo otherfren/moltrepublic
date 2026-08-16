@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted (implemented — `nostr` in the default build since N1)
 ---
 
 # Nostr transport crypto: C libsecp256k1 via rust-nostr (a third transport-edge C exception)
@@ -48,5 +48,5 @@ is bounded.
 - N0 must still confirm `tokio-tungstenite`+rustls does not re-introduce `ring`
   in a way that conflicts with the rustls-rustcrypto posture.
 
-Full reasoning: `docs/transport/nostr_transport_marmot.md` §8, and the N0 audit
+Full reasoning: `docs_archive/transport/nostr_transport_marmot.md` §8, and the N0 audit
 recorded in memory (`nostr-transport-decision`).

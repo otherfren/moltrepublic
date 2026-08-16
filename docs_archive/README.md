@@ -1,12 +1,20 @@
-# docs_archive — the record of what was decided, and why
+# docs_archive — everything that is not open work
 
-Nothing here describes open work. These documents are kept because they hold
-the REASONING behind decisions that shaped the code: what was tried, what was
-rejected, and what the tradeoff was. Deleting them would leave the code with
-no answer to "why is it like this".
+Nothing here describes open work — that is the whole rule (since 2026-08-16):
+`docs/` holds ONLY unfinished plans; this directory holds everything else.
+That is two distinct kinds of document, told apart by the status line at the
+top of each:
 
-`docs/` is the opposite: everything there either describes open work or is the
-current specification of shipping behaviour.
+- **Current specifications of shipping behaviour** — the "read first"
+  authorities CLAUDE.md points at (founding ritual, persistent chain, chat
+  bus, delivery guarantee, Nostr transport, relay pool, MCP security,
+  reproducible builds) and the ADRs. These are LIVE: consult them as the
+  authority for how the shipped thing works, and keep them current when the
+  behaviour changes.
+- **Historical records** — superseded designs, executed plans, and analysis a
+  decision consumed. Kept for the REASONING: what was tried, what was
+  rejected, and what the tradeoff was. Deleting them would leave the code
+  with no answer to "why is it like this".
 
 ## Why each of these left `docs/`
 
@@ -42,11 +50,28 @@ plan; this is the argument that produced it.
 
 - `reviews/buzz_comparison.md` → decided in `docs_archive/reviews/buzz_followups.md`
 
+**Moved 2026-08-16 (the "docs/ = open work only" cut).** Everything without
+an unbuilt remainder left `docs/` in one sweep. The specifications among
+them stay LIVE (see the top of this file); the executed plans are records.
+
+- Live specifications: `adr/0001`–`0006`, `build/reproducible-builds.md`,
+  `chain/persistent_chain.md`, `chat/chat_bus.md`,
+  `ritual/founding_ritual.md`, `ritual/recovery_ritual.md`,
+  `security/mcp-security.md`, `transport/delivery_guarantee.md`,
+  `transport/nostr_transport_marmot.md`, `transport/relay_pool.md`
+- Executed plans/designs: `chain/log_compaction.md` (WP4a+WP4b built;
+  leftovers are declared v1 limits), `memory/shared_memory_real.md` (built
+  2026-08-15), `ritual/charter_features.md` (built 2026-08-12),
+  `ritual/recovery_approval_design.md` (built 2026-08-08),
+  `storage/backup_restore_design.md` (stories 9/10/12/13 shipped)
+
 ## Rules
 
-- **Do not implement from a document in here.** If something in an archived
-  doc still looks undone, it was either dropped deliberately or superseded —
-  check `docs/` before acting on it.
+- **Do not implement NEW work from a historical record in here.** If
+  something in a superseded/executed doc still looks undone, it was either
+  dropped deliberately or superseded — check `docs/` before acting on it.
+  The live specifications are the exception: they ARE the authority for how
+  shipped behaviour works.
 - **Status lines were corrected on archiving**, so a historical record does
   not claim to be a plan. Several said "not yet built" for work that had
   shipped months earlier.
