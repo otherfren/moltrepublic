@@ -1189,6 +1189,18 @@ impl State {
                     }
                 }
             }
+            // D6: the record's stashed voter set upgrades the pills too —
+            // an over-subscribed voter (truncated off the block's m sigs)
+            // still reads Approved on the vote they cast. Display data,
+            // per holder; `approvals` stays the chain-proven count.
+            if p.voted.contains(&me) {
+                approved_by_me = true;
+            }
+            for v in &mut votes {
+                if p.voted.contains(&v.member) {
+                    v.vote = VoteState::Approved;
+                }
+            }
         }
         // every recorded decline shows on its roster row — on a PENDING
         // proposal too (a decline is a visible voice against, not a silent

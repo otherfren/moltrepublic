@@ -1381,6 +1381,7 @@ impl State {
                 declined_at: 0,
                 declined_by: molt_core::MemberId::new(),
                 decliners: Vec::new(),
+                voted: Vec::new(),
                 by: molt_core::MemberId::new(),
                 superseded: false,
                 withdrawn: false,
@@ -1444,6 +1445,7 @@ impl State {
             if let Some(p) = self.proposals.get_mut(&id) {
                 p.state = ProposalState::Applied;
             }
+            self.stash_voted(id);
             self.pending_sigs.remove(&id);
             self.proposal_changes.remove(&id);
             self.emit(Event::Applied {
@@ -1865,10 +1867,41 @@ impl State {
         self.try_commit(id);
     }
 
+    /// D6: keep the collected voter set as record-side DISPLAY data before
+    /// the ephemeral signatures are cleared at a seal — each holder shows
+    /// the voices that reached IT (over-subscribed voters included); the
+    /// block's m signatures stay the only chain truth.
+    fn stash_voted(&mut self, id: u64) {
+        let members: Vec<molt_core::MemberId> = self
+            .pending_sigs
+            .get(&id)
+            .map(|s| s.sigs.iter().map(|a| a.member.clone()).collect())
+            .unwrap_or_default();
+        if members.is_empty() {
+            return;
+        }
+        if let Some(p) = self.proposals.get_mut(&id) {
+            for m in members {
+                if !p.voted.contains(&m) {
+                    p.voted.push(m);
+                }
+            }
+        }
+    }
+
     /// Collect one signature into a proposal's pending set: dedup by member
     /// (latest wins), and rebase the set to a newer `height` (dropping stale
     /// signatures) — a signature for an already-superseded height is ignored.
+    /// A TERMINAL card collects nothing (D6): a post-seal approval must not
+    /// resurrect the ephemeral set the seal just cleared.
     fn collect_sig(&mut self, id: u64, height: u64, member: &str, sig: &str) {
+        if self
+            .proposals
+            .get(&id)
+            .is_some_and(|p| p.state != ProposalState::Proposed)
+        {
+            return;
+        }
         let entry = self.pending_sigs.entry(id).or_default();
         if height > entry.height {
             entry.height = height;
@@ -1980,6 +2013,7 @@ impl State {
         self.record(env);
         // clean up the proposal we just committed — a Membership block carries
         // no proposal id for after_block_applied to key on, so drop it here
+        self.stash_voted(proposal_id);
         self.pending_sigs.remove(&proposal_id);
         self.proposal_changes.remove(&proposal_id);
         // an accepted VOTE posts its summary into its discussion (story
@@ -2073,6 +2107,7 @@ impl State {
                 if let Some(p) = self.proposals.get_mut(proposal_id) {
                     p.state = ProposalState::Applied;
                 }
+                self.stash_voted(*proposal_id);
                 self.pending_sigs.remove(proposal_id);
                 self.emit(Event::Applied {
                     id: ProposalId(*proposal_id),
@@ -2125,6 +2160,7 @@ impl State {
                     .collect();
                 for id in ids {
                     self.proposal_changes.remove(&id);
+                    self.stash_voted(id);
                     self.pending_sigs.remove(&id);
                 }
                 // B-F2: drop the summarized history locally, automatically —
@@ -2201,6 +2237,7 @@ impl State {
             .collect();
         for id in stale {
             self.proposal_changes.remove(&id);
+            self.stash_voted(id);
             self.pending_sigs.remove(&id);
         }
     }
@@ -2808,6 +2845,7 @@ impl State {
                 declined_at: 0,
                 declined_by: String::new(),
                 decliners: Vec::new(),
+                voted: Vec::new(),
                 by: by.to_string(),
                 superseded: false,
                 withdrawn: false,
@@ -3112,6 +3150,7 @@ impl State {
                             p.state = ProposalState::Applied;
                         }
                     }
+                    self.stash_voted(id);
                     self.pending_sigs.remove(&id);
                 }
                 let mut org_touched = false;
@@ -3125,6 +3164,7 @@ impl State {
                             if let Some(p) = self.proposals.get_mut(proposal_id) {
                                 p.state = ProposalState::Applied;
                             }
+                            self.stash_voted(*proposal_id);
                             self.pending_sigs.remove(proposal_id);
                             self.emit(Event::Applied {
                                 id: ProposalId(*proposal_id),
@@ -5162,6 +5202,7 @@ mod tests {
                 declined_at: 0,
                 declined_by: String::new(),
                 decliners: Vec::new(),
+                voted: Vec::new(),
                 by: String::new(),
                 superseded: false,
                 withdrawn: false,
@@ -5176,6 +5217,68 @@ mod tests {
     /// the signatures (the ephemeral collection is cleared at commit), so
     /// the view reads them from the chain — live incident 2026-08-09,
     /// defect 7: the applied history showed "0 approvals, every pill open".
+    #[test]
+    fn an_over_subscribed_voter_still_reads_approved_on_the_applied_card() {
+        // D6: try_commit seals only the m lowest-named signatures (chain
+        // truth), but a voter whose signature fell off the block must not
+        // read Open on a vote they cast — the collected set survives as
+        // record-side DISPLAY data at the seal.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+        let mut peer = chain_signer("walter", &b, b.blocks.clone());
+        wire(
+            &mut peer,
+            "petra",
+            1,
+            WorkspaceEvent::Proposed {
+                id: ProposalId(1),
+                surface: Surface::Memory,
+                payload: json!({ "op": "add_note", "id": 1 }),
+            },
+        );
+        peer.cmd_approve(ProposalId(1)).expect("walter signs — 1 of 2 locally");
+        // the block seals from the other side, signed by petra and dora
+        b.commit_applied(1, &["petra", "dora"]);
+        peer.receive_block(b.blocks[1].clone());
+        let p = peer.proposals.get(&1).cloned().expect("card");
+        assert_eq!(p.state, ProposalState::Applied);
+        let v = peer.view(1, &p);
+        assert_eq!(v.approvals, 2, "the chain-proven count stays the block's");
+        assert!(v.approved_by_me, "walter cast a vote and must see it");
+        let walter_row = v
+            .votes
+            .iter()
+            .find(|mv| mv.member == "walter")
+            .map(|mv| mv.vote)
+            .expect("roster row");
+        assert_eq!(
+            walter_row,
+            molt_core::VoteState::Approved,
+            "the over-subscribed voter's pill"
+        );
+        // a post-seal approval must feed the display, never resurrect the
+        // ephemeral collection on a terminal card
+        wire(
+            &mut peer,
+            "dora",
+            1,
+            WorkspaceEvent::Approved {
+                id: ProposalId(1),
+                by: "dora".to_string(),
+                height: 1,
+                sig: "ff".to_string(),
+            },
+        );
+        assert!(
+            !peer.pending_sigs.contains_key(&1),
+            "a terminal card collects no pending signatures"
+        );
+    }
+
     #[test]
     fn an_applied_card_reports_the_block_signers() {
         let mut b = Builder::new(&["petra", "walter", "dora"], 2);

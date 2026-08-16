@@ -3138,6 +3138,7 @@ mod tests {
             declined_at: 0,
             declined_by: String::new(),
             decliners: Vec::new(),
+                voted: Vec::new(),
             by: String::new(),
             superseded: false,
             withdrawn: false,

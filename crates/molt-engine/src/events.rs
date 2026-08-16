@@ -298,6 +298,7 @@ impl State {
                     declined_at: 0,
                     declined_by: MemberId::new(),
                     decliners: Vec::new(),
+                voted: Vec::new(),
                     // the recording envelope's author — the same value the
                     // live wire path stamps (a WP2 re-serve re-wraps under
                     // the serving peer, so both paths agree and replay
@@ -388,6 +389,7 @@ impl State {
                     declined_at: 0,
                     declined_by: MemberId::new(),
                     decliners: Vec::new(),
+                voted: Vec::new(),
                     by: env.by.clone(),
                     superseded: false,
                     withdrawn: false,

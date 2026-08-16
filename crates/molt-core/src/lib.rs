@@ -2466,6 +2466,13 @@ pub struct ProposalRecord {
     /// reach the threshold). Additive — an older snapshot reads as empty.
     #[serde(default)]
     pub decliners: Vec<MemberId>,
+    /// Every member whose approval THIS holder collected before the seal
+    /// (D6): display data only — the block's m signatures stay the chain
+    /// truth, but an over-subscribed voter must not read Open on a vote
+    /// they cast. Per holder (each node shows the voices that reached it).
+    /// Additive, skipped when empty so pre-field dumps stay byte-identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub voted: Vec<MemberId>,
     /// Who proposed it ("" = unknown: a pre-field record, or a WP2
     /// catch-up re-serve — those arrive re-wrapped under the SERVING
     /// peer's name, so this field is an ownership DISPLAY hint (the
