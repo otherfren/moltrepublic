@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // DESIGN MOCKS for the four staged surfaces: Memory (shared brain), Quests
-// (quest board), Vault (sealed secrets) and Wallet (Monero multisig).
+// (planning Kanban), Vault (sealed secrets) and Wallet (Monero multisig).
 //
 // These panes are badged UX drafts to iterate on look & feel — every dataset
 // below is .slint-side sample data, never engine state. Actions either work
@@ -147,7 +147,10 @@ component TagChip inherits Rectangle {
     in property <string> label;
     in property <string> glyph: "";
     in property <bool> muted: false;
-    background: root.muted ? transparent : Theme.accent-soft;
+    // the chip's colour family; the default keeps the classic accent chip
+    // byte-identical (accent-soft IS accent.transparentize(0.84))
+    in property <color> tone: Theme.accent;
+    background: root.muted ? transparent : root.tone.transparentize(0.84);
     border-radius: Theme.win95 ? 0px : 4px;
     border-width: root.muted ? 1px : 0px;
     border-color: Theme.line;
@@ -169,7 +172,7 @@ component TagChip inherits Rectangle {
         }
         Text {
             text: root.label;
-            color: root.muted ? Theme.faint : (Theme.win95 ? Theme.text : Theme.accent);
+            color: root.muted ? Theme.faint : (Theme.win95 ? Theme.text : root.tone);
             font-size: 11px;
             font-weight: root.muted ? 400 : 600;
             height: 100%;
@@ -274,10 +277,14 @@ component ToolBtn inherits Rectangle {
     in property <string> glyph;
     in property <string> name;
     in property <bool> enabled: false;
+    // a working view-state toggle (the Kanban board filters) marks its
+    // "on" state with the soft accent field
+    in property <bool> active: false;
     callback clicked();
     width: 30px;
     border-radius: Theme.win95 ? 0px : 5px;
-    background: root.enabled && ta.has-hover ? Theme.raised : transparent;
+    background: root.active ? Theme.accent-soft
+        : (root.enabled && ta.has-hover ? Theme.raised : transparent);
     Rectangle {
         width: 18px;
         height: 20px;
@@ -1557,81 +1564,186 @@ export component MemoryPane inherits VerticalLayout {
 }
 
 // ---------------------------------------------------------------------------
-// Quests — the quest board
+// Quests — the planning Kanban (kanban_workflows.md §6)
 // ---------------------------------------------------------------------------
 
-struct MockQuest {
+// One board item: epic (kind 0) / story (1) / task (2). `points` of an epic
+// is the precomputed descendant roll-up (`rollup: true`); `overdue` is
+// precomputed sample state (due < "today", a local-clock rendering).
+struct MockItem {
+    id: string, // 8-hex display form of the 128-bit item id
+    kind: int, // 0 epic · 1 story · 2 task
     title: string,
-    detail: string,
-    reward: string, // "5 XMR" ("" = none)
-    who: string, // open: put forward by; claimed/done: the claimant
-    when: string,
-    done: bool,
+    parent: string, // parent item id ("" = none)
+    responsible: string, // exactly one roster seat
+    start: string, // ISO YYYY-MM-DD
+    due: string,
+    overdue: bool,
+    points: int,
+    rollup: bool, // points are the epic roll-up (rendered muted)
+    prio: int, // 0 low · 1 normal · 2 high · 3 critical
+    sprint: string, // sprint name ("" = unscheduled)
+    pi: string, // program-increment label (epics)
+    status: int, // 0 backlog · 1 ready · 2 doing · 3 review · 4 done
+    details: string,
+    ready: string, // Definition of Ready ("" = none)
+    done-crit: string, // acceptance criteria
+    scope: string, // explicitly out of scope
+    deps: [string], // item ids this depends on
+    refs: [string], // wiki pages citing this item (backlink paths)
 }
 
-component QuestCard inherits Rectangle {
-    in property <MockQuest> q;
+// One governed sprint row; `off`/`len` are the precomputed day offsets on
+// the Planning axis (2026-08-01 = day 0).
+struct MockSprintRow {
+    id: string,
+    name: string,
+    start: string,
+    end: string,
+    pi: string,
+    points: int, // committed points (precomputed sum)
+    current: bool,
+    off: int,
+    len: int,
+}
+
+// One timeline bar of the Planning view: `i` indexes the pane's flat item
+// table, `level` is the indent depth (epic 0 / story 1 / task 2).
+struct MockPlanBar {
+    i: int,
+    level: int,
+    off: int,
+    len: int,
+}
+
+// One closed item of the Archive.
+struct MockClosed {
+    id: string,
+    kind: int,
+    title: string,
+    responsible: string,
+    closed: string, // ISO close date
+    done: bool, // true = done · false = dropped
+    points: int, // 0 = none shown (epics store no points)
+}
+
+// A fixed Twemoji clip box (the nav-row idiom): an oversized emoji glyph
+// must never bleed into its neighbours.
+component KGlyph inherits Rectangle {
+    in property <string> glyph;
+    width: 18px;
+    height: 20px;
+    clip: true;
+    Text {
+        text: root.glyph;
+        font-family: "Twemoji Mozilla";
+        font-size: 13px;
+        width: 100%;
+        height: 100%;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component KanbanCard inherits Rectangle {
+    in property <MockItem> it;
+    callback clicked();
+    // formatting twins of the QuestsPane helpers (a component cannot reach
+    // its instantiator's functions)
+    pure function kind-glyph(k: int) -> string {
+        return k == 0 ? "🏔️" : (k == 1 ? "📘" : "🔧");
+    }
+    pure function prio-label(p: int) -> string {
+        return p == 3 ? Strings.kb-prio-critical
+            : (p == 2 ? Strings.kb-prio-high
+            : (p == 1 ? Strings.kb-prio-normal : Strings.kb-prio-low));
+    }
+    pure function prio-tone(p: int) -> color {
+        return p == 3 ? Theme.bad
+            : (p == 2 ? Theme.warn : (p == 1 ? Theme.accent : Theme.faint));
+    }
     background: Theme.panel-2;
     border-radius: Theme.win95 ? 0px : 8px;
     border-width: Theme.border-w;
     border-color: Theme.line;
-    opacity: root.q.done ? 0.62 : 1.0;
+    // the done column keeps the finished-work opacity idiom
+    opacity: root.it.status == 4 ? 0.62 : 1.0;
     VerticalLayout {
         padding: 11px;
         spacing: 7px;
         HorizontalLayout {
             spacing: 6px;
+            KGlyph {
+                glyph: root.kind-glyph(root.it.kind);
+            }
             Text {
-                text: root.q.title;
+                text: root.it.title;
                 color: Theme.text;
                 font-size: Theme.fs-body;
                 font-weight: 700;
                 wrap: word-wrap;
                 horizontal-stretch: 1;
             }
-            if root.q.done: Rectangle {
-                width: 18px;
-                height: 20px;
-                clip: true;
-                Text {
-                    text: "✅";
-                    font-family: "Twemoji Mozilla";
-                    font-size: 13px;
-                    width: 100%;
-                    height: 100%;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
-        }
-        if root.q.detail != "": Text {
-            text: root.q.detail;
-            color: Theme.dim;
-            font-size: Theme.fs-cap;
-            wrap: word-wrap;
         }
         HorizontalLayout {
-            spacing: 8px;
-            if root.q.reward != "": TagChip {
-                glyph: "🪙";
-                label: root.q.reward;
-                y: (parent.height - self.height) / 2;
-            }
-            Rectangle {
-                horizontal-stretch: 1;
-            }
-            GlyphCaption {
+            spacing: 6px;
+            alignment: start;
+            TagChip {
                 glyph: "👤";
-                label: "\{root.q.who} · \{root.q.when}";
+                label: root.it.responsible;
             }
+            TagChip {
+                label: "\{root.it.points} pt";
+                muted: root.it.rollup;
+            }
+            TagChip {
+                label: root.prio-label(root.it.prio);
+                tone: root.prio-tone(root.it.prio);
+                muted: root.it.prio == 0;
+            }
+            if root.it.sprint != "": TagChip {
+                label: root.it.sprint;
+                muted: true;
+            }
+        }
+        GlyphCaption {
+            glyph: "🗓️";
+            label: "\{root.it.start} → \{root.it.due}";
+            tone: root.it.overdue ? Theme.bad : Theme.faint;
+        }
+    }
+    ta := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            root.clicked();
         }
     }
 }
 
-component QuestColumn inherits Rectangle {
+// One board column: DotLabel header + visible count over the scrolling card
+// list. `idxs` indexes the pane's flat item table (pre-sorted by priority
+// desc, due asc, id asc — §3.4); the kind/mine filters are pure view-state.
+component KanbanColumn inherits Rectangle {
     in property <string> title;
     in property <color> tone;
-    in property <[MockQuest]> quests;
+    in property <[MockItem]> all;
+    in property <[int]> idxs;
+    in property <bool> f-epic: true;
+    in property <bool> f-story: true;
+    in property <bool> f-task: true;
+    in property <bool> f-mine: false;
+    in property <string> me;
+    callback pick(int);
+    pure function vis(it: MockItem) -> bool {
+        return (it.kind == 0 ? root.f-epic : (it.kind == 1 ? root.f-story : root.f-task))
+            && (!root.f-mine || it.responsible == root.me);
+    }
+    pure function vis-at(k: int) -> bool {
+        return k < root.idxs.length && root.vis(root.all[root.idxs[k]]);
+    }
+    // guarded index sum — the sample columns hold at most 5 items
+    property <int> shown: (root.vis-at(0) ? 1 : 0) + (root.vis-at(1) ? 1 : 0)
+        + (root.vis-at(2) ? 1 : 0) + (root.vis-at(3) ? 1 : 0) + (root.vis-at(4) ? 1 : 0);
     horizontal-stretch: 1;
     background: Theme.panel;
     border-radius: Theme.win95 ? 0px : 8px;
@@ -1651,7 +1763,7 @@ component QuestColumn inherits Rectangle {
                 horizontal-stretch: 1;
             }
             Text {
-                text: "\{root.quests.length}";
+                text: "\{root.shown}";
                 color: Theme.faint;
                 font-size: Theme.fs-cap;
                 vertical-alignment: center;
@@ -1666,10 +1778,26 @@ component QuestColumn inherits Rectangle {
                 viewport-width: self.width;
                 viewport-height: clist.preferred-height;
                 clist := VerticalLayout {
-                    spacing: 8px;
+                    spacing: 0;
                     alignment: start;
-                    for q in root.quests: QuestCard {
-                        q: q;
+                    // a repeater cannot carry an `if` directly — a filtered
+                    // card collapses instead (visible off + zero height; the
+                    // 8px list gap rides inside the wrapper)
+                    for i in root.idxs: Rectangle {
+                        property <bool> on: root.vis(root.all[i]);
+                        visible: self.on;
+                        height: self.on ? kc.preferred-height + 8px : 0px;
+                        clip: true;
+                        kc := KanbanCard {
+                            x: 0;
+                            y: 0;
+                            width: parent.width;
+                            height: self.preferred-height;
+                            it: root.all[i];
+                            clicked => {
+                                root.pick(i);
+                            }
+                        }
                     }
                 }
             }
@@ -1683,93 +1811,661 @@ component QuestColumn inherits Rectangle {
     }
 }
 
+// A caption/value pair of the drill-in meta grid.
+component KMeta inherits HorizontalLayout {
+    in property <string> cap;
+    in property <string> val;
+    in property <color> val-color: Theme.text;
+    spacing: 8px;
+    horizontal-stretch: 1;
+    Text {
+        text: root.cap;
+        color: Theme.dim;
+        font-size: Theme.fs-cap;
+        width: 92px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    Text {
+        text: root.val;
+        color: root.val-color;
+        font-size: Theme.fs-body;
+        vertical-alignment: center;
+        overflow: elide;
+        horizontal-stretch: 1;
+    }
+}
+
+// A drill-in template section: dim fs-cap heading over the body text.
+component KSection inherits VerticalLayout {
+    in property <string> cap;
+    in property <string> body;
+    spacing: 3px;
+    Text {
+        text: root.cap;
+        color: Theme.dim;
+        font-size: Theme.fs-cap;
+        font-weight: 600;
+    }
+    Text {
+        text: root.body;
+        color: Theme.text;
+        font-size: Theme.fs-body;
+        wrap: word-wrap;
+    }
+}
+
+// A chip-styled view-state toggle (the Create form's priority selector).
+component KChipToggle inherits Rectangle {
+    in property <string> label;
+    in property <color> tone: Theme.accent;
+    in property <bool> active: false;
+    callback clicked();
+    background: root.active ? root.tone.transparentize(0.84) : transparent;
+    border-radius: Theme.win95 ? 0px : 4px;
+    border-width: root.active ? 0px : 1px;
+    border-color: Theme.line;
+    width: kt.preferred-width + 16px;
+    height: 26px;
+    kt := Text {
+        x: 8px;
+        height: 100%;
+        text: root.label;
+        color: root.active ? (Theme.win95 ? Theme.text : root.tone) : Theme.faint;
+        font-size: 11px;
+        font-weight: root.active ? 600 : 400;
+        vertical-alignment: center;
+    }
+    TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// A captioned form slot (fs-cap caption over the field — the create idiom).
+component FormSlot inherits VerticalLayout {
+    in property <string> cap;
+    spacing: 4px;
+    horizontal-stretch: 1;
+    Text {
+        text: root.cap;
+        color: Theme.dim;
+        font-size: Theme.fs-cap;
+    }
+    @children
+}
+
+// One row of the Mine view: the item plus the honest next act (disabled).
+component MineRow inherits Rectangle {
+    in property <MockItem> it;
+    in property <int> act; // 0 none · 1 propose review · 2 propose done
+    background: Theme.panel-2;
+    border-radius: Theme.win95 ? 0px : 8px;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    HorizontalLayout {
+        padding: 11px;
+        spacing: 10px;
+        VerticalLayout {
+            spacing: 5px;
+            horizontal-stretch: 1;
+            Text {
+                text: root.it.title;
+                color: Theme.text;
+                font-size: Theme.fs-body;
+                font-weight: 700;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                spacing: 10px;
+                alignment: start;
+                cross-axis-alignment: center;
+                GlyphCaption {
+                    glyph: "🗓️";
+                    label: "\{root.it.start} → \{root.it.due}";
+                    tone: root.it.overdue ? Theme.bad : Theme.faint;
+                }
+                TagChip {
+                    label: "\{root.it.points} pt";
+                    muted: true;
+                }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            if root.act > 0: AppButton {
+                label: root.act == 1 ? Strings.kb-mv-review : Strings.kb-mv-done;
+                enabled: false;
+                tooltip: Strings.not-implemented-yet;
+                tooltip-left: true;
+            }
+        }
+    }
+}
+
 export component QuestsPane inherits VerticalLayout {
     in property <string> view;
     spacing: 8px;
 
-    // sample data — design mock only, never engine state
-    property <[MockQuest]> open-quests: [
-        { title: "Write the onboarding guide", detail: "Turn the reading list into a step-by-step guide for the next member.", reward: "3 XMR", who: "petra", when: "4 d", done: false },
-        { title: "Set up a second SMP relay", detail: "A fallback relay on separate infrastructure, cert pinned.", reward: "8 XMR", who: "walter", when: "1 w", done: false },
-        { title: "Design a republic emblem", detail: "Vector, monochrome-friendly, at home next to the wordmark.", reward: "2 XMR", who: "mara", when: "2 w", done: false },
+    // -- sample data — design mock only, never engine state -----------------
+    // One coherent dataset (kanban_workflows.md §6.1): cast petra (the local
+    // member), walter, mara, jonas; "today" is 2026-08-16.
+    property <[MockItem]> all-items: [
+        { id: "3fa1c802", kind: 0, title: "Public onboarding path", responsible: "petra", start: "2026-08-05", due: "2026-10-09", points: 16, rollup: true, prio: 2, pi: "PI-3", status: 2, details: "Everything a newcomer needs from invite to first vote." },
+        { id: "9b04d1ee", kind: 0, title: "Treasury operations", responsible: "walter", start: "2026-08-17", due: "2026-11-20", points: 11, rollup: true, prio: 1, pi: "PI-3", status: 1, details: "Running the treasury day to day: multisig, runbooks, drills." },
+        { id: "51c2ab07", kind: 1, title: "Onboarding guide v1", parent: "3fa1c802", responsible: "mara", start: "2026-08-17", due: "2026-08-28", points: 8, prio: 2, sprint: "S9", status: 1, details: "Turn the reading list into a guided path - see [onboarding](guides/onboarding.md).", ready: "Reading list curated (#20d5b3a1 done); guide skeleton agreed in chat.", done-crit: "A new member reaches their first signed proposal with no help beyond the guide.", scope: "No video material; no translation.", refs: ["guides/onboarding.md"] },
+        { id: "7e99f0c4", kind: 1, title: "Invite flow dry-run", parent: "3fa1c802", responsible: "jonas", start: "2026-08-05", due: "2026-08-16", points: 5, prio: 1, sprint: "S8", status: 3, details: "Walk a fresh invite end to end and note every rough edge." },
+        { id: "20d5b3a1", kind: 1, title: "Reading list curation", parent: "3fa1c802", responsible: "petra", start: "2026-08-05", due: "2026-08-14", points: 3, prio: 1, sprint: "S8", status: 4, details: "Pick the ten documents a newcomer actually needs." },
+        { id: "c4188e5b", kind: 1, title: "Multisig runbook", parent: "9b04d1ee", responsible: "walter", start: "2026-08-31", due: "2026-09-11", points: 8, prio: 1, sprint: "S10", status: 0, details: "Step-by-step multisig operations for treasury signers." },
+        { id: "aa07c9d3", kind: 2, title: "Draft chapter: first signed proposal", parent: "51c2ab07", responsible: "mara", start: "2026-08-17", due: "2026-08-21", points: 3, prio: 2, sprint: "S9", status: 1, details: "The guide chapter that ends in a first signed proposal." },
+        { id: "5f31e6b8", kind: 2, title: "Screenshots per surface", parent: "51c2ab07", responsible: "jonas", start: "2026-08-17", due: "2026-08-26", points: 2, prio: 1, sprint: "S9", status: 0, details: "One current screenshot per surface for the guide.", deps: ["aa07c9d3"] },
+        { id: "0b6d42f7", kind: 2, title: "Recovery drill notes", parent: "7e99f0c4", responsible: "jonas", start: "2026-08-11", due: "2026-08-16", points: 3, prio: 1, sprint: "S8", status: 2, details: "Notes from the recovery drill, ready for the runbook.", refs: ["runbooks/node-recovery.md"] },
+        { id: "d17f30c5", kind: 2, title: "Charter FAQ draft", parent: "51c2ab07", responsible: "petra", start: "2026-08-12", due: "2026-08-16", points: 2, prio: 1, sprint: "S8", status: 2, details: "Short answers to the questions every charter reader asks." },
+        { id: "6c25a984", kind: 2, title: "Glossary pass", responsible: "petra", start: "2026-09-01", due: "2026-09-05", points: 2, prio: 0, status: 0, details: "Align glossary terms across guide and charter." },
+        { id: "e3b8071d", kind: 2, title: "Second relay checklist", parent: "c4188e5b", responsible: "walter", start: "2026-08-31", due: "2026-09-04", points: 3, prio: 2, sprint: "S10", status: 1, details: "What the second relay needs before it joins the pool." },
+        { id: "4a90cc16", kind: 2, title: "Emblem vector cleanup", responsible: "mara", start: "2026-08-10", due: "2026-08-15", overdue: true, points: 1, prio: 0, sprint: "S8", status: 3, details: "Clean paths and export the emblem in three sizes." },
     ];
-    property <[MockQuest]> claimed-quests: [
-        { title: "Quarterly recovery drill", detail: "Run the full restore on a clean machine, note every rough edge.", reward: "5 XMR", who: "jonas", when: "12 d left", done: false },
-        { title: "Audit chat retention", detail: "Check the archive halves really drop on the configured rhythm.", reward: "1.5 XMR", who: "mara", when: "3 d left", done: false },
+    // per-column index lists into `all-items`, pre-sorted (§3.4: priority
+    // desc, due asc, id asc)
+    property <[int]> col-backlog: [7, 5, 10];
+    property <[int]> col-ready: [6, 2, 11, 1];
+    property <[int]> col-doing: [0, 8, 9];
+    property <[int]> col-review: [3, 12];
+    property <[int]> col-done: [4];
+    // sprints (§6.1), day offsets on the Planning axis (2026-08-01 = day 0);
+    // `points` is the straight sum of the items scheduled into the sprint
+    property <[MockSprintRow]> sprints: [
+        { id: "b41a77d0", name: "S8", start: "2026-08-05", end: "2026-08-16", pi: "PI-3", points: 14, current: true, off: 4, len: 12 },
+        { id: "5b28c9e1", name: "S9", start: "2026-08-17", end: "2026-08-28", pi: "PI-3", points: 13, off: 16, len: 12 },
+        { id: "c93d10f2", name: "S10", start: "2026-08-31", end: "2026-09-11", pi: "PI-3", points: 11, off: 30, len: 12 },
     ];
-    property <[MockQuest]> done-quests: [
-        { title: "Treasury multisig setup", detail: "", reward: "4 XMR", who: "walter", when: "1 m", done: true },
-        { title: "Found the republic", detail: "", reward: "", who: "petra", when: "4 m", done: true },
+    // timeline rows: epics first, then stories, then tasks (§6.3); a bar
+    // whose due date passes the axis clips with the edge glyph
+    property <[MockPlanBar]> plan-bars: [
+        { i: 0, level: 0, off: 4, len: 66 },
+        { i: 1, level: 0, off: 16, len: 96 },
+        { i: 2, level: 1, off: 16, len: 12 },
+        { i: 3, level: 1, off: 4, len: 12 },
+        { i: 4, level: 1, off: 4, len: 10 },
+        { i: 5, level: 1, off: 30, len: 12 },
+        { i: 6, level: 2, off: 16, len: 5 },
+        { i: 7, level: 2, off: 16, len: 10 },
+        { i: 8, level: 2, off: 10, len: 6 },
+        { i: 9, level: 2, off: 11, len: 5 },
+        { i: 11, level: 2, off: 30, len: 5 },
+        { i: 12, level: 2, off: 9, len: 6 },
+    ];
+    // Mine: petra's open story/task items by status (done/closed omitted)
+    property <[int]> mine-doing: [9];
+    property <[int]> mine-backlog: [10];
+    // Archive: closed items, newest first
+    property <[MockClosed]> closed-items: [
+        { id: "77b2f4d9", kind: 2, title: "Treasury multisig setup", responsible: "walter", closed: "2026-07-14", done: true, points: 5 },
+        { id: "1e8ca6f3", kind: 1, title: "Old reading list", responsible: "petra", closed: "2026-07-02", done: false, points: 3 },
+        { id: "b5d30f28", kind: 0, title: "Found the republic", responsible: "petra", closed: "2026-04-12", done: true, points: 0 },
     ];
 
-    if root.view == "board": VerticalLayout {
+    // -- view state ---------------------------------------------------------
+    property <int> selected-item: -1; // board drill-in (index into all-items)
+    property <bool> f-epic: true; // board kind filters
+    property <bool> f-story: true;
+    property <bool> f-task: true;
+    property <bool> f-mine: false;
+    property <int> c-kind: 2; // create form: 0 epic · 1 story · 2 task
+    property <int> c-prio: 1;
+
+    // -- formatting helpers -------------------------------------------------
+    pure function kind-glyph(k: int) -> string {
+        return k == 0 ? "🏔️" : (k == 1 ? "📘" : "🔧");
+    }
+    pure function prio-label(p: int) -> string {
+        return p == 3 ? Strings.kb-prio-critical
+            : (p == 2 ? Strings.kb-prio-high
+            : (p == 1 ? Strings.kb-prio-normal : Strings.kb-prio-low));
+    }
+    pure function prio-tone(p: int) -> color {
+        return p == 3 ? Theme.bad
+            : (p == 2 ? Theme.warn : (p == 1 ? Theme.accent : Theme.faint));
+    }
+    pure function status-label(s: int) -> string {
+        return s == 0 ? Strings.kb-col-backlog
+            : (s == 1 ? Strings.kb-col-ready
+            : (s == 2 ? Strings.kb-col-doing
+            : (s == 3 ? Strings.kb-col-review : Strings.kb-col-done)));
+    }
+    pure function status-tone(s: int) -> color {
+        return s == 0 ? Theme.faint
+            : (s == 1 ? Theme.accent
+            : (s == 2 ? Theme.warn : (s == 3 ? Theme.moved : Theme.good)));
+    }
+    // flat index of a sample item id (-1 = unknown) — sample-side lookup,
+    // the fold will own resolution once the surface is real
+    pure function idx-of(id: string) -> int {
+        return id == "3fa1c802" ? 0
+            : (id == "9b04d1ee" ? 1
+            : (id == "51c2ab07" ? 2
+            : (id == "7e99f0c4" ? 3
+            : (id == "20d5b3a1" ? 4
+            : (id == "c4188e5b" ? 5
+            : (id == "aa07c9d3" ? 6
+            : (id == "5f31e6b8" ? 7
+            : (id == "0b6d42f7" ? 8
+            : (id == "d17f30c5" ? 9
+            : (id == "6c25a984" ? 10
+            : (id == "e3b8071d" ? 11
+            : (id == "4a90cc16" ? 12 : -1))))))))))));
+    }
+    // the one linked sample body, hand-segmented so the markdown link
+    // renders as an accent span (static in the mock — §6.2); Slint has no
+    // string parsing, and the sample is fixed
+    pure function d-link(id: string) -> string {
+        return id == "51c2ab07" ? "onboarding" : "";
+    }
+    pure function d-pre(id: string) -> string {
+        return id == "51c2ab07" ? "Turn the reading list into a guided path - see" : "";
+    }
+    pure function d-post(id: string) -> string {
+        return id == "51c2ab07" ? "." : "";
+    }
+
+    // -- Board: the five columns -------------------------------------------
+    if root.view == "board" && root.selected-item < 0: VerticalLayout {
         spacing: 8px;
         vertical-stretch: 1;
         PaneHeader {
             glyph: "📋";
-            title: Strings.qb-title-board;
-            hint: Strings.qb-hint-board;
+            title: Strings.kb-title-board;
+            hint: Strings.kb-hint-board;
+        }
+        ToolStrip {
+            ToolBtn {
+                glyph: "🏔️";
+                name: Strings.kb-kind-epic;
+                enabled: true;
+                active: root.f-epic;
+                clicked => {
+                    root.f-epic = !root.f-epic;
+                }
+            }
+            ToolBtn {
+                glyph: "📘";
+                name: Strings.kb-kind-story;
+                enabled: true;
+                active: root.f-story;
+                clicked => {
+                    root.f-story = !root.f-story;
+                }
+            }
+            ToolBtn {
+                glyph: "🔧";
+                name: Strings.kb-kind-task;
+                enabled: true;
+                active: root.f-task;
+                clicked => {
+                    root.f-task = !root.f-task;
+                }
+            }
+            Rectangle {
+                width: 4px;
+            }
+            ToolBtn {
+                glyph: "🎯";
+                name: Strings.kb-title-mine;
+                enabled: true;
+                active: root.f-mine;
+                clicked => {
+                    root.f-mine = !root.f-mine;
+                }
+            }
+            Rectangle {
+                horizontal-stretch: 1;
+            }
         }
         HorizontalLayout {
             spacing: 8px;
             vertical-stretch: 1;
-            QuestColumn {
-                title: Strings.qb-col-open;
+            KanbanColumn {
+                title: Strings.kb-col-backlog;
+                tone: Theme.faint;
+                all: root.all-items;
+                idxs: root.col-backlog;
+                f-epic: root.f-epic;
+                f-story: root.f-story;
+                f-task: root.f-task;
+                f-mine: root.f-mine;
+                me: "petra";
+                pick(i) => {
+                    root.selected-item = i;
+                }
+            }
+            KanbanColumn {
+                title: Strings.kb-col-ready;
                 tone: Theme.accent;
-                quests: root.open-quests;
+                all: root.all-items;
+                idxs: root.col-ready;
+                f-epic: root.f-epic;
+                f-story: root.f-story;
+                f-task: root.f-task;
+                f-mine: root.f-mine;
+                me: "petra";
+                pick(i) => {
+                    root.selected-item = i;
+                }
             }
-            QuestColumn {
-                title: Strings.qb-col-claimed;
+            KanbanColumn {
+                title: Strings.kb-col-doing;
                 tone: Theme.warn;
-                quests: root.claimed-quests;
+                all: root.all-items;
+                idxs: root.col-doing;
+                f-epic: root.f-epic;
+                f-story: root.f-story;
+                f-task: root.f-task;
+                f-mine: root.f-mine;
+                me: "petra";
+                pick(i) => {
+                    root.selected-item = i;
+                }
             }
-            QuestColumn {
-                title: Strings.qb-col-done;
+            KanbanColumn {
+                title: Strings.kb-col-review;
+                tone: Theme.moved;
+                all: root.all-items;
+                idxs: root.col-review;
+                f-epic: root.f-epic;
+                f-story: root.f-story;
+                f-task: root.f-task;
+                f-mine: root.f-mine;
+                me: "petra";
+                pick(i) => {
+                    root.selected-item = i;
+                }
+            }
+            KanbanColumn {
+                title: Strings.kb-col-done;
                 tone: Theme.good;
-                quests: root.done-quests;
+                all: root.all-items;
+                idxs: root.col-done;
+                f-epic: root.f-epic;
+                f-story: root.f-story;
+                f-task: root.f-task;
+                f-mine: root.f-mine;
+                me: "petra";
+                pick(i) => {
+                    root.selected-item = i;
+                }
             }
         }
     }
 
-    if root.view == "create": VerticalLayout {
+    // -- Board: the drill-in (replaces the columns, in-pane) ----------------
+    if root.view == "board" && root.selected-item >= 0: VerticalLayout {
         spacing: 8px;
+        vertical-stretch: 1;
         PaneHeader {
-            glyph: "✨";
-            title: Strings.qb-title-create;
-            hint: Strings.qb-hint-create;
+            glyph: "📋";
+            title: Strings.kb-title-board;
+            hint: Strings.kb-hint-board;
         }
-        PanePanel {
-            AppField {
-                placeholder: Strings.qb-ph-title;
+        ToolStrip {
+            ToolBtn {
+                glyph: "⬅️";
+                name: Strings.kb-back;
+                enabled: true;
+                clicked => {
+                    root.selected-item = -1;
+                }
             }
-            AppArea {
-                height: 140px;
-                placeholder: Strings.qb-ph-desc;
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+        }
+        dv := PanePanel {
+            property <MockItem> sel: root.all-items[root.selected-item];
+            // title row: kind glyph + title + id caption + status
+            HorizontalLayout {
+                spacing: 8px;
+                cross-axis-alignment: center;
+                KGlyph {
+                    glyph: root.kind-glyph(dv.sel.kind);
+                }
+                Text {
+                    text: dv.sel.title;
+                    color: Theme.text;
+                    font-size: Theme.fs-h2;
+                    font-weight: 700;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                }
+                Text {
+                    text: "#\{dv.sel.id}";
+                    color: Theme.faint;
+                    font-size: Theme.fs-cap;
+                }
+                DotLabel {
+                    tone: root.status-tone(dv.sel.status);
+                    label: root.status-label(dv.sel.status);
+                    label-size: Theme.fs-cap;
+                    label-weight: 700;
+                }
+            }
+            // meta grid
+            HorizontalLayout {
+                spacing: 8px;
+                KMeta {
+                    cap: Strings.kb-f-resp;
+                    val: dv.sel.responsible;
+                }
+                KMeta {
+                    cap: Strings.kb-f-start;
+                    val: dv.sel.start;
+                }
             }
             HorizontalLayout {
                 spacing: 8px;
-                VerticalLayout {
-                    spacing: 4px;
-                    horizontal-stretch: 1;
-                    Text {
-                        text: Strings.qb-reward;
-                        color: Theme.dim;
-                        font-size: Theme.fs-cap;
+                KMeta {
+                    cap: Strings.kb-f-due;
+                    val: dv.sel.due;
+                    val-color: dv.sel.overdue ? Theme.bad : Theme.text;
+                }
+                KMeta {
+                    cap: Strings.kb-f-points;
+                    val: dv.sel.rollup ? "\{dv.sel.points} pt · \{Strings.kb-rollup}" : "\{dv.sel.points} pt";
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                KMeta {
+                    cap: Strings.kb-f-prio;
+                    val: root.prio-label(dv.sel.prio);
+                    val-color: root.prio-tone(dv.sel.prio);
+                }
+                KMeta {
+                    cap: dv.sel.kind == 0 ? Strings.kb-f-pi : Strings.kb-f-sprint;
+                    val: dv.sel.kind == 0 ? (dv.sel.pi == "" ? "-" : dv.sel.pi)
+                        : (dv.sel.sprint == "" ? "-" : dv.sel.sprint);
+                }
+            }
+            // parent — clickable, selects the parent item
+            if dv.sel.parent != "": HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: Strings.kb-f-parent;
+                    color: Theme.dim;
+                    font-size: Theme.fs-cap;
+                    width: 92px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                pl := Rectangle {
+                    width: plt.preferred-width + 4px;
+                    height: plt.preferred-height + 2px;
+                    border-radius: 3px;
+                    background: pl-ta.has-hover ? Theme.accent-soft : transparent;
+                    plt := Text {
+                        x: 2px;
+                        text: "#\{dv.sel.parent} · \{root.all-items[root.idx-of(dv.sel.parent)].title}";
+                        color: Theme.accent;
+                        font-size: Theme.fs-body;
                     }
-                    AppField {
-                        placeholder: "0.0";
+                    pl-ta := TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            if (root.idx-of(dv.sel.parent) >= 0) {
+                                root.selected-item = root.idx-of(dv.sel.parent);
+                            }
+                        }
                     }
                 }
-                VerticalLayout {
-                    spacing: 4px;
+                Rectangle {
                     horizontal-stretch: 1;
-                    Text {
-                        text: Strings.qb-deadline;
-                        color: Theme.dim;
-                        font-size: Theme.fs-cap;
+                }
+            }
+            // dependencies — id chips, muted when the id is unknown
+            if dv.sel.deps.length > 0: HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: Strings.kb-f-deps;
+                    color: Theme.dim;
+                    font-size: Theme.fs-cap;
+                    width: 92px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+                    horizontal-stretch: 1;
+                    for d in dv.sel.deps: TagChip {
+                        label: "#\{d}";
+                        muted: root.idx-of(d) < 0;
                     }
-                    AppField {
-                        placeholder: "2026-08-01";
+                }
+            }
+            // children of an epic/story: status dot + title + responsible
+            // (a repeater cannot carry an `if` — foreign rows collapse)
+            if dv.sel.kind != 2: VerticalLayout {
+                spacing: 0;
+                for c[ci] in root.all-items: Rectangle {
+                    property <bool> on: c.parent == dv.sel.id;
+                    visible: self.on;
+                    height: self.on ? 28px : 0px;
+                    border-radius: Theme.win95 ? 0px : 4px;
+                    background: ch-ta.has-hover ? Theme.raised : transparent;
+                    HorizontalLayout {
+                        padding-left: 6px;
+                        padding-right: 6px;
+                        spacing: 8px;
+                        cross-axis-alignment: center;
+                        Rectangle {
+                            width: 9px;
+                            height: 9px;
+                            border-radius: 4.5px;
+                            background: root.status-tone(c.status);
+                        }
+                        Text {
+                            text: c.title;
+                            color: Theme.text;
+                            font-size: Theme.fs-body;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+                        Text {
+                            text: c.responsible;
+                            color: Theme.faint;
+                            font-size: Theme.fs-cap;
+                        }
+                    }
+                    ch-ta := TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            root.selected-item = ci;
+                        }
+                    }
+                }
+            }
+            // template sections; the one linked body renders its link as an
+            // accent span (SpanFlow's stacked-runs idiom, static here)
+            if root.d-link(dv.sel.id) == "": KSection {
+                cap: Strings.kb-sec-details;
+                body: dv.sel.details;
+            }
+            if root.d-link(dv.sel.id) != "": VerticalLayout {
+                spacing: 3px;
+                Text {
+                    text: Strings.kb-sec-details;
+                    color: Theme.dim;
+                    font-size: Theme.fs-cap;
+                    font-weight: 600;
+                }
+                Text {
+                    text: root.d-pre(dv.sel.id);
+                    color: Theme.text;
+                    font-size: Theme.fs-body;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 0;
+                    alignment: start;
+                    dl := Rectangle {
+                        width: dlt.preferred-width + 4px;
+                        height: dlt.preferred-height;
+                        border-radius: 3px;
+                        dlt := Text {
+                            x: 2px;
+                            text: root.d-link(dv.sel.id);
+                            color: Theme.accent;
+                            font-size: Theme.fs-body;
+                        }
+                        Rectangle {
+                            x: 2px;
+                            y: parent.height - 1px;
+                            width: parent.width - 4px;
+                            height: 1px;
+                            background: Theme.accent;
+                        }
+                    }
+                    Text {
+                        text: root.d-post(dv.sel.id);
+                        color: Theme.text;
+                        font-size: Theme.fs-body;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+            if dv.sel.ready != "": KSection {
+                cap: Strings.kb-sec-ready;
+                body: dv.sel.ready;
+            }
+            if dv.sel.done-crit != "": KSection {
+                cap: Strings.kb-sec-done;
+                body: dv.sel.done-crit;
+            }
+            if dv.sel.scope != "": KSection {
+                cap: Strings.kb-sec-scope;
+                body: dv.sel.scope;
+            }
+            // wiki backlinks (computed on read once real — §4)
+            if dv.sel.refs.length > 0: HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: Strings.kb-f-refs;
+                    color: Theme.dim;
+                    font-size: Theme.fs-cap;
+                    width: 92px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: start;
+                    horizontal-stretch: 1;
+                    for r in dv.sel.refs: Text {
+                        text: r;
+                        color: Theme.accent;
+                        font-size: Theme.fs-cap;
+                        vertical-alignment: center;
                     }
                 }
             }
@@ -1777,7 +2473,337 @@ export component QuestsPane inherits VerticalLayout {
                 alignment: start;
                 AppButton {
                     emoji: "📋";
-                    label: Strings.qb-propose;
+                    label: Strings.kb-propose-change;
+                    primary: true;
+                    enabled: false;
+                    tooltip: Strings.not-implemented-yet;
+                }
+            }
+        }
+    }
+
+    // -- Planning: sprints + timeline ---------------------------------------
+    if root.view == "plan": VerticalLayout {
+        spacing: 8px;
+        vertical-stretch: 1;
+        PaneHeader {
+            glyph: "🗓️";
+            title: Strings.kb-title-plan;
+            hint: Strings.kb-hint-plan;
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            vertical-stretch: 1;
+            // sprint list
+            VerticalLayout {
+                width: 240px;
+                spacing: 8px;
+                alignment: start;
+                for sp in root.sprints: Rectangle {
+                    background: Theme.panel-2;
+                    border-radius: Theme.win95 ? 0px : 8px;
+                    border-width: Theme.border-w;
+                    border-color: Theme.line;
+                    VerticalLayout {
+                        padding: 10px;
+                        spacing: 4px;
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text {
+                                text: sp.name;
+                                color: Theme.text;
+                                font-size: Theme.fs-body;
+                                font-weight: 700;
+                                horizontal-stretch: 1;
+                            }
+                            if sp.current: DotLabel {
+                                tone: Theme.good;
+                                label: Strings.kb-current;
+                                label-size: Theme.fs-cap;
+                            }
+                        }
+                        Text {
+                            text: "\{sp.start} → \{sp.end}";
+                            color: Theme.faint;
+                            font-size: Theme.fs-cap;
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            cross-axis-alignment: center;
+                            Text {
+                                text: "\{sp.points} pt \{Strings.kb-committed}";
+                                color: Theme.dim;
+                                font-size: Theme.fs-cap;
+                                horizontal-stretch: 1;
+                            }
+                            TagChip {
+                                label: sp.pi;
+                                muted: true;
+                            }
+                        }
+                    }
+                }
+            }
+            // timeline: axis 2026-08-01..2026-09-30 (60 days)
+            PanePanel {
+                pb := Rectangle {
+                    property <length> ppd: max(0px, (self.width - 160px) / 60);
+                    height: tl-content.preferred-height;
+                    // sprint labels on top …
+                    for sp in root.sprints: Text {
+                        x: 160px + sp.off * pb.ppd + 3px;
+                        y: 0px;
+                        height: 16px;
+                        text: sp.name;
+                        color: Theme.faint;
+                        font-size: Theme.fs-cap;
+                    }
+                    // … and their boundary hairlines underneath
+                    for sp in root.sprints: Rectangle {
+                        x: 160px + sp.off * pb.ppd;
+                        y: 16px;
+                        width: 1px;
+                        height: parent.height - 16px;
+                        background: Theme.line;
+                    }
+                    for sp in root.sprints: Rectangle {
+                        x: 160px + (sp.off + sp.len) * pb.ppd;
+                        y: 16px;
+                        width: 1px;
+                        height: parent.height - 16px;
+                        background: Theme.line;
+                    }
+                    tl-content := VerticalLayout {
+                        width: 100%;
+                        Rectangle {
+                            height: 16px;
+                        }
+                        for b in root.plan-bars: HorizontalLayout {
+                            height: 24px;
+                            spacing: 0;
+                            Rectangle {
+                                width: 160px;
+                                Text {
+                                    x: b.level * 12px;
+                                    width: parent.width - b.level * 12px;
+                                    height: 100%;
+                                    text: root.all-items[b.i].title;
+                                    color: Theme.dim;
+                                    font-size: Theme.fs-cap;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                            }
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                // epic: soft accent block; story/task: thin
+                                // bar in the status-column tone
+                                Rectangle {
+                                    x: b.off * pb.ppd;
+                                    y: (parent.height - self.height) / 2;
+                                    width: max(0, min(b.len, 60 - b.off)) * pb.ppd;
+                                    height: root.all-items[b.i].kind == 0 ? 14px : 8px;
+                                    border-radius: Theme.win95 ? 0px : 3px;
+                                    border-width: root.all-items[b.i].kind == 0 ? 1px : 0px;
+                                    border-color: Theme.accent;
+                                    background: root.all-items[b.i].kind == 0
+                                        ? Theme.accent-soft
+                                        : root.status-tone(root.all-items[b.i].status);
+                                }
+                                // a due date past the axis clips with the
+                                // edge glyph
+                                if b.off + b.len > 60: Text {
+                                    x: parent.width - self.preferred-width - 2px;
+                                    height: 100%;
+                                    text: "→";
+                                    color: Theme.faint;
+                                    font-size: Theme.fs-cap;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+                Text {
+                    text: "\{Strings.kb-unscheduled}: #\{root.all-items[10].id} \{root.all-items[10].title}";
+                    color: Theme.faint;
+                    font-size: Theme.fs-cap;
+                }
+            }
+        }
+    }
+
+    // -- Create -------------------------------------------------------------
+    if root.view == "create": VerticalLayout {
+        spacing: 8px;
+        PaneHeader {
+            glyph: "✨";
+            title: Strings.kb-title-create;
+            hint: Strings.kb-hint-create;
+        }
+        PanePanel {
+            // kind selector (view-state): epic hides points and swaps
+            // sprint for PI
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                AppButton {
+                    label: Strings.kb-kind-epic;
+                    pad: 10px;
+                    primary: root.c-kind == 0;
+                    clicked => {
+                        root.c-kind = 0;
+                    }
+                }
+                AppButton {
+                    label: Strings.kb-kind-story;
+                    pad: 10px;
+                    primary: root.c-kind == 1;
+                    clicked => {
+                        root.c-kind = 1;
+                    }
+                }
+                AppButton {
+                    label: Strings.kb-kind-task;
+                    pad: 10px;
+                    primary: root.c-kind == 2;
+                    clicked => {
+                        root.c-kind = 2;
+                    }
+                }
+            }
+            AppField {
+                placeholder: Strings.kb-ph-title;
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                FormSlot {
+                    cap: Strings.kb-f-parent;
+                    AppField {
+                        placeholder: Strings.kb-ph-parent;
+                    }
+                }
+                FormSlot {
+                    cap: Strings.kb-f-resp;
+                    AppField {
+                        placeholder: Strings.kb-ph-resp;
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                FormSlot {
+                    cap: Strings.kb-f-start;
+                    AppField {
+                        placeholder: Strings.kb-ph-date;
+                    }
+                }
+                FormSlot {
+                    cap: Strings.kb-f-due;
+                    AppField {
+                        placeholder: Strings.kb-ph-date;
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                if root.c-kind != 0: FormSlot {
+                    cap: Strings.kb-f-points;
+                    AppField {
+                        placeholder: Strings.kb-ph-points;
+                    }
+                }
+                FormSlot {
+                    cap: Strings.kb-f-prio;
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+                        KChipToggle {
+                            label: Strings.kb-prio-low;
+                            tone: Theme.faint;
+                            active: root.c-prio == 0;
+                            clicked => {
+                                root.c-prio = 0;
+                            }
+                        }
+                        KChipToggle {
+                            label: Strings.kb-prio-normal;
+                            tone: Theme.accent;
+                            active: root.c-prio == 1;
+                            clicked => {
+                                root.c-prio = 1;
+                            }
+                        }
+                        KChipToggle {
+                            label: Strings.kb-prio-high;
+                            tone: Theme.warn;
+                            active: root.c-prio == 2;
+                            clicked => {
+                                root.c-prio = 2;
+                            }
+                        }
+                        KChipToggle {
+                            label: Strings.kb-prio-critical;
+                            tone: Theme.bad;
+                            active: root.c-prio == 3;
+                            clicked => {
+                                root.c-prio = 3;
+                            }
+                        }
+                    }
+                }
+                if root.c-kind != 0: FormSlot {
+                    cap: Strings.kb-f-sprint;
+                    AppField {
+                        placeholder: "S9";
+                    }
+                }
+                if root.c-kind == 0: FormSlot {
+                    cap: Strings.kb-f-pi;
+                    AppField {
+                        placeholder: "PI-3";
+                    }
+                }
+            }
+            FormSlot {
+                cap: Strings.kb-sec-details;
+                AppArea {
+                    height: 90px;
+                    placeholder: Strings.kb-ph-details;
+                }
+            }
+            FormSlot {
+                cap: Strings.kb-sec-ready;
+                AppArea {
+                    height: 90px;
+                    placeholder: Strings.kb-ph-ready;
+                }
+            }
+            FormSlot {
+                cap: Strings.kb-sec-done;
+                AppArea {
+                    height: 90px;
+                    placeholder: Strings.kb-ph-done;
+                }
+            }
+            FormSlot {
+                cap: Strings.kb-sec-scope;
+                AppArea {
+                    height: 90px;
+                    placeholder: Strings.kb-ph-scope;
+                }
+            }
+            FormSlot {
+                cap: Strings.kb-f-deps;
+                AppField {
+                    placeholder: Strings.kb-ph-deps;
+                }
+            }
+            HorizontalLayout {
+                alignment: start;
+                AppButton {
+                    emoji: "📋";
+                    label: Strings.kb-propose;
                     primary: true;
                     enabled: false;
                     tooltip: Strings.not-implemented-yet;
@@ -1787,77 +2813,48 @@ export component QuestsPane inherits VerticalLayout {
         }
     }
 
+    // -- Mine ---------------------------------------------------------------
     if root.view == "my-quests": VerticalLayout {
         spacing: 8px;
         PaneHeader {
             glyph: "🎯";
-            title: Strings.qb-title-mine;
-            hint: Strings.qb-hint-mine;
+            title: Strings.kb-title-mine;
+            hint: Strings.kb-hint-mine;
         }
         PanePanel {
-            for q in root.claimed-quests: Rectangle {
-                background: Theme.panel-2;
-                border-radius: Theme.win95 ? 0px : 8px;
-                border-width: Theme.border-w;
-                border-color: Theme.line;
-                VerticalLayout {
-                    padding: 11px;
-                    spacing: 7px;
-                    HorizontalLayout {
-                        spacing: 10px;
-                        VerticalLayout {
-                            spacing: 4px;
-                            horizontal-stretch: 1;
-                            Text {
-                                text: q.title;
-                                color: Theme.text;
-                                font-size: Theme.fs-body;
-                                font-weight: 700;
-                                wrap: word-wrap;
-                            }
-                            Text {
-                                text: q.detail;
-                                color: Theme.dim;
-                                font-size: Theme.fs-cap;
-                                wrap: word-wrap;
-                            }
-                            HorizontalLayout {
-                                spacing: 14px;
-                                alignment: start;
-                                GlyphCaption {
-                                    glyph: "⏳";
-                                    label: q.when;
-                                }
-                                GlyphCaption {
-                                    glyph: "🪙";
-                                    label: q.reward;
-                                }
-                            }
-                        }
-                        VerticalLayout {
-                            alignment: center;
-                            AppButton {
-                                label: Strings.qb-mark-done;
-                                enabled: false;
-                                tooltip: Strings.not-implemented-yet;
-                                tooltip-left: true;
-                            }
-                        }
-                    }
-                }
+            DotLabel {
+                tone: Theme.warn;
+                label: Strings.kb-col-doing;
+                label-size: Theme.fs-cap;
+                label-weight: 700;
+            }
+            for i in root.mine-doing: MineRow {
+                it: root.all-items[i];
+                act: 1;
+            }
+            DotLabel {
+                tone: Theme.faint;
+                label: Strings.kb-col-backlog;
+                label-size: Theme.fs-cap;
+                label-weight: 700;
+            }
+            for i in root.mine-backlog: MineRow {
+                it: root.all-items[i];
+                act: 0;
             }
         }
     }
 
+    // -- Archive ------------------------------------------------------------
     if root.view == "archive": VerticalLayout {
         spacing: 8px;
         PaneHeader {
             glyph: "🗄️";
-            title: Strings.qb-title-archive;
-            hint: Strings.qb-hint-archive;
+            title: Strings.kb-title-archive;
+            hint: Strings.kb-hint-archive;
         }
         PanePanel {
-            for q in root.done-quests: Rectangle {
+            for c in root.closed-items: Rectangle {
                 background: Theme.panel-2;
                 border-radius: Theme.win95 ? 0px : 8px;
                 border-width: Theme.border-w;
@@ -1867,22 +2864,15 @@ export component QuestsPane inherits VerticalLayout {
                     padding-left: 12px;
                     padding-right: 12px;
                     spacing: 10px;
-                    Rectangle {
-                        width: 18px;
-                        height: 100%;
-                        clip: true;
-                        Text {
-                            text: "✅";
-                            font-family: "Twemoji Mozilla";
-                            font-size: 13px;
-                            width: 100%;
-                            height: 100%;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
+                    cross-axis-alignment: center;
+                    KGlyph {
+                        glyph: c.done ? "✅" : "🚫";
+                    }
+                    KGlyph {
+                        glyph: root.kind-glyph(c.kind);
                     }
                     Text {
-                        text: q.title;
+                        text: c.title;
                         color: Theme.dim;
                         font-size: Theme.fs-body;
                         vertical-alignment: center;
@@ -1890,7 +2880,9 @@ export component QuestsPane inherits VerticalLayout {
                         horizontal-stretch: 1;
                     }
                     Text {
-                        text: q.reward == "" ? "\{q.who} · \{q.when}" : "\{q.reward} → \{q.who} · \{q.when}";
+                        text: c.points > 0
+                            ? "\{c.responsible} · \{c.done ? Strings.kb-closed-done : Strings.kb-closed-dropped} \{c.closed} · \{c.points} pt"
+                            : "\{c.responsible} · \{c.done ? Strings.kb-closed-done : Strings.kb-closed-dropped} \{c.closed}";
                         color: Theme.faint;
                         font-size: Theme.fs-cap;
                         vertical-alignment: center;

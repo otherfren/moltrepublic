@@ -898,7 +898,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "select_view",
             command: "select_view",
-            description: "Select a surface and one of its sub-views (organization: status/members/uploads/pending/declined · chat: today · memory: brain/proposals/accepted/denied · quests: board/create/proposals/my-quests/archive · vault: secrets/disclose/proposals/exposed · wallet: balance/history/send/receive/status/settings).",
+            description: "Select a surface and one of its sub-views (organization: status/members/uploads/pending/declined · chat: today · memory: brain/proposals/accepted/denied · quests: board/plan/create/proposals/my-quests/archive · vault: secrets/disclose/proposals/exposed · wallet: balance/history/send/receive/status/settings).",
             schema: || json!({
                 "type": "object",
                 "properties": {

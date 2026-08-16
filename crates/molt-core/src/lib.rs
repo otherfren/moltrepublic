@@ -163,9 +163,13 @@ impl Surface {
             ],
             Surface::Quests => &[
                 ("board", "Board"),
+                // sprint scheduling (kanban_workflows.md §6.3)
+                ("plan", "Planning"),
                 ("create", "Create"),
                 ("proposals", "Proposals"),
-                ("my-quests", "My Quests"),
+                // the wire key predates the Kanban rework and stays — it is
+                // select_view's vocabulary; only the label moved to "Mine"
+                ("my-quests", "Mine"),
                 ("archive", "Archive"),
             ],
             Surface::Vault => &[
