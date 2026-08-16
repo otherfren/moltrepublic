@@ -1259,20 +1259,28 @@ export global Strings {
     in property <string> kb-unscheduled;
     in property <string> kb-closed-done;
     in property <string> kb-closed-dropped;
-    // Vault (sealed secrets)
+    // Vault (sealed secrets, threshold-elected disclosure)
     in property <string> vt-title-secrets;
     in property <string> vt-hint-secrets;
     in property <string> vt-seal-new;
     in property <string> vt-sealed-by;
     in property <string> vt-opens-at;
-    in property <string> vt-title-disclose;
-    in property <string> vt-hint-disclose;
+    in property <string> vt-sealing;
+    in property <string> vt-verified-word;
+    in property <string> vt-title-requests;
+    in property <string> vt-hint-requests;
     in property <string> vt-request;
     in property <string> vt-requested-by;
     in property <string> vt-signed-word;
-    in property <string> vt-title-exposed;
-    in property <string> vt-hint-exposed;
-    in property <string> vt-released-word;
+    in property <string> vt-resealed-word;
+    in property <string> vt-granted-word;
+    in property <string> vt-denied-word;
+    in property <string> vt-title-unsealed;
+    in property <string> vt-hint-unsealed;
+    in property <string> vt-only-you;
+    in property <string> vt-only-by;
+    in property <string> vt-reveal;
+    in property <string> vt-hide;
     // Wallet (Monero multisig)
     in property <string> wl-title-balance;
     in property <string> wl-hint-balance;

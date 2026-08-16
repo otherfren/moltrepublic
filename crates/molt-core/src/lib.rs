@@ -56,7 +56,8 @@ pub enum Surface {
     Memory,
     /// The quest board: tasks put forward, taken and completed. Gated.
     Quests,
-    /// Sealed secrets, released only at the threshold. Gated.
+    /// Sealed secrets, disclosed by threshold vote to one elected reader.
+    /// Gated.
     Vault,
     /// Shared funds (Monero multisig in production). Gated.
     Wallet,
@@ -174,9 +175,12 @@ impl Surface {
             ],
             Surface::Vault => &[
                 ("secrets", "Secrets"),
-                ("disclose", "Disclose"),
+                // access requests: a threshold vote elects ONE reader; the
+                // committed grant re-seals the key shares to that member
+                // alone (docs/vault/vault_threshold_disclosure.md)
+                ("requests", "Requests"),
                 ("proposals", "Proposals"),
-                ("exposed", "Exposed"),
+                ("unsealed", "Unsealed"),
             ],
             Surface::Wallet => &[
                 ("balance", "Balance"),
