@@ -3231,7 +3231,7 @@ impl State {
                 by: me.clone(),
             });
         }
-        let mut declined: Vec<u64> = self
+        let mut declined: Vec<(u64, String)> = self
             .proposals
             .iter()
             .filter(|(id, p)| {
@@ -3252,20 +3252,23 @@ impl State {
                         _ => false,
                     }
             })
-            .map(|(id, _)| *id)
-            .chain(
-                self.pending_declines
+            // a registered voice recomputes its anchor from the own record;
+            // a parked voice re-serves the hash it ARRIVED with (D1)
+            .map(|(id, p)| (*id, crate::State::decline_payload_hash(&p.payload)))
+            .chain(self.pending_declines.iter().filter_map(|(id, parked)| {
+                parked
                     .iter()
-                    .filter(|(_, parked)| parked.iter().any(|(m, _)| m == &me))
-                    .map(|(id, _)| *id),
-            )
+                    .find(|(m, _, _)| m == &me)
+                    .map(|(_, _, h)| (*id, h.clone()))
+            }))
             .collect();
         declined.sort_unstable();
         declined.dedup();
-        for id in declined {
+        for (id, hash) in declined {
             events.push(WorkspaceEvent::Declined {
                 id: ProposalId(id),
                 by: me.clone(),
+                hash,
             });
         }
         events
@@ -4542,7 +4545,7 @@ mod tests {
             &mut peer,
             "dora",
             1,
-            WorkspaceEvent::Declined { id: ProposalId(9), by: "dora".to_string() },
+            WorkspaceEvent::Declined { id: ProposalId(9), by: "dora".to_string(), hash: String::new() },
         );
         let p = peer.proposals.get(&9).expect("registered");
         assert_eq!(p.decliners, vec!["dora".to_string()], "the wire decline counts");
@@ -4553,7 +4556,7 @@ mod tests {
             &mut peer,
             "petra",
             2,
-            WorkspaceEvent::Declined { id: ProposalId(9), by: "dora".to_string() },
+            WorkspaceEvent::Declined { id: ProposalId(9), by: "dora".to_string(), hash: String::new() },
         );
         let p = peer.proposals.get(&9).expect("still there");
         assert_eq!(p.decliners.len(), 1, "a decline must carry its link identity");
@@ -4562,7 +4565,7 @@ mod tests {
             &mut peer,
             "dora",
             2,
-            WorkspaceEvent::Declined { id: ProposalId(9), by: "dora".to_string() },
+            WorkspaceEvent::Declined { id: ProposalId(9), by: "dora".to_string(), hash: String::new() },
         );
         assert_eq!(peer.proposals.get(&9).expect("still there").decliners.len(), 1);
         // petra's real decline tips it: 2 > n − m = 1 → Rejected
@@ -4570,7 +4573,7 @@ mod tests {
             &mut peer,
             "petra",
             3,
-            WorkspaceEvent::Declined { id: ProposalId(9), by: "petra".to_string() },
+            WorkspaceEvent::Declined { id: ProposalId(9), by: "petra".to_string(), hash: String::new() },
         );
         let p = peer.proposals.get(&9).expect("still there");
         assert_eq!(p.state, ProposalState::Rejected, "a majority decline is terminal");
@@ -4598,7 +4601,7 @@ mod tests {
                 &mut walter,
                 "petra",
                 i + 1,
-                WorkspaceEvent::Declined { id: ProposalId(base + i), by: "petra".to_string() },
+                WorkspaceEvent::Declined { id: ProposalId(base + i), by: "petra".to_string(), hash: String::new() },
             );
         }
         let accepted = |st: &crate::State, seq: u64| {
@@ -4613,6 +4616,7 @@ mod tests {
             WorkspaceEvent::Declined {
                 id: ProposalId(base + per_member),
                 by: "petra".to_string(),
+                hash: String::new(),
             },
         );
         assert!(
@@ -4624,11 +4628,100 @@ mod tests {
             &mut walter,
             "petra",
             per_member + 2,
-            WorkspaceEvent::Declined { id: ProposalId(u64::MAX), by: "petra".to_string() },
+            WorkspaceEvent::Declined { id: ProposalId(u64::MAX), by: "petra".to_string(), hash: String::new() },
         );
         assert!(
             accepted(&walter, per_member + 2),
             "implausible-id garbage is accepted and dropped, never resent"
+        );
+    }
+
+    /// D1: a decline binds the payload the decliner SAW, not a bare id —
+    /// two proposers minting the same id in one gossip round-trip must
+    /// not let a voice register against a proposal the decliner never
+    /// judged. An empty hash (older sender) keeps id-only semantics, and
+    /// the park stores the hash so a drained voice is checked too.
+    #[test]
+    fn a_decline_carrying_a_foreign_payload_hash_does_not_register() {
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        wire(
+            &mut walter,
+            "petra",
+            1,
+            WorkspaceEvent::Proposed {
+                id: ProposalId(4),
+                surface: Surface::Organization,
+                payload: json!({ "op": "set_name", "value": "X" }),
+            },
+        );
+        let h = |v: &serde_json::Value| crate::State::decline_payload_hash(v);
+        wire(
+            &mut walter,
+            "dora",
+            1,
+            WorkspaceEvent::Declined {
+                id: ProposalId(4),
+                by: "dora".to_string(),
+                hash: h(&json!({ "op": "set_name", "value": "Y" })),
+            },
+        );
+        let p = walter.proposals.get(&4).expect("card");
+        assert!(p.decliners.is_empty(), "a mismatching hash must not register");
+        wire(
+            &mut walter,
+            "dora",
+            2,
+            WorkspaceEvent::Declined {
+                id: ProposalId(4),
+                by: "dora".to_string(),
+                hash: h(&json!({ "op": "set_name", "value": "X" })),
+            },
+        );
+        assert_eq!(
+            walter.proposals.get(&4).expect("card").decliners,
+            vec!["dora".to_string()],
+            "the matching hash registers"
+        );
+        wire(
+            &mut walter,
+            "petra",
+            2,
+            WorkspaceEvent::Declined {
+                id: ProposalId(4),
+                by: "petra".to_string(),
+                hash: String::new(),
+            },
+        );
+        assert_eq!(
+            walter.proposals.get(&4).expect("card").decliners.len(),
+            2,
+            "an empty hash (older sender) keeps id-only semantics"
+        );
+        // the PARK stores the hash: a parked mismatch never registers either
+        wire(
+            &mut walter,
+            "dora",
+            3,
+            WorkspaceEvent::Declined {
+                id: ProposalId(9),
+                by: "dora".to_string(),
+                hash: h(&json!({ "op": "set_name", "value": "Z" })),
+            },
+        );
+        wire(
+            &mut walter,
+            "petra",
+            3,
+            WorkspaceEvent::Proposed {
+                id: ProposalId(9),
+                surface: Surface::Organization,
+                payload: json!({ "op": "set_name", "value": "W" }),
+            },
+        );
+        assert!(
+            walter.proposals.get(&9).expect("card").decliners.is_empty(),
+            "a drained parked voice is hash-checked too"
         );
     }
 
@@ -4644,13 +4737,13 @@ mod tests {
             &mut peer,
             "dora",
             1,
-            WorkspaceEvent::Declined { id: ProposalId(4), by: "dora".to_string() },
+            WorkspaceEvent::Declined { id: ProposalId(4), by: "dora".to_string(), hash: String::new() },
         );
         wire(
             &mut peer,
             "petra",
             1,
-            WorkspaceEvent::Declined { id: ProposalId(4), by: "petra".to_string() },
+            WorkspaceEvent::Declined { id: ProposalId(4), by: "petra".to_string(), hash: String::new() },
         );
         assert!(peer.proposals.is_empty(), "no card yet — the declines wait");
         wire(
@@ -4710,7 +4803,7 @@ mod tests {
             &mut peer,
             "petra",
             3,
-            WorkspaceEvent::Declined { id: ProposalId(8), by: "petra".to_string() },
+            WorkspaceEvent::Declined { id: ProposalId(8), by: "petra".to_string(), hash: String::new() },
         );
         assert_eq!(
             peer.proposals.get(&8).expect("card").state,
@@ -4720,12 +4813,12 @@ mod tests {
         // the retention gate below would age the card out immediately
         peer.proposals.get_mut(&8).expect("card").declined_at = crate::now_secs();
         // a parked own decline (own-log replay raced a re-served proposal)
-        peer.register_decline(11, "walter", 1_751_000_000);
+        peer.register_decline(11, "walter", 1_751_000_000, "");
         let events = peer.open_governance_events();
         let own_declines: Vec<u64> = events
             .iter()
             .filter_map(|e| match e {
-                WorkspaceEvent::Declined { id, by } if by == "walter" => Some(id.0),
+                WorkspaceEvent::Declined { id, by, .. } if by == "walter" => Some(id.0),
                 _ => None,
             })
             .collect();
@@ -4746,7 +4839,7 @@ mod tests {
             .open_governance_events()
             .iter()
             .filter_map(|e| match e {
-                WorkspaceEvent::Declined { id, by } if by == "walter" => Some(id.0),
+                WorkspaceEvent::Declined { id, by, .. } if by == "walter" => Some(id.0),
                 _ => None,
             })
             .collect();
@@ -4781,7 +4874,7 @@ mod tests {
             &mut peer,
             "dora",
             1,
-            WorkspaceEvent::Declined { id: ProposalId(9), by: "dora".to_string() },
+            WorkspaceEvent::Declined { id: ProposalId(9), by: "dora".to_string(), hash: String::new() },
         );
         peer.serve_open_governance();
         assert_eq!(
@@ -4803,7 +4896,7 @@ mod tests {
             &mut peer,
             "petra",
             1,
-            WorkspaceEvent::Declined { id: ProposalId(u64::MAX), by: "petra".to_string() },
+            WorkspaceEvent::Declined { id: ProposalId(u64::MAX), by: "petra".to_string(), hash: String::new() },
         );
         assert!(peer.pending_declines.is_empty(), "garbage never parks");
         assert_eq!(peer.next_id, before, "and never moves the mint counter");

@@ -615,7 +615,7 @@ pub(crate) struct State {
     /// before a re-served foreign proposal returns — parked votes register
     /// the moment the proposal is known ([`State::register_decline`]).
     /// Ephemeral and bounded, like the signature collection above.
-    pub(crate) pending_declines: HashMap<u64, Vec<(MemberId, u64)>>,
+    pub(crate) pending_declines: HashMap<u64, Vec<(MemberId, u64, String)>>,
     /// Parked withdraws whose proposal is not known yet (one slot per id —
     /// a withdraw has exactly one legitimate author), the decline park's
     /// sibling. Drained by `receive_proposed`.
@@ -3373,6 +3373,7 @@ mod tests {
             body: molt_core::WorkspaceEvent::Declined {
                 id: molt_core::ProposalId(2),
                 by: "peer-1".to_string(),
+                hash: String::new(),
             },
         });
         let org = st.snapshot(Surface::Organization, None, None);

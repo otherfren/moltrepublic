@@ -2257,6 +2257,16 @@ pub enum WorkspaceEvent {
         id: ProposalId,
         /// The declining member.
         by: MemberId,
+        /// The sha256 content anchor of the payload the decliner SAW
+        /// (the engine's `decline_payload_hash` formula — a cross-node
+        /// contract like `molt-chat-legacy-id`; molt-core stays hash-free)
+        /// (D1): a receiver registers the voice only against a record whose
+        /// payload hashes identically — two proposers minting one id in a
+        /// gossip round-trip must not cross votes. "" (older sender) keeps
+        /// id-only semantics; skipped empty so the legacy wire shape stays
+        /// byte-identical.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        hash: String,
     },
     /// A proposal reached the threshold; its payload joined the surface log.
     Applied {

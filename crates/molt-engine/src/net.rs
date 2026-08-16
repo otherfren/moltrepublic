@@ -1216,7 +1216,7 @@ impl State {
         // the voice is gone for good; left unmarked, the sender's resend
         // re-earns it once the park has room (successors hold in the G7
         // ordered park, bounded by its give-up valve).
-        if let WorkspaceEvent::Declined { id, by } = &envelope.body {
+        if let WorkspaceEvent::Declined { id, by, .. } = &envelope.body {
             if by == &from && self.decline_would_shed(id.0, by) {
                 tracing::warn!(%from, id = id.0, "decline park full — leaving the frame unacked for the resend");
                 return Ok(Reply::Ack);
@@ -1456,12 +1456,12 @@ impl State {
             // link identity is the only proof of authorship (`ChatRead`
             // posture): it counts for `from`, and a body claiming another
             // member is dropped, never re-attributed.
-            WorkspaceEvent::Declined { id, by } if self.is_chain_governed() => {
+            WorkspaceEvent::Declined { id, by, hash } if self.is_chain_governed() => {
                 if by != from {
                     tracing::warn!(%from, claimed = %by, "dropping a decline claiming another member");
                     return Ok(Reply::Ack);
                 }
-                match self.register_decline(id.0, &from, envelope.ts) {
+                match self.register_decline(id.0, &from, envelope.ts, &hash) {
                     crate::proposals::DeclineOutcome::Rejected => {
                         // silent on the summary: the node whose LOCAL
                         // decline tips the vote posts it, exactly once
@@ -3376,6 +3376,7 @@ mod tests {
             body: WorkspaceEvent::Declined {
                 id: molt_core::ProposalId(1),
                 by: "peer-2".to_string(),
+                hash: String::new(),
             },
         });
         // the local send path refuses…

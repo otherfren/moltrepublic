@@ -333,7 +333,7 @@ impl State {
                 // [`State::register_withdraw`]; emit-free on replay
                 let _ = self.register_withdraw(id.0, by, env.ts);
             }
-            WorkspaceEvent::Declined { id, by } => {
+            WorkspaceEvent::Declined { id, by, hash } => {
                 // a decline is ONE member's voice, not a veto: the proposal
                 // turns Rejected only when approval can no longer reach the
                 // threshold (declines > n − m; pre-ritual keeps the
@@ -343,7 +343,7 @@ impl State {
                 // the proposal back, and the vote must still be standing.
                 // All in [`State::register_decline`]; the outcome is
                 // ignored here, replay must not ring frontends.
-                let _ = self.register_decline(id.0, by, env.ts);
+                let _ = self.register_decline(id.0, by, env.ts, hash);
             }
             WorkspaceEvent::Applied { id } => {
                 if let Some(p) = self.proposals.get_mut(&id.0) {
@@ -900,6 +900,7 @@ mod tests {
             WorkspaceEvent::Declined {
                 id: ProposalId(1),
                 by: "walter".to_string(),
+                hash: String::new(),
             },
         ));
         assert_eq!(
@@ -914,6 +915,7 @@ mod tests {
             WorkspaceEvent::Declined {
                 id: ProposalId(1),
                 by: "walter".to_string(),
+                hash: String::new(),
             },
         ));
         assert_eq!(
@@ -928,6 +930,7 @@ mod tests {
             WorkspaceEvent::Declined {
                 id: ProposalId(1),
                 by: "ida".to_string(),
+                hash: String::new(),
             },
         ));
         let d = st.dump();

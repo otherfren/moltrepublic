@@ -753,11 +753,19 @@ impl State {
             // still stands — retraction semantics are the D2 follow-up
             // (docs/reviews/decline_convergence_review_followups.md).
         }
+        // D1: the voice binds the payload the decliner SAW — a receiver
+        // registers it only against a record hashing identically
+        let hash = self
+            .proposals
+            .get(&proposal.0)
+            .map(|p| Self::decline_payload_hash(&p.payload))
+            .unwrap_or_default();
         let env = self.make_env(
             me.clone(),
             WorkspaceEvent::Declined {
                 id: proposal,
                 by: me.clone(),
+                hash,
             },
         );
         self.record(env);
@@ -785,6 +793,19 @@ impl State {
             });
         }
         Ok(Reply::Ack)
+    }
+
+    /// The content anchor a decline carries (D1, `WorkspaceEvent::Declined`):
+    /// lowercase sha256 hex over a domain tag + the payload's canonical
+    /// JSON bytes. A CROSS-NODE contract like `molt-chat-legacy-id`:
+    /// deterministic because the workspace pins serde_json's sorted-keys
+    /// map (`serde_json_object_serializes_with_sorted_keys`).
+    pub(crate) fn decline_payload_hash(payload: &serde_json::Value) -> String {
+        use sha2::Digest as _;
+        let mut h = sha2::Sha256::new();
+        h.update(b"molt-decline-payload-v1\0");
+        h.update(serde_json::to_vec(payload).unwrap_or_default());
+        hex::encode(h.finalize())
     }
 
     /// The one decline-bookkeeping choke point (log applier, wire ingest,
@@ -816,13 +837,19 @@ impl State {
         let member_parked = self
             .pending_declines
             .values()
-            .filter(|p| p.iter().any(|(m, _)| m == by))
+            .filter(|p| p.iter().any(|(m, _, _)| m == by))
             .count();
         self.pending_declines.len() >= PARKED_DECLINE_IDS_MAX
             || member_parked >= PARKED_DECLINES_PER_MEMBER_MAX
     }
 
-    pub(crate) fn register_decline(&mut self, id: u64, by: &str, ts: u64) -> DeclineOutcome {
+    pub(crate) fn register_decline(
+        &mut self,
+        id: u64,
+        by: &str,
+        ts: u64,
+        hash: &str,
+    ) -> DeclineOutcome {
         let veto_room = self
             .replica
             .as_ref()
@@ -843,7 +870,7 @@ impl State {
             let member_parked = self
                 .pending_declines
                 .values()
-                .filter(|p| p.iter().any(|(m, _)| m == by))
+                .filter(|p| p.iter().any(|(m, _, _)| m == by))
                 .count();
             if !self.pending_declines.contains_key(&id)
                 && (self.pending_declines.len() >= PARKED_DECLINE_IDS_MAX
@@ -853,11 +880,17 @@ impl State {
                 return DeclineOutcome::Known;
             }
             let parked = self.pending_declines.entry(id).or_default();
-            if !parked.iter().any(|(m, _)| m == by) {
-                parked.push((by.to_string(), ts));
+            if !parked.iter().any(|(m, _, _)| m == by) {
+                parked.push((by.to_string(), ts, hash.to_string()));
             }
             return DeclineOutcome::Parked;
         };
+        // D1: a non-empty hash must match the record's payload — an empty
+        // one (older sender) keeps the id-only semantics
+        if !hash.is_empty() && Self::decline_payload_hash(&p.payload) != hash {
+            tracing::warn!(%id, %by, "dropping a decline whose payload hash does not match this record");
+            return DeclineOutcome::Known;
+        }
         if p.state != ProposalState::Proposed || p.decliners.iter().any(|d| d == by) {
             return DeclineOutcome::Known;
         }
@@ -883,8 +916,8 @@ impl State {
             return DeclineOutcome::Known;
         };
         let mut strongest = DeclineOutcome::Known;
-        for (by, ts) in parked {
-            match self.register_decline(id, &by, ts) {
+        for (by, ts, hash) in parked {
+            match self.register_decline(id, &by, ts, &hash) {
                 DeclineOutcome::Rejected => strongest = DeclineOutcome::Rejected,
                 DeclineOutcome::Voice if strongest != DeclineOutcome::Rejected => {
                     strongest = DeclineOutcome::Voice;
