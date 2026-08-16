@@ -56,7 +56,8 @@ pub enum Surface {
     Memory,
     /// The quest board: tasks put forward, taken and completed. Gated.
     Quests,
-    /// Sealed secrets, released only at the threshold. Gated.
+    /// Sealed secrets, disclosed by threshold vote to one elected reader.
+    /// Gated.
     Vault,
     /// Shared funds (Monero multisig in production). Gated.
     Wallet,
@@ -170,9 +171,12 @@ impl Surface {
             ],
             Surface::Vault => &[
                 ("secrets", "Secrets"),
-                ("disclose", "Disclose"),
+                // access requests: a threshold vote elects ONE reader; the
+                // committed grant re-seals the key shares to that member
+                // alone (docs/vault/vault_threshold_disclosure.md)
+                ("requests", "Requests"),
                 ("proposals", "Proposals"),
-                ("exposed", "Exposed"),
+                ("unsealed", "Unsealed"),
             ],
             Surface::Wallet => &[
                 ("balance", "Balance"),
@@ -5043,6 +5047,12 @@ pub struct UploadView {
     /// This node's live download of the share, if any (requester side).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download: Option<DownloadView>,
+    /// ONE status word for the relay plane (`file_transfer_nostr.md` §5.5):
+    /// `"relay-held"` (a live series stamp is known — downloads need no
+    /// live sharer), `"sharer-only"` (the first download wakes the
+    /// sharer), `"gone"` (withdrawn and not on the relays). Additive.
+    #[serde(default)]
+    pub availability: String,
 }
 
 /// A one-shot status summary of the running group.

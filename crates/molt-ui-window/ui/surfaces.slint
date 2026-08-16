@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // DESIGN MOCKS for the four staged surfaces: Memory (shared brain), Quests
-// (quest board), Vault (sealed secrets) and Wallet (Monero multisig).
+// (quest board), Vault (sealed secrets, threshold-elected disclosure) and
+// Wallet (Monero multisig).
 //
 // These panes are badged UX drafts to iterate on look & feel — every dataset
 // below is .slint-side sample data, never engine state. Actions either work
@@ -183,6 +184,9 @@ component TagChip inherits Rectangle {
 component SigMeter inherits HorizontalLayout {
     in property <int> signed;
     in property <int> need;
+    // the counted word — "signed" by default; the vault's unseal meter
+    // counts re-sealed key shares instead
+    in property <string> word: Strings.vt-signed-word;
     spacing: 10px;
     Rectangle {
         height: 6px;
@@ -199,7 +203,7 @@ component SigMeter inherits HorizontalLayout {
         }
     }
     Text {
-        text: "\{root.signed}/\{root.need} \{Strings.vt-signed-word}";
+        text: "\{root.signed}/\{root.need} \{root.word}";
         color: Theme.dim;
         font-size: Theme.fs-cap;
         vertical-alignment: center;
@@ -1902,16 +1906,24 @@ export component QuestsPane inherits VerticalLayout {
 }
 
 // ---------------------------------------------------------------------------
-// Vault — sealed secrets
+// Vault — sealed secrets, threshold-elected disclosure
 // ---------------------------------------------------------------------------
+//
+// The model (docs/vault/vault_threshold_disclosure.md): a deposit is
+// encrypted and its key Shamir-shared across ALL seats; a threshold vote
+// elects ONE reader; the share holders then re-seal their shares to that
+// member alone. Everyone else — voters included — sees only THAT the grant
+// happened, never the content.
 
 struct MockSecret {
     name: string,
     glyph: string, // 🔑 credential · 📄 document
     by: string,
     when: string,
-    need: int, // released at `need` of `total` signatures
+    need: int, // unseals at `need` of `total` re-sealed shares
     total: int,
+    verified: int, // seats whose share passed the commitment check
+    sealing: bool, // still collecting verifications — not yet releasable
 }
 
 struct MockSigner {
@@ -1919,19 +1931,27 @@ struct MockSigner {
     signed: bool,
 }
 
-struct MockRelease {
+// One access request walking `state`: vote (threshold elects the reader)
+// → unseal (share holders re-encrypt to the reader) → granted | denied.
+struct MockRequest {
     secret: string,
+    reader: string, // the ONE member the vote elects
     by: string,
     reason: string,
-    signers: [MockSigner],
-    signed: int, // collected signatures (matches the signers marked true)
+    state: string, // "vote" | "unseal" | "granted" | "denied"
+    signed: int, // collected vote signatures
+    resealed: int, // shares re-sealed to the reader (unseal state)
     need: int,
+    when: string, // outcome age (granted/denied states)
+    signers: [MockSigner], // vote: ✍️ marks · unseal: 🧩 marks (no reader)
 }
 
-struct MockExposed {
+// One entry of the unsealed audit list: content only when `mine`.
+struct MockUnsealed {
     name: string,
+    reader: string,
+    mine: bool, // the local member is the elected reader
     content: string,
-    by: string,
     when: string,
 }
 
@@ -1944,7 +1964,8 @@ component SecretCard inherits Rectangle {
     HorizontalLayout {
         padding: 12px;
         spacing: 12px;
-        // the seal medallion — the vault's signature element
+        // the seal medallion — the vault's signature element; amber-ringed
+        // with an hourglass while the seats still verify their shares
         Rectangle {
             width: 44px;
             height: 44px;
@@ -1952,7 +1973,7 @@ component SecretCard inherits Rectangle {
             border-radius: Theme.win95 ? 0px : 22px;
             background: Theme.accent-soft;
             border-width: Theme.border-w;
-            border-color: Theme.accent;
+            border-color: root.s.sealing ? Theme.warn : Theme.accent;
             clip: true;
             Text {
                 text: root.s.glyph;
@@ -1971,7 +1992,7 @@ component SecretCard inherits Rectangle {
                 border-radius: 7px;
                 background: Theme.panel;
                 Text {
-                    text: "🔒";
+                    text: root.s.sealing ? "⏳" : "🔒";
                     font-family: "Twemoji Mozilla";
                     font-size: 9px;
                     width: 100%;
@@ -2018,6 +2039,162 @@ component SecretCard inherits Rectangle {
                     vertical-alignment: center;
                 }
             }
+            if root.s.sealing: HorizontalLayout {
+                alignment: start;
+                TagChip {
+                    glyph: "⏳";
+                    label: "\{Strings.vt-sealing} - \{root.s.verified}/\{root.s.total} \{Strings.vt-verified-word}";
+                    muted: true;
+                }
+            }
+        }
+    }
+}
+
+component RequestCard inherits Rectangle {
+    in property <MockRequest> r;
+    background: Theme.panel-2;
+    border-radius: Theme.win95 ? 0px : 10px;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+        HorizontalLayout {
+            spacing: 8px;
+            Text {
+                text: root.r.secret;
+                color: Theme.text;
+                font-size: Theme.fs-body;
+                font-weight: 700;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+            Text {
+                text: "\{Strings.vt-requested-by} \{root.r.by}";
+                color: Theme.faint;
+                font-size: Theme.fs-cap;
+                vertical-alignment: center;
+            }
+        }
+        // the elected reader — the request's one deciding fact
+        HorizontalLayout {
+            alignment: start;
+            TagChip {
+                glyph: "👤";
+                label: "→ \{root.r.reader}";
+            }
+        }
+        Text {
+            text: root.r.reason;
+            color: Theme.dim;
+            font-size: Theme.fs-cap;
+            wrap: word-wrap;
+        }
+        if root.r.state == "vote": SigMeter {
+            signed: root.r.signed;
+            need: root.r.need;
+        }
+        if root.r.state == "unseal": SigMeter {
+            signed: root.r.resealed;
+            need: root.r.need;
+            word: Strings.vt-resealed-word;
+        }
+        if root.r.state == "vote" || root.r.state == "unseal": HorizontalLayout {
+            spacing: 6px;
+            alignment: start;
+            for m in root.r.signers: TagChip {
+                glyph: m.signed ? (root.r.state == "vote" ? "✍️" : "🧩") : "";
+                label: m.name;
+                muted: !m.signed;
+            }
+        }
+        if root.r.state == "granted": GlyphCaption {
+            glyph: "🔓";
+            label: "\{Strings.vt-granted-word} · \{root.r.when} · \{Strings.vt-only-by} \{root.r.reader}";
+            tone: Theme.good;
+        }
+        if root.r.state == "denied": GlyphCaption {
+            glyph: "🚫";
+            label: "\{Strings.vt-denied-word} · \{root.r.when} · \{root.r.signed}/\{root.r.need} \{Strings.vt-signed-word}";
+        }
+    }
+}
+
+component UnsealedCard inherits Rectangle {
+    in property <MockUnsealed> u;
+    // pure view-state: the toggle only shows/hides sample content
+    property <bool> shown: false;
+    background: Theme.panel-2;
+    border-radius: Theme.win95 ? 0px : 10px;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+        HorizontalLayout {
+            spacing: 8px;
+            Text {
+                text: root.u.name;
+                color: Theme.text;
+                font-size: Theme.fs-body;
+                font-weight: 700;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+            Text {
+                text: "\{Strings.vt-granted-word} · \{root.u.when}";
+                color: Theme.faint;
+                font-size: Theme.fs-cap;
+                vertical-alignment: center;
+            }
+        }
+        // mine: the eye chip + reveal toggle — foreign: only the lock,
+        // which IS the zero-knowledge story
+        HorizontalLayout {
+            spacing: 6px;
+            if root.u.mine: VerticalLayout {
+                alignment: center;
+                TagChip {
+                    glyph: "👁️";
+                    label: Strings.vt-only-you;
+                }
+            }
+            if !root.u.mine: VerticalLayout {
+                alignment: center;
+                TagChip {
+                    glyph: "🔒";
+                    label: "\{Strings.vt-only-by} \{root.u.reader}";
+                    muted: true;
+                }
+            }
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+            if root.u.mine: AppButton {
+                emoji: root.shown ? "🙈" : "👁️";
+                label: root.shown ? Strings.vt-hide : Strings.vt-reveal;
+                pad: 10px;
+                clicked => {
+                    root.shown = !root.shown;
+                }
+            }
+        }
+        if root.u.mine: Rectangle {
+            background: Theme.bg;
+            border-radius: Theme.win95 ? 0px : 6px;
+            border-width: Theme.border-w;
+            border-color: Theme.line;
+            height: ct.preferred-height + 16px;
+            ct := Text {
+                x: 10px;
+                y: 8px;
+                width: parent.width - 20px;
+                text: root.shown ? root.u.content : "•••••••••••••••••••••";
+                color: root.shown ? Theme.text : Theme.faint;
+                font-size: Theme.fs-cap;
+                wrap: word-wrap;
+            }
         }
     }
 }
@@ -2028,20 +2205,22 @@ export component VaultPane inherits VerticalLayout {
 
     // sample data — design mock only, never engine state
     property <[MockSecret]> secrets: [
-        { name: "Treasury seed phrase", glyph: "🔑", by: "petra", when: "at the founding", need: 4, total: 4 },
-        { name: "S3 backup credentials", glyph: "🔑", by: "walter", when: "2 w", need: 3, total: 4 },
-        { name: "Emergency contact list", glyph: "📄", by: "mara", when: "1 m", need: 3, total: 4 },
-        { name: "Domain registrar login", glyph: "🔑", by: "petra", when: "3 w", need: 3, total: 4 },
+        { name: "Treasury seed phrase", glyph: "🔑", by: "petra", when: "at the founding", need: 3, total: 4, verified: 4, sealing: false },
+        { name: "S3 backup credentials", glyph: "🔑", by: "walter", when: "2 w", need: 3, total: 4, verified: 4, sealing: false },
+        { name: "Emergency contact list", glyph: "📄", by: "mara", when: "1 m", need: 3, total: 4, verified: 4, sealing: false },
+        { name: "Domain registrar login", glyph: "🔑", by: "petra", when: "2 h", need: 3, total: 4, verified: 2, sealing: true },
     ];
-    property <[MockRelease]> releases: [
-        { secret: "S3 backup credentials", by: "walter", reason: "Rotating the bucket keys after the provider notice.", signed: 2, need: 3, signers: [
+    property <[MockRequest]> requests: [
+        { secret: "S3 backup credentials", reader: "jonas", by: "walter", reason: "Walter hands the bucket ops to jonas.", state: "vote", signed: 2, resealed: 0, need: 3, when: "", signers: [
             { name: "walter", signed: true }, { name: "petra", signed: true }, { name: "mara", signed: false }, { name: "jonas", signed: false }] },
-        { secret: "Emergency contact list", by: "mara", reason: "Yearly check that the numbers still work.", signed: 1, need: 3, signers: [
-            { name: "mara", signed: true }, { name: "petra", signed: false }, { name: "walter", signed: false }, { name: "jonas", signed: false }] },
+        { secret: "Emergency contact list", reader: "petra", by: "mara", reason: "The yearly check that the numbers still work.", state: "unseal", signed: 3, resealed: 2, need: 3, when: "", signers: [
+            { name: "walter", signed: true }, { name: "mara", signed: true }, { name: "jonas", signed: false }] },
+        { secret: "Old relay admin password", reader: "walter", by: "walter", reason: "Rotating the relay after the provider notice.", state: "granted", signed: 3, resealed: 3, need: 3, when: "2 m", signers: [] },
+        { secret: "Treasury seed phrase", reader: "jonas", by: "jonas", reason: "Backup access while petra travels.", state: "denied", signed: 1, resealed: 0, need: 3, when: "3 w", signers: [] },
     ];
-    property <[MockExposed]> exposed: [
-        { name: "Old relay admin password", content: "relay-2025 · root · \"circular-otter-42\"", by: "walter", when: "2 m" },
-        { name: "Budget sheet key (2025)", content: "age1q…8vte - decrypts budget-2025.age in the uploads", by: "petra", when: "5 m" },
+    property <[MockUnsealed]> unsealed: [
+        { name: "Budget sheet key (2025)", reader: "", mine: true, content: "age1q…8vte - decrypts budget-2025.age in the uploads", when: "5 m" },
+        { name: "Old relay admin password", reader: "walter", mine: false, content: "", when: "2 m" },
     ];
 
     if root.view == "secrets": VerticalLayout {
@@ -2069,12 +2248,12 @@ export component VaultPane inherits VerticalLayout {
         }
     }
 
-    if root.view == "disclose": VerticalLayout {
+    if root.view == "requests": VerticalLayout {
         spacing: 8px;
         PaneHeader {
             glyph: "📤";
-            title: Strings.vt-title-disclose;
-            hint: Strings.vt-hint-disclose;
+            title: Strings.vt-title-requests;
+            hint: Strings.vt-hint-requests;
         }
         HorizontalLayout {
             alignment: start;
@@ -2088,106 +2267,22 @@ export component VaultPane inherits VerticalLayout {
             }
         }
         PanePanel {
-            for r in root.releases: Rectangle {
-                background: Theme.panel-2;
-                border-radius: Theme.win95 ? 0px : 10px;
-                border-width: Theme.border-w;
-                border-color: Theme.line;
-                VerticalLayout {
-                    padding: 12px;
-                    spacing: 8px;
-                    HorizontalLayout {
-                        spacing: 8px;
-                        Text {
-                            text: r.secret;
-                            color: Theme.text;
-                            font-size: Theme.fs-body;
-                            font-weight: 700;
-                            overflow: elide;
-                            horizontal-stretch: 1;
-                        }
-                        Text {
-                            text: "\{Strings.vt-requested-by} \{r.by}";
-                            color: Theme.faint;
-                            font-size: Theme.fs-cap;
-                            vertical-alignment: center;
-                        }
-                    }
-                    Text {
-                        text: r.reason;
-                        color: Theme.dim;
-                        font-size: Theme.fs-cap;
-                        wrap: word-wrap;
-                    }
-                    SigMeter {
-                        signed: r.signed;
-                        need: r.need;
-                    }
-                    HorizontalLayout {
-                        spacing: 6px;
-                        alignment: start;
-                        for m in r.signers: TagChip {
-                            glyph: m.signed ? "✍️" : "";
-                            label: m.name;
-                            muted: !m.signed;
-                        }
-                    }
-                }
+            for r in root.requests: RequestCard {
+                r: r;
             }
         }
     }
 
-    if root.view == "exposed": VerticalLayout {
+    if root.view == "unsealed": VerticalLayout {
         spacing: 8px;
         PaneHeader {
             glyph: "🔓";
-            title: Strings.vt-title-exposed;
-            hint: Strings.vt-hint-exposed;
+            title: Strings.vt-title-unsealed;
+            hint: Strings.vt-hint-unsealed;
         }
         PanePanel {
-            for e in root.exposed: Rectangle {
-                background: Theme.panel-2;
-                border-radius: Theme.win95 ? 0px : 10px;
-                border-width: Theme.border-w;
-                border-color: Theme.line;
-                VerticalLayout {
-                    padding: 12px;
-                    spacing: 8px;
-                    HorizontalLayout {
-                        spacing: 8px;
-                        Text {
-                            text: e.name;
-                            color: Theme.text;
-                            font-size: Theme.fs-body;
-                            font-weight: 700;
-                            overflow: elide;
-                            horizontal-stretch: 1;
-                        }
-                        Text {
-                            text: "\{Strings.vt-released-word} · \{Strings.vt-requested-by} \{e.by} · \{e.when}";
-                            color: Theme.faint;
-                            font-size: Theme.fs-cap;
-                            vertical-alignment: center;
-                        }
-                    }
-                    // the revealed content on an inset well
-                    Rectangle {
-                        background: Theme.bg;
-                        border-radius: Theme.win95 ? 0px : 6px;
-                        border-width: Theme.border-w;
-                        border-color: Theme.line;
-                        height: ct.preferred-height + 16px;
-                        ct := Text {
-                            x: 10px;
-                            y: 8px;
-                            width: parent.width - 20px;
-                            text: e.content;
-                            color: Theme.text;
-                            font-size: Theme.fs-cap;
-                            wrap: word-wrap;
-                        }
-                    }
-                }
+            for u in root.unsealed: UnsealedCard {
+                u: u;
             }
         }
     }

@@ -4668,8 +4668,8 @@ fn view_icon(key: &str) -> &'static str {
         "create" => "✨",
         "my-quests" => "🎯",
         "secrets" => "🔐",
-        "disclose" => "📤",
-        "exposed" => "🔓",
+        "requests" => "📤",
+        "unsealed" => "🔓",
         "balance" => "💰",
         "history" => "📜",
         "send" => "📤",
@@ -5927,8 +5927,8 @@ fn view_label(lang: i32, key: &str, en: &str) -> String {
         "create" => "Erstellen",
         "my-quests" => "Meine Quests",
         "secrets" => "Geheimnisse",
-        "disclose" => "Offenlegen",
-        "exposed" => "Offengelegt",
+        "requests" => "Anträge",
+        "unsealed" => "Entsiegelt",
         "balance" => "Kontostand",
         "history" => "Verlauf",
         "send" => "Senden",
@@ -7859,18 +7859,26 @@ lexicon! {
     qb_title_archive: "Closed quests", "Abgeschlossene Quests";
     qb_hint_archive: "Completed and expired quests, kept for the record.", "Erledigte und ausgelaufene Quests, festgehalten fürs Protokoll.";
     vt_title_secrets: "Sealed secrets", "Versiegelte Geheimnisse";
-    vt_hint_secrets: "Encrypted entries no single member can open - release needs the threshold.", "Verschlüsselte Einträge, die kein einzelnes Mitglied öffnen kann - die Freigabe braucht die Schwelle.";
+    vt_hint_secrets: "Encrypted deposits - every seat guards one key share, below the threshold nothing opens.", "Verschlüsselte Einlagen - jeder Sitz hütet einen Schlüssel-Anteil, unterhalb der Schwelle öffnet nichts.";
     vt_seal_new: "Seal a secret", "Geheimnis versiegeln";
     vt_sealed_by: "sealed by", "versiegelt von";
     vt_opens_at: "opens at", "öffnet bei";
-    vt_title_disclose: "Release requests", "Freigabe-Anfragen";
-    vt_hint_disclose: "A member asks for a secret to be released; it opens once the threshold has signed.", "Ein Mitglied bittet um Freigabe eines Geheimnisses; es öffnet sich, sobald die Schwelle signiert hat.";
-    vt_request: "Request release", "Freigabe anfragen";
-    vt_requested_by: "requested by", "angefragt von";
+    vt_sealing: "sealing", "wird versiegelt";
+    vt_verified_word: "verified", "geprüft";
+    vt_title_requests: "Access requests", "Zugriffs-Anträge";
+    vt_hint_requests: "A vote elects the one reader - at the threshold the key shares re-seal to that member alone.", "Ein Vote wählt den einen Leser - ab der Schwelle werden die Schlüssel-Anteile allein auf dieses Mitglied umversiegelt.";
+    vt_request: "Request access", "Zugriff beantragen";
+    vt_requested_by: "requested by", "beantragt von";
     vt_signed_word: "signed", "signiert";
-    vt_title_exposed: "Released secrets", "Offengelegte Geheimnisse";
-    vt_hint_exposed: "Opened by threshold decision - readable by every member, irreversibly.", "Per Schwellen-Entscheid geöffnet - für jedes Mitglied lesbar, unumkehrbar.";
-    vt_released_word: "released", "freigegeben";
+    vt_resealed_word: "re-sealed", "umversiegelt";
+    vt_granted_word: "granted", "erteilt";
+    vt_denied_word: "denied", "abgelehnt";
+    vt_title_unsealed: "Unsealed", "Entsiegelt";
+    vt_hint_unsealed: "Every grant is on record - the content opens only for the elected reader.", "Jede Erteilung steht im Protokoll - der Inhalt öffnet sich nur für den gewählten Leser.";
+    vt_only_you: "readable only by you", "nur für dich lesbar";
+    vt_only_by: "readable only by", "lesbar nur für";
+    vt_reveal: "Reveal", "Anzeigen";
+    vt_hide: "Hide", "Verbergen";
     wl_title_balance: "Treasury balance", "Kassenstand";
     wl_hint_balance: "The shared Monero multisig wallet - no single member can spend from it.", "Die gemeinsame Monero-Multisig-Wallet - kein einzelnes Mitglied kann daraus ausgeben.";
     wl_unlocked: "unlocked", "verfügbar";
