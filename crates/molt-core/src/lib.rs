@@ -5043,6 +5043,12 @@ pub struct UploadView {
     /// This node's live download of the share, if any (requester side).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download: Option<DownloadView>,
+    /// ONE status word for the relay plane (`file_transfer_nostr.md` §5.5):
+    /// `"relay-held"` (a live series stamp is known — downloads need no
+    /// live sharer), `"sharer-only"` (the first download wakes the
+    /// sharer), `"gone"` (withdrawn and not on the relays). Additive.
+    #[serde(default)]
+    pub availability: String,
 }
 
 /// A one-shot status summary of the running group.
