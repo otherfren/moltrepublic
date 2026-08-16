@@ -350,6 +350,23 @@ impl Subscription {
         self.sync_state(timeout).await.full()
     }
 
+    /// `Some(reason)` while NO relay connection is up — the subscription is
+    /// deaf right now (the supervisors keep reconnecting, so this is
+    /// advisory, never terminal). `None` while at least one relay is `Up`.
+    /// The channel itself never closes (reconnect supervisors hold the
+    /// senders), so this health read is the only honest deafness signal.
+    pub async fn deaf(&self) -> Option<String> {
+        let health = self.health.lock().await;
+        let up = self
+            .urls
+            .iter()
+            .filter(|u| matches!(health.get(*u), Some(RelayHealth::Up)))
+            .count();
+        (up == 0).then(|| {
+            format!("no live relay connection (0 of {} up, reconnecting)", self.urls.len())
+        })
+    }
+
     /// How many relays actually replayed, out of how many accepted the REQ.
     ///
     /// `synced()` collapses "none replayed" and "some replayed" into one

@@ -603,15 +603,26 @@ impl CatchupSub {
 
     /// The next valid 445 under one of the catch-up windows. Same strict tag
     /// gate as [`GroupSub::recv`] — and no roll check, by design.
+    ///
+    /// A quiet slice that ends with NO relay connection up returns
+    /// [`GroupRecv::Deaf`], never `Idle` (FP2): "nothing stored" sends the
+    /// caller to the sharer, "no relay reachable" to the network, and the
+    /// two must not conflate. Evaluated only at slice end, so a healed blip
+    /// inside the slice never trips it.
     pub async fn recv(&mut self, timeout: Duration) -> GroupRecv {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let now = tokio::time::Instant::now();
             if now >= deadline {
-                return GroupRecv::Idle;
+                return match self.sub.deaf().await {
+                    Some(why) => GroupRecv::Deaf(why),
+                    None => GroupRecv::Idle,
+                };
             }
             let Some(event) = self.sub.recv(deadline.saturating_duration_since(now)).await else {
-                return GroupRecv::Idle;
+                // slice elapsed (the channel itself never closes — the
+                // reconnect supervisors hold the senders)
+                continue;
             };
             let tags: Vec<Vec<String>> =
                 event.tags.iter().map(|t| t.as_slice().to_vec()).collect();

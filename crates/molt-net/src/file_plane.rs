@@ -166,12 +166,11 @@ pub async fn fetch_series(
                 }
             }
             GroupRecv::Idle => {
-                // Idle covers BOTH "nothing stored" and "no relay reachable"
-                // (the subscription's recv cannot tell them apart today), so
-                // the message must not claim to know which
+                // Idle now guarantees a live relay connection answered the
+                // whole quiet window (a dead pool is Deaf, below) — this is
+                // the honest MISS: retention pruned it, or never published
                 return Err(NetError::Framing(
-                    "no chunk of this series arrived — not on the relays, or no relay reachable"
-                        .to_string(),
+                    "no chunk of this series arrived — the relays do not hold it".to_string(),
                 ));
             }
             GroupRecv::Deaf(why) => {

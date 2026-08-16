@@ -163,3 +163,88 @@ async fn an_absent_series_misses_honestly() {
     .await;
     assert!(err.is_err(), "an absent series is a miss, not a hang");
 }
+
+/// FP2: a subscription whose every relay connection ENDED must surface as
+/// a transport fault, never as the honest miss — "not stored" sends the
+/// user to the sharer, "no relay reachable" sends them to their network,
+/// and conflating the two burns the wrong hour.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dead_relay_mid_fetch_is_a_transport_error_not_a_miss() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokio::net::{TcpListener, TcpStream};
+
+    // minimal cuttable TCP proxy (the nostr_window_roll.rs shape)
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let target = relay.url().await.to_string().trim_start_matches("ws://").to_string();
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind proxy");
+    let port = listener.local_addr().expect("addr").port();
+    let enabled = Arc::new(AtomicBool::new(true));
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let forwards: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    {
+        let (on, n, fw) = (enabled.clone(), accepts.clone(), forwards.clone());
+        tokio::spawn(async move {
+            while let Ok((mut inbound, _)) = listener.accept().await {
+                n.fetch_add(1, Ordering::SeqCst);
+                if !on.load(Ordering::SeqCst) {
+                    drop(inbound);
+                    continue;
+                }
+                let target = target.clone();
+                fw.lock().await.push(tokio::spawn(async move {
+                    if let Ok(mut outbound) = TcpStream::connect(&target).await {
+                        let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                    }
+                }));
+            }
+        });
+    }
+
+    let url = format!("ws://127.0.0.1:{port}");
+    let chan = GroupChannel::new(dialer(), vec![url], SEED);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    let fetch = tokio::spawn(async move {
+        fetch_series(
+            &chan,
+            &[EXPORTER],
+            "ff06",
+            &sha_hex(b"never published"),
+            now,
+            FILE_CAP_DEFAULT_BYTES,
+            // the deaf verdict is evaluated at the END of a quiet slice, so
+            // the slice must outlive the cut below but keep the test fast
+            Some(Duration::from_secs(3)),
+        )
+        .await
+    });
+
+    // wait until the fetch's subscription actually dialed through, give the
+    // REQ a moment to place, then the relay goes away
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while accepts.load(Ordering::SeqCst) == 0 {
+        assert!(tokio::time::Instant::now() < deadline, "the fetch never dialed");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    enabled.store(false, Ordering::SeqCst);
+    for f in forwards.lock().await.drain(..) {
+        f.abort();
+    }
+
+    let err = tokio::time::timeout(Duration::from_secs(15), fetch)
+        .await
+        .expect("a deaf subscription must end the fetch at the quiet slice")
+        .expect("join")
+        .expect_err("a dead relay is an error");
+    let msg = err.to_string();
+    assert!(msg.contains("deaf"), "the error names the transport fault: {msg}");
+    assert!(
+        !msg.contains("no chunk of this series arrived"),
+        "a dead relay must not read as a miss: {msg}"
+    );
+}
