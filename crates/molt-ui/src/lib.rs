@@ -1667,7 +1667,7 @@ pub fn run_app(
                                 let msg = ui.global::<Strings>().get_toast_proposed();
                                 ui.invoke_show_toast(msg);
                             }
-                            Err(e) => ui.invoke_show_toast_error(format!("\u{26a0} {e}").into()),
+                            Err(e) => ui.invoke_show_toast_error(error_toast(&ui, &e)),
                         }
                     });
                 });
@@ -2637,6 +2637,29 @@ fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
 /// the UI thread.
 fn error_toast(ui: &AppWindow, e: &molt_core::MoltError) -> slint::SharedString {
     format!("⚠ {}", localize_error(ui.get_lang_index(), e)).into()
+}
+
+/// The wiki pane's own refusals (E6): GUI-authored one-liners, localized
+/// by phrase with the honest-English fallback. Pinned by a source scan
+/// over `wiki.rs`, so a new `Err("…")` there goes red until it has an arm.
+fn localize_wiki_err(lang: i32, e: &str) -> &str {
+    if lang != 1 {
+        return e;
+    }
+    match e {
+        "unknown folder" => "unbekannter Ordner",
+        "too deep" => "zu tief verschachtelt",
+        "empty name" => "leerer Name",
+        "no path separators" => "keine Pfadtrenner im Namen",
+        "name already taken" => "Name schon vergeben",
+        "unknown file" => "unbekannte Datei",
+        "deleted" => "gelöscht",
+        "into itself" => "nicht in sich selbst",
+        "nothing to undo" => "nichts rückgängig zu machen",
+        "folder not empty" => "Ordner nicht leer",
+        "a draft has no base" => "ein Entwurf hat keine Basis",
+        other => other,
+    }
 }
 
 fn issue_then_toast(
@@ -7072,7 +7095,7 @@ fn wire_wiki(
                     // only act while the model still renames this folder
                     if w.renaming_folder() == Some(old.as_str()) {
                         if let Err(e) = w.rename_folder_commit(&old, &name) {
-                            ui.invoke_show_toast_error(e.into());
+                            ui.invoke_show_toast_error(localize_wiki_err(ui.get_lang_index(), &e).into());
                         }
                     }
                 }
@@ -7111,7 +7134,7 @@ fn wire_wiki(
                 {
                     let mut w = m.borrow_mut();
                     if let Err(e) = w.move_folder_under(&folder, target.as_deref()) {
-                        ui.invoke_show_toast_error(e.into());
+                        ui.invoke_show_toast_error(localize_wiki_err(ui.get_lang_index(), &e).into());
                     }
                 }
                 sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
@@ -7132,7 +7155,7 @@ fn wire_wiki(
                 {
                     let mut w = m.borrow_mut();
                     if let Err(e) = w.move_to(wiki_doc_id(id), None) {
-                        ui.invoke_show_toast_error(e.into());
+                        ui.invoke_show_toast_error(localize_wiki_err(ui.get_lang_index(), &e).into());
                     }
                 }
                 sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
@@ -7153,7 +7176,7 @@ fn wire_wiki(
                 {
                     let mut w = m.borrow_mut();
                     if let Err(e) = w.new_folder_in(&parent) {
-                        ui.invoke_show_toast_error(e.into());
+                        ui.invoke_show_toast_error(localize_wiki_err(ui.get_lang_index(), &e).into());
                     }
                 }
                 sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
@@ -7173,7 +7196,7 @@ fn wire_wiki(
                 {
                     let mut w = m.borrow_mut();
                     if let Err(e) = w.move_folder_to_root(&folder) {
-                        ui.invoke_show_toast_error(e.into());
+                        ui.invoke_show_toast_error(localize_wiki_err(ui.get_lang_index(), &e).into());
                     }
                 }
                 sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
@@ -7201,7 +7224,7 @@ fn wire_wiki(
                     // cancel — only act while the model still renames this id
                     if w.renaming() == Some(id) {
                         if let Err(e) = w.rename_commit(id, &name) {
-                            ui.invoke_show_toast_error(e.into());
+                            ui.invoke_show_toast_error(localize_wiki_err(ui.get_lang_index(), &e).into());
                         }
                     }
                 }
@@ -7229,7 +7252,7 @@ fn wire_wiki(
                 {
                     let mut w = m.borrow_mut();
                     if let Err(e) = w.move_to(wiki_doc_id(id), target.as_deref()) {
-                        ui.invoke_show_toast_error(e.into());
+                        ui.invoke_show_toast_error(localize_wiki_err(ui.get_lang_index(), &e).into());
                     }
                 }
                 sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
@@ -7248,7 +7271,7 @@ fn wire_wiki(
         g.on_cs_undo(move || {
             let Some(ui) = weak.upgrade() else { return };
             if let Err(e) = m.borrow_mut().undo() {
-                ui.invoke_show_toast_error(e.into());
+                ui.invoke_show_toast_error(localize_wiki_err(ui.get_lang_index(), &e).into());
             }
             *la.borrow_mut() = None;
             sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
@@ -7272,7 +7295,7 @@ fn wire_wiki(
         g.on_nav_revert(move |id| {
             let Some(ui) = weak.upgrade() else { return };
             if let Err(e) = m.borrow_mut().revert_doc(wiki_doc_id(id)) {
-                ui.invoke_show_toast_error(e.into());
+                ui.invoke_show_toast_error(localize_wiki_err(ui.get_lang_index(), &e).into());
             }
             *la.borrow_mut() = None;
             sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
@@ -7287,7 +7310,7 @@ fn wire_wiki(
             let active = m.borrow().active_id();
             if let Some(id) = active {
                 if let Err(e) = m.borrow_mut().revert_doc(id) {
-                    ui.invoke_show_toast_error(e.into());
+                    ui.invoke_show_toast_error(localize_wiki_err(ui.get_lang_index(), &e).into());
                 }
             }
             *la.borrow_mut() = None;
@@ -7475,7 +7498,7 @@ fn wire_wiki_vote(
                         let msg = ui.global::<Strings>().get_toast_proposed();
                         ui.invoke_show_toast(msg);
                     }
-                    Err(e) => ui.invoke_show_toast_error(format!("\u{26a0} {e}").into()),
+                    Err(e) => ui.invoke_show_toast_error(error_toast(&ui, &e)),
                 }
             });
         });
@@ -8186,6 +8209,26 @@ lexicon! {
 
 #[cfg(test)]
 mod tests {
+    /// E6: every wiki-side refusal literal renders German — pinned against
+    /// the SOURCE, so a new `Err("…")` in wiki.rs goes red here until it
+    /// gets an arm in `localize_wiki_err`.
+    #[test]
+    fn every_wiki_error_renders_german() {
+        let src = include_str!("wiki.rs");
+        let mut found = 0;
+        for part in src.split("Err(\"").skip(1) {
+            let lit = part.split('"').next().expect("literal terminates");
+            found += 1;
+            let de = super::localize_wiki_err(1, lit);
+            assert_ne!(de, lit, "wiki error without a German arm: {lit:?}");
+            assert!(!de.is_empty());
+        }
+        assert!(found >= 20, "the wiki.rs error scan found only {found} sites");
+        // honest fallback + non-German identity
+        assert_eq!(super::localize_wiki_err(1, "some new error"), "some new error");
+        assert_eq!(super::localize_wiki_err(0, "unknown folder"), "unknown folder");
+    }
+
     /// E3 coverage: every headline phrase the engine can emit has a
     /// German rendering — a new phrase without one goes red here instead
     /// of silently showing English in the German UI. (The engine pins the
