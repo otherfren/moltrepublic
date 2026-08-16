@@ -2026,7 +2026,7 @@ pub fn roster_canonical_bytes(
         b"molt-roster-v4\0".as_slice()
     });
     let id = ws_id.as_bytes();
-    out.extend_from_slice(&u32::try_from(id.len()).unwrap_or(0).to_le_bytes());
+    out.extend_from_slice(&u32::try_from(id.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
     out.extend_from_slice(id);
     out.push(rule_m);
     out.push(rule_n);
@@ -2036,44 +2036,44 @@ pub fn roster_canonical_bytes(
     // collides — a one-member table byte-matches a zero-member table whose
     // agenda and relay absorb the same bytes. Same class as the separator-only
     // `republic_id` that let a forged larger founding table collide.
-    out.extend_from_slice(&u32::try_from(members.len()).unwrap_or(0).to_le_bytes());
+    out.extend_from_slice(&u32::try_from(members.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
     for m in members {
         let name = m.member.as_bytes();
-        out.extend_from_slice(&u32::try_from(name.len()).unwrap_or(0).to_le_bytes());
+        out.extend_from_slice(&u32::try_from(name.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
         out.extend_from_slice(name);
         let pk = m.identity_pk.as_bytes();
-        out.extend_from_slice(&u32::try_from(pk.len()).unwrap_or(0).to_le_bytes());
+        out.extend_from_slice(&u32::try_from(pk.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
         out.extend_from_slice(pk);
         // the third anchor rides inside each member's length-prefixed run;
         // a legacy (empty) value length-prefixes as 0 — no special casing
         // that could collide two different rosters onto one byte form
         let npk = m.nostr_pk.as_bytes();
-        out.extend_from_slice(&u32::try_from(npk.len()).unwrap_or(0).to_le_bytes());
+        out.extend_from_slice(&u32::try_from(npk.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
         out.extend_from_slice(npk);
     }
     // the deliberated charter (DAO name is already folded into the republic id
     // that salts ws_id; the free-text agenda is bound here) — every member's
     // seal signature is its ratification of exactly these bytes
     let ag = agenda.as_bytes();
-    out.extend_from_slice(&u32::try_from(ag.len()).unwrap_or(0).to_le_bytes());
+    out.extend_from_slice(&u32::try_from(ag.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
     out.extend_from_slice(ag);
     // the group's relay pool: entry-COUNTED then each entry length-prefixed,
     // so the preimage stays injective for any pool content and the field
     // cannot be extended by a longer neighbour
-    out.extend_from_slice(&u32::try_from(relays.len()).unwrap_or(0).to_le_bytes());
+    out.extend_from_slice(&u32::try_from(relays.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
     for r in relays {
         let b = r.as_bytes();
-        out.extend_from_slice(&u32::try_from(b.len()).unwrap_or(0).to_le_bytes());
+        out.extend_from_slice(&u32::try_from(b.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
         out.extend_from_slice(b);
     }
     // v5: the ratified feature set — entry-COUNTED then each key
     // length-prefixed, like the relay run. Written only when present, so a
     // legacy (None) table stays byte-identical to v4.
     if let Some(f) = features {
-        out.extend_from_slice(&u32::try_from(f.len()).unwrap_or(0).to_le_bytes());
+        out.extend_from_slice(&u32::try_from(f.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
         for k in f {
             let b = k.as_bytes();
-            out.extend_from_slice(&u32::try_from(b.len()).unwrap_or(0).to_le_bytes());
+            out.extend_from_slice(&u32::try_from(b.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
             out.extend_from_slice(b);
         }
     }
@@ -2698,15 +2698,14 @@ impl InviteInfo {
     }
 }
 
-/// Tiny demo PRNGs behind every mock generator in the workspace. This is
-/// NOT cryptography — it feeds simulations (seeds, tickets, reply timing).
+/// Tiny non-crypto PRNG. This is NOT cryptography and must never touch a
+/// key, nonce, ticket or secret (a caller once derived tickets from the
+/// deleted LCG sibling — the exact misuse this doc exists to stop; use
+/// `getrandom` for anything an adversary must not predict). Hidden from
+/// rustdoc so the RNG-free contract crate does not advertise an RNG; the
+/// call-site allowlist is pinned by `tests/guards.rs`.
+#[doc(hidden)]
 pub mod mockrand {
-    /// One LCG step (Knuth's MMIX constants).
-    pub fn lcg(x: u64) -> u64 {
-        x.wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407)
-    }
-
     /// One xorshift64 step, advancing the seed in place.
     pub fn xorshift(seed: &mut u64) -> u64 {
         *seed ^= *seed << 13;

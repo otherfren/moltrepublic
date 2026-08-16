@@ -985,10 +985,17 @@ where
     };
     // independent uniform jitter before this send's dispatch (§5); it
     // delays, it never reorders within one member (this task is the
-    // per-member sub-queue)
+    // per-member sub-queue). Drawn from the OS RNG (L12): xorshift64 is
+    // invertible from a few observed outputs, so a timing observer could
+    // reconstruct the schedule this jitter exists to blur; the xorshift
+    // stays only as the never-fails fallback.
     if cfg.jitter_max_ms > 0 {
-        let jitter = mockrand::xorshift(rng) % (cfg.jitter_max_ms + 1);
-        tokio::time::sleep(Duration::from_millis(jitter)).await;
+        let mut b = [0u8; 8];
+        let draw = match getrandom::getrandom(&mut b) {
+            Ok(()) => u64::from_le_bytes(b),
+            Err(_) => mockrand::xorshift(rng),
+        };
+        tokio::time::sleep(Duration::from_millis(draw % (cfg.jitter_max_ms + 1))).await;
     }
     for chunk in chunks {
         let block = match wrap(&peer.wrap_out, &chunk) {

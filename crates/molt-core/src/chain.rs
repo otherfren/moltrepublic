@@ -178,7 +178,7 @@ pub struct ChainBlock {
 /// Append a `u32`-length-prefixed byte string (same framing as
 /// [`roster_canonical_bytes`], so the layouts stay siblings).
 fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
-    out.extend_from_slice(&u32::try_from(b.len()).unwrap_or(0).to_le_bytes());
+    out.extend_from_slice(&u32::try_from(b.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
     out.extend_from_slice(b);
 }
 
@@ -223,7 +223,7 @@ pub fn approval_bytes(republic_id: &str, height: u64, change: &ChainChange) -> V
             put_bytes(&mut out, surface.as_str().as_bytes());
             // serde_json has no `preserve_order` here, so `Value::Object` is a
             // BTreeMap and this serialization is canonical across members.
-            put_bytes(&mut out, &serde_json::to_vec(payload).unwrap_or_default());
+            put_bytes(&mut out, &serde_json::to_vec(payload).expect("a serde_json::Value serializes - an empty frame would sign a different payload"));
             out
         }
         ChainChange::Membership {
@@ -262,7 +262,7 @@ pub fn approval_bytes(republic_id: &str, height: u64, change: &ChainChange) -> V
             // (the marker occupies a position no v2 preimage ever wrote).
             if !relays.is_empty() {
                 out.push(1);
-                out.extend_from_slice(&u64::try_from(relays.len()).unwrap_or(0).to_le_bytes());
+                out.extend_from_slice(&u64::try_from(relays.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
                 for r in relays {
                     put_bytes(&mut out, r.as_bytes());
                 }
@@ -466,7 +466,7 @@ pub fn checkpoint_canonical_bytes(s: &CheckpointState) -> Vec<u8> {
     put_bytes(&mut out, s.founding_name.as_bytes());
     out.push(s.rule_m);
     out.push(s.rule_n);
-    out.extend_from_slice(&u64::try_from(s.founding_identities.len()).unwrap_or(0).to_le_bytes());
+    out.extend_from_slice(&u64::try_from(s.founding_identities.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
     for i in &s.founding_identities {
         put_bytes(&mut out, i.member.as_bytes());
         put_bytes(&mut out, i.identity_pk.as_bytes());
@@ -477,19 +477,19 @@ pub fn checkpoint_canonical_bytes(s: &CheckpointState) -> Vec<u8> {
     // says nothing about who can reach whom, and the tamper-evidence
     // roster-v4 gives the genesis vanishes the moment the genesis is dropped
     // — exactly what the v1→v2 bump fixed for the third anchor.
-    out.extend_from_slice(&u64::try_from(s.relays.len()).unwrap_or(0).to_le_bytes());
+    out.extend_from_slice(&u64::try_from(s.relays.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
     for r in &s.relays {
         put_bytes(&mut out, r.as_bytes());
     }
     // v7: the ratified founding feature set (see the field's own doc).
     // Written only when present, so a v6 state stays byte-identical.
     if let Some(features) = &s.founding_features {
-        out.extend_from_slice(&u64::try_from(features.len()).unwrap_or(0).to_le_bytes());
+        out.extend_from_slice(&u64::try_from(features.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
         for f in features {
             put_bytes(&mut out, f.as_bytes());
         }
     }
-    out.extend_from_slice(&u64::try_from(s.roster.len()).unwrap_or(0).to_le_bytes());
+    out.extend_from_slice(&u64::try_from(s.roster.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
     for i in &s.roster {
         put_bytes(&mut out, i.member.as_bytes());
         put_bytes(&mut out, i.identity_pk.as_bytes());
@@ -497,29 +497,29 @@ pub fn checkpoint_canonical_bytes(s: &CheckpointState) -> Vec<u8> {
     }
     for (surface, entries) in &s.applied {
         put_bytes(&mut out, surface.as_str().as_bytes());
-        out.extend_from_slice(&u64::try_from(entries.len()).unwrap_or(0).to_le_bytes());
+        out.extend_from_slice(&u64::try_from(entries.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
         for (id, payload) in entries {
             out.extend_from_slice(&id.to_le_bytes());
-            put_bytes(&mut out, &serde_json::to_vec(payload).unwrap_or_default());
+            put_bytes(&mut out, &serde_json::to_vec(payload).expect("a serde_json::Value serializes - an empty frame would sign a different payload"));
         }
     }
-    out.extend_from_slice(&u64::try_from(s.consumed_ids.len()).unwrap_or(0).to_le_bytes());
+    out.extend_from_slice(&u64::try_from(s.consumed_ids.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
     for id in &s.consumed_ids {
         out.extend_from_slice(&id.to_le_bytes());
     }
     // v5: the working transport anchors. Without them a cut silently strands
     // every seat that had recovered (see the field's own doc).
-    out.extend_from_slice(&u64::try_from(s.anchors.len()).unwrap_or(0).to_le_bytes());
+    out.extend_from_slice(&u64::try_from(s.anchors.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
     for (member, pk) in &s.anchors {
         put_bytes(&mut out, member.as_bytes());
         put_bytes(&mut out, pk.as_bytes());
     }
     // v6: the relay ledger. Without it a cut forgets every declared
     // reachability (see the field's own doc).
-    out.extend_from_slice(&u64::try_from(s.member_relays.len()).unwrap_or(0).to_le_bytes());
+    out.extend_from_slice(&u64::try_from(s.member_relays.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
     for (member, relays) in &s.member_relays {
         put_bytes(&mut out, member.as_bytes());
-        out.extend_from_slice(&u64::try_from(relays.len()).unwrap_or(0).to_le_bytes());
+        out.extend_from_slice(&u64::try_from(relays.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
         for r in relays {
             put_bytes(&mut out, r.as_bytes());
         }
@@ -598,6 +598,57 @@ mod tests {
 
     /// A small, hand-built checkpoint state — the fixture the byte pin and
     /// the slot tests share.
+    /// L14 guard: `Surface::ALL` and the checkpoint tag must move
+    /// TOGETHER. The applied section emits one group per `Surface::ALL`
+    /// entry (empty ones included — `genesis_base` shapes every real
+    /// state that way), so a 7th surface changes every checkpoint
+    /// preimage; under an unchanged tag, old and new builds then hash the
+    /// same chain differently and diverge silently. This test goes red on
+    /// the surface-set edit so the tag bump lands in the SAME commit.
+    #[test]
+    fn the_checkpoint_tag_binds_the_surface_set() {
+        assert_eq!(
+            Surface::ALL.map(|s| s.as_str()),
+            ["organization", "chat", "memory", "quests", "vault", "wallet"],
+            "Surface::ALL changed — every checkpoint preimage changed with \
+             it; bump the checkpoint tag in THIS commit"
+        );
+        // a real (genesis_base-shaped) state carries one applied group per
+        // surface, empty ones included — pin that the bytes really contain
+        // one length-prefixed group key per Surface::ALL entry
+        let mut s = pinned_state();
+        s.applied = Surface::ALL
+            .into_iter()
+            .map(|sf| {
+                (
+                    sf,
+                    if sf == Surface::Organization {
+                        vec![(7, json!({ "op": "set_name", "value": "X" }))]
+                    } else {
+                        Vec::new()
+                    },
+                )
+            })
+            .collect();
+        let bytes = checkpoint_canonical_bytes(&s);
+        assert!(
+            bytes.starts_with(b"molt-chain-checkpoint-v6\0"),
+            "the surface set and the checkpoint tag move together"
+        );
+        for sf in Surface::ALL {
+            let mut needle = Vec::new();
+            let name = sf.as_str().as_bytes();
+            needle.extend_from_slice(
+                &u32::try_from(name.len()).expect("short name").to_le_bytes(),
+            );
+            needle.extend_from_slice(name);
+            assert!(
+                bytes.windows(needle.len()).any(|w| w == needle),
+                "the applied section must carry a group for {sf:?}"
+            );
+        }
+    }
+
     fn pinned_state() -> CheckpointState {
         CheckpointState {
             founding_name: "Chess Club".to_string(),

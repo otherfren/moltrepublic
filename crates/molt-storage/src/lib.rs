@@ -297,16 +297,16 @@ pub fn republic_id(
     pairs.sort_unstable();
     let mut h = Sha256::new_with_prefix(b"molt-republic-id-v2\0");
     let name = name.as_bytes();
-    h.update(u32::try_from(name.len()).unwrap_or(0).to_le_bytes());
+    h.update(u32::try_from(name.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
     h.update(name);
     h.update([rule_m, rule_n]);
-    h.update(u32::try_from(pairs.len()).unwrap_or(0).to_le_bytes());
+    h.update(u32::try_from(pairs.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
     for (pk, npk) in pairs {
         let pk = pk.as_bytes();
-        h.update(u32::try_from(pk.len()).unwrap_or(0).to_le_bytes());
+        h.update(u32::try_from(pk.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
         h.update(pk);
         let npk = npk.as_bytes();
-        h.update(u32::try_from(npk.len()).unwrap_or(0).to_le_bytes());
+        h.update(u32::try_from(npk.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
         h.update(npk);
     }
     hex::encode(h.finalize())
