@@ -624,10 +624,9 @@ pub fn run_app(
                         let _ = w.execute(Command::Navigate { screen }).await;
                     }
                     Err(e) => {
-                        let msg = format!("⚠ {e}");
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = weak.upgrade() {
-                                ui.invoke_show_toast_error(msg.into());
+                                ui.invoke_show_toast_error(error_toast(&ui, &e));
                             }
                         });
                     }
@@ -1174,11 +1173,10 @@ pub fn run_app(
             };
             rt.spawn(async move {
                 if let Err(e) = w.execute(cmd).await {
-                    let msg = format!("⚠ {e}");
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade() {
                             ui.set_jw_starting(false);
-                            ui.invoke_show_toast_error(msg.into());
+                            ui.invoke_show_toast_error(error_toast(&ui, &e));
                         }
                     });
                 }
@@ -1327,7 +1325,12 @@ pub fn run_app(
                 Ok(ch) => ch,
                 Err(e) => {
                     if let Some(ui) = weak.upgrade() {
-                        ui.invoke_show_toast_error(format!("⚠ {e}").into());
+                        // a normalization refusal is a plain String — wrap
+                        // it as the payload error it is, so it localizes
+                        ui.invoke_show_toast_error(error_toast(
+                            &ui,
+                            &molt_core::MoltError::BadPayload(e),
+                        ));
                     }
                     return;
                 }
@@ -1431,10 +1434,9 @@ pub fn run_app(
                     channel,
                 };
                 if let Err(e) = w.execute(cmd).await {
-                    let msg = format!("⚠ {e}");
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade() {
-                            ui.invoke_show_toast_error(msg.into());
+                            ui.invoke_show_toast_error(error_toast(&ui, &e));
                         }
                     });
                 }
@@ -1463,10 +1465,9 @@ pub fn run_app(
                     dest: Some(dest.path().display().to_string()),
                 };
                 if let Err(e) = w.execute(cmd).await {
-                    let msg = format!("⚠ {e}");
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade() {
-                            ui.invoke_show_toast_error(msg.into());
+                            ui.invoke_show_toast_error(error_toast(&ui, &e));
                         }
                     });
                 }
@@ -2549,6 +2550,95 @@ fn read_settings_draft(ui: &AppWindow, stored_cap: u64) -> SessionSettings {
 /// moment the button was pressed, and a command that then failed showed the
 /// user success followed by an error, for a proposal that never existed.
 /// The confirmation belongs to the outcome, not to the intent.
+/// E3 (`i18n_error_codes_plan.md`): the wizard headline, localized BY
+/// PHRASE — the engine's English phrase is the stable key (one inventory,
+/// `molt_engine::known_headlines`, pinned producible engine-side). An
+/// unknown phrase renders as itself: honest English fallback instead of
+/// silence, and the coverage test below keeps the map complete.
+fn localize_headline(lang: i32, phrase: &str) -> String {
+    if lang != 1 || phrase.is_empty() {
+        return phrase.to_string();
+    }
+    match phrase {
+        "No shared relay" => "Kein gemeinsames Relay",
+        "Clearnet dialing is off" => "Clearnet-Verbindungen sind aus",
+        "Relay check running" => "Relay-Prüfung läuft",
+        "No dialable relay" => "Kein wählbares Relay",
+        "Relay not answering" => "Relay antwortet nicht",
+        "No relay configured" => "Kein Relay konfiguriert",
+        "No relay confirmed" => "Kein Relay bestätigt",
+        "Tor cannot reach the relay" => "Tor erreicht das Relay nicht",
+        "No answer in time" => "Keine Antwort rechtzeitig",
+        "No relay took it" => "Kein Relay hat es angenommen",
+        "Invite already used" => "Einladung bereits benutzt",
+        "The founder ended it" => "Der Gründer hat es beendet",
+        "The founder refused it" => "Der Gründer hat es abgelehnt",
+        "Workspace already exists" => "Workspace existiert bereits",
+        "Cannot decrypt the backup" => "Backup lässt sich nicht entschlüsseln",
+        "Chain does not verify" => "Chain verifiziert nicht",
+        "Backup carries no chain" => "Backup trägt keine Chain",
+        "No seat in this roster" => "Kein Sitz in diesem Roster",
+        "Workspace is open" => "Workspace ist geöffnet",
+        "Cannot read the file" => "Datei lässt sich nicht lesen",
+        "Backup file too big" => "Backup-Datei zu groß",
+        "No backup in the bucket" => "Kein Backup im Bucket",
+        "Download failed" => "Download fehlgeschlagen",
+        other => return other.to_string(),
+    }
+    .to_string()
+}
+
+/// E2 (`i18n_error_codes_plan.md`): render a [`MoltError`] in the ACTIVE
+/// language. English stays the engine `Display` verbatim (MCP parity);
+/// the German arms are authored here, compact, with engine-diagnostic
+/// free-text tails carried through untouched. The match deliberately has
+/// NO wildcard — a new variant fails compilation here until it gets a
+/// German arm (the plan's coverage rule, in compiler form).
+fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
+    use molt_core::MoltError as E;
+    if lang != 1 {
+        return e.to_string();
+    }
+    match e {
+        E::UnknownProposal(id) => format!("Unbekannter Vorschlag #{}", id.0),
+        E::ChatNotGated => "Chat ist ungated - zum Schreiben den Chat-Befehl nutzen, nicht propose".to_string(),
+        E::BadPayload(t) => format!("Ungültige Payload: {t}"),
+        E::FeatureDisabled(k) => format!("{k}: nicht aktiviert"),
+        E::AlreadyTerminal(id, st) => format!("Vorschlag #{} ist bereits {st:?}", id.0),
+        E::NotTheProposer(id) => format!("Vorschlag #{}: nur wer vorschlägt, zieht zurück", id.0),
+        E::AlreadyApproved(id) => format!(
+            "Vorschlag #{} trägt die Zustimmung dieses Nodes bereits - die übrigen Stimmen müssen von den Mitgliedern selbst kommen",
+            id.0
+        ),
+        E::AlreadyDeclined(id) => format!("Vorschlag #{} trägt die Ablehnung dieses Mitglieds bereits", id.0),
+        E::DiscussionClosed(id, st) => format!("Diskussion zu Vorschlag #{} ist schreibgeschützt - der Vote ist {st:?}", id.0),
+        E::Settings(t) => format!("Einstellungen: {t}"),
+        E::UnknownWorkspace(w) => format!("Unbekannter Workspace `{w}`"),
+        E::WorkspaceBusy(t) => format!("Workspace ist belegt: {t}"),
+        E::WorkspaceEncrypted(w) => format!("Workspace `{w}` ist versiegelt - erst entsiegeln"),
+        E::Storage(t) => format!("Speicher: {t}"),
+        E::UnknownView(sf, v) => format!("Surface {sf:?} hat keine Ansicht `{v}`"),
+        E::UnknownMessage(id) => format!("Unbekannte Chat-Nachricht {id}"),
+        E::NoFile(id) => format!("Nachricht {id} trägt keine geteilte Datei"),
+        E::FileUnavailable(id) => format!("Die geteilte Datei an {id} ist nicht mehr verfügbar"),
+        E::FileExpired(id) => format!("Die geteilte Datei an {id} ist aus dem Aufbewahrungsfenster gealtert"),
+        E::NotYourFile(_) => "Nur wer die Datei geteilt hat, kann sie entfernen".to_string(),
+        E::NotYourMessage(_) => "Nur wer die Nachricht geschrieben hat, kann sie löschen".to_string(),
+        E::Restore(t) => format!("Restore: {t}"),
+        E::Create(t) => format!("Gründung: {t}"),
+        E::Join(t) => format!("Beitritt: {t}"),
+        E::Recover(t) => format!("Recovery: {t}"),
+        E::Engine(t) => format!("Engine: {t}"),
+    }
+}
+
+/// The one way an engine error becomes toast copy: ⚠ + the localized
+/// rendering (E2). Reads the language off the window, so it must run on
+/// the UI thread.
+fn error_toast(ui: &AppWindow, e: &molt_core::MoltError) -> slint::SharedString {
+    format!("⚠ {}", localize_error(ui.get_lang_index(), e)).into()
+}
+
 fn issue_then_toast(
     rt: &Handle,
     wallet: &WalletHandle,
@@ -2564,7 +2654,7 @@ fn issue_then_toast(
             let Some(ui) = weak.upgrade() else { return };
             match outcome {
                 Ok(_) => ui.invoke_show_toast(toast.into()),
-                Err(e) => ui.invoke_show_toast_error(format!("⚠ {e}").into()),
+                Err(e) => ui.invoke_show_toast_error(error_toast(&ui, &e)),
             }
         });
     });
@@ -2578,10 +2668,9 @@ fn issue(rt: &Handle, wallet: &WalletHandle, weak: &slint::Weak<AppWindow>, cmd:
     let weak = weak.clone();
     rt.spawn(async move {
         if let Err(e) = w.execute(cmd).await {
-            let msg = format!("⚠ {e}");
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
-                    ui.invoke_show_toast_error(msg.into());
+                    ui.invoke_show_toast_error(error_toast(&ui, &e));
                 }
             });
         }
@@ -3238,7 +3327,7 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     ui.set_rw_outcome(i32::from(sv.restore.run.outcome));
     sync_strings(&ui.get_rw_log(), &sv.restore.run.log, |m| ui.set_rw_log(m));
     sync_log_tones(&ui.get_rw_log_tone(), &sv.restore.run.log, |m| ui.set_rw_log_tone(m));
-    ui.set_rw_headline(sv.restore.run.headline.clone().into());
+    ui.set_rw_headline(localize_headline(ui.get_lang_index(), &sv.restore.run.headline).into());
 
     // founding ritual; the run header is composed here so an MCP-started
     // founding shows real values even with an empty local form
@@ -3256,7 +3345,7 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     );
     sync_strings(&ui.get_cw_log(), &sv.create.run.log, |m| ui.set_cw_log(m));
     sync_log_tones(&ui.get_cw_log_tone(), &sv.create.run.log, |m| ui.set_cw_log_tone(m));
-    ui.set_cw_headline(sv.create.run.headline.clone().into());
+    ui.set_cw_headline(localize_headline(ui.get_lang_index(), &sv.create.run.headline).into());
     // a declined seat switches the failure banner to "the founding is over"
     ui.set_cw_declined(sv.create.seats.iter().any(|s| s.state == 3));
     // the ritual member list: founder plus one row per seat. The founder
@@ -3355,7 +3444,7 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     ui.set_jw_feat_wallet(jw_feat("wallet"));
     sync_strings(&ui.get_jw_log(), &sv.join.run.log, |m| ui.set_jw_log(m));
     sync_log_tones(&ui.get_jw_log_tone(), &sv.join.run.log, |m| ui.set_jw_log_tone(m));
-    ui.set_jw_headline(sv.join.run.headline.clone().into());
+    ui.set_jw_headline(localize_headline(ui.get_lang_index(), &sv.join.run.headline).into());
 }
 
 /// What a `molt://…` link in the Restore wizard's one link field turns out
@@ -8047,6 +8136,37 @@ lexicon! {
 
 #[cfg(test)]
 mod tests {
+    /// E3 coverage: every headline phrase the engine can emit has a
+    /// German rendering — a new phrase without one goes red here instead
+    /// of silently showing English in the German UI. (The engine pins the
+    /// inventory producible; this pins it translated.)
+    #[test]
+    fn every_engine_headline_has_a_german_rendering() {
+        for phrase in molt_engine::known_headlines() {
+            let de = super::localize_headline(1, phrase);
+            assert_ne!(
+                &de, phrase,
+                "phrase without a German arm: {phrase}"
+            );
+            assert!(!de.is_empty());
+        }
+        // …and the honest fallback: unknown phrases render as themselves
+        assert_eq!(super::localize_headline(1, "Brand new phrase"), "Brand new phrase");
+        assert_eq!(super::localize_headline(0, "No shared relay"), "No shared relay");
+    }
+
+    /// E2: the error toast renders in the active language, and the match
+    /// carries NO wildcard — a new MoltError variant fails compilation in
+    /// `localize_error` until it gets a German arm.
+    #[test]
+    fn engine_errors_render_in_the_active_language() {
+        let e = molt_core::MoltError::UnknownProposal(molt_core::ProposalId(7));
+        assert_eq!(super::localize_error(0, &e), e.to_string(), "EN = engine Display (MCP parity)");
+        assert_eq!(super::localize_error(1, &e), "Unbekannter Vorschlag #7");
+        let e = molt_core::MoltError::WorkspaceEncrypted("R".to_string());
+        assert!(super::localize_error(1, &e).contains("versiegelt"));
+    }
+
     /// R1 (relay_topology_plan): the create wizard states rule 1 — ONE
     /// relay every member can reach (the join runs over the INTERSECTION;
     /// "identical pool" was a stricter, false rule that contradicted the

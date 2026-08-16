@@ -40,6 +40,7 @@ mod nostr_ritual;
 mod proposals;
 mod recovery;
 mod relay_msg;
+pub use relay_msg::known_headlines;
 mod session;
 mod transfer;
 

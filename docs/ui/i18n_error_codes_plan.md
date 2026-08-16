@@ -1,10 +1,19 @@
 # Error codes: making every engine-composed string localizable
 
-Status: **PLAN — ratified 2026-08-09 (full scope).** Execution order below;
-each etappe lands green on master on its own. The audit that motivates this
-is `i18n_error_audit.md` — engine-composed English reaches users through
-~35 toast paths, the wizard headline layer, notices and the run-log, and
-the GUI lexicon structurally cannot reach it.
+Status: **E1–E3 BUILT (2026-08-16); E4–E6 open.** E1 landed in compiler
+form: `molt-ui::localize_error` matches every `MoltError` variant with NO
+wildcard, so a new variant fails compilation until it gets a German arm
+(EN stays the engine `Display` verbatim — MCP parity; free-text tails ride
+through untouched). E2: both toast funnels and the five direct toast
+sites render through it, in the window's active language. E3 landed
+phrase-as-key instead of a parallel key field: the engine exports its
+headline inventory (`molt_engine::known_headlines`, pinned PRODUCIBLE by
+`every_known_headline_is_producible`), the GUI localizes by phrase with
+an honest English fallback, and
+`every_engine_headline_has_a_german_rendering` keeps the map complete —
+no wire change, agents keep reading English. Open: E4 (typed notices),
+E5 (run-log lines), E6's remaining fill (the notice/log vocabularies).
+The audit that motivates this is `i18n_error_audit.md`.
 
 ## Architecture
 

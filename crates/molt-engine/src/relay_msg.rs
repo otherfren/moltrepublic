@@ -179,6 +179,42 @@ pub(crate) fn republic_relay_reason(verdicts: &[InviteRelayVerdict]) -> String {
 /// (`pool_gap_reason`, `join_relay_refusal`) rather than from re-typed
 /// sentences, so a reworded message breaks the test instead of silently
 /// killing an arm.
+/// Every headline phrase the three classifiers can emit (E3): the GUI
+/// localizes BY PHRASE — the English phrase is the stable key — and its
+/// coverage test walks exactly this list, so a new arm without a German
+/// mapping goes red instead of silently rendering English. Pinned
+/// producible by `every_known_headline_is_producible`.
+pub fn known_headlines() -> &'static [&'static str] {
+    &[
+        // network vocabulary (both legs)
+        "No shared relay",
+        "Clearnet dialing is off",
+        "Relay check running",
+        "No dialable relay",
+        "Relay not answering",
+        "No relay configured",
+        "No relay confirmed",
+        "Tor cannot reach the relay",
+        "No answer in time",
+        // the founding/join leg
+        "No relay took it",
+        "Invite already used",
+        "The founder ended it",
+        "The founder refused it",
+        "Workspace already exists",
+        // the restore leg
+        "Cannot decrypt the backup",
+        "Chain does not verify",
+        "Backup carries no chain",
+        "No seat in this roster",
+        "Workspace is open",
+        "Cannot read the file",
+        "Backup file too big",
+        "No backup in the bucket",
+        "Download failed",
+    ]
+}
+
 pub(crate) fn headline_for(error: &str) -> String {
     let e = error.to_ascii_lowercase();
     // the leg's OWN anchored phrases decide first; the network vocabulary is
@@ -300,6 +336,53 @@ mod tests {
 
     fn entry(url: &str, confirmed: bool) -> RelayEntry {
         RelayEntry { url: url.to_string(), confirmed }
+    }
+
+    /// E3: every phrase in [`known_headlines`] is really producible by
+    /// one of the three classifiers — the GUI's German coverage walks
+    /// that list, so a phrase that fell out of the classifiers (or an arm
+    /// missing from the list) must fail HERE, not render silently.
+    #[test]
+    fn every_known_headline_is_producible() {
+        let inputs: &[&str] = &[
+            "no relay in common with this invite",
+            "clearnet/local dialing off (x)",
+            "the confirmation is still verifying",
+            "no dialable relay for this invite",
+            "inbox not readable on any relay",
+            "no relay configured",
+            "no relay confirmed",
+            "tor circuit failed",
+            "the request timed out",
+            "the seal did not publish",
+            "this invite was already used",
+            "the founder ended this founding",
+            "the founder refused this activation",
+            "a workspace of this name already exists",
+        ];
+        let restore_inputs: &[&str] = &[
+            "crypto: frame does not authenticate",
+            "chain verification failed",
+            "the blob carries no verifiable chain",
+            "this seed holds no seat in the roster",
+            "the workspace is currently open",
+            "reading /tmp/x: permission denied",
+            "file is 9 bytes — beyond the 5-byte cap",
+            "no backup for workspace x",
+            "download failed: 404",
+        ];
+        let mut produced: Vec<String> = inputs
+            .iter()
+            .map(|e| headline_for(e))
+            .chain(restore_inputs.iter().map(|e| restore_headline_for(e)))
+            .filter(|h| !h.is_empty())
+            .collect();
+        produced.sort_unstable();
+        produced.dedup();
+        let mut known: Vec<String> =
+            known_headlines().iter().map(|s| (*s).to_string()).collect();
+        known.sort_unstable();
+        assert_eq!(produced, known, "the list and the classifiers move together");
     }
 
     /// R2 residual: the MIXED-fault headline (unconfirmed + unknown, no
