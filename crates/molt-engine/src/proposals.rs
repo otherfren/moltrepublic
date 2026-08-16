@@ -38,7 +38,7 @@ pub(crate) const PARKED_DECLINES_PER_MEMBER_MAX: usize = 64;
 /// still park: a real decline references an id some proposer minted and
 /// gossiped, so anything far past `next_id` is garbage — and bounding it
 /// keeps a hostile id (u64::MAX) from poisoning the mint counter.
-const PARKED_DECLINE_ID_WINDOW: u64 = 1024;
+pub(crate) const PARKED_DECLINE_ID_WINDOW: u64 = 1024;
 
 /// What registering a decline did. The wire ingest emits from this; the log
 /// applier ignores it (replay must not ring frontends).

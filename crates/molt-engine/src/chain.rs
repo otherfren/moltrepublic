@@ -39,6 +39,15 @@ pub(crate) const AUTO_CHECKPOINT_MIN_LEN: usize = 32;
 /// chain-governed republic (never persisted; rebuilt from gossip). The
 /// committer bundles these into a block once `sigs` reaches the threshold. A
 /// re-base (the head advanced past `height`) clears it and re-signs.
+/// L3: open cards one proposer may hold at once — a flooding member can
+/// only crowd itself (the shed card is re-earned by the WP2 re-serve).
+const OPEN_CARDS_PER_PROPOSER_MAX: usize = 64;
+
+/// L3: how far past the head a buffered future block may claim to be, and
+/// the buffer's size bound — larger than any served suffix batch, small
+/// enough that ~96 KiB frames cannot pin unbounded RAM.
+const CATCHUP_BUFFER_WINDOW: u64 = 4096;
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PendingApproval {
     /// The chain height every signature here is bound to.
@@ -1658,6 +1667,27 @@ impl State {
         relays: Vec<String>,
         consent: Option<String>,
     ) {
+        if !self.plausible_wire_id(id) {
+            tracing::warn!(%id, "refusing a membership proposal with an implausible id");
+            return;
+        }
+        // L3: pending membership changes are bounded by what can ever be
+        // open at once — one re-admission per seat plus slack for Joined
+        // seats not on the roster yet
+        let pending_membership = self
+            .proposal_changes
+            .values()
+            .filter(|c| matches!(c, ChainChange::Membership { .. }))
+            .count();
+        let cap = self
+            .replica
+            .as_ref()
+            .map(|r| r.roster.len().saturating_add(8))
+            .unwrap_or(16);
+        if pending_membership >= cap && !self.proposal_changes.contains_key(&id) {
+            tracing::warn!(%id, "refusing a membership proposal beyond the pending cap");
+            return;
+        }
         self.next_id = self.next_id.max(id.saturating_add(1));
         let change = ChainChange::Membership {
             op,
@@ -1913,6 +1943,17 @@ impl State {
             .proposals
             .get(&id)
             .is_some_and(|p| p.state != ProposalState::Proposed)
+        {
+            return;
+        }
+        // L3: only roster members' signatures collect — dedup is by the
+        // free-form member string, so distinct fake names grew one Vec
+        // without bound. Roster membership (not link identity) is the rule:
+        // the WP2 re-serve legitimately relays other members' signatures.
+        if !self
+            .chain_head
+            .as_ref()
+            .is_some_and(|h| h.identities.iter().any(|i| i.member == member))
         {
             return;
         }
@@ -2817,7 +2858,14 @@ impl State {
     /// pin in `docs_archive/chain/log_compaction.md`) — the proposer re-proposes
     /// at the then-current head; a stale cut dies on re-base anyway.
     pub(crate) fn receive_checkpoint_proposal(&mut self, id: u64, upto: u64, state_hash: &str) {
-        self.next_id = self.next_id.max(id + 1);
+        // L3: the guard runs BEFORE the bump — `id + 1` on u64::MAX was a
+        // one-frame remote ABORT (overflow-checks + panic=abort), and an
+        // in-range absurd id would poison the mint counter
+        if !self.plausible_wire_id(id) {
+            tracing::warn!(%id, "refusing a checkpoint proposal with an implausible id");
+            return;
+        }
+        self.next_id = self.next_id.max(id.saturating_add(1));
         let Some(head) = self.chain_head.as_ref() else {
             return;
         };
@@ -2858,6 +2906,17 @@ impl State {
             }
             _ => {}
         }
+        // L3: ONE cut per head — the identical (upto, state_hash) under a
+        // second id would mint one registry entry + one signed Approved
+        // per frame (1:1 outbound amplification); the first id IS the cut
+        if self
+            .proposal_changes
+            .iter()
+            .any(|(other, c)| *other != id && *c == this)
+        {
+            tracing::debug!(%id, upto, "ignoring a duplicate checkpoint cut under a fresh id");
+            return;
+        }
         self.proposal_changes.insert(id, this);
         // replay guard: one signature per member per cut — a re-received
         // frame must not amplify into fresh Approved gossip
@@ -2882,6 +2941,16 @@ impl State {
     /// refused id collision or a deduplicated re-serve (WP2 catch-up
     /// re-wraps open proposals under the serving peer's name) returns
     /// `false`, and the caller must not announce it on the event stream.
+    /// L3: a peer-chosen proposal id far past the mint counter is garbage —
+    /// registering it (or even bumping `next_id` for it) would poison every
+    /// later local mint (a u64::MAX id would freeze proposing for good).
+    /// Window shared with the decline park.
+    fn plausible_wire_id(&self, id: u64) -> bool {
+        id <= self
+            .next_id
+            .saturating_add(crate::proposals::PARKED_DECLINE_ID_WINDOW)
+    }
+
     pub(crate) fn receive_proposed(
         &mut self,
         id: u64,
@@ -2889,6 +2958,24 @@ impl State {
         payload: serde_json::Value,
         by: &str,
     ) -> bool {
+        if !self.plausible_wire_id(id) {
+            tracing::warn!(%id, "refusing a proposal with an implausible id");
+            return false;
+        }
+        // L3: a flooding proposer may only crowd ITSELF — the newest card
+        // is refused (the WP2 re-serve re-earns an honest one later), and
+        // another member's cards are never evicted
+        if !self.proposals.contains_key(&id) {
+            let open_by = self
+                .proposals
+                .values()
+                .filter(|p| p.state == ProposalState::Proposed && p.by == by)
+                .count();
+            if open_by >= OPEN_CARDS_PER_PROPOSER_MAX {
+                tracing::warn!(%id, %by, "refusing a proposal beyond the per-proposer open cap");
+                return false;
+            }
+        }
         self.next_id = self.next_id.max(id.saturating_add(1));
         // SECURITY (symmetric to receive_membership_proposal): an id already
         // registered in `proposal_changes` (a membership/checkpoint change)
@@ -2953,6 +3040,13 @@ impl State {
             tracing::warn!(%id, height, "dropping an approval for an implausible future height");
             return;
         }
+        // L3: an approval may OUTRUN its card (collected, displayed once it
+        // lands) — but only inside the same id window everything else uses,
+        // or unknown-id entries grow without bound
+        if !self.plausible_wire_id(id) {
+            tracing::warn!(%id, "dropping an approval for an implausible proposal id");
+            return;
+        }
         self.collect_sig(id, height, by, sig);
         if self.approval_verifies(id, height, by, sig) {
             if let Some(p) = self.pending_sigs.get_mut(&id) {
@@ -2978,7 +3072,18 @@ impl State {
                     self.persist_chain_now();
                 }
             } else {
+                // L3: headless too, the buffer is size-capped (no head to
+                // window against) — shed the highest, the re-serve re-earns
                 self.pending_blocks.insert(block.height, block);
+                while self.pending_blocks.len()
+                    > usize::try_from(CATCHUP_BUFFER_WINDOW).unwrap_or(usize::MAX)
+                {
+                    if let Some(top) = self.pending_blocks.keys().next_back().copied() {
+                        self.pending_blocks.remove(&top);
+                    } else {
+                        break;
+                    }
+                }
                 // WP4b: with a served blob stashed, the buffered block may
                 // be the missing anchor/suffix piece
                 self.try_adopt_from_blob();
@@ -2996,8 +3101,31 @@ impl State {
             self.tie_break(block);
         } else {
             // a gap: we are behind. Buffer this block and ask the mesh for the
-            // blocks we are missing (any survivor re-serves them).
+            // blocks we are missing (any survivor re-serves them). L3: only
+            // heights the drain could ever reach are buffered (contiguous
+            // upward from head+1, or the stashed blob's re-anchor run), and
+            // the buffer is capped — when full the HIGHEST height is shed
+            // (furthest from applicable; a re-served suffix re-earns it).
+            let anchor_ok = self
+                .pending_served_blob
+                .as_ref()
+                .is_some_and(|blob| {
+                    block.height > blob.upto
+                        && block.height <= blob.upto.saturating_add(CATCHUP_BUFFER_WINDOW)
+                });
+            if block.height > head.height.saturating_add(CATCHUP_BUFFER_WINDOW) && !anchor_ok {
+                tracing::warn!(height = block.height, head = head.height, "refusing to buffer a block far past the head");
+                return;
+            }
+            self.pending_blocks.retain(|h, _| *h > head.height);
             self.pending_blocks.insert(block.height, block);
+            while self.pending_blocks.len() > usize::try_from(CATCHUP_BUFFER_WINDOW).unwrap_or(usize::MAX) {
+                if let Some(top) = self.pending_blocks.keys().next_back().copied() {
+                    self.pending_blocks.remove(&top);
+                } else {
+                    break;
+                }
+            }
             self.try_adopt_from_blob();
             self.request_catchup(head.height + 1);
         }
@@ -5218,6 +5346,149 @@ mod tests {
             "the own signature is retracted by the decline"
         );
         assert!(!v.approved_by_me, "…and the view says so");
+    }
+
+    /// L3 headline: `receive_checkpoint_proposal` ran `id + 1` BEFORE any
+    /// guard — with overflow-checks + panic=abort in release, one hostile
+    /// frame from any roster peer ABORTED the process. And every wire
+    /// receive fn bumped the mint counter before its guards, so an
+    /// in-window absurd id poisoned every later local mint.
+    #[test]
+    fn implausible_wire_ids_neither_abort_nor_poison_the_mint() {
+        let b = Builder::new(&["petra", "walter"], 2);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        let before = walter.next_id;
+        // the former one-frame remote abort
+        walter.receive_checkpoint_proposal(u64::MAX, 0, "00");
+        assert_eq!(walter.next_id, before, "no mint poison from the cut");
+        // the surface twin
+        assert!(!walter.receive_proposed(
+            u64::MAX,
+            Surface::Memory,
+            json!({ "op": "add_note" }),
+            "petra"
+        ));
+        assert_eq!(walter.next_id, before, "no mint poison from a proposal");
+        // …and the membership twin
+        walter.receive_membership_proposal(
+            u64::MAX,
+            MembershipOp::Restored,
+            "petra",
+            &b.pk("petra"),
+            None,
+            Vec::new(),
+            None,
+        );
+        assert_eq!(walter.next_id, before, "no mint poison from membership");
+    }
+
+    /// L3: signatures collect only for ROSTER members — dedup is by the
+    /// free-form member string, so distinct fake names grew one Vec
+    /// without bound (~96 KiB of wire per entry).
+    #[test]
+    fn approvals_from_non_members_never_enter_the_pending_set() {
+        let b = Builder::new(&["petra", "walter"], 2);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        wire(
+            &mut walter,
+            "petra",
+            1,
+            WorkspaceEvent::Proposed {
+                id: ProposalId(1),
+                surface: Surface::Memory,
+                payload: json!({ "op": "add_note", "id": 1 }),
+            },
+        );
+        for i in 0..100u64 {
+            walter.receive_approval(1, &format!("ghost{i}"), 1, "ff");
+        }
+        assert!(
+            walter.pending_sigs.get(&1).map_or(0, |p| p.sigs.len()) <= 2,
+            "ghost names must not grow the set"
+        );
+    }
+
+    /// L3: ONE cut per head is registered and co-signed — the identical
+    /// (upto, state_hash) under fresh ids minted one registry entry plus
+    /// one signed Approved per frame (a 1:1 outbound amplifier).
+    #[test]
+    fn only_one_cut_per_head_registers() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let b = Builder::new(&["petra", "walter"], 2);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        let ours = checkpoint_state_hash(
+            &walter.own_checkpoint_state(0).expect("own projection"),
+        );
+        for id in 50..60u64 {
+            walter.receive_checkpoint_proposal(id, 0, &ours);
+        }
+        let cuts = walter
+            .proposal_changes
+            .values()
+            .filter(|c| matches!(c, ChainChange::Checkpoint { .. }))
+            .count();
+        assert_eq!(cuts, 1, "the first id IS the cut for this head");
+    }
+
+    /// L3: the future-block buffer holds only heights the drain could ever
+    /// reach and stays size-capped — an unverified far-future block was
+    /// buffered forever (and one such block froze auto-compaction).
+    #[test]
+    fn a_far_future_block_is_refused_not_buffered() {
+        let b = Builder::new(&["petra", "walter"], 2);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        let junk = |height: u64| ChainBlock {
+            height,
+            prev: "00".to_string(),
+            change: ChainChange::Applied {
+                proposal_id: height,
+                surface: Surface::Memory,
+                payload: json!({ "op": "add_note" }),
+            },
+            sigs: Vec::new(),
+        };
+        walter.receive_block(junk(u64::MAX / 2));
+        assert!(
+            walter.pending_blocks.is_empty(),
+            "a block far past the head never buffers"
+        );
+        walter.receive_block(junk(3));
+        assert_eq!(walter.pending_blocks.len(), 1, "a near gap buffers for the drain");
+    }
+
+    /// L3: a flooding proposer crowds only ITSELF — the newest own card is
+    /// refused at the cap, another member's card still lands.
+    #[test]
+    fn a_wire_proposal_flood_is_bounded_per_proposer() {
+        let b = Builder::new(&["petra", "walter"], 2);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        for i in 0..200u64 {
+            walter.receive_proposed(
+                100 + i,
+                Surface::Memory,
+                json!({ "op": "add_note", "i": i }),
+                "petra",
+            );
+        }
+        let open_petra = walter
+            .proposals
+            .values()
+            .filter(|p| p.state == ProposalState::Proposed && p.by == "petra")
+            .count();
+        assert_eq!(open_petra, OPEN_CARDS_PER_PROPOSER_MAX, "the cap holds");
+        assert!(
+            walter.receive_proposed(
+                900,
+                Surface::Memory,
+                json!({ "op": "add_note" }),
+                "walter"
+            ),
+            "another member's honest card still lands"
+        );
     }
 
     /// L2: the DISPLAYED approval count and pills read only signatures
