@@ -1399,7 +1399,7 @@ pub fn tools() -> Vec<ToolDef> {
                 "properties": {
                     "name": { "type": "string", "description": "the final republic name to ratify" },
                     "agenda": { "type": "string", "description": "the free-text charter/agenda to ratify" },
-                    "features": { "type": "array", "items": { "type": "string", "enum": ["memory", "quests", "vault", "wallet"] }, "description": "the optional surfaces to activate (chat is always on); omitted = none" }
+                    "features": { "type": "array", "items": { "type": "string", "enum": ["memory", "quests", "vault", "wallet"] }, "description": "the optional surfaces to activate (chat is always on); omitted = none. memory (the shared wiki) and wallet are real; quests and vault have no real surface yet - the GUI wizard locks them off, prefer leaving them out" }
                 },
                 "required": ["name"]
             }),
@@ -1458,7 +1458,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "confirm_seed_backup",
             command: "confirm_seed_backup",
-            description: "Confirm the operator's recovery-phrase backup during a RUNNING founding or join ritual by re-typing the phrase (create.seed / join.seed). The engine matches it; the ritual seals - and touches disk - only once EVERY participant confirmed (founder included). Founder side: any time before the seal. Joiner side: after ratifying (join.awaiting_backup).",
+            description: "Confirm the operator's recovery-phrase backup during a RUNNING founding or join ritual by re-typing the phrase (create.seed / join.seed). The engine matches it; the ritual seals - and touches disk - only once EVERY participant confirmed (founder included). Founder side: any time before the seal (the GUI prompts once every member ratified - seats at state 2 or 4). Joiner side: after ratifying (join.awaiting_backup).",
             schema: || json!({
                 "type": "object",
                 "properties": {

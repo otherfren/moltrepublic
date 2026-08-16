@@ -1130,10 +1130,10 @@ pub fn run_app(
             let features = weak
                 .upgrade()
                 .map(|ui| {
+                    // quests/vault have no wizard checkbox (locked off,
+                    // not built) — no property to read until they ship
                     [
                         (ui.get_cw_feat_memory(), "memory"),
-                        (ui.get_cw_feat_quests(), "quests"),
-                        (ui.get_cw_feat_vault(), "vault"),
                         (ui.get_cw_feat_wallet(), "wallet"),
                     ]
                     .into_iter()
@@ -3111,7 +3111,7 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     ui.set_rw_progress(f32::from(sv.restore.run.progress_pct) / 100.0);
     ui.set_rw_outcome(i32::from(sv.restore.run.outcome));
     sync_strings(&ui.get_rw_log(), &sv.restore.run.log, |m| ui.set_rw_log(m));
-    ui.set_rw_log_tone(log_tones(&sv.restore.run.log));
+    sync_log_tones(&ui.get_rw_log_tone(), &sv.restore.run.log, |m| ui.set_rw_log_tone(m));
     ui.set_rw_headline(sv.restore.run.headline.clone().into());
 
     // founding ritual; the run header is composed here so an MCP-started
@@ -3129,16 +3129,17 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
         .into(),
     );
     sync_strings(&ui.get_cw_log(), &sv.create.run.log, |m| ui.set_cw_log(m));
-    ui.set_cw_log_text(sv.create.run.log.join("\n").into());
-    ui.set_cw_log_tone(log_tones(&sv.create.run.log));
+    sync_log_tones(&ui.get_cw_log_tone(), &sv.create.run.log, |m| ui.set_cw_log_tone(m));
     ui.set_cw_headline(sv.create.run.headline.clone().into());
     // a declined seat switches the failure banner to "the founding is over"
     ui.set_cw_declined(sv.create.seats.iter().any(|s| s.state == 3));
-    // the ritual member list: founder (always sealed) plus one row per seat
+    // the ritual member list: founder plus one row per seat. The founder
+    // row is sealed by construction (2) and fully green (4) once their own
+    // phrase backup is confirmed — same scale as the member seats.
     let mut seats: Vec<RitualSeat> = vec![RitualSeat {
         member: sv.create.member.as_str().into(),
         detail: strings_founder(lang).into(),
-        state: 2,
+        state: if sv.create.backup_confirmed { 4 } else { 2 },
     }];
     for (i, s) in sv.create.seats.iter().enumerate() {
         let (member, detail) = if s.member.is_empty() {
@@ -3167,9 +3168,22 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
             state: i32::from(s.state),
         });
     }
-    let sealed = seats.iter().filter(|s| s.state == 2).count();
+    // sealed = the roster signature is in (state 2), key secured or not
+    // (state 4) — counting only 2 read as a regression at the very end
+    let sealed = seats.iter().filter(|s| s.state == 2 || s.state == 4).count();
     ui.set_cw_sealed(i32::try_from(sealed).unwrap_or(0));
     ui.set_cw_total(i32::try_from(seats.len()).unwrap_or(0));
+    // every MEMBER has ratified the charter (signature delivered, 2/4) —
+    // gates the founder's own phrase-backup prompt: it comes only after
+    // all others accepted the charter and features
+    ui.set_cw_all_ratified(
+        !sv.create.seats.is_empty()
+            && sv
+                .create
+                .seats
+                .iter()
+                .all(|s| s.state == 2 || s.state == 4),
+    );
     ui.set_cw_simulated(sv.create.simulated);
     // the deliberation step: once every seat has joined, the founder proposes
     // the final name + charter for the members to ratify (the agenda itself is
@@ -3214,7 +3228,7 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     ui.set_jw_feat_vault(jw_feat("vault"));
     ui.set_jw_feat_wallet(jw_feat("wallet"));
     sync_strings(&ui.get_jw_log(), &sv.join.run.log, |m| ui.set_jw_log(m));
-    ui.set_jw_log_tone(log_tones(&sv.join.run.log));
+    sync_log_tones(&ui.get_jw_log_tone(), &sv.join.run.log, |m| ui.set_jw_log_tone(m));
     ui.set_jw_headline(sv.join.run.headline.clone().into());
 }
 
@@ -3294,8 +3308,12 @@ fn invite_relays_missing(ui: &AppWindow, link: &str) -> i32 {
 /// Per-line tone of a run log (0 neutral, 1 good, 2 bad) from the ✓/✗
 /// prefix convention every engine log line follows — lets the Slint side
 /// highlight terminal lines without string surgery it cannot do.
-fn log_tones(log: &[String]) -> ModelRc<i32> {
-    ModelRc::new(VecModel::from(
+// Mirrored in place via sync_rows: the log modal's per-line colour bindings
+// consume these models, and a fresh ModelRc per engine tick would reset the
+// repeater on every tick while the modal is open.
+fn sync_log_tones(current: &ModelRc<i32>, log: &[String], set: impl FnOnce(ModelRc<i32>)) {
+    sync_rows(
+        current,
         log.iter()
             .map(|l| match l.chars().next() {
                 Some('✓') => 1,
@@ -3303,7 +3321,8 @@ fn log_tones(log: &[String]) -> ModelRc<i32> {
                 _ => 0,
             })
             .collect::<Vec<i32>>(),
-    ))
+        set,
+    );
 }
 
 /// The genesis frame reached no relay: the founding succeeded locally, but
@@ -7259,6 +7278,16 @@ lexicon! {
     choice_restore_rest: "e)Join / Recovery", "e)Join / Recovery";
     choice_restore_sub: "Join with an invite, or come back to a seat you hold", "Mit einer Einladung beitreten, oder auf deinen Sitz zurück";
     nav_back: "Back", "Zurück";
+    wiz_step_setup: "Setup", "Einrichtung";
+    wiz_step_invites: "Invites", "Einladungen";
+    wiz_step_charter: "Charter & Features", "Charta & Features";
+    wiz_step_enter: "Enter", "Eintreten";
+    wiz_sealed_note: "Sealed by all members", "Von allen Mitgliedern besiegelt";
+    wiz_step_invite: "Invite", "Einladung";
+    wiz_step_joining: "Joining", "Beitritt";
+    wiz_step_way: "Way in", "Zugang";
+    wiz_step_phrase: "Phrase", "Phrase";
+    wiz_step_restore: "Restore", "Wiederherstellung";
     field_network: "Anonymity network", "Anonymitäts-Netzwerk";
     not_implemented_yet: "not yet", "noch nicht";
     field_tor_mode: "Tor mode", "Tor-Modus";
@@ -7351,7 +7380,6 @@ lexicon! {
     feat_wallet: "Wallet", "Wallet";
     jw_back_to_start: "Back to start", "Zurück zum Start";
     jw_ratify_title: "Ratify the charter", "Satzung ratifizieren";
-    jw_ratify_hint: "The founder proposed this name and charter. Confirm to add your signature and join; the workspace opens once every member has ratified.", "Der Gründer hat diesen Namen und diese Satzung vorgeschlagen. Bestätige, um deine Signatur beizusteuern und beizutreten; der Workspace geht auf, sobald jedes Mitglied ratifiziert hat.";
     jw_ratify_confirm: "Confirm & join", "Bestätigen & beitreten";
     jw_ratify_decline: "Decline", "Ablehnen";
     jw_ratify_agenda_empty: "(no agenda set)", "(keine Agenda festgelegt)";

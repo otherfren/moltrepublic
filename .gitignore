@@ -13,3 +13,9 @@ config3.toml.lock
 config3.toml.tmp-*
 deleteme.md
 /.secrets/
+config4.toml
+config4.toml.lock
+config4.toml.tmp-*
+config5.toml
+config5.toml.lock
+config5.toml.tmp-*

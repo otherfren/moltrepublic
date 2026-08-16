@@ -5,7 +5,7 @@
 // (app.slint) composes these into the actual screens.
 
 import { Theme, Strings, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, MemberSync, ProposalRow, HintTip, PatchView } from "theme.slint";
-import { AppButton, AppField, ScrollHint, HoverTip } from "components.slint";
+import { AppButton, AppField, AppCheck, ScrollHint, HoverTip, DotLabel } from "components.slint";
 
 // A large clickable option card used on the first-run choice screen. The
 // title is split into its hotkey letter (rendered underlined; the window
@@ -1851,18 +1851,14 @@ export component SeedPanel inherits Rectangle {
     }
 }
 
-// The wizards' shared last step (create + join): the freshly minted recovery
-// phrase, and the re-typed proof it was backed up — `enter` fires only while
-// `armed` (the caller's engine-side phrase match), and entering IS the backup
-// confirmation.
+// The wizards' phrase-backup proof (create + join): the freshly minted
+// recovery phrase, and the re-typed proof it was backed up. The confirm
+// ACTION lives in the wizard footer; the field's Enter key fires the same
+// `enter()` — only while `armed` (the caller's engine-side phrase match).
 export component SeedConfirmStep inherits VerticalLayout {
     in property <string> seed;
-    in property <image> icon;
     // the re-typed phrase matches — computed by the caller (engine rule)
     in property <bool> armed;
-    // the action button's label: "Enter republic" post-seal (legacy),
-    // "Confirm backup" during the ❻½ ritual round
-    in property <string> action-label: Strings.enter-republic;
     in-out property <string> check;
     callback enter();
     callback copy-requested();
@@ -1898,30 +1894,129 @@ export component SeedConfirmStep inherits VerticalLayout {
             }
         }
     }
-    HorizontalLayout {
-        spacing: 10px;
-        Rectangle {
-            horizontal-stretch: 1;
+}
+
+// The proposed charter + feature selection, read-only — exactly what the
+// ratify signature covers (sign-what-you-see). The joiner's ratify step
+// (accent-framed: a decision is pending, taken in the wizard footer) and
+// both sides' waiting phases share it.
+export component CharterView inherits Rectangle {
+    in property <string> heading;
+    in property <string> republic;
+    in property <string> agenda;
+    in property <bool> feat-memory;
+    in property <bool> feat-quests;
+    in property <bool> feat-vault;
+    in property <bool> feat-wallet;
+    in property <bool> accent: false;
+    border-radius: Theme.win95 ? 0px : 8px;
+    background: Theme.panel;
+    border-width: Theme.border-w;
+    border-color: root.accent ? Theme.accent : Theme.line;
+    VerticalLayout {
+        padding: 14px;
+        spacing: 8px;
+        Text {
+            text: root.heading;
+            color: root.accent ? Theme.accent : Theme.text;
+            font-size: Theme.fs-h2;
+            font-weight: 700;
+            wrap: word-wrap;
         }
-        AppButton {
-            height: 38px;
-            primary: true;
-            icon: root.icon;
-            icon-set: true;
-            label: root.action-label;
-            enabled: root.armed;
-            clicked => {
-                root.enter();
+        Text {
+            text: root.republic;
+            color: Theme.text;
+            font-size: Theme.fs-body;
+            font-weight: 700;
+            overflow: elide;
+        }
+        // the charter text: its own bounded panel with its own scroll - a
+        // long charter must never push the rest out of reach
+        Rectangle {
+            height: min(10 * 1.4 * Theme.fs-cap + 20px, cvw-fl.viewport-height + 20px);
+            background: Theme.panel-2;
+            border-radius: Theme.win95 ? 0px : 8px;
+            border-width: Theme.border-w;
+            border-color: Theme.line;
+            clip: true;
+            cvw-fl := Flickable {
+                x: 10px;
+                y: 10px;
+                width: parent.width - 20px;
+                height: parent.height - 20px;
+                viewport-width: self.width;
+                viewport-height: cvw-txt.preferred-height;
+                cvw-txt := Text {
+                    width: 100%;
+                    text: root.agenda;
+                    color: Theme.dim;
+                    font-size: Theme.fs-cap;
+                    wrap: word-wrap;
+                }
+            }
+            ScrollHint {
+                x: parent.width - 7px;
+                view-h: cvw-fl.height;
+                content-h: cvw-fl.viewport-height;
+                scroll-y: cvw-fl.viewport-y;
+            }
+        }
+        // the feature selection as it will be (or was) signed - read-only
+        HorizontalLayout {
+            alignment: start;
+            Rectangle {
+                background: Theme.panel-2;
+                border-radius: Theme.win95 ? 0px : 8px;
+                border-width: Theme.border-w;
+                border-color: Theme.line;
+                VerticalLayout {
+                    padding: 14px;
+                    padding-left: 18px;
+                    padding-right: 22px;
+                    spacing: 10px;
+                    Text {
+                        text: Strings.cw-features;
+                        color: Theme.text;
+                        font-size: Theme.fs-h2;
+                        font-weight: 700;
+                    }
+                    GridLayout {
+                        spacing: 10px;
+                        Row {
+                            AppCheck { width: 180px; label: Strings.feat-chat; checked: true; enabled: false; }
+                            AppCheck { width: 180px; label: Strings.feat-memory; checked: root.feat-memory; enabled: false; }
+                        }
+                        Row {
+                            AppCheck { width: 180px; label: Strings.feat-quests; checked: root.feat-quests; enabled: false; }
+                            AppCheck { width: 180px; label: Strings.feat-vault; checked: root.feat-vault; enabled: false; }
+                        }
+                        Row {
+                            AppCheck { width: 180px; label: Strings.feat-wallet; checked: root.feat-wallet; enabled: false; }
+                        }
+                    }
+                }
             }
         }
     }
 }
 
-// The shared run view for the engine-ticked mock runs (restore / found /
-// join): the way panel with a progress bar and phase line, an optional
-// success slot (`@children`, used for the founding result), the live detail
-// log, and an outcome-gated Back/Finish footer. The engine owns progress,
-// log and outcome — this component only renders and reports clicks.
+// The wizards' shared last step: the sealed republic — identical for
+// founder and joiner (name, rule, the sealed verdict); Enter republic sits
+// in the wizard footer.
+export component SealedPanel inherits RestoreWay {
+    icon: @image-url("assets/republic.svg");
+    DotLabel {
+        tone: Theme.good;
+        label: Strings.wiz-sealed-note;
+        label-color: Theme.good;
+    }
+}
+
+// The shared run-status panel for the engine-ticked runs (restore / join):
+// the way panel with a progress bar, phase line and failure headline. The
+// engine owns progress and outcome — this component only renders them. The
+// live log lives in the wizards' log modal (RitualLog), the Back/Finish
+// actions in the wizard footer.
 export component RunView inherits VerticalLayout {
     in property <string> title;
     in property <string> hint;
@@ -1937,23 +2032,9 @@ export component RunView inherits VerticalLayout {
     in property <string> ph-founder: "";
     in property <string> failed-label;
     // the ONE thing that went wrong, in a few words — rendered large and in
-    // the signal colour. The log below keeps the detail; a failure an
+    // the signal colour. The log modal keeps the detail; a failure an
     // operator must act on cannot live at the end of a small technical line.
     in property <string> headline;
-    in property <[string]> log;
-    // per-line tone (0 neutral, 1 good, 2 bad), computed Rust-side from the
-    // ✓/✗ prefix; an empty model keeps every line neutral
-    in property <[int]> tones;
-    // the founding hides the log on success to make room for its result
-    in property <bool> show-log: true;
-    // the founding cannot fail, so it hides the (never armed) back button
-    in property <bool> back-shown: true;
-    in property <bool> back-enabled: false;
-    in property <bool> finish-enabled: false;
-    in property <string> finish-label;
-    callback back();
-    callback finish();
-    callback copy-log-clicked();
     spacing: 12px;
 
     RestoreWay {
@@ -2011,99 +2092,224 @@ export component RunView inherits VerticalLayout {
     }
 
     @children
+}
 
-    // live details: what is fetched, derived and copied where —
-    // auto-scrolls to each new line; fills the remaining height
-    if root.show-log: Rectangle {
-        vertical-stretch: 1;
-        background: Theme.panel-2;
-        border-radius: Theme.win95 ? 0px : 8px;
-        border-width: Theme.border-w;
-        border-color: Theme.line;
+// The live ritual/run log, bounded and bottom-pinned, one tone-coloured
+// line per event — the content of the wizards' log modal. Caller sets the
+// height.
+export component RitualLog inherits Rectangle {
+    in property <[string]> log;
+    // per-line tone (0 neutral, 1 good, 2 bad), computed Rust-side from the
+    // ✓/✗ prefix; an empty model keeps every line neutral
+    in property <[int]> tones;
+    background: Theme.panel-2;
+    border-radius: Theme.win95 ? 0px : 8px;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    clip: true;
+    rl-fl := Flickable {
+        x: 12px;
+        y: 10px;
+        width: parent.width - 24px;
+        height: parent.height - 20px;
+        viewport-width: self.width;
+        viewport-height: rl-lines.preferred-height;
+        // pinned to the bottom: the newest line is always in view (a
+        // manual drag detaches the pin)
+        viewport-y: min(0px, self.height - self.viewport-height);
+        rl-lines := VerticalLayout {
+            spacing: 3px;
+            alignment: start;
+            for line[i] in root.log: Text {
+                text: line;
+                // terminal ✓/✗ lines stand out of the gray flow
+                color: i < root.tones.length
+                    ? (root.tones[i] == 2 ? Theme.bad
+                        : root.tones[i] == 1 ? Theme.good : Theme.dim)
+                    : Theme.dim;
+                font-size: Theme.fs-cap;
+                // WRAP, never elide: a failure line's tail is the part
+                // that says what to DO about it — eliding it is how "the
+                // invitation was refused" reached the operator with no
+                // reason at all (2026-08-01)
+                wrap: word-wrap;
+            }
+        }
+    }
+    ScrollHint {
+        x: parent.width - 7px;
+        view-h: rl-fl.height;
+        content-h: rl-fl.viewport-height;
+        scroll-y: rl-fl.viewport-y;
+    }
+}
+
+// The wizards' shared chrome (create / join / restore): a fixed header
+// band — title, step caption, close — whose bottom edge is a full-width
+// step progress bar; a scrollable content column; and a fixed footer that
+// owns every step-advancing button, so Continue/Propose/Enter stay visible
+// no matter how far the content scrolls. Footer order: [back] left, then
+// [log · alt · primary] right — an empty label hides its button.
+export component WizardFrame inherits VerticalLayout {
+    in property <string> title;
+    // 0-based current step; the bar fills (step+1)/steps
+    in property <int> step;
+    in property <int> steps: 1;
+    // short name of the current step for the "n / m · name" caption
+    in property <string> step-label;
+    in property <bool> close-enabled: true;
+    callback close();
+
+    in property <string> back-label;
+    in property <bool> back-enabled: true;
+    callback back();
+    in property <string> log-label;
+    callback show-log();
+    in property <string> alt-label;
+    in property <bool> alt-enabled: true;
+    callback alt();
+    in property <string> primary-label;
+    in property <bool> primary-enabled: true;
+    in property <image> primary-icon;
+    in property <bool> primary-icon-set: false;
+    callback primary();
+
+    spacing: 0;
+
+    // header band: its own surface, closed by the progress bar edge.
+    // stretch 0: a Rectangle's implicit stretch is 1 and would split the
+    // leftover height with the content column
+    Rectangle {
+        vertical-stretch: 0;
+        background: Theme.panel;
         VerticalLayout {
-            padding: 12px;
-            spacing: 8px;
+            spacing: 0;
             HorizontalLayout {
-                spacing: 8px;
+                padding: 14px;
+                padding-left: 20px;
+                spacing: 12px;
                 Text {
-                    text: Strings.rw-log-title;
+                    text: root.title;
+                    color: Theme.text;
+                    font-size: Theme.fs-h1;
+                    font-weight: 700;
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                Text {
+                    text: root.step-label == ""
+                        ? "\{root.step + 1} / \{root.steps}"
+                        : "\{root.step + 1} / \{root.steps} · \{root.step-label}";
                     color: Theme.faint;
                     font-size: Theme.fs-cap;
-                    font-weight: 700;
                     vertical-alignment: center;
-                    horizontal-stretch: 1;
                 }
                 AppButton {
-                    height: 26px;
-                    pad: 9px;
-                    label: Strings.ow-copy;
+                    label: "×";
+                    enabled: root.close-enabled;
                     clicked => {
-                        root.copy-log-clicked();
+                        root.close();
                     }
                 }
             }
+            // the step progress bar IS the header's bottom edge. The
+            // animated value is the unitless fraction: animating width
+            // itself would restart the ease on every window-resize frame
             Rectangle {
-                vertical-stretch: 1;
-                clip: true;
-                logfl := Flickable {
-                    width: 100%;
-                    height: 100%;
-                    viewport-width: self.width;
-                    viewport-height: loglines.preferred-height;
-                    // pinned to the bottom: auto-scrolls on every new
-                    // line (a manual drag detaches the pin)
-                    viewport-y: min(0px, self.height - self.viewport-height);
-                    loglines := VerticalLayout {
-                        spacing: 3px;
-                        alignment: start;
-                        for line[i] in root.log: Text {
-                            text: line;
-                            // terminal ✓/✗ lines stand out of the gray flow
-                            color: i < root.tones.length
-                                ? (root.tones[i] == 2 ? Theme.bad
-                                    : root.tones[i] == 1 ? Theme.good : Theme.dim)
-                                : Theme.dim;
-                            font-size: Theme.fs-cap;
-                            // WRAP, never elide: a failure line's tail is the
-                            // part that says what to DO about it — eliding it
-                            // is how "the invitation was refused" reached the
-                            // operator with no reason at all (2026-08-01)
-                            wrap: word-wrap;
-                        }
-                    }
+                height: 5px;
+                background: Theme.line;
+                property <float> frac: (root.step + 1) / max(1, root.steps);
+                animate frac {
+                    duration: 200ms;
+                    easing: ease-in-out;
                 }
-                ScrollHint {
-                    x: parent.width - 7px;
-                    view-h: logfl.height;
-                    content-h: logfl.viewport-height;
-                    scroll-y: logfl.viewport-y;
+                Rectangle {
+                    x: 0;
+                    width: parent.width * parent.frac;
+                    height: parent.height;
+                    background: Theme.accent;
                 }
             }
         }
     }
 
-    // back arms only after a failure; finish arms only after success and
-    // jumps straight into the workspace
-    HorizontalLayout {
-        spacing: 10px;
-        if root.back-shown: AppButton {
-            label: Strings.nav-back;
-            enabled: root.back-enabled;
-            clicked => {
-                root.back();
+    // content column: the only part that scrolls
+    Rectangle {
+        vertical-stretch: 1;
+        clip: true;
+        wf-fl := Flickable {
+            width: 100%;
+            height: 100%;
+            viewport-width: self.width;
+            viewport-height: wf-col.preferred-height;
+            wf-col := VerticalLayout {
+                padding: 16px;
+                spacing: 12px;
+                alignment: start;
+                @children
             }
         }
-        Rectangle {
-            horizontal-stretch: 1;
+        ScrollHint {
+            x: parent.width - 7px;
+            view-h: wf-fl.height;
+            content-h: wf-fl.viewport-height;
+            scroll-y: wf-fl.viewport-y;
         }
-        // no label = no button: a caller without a finish action must not
-        // render an empty, permanently-dead primary button
-        if root.finish-label != "": AppButton {
-            primary: true;
-            label: root.finish-label;
-            enabled: root.finish-enabled;
-            clicked => {
-                root.finish();
+    }
+
+    // footer band: never scrolls (stretch 0, like the header)
+    Rectangle {
+        vertical-stretch: 0;
+        background: Theme.panel;
+        VerticalLayout {
+            spacing: 0;
+            Rectangle {
+                height: Theme.border-w;
+                background: Theme.line;
+            }
+            HorizontalLayout {
+                padding: 12px;
+                padding-left: 16px;
+                padding-right: 16px;
+                spacing: 10px;
+                if root.back-label != "": AppButton {
+                    height: 38px;
+                    label: root.back-label;
+                    enabled: root.back-enabled;
+                    clicked => {
+                        root.back();
+                    }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+                if root.log-label != "": AppButton {
+                    height: 38px;
+                    label: root.log-label;
+                    clicked => {
+                        root.show-log();
+                    }
+                }
+                if root.alt-label != "": AppButton {
+                    height: 38px;
+                    label: root.alt-label;
+                    enabled: root.alt-enabled;
+                    clicked => {
+                        root.alt();
+                    }
+                }
+                if root.primary-label != "": AppButton {
+                    height: 38px;
+                    primary: true;
+                    icon: root.primary-icon;
+                    icon-set: root.primary-icon-set;
+                    label: root.primary-label;
+                    enabled: root.primary-enabled;
+                    clicked => {
+                        root.primary();
+                    }
+                }
             }
         }
     }

@@ -26,7 +26,7 @@ import {
     ConfirmModal, DotLabel
 } from "components.slint";
 import {
-    BusyModal, ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, SeedConfirmStep, RunView, ProposalCard, DecisionTable, Spinner, DiffViewer
+    BusyModal, ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, SeedConfirmStep, RunView, RitualLog, WizardFrame, CharterView, SealedPanel, ProposalCard, DecisionTable, Spinner, DiffViewer
 } from "parts.slint";
 // the four staged surfaces' badged DESIGN-MOCK panes (sample data lives
 // .slint-side only; the real governance views stay below in this file)
@@ -1010,9 +1010,6 @@ export component AppWindow inherits Window {
     // "create" | "join") joins one and puts it on the clipboard
     in property <[string]> rw-log;
     in property <[string]> cw-log;
-    // the same log as ONE string (joined in Rust) — feeds the selectable
-    // read-only text input the lobby shows
-    in property <string> cw-log-text;
     in property <[string]> jw-log;
     // per-line ✓/✗ tones for the three run logs (see cw-log-tone)
     in property <[int]> rw-log-tone;
@@ -1031,6 +1028,8 @@ export component AppWindow inherits Window {
     in-out property <bool> confirm-leave-open: false;
     // modal: aborting a RUNNING founding ritual (voids every invite link)
     in-out property <bool> confirm-abort-ritual-open: false;
+    // the wizards' ritual/run log modal (footer log button)
+    property <bool> wizard-log-open: false;
     // mirrored from the engine session (co-equal): which surface the main
     // view shows and which of its sub-views is active; changing them is a
     // SelectSurface / SelectView command
@@ -1053,6 +1052,9 @@ export component AppWindow inherits Window {
         // a view switch can unmount a hovered HintTip writer without a
         // hover-out — never carry a hint across screens
         HintTip.label = "";
+        // the wizard log modal reads the CURRENT screen's log — a screen
+        // change under it (engine navigate, seal) would swap its content
+        root.wizard-log-open = false;
         if (root.screen != root.nav-default-screen) {
             root.nav-default-screen = root.screen;
             root.nav-collapsed = root.screen != AppScreen.main;
@@ -1092,7 +1094,8 @@ export component AppWindow inherits Window {
         || root.patch-view-open
         || root.relay-clearnet-modal-open
         || root.nt-open
-        || root.recover-link-open;
+        || root.recover-link-open
+        || root.wizard-log-open;
     changed any-modal-open => {
         if (!root.any-modal-open) {
             esc.focus();
@@ -1258,6 +1261,9 @@ export component AppWindow inherits Window {
     in property <int> cw-sealed;   // how many rows are green
     in property <int> cw-total;    // total rows (n)
     in property <bool> cw-can-propose; // every seat joined → deliberation unlocked
+    // every member ratified the charter (signature in) — only then is the
+    // founder prompted for the own phrase backup (❻½ UI order)
+    in property <bool> cw-all-ratified;
     // a seat declined the charter: the failure banner switches from the
     // network wording to "the founding is over" (mirrored from seat state 3)
     in property <bool> cw-declined;
@@ -1267,12 +1273,13 @@ export component AppWindow inherits Window {
     // the one charter length limit, engine and UI alike (AGENDA_MAX)
     property <int> cw-agenda-max: 4096;
     // the charter step's feature selection (charter_features.md): chat is
-    // core and not a property; wallet defaults on, the rest off. Read by
-    // the Rust create-propose handler, reset when a ritual starts.
-    in-out property <bool> cw-feat-memory: false;
-    in-out property <bool> cw-feat-quests: false;
-    in-out property <bool> cw-feat-vault: false;
-    in-out property <bool> cw-feat-wallet: true;
+    // core and not a property; shared memory defaults on, wallet off.
+    // kanban/vault are locked off in the wizard (not built yet) and have
+    // NO properties — re-introduce checkbox + property + Rust read whole
+    // when they ship. Read by the Rust create-propose handler, reset when
+    // a ritual starts.
+    in-out property <bool> cw-feat-memory: true;
+    in-out property <bool> cw-feat-wallet: false;
     // the members are in-process simulations (no real network yet): the
     // lobby shows a SIMULATION badge so it is never mistaken for a real
     // off-band exchange
@@ -1815,7 +1822,9 @@ export component AppWindow inherits Window {
     // clickable (never during a running engine mock-run). An open modal is
     // closed first, like a click on its scrim.
     function handle-escape() {
-        if (root.recover-link-open) {
+        if (root.wizard-log-open) {
+            root.wizard-log-open = false;
+        } else if (root.recover-link-open) {
             root.recover-link-open = false;
         } else if (root.confirm-quit-open) {
             root.confirm-quit-open = false;
@@ -1908,10 +1917,8 @@ export component AppWindow inherits Window {
         root.cw-seed-check = "";
         root.cw-threshold = 2;
         root.cw-members = 3;
-        root.cw-feat-memory = false;
-        root.cw-feat-quests = false;
-        root.cw-feat-vault = false;
-        root.cw-feat-wallet = true;
+        root.cw-feat-memory = true;
+        root.cw-feat-wallet = false;
     }
 
     init => {
@@ -2493,67 +2500,65 @@ export component AppWindow inherits Window {
             // (progress + live log, like the restore), and on success the
             // founding result appears: the recovery phrase and one one-time
             // invite link per future member. ----
-            if root.screen == AppScreen.create: VerticalLayout {
-                padding: 24px;
-                padding-left: 16px;
-                padding-right: 16px;
-                spacing: 12px;
-
-                HorizontalLayout {
-                    Text {
-                        text: Strings.cw-title;
-                        color: Theme.text;
-                        font-size: Theme.fs-h1;
-                        font-weight: 700;
-                        horizontal-stretch: 1;
-                        vertical-alignment: center;
+            if root.screen == AppScreen.create: WizardFrame {
+                // steps: configure · ritual/invites · charter · phrase & enter
+                property <int> cur: root.cw-step == 0 ? 0
+                    : (root.cw-outcome == 1 ? 3
+                    : ((root.cw-can-propose || root.cw-proposed) && root.cw-outcome == 0 ? 2 : 1));
+                title: Strings.cw-title;
+                steps: 4;
+                step: self.cur;
+                step-label: self.cur == 0 ? Strings.wiz-step-setup
+                    : (self.cur == 1 ? Strings.wiz-step-invites
+                    : (self.cur == 2 ? Strings.wiz-step-charter : Strings.wiz-step-enter));
+                // always armed: a stuck ritual (a spent link, absent
+                // joiners) must be abortable. Mid-run it asks first —
+                // aborting voids every distributed invite link.
+                close => {
+                    if (root.cw-running) {
+                        root.confirm-abort-ritual-open = true;
+                    } else if (root.cw-step == 1) {
+                        root.create-cancel();
+                    } else {
+                        root.navigate(AppScreen.choice);
                     }
-                    AppButton {
-                        label: "×";
-                        // always armed: a stuck ritual (a spent link, absent
-                        // joiners) must be abortable. Mid-run it asks first —
-                        // aborting voids every distributed invite link.
-                        clicked => {
-                            if (root.cw-running) {
-                                root.confirm-abort-ritual-open = true;
-                            } else if (root.cw-step == 1) {
-                                root.create-cancel();
-                            } else {
-                                root.navigate(AppScreen.choice);
-                            }
-                        }
+                }
+                log-label: root.cw-step == 1 ? Strings.cw-log-title : "";
+                show-log => {
+                    root.wizard-log-open = true;
+                }
+                // the one advancing action of the current phase — the labels
+                // walk the ritual: found · propose · confirm backup · enter
+                primary-label: root.cw-step == 0 ? Strings.cw-found
+                    : (root.cw-outcome == 1 ? Strings.enter-republic
+                    : (root.cw-can-propose && !root.cw-proposed && root.cw-outcome == 0 ? Strings.cw-propose
+                    : (root.cw-proposed && root.cw-outcome == 0 && !root.cw-backup-confirmed
+                        && root.cw-all-ratified ? Strings.cw-backup-confirm
+                    : "")));
+                primary-enabled: root.cw-step == 0 ? (root.cw-name != "" && root.cw-member != "")
+                    : (root.cw-outcome == 1 ? true
+                    : (root.cw-can-propose && !root.cw-proposed
+                        ? (root.cw-name != "" && root.cw-agenda != ""
+                            && root.cw-agenda.character-count <= root.cw-agenda-max)
+                        : root.seed-matches(root.cw-seed-check, root.cw-seed)));
+                primary-icon: @image-url("assets/create.svg");
+                primary-icon-set: root.cw-step == 0 || root.cw-outcome == 1;
+                primary => {
+                    if (root.cw-step == 0) {
+                        root.create-start(root.cw-name, root.cw-member, root.cw-threshold, root.cw-members);
+                    } else if (root.cw-outcome == 1) {
+                        root.create-finish();
+                    } else if (root.cw-can-propose && !root.cw-proposed) {
+                        root.cw-proposed = true;
+                        root.create-propose(root.cw-name, root.cw-agenda);
+                    } else if (root.cw-proposed && !root.cw-backup-confirmed && root.cw-all-ratified) {
+                        root.confirm-seed-backup(root.cw-seed-check);
+                        root.cw-seed-check = "";
                     }
                 }
 
-                // step dots: configure · ritual/invites · charter · phrase & enter
-                HorizontalLayout {
-                    alignment: center;
-                    spacing: 7px;
-                    for i in 4: Rectangle {
-                        width: 9px;
-                        height: 9px;
-                        border-radius: 4.5px;
-                        background: i == (root.cw-step == 0 ? 0
-                            : (root.cw-outcome == 1 ? 3
-                            : ((root.cw-can-propose || root.cw-proposed) && root.cw-outcome == 0 ? 2 : 1))) ? Theme.accent : Theme.line;
-                    }
-                }
-
-                // scrollable: at raised font sizes the form outgrows the
-                // window - the Flickable + hint keep every field reachable
-                if root.cw-step == 0: Rectangle {
-                    vertical-stretch: 1;
-                    clip: true;
-                    cwsfl := Flickable {
-                        width: 100%;
-                        height: 100%;
-                        viewport-width: self.width;
-                        viewport-height: cws0.preferred-height;
-                    cws0 := VerticalLayout {
+                if root.cw-step == 0: VerticalLayout {
                     spacing: 12px;
-                    // pack to the top: leftover height stays blank instead of
-                    // inflating the last panel
-                    alignment: start;
 
                     // who this republic is
                     RestoreWay {
@@ -2818,53 +2823,15 @@ export component AppWindow inherits Window {
                     }
 
 
-                    HorizontalLayout {
-                        Rectangle {
-                            horizontal-stretch: 1;
-                        }
-                        AppButton {
-                            height: 38px;
-                            primary: true;
-                            icon: @image-url("assets/create.svg");
-                            icon-set: true;
-                            label: Strings.cw-found;
-                            enabled: root.cw-name != "" && root.cw-member != "";
-                            clicked => {
-                                root.create-start(root.cw-name, root.cw-member, root.cw-threshold, root.cw-members);
-                            }
-                        }
-                    }
-                    }
-                    }
-                    ScrollHint {
-                        x: parent.width - 7px;
-                        view-h: cwsfl.height;
-                        content-h: cwsfl.viewport-height;
-                        scroll-y: cwsfl.viewport-y;
-                    }
                 }
 
                 // step 2 AND the seed step share this branch: the founding
-                // ritual lobby — the live member list (rows turn green as
-                // members activate their link and sign the roster) and the
-                // real ritual event log. Once the republic exists
-                // (outcome 1) the phrase step replaces the lobby panels but
-                // KEEPS the log: the post-seal lines (mesh bootstrap) land
-                // there, and hiding them looked like a dead node.
-                // scrollable like step 0: at raised font sizes the charter
-                // step outgrows the window - the buttons must stay reachable
-                if root.cw-step == 1: Rectangle {
-                    vertical-stretch: 1;
-                    clip: true;
-                    cwrfl := Flickable {
-                        width: 100%;
-                        height: 100%;
-                        viewport-width: self.width;
-                        // fills the window while everything fits (the log
-                        // keeps the leftover height); grows and scrolls when
-                        // a panel outgrows it
-                        viewport-height: max(self.height, cws1.preferred-height);
-                    cws1 := VerticalLayout {
+                // ritual lobby. Stack principle: the phase's CURRENT
+                // interaction (failure banner, wait note, seed proof or the
+                // charter) sits on top, the standing member list — the
+                // artifact of the invite step — below it. The live ritual
+                // log moved behind the footer's log button (a modal).
+                if root.cw-step == 1: VerticalLayout {
                     spacing: 12px;
 
                     // the founding failed: say so loudly, right where the
@@ -2926,10 +2893,20 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // the charter is OUT — the founder can only wait now, and
-                    // the screen must SAY so (a silent lobby right after
-                    // "Propose & Seal" reads as a bug)
-                    if root.cw-proposed && root.cw-outcome == 0: Rectangle {
+                    // the republic is sealed — the shared last step, pixel-
+                    // identical to the joiner's (SealedPanel); Enter republic
+                    // sits in the footer
+                    if root.cw-outcome == 1: SealedPanel {
+                        title: root.cw-name;
+                        hint: "\{root.cw-threshold}-of-\{root.cw-members}";
+                    }
+
+                    // the charter is OUT — the founder waits, and the screen
+                    // must SAY so (a silent lobby right after "Propose &
+                    // Seal" reads as a bug). Hidden only while the founder's
+                    // own phrase-backup prompt is the current interaction.
+                    if root.cw-proposed && root.cw-outcome == 0
+                        && (!root.cw-all-ratified || root.cw-backup-confirmed): Rectangle {
                         vertical-stretch: 0;
                         background: Theme.panel;
                         border-radius: Theme.win95 ? 0px : 8px;
@@ -2956,13 +2933,14 @@ export component AppWindow inherits Window {
                     // ❻½ (seed_backup_confirmation.md): the founder's OWN
                     // phrase-backup proof — the ritual seals, and the disk
                     // is touched, only once EVERY participant confirmed
-                    // (n-of-n includes this seat)
+                    // (n-of-n includes this seat). Prompted only AFTER every
+                    // member ratified: two competing calls to action at once
+                    // read as noise.
                     if root.cw-proposed && root.cw-outcome == 0
+                        && root.cw-all-ratified
                         && !root.cw-backup-confirmed: SeedConfirmStep {
                         vertical-stretch: 0;
                         seed: root.cw-seed;
-                        icon: @image-url("assets/create.svg");
-                        action-label: Strings.cw-backup-confirm;
                         armed: root.seed-matches(root.cw-seed-check, root.cw-seed);
                         check <=> root.cw-seed-check;
                         enter => {
@@ -2975,13 +2953,133 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // the member list: founder + one row per seat. Sized by
-                    // its CONTENT (capped, the Flickable scrolls beyond the
-                    // cap — a member is never cut off), never stretched; the
-                    // log below takes the leftover height. Hidden during the
-                    // charter step and the seed step — one thing at a time.
-                    if root.cw-outcome != 1
-                        && !(root.cw-can-propose && !root.cw-proposed && root.cw-outcome == 0): Rectangle {
+                    // while the proposal is out, the founder keeps seeing
+                    // WHAT is being ratified — the same read-only view the
+                    // members ratify from
+                    if root.cw-proposed && root.cw-outcome == 0: CharterView {
+                        heading: Strings.wiz-step-charter;
+                        republic: root.cw-name;
+                        agenda: root.cw-agenda == "" ? Strings.jw-ratify-agenda-empty : root.cw-agenda;
+                        feat-memory: root.cw-feat-memory;
+                        feat-quests: false;
+                        feat-vault: false;
+                        feat-wallet: root.cw-feat-wallet;
+                    }
+
+                    // ---- deliberation: the phase's current interaction, on
+                    // top of the stack — its own panel, accent-framed so it
+                    // reads as "input needed now". Propose & Seal sits in
+                    // the wizard footer. ----
+                    if root.cw-can-propose && !root.cw-proposed && root.cw-outcome == 0: Rectangle {
+                        vertical-stretch: 0;
+                        background: Theme.panel;
+                        border-radius: Theme.win95 ? 0px : 8px;
+                        border-width: Theme.border-w;
+                        border-color: Theme.accent;
+                        VerticalLayout {
+                            padding: 14px;
+                            spacing: 8px;
+                            Text {
+                                text: Strings.cw-charter-step;
+                                color: Theme.accent;
+                                font-size: Theme.fs-h2;
+                                font-weight: 700;
+                                wrap: word-wrap;
+                            }
+                            // the ONE instruction, at reading size — what to
+                            // write and what it means
+                            Text {
+                                text: Strings.cw-charter-hint;
+                                color: Theme.text;
+                                font-size: Theme.fs-body;
+                                wrap: word-wrap;
+                            }
+                            // the name was fixed when the ritual started —
+                            // shown read-only, never re-editable here
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: "\{Strings.cw-charter-name-label}:";
+                                    color: Theme.faint;
+                                    font-size: Theme.fs-body;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: root.cw-name;
+                                    color: Theme.text;
+                                    font-size: Theme.fs-body;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+                            }
+                            // the charter itself: seven visible body lines
+                            // (plus the skin's 2x8px padding), its own
+                            // scroll hint, the engine's 4096-char limit
+                            AppArea {
+                                height: 7 * 1.2 * Theme.fs-body + 16px;
+                                text <=> root.cw-agenda;
+                                placeholder: Strings.cw-charter-agenda-ph;
+                            }
+                            Text {
+                                text: "\{root.cw-agenda.character-count} / \{root.cw-agenda-max}";
+                                color: root.cw-agenda.character-count > root.cw-agenda-max ? Theme.bad : Theme.faint;
+                                font-size: Theme.fs-cap;
+                                horizontal-alignment: right;
+                            }
+                            // the feature selection, ratified with the
+                            // charter: chat is core (locked on), kanban and
+                            // vault are not built yet (locked off); the rest
+                            // is this republic's choice - enable-only
+                            // forever, so a vote can add but never remove
+                            // content-sized, anchored left - the panel must
+                            // not stretch across the step's width
+                            HorizontalLayout {
+                                alignment: start;
+                                Rectangle {
+                                    background: Theme.panel-2;
+                                    border-radius: Theme.win95 ? 0px : 8px;
+                                    border-width: Theme.border-w;
+                                    border-color: Theme.line;
+                                    VerticalLayout {
+                                        padding: 14px;
+                                        padding-left: 18px;
+                                        padding-right: 22px;
+                                        spacing: 10px;
+                                        Text {
+                                            text: Strings.cw-features;
+                                            color: Theme.text;
+                                            font-size: Theme.fs-h2;
+                                            font-weight: 700;
+                                        }
+                                        GridLayout {
+                                            spacing: 10px;
+                                            Row {
+                                                AppCheck { width: 180px; label: Strings.feat-chat; checked: true; enabled: false; }
+                                                AppCheck { width: 180px; label: Strings.feat-memory; checked <=> root.cw-feat-memory; }
+                                            }
+                                            Row {
+                                                AppCheck { width: 180px; label: Strings.feat-quests; checked: false; enabled: false; }
+                                                AppCheck { width: 180px; label: Strings.feat-vault; checked: false; enabled: false; }
+                                            }
+                                            Row {
+                                                AppCheck { width: 180px; label: Strings.feat-wallet; checked <=> root.cw-feat-wallet; }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // the member list: founder + one row per seat, rows turn
+                    // green as members activate their link and sign the
+                    // roster (capped, the list scrolls beyond the cap). The
+                    // ritual's standing state, stacked under the current
+                    // interaction — gone once sealed (the shared last step
+                    // is identical for founder and joiner).
+                    if root.cw-outcome != 1: Rectangle {
                         height: min(340px, 84px + root.cw-seats.length * 49px);
                         background: Theme.panel-2;
                         border-radius: Theme.win95 ? 0px : 8px;
@@ -3024,7 +3122,9 @@ export component AppWindow inherits Window {
                                     vertical-alignment: center;
                                 }
                             }
-                            Text {
+                            // only while links are still being handed out —
+                            // once everyone joined the advice is stale
+                            if !root.cw-can-propose && !root.cw-proposed: Text {
                                 text: root.cw-simulated ? Strings.cw-ritual-hint-sim : Strings.cw-ritual-hint;
                                 color: root.cw-simulated ? Theme.warn : Theme.faint;
                                 font-size: Theme.fs-cap;
@@ -3125,242 +3225,6 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // ---- deliberation: the next step, right under the
-                    // members — its own panel, accent-framed so it reads as
-                    // "input needed now". It never stretches; the log below
-                    // takes the leftover height. ----
-                    if root.cw-can-propose && !root.cw-proposed && root.cw-outcome == 0: Rectangle {
-                        // explicit: a Rectangle's implicit stretch is 1 and
-                        // would split the leftover height with the log
-                        vertical-stretch: 0;
-                        background: Theme.panel;
-                        border-radius: Theme.win95 ? 0px : 8px;
-                        border-width: Theme.border-w;
-                        border-color: Theme.accent;
-                        VerticalLayout {
-                            padding: 14px;
-                            spacing: 8px;
-                            Text {
-                                text: Strings.cw-charter-step;
-                                color: Theme.accent;
-                                font-size: Theme.fs-h2;
-                                font-weight: 700;
-                                wrap: word-wrap;
-                            }
-                            // the ONE instruction, at reading size — what to
-                            // write and what it means
-                            Text {
-                                text: Strings.cw-charter-hint;
-                                color: Theme.text;
-                                font-size: Theme.fs-body;
-                                wrap: word-wrap;
-                            }
-                            // the name was fixed when the ritual started —
-                            // shown read-only, never re-editable here
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    text: "\{Strings.cw-charter-name-label}:";
-                                    color: Theme.faint;
-                                    font-size: Theme.fs-body;
-                                    vertical-alignment: center;
-                                }
-                                Text {
-                                    text: root.cw-name;
-                                    color: Theme.text;
-                                    font-size: Theme.fs-body;
-                                    font-weight: 700;
-                                    vertical-alignment: center;
-                                    horizontal-stretch: 1;
-                                    overflow: elide;
-                                }
-                            }
-                            // the charter itself: seven visible body lines
-                            // (plus the skin's 2x8px padding), its own
-                            // scroll hint, the engine's 4096-char limit
-                            AppArea {
-                                height: 7 * 1.2 * Theme.fs-body + 16px;
-                                text <=> root.cw-agenda;
-                                placeholder: Strings.cw-charter-agenda-ph;
-                            }
-                            // the feature selection, ratified with the
-                            // charter: chat is core (locked on); the rest
-                            // is this republic's choice - enable-only
-                            // forever, so a vote can add but never remove
-                            // content-sized, anchored left - the panel must
-                            // not stretch across the step's width
-                            HorizontalLayout {
-                                alignment: start;
-                                Rectangle {
-                                    background: Theme.panel-2;
-                                    border-radius: Theme.win95 ? 0px : 8px;
-                                    border-width: Theme.border-w;
-                                    border-color: Theme.line;
-                                    VerticalLayout {
-                                        padding: 14px;
-                                        padding-left: 18px;
-                                        padding-right: 22px;
-                                        spacing: 10px;
-                                        Text {
-                                            text: Strings.cw-features;
-                                            color: Theme.text;
-                                            font-size: Theme.fs-h2;
-                                            font-weight: 700;
-                                        }
-                                        GridLayout {
-                                            spacing: 10px;
-                                            Row {
-                                                AppCheck { width: 180px; label: Strings.feat-chat; checked: true; enabled: false; }
-                                                AppCheck { width: 180px; label: Strings.feat-memory; checked <=> root.cw-feat-memory; }
-                                            }
-                                            Row {
-                                                AppCheck { width: 180px; label: Strings.feat-quests; checked <=> root.cw-feat-quests; }
-                                                AppCheck { width: 180px; label: Strings.feat-vault; checked <=> root.cw-feat-vault; }
-                                            }
-                                            Row {
-                                                AppCheck { width: 180px; label: Strings.feat-wallet; checked <=> root.cw-feat-wallet; }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Rectangle { horizontal-stretch: 1; }
-                                VerticalLayout {
-                                    horizontal-stretch: 0;
-                                    alignment: end;
-                                    spacing: 6px;
-                                    Text {
-                                        text: "\{root.cw-agenda.character-count} / \{root.cw-agenda-max}";
-                                        color: root.cw-agenda.character-count > root.cw-agenda-max ? Theme.bad : Theme.faint;
-                                        font-size: Theme.fs-cap;
-                                        horizontal-alignment: right;
-                                    }
-                                    AppButton {
-                                        height: 34px;
-                                        primary: true;
-                                        label: Strings.cw-propose;
-                                        // arms only once a charter is written
-                                        // (and within the shared limit)
-                                        enabled: root.cw-name != ""
-                                            && root.cw-agenda != ""
-                                            && root.cw-agenda.character-count <= root.cw-agenda-max;
-                                        clicked => {
-                                            root.cw-proposed = true;
-                                            root.create-propose(root.cw-name, root.cw-agenda);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // outcome 1: the republic EXISTS — the phrase backup was
-                    // already confirmed DURING the ritual (❻½), so this is
-                    // just the way in. Compact (stretch 0): the log keeps
-                    // the leftover height.
-                    if root.cw-outcome == 1: HorizontalLayout {
-                        vertical-stretch: 0;
-                        spacing: 10px;
-                        Rectangle {
-                            horizontal-stretch: 1;
-                        }
-                        AppButton {
-                            height: 38px;
-                            primary: true;
-                            icon: @image-url("assets/create.svg");
-                            icon-set: true;
-                            label: Strings.enter-republic;
-                            clicked => {
-                                root.create-finish();
-                            }
-                        }
-                    }
-
-                    // the live ritual log: real events (activated · key
-                    // received · signed · workspace created). It owns the
-                    // leftover height, on the base background so the text
-                    // carries real contrast.
-                    Rectangle {
-                        vertical-stretch: 1;
-                        // in the scrolled (overflowing) state the log keeps a
-                        // readable slice instead of collapsing
-                        preferred-height: 200px;
-                        background: Theme.panel;
-                        border-radius: Theme.win95 ? 0px : 8px;
-                        border-width: Theme.border-w;
-                        border-color: root.cw-outcome == 2 ? Theme.bad : Theme.line;
-                        VerticalLayout {
-                            padding: 12px;
-                            spacing: 6px;
-                            HorizontalLayout {
-                                Text {
-                                    // the log IS this step's content — its
-                                    // title reads like one (gray = unimportant,
-                                    // and this is not unimportant)
-                                    text: Strings.cw-log-title;
-                                    color: Theme.text;
-                                    font-size: Theme.fs-h2;
-                                    font-weight: 700;
-                                    horizontal-stretch: 1;
-                                }
-                                AppButton {
-                                    height: 26px;
-                                    pad: 9px;
-                                    label: Strings.ow-copy;
-                                    clicked => {
-                                        root.copy-log("create");
-                                        root.show-toast(Strings.toast-copied);
-                                    }
-                                }
-                            }
-                            Rectangle {
-                                vertical-stretch: 1;
-                                clip: true;
-                                logfl := Flickable {
-                                    width: 100%;
-                                    height: 100%;
-                                    viewport-width: self.width;
-                                    viewport-height: max(self.height, logtext.preferred-height);
-                                    // pinned to the bottom: the newest line is
-                                    // always in view (like the RunView log)
-                                    viewport-y: min(0px, self.height - self.viewport-height);
-                                    // ONE read-only text input instead of a
-                                    // Text-per-line list: the operator can
-                                    // SELECT and copy any part of the log
-                                    // (wrap, never elide — a failure line's
-                                    // tail says what to DO about it)
-                                    logtext := TextInput {
-                                        width: 100%;
-                                        height: logfl.viewport-height;
-                                        text: root.cw-log-text;
-                                        read-only: true;
-                                        color: Theme.text;
-                                        font-size: Theme.fs-body;
-                                        font-family: "monospace";
-                                        single-line: false;
-                                        wrap: word-wrap;
-                                    }
-                                }
-                                ScrollHint {
-                                    x: parent.width - 7px;
-                                    view-h: logfl.height;
-                                    content-h: logfl.viewport-height;
-                                    scroll-y: logfl.viewport-y;
-                                }
-                            }
-                        }
-                    }
-
-                    }
-                    }
-                    ScrollHint {
-                        x: parent.width - 7px;
-                        view-h: cwrfl.height;
-                        content-h: cwrfl.viewport-height;
-                        scroll-y: cwrfl.viewport-y;
-                    }
                 }
 
             }
@@ -3939,63 +3803,73 @@ export component AppWindow inherits Window {
             // restore ways — what the invite says you are joining, plus your
             // handle and the Join button. Joining is an engine-run (progress
             // + live log); malformed invites fail partway. ----
-            if root.screen == AppScreen.join: VerticalLayout {
-                padding: 24px;
-                padding-left: 16px;
-                padding-right: 16px;
-                spacing: 12px;
-
-                HorizontalLayout {
-                    Text {
-                        text: Strings.jw-title;
-                        color: Theme.text;
-                        font-size: Theme.fs-h1;
-                        font-weight: 700;
-                        horizontal-stretch: 1;
-                        vertical-alignment: center;
+            if root.screen == AppScreen.join: WizardFrame {
+                // steps mirror the founder's four: invite · joining ·
+                // charter & features (the proposal arrived; ratify + phrase
+                // proof) · enter — so both sides' headers read the same
+                property <int> cur: root.jw-sealed ? 3
+                    : (root.jw-step == 0 ? 0
+                    : (root.jw-proposed-name != "" ? 2 : 1));
+                title: Strings.jw-title;
+                steps: 4;
+                step: self.cur;
+                step-label: self.cur == 0 ? Strings.wiz-step-invite
+                    : (self.cur == 1 ? Strings.wiz-step-joining
+                    : (self.cur == 2 ? Strings.wiz-step-charter : Strings.wiz-step-enter));
+                // always armed: a joiner stuck waiting (spent link,
+                // vanished founder) must never be trapped — cancel
+                // invalidates the in-flight join task engine-side
+                close => {
+                    if (root.jw-step == 1) {
+                        root.join-cancel();
+                    } else {
+                        root.navigate(AppScreen.choice);
                     }
-                    AppButton {
-                        label: "×";
-                        // always armed: a joiner stuck waiting (spent link,
-                        // vanished founder) must never be trapped — cancel
-                        // invalidates the in-flight join task engine-side
-                        clicked => {
-                            if (root.jw-step == 1) {
-                                root.join-cancel();
-                            } else {
-                                root.navigate(AppScreen.choice);
-                            }
-                        }
+                }
+                log-label: root.jw-step == 1 ? Strings.cw-log-title : "";
+                show-log => {
+                    root.wizard-log-open = true;
+                }
+                alt-label: root.jw-step == 1 && root.jw-awaiting-ratify && !root.jw-sealed
+                    && root.jw-outcome != 2 ? Strings.jw-ratify-decline : "";
+                alt => {
+                    root.join-decline-charter();
+                }
+                // the one advancing action of the current phase: join ·
+                // ratify · confirm backup · enter. A FAILED run beats every
+                // pending phase flag - the only way left is back out.
+                primary-label: root.jw-step == 0 ? Strings.jw-join
+                    : (root.jw-outcome == 2 ? Strings.jw-back-to-start
+                    : (root.jw-sealed ? Strings.enter-republic
+                    : (root.jw-awaiting-ratify ? Strings.jw-ratify-confirm
+                    : (root.jw-awaiting-backup ? Strings.cw-backup-confirm
+                    : ""))));
+                primary-enabled: root.jw-step == 0
+                    ? (root.jw-invite != "" && root.jw-member != "" && !root.jw-starting)
+                    : (root.jw-outcome != 2 && !root.jw-sealed
+                        && !root.jw-awaiting-ratify && root.jw-awaiting-backup
+                        ? root.seed-matches(root.jw-seed-check, root.jw-seed)
+                        : true);
+                primary-icon: @image-url("assets/join.svg");
+                primary-icon-set: root.jw-sealed;
+                primary => {
+                    if (root.jw-step == 0) {
+                        root.jw-starting = true;
+                        root.join-start(root.jw-invite, root.jw-member);
+                    } else if (root.jw-outcome == 2) {
+                        root.join-cancel();
+                    } else if (root.jw-sealed) {
+                        root.join-finish();
+                    } else if (root.jw-awaiting-ratify) {
+                        root.join-confirm-charter();
+                    } else if (root.jw-awaiting-backup) {
+                        root.confirm-seed-backup(root.jw-seed-check);
+                        root.jw-seed-check = "";
                     }
                 }
 
-                // step dots: 1 = the invite, 2 = join progress, 3 = phrase & enter
-                HorizontalLayout {
-                    alignment: center;
-                    spacing: 7px;
-                    for i in 3: Rectangle {
-                        width: 9px;
-                        height: 9px;
-                        border-radius: 4.5px;
-                        background: i == (root.jw-sealed ? 2 : root.jw-step) ? Theme.accent : Theme.line;
-                    }
-                }
-
-                // scrollable: at raised font sizes the form outgrows the
-                // window - the Flickable + hint keep every field reachable
-                if root.jw-step == 0: Rectangle {
-                    vertical-stretch: 1;
-                    clip: true;
-                    jwsfl := Flickable {
-                        width: 100%;
-                        height: 100%;
-                        viewport-width: self.width;
-                        viewport-height: jws0.preferred-height;
-                    jws0 := VerticalLayout {
+                if root.jw-step == 0: VerticalLayout {
                     spacing: 12px;
-                    // pack to the top: leftover height stays blank instead of
-                    // inflating the last panel
-                    alignment: start;
 
                     // the invite link feeds everything below
                     RestoreWay {
@@ -4071,177 +3945,27 @@ export component AppWindow inherits Window {
                                         root.show-toast(Strings.jw-adopt-done);
                                     }
                                 }
-                                AppButton {
-                                    height: 38px;
-                                    primary: true;
-                                    enabled: root.jw-invite != "" && root.jw-member != "" && !root.jw-starting;
-                                    label: Strings.jw-join;
-                                    clicked => {
-                                        root.jw-starting = true;
-                                        root.join-start(root.jw-invite, root.jw-member);
-                                    }
-                                }
                             }
                         }
                     }
 
-                    }
-                    }
-                    ScrollHint {
-                        x: parent.width - 7px;
-                        view-h: jwsfl.height;
-                        content-h: jwsfl.viewport-height;
-                        scroll-y: jwsfl.viewport-y;
-                    }
                 }
 
-                // step 2: the real join run — the live log while it waits for
-                // every member to seal. The recovery phrase is NOT shown here
-                // (2026-08-08): a failed founding needs no phrase, and a
-                // sealed one gates entry on the backup step below.
-                // scrollable like step 0: the ratify panel grows with the
-                // charter, and the decision buttons must stay reachable
-                if root.jw-step == 1: Rectangle {
-                    vertical-stretch: 1;
-                    clip: true;
-                    jwrfl := Flickable {
-                        width: 100%;
-                        height: 100%;
-                        viewport-width: self.width;
-                        // fills the window while everything fits (the run view
-                        // keeps the leftover height); grows and scrolls when a
-                        // panel outgrows it
-                        viewport-height: max(self.height, jws1.preferred-height);
-                    jws1 := VerticalLayout {
+                // step 2: the real join run. Stack principle: the phase's
+                // current interaction (ratify / phrase proof) on top, the
+                // standing run status below; the live log moved behind the
+                // footer's log button (a modal). The recovery phrase is NOT
+                // shown before the seal gates entry on the backup step.
+                if root.jw-step == 1: VerticalLayout {
                     spacing: 12px;
-                    // ---- ratification: confirm the founder's proposed charter
-                    if root.jw-awaiting-ratify && !root.jw-sealed: Rectangle {
-                        border-radius: Theme.win95 ? 0px : 8px;
-                        background: Theme.panel;
-                        border-width: Theme.border-w;
-                        border-color: Theme.line;
-                        VerticalLayout {
-                            padding: 14px;
-                            spacing: 8px;
-                            Text {
-                                text: Strings.jw-ratify-title;
-                                color: Theme.text;
-                                font-weight: 700;
-                                font-size: Theme.fs-body;
-                            }
-                            Text {
-                                text: root.jw-proposed-name;
-                                color: Theme.text;
-                                font-size: Theme.fs-body;
-                            }
-                            // the charter itself: its own bounded panel with
-                            // its own scroll - a long charter must never push
-                            // the decision buttons out of the window
-                            Rectangle {
-                                height: min(10 * 1.4 * Theme.fs-cap + 20px, agfl.viewport-height + 20px);
-                                background: Theme.panel-2;
-                                border-radius: Theme.win95 ? 0px : 8px;
-                                border-width: Theme.border-w;
-                                border-color: Theme.line;
-                                clip: true;
-                                agfl := Flickable {
-                                    x: 10px;
-                                    y: 10px;
-                                    width: parent.width - 20px;
-                                    height: parent.height - 20px;
-                                    viewport-width: self.width;
-                                    viewport-height: agtxt.preferred-height;
-                                    agtxt := Text {
-                                        width: 100%;
-                                        text: root.jw-proposed-agenda == "" ? Strings.jw-ratify-agenda-empty
-                                            : root.jw-proposed-agenda;
-                                        color: Theme.dim;
-                                        font-size: Theme.fs-cap;
-                                        wrap: word-wrap;
-                                    }
-                                }
-                                ScrollHint {
-                                    x: parent.width - 7px;
-                                    view-h: agfl.height;
-                                    content-h: agfl.viewport-height;
-                                    scroll-y: agfl.viewport-y;
-                                }
-                            }
-                            // the proposed feature selection, exactly as it
-                            // will be signed - read-only, off rows dimmed;
-                            // the same panel the founder's wizard shows
-                            HorizontalLayout {
-                                alignment: start;
-                                Rectangle {
-                                    background: Theme.panel-2;
-                                    border-radius: Theme.win95 ? 0px : 8px;
-                                    border-width: Theme.border-w;
-                                    border-color: Theme.line;
-                                    VerticalLayout {
-                                        padding: 14px;
-                                        padding-left: 18px;
-                                        padding-right: 22px;
-                                        spacing: 10px;
-                                        Text {
-                                            text: Strings.cw-features;
-                                            color: Theme.text;
-                                            font-size: Theme.fs-h2;
-                                            font-weight: 700;
-                                        }
-                                        GridLayout {
-                                            spacing: 10px;
-                                            Row {
-                                                AppCheck { width: 180px; label: Strings.feat-chat; checked: true; enabled: false; }
-                                                AppCheck { width: 180px; label: Strings.feat-memory; checked: root.jw-feat-memory; enabled: false; }
-                                            }
-                                            Row {
-                                                AppCheck { width: 180px; label: Strings.feat-quests; checked: root.jw-feat-quests; enabled: false; }
-                                                AppCheck { width: 180px; label: Strings.feat-vault; checked: root.jw-feat-vault; enabled: false; }
-                                            }
-                                            Row {
-                                                AppCheck { width: 180px; label: Strings.feat-wallet; checked: root.jw-feat-wallet; enabled: false; }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            Text {
-                                text: Strings.jw-ratify-hint;
-                                color: Theme.faint;
-                                font-size: Theme.fs-cap;
-                                wrap: word-wrap;
-                            }
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Rectangle { horizontal-stretch: 1; }
-                                AppButton {
-                                    height: 34px;
-                                    label: Strings.jw-ratify-decline;
-                                    clicked => {
-                                        root.join-decline-charter();
-                                    }
-                                }
-                                AppButton {
-                                    height: 34px;
-                                    primary: true;
-                                    label: Strings.jw-ratify-confirm;
-                                    clicked => {
-                                        root.join-confirm-charter();
-                                    }
-                                }
-                            }
-                        }
-                    }
                     // step 2½ (❻½): the phrase-backup confirmation — BEFORE
                     // the seal, the exact twin of the founder's. Confirming
                     // releases the signed attestation; the ritual then waits
                     // for everyone. Lives in the scrollable column so the
                     // confirm button stays reachable.
-                    if root.jw-awaiting-backup && !root.jw-sealed: SeedConfirmStep {
+                    if root.jw-awaiting-backup && !root.jw-sealed && root.jw-outcome != 2: SeedConfirmStep {
                         vertical-stretch: 0;
                         seed: root.jw-seed;
-                        icon: @image-url("assets/join.svg");
-                        action-label: Strings.cw-backup-confirm;
                         armed: root.seed-matches(root.jw-seed-check, root.jw-seed);
                         check <=> root.jw-seed-check;
                         enter => {
@@ -4253,31 +3977,28 @@ export component AppWindow inherits Window {
                             root.show-toast(Strings.toast-copied);
                         }
                     }
-                    // the join SEALED - the way in sits ABOVE the run view,
-                    // which stays: the joiner keeps the same ritual log the
-                    // founder keeps (hiding it read as a dead node)
-                    if root.jw-sealed: HorizontalLayout {
-                        vertical-stretch: 0;
-                        spacing: 10px;
-                        Rectangle {
-                            horizontal-stretch: 1;
-                        }
-                        AppButton {
-                            height: 38px;
-                            primary: true;
-                            icon: @image-url("assets/join.svg");
-                            icon-set: true;
-                            label: Strings.enter-republic;
-                            clicked => {
-                                root.join-finish();
-                            }
-                        }
+                    // the proposed charter + features, exactly as signed —
+                    // accent-framed while the ratify decision (footer) is
+                    // pending, plain afterwards as the standing record
+                    if root.jw-proposed-name != "" && !root.jw-sealed && root.jw-outcome != 2: CharterView {
+                        accent: root.jw-awaiting-ratify;
+                        heading: root.jw-awaiting-ratify ? Strings.jw-ratify-title : Strings.wiz-step-charter;
+                        republic: root.jw-proposed-name;
+                        agenda: root.jw-proposed-agenda == "" ? Strings.jw-ratify-agenda-empty
+                            : root.jw-proposed-agenda;
+                        feat-memory: root.jw-feat-memory;
+                        feat-quests: root.jw-feat-quests;
+                        feat-vault: root.jw-feat-vault;
+                        feat-wallet: root.jw-feat-wallet;
                     }
-                    RunView {
-                        vertical-stretch: 1;
-                        // in the scrolled (overflowing) state the run view
-                        // keeps a readable slice instead of collapsing
-                        preferred-height: 240px;
+                    // the join SEALED — the shared last step, pixel-identical
+                    // to the founder's; Enter republic sits in the footer
+                    if root.jw-sealed: SealedPanel {
+                        title: root.jw-republic;
+                        hint: root.jw-rule;
+                    }
+                    if !root.jw-sealed: RunView {
+                        vertical-stretch: 0;
                         title: root.jw-republic;
                         hint: root.jw-inviter == "" ? root.jw-rule
                             : "\{root.jw-rule} · \{Strings.jw-invited-by} \{root.jw-inviter}";
@@ -4289,33 +4010,9 @@ export component AppWindow inherits Window {
                         ph3: Strings.jw-ph3;
                         ph-founder: Strings.jw-ph-founder;
                         failed-label: Strings.jw-failed;
-                        log: root.jw-log;
                         headline: root.jw-headline;
-                        tones: root.jw-log-tone;
-                        back-shown: false;
-                        // a sealed join enters through the phrase-backup
-                        // step — so the only button here is the way OUT
-                        // after a failure/decline (labelled, never blank)
-                        finish-label: root.jw-outcome == 2 ? Strings.jw-back-to-start : "";
-                        finish-enabled: root.jw-outcome == 2;
-                        finish => {
-                            root.join-cancel();
-                        }
-                        copy-log-clicked => {
-                            root.copy-log("join");
-                            root.show-toast(Strings.toast-copied);
-                        }
-                    }
-                    }
-                    }
-                    ScrollHint {
-                        x: parent.width - 7px;
-                        view-h: jwrfl.height;
-                        content-h: jwrfl.viewport-height;
-                        scroll-y: jwrfl.viewport-y;
                     }
                 }
-
             }
 
             // ---- the two wizards that share this screen (`rw-mode`):
@@ -4324,65 +4021,70 @@ export component AppWindow inherits Window {
             // when the way in needs one, which a founding invite does not
             // (joining is where a phrase comes from). Step 3 is the run.
             // See docs_archive/ui/welcome_rework.md. ----
-            if root.screen == AppScreen.restore: VerticalLayout {
-                padding: 24px;
-                padding-left: 16px;
-                padding-right: 16px;
-                spacing: 12px;
-
-                HorizontalLayout {
-                    Text {
-                        text: root.rw-mode == "s3" ? Strings.rw-title-s3 : Strings.rw-title;
-                        color: Theme.text;
-                        font-size: Theme.fs-h1;
-                        font-weight: 700;
-                        horizontal-stretch: 1;
-                        vertical-alignment: center;
-                    }
-                    AppButton {
-                        label: "×";
-                        // no bailing out while the restore is running; after a
-                        // failure it works again
-                        enabled: !root.restore-running;
-                        clicked => {
-                            if (root.rw-step == 1) {
-                                root.restore-cancel();
-                            } else if (root.rw-phase == 1) {
-                                root.rw-phase = 0;
-                            } else {
-                                root.navigate(AppScreen.choice);
-                            }
-                        }
+            if root.screen == AppScreen.restore: WizardFrame {
+                // steps: the way in · the phrase (when needed) · the run
+                title: root.rw-mode == "s3" ? Strings.rw-title-s3 : Strings.rw-title;
+                steps: 3;
+                step: root.rw-dot;
+                step-label: root.rw-dot == 0 ? Strings.wiz-step-way
+                    : (root.rw-dot == 1 ? Strings.wiz-step-phrase : Strings.wiz-step-restore);
+                // no bailing out while the restore is running; after a
+                // failure it works again
+                close-enabled: !root.restore-running;
+                close => {
+                    if (root.rw-step == 1) {
+                        root.restore-cancel();
+                    } else if (root.rw-phase == 1) {
+                        root.rw-phase = 0;
+                    } else {
+                        root.navigate(AppScreen.choice);
                     }
                 }
-
-                // step dots: the way in · the phrase (when needed) · the run
-                HorizontalLayout {
-                    alignment: center;
-                    spacing: 7px;
-                    for i in 3: Rectangle {
-                        width: 9px;
-                        height: 9px;
-                        border-radius: 4.5px;
-                        background: i == root.rw-dot ? Theme.accent : Theme.line;
+                log-label: root.rw-step == 1 ? Strings.rw-log-title : "";
+                show-log => {
+                    root.wizard-log-open = true;
+                }
+                back-label: root.rw-step == 1 ? Strings.nav-back
+                    : (root.rw-phase == 1 ? Strings.rw-back : "");
+                back-enabled: root.rw-step == 1 ? root.rw-outcome == 2 : true;
+                back => {
+                    if (root.rw-step == 1) {
+                        root.restore-cancel();
+                    } else {
+                        root.rw-phase = 0;
+                    }
+                }
+                // the one advancing action per phase: Continue (way in /
+                // phrase) · Finish (run). While a run-in-flight banner owns
+                // the link step, its "go to run" button stays in the content.
+                primary-label: root.rw-step == 1 ? Strings.rw-finish
+                    : (root.rw-phase == 0 && root.rw-mode == "link" && root.run-banner() != ""
+                        ? "" : Strings.rw-continue);
+                primary-enabled: root.rw-step == 1 ? root.rw-outcome == 1
+                    : (root.rw-phase == 1
+                        ? (!root.run-active && !root.rv-running && root.rw-seed != "")
+                        : (root.rw-mode == "link"
+                            ? root.link-armed()
+                            : (!root.run-active && !root.rv-running
+                                && root.cfg-s3-endpoint != "" && root.rw-s3-target != "")));
+                primary => {
+                    if (root.rw-step == 1) {
+                        root.restore-finish();
+                    } else if (root.rw-phase == 1) {
+                        root.phrase-continue();
+                    } else if (root.rw-mode == "link") {
+                        root.link-continue();
+                    } else {
+                        root.rw-pending = "s3";
+                        root.rw-phase = 1;
                     }
                 }
 
                 // STEP 2 - the recovery phrase, asked only once we know a
-                // way in that needs it. A join never lands here.
-                // scrollable: at raised font sizes the step outgrows the
-                // window - the buttons must stay reachable
-                if root.rw-step == 0 && root.rw-phase == 1: Rectangle {
-                    vertical-stretch: 1;
-                    clip: true;
-                    rwpfl := Flickable {
-                        width: 100%;
-                        height: 100%;
-                        viewport-width: self.width;
-                        viewport-height: rwp1.preferred-height;
-                    rwp1 := VerticalLayout {
+                // way in that needs it. A join never lands here. Back and
+                // Continue live in the wizard footer.
+                if root.rw-step == 0 && root.rw-phase == 1: VerticalLayout {
                     spacing: 12px;
-                    alignment: start;
                     RestoreWay {
                         title: Strings.rw-seed;
                         hint: root.rw-pending == "s3" ? Strings.rw-seed-hint-s3 : Strings.rw-seed-hint;
@@ -4416,28 +4118,6 @@ export component AppWindow inherits Window {
                                 ? root.rw-s3-target
                                 : "\{Strings.rw-link-recover} \{root.rv-kind.republic} · \{root.rv-kind.who}";
                             label-color: Theme.text;
-                        }
-                        HorizontalLayout {
-                            spacing: 8px;
-                            AppButton {
-                                height: 38px;
-                                label: Strings.rw-back;
-                                clicked => {
-                                    root.rw-phase = 0;
-                                }
-                            }
-                            Rectangle { horizontal-stretch: 1; }
-                            AppButton {
-                                height: 38px;
-                                primary: true;
-                                // any run in flight owns the screen (a
-                                // second start can only be refused)
-                                enabled: !root.run-active && !root.rv-running && root.rw-seed != "";
-                                label: Strings.rw-continue;
-                                clicked => {
-                                    root.phrase-continue();
-                                }
-                            }
                         }
                         // a recovery runs from HERE: its wait spans the
                         // survivors' human approval, so it reports in place
@@ -4477,30 +4157,12 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
-                    }
-                    }
-                    ScrollHint {
-                        x: parent.width - 7px;
-                        view-h: rwpfl.height;
-                        content-h: rwpfl.viewport-height;
-                        scroll-y: rwpfl.viewport-y;
-                    }
                 }
 
-                // STEP 1 - which way in. Scrollable: at raised font sizes
-                // the step outgrows the window - the buttons must stay
-                // reachable
-                if root.rw-step == 0 && root.rw-phase == 0: Rectangle {
-                    vertical-stretch: 1;
-                    clip: true;
-                    rwwfl := Flickable {
-                        width: 100%;
-                        height: 100%;
-                        viewport-width: self.width;
-                        viewport-height: rww0.preferred-height;
-                    rww0 := VerticalLayout {
-                spacing: 12px;
-                alignment: start;
+                // STEP 1 - which way in. Continue lives in the wizard
+                // footer.
+                if root.rw-step == 0 && root.rw-phase == 0: VerticalLayout {
+                    spacing: 12px;
 
                 // The one way in that starts from a link somebody sent you.
                 // BOTH shapes land here (welcome_rework.md): a founding
@@ -4596,19 +4258,6 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
-                    if root.run-banner() == "": HorizontalLayout {
-                        spacing: 8px;
-                        Rectangle { horizontal-stretch: 1; }
-                        AppButton {
-                            height: 38px;
-                            primary: true;
-                            enabled: root.link-armed();
-                            label: Strings.rw-continue;
-                            clicked => {
-                                root.link-continue();
-                            }
-                        }
-                    }
                 }
 
                 }
@@ -4666,46 +4315,23 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
-                    HorizontalLayout {
-                        spacing: 8px;
-                        // which backup: the id pseudonym from the backup
-                        // table (newest object), or a full object key
-                        AppField {
-                            text <=> root.rw-s3-target;
-                            placeholder: Strings.rw-s3-target-ph;
-                            horizontal-stretch: 1;
-                        }
-                        AppButton {
-                            height: 38px;
-                            primary: true;
-                            enabled: !root.run-active && !root.rv-running
-                                && root.cfg-s3-endpoint != "" && root.rw-s3-target != "";
-                            label: Strings.rw-continue;
-                            clicked => {
-                                root.rw-pending = "s3";
-                                root.rw-phase = 1;
-                            }
-                        }
+                    // which backup: the id pseudonym from the backup
+                    // table (newest object), or a full object key
+                    AppField {
+                        text <=> root.rw-s3-target;
+                        placeholder: Strings.rw-s3-target-ph;
                     }
                     }
                 }
 
                 }
-
-                }
-                    }
-                    ScrollHint {
-                        x: parent.width - 7px;
-                        view-h: rwwfl.height;
-                        content-h: rwwfl.viewport-height;
-                        scroll-y: rwwfl.viewport-y;
-                    }
                 }
 
-                // step 2: the running restore (shared RunView: progress bar,
-                // live log, outcome-gated Back/Finish)
+                // step 2: the running restore (progress panel; the live log
+                // sits behind the footer's log button, Back/Finish in the
+                // footer)
                 if root.rw-step == 1: RunView {
-                    vertical-stretch: 1;
+                    vertical-stretch: 0;
                     // `RestoreStart.way` is "s3" | "file" and nothing else -
                     // a recovery is not a restore and runs its own state
                     title: root.rw-way == "s3" ? Strings.rw-via-s3 : Strings.rw-via-file;
@@ -4717,24 +4343,8 @@ export component AppWindow inherits Window {
                     ph2: Strings.rw-ph2;
                     ph3: Strings.rw-ph3;
                     failed-label: Strings.rw-failed;
-                    log: root.rw-log;
                     headline: root.rw-headline;
-                    tones: root.rw-log-tone;
-                    back-enabled: root.rw-outcome == 2;
-                    finish-enabled: root.rw-outcome == 1;
-                    finish-label: Strings.rw-finish;
-                    back => {
-                        root.restore-cancel();
-                    }
-                    finish => {
-                        root.restore-finish();
-                    }
-                    copy-log-clicked => {
-                        root.copy-log("restore");
-                        root.show-toast(Strings.toast-copied);
-                    }
                 }
-
             }
 
             // ---- main view: the selected surface (surfaces live in the sidebar) ----
@@ -8570,6 +8180,37 @@ export component AppWindow inherits Window {
                 checked <=> root.of-wallet-draft;
                 enabled: !root.org-feat-wallet;
             }
+        }
+    }
+
+    // =================================================================
+    // Modal: the wizards' live ritual/run log — bounded, tone-coloured,
+    // copyable; opened from the wizard footer's log button.
+    // =================================================================
+    if root.wizard-log-open: ConfirmModal {
+        dialog-width: 760px;
+        title: root.screen == AppScreen.restore ? Strings.rw-log-title : Strings.cw-log-title;
+        body: "";
+        cancel-label: "";
+        alt-label: Strings.ow-copy;
+        confirm-label: Strings.set-close;
+        alted => {
+            root.copy-log(root.screen == AppScreen.create ? "create"
+                : (root.screen == AppScreen.join ? "join" : "restore"));
+            root.show-toast(Strings.toast-copied);
+        }
+        dismissed => {
+            root.wizard-log-open = false;
+        }
+        confirmed => {
+            root.wizard-log-open = false;
+        }
+        RitualLog {
+            height: 420px;
+            log: root.screen == AppScreen.create ? root.cw-log
+                : (root.screen == AppScreen.join ? root.jw-log : root.rw-log);
+            tones: root.screen == AppScreen.create ? root.cw-log-tone
+                : (root.screen == AppScreen.join ? root.jw-log-tone : root.rw-log-tone);
         }
     }
 
