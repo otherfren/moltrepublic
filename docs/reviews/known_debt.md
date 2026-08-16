@@ -40,6 +40,18 @@ claiming a plausible near-future height still delays compaction until
 the drain or a re-serve clears it. Refine the gate to "a buffered block
 ADJACENT to head" if it ever bites.
 
+## Window-build spike: slint-build `experimental-module-builds`
+
+The ~400k-line generated module is one compilation unit because
+slint-build compiles ONE root — but slint-build 1.17 ships an
+experimental `as_library()`/`rust_module()` pair ("components and types
+accessible from other modules"). A spike could split the design-mock
+panes (`surfaces.slint`, the heaviest repeaters) into their own Slint
+library crate so their codegen is paid only when THEY change.
+Experimental upstream — pin the behavior before relying on it. Cheap
+companion win either way: dedup the mock components (the vault KANN
+list) — codegen scales with element count.
+
 ## GUI-over-MCP steps 2+5 · i18n E4–E6
 
 Tracked in their own live plans: `docs/ui/gui_over_mcp.md` (headless
