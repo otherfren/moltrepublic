@@ -4667,6 +4667,7 @@ fn view_icon(key: &str) -> &'static str {
         "accepted" => "✅",
         "denied" => "❌",
         "board" => "📋",
+        "plan" => "🗓️",
         "create" => "✨",
         "my-quests" => "🎯",
         "secrets" => "🔐",
@@ -5950,7 +5951,8 @@ fn view_label(lang: i32, key: &str, en: &str) -> String {
         "accepted" => "Angenommen",
         "denied" => "Abgelehnt",
         "create" => "Erstellen",
-        "my-quests" => "Meine Quests",
+        "plan" => "Planung",
+        "my-quests" => "Meine",
         "secrets" => "Geheimnisse",
         "disclose" => "Offenlegen",
         "exposed" => "Offengelegt",
@@ -7866,23 +7868,63 @@ lexicon! {
     pv_title: "Wiki patch", "Wiki-Patch";
     pv_copy: "Copy patch", "Patch kopieren";
     pv_copied: "Patch copied", "Patch kopiert";
-    qb_title_board: "Quest board", "Quest-Board";
-    qb_hint_board: "Tasks put forward, claimed and completed. Putting one forward and reporting it done are gated proposals.", "Aufgaben - ausgeschrieben, übernommen, erledigt. Ausschreiben und Erledigt-Melden sind geschützte Vorschläge.";
-    qb_col_open: "Open", "Offen";
-    qb_col_claimed: "Claimed", "Übernommen";
-    qb_col_done: "Done", "Erledigt";
-    qb_title_create: "Put forward a quest", "Quest ausschreiben";
-    qb_hint_create: "Describe the task and pin a reward from the treasury. Putting it forward starts a gated proposal.", "Beschreibe die Aufgabe und setze eine Belohnung aus der Kasse aus. Das Ausschreiben startet einen geschützten Vorschlag.";
-    qb_ph_title: "Quest title", "Titel der Quest";
-    qb_ph_desc: "What needs doing - and how completion will be judged", "Was zu tun ist - und woran Erledigung gemessen wird";
-    qb_reward: "Reward (XMR)", "Belohnung (XMR)";
-    qb_deadline: "Deadline", "Frist";
-    qb_propose: "Put forward", "Ausschreiben";
-    qb_title_mine: "My quests", "Meine Quests";
-    qb_hint_mine: "Quests you claimed. Reporting one done asks the members to confirm completion - the reward transfers once the threshold agrees.", "Von dir übernommene Quests. Erledigt melden bittet die Mitglieder um Bestätigung - die Belohnung fließt, sobald die Schwelle zustimmt.";
-    qb_mark_done: "Report done", "Erledigt melden";
-    qb_title_archive: "Closed quests", "Abgeschlossene Quests";
-    qb_hint_archive: "Completed and expired quests, kept for the record.", "Erledigte und ausgelaufene Quests, festgehalten fürs Protokoll.";
+    kb_title_board: "Board", "Board";
+    kb_hint_board: "The shared plan - every change on it is a threshold vote.", "Der gemeinsame Plan - jede Änderung daran ist eine Schwellen-Abstimmung.";
+    kb_col_backlog: "Backlog", "Backlog";
+    kb_col_ready: "Ready", "Bereit";
+    kb_col_doing: "Doing", "In Arbeit";
+    kb_col_review: "Review", "Review";
+    kb_col_done: "Done", "Fertig";
+    kb_title_plan: "Planning", "Planung";
+    kb_hint_plan: "Sprints and dates - where the work is scheduled.", "Sprints und Termine - hier wird die Arbeit eingeplant.";
+    kb_title_create: "Create", "Erstellen";
+    kb_hint_create: "Draft an epic, story or task - proposing starts a vote.", "Entwirf ein Epic, eine Story oder einen Task - Vorschlagen startet eine Abstimmung.";
+    kb_title_mine: "Mine", "Meine";
+    kb_hint_mine: "Items you are responsible for.", "Einträge, für die du verantwortlich bist.";
+    kb_title_archive: "Archive", "Archiv";
+    kb_hint_archive: "Closed items - done or dropped.", "Geschlossene Einträge - fertig oder verworfen.";
+    kb_kind_epic: "Epic", "Epic";
+    kb_kind_story: "Story", "Story";
+    kb_kind_task: "Task", "Task";
+    kb_f_parent: "Parent", "Übergeordnet";
+    kb_f_resp: "Responsible", "Verantwortlich";
+    kb_f_start: "Start", "Start";
+    kb_f_due: "Due", "Fällig";
+    kb_f_points: "Points", "Punkte";
+    kb_f_prio: "Priority", "Priorität";
+    kb_f_sprint: "Sprint", "Sprint";
+    kb_f_pi: "PI", "PI";
+    kb_f_deps: "Depends on", "Hängt ab von";
+    kb_f_refs: "Referenced by", "Verwiesen von";
+    kb_sec_details: "Details", "Details";
+    kb_sec_ready: "Definition of Ready", "Definition of Ready";
+    kb_sec_done: "Acceptance criteria", "Akzeptanzkriterien";
+    kb_sec_scope: "Out of scope", "Nicht enthalten";
+    kb_prio_low: "Low", "Niedrig";
+    kb_prio_normal: "Normal", "Normal";
+    kb_prio_high: "High", "Hoch";
+    kb_prio_critical: "Critical", "Kritisch";
+    kb_ph_title: "Title", "Titel";
+    kb_ph_parent: "#id - optional", "#id - optional";
+    kb_ph_resp: "member", "Mitglied";
+    kb_ph_date: "YYYY-MM-DD", "JJJJ-MM-TT";
+    kb_ph_points: "3", "3";
+    kb_ph_deps: "#id, #id", "#id, #id";
+    kb_ph_details: "What and why - markdown, [links](notes/page.md) allowed", "Was und warum - Markdown, [Links](notes/page.md) erlaubt";
+    kb_ph_ready: "Ready when: what must exist before work starts", "Bereit wenn: was vor Arbeitsbeginn vorliegen muss";
+    kb_ph_done: "Done when: verifiable acceptance criteria", "Fertig wenn: prüfbare Akzeptanzkriterien";
+    kb_ph_scope: "Explicitly not part of this item", "Ausdrücklich nicht Teil dieses Eintrags";
+    kb_propose: "Propose", "Vorschlagen";
+    kb_propose_change: "Propose change", "Änderung vorschlagen";
+    kb_back: "Back", "Zurück";
+    kb_mv_review: "Propose: move to review", "Vorschlagen: nach Review";
+    kb_mv_done: "Propose: move to done", "Vorschlagen: nach Fertig";
+    kb_rollup: "rolled up", "aufsummiert";
+    kb_committed: "committed", "eingeplant";
+    kb_current: "current", "aktuell";
+    kb_unscheduled: "not scheduled", "nicht eingeplant";
+    kb_closed_done: "done", "fertig";
+    kb_closed_dropped: "dropped", "verworfen";
     vt_title_secrets: "Sealed secrets", "Versiegelte Geheimnisse";
     vt_hint_secrets: "Encrypted entries no single member can open - release needs the threshold.", "Verschlüsselte Einträge, die kein einzelnes Mitglied öffnen kann - die Freigabe braucht die Schwelle.";
     vt_seal_new: "Seal a secret", "Geheimnis versiegeln";
@@ -9215,6 +9257,11 @@ mod tests {
         assert_eq!(view_label(1, "members", "Members"), "Mitglieder");
         assert_eq!(view_label(1, "archive", "Archive"), "Archiv");
         assert_eq!(view_label(1, "pending", "Pending"), "Ausstehend");
+        // the Kanban views (kanban_workflows.md §6.0): "plan" is new,
+        // "my-quests" keeps its wire key under the "Mine" label
+        assert_eq!(view_label(1, "plan", "Planning"), "Planung");
+        assert_eq!(view_label(0, "plan", "Planning"), "Planning");
+        assert_eq!(view_label(1, "my-quests", "Mine"), "Meine");
         // unmapped keys fall back to the shared English vocabulary
         assert_eq!(view_label(1, "status", "Status"), "Status");
         assert_eq!(view_label(0, "members", "Members"), "Members");
