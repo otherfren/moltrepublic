@@ -2221,7 +2221,7 @@ component SettingRow inherits Rectangle {
     border-radius: Theme.win95 ? 0px : 8px;
     border-width: Theme.border-w;
     border-color: Theme.line;
-    height: 44px;
+    height: max(44px, Theme.fs-body * 1.4 + 20px);
     HorizontalLayout {
         padding-left: 12px;
         padding-right: 12px;
@@ -2265,8 +2265,12 @@ export component WalletPane inherits VerticalLayout {
         { label: "Relay hosting Q3", amount: "2.4000", signed: 0, need: 3, signers: [
             { name: "petra", signed: false }, { name: "walter", signed: false }, { name: "mara", signed: false }, { name: "jonas", signed: false }] },
     ];
-    // send form: pure pane state for design iteration (priority chip row)
+    // send form: pure pane state for design iteration — the drafts are
+    // bound so typed input survives a view switch (a field that forgets
+    // on tab-away reads as broken, mock or not)
     property <int> prio: 1;
+    property <string> send-addr;
+    property <string> send-amount;
 
     // the receive card's decorative pseudo-QR: a deterministic 17×17
     // module pattern with the three finder squares — design chrome only,
@@ -2284,31 +2288,31 @@ export component WalletPane inherits VerticalLayout {
         return Math.mod(row * 17 + col * 31 + row * col * 7, 11) < 5;
     }
 
-    if root.view == "balance": VerticalLayout {
+    if root.view != "history" && root.view != "send" && root.view != "receive"
+        && root.view != "settings": VerticalLayout {
         spacing: 8px;
         PaneHeader {
             glyph: "💰";
             title: Strings.wl-title-balance;
             hint: Strings.wl-hint-balance;
         }
-        // the balance figure — the wallet's signature moment
+        // the balance figure — the wallet's signature moment. A real
+        // padded layout, not an anchored one (the parts.slint mis-measure
+        // trap), and the figure rides the font ladder.
         Rectangle {
             background: Theme.panel;
             border-radius: Theme.win95 ? 0px : 8px;
             border-width: Theme.border-w;
             border-color: Theme.line;
-            height: bal.preferred-height + 36px;
-            bal := VerticalLayout {
-                x: 18px;
-                y: 18px;
-                width: parent.width - 36px;
+            VerticalLayout {
+                padding: 18px;
                 spacing: 8px;
                 HorizontalLayout {
                     spacing: 10px;
                     Text {
                         text: "128.4062";
                         color: Theme.text;
-                        font-size: 34px;
+                        font-size: Theme.fs-h1 + 10px;
                         font-weight: 800;
                     }
                     Text {
@@ -2324,7 +2328,7 @@ export component WalletPane inherits VerticalLayout {
                     VerticalLayout {
                         alignment: center;
                         TagChip {
-                            label: "3 \{Strings.cw-rule-b} 4 \{Strings.wl-multisig-word}";
+                            label: Strings.wl-rule-sample;
                         }
                     }
                 }
@@ -2371,7 +2375,7 @@ export component WalletPane inherits VerticalLayout {
                             horizontal-stretch: 1;
                         }
                         Text {
-                            text: "− \{t.amount} XMR";
+                            text: "- \{t.amount} XMR";
                             color: Theme.text;
                             font-size: Theme.fs-body;
                             font-weight: 700;
@@ -2409,7 +2413,9 @@ export component WalletPane inherits VerticalLayout {
                 border-radius: Theme.win95 ? 0px : 8px;
                 border-width: Theme.border-w;
                 border-color: Theme.line;
-                height: 52px;
+                // follows the font ladder — a fixed 52px clipped the two
+                // stacked lines at larger app fonts
+                height: max(52px, Theme.fs-body * 1.4 + Theme.fs-cap * 1.4 + 20px);
                 HorizontalLayout {
                     padding-left: 12px;
                     padding-right: 12px;
@@ -2442,24 +2448,26 @@ export component WalletPane inherits VerticalLayout {
                         Text {
                             text: "\{t.when} · \{t.txid}";
                             color: Theme.faint;
-                            font-size: 11px;
+                            font-size: Theme.fs-cap;
                             overflow: elide;
                         }
                     }
+                    // the tone alone says "confirmed" — a plain-text ✓ would
+                    // render as a thin monochrome outline (the Twemoji rule)
                     Text {
-                        text: t.conf >= 10 ? "10/10 ✓" : "\{t.conf}/10";
+                        text: "\{min(t.conf, 10)}/10";
                         color: t.conf >= 10 ? Theme.good : Theme.warn;
                         font-size: Theme.fs-cap;
                         vertical-alignment: center;
                     }
                     Text {
-                        text: t.incoming ? "+ \{t.amount}" : "− \{t.amount}";
+                        text: t.incoming ? "+ \{t.amount}" : "- \{t.amount}";
                         color: t.incoming ? Theme.good : Theme.text;
                         font-size: Theme.fs-body;
                         font-weight: 700;
                         vertical-alignment: center;
                         horizontal-alignment: right;
-                        width: 90px;
+                        width: max(90px, Theme.fs-body * 6);
                     }
                 }
             }
@@ -2483,6 +2491,7 @@ export component WalletPane inherits VerticalLayout {
                 }
                 AppField {
                     placeholder: "4…";
+                    text <=> root.send-addr;
                 }
             }
             VerticalLayout {
@@ -2494,6 +2503,7 @@ export component WalletPane inherits VerticalLayout {
                 }
                 AppField {
                     placeholder: "0.0000";
+                    text <=> root.send-amount;
                 }
             }
             VerticalLayout {
@@ -2540,7 +2550,7 @@ export component WalletPane inherits VerticalLayout {
                     tooltip-below: true;
                 }
                 Text {
-                    text: "\{Strings.wl-fee} ≈ 0.000021 XMR";
+                    text: "\{Strings.wl-fee} ~0.000021 XMR";
                     color: Theme.faint;
                     font-size: Theme.fs-cap;
                     vertical-alignment: center;
@@ -2562,7 +2572,9 @@ export component WalletPane inherits VerticalLayout {
         PanePanel {
             HorizontalLayout {
                 spacing: 16px;
-                alignment: start;
+                // no alignment:start here — it cancelled the address
+                // column's horizontal-stretch and left the pane's right
+                // half dead space
                 // decorative pseudo-QR on a light well (QR needs light
                 // ground on every theme)
                 Rectangle {
@@ -2595,17 +2607,17 @@ export component WalletPane inherits VerticalLayout {
                         border-radius: Theme.win95 ? 0px : 6px;
                         border-width: Theme.border-w;
                         border-color: Theme.line;
-                        height: addr.preferred-height + 16px;
-                        // deliberately mid-truncated: a design-mock address
-                        // must never be transcribable into a send field
-                        addr := Text {
-                            x: 10px;
-                            y: 8px;
-                            width: parent.width - 20px;
-                            text: "8BdKQ9wJ3mPZxVtF7nRqYcLhG2sD4eTv … PxQbUcFgAt2iE9oRk4";
-                            color: Theme.text;
-                            font-size: Theme.fs-cap;
-                            wrap: char-wrap;
+                        VerticalLayout {
+                            padding: 10px;
+                            // deliberately mid-truncated: a design-mock
+                            // address must never be transcribable into a
+                            // send field
+                            Text {
+                                text: "8BdKQ9wJ3mPZxVtF7nRqYcLhG2sD4eTv … PxQbUcFgAt2iE9oRk4";
+                                color: Theme.text;
+                                font-size: Theme.fs-cap;
+                                wrap: char-wrap;
+                            }
                         }
                     }
                     HorizontalLayout {
@@ -2636,11 +2648,11 @@ export component WalletPane inherits VerticalLayout {
             }
             SettingRow {
                 label: Strings.wl-sync;
-                value: "3 214 502 ✓";
+                value: "3 214 502";
             }
             SettingRow {
                 label: Strings.wl-signer-set;
-                value: "3 \{Strings.cw-rule-b} 4 - petra, walter, mara, jonas";
+                value: "\{Strings.wl-rule-sample} - petra, walter, mara, jonas";
             }
         }
     }

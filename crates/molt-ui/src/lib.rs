@@ -18,8 +18,7 @@
 //! (create / open / join / restore), a shared completion screen, the main
 //! surfaces view, and a settings panel. The settings are real (they persist
 //! to the node's `config.toml` and mirror external edits of it); the
-//! workspace lifecycles are still a **simulation** — no workspace is created
-//! on disk yet.
+//! workspace lifecycles are real — create/open/join/close write to disk.
 //!
 //! The GUI is a **live-mirror of the engine's shared session**, not a holder of
 //! its own state. Every action (navigate, switch language, save settings, finish
@@ -3468,6 +3467,8 @@ struct UploadRowData {
     status: String,
     /// 0 idle · 1 running · 2 done · 3 failed (drives color + button).
     status_kind: i32,
+    /// §5.5 raw availability word (relay-held / sharer-only / gone).
+    availability: String,
     /// Share time (unix seconds) — the sort key behind the rendered `date`.
     ts: u64,
     /// Size in bytes — the sort key behind the rendered `size` label.
@@ -3969,6 +3970,7 @@ async fn gather_surfaces(
                 ts: u.ts,
                 bytes: u.size,
                 expires_ts: u.expires_ts,
+                availability: u.availability,
                 checksum_full: u.checksum,
                 status: match u.download.as_ref().map(|d| d.phase.as_str()) {
                     Some("requested") => "0 %".to_string(),
@@ -4554,6 +4556,7 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
             expires: u.expires.as_str().into(),
             status: u.status.as_str().into(),
             status_kind: u.status_kind,
+            availability: u.availability.as_str().into(),
         })
         .collect();
     sync_rows(&ui.get_org_uploads(), uploads, |m| ui.set_org_uploads(m));
@@ -5954,7 +5957,7 @@ fn view_label(lang: i32, key: &str, en: &str) -> String {
         "secrets" => "Geheimnisse",
         "disclose" => "Offenlegen",
         "exposed" => "Offengelegt",
-        "balance" => "Kontostand",
+        "balance" => "Kassenstand",
         "history" => "Verlauf",
         "send" => "Senden",
         "receive" => "Empfangen",
@@ -7369,7 +7372,7 @@ lexicon! {
     // dial a relay in common. Stated at CREATE time because that is the last
     // moment the choice is cheap (§10.15, user-ratified 2026-08-02).
     cw_grp_relays: "Relays", "Relays";
-    cw_relays_hint: "Nostr relays are the group's mailboxes. All members must share the identical relay pool.", "Nostr-Relays dienen als Briefkästen. Alle Mitglieder müssen sich den identischen Pool an Nostr-Relays teilen.";
+    cw_relays_hint: "The group needs ONE relay every member can reach. A self-hosted relay must be in every member's pool before they join.", "Die Gruppe braucht EIN Relay, das jedes Mitglied erreicht. Ein eigenes Relay muss vor dem Beitritt im Pool jedes Mitglieds stehen.";
     cw_relays_none: "No relay this node can dial - add one in Settings.", "Kein erreichbarer Relay - in den Einstellungen einen hinzufügen.";
     cw_relays_toggle: "Use for this republic", "Für diese Republik verwenden";
     cw_grp_transport: "Anonymization Layer", "Anonymisierungsschicht";
@@ -7463,6 +7466,7 @@ lexicon! {
     ou_col_checksum: "Checksum", "Checksum";
     ou_col_download: "Download", "Download";
     ou_col_expires: "Expires in", "Läuft ab in";
+    ou_gone: "gone", "weg";
     ou_download: "Download", "Download";
     ou_offline: "user offline", "Nutzer offline";
     ou_empty: "No files shared yet.", "Noch keine Dateien geteilt.";
@@ -7782,7 +7786,6 @@ lexicon! {
     mv_chat_ph: "Write a message…", "Nachricht schreiben…";
     mv_propose_ph: "Describe a proposal…", "Vorschlag beschreiben…";
     mv_empty_chat: "No messages yet.", "Noch keine Nachrichten.";
-    mv_later: "Nothing here yet - this view comes with a later build.", "Hier ist noch nichts - diese Ansicht kommt mit einem späteren Build.";
     mv_empty_pending: "Nothing awaiting approval.", "Nichts wartet auf Zustimmung.";
     mv_empty_applied: "Nothing applied yet.", "Noch nichts angewandt.";
     mv_deleted_by: "deleted by", "gelöscht durch";
@@ -7900,12 +7903,12 @@ lexicon! {
     wl_hint_balance: "The shared Monero multisig wallet - no single member can spend from it.", "Die gemeinsame Monero-Multisig-Wallet - kein einzelnes Mitglied kann daraus ausgeben.";
     wl_unlocked: "unlocked", "verfügbar";
     wl_locked: "locked", "in Bestätigung";
-    wl_multisig_word: "multisig", "Multisig";
+    wl_rule_sample: "3-of-4 multisig", "3-von-4-Multisig";
     wl_pending_sigs: "Awaiting signatures", "Warten auf Signaturen";
     wl_title_history: "Transfers", "Transfers";
     wl_hint_history: "Every movement of the treasury, confirmations included.", "Jede Bewegung der Kasse, samt Bestätigungen.";
     wl_title_send: "Send from the treasury", "Aus der Kasse senden";
-    wl_hint_send: "A transfer is a gated proposal - the wallet signs only once the threshold approves.", "Ein Transfer ist ein geschützter Vorschlag - die Wallet signiert erst, wenn die Schwelle zustimmt.";
+    wl_hint_send: "A transfer is a threshold vote.", "Ein Transfer ist ein Threshold-Vote.";
     wl_to_address: "Recipient address", "Empfängeradresse";
     wl_amount: "Amount (XMR)", "Betrag (XMR)";
     wl_priority: "Priority", "Priorität";
@@ -7915,10 +7918,10 @@ lexicon! {
     wl_fee: "network fee", "Netzwerkgebühr";
     wl_propose_transfer: "Propose transfer", "Transfer vorschlagen";
     wl_title_receive: "Receive into the treasury", "In die Kasse empfangen";
-    wl_hint_receive: "Deposits to the shared subaddress land in the treasury after confirmation - visible to every member.", "Einzahlungen an die gemeinsame Subadresse landen nach Bestätigung in der Kasse - sichtbar für jedes Mitglied.";
+    wl_hint_receive: "Deposits land in the treasury - visible to every member.", "Einzahlungen landen in der Kasse - sichtbar für jedes Mitglied.";
     wl_subaddress: "Shared subaddress", "Gemeinsame Subadresse";
     wl_title_settings: "Wallet settings", "Wallet-Einstellungen";
-    wl_hint_settings: "How this node talks to Monero - the signer set is fixed by the founding.", "Wie dieser Node mit Monero spricht - der Signer-Kreis ist seit der Gründung fest.";
+    wl_hint_settings: "This node's Monero connection - the signers are fixed.", "Die Monero-Anbindung dieses Nodes - der Signer-Kreis ist fest.";
     wl_node: "Monero node", "Monero-Node";
     wl_sync: "Sync height", "Sync-Höhe";
     wl_signer_set: "Signer set", "Signer-Kreis";
@@ -7926,6 +7929,29 @@ lexicon! {
 
 #[cfg(test)]
 mod tests {
+    /// R1 (relay_topology_plan): the create wizard states rule 1 — ONE
+    /// relay every member can reach (the join runs over the INTERSECTION;
+    /// "identical pool" was a stricter, false rule that contradicted the
+    /// engine's own gate) — plus the self-hosted branch.
+    #[test]
+    fn the_create_wizard_states_the_one_shared_relay_rule() {
+        for l in [Lexicon::en(), Lexicon::de()] {
+            let h = l.cw_relays_hint;
+            assert!(
+                h.contains("ONE relay") || h.contains("EIN Relay"),
+                "branch 1 - one shared relay: {h}"
+            );
+            assert!(
+                h.to_lowercase().contains("pool"),
+                "branch 2 - the self-hosted relay in every pool: {h}"
+            );
+            assert!(
+                !h.contains("identical") && !h.contains("identischen"),
+                "the pool need not be identical - the join runs over the intersection: {h}"
+            );
+        }
+    }
+
     /// L10: the retention pair renders its unit in the ACTIVE language —
     /// the payload carries the machine value, and a legacy "30 days"
     /// normalizes by its leading number instead of leaking English into
@@ -9387,6 +9413,7 @@ mod tests {
             expires: String::new(),
             status: String::new(),
             status_kind: 0,
+            availability: String::new(),
             ts,
             bytes,
             expires_ts: ts,

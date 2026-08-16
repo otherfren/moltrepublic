@@ -11,7 +11,7 @@
 // SessionChanged event, and every UI action calls a callback the Rust side
 // turns into a molt_core::Command on the shared WalletHandle. An MCP agent
 // issuing the same commands drives this same state — the two operators are
-// co-equal. Everything is a mock: nothing is written to disk.
+// co-equal. State is real: workspaces, settings, chain and chat persist.
 //
 // Three runtime themes (Monero light / dark.fi dark / Win95 Brutalism) via
 // Theme; all controls are hand-rolled (components.slint) so they restyle live.
@@ -30,7 +30,7 @@ import {
 } from "parts.slint";
 // the four staged surfaces' badged DESIGN-MOCK panes (sample data lives
 // .slint-side only; the real governance views stay below in this file)
-import { MemoryPane, MockBadge, QuestsPane, VaultPane, WalletPane } from "surfaces.slint";
+import { MemoryPane, QuestsPane, VaultPane, WalletPane } from "surfaces.slint";
 
 export { Strings, Theme, WikiState, PatchView }
 
@@ -1485,14 +1485,14 @@ export component AppWindow inherits Window {
     in-out property <string> org-logo-draft;
     // the republic's CURRENT image (engine StatusView.image): the file
     // reference, plus the picture when the file is locally loadable — the
-    // Rust side loads it (bytes stay with the sharer; mock transfer)
+    // Rust side loads it (bytes stay with the sharer until a download)
     in property <string> org-img-path;
     in property <image> org-img;
     in property <bool> org-img-set: false;
     // pick a new image via the real (rfd) file dialog — fills org-logo-draft
     callback org-logo-pick();
-    // image preview overlay: a proposed image after its (mock) download —
-    // the chat file-share mechanism (download from the proposer's device)
+    // image preview overlay: a proposed image decoded locally from the
+    // voted-on payload bytes (no download involved)
     // inline proposed-image viewer: ONE decoded image at a time, keyed by
     // the proposal id it belongs to (-1 = none open) — the card whose id
     // matches renders it inside its own panel, no modal
@@ -1511,7 +1511,7 @@ export component AppWindow inherits Window {
     property <string> org-name-draft;
     // charter reader (click on the charter → full text, scrollable)
     property <bool> charter-view-open: false;
-    // chat-retention setting (mock current value; a change is a proposal)
+    // chat-retention setting (effective org value; a change is a proposal)
     // the effective "delete chat after" window — mirrored from the
     // engine's StatusView (an applied set_chat_retention changes it)
     in property <int> org-chat-retention: 7;
@@ -1673,7 +1673,7 @@ export component AppWindow inherits Window {
     in-out property <bool> bk-sort-desc: false;
     callback sort-backups(string, bool);
 
-    // open screen (mock local workspace list + current selection). The list
+    // open screen (local workspace list + current selection). The list
     // itself is a Rust-side VecModel so entries can actually be deleted.
     in property <[WorkspaceItem]> ws-list;
     callback delete-workspace(string);
@@ -1819,7 +1819,7 @@ export component AppWindow inherits Window {
     }
 
     // Escape presses the active screen's × — but only when that × is
-    // clickable (never during a running engine mock-run). An open modal is
+    // clickable (never during a running engine run). An open modal is
     // closed first, like a click on its scrim.
     function handle-escape() {
         if (root.wizard-log-open) {
@@ -2159,7 +2159,8 @@ export component AppWindow inherits Window {
                                         && (s.key != "chat" || v.key != "today"
                                             || root.selected-channel == "group"
                                             || !root.selected-channel-listed);
-                                    pending: v.key == "proposals" || v.key == "pending" ? s.pending-count
+                                    pending: v.key == "proposals" || v.key == "pending"
+                                        || (s.key == "wallet" && v.key == "status") ? s.pending-count
                                         : (s.key == "chat" && v.key == "today" ? root.group-unread : 0);
                                     alert: v.key == "pending" ? s.pending-my-vote-count : 0;
                                     alert-total: v.key == "pending" ? s.pending-count : 0;
@@ -2833,6 +2834,15 @@ export component AppWindow inherits Window {
                 // log moved behind the footer's log button (a modal).
                 if root.cw-step == 1: VerticalLayout {
                     spacing: 12px;
+                    // the CURRENT decision must outshine the standing
+                    // context (user report 2026-08-16): while an input is
+                    // active (deliberation, or the phrase backup), the
+                    // panels stacked under it dim — the eye lands on the
+                    // form, not on the pile
+                    property <bool> input-active:
+                        (root.cw-can-propose && !root.cw-proposed && root.cw-outcome == 0)
+                        || (root.cw-proposed && root.cw-all-ratified
+                            && !root.cw-backup-confirmed && root.cw-outcome == 0);
 
                     // the founding failed: say so loudly, right where the
                     // user is looking — the log line alone is too quiet for
@@ -2957,6 +2967,7 @@ export component AppWindow inherits Window {
                     // WHAT is being ratified — the same read-only view the
                     // members ratify from
                     if root.cw-proposed && root.cw-outcome == 0: CharterView {
+                        opacity: input-active ? 0.55 : 1;
                         heading: Strings.wiz-step-charter;
                         republic: root.cw-name;
                         agenda: root.cw-agenda == "" ? Strings.jw-ratify-agenda-empty : root.cw-agenda;
@@ -3080,7 +3091,12 @@ export component AppWindow inherits Window {
                     // interaction — gone once sealed (the shared last step
                     // is identical for founder and joiner).
                     if root.cw-outcome != 1: Rectangle {
-                        height: min(340px, 84px + root.cw-seats.length * 49px);
+                        opacity: input-active ? 0.55 : 1;
+                        // row height follows the font ladder: a fixed 44px
+                        // clipped the two stacked lines at larger app fonts
+                        // (user report 2026-08-16)
+                        property <length> seat-row-h: max(44px, Theme.fs-body * 1.4 + Theme.fs-cap * 1.4 + 16px);
+                        height: min(340px, 84px + root.cw-seats.length * (self.seat-row-h + 5px));
                         background: Theme.panel-2;
                         border-radius: Theme.win95 ? 0px : 8px;
                         border-width: Theme.border-w;
@@ -3142,7 +3158,7 @@ export component AppWindow inherits Window {
                                         spacing: 5px;
                                         alignment: start;
                                         for seat in root.cw-seats: Rectangle {
-                                            height: 44px;
+                                            height: seat-row-h;
                                             border-radius: Theme.win95 ? 0px : 8px;
                                             background: Theme.panel;
                                             border-width: Theme.border-w;
@@ -3229,7 +3245,7 @@ export component AppWindow inherits Window {
 
             }
 
-            // ---- open (mock empty list) ----
+            // ---- open (local workspace list) ----
             if root.screen == AppScreen.open: VerticalLayout {
                 padding: 24px;
                 // side padding matches the 16px list/details splitter gap
@@ -5806,7 +5822,7 @@ export component AppWindow inherits Window {
 
                         // Organization → Uploads: every file shared into the
                         // chat. Only metadata lives here — the bytes move
-                        // user-to-user via the share link (mock transfer).
+                        // user-to-user via the share link (real transfer).
                         if s.key == "organization" && root.selected-view == "uploads": VerticalLayout {
                             padding: 8px;
                             spacing: 8px;
@@ -6059,7 +6075,11 @@ export component AppWindow inherits Window {
                                                         vertical-alignment: center;
                                                         horizontal-alignment: center;
                                                     }
-                                                    if u.online && u.status-kind != 1: AppButton {
+                                                    // §5.5: a relay-held series downloads WITHOUT a
+                                                    // live sharer — the button follows the fact, and a
+                                                    // gone share says the one word instead of "offline"
+                                                    if (u.online || u.availability == "relay-held")
+                                                        && u.status-kind != 1: AppButton {
                                                         height: 28px;
                                                         pad: 10px;
                                                         y: (parent.height - self.height) / 2;
@@ -6069,8 +6089,9 @@ export component AppWindow inherits Window {
                                                             root.download-file(u.id);
                                                         }
                                                     }
-                                                    if !u.online && u.status-kind != 1: Text {
-                                                        text: Strings.ou-offline;
+                                                    if !u.online && u.availability != "relay-held"
+                                                        && u.status-kind != 1: Text {
+                                                        text: u.availability == "gone" ? Strings.ou-gone : Strings.ou-offline;
                                                         color: Theme.faint;
                                                         font-size: Theme.fs-cap;
                                                         vertical-alignment: center;
@@ -6624,7 +6645,7 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // ---- settings (in-memory config editor — MOCK, no disk write) ----
+            // ---- settings (config.toml editor — persisted to disk) ----
             if root.screen == AppScreen.settings: VerticalLayout {
                 padding: 24px;
                 spacing: 16px;
@@ -8417,7 +8438,9 @@ export component AppWindow inherits Window {
         }
         confirmed => {
             root.org-retention-modal-open = false;
-            root.org-propose("set_chat_retention", "\{root.org-retention-draft} days");
+            // L10: a MACHINE value - the unit renders per language in the
+            // card (a baked "days" froze the proposer's English)
+            root.org-propose("set_chat_retention", root.org-retention-draft);
         }
         HorizontalLayout {
             spacing: 8px;

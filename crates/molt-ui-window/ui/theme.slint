@@ -8,10 +8,10 @@
 export enum AppScreen {
     choice,    // first-run: create / open / join / restore
     create,    // create-workspace wizard
-    open,      // open a local workspace (mock list)
-    join,      // join via invite (mock)
-    restore,   // restore from backup / seed (mock)
-    settings,  // config.toml editor (mock — no disk write)
+    open,      // open a local workspace (real disk scan)
+    join,      // join via invite (real join ritual)
+    restore,   // restore from backup / seed (file/S3 restore + recovery)
+    settings,  // config.toml editor (persists to disk)
     main,      // placeholder main view (surfaces land in Phase B)
 }
 
@@ -180,6 +180,9 @@ export struct UploadRow {
     expires: string, // "in 13 days" · "expired" · "-" (unavailable)
     status: string, // live download status ("" idle · "42 %" · check/warn)
     status-kind: int, // 0 idle · 1 running · 2 done · 3 failed
+    // §5.5: the relay plane's raw availability word — "relay-held" (the
+    // relays serve it, no live sharer needed) · "sharer-only" · "gone"
+    availability: string,
 }
 
 // One row of the founding-ritual member list: the founder plus one per
@@ -201,8 +204,8 @@ export struct WorkspaceItem {
     last-sync-min: int, // minutes since the last completed sync (sort key)
     s3: bool, // automatic S3 backup configured
     backup: string, // human "last backup" label, e.g. "30 min ago" / "never"
-    encrypted: bool, // at-rest encrypted (mock): inactive until decrypted
-    seed: string, // recovery seed all secret keys derive from (mock)
+    encrypted: bool, // at-rest sealed (S6, real): open refuses until unsealed
+    seed: string, // recovery seed all secret keys derive from (real entropy, device-sealed)
     net: string, // effective global anonymity network at founding/join ("tor" | "none"; demo entries may carry legacy values)
     members: [MemberSync], // who is in the DAO + when they last synced
 }
@@ -743,7 +746,7 @@ export global Strings {
     // Organization → Status / Members
     in property <string> org-reachable;
     // Organization → Status: the approvals table (per-surface governance
-    // counts) and the mock logo/charter edit modals
+    // counts) and the logo/charter edit modals (real proposals)
     in property <string> org-approvals;
     in property <string> oa-col-surface;
     in property <string> oa-pending;
@@ -778,6 +781,7 @@ export global Strings {
     in property <string> ou-col-expires;
     in property <string> ou-download;
     in property <string> ou-offline;
+    in property <string> ou-gone;
     in property <string> ou-empty;
     in property <string> ou-filter-ph;
     in property <string> ou-no-match;
@@ -1107,7 +1111,6 @@ export global Strings {
     in property <string> mv-chat-ph;
     in property <string> mv-propose-ph;
     in property <string> mv-empty-chat;
-    in property <string> mv-later;
     in property <string> mv-empty-pending;
     in property <string> mv-empty-applied;
     in property <string> mv-deleted-by;
@@ -1235,7 +1238,7 @@ export global Strings {
     in property <string> wl-hint-balance;
     in property <string> wl-unlocked;
     in property <string> wl-locked;
-    in property <string> wl-multisig-word;
+    in property <string> wl-rule-sample;
     in property <string> wl-pending-sigs;
     in property <string> wl-title-history;
     in property <string> wl-hint-history;
