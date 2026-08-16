@@ -11,8 +11,12 @@ headline inventory (`molt_engine::known_headlines`, pinned PRODUCIBLE by
 `every_known_headline_is_producible`), the GUI localizes by phrase with
 an honest English fallback, and
 `every_engine_headline_has_a_german_rendering` keeps the map complete —
-no wire change, agents keep reading English. Open: E4 (typed notices),
-E5 (run-log lines), E6's remaining fill (the notice/log vocabularies).
+no wire change, agents keep reading English. E4 was largely OVERTAKEN
+by the code since the plan was written: the recovery family is a typed
+GUI-side enum (`RecoverNotice`) and every toast prefix renders through a
+lexicon word with the diagnostic tail carried verbatim — the E4 remainder
+is vocabulary (net_health reasons, S3 verdicts) and folds into E6. Open:
+E5 (run-log lines, lowest urgency by design) and the E6 remainder.
 The audit that motivates this is `i18n_error_audit.md`.
 
 ## Architecture
