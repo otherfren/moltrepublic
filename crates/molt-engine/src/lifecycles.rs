@@ -761,6 +761,19 @@ impl State {
                 "threshold must be within 2..=members and members within 2..=13".to_string(),
             ));
         }
+        // pool-settled gate, BEFORE the destructive prelude below: a probe
+        // still in flight means the pool is about to change — minting
+        // invites now would silently drop the relay the operator just
+        // consented to. Refusing any later would first have destroyed the
+        // operator's in-flight join/recovery and told every peer, for a
+        // transient condition that invites a retry (review 2026-08-16).
+        // Keystone in tests/relay_pool.rs.
+        if !self.ritual_sim && !self.pending_relay_confirms.is_empty() {
+            return Err(MoltError::Create(format!(
+                "cannot found: {}",
+                crate::relay_msg::pool_verifying_reason()
+            )));
+        }
         // The founder's recovery phrase is real entropy — the workspace id
         // and every key hangs off it. It is shown once during the ritual
         // and never persisted into the shared session of a real workspace.
@@ -1233,6 +1246,14 @@ impl State {
         if member.is_empty() {
             return Err(MoltError::Join("the handle must not be empty".to_string()));
         }
+        // the founding's twin gate: "adopt relays" confirms async, and a
+        // join in the same breath would race the verdict — the link-carried
+        // relays would be judged against a pool about to change
+        if !self.pending_relay_confirms.is_empty() {
+            return Err(MoltError::Join(
+                crate::relay_msg::pool_verifying_reason().to_string(),
+            ));
+        }
         let invite = invite.trim().to_string();
         // a real join needs a link that carries the v2 transport handover —
         // a bare preview link (or a pre-N4 queue-shaped one) is not joinable,
@@ -1608,6 +1629,14 @@ impl State {
         if phrase.is_empty() {
             return Err(MoltError::Recover(
                 "the recovery phrase must not be empty".to_string(),
+            ));
+        }
+        // pool-settled gate (the join twin), BEFORE the destructive context
+        // switch below: the link-carried relays are judged against a pool
+        // about to change while a confirmation probe is in flight
+        if !self.pending_relay_confirms.is_empty() {
+            return Err(MoltError::Recover(
+                crate::relay_msg::pool_verifying_reason().to_string(),
             ));
         }
         // …and so does any in-flight join or founding: a recovery is a context

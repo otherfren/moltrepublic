@@ -578,6 +578,13 @@ pub(crate) struct State {
     /// `(proposal id, payload)` shape as [`State::applied`]; the id is always
     /// present here (every `Applied` block names its proposal).
     pub(crate) chain_applied: HashMap<Surface, Vec<(Option<u64>, Value)>>,
+    /// The sealing signatures per Applied proposal id — a chain PROJECTION
+    /// like [`State::chain_applied`], maintained by the same two writers
+    /// (full re-fold + append). `ProposalView` building reads voters from
+    /// here in O(1); the per-card reverse chain scan it replaces made every
+    /// snapshot O(cards × chain) once ALL applied history materializes
+    /// cards (review 2026-08-16).
+    pub(crate) chain_applied_sigs: HashMap<u64, Vec<molt_core::RosterAttestation>>,
     /// WORKING transport anchors — `member -> nostr_pk` for every seat a
     /// `Restored` block re-anchored. A chain PROJECTION like
     /// [`State::chain_applied`]: rebuilt from the chain, never persisted
@@ -720,6 +727,15 @@ pub(crate) struct State {
     /// no clearnet packet leaves before the user acts again
     /// (`docs_archive/transport/relay_pool.md` §3). Onion relays are unaffected.
     pub(crate) clearnet_session: bool,
+    /// Relay confirmations whose probe verdict has not landed yet
+    /// (`cmd_relay_confirm` → async probe → `cmd_net_relay_probed`).
+    /// Founding and joining REFUSE while this is non-empty: minting invites
+    /// (or gating a link) from a pool the operator just changed silently
+    /// dropped the relay they had consented to seconds earlier (observed
+    /// 2026-08-16 — the "invites went stale" note fired right after the
+    /// ritual opened). Every probe path is timeout-bounded, so an entry
+    /// always clears.
+    pub(crate) pending_relay_confirms: std::collections::HashSet<String>,
     /// Presence clock **test seam** (same posture as [`State::demo_mesh`]):
     /// `None` in every production context — presence stamping/aging then
     /// runs on the shared [`now_secs`] clock; tests pin it to age pills
@@ -946,6 +962,7 @@ impl State {
             pending_served_blob: None,
             checkpoint_blob: None,
             chain_applied: HashMap::new(),
+            chain_applied_sigs: HashMap::new(),
             chain_anchors: HashMap::new(),
             chain_member_relays: HashMap::new(),
             split_noted: std::collections::HashSet::new(),
@@ -978,6 +995,7 @@ impl State {
             // (ADR-0004 amendment): an operator who acknowledged clearnet
             // exposure is not asked again on every restart
             clearnet_session: session.settings.clearnet_relays_enabled,
+            pending_relay_confirms: std::collections::HashSet::new(),
             clock_override: None,
             s3_list_gen: 0,
             tor_test_gen: 0,
@@ -1215,7 +1233,12 @@ impl State {
                         return Err(MoltError::UnknownView(surface, v.clone()));
                     }
                 }
-                Ok(Reply::State(self.snapshot(surface, channel, view.as_deref())))
+                let snap = self.snapshot(surface, channel, view.as_deref());
+                // retrieval IS the reading: the chat messages just handed
+                // out get the same honest receipts the GUI sends when it
+                // renders them (State::receipt_returned_chat)
+                self.receipt_returned_chat(&snap);
+                Ok(Reply::State(snap))
             }
             Command::ProposeCheckpoint => self.cmd_propose_checkpoint(),
             Command::ListProposals => {

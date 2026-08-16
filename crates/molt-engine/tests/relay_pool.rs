@@ -357,3 +357,121 @@ fn bad_urls_are_refused_and_duplicates_collapse() {
         assert_eq!(session(&w).await.relays.len(), 1);
     });
 }
+
+/// KEYSTONE (2026-08-16) — a founding must not overtake a relay confirmation
+/// still being verified: the confirm lands async on the probe's verdict, and
+/// a `create_start` issued in the same breath minted invites from a pool
+/// MISSING the relay the operator had just consented to (observed in the
+/// 5-node dev test: the "invites went stale" note fired right after the
+/// ritual opened). Fail closed: found only once the pool has settled.
+#[test]
+fn founding_refuses_while_a_confirmation_is_still_verifying() {
+    rt().block_on(async {
+        let w = spawn(GroupConfig::demo(), SessionView::default());
+        // a private, unroutable target: ws:// is allowed for it, and its
+        // probe cannot come back fast enough to close the race window
+        let slow = "ws://10.255.255.1:9";
+        w.execute(Command::RelayAdd { url: slow.to_string() }).await.expect("add");
+        w.execute(Command::RelayConfirm { url: slow.to_string(), accept_clearnet: true })
+            .await
+            .expect("confirm accepted");
+        let refused = w
+            .execute(Command::CreateStart {
+                name: "r".to_string(),
+                member: "m".to_string(),
+                threshold: 2,
+                members: 2,
+                relays: Vec::new(),
+            })
+            .await;
+        let err = format!("{:?}", refused.expect_err("the race must be refused"));
+        assert!(
+            err.contains("still verifying"),
+            "the refusal names the pending confirmation: {err}"
+        );
+
+        // a STANDALONE probe's verdict for the same URL (confirm = false)
+        // must NOT open the gate — only the confirm probe's own verdict
+        // settles the pending confirmation (review 2026-08-16). The url is
+        // read back from the pool so it matches the normalized pending key.
+        let stored = session(&w).await.settings.relays[0].url.clone();
+        w.execute(Command::NetRelayProbed {
+            url: stored,
+            error: String::new(),
+            unreachable: false,
+            confirm: false,
+        })
+        .await
+        .expect("standalone verdict lands");
+        let still = w
+            .execute(Command::CreateStart {
+                name: "r".to_string(),
+                member: "m".to_string(),
+                threshold: 2,
+                members: 2,
+                relays: Vec::new(),
+            })
+            .await;
+        let err = format!("{:?}", still.expect_err("the gate must stay closed"));
+        assert!(
+            err.contains("still verifying"),
+            "a standalone verdict must not clear the confirm gate: {err}"
+        );
+    });
+}
+
+/// …and the gate CLEARS with the verdict: once the probe came back the same
+/// founding passes it (it may still fail for transport reasons — just never
+/// with the pending-confirmation refusal).
+#[test]
+fn founding_passes_once_the_confirmation_verdict_landed() {
+    rt().block_on(async {
+        let w = spawn(GroupConfig::demo(), SessionView::default());
+        w.execute(Command::RelayAdd { url: ONION.to_string() }).await.expect("add");
+        w.execute(Command::RelayConfirm { url: ONION.to_string(), accept_clearnet: false })
+            .await
+            .expect("confirm accepted");
+        wait_confirmed(&w, ONION).await;
+        let again = w
+            .execute(Command::CreateStart {
+                name: "r".to_string(),
+                member: "m".to_string(),
+                threshold: 2,
+                members: 2,
+                relays: Vec::new(),
+            })
+            .await;
+        if let Err(e) = again {
+            let msg = format!("{e:?}");
+            assert!(
+                !msg.contains("still verifying"),
+                "the gate must clear with the verdict: {msg}"
+            );
+        }
+    });
+}
+
+/// The joiner's twin: `adopt relays` confirms async too, and a join in the
+/// same breath would race the verdict exactly like the founding.
+#[test]
+fn joining_refuses_while_a_confirmation_is_still_verifying() {
+    rt().block_on(async {
+        let w = spawn(GroupConfig::demo(), SessionView::default());
+        let slow = "ws://10.255.255.1:9";
+        w.execute(Command::RelayAdd { url: slow.to_string() }).await.expect("add");
+        w.execute(Command::RelayConfirm { url: slow.to_string(), accept_clearnet: true })
+            .await
+            .expect("confirm accepted");
+        let refused = w
+            .execute(Command::JoinStart {
+                invite: "molt://invite/x".to_string(),
+                member: "m".to_string(),
+            })
+            .await;
+        let err = format!("{:?}", refused.expect_err("the race must be refused"));
+        assert!(
+            err.contains("still verifying"),
+            "the refusal names the pending confirmation: {err}"
+        );
+    });
+}

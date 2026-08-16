@@ -1081,10 +1081,13 @@ impl State {
             // NEWEST matching block wins (a seat can be restored again)
             let op = p.payload.get("op").and_then(Value::as_str).unwrap_or("");
             let seat = p.payload.get("member").and_then(Value::as_str);
-            let sealed = self.chain.iter().rev().find_map(|blk| match &blk.change {
-                molt_core::ChainChange::Applied { proposal_id, .. } if *proposal_id == id => {
-                    Some(&blk.sigs)
-                }
+            // O(1) for Applied cards: the sealing sigs ride the chain
+            // projection (`chain_applied_sigs`) — the per-card reverse
+            // chain scan made every snapshot O(cards × chain) once ALL
+            // applied history materializes cards. Only a Membership card
+            // (its block carries no proposal id) still matches by content.
+            let sealed = self.chain_applied_sigs.get(&id).or_else(|| {
+                self.chain.iter().rev().find_map(|blk| match &blk.change {
                 molt_core::ChainChange::Membership { op: bop, member, .. }
                     if seat == Some(member.as_str())
                         && matches!(
@@ -1096,6 +1099,7 @@ impl State {
                     Some(&blk.sigs)
                 }
                 _ => None,
+                })
             });
             if let Some(sigs) = sealed {
                 approvals = sigs.len();

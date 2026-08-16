@@ -4807,9 +4807,21 @@ fn surface_data(
                     None => ProposalRowData {
                         id: -1,
                         text: display_title(lang, payload),
+                        // a table CELL: the compact summary when the payload
+                        // carries one AS A STRING, else the value's first
+                        // line — keyed on string-ness, not key presence (a
+                        // foreign payload's `"summary": null` must fall
+                        // through, not blank the cell), and never multi-line
+                        // (a git patch dump burst the row)
                         proposed: payload
-                            .get("value")
+                            .get("summary")
                             .and_then(serde_json::Value::as_str)
+                            .or_else(|| {
+                                payload.get("value").and_then(serde_json::Value::as_str)
+                            })
+                            .unwrap_or_default()
+                            .lines()
+                            .next()
                             .unwrap_or_default()
                             .to_string(),
                         ..ProposalRowData::default()

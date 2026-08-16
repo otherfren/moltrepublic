@@ -30,6 +30,13 @@ use molt_core::relay::{InviteRelayBlock, InviteRelayVerdict, PoolGap, RelayEntry
 /// line, never repeated per relay.
 const CLEARNET_KEY: &str = "[transport.nostr] clearnet_enabled";
 
+/// The pool is about to change: a relay confirmation's probe verdict has
+/// not landed yet. ONE sentence for every gate that refuses on it (found,
+/// join, recovery) — hand-typed copies already drifted once.
+pub(crate) fn pool_verifying_reason() -> &'static str {
+    "a relay confirmation is still verifying - retry in a moment"
+}
+
 /// Why this node has nothing to dial at all — for the founding/recovery
 /// prerequisites, which fail before any invite is involved.
 pub(crate) fn pool_gap_reason(gap: PoolGap) -> String {
@@ -216,6 +223,8 @@ fn network_headline(e: &str) -> Option<&'static str> {
         "No shared relay"
     } else if e.contains("clearnet/local dialing off") {
         "Clearnet dialing is off"
+    } else if e.contains("confirmation is still verifying") {
+        "Relay check running"
     } else if e.contains("no dialable relay") {
         "No dialable relay"
     } else if e.contains("not readable on any relay") {
@@ -358,6 +367,7 @@ mod tests {
             format!("cannot found: {}", pool_gap_reason(PoolGap::Empty)),
             format!("cannot found: {}", pool_gap_reason(PoolGap::Unconfirmed)),
             format!("cannot found: {}", pool_gap_reason(PoolGap::NonOnionOff)),
+            format!("cannot found: {}", pool_verifying_reason()),
             // …emitted verbatim by nostr_ritual.rs / dial.rs / lifecycles.rs
             "the founding inbox is not readable on any relay — no relay replayed \
              the subscription (auth required, rate limited, or refused). No invite \

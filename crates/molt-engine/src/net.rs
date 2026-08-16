@@ -2052,6 +2052,14 @@ impl State {
                 "recovery needs an open, chain-governed republic".to_string(),
             ));
         }
+        // pool-settled gate (the founding/join twin): the minted link names
+        // this node's relay pool — minting while a confirmation probe is in
+        // flight hands out a link naming a pool about to change
+        if !self.pending_relay_confirms.is_empty() {
+            return Err(MoltError::Recover(
+                crate::relay_msg::pool_verifying_reason().to_string(),
+            ));
+        }
         let Some(replica) = self.replica.as_ref() else {
             return Err(MoltError::Recover("no republic is open".to_string()));
         };

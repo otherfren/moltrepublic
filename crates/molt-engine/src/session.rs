@@ -257,8 +257,14 @@ impl State {
         // B4: the confirmation lands on the PROBE's verdict, off-actor — an
         // unusable relay never becomes a confirmed one. The add stays
         // dial-free (ADR-0004's "adding is safe"); the confirm is the
-        // moment dialing was consented to, so the probe dials here.
-        self.spawn_relay_probe(url, true)
+        // moment dialing was consented to, so the probe dials here. Until
+        // the verdict lands, founding/joining refuse (pending_relay_confirms):
+        // they must not mint from a pool the operator just changed.
+        let reply = self.spawn_relay_probe(url.clone(), true);
+        if reply.is_ok() {
+            self.pending_relay_confirms.insert(url);
+        }
+        reply
     }
 
     /// B4: vet a relay without touching the pool — the standalone tool half
@@ -311,6 +317,15 @@ impl State {
         unreachable: bool,
         confirm: bool,
     ) -> Result<Reply, MoltError> {
+        // every CONFIRM verdict settles the pending confirmation — refused,
+        // unreachable, confirmed or gone-entry alike (the founding/join
+        // gate waits on this). A standalone probe's verdict (confirm =
+        // false) must NOT: it can land while the confirm probe for the same
+        // URL is still in flight, and clearing the gate then re-opens the
+        // exact minted-from-a-changing-pool race the gate exists for.
+        if confirm {
+            self.pending_relay_confirms.remove(&url);
+        }
         if !error.is_empty() && !unreachable {
             self.session.notice = format!("relay-refused:{url} - {error}");
             self.emit_session(SessionScope::Full);

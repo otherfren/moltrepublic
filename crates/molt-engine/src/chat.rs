@@ -595,6 +595,29 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// Retrieval IS the reading (user decision 2026-08-16): a chat
+    /// `ReadState` receipts the foreign messages it returns, so an MCP
+    /// agent's poll sends the same honest receipts the GUI sends when it
+    /// renders a channel — agents and humans behave the same. Reuses
+    /// [`State::cmd_mark_read`]'s rules (own / deleted / system-kind /
+    /// already-read are filtered there; silent no-op while this node's
+    /// receipts are off). Only what was RETURNED is receipted — a filtered
+    /// read (one channel, the unread slice) confirms exactly that slice.
+    pub(crate) fn receipt_returned_chat(&mut self, snap: &molt_core::SurfaceSnapshot) {
+        if snap.surface != molt_core::Surface::Chat {
+            return;
+        }
+        let ids: Vec<MessageId> = snap
+            .applied
+            .iter()
+            .filter_map(|m| m.get("id").and_then(serde_json::Value::as_str))
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        if !ids.is_empty() {
+            let _ = self.cmd_mark_read(ids);
+        }
+    }
+
     /// Wipe one of YOUR OWN messages for everyone; only the deletion notice
     /// remains. Only the author may delete (the P5 "no moderation" posture):
     /// peers enforce exactly this on the wire (`wire_delete` drops a foreign
@@ -1252,6 +1275,35 @@ mod tests {
 
         st.cmd_mark_read(vec![peer]).expect("mark read again");
         assert_eq!(read_by(&st, &peer), vec!["me".to_string()], "idempotent");
+    }
+
+    /// Retrieval IS the reading (user decision 2026-08-16): a ReadState on
+    /// the chat surface receipts the foreign messages it RETURNS — an MCP
+    /// agent's poll behaves exactly like the GUI rendering the channel, so
+    /// agents and humans light the same dots.
+    #[test]
+    fn a_chat_read_state_receipts_what_it_returns() {
+        let mut st = plain_state();
+        let peer = MessageId([25u8; 16]);
+        land_chat(&mut st, 1, peer, "peer-1", "hello");
+        // the harness stamps ancient timestamps — pin them to "unknown age"
+        // so the retention window keeps them visible for the read
+        for m in &mut st.chat {
+            m.ts = 0;
+        }
+        let snap = st.snapshot(molt_core::Surface::Chat, None, None);
+        st.receipt_returned_chat(&snap);
+        assert_eq!(read_by(&st, &peer), vec!["me".to_string()]);
+
+        // a non-chat snapshot receipts nothing
+        let m2 = MessageId([26u8; 16]);
+        land_chat(&mut st, 2, m2, "peer-1", "later");
+        for m in &mut st.chat {
+            m.ts = 0;
+        }
+        let org = st.snapshot(molt_core::Surface::Organization, None, None);
+        st.receipt_returned_chat(&org);
+        assert!(read_by(&st, &m2).is_empty(), "only a chat read receipts");
     }
 
     /// The local privacy switch: while read receipts are off this node

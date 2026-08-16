@@ -1308,6 +1308,8 @@ impl State {
                     .entry(*surface)
                     .or_default()
                     .push((Some(*proposal_id), payload.clone()));
+                self.chain_applied_sigs
+                    .insert(*proposal_id, block.sigs.clone());
                 // R6: a committed pool edit reaches the live transport
                 if payload.get("op").and_then(serde_json::Value::as_str) == Some("set_relays") {
                     self.adopt_pool_change();
@@ -1355,11 +1357,62 @@ impl State {
     /// harmlessly; the reopen order makes it load-bearing. Deliberation is
     /// ephemeral: after a replay only chain truth remains, so a card the
     /// chain consumed can only honestly read Applied.
+    /// The chain is the durable record; the `Proposed` gossip is ephemeral
+    /// RAM on every RECEIVER (only the proposer's own log carries it). A
+    /// holder that adopts an Applied block without the card — a reopen, a
+    /// catch-up past lost gossip — materializes the record FROM the block,
+    /// so the Accepted view keeps its id, title, patch shape and (via the
+    /// sealed sigs, resolved in `view`) its voters. The proposer stays
+    /// unattributed: the block does not record it, and inventing one would
+    /// be a forgery.
+    fn ensure_applied_record(
+        &mut self,
+        proposal_id: u64,
+        surface: Surface,
+        payload: serde_json::Value,
+    ) {
+        self.proposals
+            .entry(proposal_id)
+            .or_insert_with(|| molt_core::ProposalRecord {
+                surface,
+                payload,
+                approvals: 0,
+                state: ProposalState::Applied,
+                declined_at: 0,
+                declined_by: molt_core::MemberId::new(),
+                decliners: Vec::new(),
+                by: molt_core::MemberId::new(),
+                superseded: false,
+                withdrawn: false,
+            });
+    }
+
     fn settle_cards_against_chain(&mut self) {
+        // ONE pass over blob + chain: records missing entirely (this holder
+        // never was the proposer and its ephemeral gossip is gone) come
+        // back from the durable evidence — the blob's summarized applied
+        // payloads below the cut (their voter pills stay open: only
+        // chain-provable votes are shown, the sigs went with the cut, and
+        // without this a pruned and an unpruned holder of the SAME republic
+        // showed different Accepted tables) and the live blocks above it.
+        // Replay-resurrected open cards settle to Applied.
+        let mut materialize: Vec<(u64, Surface, serde_json::Value)> = Vec::new();
         let mut settle: Vec<(u64, Surface)> = Vec::new();
-        // ids consumed below a checkpoint cut: their blocks are gone, the
-        // blob remembers; the surviving card names its own surface
         if let Some(blob) = &self.checkpoint_blob {
+            for (surface, entries) in &blob.applied {
+                for (id, payload) in entries {
+                    match self.proposals.get(id) {
+                        None => materialize.push((*id, *surface, payload.clone())),
+                        Some(p) if p.state != ProposalState::Applied => {
+                            settle.push((*id, *surface));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // consumed ids whose payload the summary dropped (LWW slots):
+            // no card to materialize, but a surviving open card still
+            // settles — the id was decided
             for id in &blob.consumed_ids {
                 if let Some(p) = self.proposals.get(id) {
                     if p.state != ProposalState::Applied {
@@ -1372,17 +1425,20 @@ impl State {
             if let ChainChange::Applied {
                 proposal_id,
                 surface,
-                ..
+                payload,
             } = &block.change
             {
-                if self
-                    .proposals
-                    .get(proposal_id)
-                    .is_some_and(|p| p.state != ProposalState::Applied)
-                {
-                    settle.push((*proposal_id, *surface));
+                match self.proposals.get(proposal_id) {
+                    None => materialize.push((*proposal_id, *surface, payload.clone())),
+                    Some(p) if p.state != ProposalState::Applied => {
+                        settle.push((*proposal_id, *surface));
+                    }
+                    _ => {}
                 }
             }
+        }
+        for (id, surface, payload) in materialize {
+            self.ensure_applied_record(id, surface, payload);
         }
         for (id, surface) in settle {
             if let Some(p) = self.proposals.get_mut(&id) {
@@ -1423,6 +1479,8 @@ impl State {
                 }
             }
         }
+        let mut sigs: std::collections::HashMap<u64, Vec<molt_core::RosterAttestation>> =
+            std::collections::HashMap::new();
         for block in &self.chain {
             if let ChainChange::Applied {
                 proposal_id,
@@ -1434,9 +1492,11 @@ impl State {
                     .entry(*surface)
                     .or_default()
                     .push((Some(*proposal_id), payload.clone()));
+                sigs.insert(*proposal_id, block.sigs.clone());
             }
         }
         self.chain_applied = projected;
+        self.chain_applied_sigs = sigs;
         // the gossip-replayed proposal CARDS are older than the chain on a
         // reopen (`open_stored_workspace` replays them first) — settle them
         // against the verified truth or every restart resurrects decided
@@ -2005,8 +2065,11 @@ impl State {
             ChainChange::Applied {
                 proposal_id,
                 surface,
-                ..
+                payload,
             } => {
+                // a block for a proposal this node never heard of (lost
+                // gossip, late join) still yields a full accepted card
+                self.ensure_applied_record(*proposal_id, *surface, payload.clone());
                 if let Some(p) = self.proposals.get_mut(proposal_id) {
                     p.state = ProposalState::Applied;
                 }
@@ -3248,11 +3311,25 @@ impl State {
                 self.chain_head = Some(head);
                 self.apply_chain_to_state();
                 self.persist_chain_now();
-                // the displaced proposal returns to pending and re-bases
+                // the displaced proposal returns to pending and re-bases —
+                // but ONLY a card with a deliberation behind it (a proposer
+                // this holder learned via gossip). A record MATERIALIZED
+                // from the now-displaced block (`ensure_applied_record`,
+                // by == "") has no vote to return to here: flipping it open
+                // would mint an unowned, unwithdrawable phantom card that
+                // re-gossips forever and blocks auto-checkpoints. Drop it —
+                // the holder returns to "never heard of it", and the WP2
+                // re-serve restores the real card while the vote is open.
                 if let Some(ChainChange::Applied { proposal_id, .. }) =
                     displaced.as_ref().map(|b| &b.change)
                 {
-                    if let Some(p) = self.proposals.get_mut(proposal_id) {
+                    let materialized = self
+                        .proposals
+                        .get(proposal_id)
+                        .is_some_and(|p| p.by.is_empty());
+                    if materialized {
+                        self.proposals.remove(proposal_id);
+                    } else if let Some(p) = self.proposals.get_mut(proposal_id) {
                         p.state = ProposalState::Proposed;
                     }
                 }
@@ -3826,6 +3903,179 @@ mod tests {
             snap.applied_ids,
             vec![Some(7)],
             "the block's proposal id rides the id track"
+        );
+    }
+
+    /// The deliberation gossip is ephemeral RAM on every RECEIVER — only the
+    /// proposer's own log records `Proposed`. A holder that adopts an
+    /// Applied block without the card (reopen replay, catch-up past lost
+    /// gossip) must materialize the record FROM the block: the chain
+    /// carries payload and signers. Without it the Accepted view degraded
+    /// to an id-less row — no voters, and the raw multi-line patch dumped
+    /// into the value cell (field report 2026-08-16, the dev republic).
+    #[test]
+    fn an_adopted_applied_block_materializes_its_accepted_card() {
+        let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+        let block = b.seal(
+            1,
+            ChainChange::Applied {
+                proposal_id: 4,
+                surface: Surface::Memory,
+                payload: json!({
+                    "op": "wiki_patch",
+                    "value": "diff --git a/a.md b/a.md\nnew file mode 100644\n--- /dev/null\n+++ b/a.md\n@@ -0,0 +1,1 @@\n+hi\n",
+                    "summary": "+1 -0 →0 ~1",
+                }),
+            },
+            &["petra", "walter"],
+        );
+        b.push(block);
+
+        // a reopen: the chain comes from disk, the ephemeral proposal map
+        // is empty (this peer never was the proposer)
+        let mut peer = crate::tests::plain_state();
+        peer.replica = Some(crate::ReplicaState {
+            name: "Chess Club".to_string(),
+            member: "dora".to_string(),
+            roster: vec!["petra".to_string(), "walter".to_string(), "dora".to_string()],
+            rule_m: 2,
+            identities: Vec::new(),
+            agenda: String::new(),
+            features: None,
+            republic_id: b.republic_id.clone(),
+            founded_ts: 0,
+        });
+        peer.adopt_chain(b.blocks.clone());
+
+        let snap = peer.snapshot(Surface::Memory, None, None);
+        assert_eq!(snap.applied_ids, vec![Some(4)]);
+        assert_eq!(snap.accepted.len(), 1, "the accepted card exists again");
+        let card = &snap.accepted[0];
+        assert_eq!(card.id.0, 4);
+        assert_eq!(card.state, molt_core::ProposalState::Applied);
+        assert_eq!(card.approvals, 2, "the sealed block's signer count");
+        let approved: Vec<&str> = card
+            .votes
+            .iter()
+            .filter(|v| v.vote == molt_core::VoteState::Approved)
+            .map(|v| v.member.as_str())
+            .collect();
+        assert_eq!(approved, vec!["petra", "walter"], "who voted is chain-proven");
+        assert_eq!(
+            card.payload["op"],
+            json!("wiki_patch"),
+            "the payload keeps its shape (the GUI's patch rendering keys on it)"
+        );
+
+        // the LIVE twin: a broadcast block for a proposal this node never
+        // heard of (its gossip was lost) materializes the card the same way
+        let late = b.seal(
+            2,
+            ChainChange::Applied {
+                proposal_id: 9,
+                surface: Surface::Memory,
+                payload: json!({ "op": "add_note", "title": "minutes" }),
+            },
+            &["walter", "dora"],
+        );
+        peer.receive_block(late);
+        let snap = peer.snapshot(Surface::Memory, None, None);
+        assert_eq!(snap.accepted.len(), 2, "both cards stand");
+        let card = snap
+            .accepted
+            .iter()
+            .find(|c| c.id.0 == 9)
+            .expect("the late block's card");
+        assert_eq!(card.approvals, 2);
+        assert!(
+            card.votes
+                .iter()
+                .any(|v| v.member == "dora" && v.vote == molt_core::VoteState::Approved),
+            "the live-adopted card names its signers too"
+        );
+    }
+
+    /// KEYSTONE for `tie_break` (previously untested): two members seal
+    /// competing blocks at the same height; the lower hash wins the tip.
+    /// A record MATERIALIZED from the displaced block must VANISH with it
+    /// (review 2026-08-16: flipping it to Proposed minted a permanent,
+    /// unowned open card — unwithdrawable, re-gossiped forever, and it
+    /// blocked auto-checkpoints on that holder).
+    #[test]
+    fn tie_break_drops_a_materialized_card_with_its_displaced_block() {
+        let b = Builder::new(&["petra", "walter"], 2);
+        let genesis = b.blocks.clone();
+        let block_a = b.seal(
+            1,
+            ChainChange::Applied {
+                proposal_id: 7,
+                surface: Surface::Memory,
+                payload: json!({ "op": "add_note", "title": "a" }),
+            },
+            &["petra", "walter"],
+        );
+        let block_b = b.seal(
+            1,
+            ChainChange::Applied {
+                proposal_id: 9,
+                surface: Surface::Memory,
+                payload: json!({ "op": "add_note", "title": "b" }),
+            },
+            &["petra", "walter"],
+        );
+        let rid = b.republic_id.clone();
+        let hash = |blk: &ChainBlock| molt_storage::content_hash(&block_link_bytes(&rid, blk));
+        let (winner, loser) = if hash(&block_a) < hash(&block_b) {
+            (block_a, block_b)
+        } else {
+            (block_b, block_a)
+        };
+        let (loser_id, winner_id) = match (&loser.change, &winner.change) {
+            (
+                ChainChange::Applied { proposal_id: l, .. },
+                ChainChange::Applied { proposal_id: w, .. },
+            ) => (*l, *w),
+            _ => unreachable!("both are Applied"),
+        };
+
+        // the peer adopts the LOSER first (its card is materialized from
+        // the block — this holder never saw the gossip), then the winner
+        // arrives and takes the tip
+        let mut peer = crate::tests::plain_state();
+        peer.replica = Some(crate::ReplicaState {
+            name: "Chess Club".to_string(),
+            member: "walter".to_string(),
+            roster: vec!["petra".to_string(), "walter".to_string()],
+            rule_m: 2,
+            identities: Vec::new(),
+            agenda: String::new(),
+            features: None,
+            republic_id: rid.clone(),
+            founded_ts: 0,
+        });
+        peer.adopt_chain(genesis);
+        peer.receive_block(loser);
+        assert_eq!(
+            peer.proposals.get(&loser_id).map(|p| p.state),
+            Some(ProposalState::Applied),
+            "the loser's card is materialized while its block stands"
+        );
+
+        peer.receive_block(winner);
+        assert_eq!(peer.chain.len(), 2);
+        let tip = peer.chain.last().expect("tip");
+        assert!(
+            matches!(&tip.change, ChainChange::Applied { proposal_id, .. } if *proposal_id == winner_id),
+            "the lower hash holds the tip"
+        );
+        assert!(
+            !peer.proposals.contains_key(&loser_id),
+            "the materialized card vanished with its displaced block — no phantom open card"
+        );
+        assert_eq!(
+            peer.proposals.get(&winner_id).map(|p| p.state),
+            Some(ProposalState::Applied),
+            "the winner's card stands, chain-proven"
         );
     }
 
@@ -4948,6 +5198,25 @@ mod tests {
             reopened.chain_applied.get(&Surface::Memory).map(|v| v.len()),
             Some(2)
         );
+        // …and the Accepted cards match an unpruned holder's (review
+        // 2026-08-16): the pre-cut card materializes from the blob's
+        // summarized payloads — voter pills open, the sigs went with the
+        // cut — the post-cut card from its live block, voters proven
+        let snap = reopened.snapshot(Surface::Memory, None, None);
+        let card = |pid: u64| {
+            snap.accepted
+                .iter()
+                .find(|c| c.id.0 == pid)
+                .unwrap_or_else(|| panic!("card {pid}"))
+        };
+        assert_eq!(card(1).approvals, 0, "pre-cut: only chain-provable votes show");
+        assert!(
+            card(41)
+                .votes
+                .iter()
+                .any(|v| v.vote == molt_core::VoteState::Approved),
+            "post-cut: the live block's signers show"
+        );
     }
 
     /// A reopen replays the proposal CARDS from the persisted gossip first
@@ -4984,13 +5253,19 @@ mod tests {
         );
 
         // the LIVE twin: a late (resent) Proposed for a consumed id must not
-        // open a fresh card either
+        // re-open a card. Adoption already materialized the APPLIED record
+        // from the block (ensure_applied_record) — the resend must neither
+        // create a second one nor flip it back to open.
         let mut live = chain_peer("walter", &b, b.blocks.clone());
         assert!(
             !live.receive_proposed(7, Surface::Memory, json!({ "op": "add_note", "id": 7 }), "peer"),
             "a consumed id must not open a fresh card"
         );
-        assert!(!live.proposals.contains_key(&7), "no resurrected card");
+        assert_eq!(
+            live.proposals.get(&7).map(|p| p.state),
+            Some(ProposalState::Applied),
+            "the consumed id stays a settled, chain-proven card"
+        );
     }
 
     /// **The `seen` trap.** Once a checkpoint drops the history below the cut,
@@ -7120,9 +7395,14 @@ mod tests {
                 serde_json::json!({ "op": "set_features", "value": "memory quests" }),
             )
             .expect("an unknown effective key must not brick the gates");
-        // …and the fold still keeps zzz alongside the new enable
+        // …and the fold still keeps zzz alongside the new enable. Select
+        // the OPEN card: adoption materialized the applied block's card too
         let (id, surface, payload) = {
-            let (id, rec) = walter.proposals.iter().next().expect("open proposal");
+            let (id, rec) = walter
+                .proposals
+                .iter()
+                .find(|(_, p)| p.state == ProposalState::Proposed)
+                .expect("open proposal");
             (*id, rec.surface, rec.payload.clone())
         };
         let mut petra = chain_signer("petra", &b, b.blocks.clone());
@@ -7177,7 +7457,12 @@ mod tests {
                 serde_json::json!({ "op": "set_features", "value": "memory quests vault" }),
             )
             .expect("propose");
-        let (id, rec) = walter.proposals.iter().next().expect("open proposal");
+        // the OPEN card (adoption materialized the applied block's card too)
+        let (id, rec) = walter
+            .proposals
+            .iter()
+            .find(|(_, p)| p.state == ProposalState::Proposed)
+            .expect("open proposal");
         assert!(*id > 1, "the consumed id 1 must be skipped, got {id}");
         // and a peer registers it instead of refusing a "stale resend"
         let mut petra = chain_signer("petra", &b, b.blocks.clone());
