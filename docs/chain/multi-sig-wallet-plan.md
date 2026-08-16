@@ -783,9 +783,10 @@ Sicherheitskritischer Flow ⇒ erst Design-Doc, erst diskutieren
 
 ## 15. Ausführungsreihenfolge (Checkliste)
 
-1. [ ] Design-Doc §14 schreiben, mit dem User diskutieren — **STOP bis
-   zur Ratifizierung** (Concept-Doc-Regel: Diskussion vor Umsetzung).
+1. [x] Design-Doc §14 geschrieben und diskutiert — **RATIFIZIERT
+   2026-08-16** (inkl. der Revisionen dieses Datums).
 2. [ ] Dep-Lock-Spike §6 (Commit: Workspace-Deps + bare molt-treasury).
+   **← HIER geht es weiter.**
 3. [ ] §10.1–10.3: molt-treasury roster/keys/dkg (Commit je grünem Block).
 4. [ ] §10.4–10.5: core-Fixture + molt-storage `wallet.state` +
    Backup-Include + Doc-Tabelle.
