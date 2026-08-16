@@ -927,7 +927,7 @@ pub(crate) fn spawn_nostr_fetch(
     cap: u64,
     scope: u64,
     cmd_tx: mpsc::Sender<Envelope>,
-) {
+) -> tokio::task::AbortHandle {
     tokio::spawn(async move {
         let result: Result<String, String> = async {
             let bytes = molt_net::file_plane::fetch_series(
@@ -972,7 +972,8 @@ pub(crate) fn spawn_nostr_fetch(
             Err(reason) => Command::NetFileFailed { id, reason, generation: Some(scope) },
         };
         feed(&cmd_tx, cmd).await;
-    });
+    })
+    .abort_handle()
 }
 
 /// RELAY file plane, sharer side: read the shared file and publish its

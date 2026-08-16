@@ -632,6 +632,12 @@ pub(crate) struct State {
     /// Shares whose lazy series publish is in flight (sharer-side dedup —
     /// a burst of `FileWanted`s must not publish the series N times).
     pub(crate) file_serving: std::collections::HashSet<molt_core::MessageId>,
+    /// Abort handles of running relay-plane fetch tasks (FP3): each holds
+    /// a PRIVATE subscription no net teardown reaches, so the workspace
+    /// boundary ends them explicitly. Inbound-only readers — abort is safe
+    /// (the landing write runs inside `spawn_blocking`, which an abort
+    /// never interrupts mid-file).
+    pub(crate) file_fetches: Vec<tokio::task::AbortHandle>,
     /// Sharer-side: when this node last ANNOUNCED each share's stamp — a
     /// `FileWanted` right after an announce means the requester cannot use
     /// that series (pruned/foreign epoch) and a fresh publish is due.
@@ -972,6 +978,7 @@ impl State {
             file_series: HashMap::new(),
             file_pending: HashMap::new(),
             file_serving: std::collections::HashSet::new(),
+            file_fetches: Vec::new(),
             file_announced: HashMap::new(),
             proposal_changes: HashMap::new(),
             pending_blocks: std::collections::BTreeMap::new(),

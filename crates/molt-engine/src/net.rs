@@ -1721,7 +1721,7 @@ impl State {
             );
             return;
         };
-        crate::transfer::spawn_nostr_fetch(
+        let fetch = crate::transfer::spawn_nostr_fetch(
             channel,
             ring,
             id,
@@ -1735,6 +1735,8 @@ impl State {
             self.net_scope,
             cmd_tx,
         );
+        self.file_fetches.retain(|h| !h.is_finished());
+        self.file_fetches.push(fetch);
     }
 
     /// A `FileWanted` broadcast landed: ONLY the sharer answers (every
@@ -3690,6 +3692,34 @@ mod tests {
             matches!(st.session.net_health, molt_core::NetHealth::Down { .. }),
             "link signals must never lift a Down verdict"
         );
+    }
+
+    /// FP3: a relay-plane fetch task holds a PRIVATE subscription (its own
+    /// relay runtime, which no net teardown reaches) — the close/switch
+    /// boundary must end the task instead of letting it live out its fetch
+    /// budget against a closed workspace.
+    #[test]
+    fn a_workspace_reset_aborts_the_running_file_fetches() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let mut st = crate::tests::plain_state();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _hold = tx;
+            std::future::pending::<()>().await;
+        });
+        st.file_fetches.push(task.abort_handle());
+        st.reset_workspace_state();
+        rt.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+                .await
+                .expect("the fetch task must be aborted at the workspace boundary")
+                .expect_err("the sender drops with the aborted future, unused");
+        });
+        assert!(st.file_fetches.is_empty(), "the handle list is cleared");
     }
 
     /// Link/send-stuck state is scoped to the workspace: the close/switch

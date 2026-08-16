@@ -674,6 +674,12 @@ impl State {
         for task in self.recovery_inboxes.drain(..) {
             task.abort();
         }
+        // …and so are the relay-plane file fetches (FP3): private inbound
+        // subscriptions; their landing write runs inside spawn_blocking,
+        // which an abort never interrupts mid-file
+        for fetch in self.file_fetches.drain(..) {
+            fetch.abort();
+        }
         // the group runtime's OUTBOX is DRAINED, not aborted: a frame between
         // seal and relay-OK would otherwise vanish silently. The drain awaits,
         // and the actor never awaits — so it rides a spawned task, the same
