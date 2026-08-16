@@ -912,6 +912,7 @@ impl State {
         // Deterministic on every caller (applier, wire, park drain, replay).
         if let Some(pending) = self.pending_sigs.get_mut(&id) {
             pending.sigs.retain(|a| a.member != by);
+            pending.verified.remove(by);
         }
         p.decliners.push(by.to_string());
         if p.decliners.len() > veto_room {
@@ -1116,7 +1117,7 @@ impl State {
             let me = self.member();
             self.pending_sigs
                 .get(&id)
-                .is_some_and(|s| s.sigs.iter().any(|a| a.member == me))
+                .is_some_and(|s| s.verified.contains(&me))
         } else {
             Self::operator_approved(p)
         };
@@ -1128,10 +1129,12 @@ impl State {
         // its extra count stays anonymous rather than pinned on a member.)
         let me = self.member();
         let mut votes: Vec<MemberVote> = if self.is_chain_governed() {
+            // L2: the pills show VERIFIED voices only — a raw collected
+            // sig could paint a forged stance onto a named seat
             let signed: Vec<String> = self
                 .pending_sigs
                 .get(&id)
-                .map(|s| s.sigs.iter().map(|a| a.member.clone()).collect())
+                .map(|s| s.verified.iter().cloned().collect())
                 .unwrap_or_default();
             self.roster()
                 .into_iter()

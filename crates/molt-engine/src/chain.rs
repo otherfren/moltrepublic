@@ -45,6 +45,12 @@ pub(crate) struct PendingApproval {
     pub height: u64,
     /// One signature per distinct member (latest wins).
     pub sigs: Vec<RosterAttestation>,
+    /// Members whose CURRENT signature verified against the live target's
+    /// approval bytes (L2): the DISPLAY reads only these — a raw collected
+    /// sig could paint a forged stance onto a named seat. `try_commit`
+    /// keeps its own authoritative filter; a sig unverifiable YET (its
+    /// card has not landed) stays collected and is re-checked on arrival.
+    pub verified: std::collections::BTreeSet<String>,
 }
 
 /// A recovery in flight on the coordinator: the returning member's fresh MLS
@@ -1673,6 +1679,8 @@ impl State {
             return;
         }
         self.proposal_changes.insert(id, change);
+        // L2: signatures that OUTRAN this change become displayable now
+        self.reverify_pending(id);
     }
 
     /// Whether `id` may register `change`: free unless it already names a
@@ -1835,7 +1843,9 @@ impl State {
 
     /// Distinct collected approvals for a proposal (for the UI progress).
     pub(crate) fn chain_approval_count(&self, id: u64) -> usize {
-        self.pending_sigs.get(&id).map(|p| p.sigs.len()).unwrap_or(0)
+        // L2: the DISPLAYED count is the verified one — raw collected sigs
+        // could inflate progress with junk a peer gossiped
+        self.pending_sigs.get(&id).map(|p| p.verified.len()).unwrap_or(0)
     }
 
     /// Sign this node's approval of a proposal at the current head+1 and
@@ -1854,6 +1864,10 @@ impl State {
         let sig = molt_storage::identity_sign(sk, &bytes);
         let me = self.member();
         self.collect_sig(id, height, &me, &sig);
+        // the own signature is genuine by construction (L2)
+        if let Some(p) = self.pending_sigs.get_mut(&id) {
+            p.verified.insert(me.clone());
+        }
         let env = self.make_env(
             me.clone(),
             WorkspaceEvent::Approved {
@@ -1906,14 +1920,61 @@ impl State {
         if height > entry.height {
             entry.height = height;
             entry.sigs.clear();
+            entry.verified.clear();
         } else if height < entry.height {
             return;
         }
         entry.sigs.retain(|a| a.member != member);
+        // the REPLACED signature's verdict must not survive the replacement
+        entry.verified.remove(member);
         entry.sigs.push(RosterAttestation {
             member: member.to_string(),
             sig: sig.to_string(),
         });
+    }
+
+    /// L2: does this (member, sig) verify against the LIVE target's
+    /// approval bytes? Checkable only when the head exists, the height is
+    /// the current target and the change is registered here — anything
+    /// else is "not verifiable yet", which callers treat as not-displayed
+    /// rather than dropped (liveness: an approval may outrun its card).
+    fn approval_verifies(&self, id: u64, height: u64, member: &str, sig: &str) -> bool {
+        let Some(head) = self.chain_head.as_ref() else {
+            return false;
+        };
+        if height != head.height + 1 {
+            return false;
+        }
+        let Some(change) = self.proposal_change(id) else {
+            return false;
+        };
+        let bytes = approval_bytes(&self.republic_id(), height, &change);
+        head.identities
+            .iter()
+            .any(|i| i.member == member && molt_storage::identity_verify(&i.identity_pk, &bytes, sig))
+    }
+
+    /// L2: re-check every collected-but-unverified signature of `id` — the
+    /// card (or its registered change) just landed, so sigs that outran it
+    /// become displayable now.
+    pub(crate) fn reverify_pending(&mut self, id: u64) {
+        let Some(pending) = self.pending_sigs.get(&id) else {
+            return;
+        };
+        let height = pending.height;
+        let candidates: Vec<(String, String)> = pending
+            .sigs
+            .iter()
+            .filter(|a| !pending.verified.contains(&a.member))
+            .map(|a| (a.member.clone(), a.sig.clone()))
+            .collect();
+        for (member, sig) in candidates {
+            if self.approval_verifies(id, height, &member, &sig) {
+                if let Some(p) = self.pending_sigs.get_mut(&id) {
+                    p.verified.insert(member);
+                }
+            }
+        }
     }
 
     /// Try to seal a block for a proposal that has gathered the threshold of
@@ -2869,6 +2930,10 @@ impl State {
             // superseded right away — no zombie pending cards on rejoiners
             self.supersede_stale_wiki();
         }
+        if inserted {
+            // L2: signatures that OUTRAN this card become displayable now
+            self.reverify_pending(id);
+        }
         inserted
     }
 
@@ -2889,6 +2954,11 @@ impl State {
             return;
         }
         self.collect_sig(id, height, by, sig);
+        if self.approval_verifies(id, height, by, sig) {
+            if let Some(p) = self.pending_sigs.get_mut(&id) {
+                p.verified.insert(by.to_string());
+            }
+        }
         self.try_commit(id);
     }
 
@@ -3248,7 +3318,9 @@ impl State {
                 payload: p.payload.clone(),
             });
             if let Some(pending) = self.pending_sigs.get(id) {
-                for a in &pending.sigs {
+                // L2: only VERIFIED signatures are re-served — junk a peer
+                // once gossiped must not be amplified to the next node
+                for a in pending.sigs.iter().filter(|a| pending.verified.contains(&a.member)) {
                     events.push(WorkspaceEvent::Approved {
                         id: ProposalId(*id),
                         by: a.member.clone(),
@@ -5146,6 +5218,97 @@ mod tests {
             "the own signature is retracted by the decline"
         );
         assert!(!v.approved_by_me, "…and the view says so");
+    }
+
+    /// L2: the DISPLAYED approval count and pills read only signatures
+    /// that VERIFY — a peer gossiping junk must not inflate progress or
+    /// paint a forged stance onto a named seat. Sealing was always safe
+    /// (`try_commit` filters); this pins the display.
+    #[test]
+    fn an_unverifiable_approval_is_not_displayed_as_consent() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let b = Builder::new(&["petra", "walter"], 2);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        let payload = json!({ "op": "add_note", "id": 1 });
+        wire(
+            &mut walter,
+            "petra",
+            1,
+            WorkspaceEvent::Proposed {
+                id: ProposalId(1),
+                surface: Surface::Memory,
+                payload: payload.clone(),
+            },
+        );
+        // junk: parses as no valid signature over the approval bytes
+        walter.receive_approval(1, "petra", 1, "deadbeef");
+        assert_eq!(walter.chain_approval_count(1), 0, "junk shows no progress");
+        let p = walter.proposals.get(&1).cloned().expect("card");
+        let v = walter.view(1, &p);
+        assert_eq!(v.approvals, 0);
+        let petra_row = v
+            .votes
+            .iter()
+            .find(|mv| mv.member == "petra")
+            .map(|mv| mv.vote)
+            .expect("row");
+        assert_eq!(petra_row, molt_core::VoteState::Open, "no forged pill");
+        // …the genuine signature counts, and the vote still seals (liveness)
+        let change = ChainChange::Applied {
+            proposal_id: 1,
+            surface: Surface::Memory,
+            payload: payload.clone(),
+        };
+        let bytes = approval_bytes(&b.republic_id, 1, &change);
+        walter.receive_approval(1, "petra", 1, &identity_sign(b.key("petra"), &bytes));
+        assert_eq!(walter.chain_approval_count(1), 1, "the genuine one displays");
+        walter.chain_sign_and_gossip_approval(1);
+        assert_eq!(
+            walter.chain_head.as_ref().expect("head").height,
+            1,
+            "verification costs no liveness — the block seals"
+        );
+    }
+
+    /// L2 liveness twin: an approval that OUTRAN its card is collected but
+    /// not displayed, and becomes displayable the moment the card lands —
+    /// the naive drop-on-unverifiable fix would wedge gossip ordering.
+    #[test]
+    fn an_approval_that_outran_its_card_counts_once_the_card_lands() {
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        let payload = json!({ "op": "set_name", "value": "Early" });
+        let change = ChainChange::Applied {
+            proposal_id: 1,
+            surface: Surface::Organization,
+            payload: payload.clone(),
+        };
+        let bytes = approval_bytes(&b.republic_id, 1, &change);
+        walter.receive_approval(1, "petra", 1, &identity_sign(b.key("petra"), &bytes));
+        assert_eq!(
+            walter.chain_approval_count(1),
+            0,
+            "not verifiable yet — the card has not landed"
+        );
+        wire(
+            &mut walter,
+            "petra",
+            1,
+            WorkspaceEvent::Proposed {
+                id: ProposalId(1),
+                surface: Surface::Organization,
+                payload,
+            },
+        );
+        assert_eq!(
+            walter.chain_approval_count(1),
+            1,
+            "the card landed — the collected signature displays"
+        );
     }
 
     /// D2: `try_commit` excludes CURRENT decliners — a stale re-served
