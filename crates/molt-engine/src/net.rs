@@ -1423,20 +1423,22 @@ impl State {
                     ) {
                         self.emit(molt_core::Event::Withdrawn { id });
                     }
-                    // votes that outran the card (parked declines) stand now
-                    match self.register_parked_declines(id.0) {
-                        crate::proposals::DeclineOutcome::Rejected => {
-                            self.emit(molt_core::Event::Rejected { id });
+                    // votes that outran the card (parked declines) stand
+                    // now — every drained voice speaks (D4), and a drain
+                    // that tips posts the decision line too (D5)
+                    let drain = self.register_parked_declines(id.0);
+                    for by in drain.voices {
+                        self.emit(molt_core::Event::Declined { id, by });
+                    }
+                    if drain.rejected {
+                        self.emit(molt_core::Event::Rejected { id });
+                        if let Some((payload, who)) = self
+                            .proposals
+                            .get(&id.0)
+                            .map(|p| (p.payload.clone(), p.declined_by.clone()))
+                        {
+                            self.post_decision_summary(id.0, &payload, Some(&who));
                         }
-                        crate::proposals::DeclineOutcome::Voice => {
-                            let by = self
-                                .proposals
-                                .get(&id.0)
-                                .and_then(|p| p.decliners.last().cloned())
-                                .unwrap_or_default();
-                            self.emit(molt_core::Event::Declined { id, by });
-                        }
-                        _ => {}
                     }
                 }
             }
@@ -1463,9 +1465,19 @@ impl State {
                 }
                 match self.register_decline(id.0, &from, envelope.ts, &hash) {
                     crate::proposals::DeclineOutcome::Rejected => {
-                        // silent on the summary: the node whose LOCAL
-                        // decline tips the vote posts it, exactly once
                         self.emit(molt_core::Event::Rejected { id });
+                        // D5: the WIRE tip posts the decision line too —
+                        // under the deterministic summary id, so a second
+                        // poster collapses in the duplicate-id drop
+                        // (pre-D5 this stayed silent and a vote tipped by
+                        // a received decline had no line anywhere)
+                        if let Some((payload, who)) = self
+                            .proposals
+                            .get(&id.0)
+                            .map(|p| (p.payload.clone(), p.declined_by.clone()))
+                        {
+                            self.post_decision_summary(id.0, &payload, Some(&who));
+                        }
                     }
                     crate::proposals::DeclineOutcome::Voice => {
                         self.emit(molt_core::Event::Declined { id, by: from });

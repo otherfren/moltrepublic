@@ -54,6 +54,17 @@ pub(crate) enum DeclineOutcome {
     Parked,
 }
 
+/// What a park drain registered (D4): each drained voice by name, so the
+/// LIVE wire arm can emit one `Event::Declined` per member (the applier
+/// callers discard — replay must not ring frontends), plus whether the
+/// drain tipped the card terminal.
+pub(crate) struct ParkDrain {
+    /// The members whose parked voices registered, in park order.
+    pub(crate) voices: Vec<molt_core::MemberId>,
+    /// The drain turned the card Rejected.
+    pub(crate) rejected: bool,
+}
+
 /// What one withdraw registration did.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum WithdrawOutcome {
@@ -911,21 +922,22 @@ impl State {
     /// Returns the strongest outcome (Rejected > Voice > Known) so a live
     /// caller can ring frontends; replay callers ignore it. Idempotent —
     /// the park entry is consumed.
-    pub(crate) fn register_parked_declines(&mut self, id: u64) -> DeclineOutcome {
+    pub(crate) fn register_parked_declines(&mut self, id: u64) -> ParkDrain {
+        let mut drain = ParkDrain { voices: Vec::new(), rejected: false };
         let Some(parked) = self.pending_declines.remove(&id) else {
-            return DeclineOutcome::Known;
+            return drain;
         };
-        let mut strongest = DeclineOutcome::Known;
         for (by, ts, hash) in parked {
             match self.register_decline(id, &by, ts, &hash) {
-                DeclineOutcome::Rejected => strongest = DeclineOutcome::Rejected,
-                DeclineOutcome::Voice if strongest != DeclineOutcome::Rejected => {
-                    strongest = DeclineOutcome::Voice;
+                DeclineOutcome::Rejected => {
+                    drain.voices.push(by);
+                    drain.rejected = true;
                 }
+                DeclineOutcome::Voice => drain.voices.push(by),
                 _ => {}
             }
         }
-        strongest
+        drain
     }
 
     /// The one-line summary a DECIDED vote posts into its own discussion
@@ -997,12 +1009,21 @@ impl State {
     ) {
         let me = self.member();
         let body = Self::decision_summary(id, payload, decliner);
-        if let Err(e) = self.post_message_with_kind(
+        // D5: DETERMINISTIC id — whoever tips posts, and concurrent posters
+        // collapse via the ordinary duplicate-id drop. Already holding the
+        // line (the other tipper's copy landed first, or a replay) = done.
+        let republic = self.replica.as_ref().map(|r| r.republic_id.clone()).unwrap_or_default();
+        let sid = crate::chat::decision_summary_id(&republic, id, decliner.is_some());
+        if self.chat_pos.contains_key(&sid) {
+            return;
+        }
+        if let Err(e) = self.post_message_with_kind_id(
             me,
             body,
             None,
             molt_core::ChannelRef::Patch { id: ProposalId(id) },
             molt_core::ChatKind::System,
+            sid,
         ) {
             tracing::warn!(error = %e, id, "could not post the decision summary");
         }

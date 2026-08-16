@@ -4636,6 +4636,152 @@ mod tests {
         );
     }
 
+    /// D4: a park drain speaks with EVERY drained voice — one
+    /// `Event::Declined` per registered member (never one event naming
+    /// `decliners.last()`), and a drain that tips emits the voices AND the
+    /// `Rejected`. An event-stream consumer must not undercount votes.
+    #[test]
+    fn a_park_drain_emits_one_declined_event_per_voice() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        // veto_room = 4 - 2 = 2: two parked voices stay a Voice drain
+        let b = Builder::new(&["petra", "walter", "dora", "erika"], 2);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        wire(
+            &mut walter,
+            "dora",
+            1,
+            WorkspaceEvent::Declined { id: ProposalId(4), by: "dora".to_string(), hash: String::new() },
+        );
+        wire(
+            &mut walter,
+            "erika",
+            1,
+            WorkspaceEvent::Declined { id: ProposalId(4), by: "erika".to_string(), hash: String::new() },
+        );
+        let mut ev = walter.subscribe_events();
+        wire(
+            &mut walter,
+            "petra",
+            1,
+            WorkspaceEvent::Proposed {
+                id: ProposalId(4),
+                surface: Surface::Organization,
+                payload: json!({ "op": "set_name", "value": "Late" }),
+            },
+        );
+        let mut declined: Vec<String> = Vec::new();
+        let mut rejected = 0;
+        while let Ok(e) = ev.try_recv() {
+            match e {
+                crate::Event::Declined { id, by } if id.0 == 4 => declined.push(by),
+                crate::Event::Rejected { id } if id.0 == 4 => rejected += 1,
+                _ => {}
+            }
+        }
+        declined.sort_unstable();
+        assert_eq!(
+            declined,
+            vec!["dora".to_string(), "erika".to_string()],
+            "one event per drained voice"
+        );
+        assert_eq!(rejected, 0, "two voices in veto room 2 do not tip");
+
+        // …and a drain that TIPS still speaks every voice, then the verdict
+        let mut peer = chain_signer("walter", &b, b.blocks.clone());
+        for (i, who) in ["dora", "erika", "petra"].iter().enumerate() {
+            wire(
+                &mut peer,
+                who,
+                u64::try_from(i).expect("i") + 1,
+                WorkspaceEvent::Declined {
+                    id: ProposalId(4),
+                    by: (*who).to_string(),
+                    hash: String::new(),
+                },
+            );
+        }
+        let mut ev = peer.subscribe_events();
+        wire(
+            &mut peer,
+            "petra",
+            2,
+            WorkspaceEvent::Proposed {
+                id: ProposalId(4),
+                surface: Surface::Organization,
+                payload: json!({ "op": "set_name", "value": "Late" }),
+            },
+        );
+        let (mut declined, mut rejected) = (0, 0);
+        while let Ok(e) = ev.try_recv() {
+            match e {
+                crate::Event::Declined { id, .. } if id.0 == 4 => declined += 1,
+                crate::Event::Rejected { id } if id.0 == 4 => rejected += 1,
+                _ => {}
+            }
+        }
+        assert_eq!((declined, rejected), (3, 1), "3 voices + the verdict");
+    }
+
+    /// D5: the decision line of a DECLINED vote is minted under a
+    /// DETERMINISTIC message id — whoever tips posts it, concurrent
+    /// posters collapse via the ordinary duplicate-id drop, and a wire tip
+    /// posts too (it used to stay silent, so a vote tipped by a received
+    /// decline had no decision line anywhere).
+    #[test]
+    fn a_wire_tipped_decline_posts_its_summary_exactly_once() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        // veto_room = 3 - 2 = 1: the SECOND decline tips
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        wire(
+            &mut walter,
+            "petra",
+            1,
+            WorkspaceEvent::Proposed {
+                id: ProposalId(4),
+                surface: Surface::Organization,
+                payload: json!({ "op": "set_name", "value": "X" }),
+            },
+        );
+        let summaries = |st: &crate::State| {
+            st.chat_visible()
+                .filter(|m| {
+                    m.kind == molt_core::ChatKind::System
+                        && matches!(&m.channel, molt_core::ChannelRef::Patch { id } if id.0 == 4)
+                })
+                .count()
+        };
+        walter.cmd_decline(ProposalId(4)).expect("own voice, no tip");
+        assert_eq!(summaries(&walter), 0, "one voice does not decide");
+        wire(
+            &mut walter,
+            "dora",
+            1,
+            WorkspaceEvent::Declined { id: ProposalId(4), by: "dora".to_string(), hash: String::new() },
+        );
+        assert_eq!(
+            summaries(&walter),
+            1,
+            "the wire tip posts the decision line"
+        );
+        // the OTHER tipper's copy arrives under the SAME deterministic id —
+        // the ordinary duplicate-id drop collapses it
+        let sid = crate::chat::decision_summary_id(&b.republic_id, 4, true);
+        let copy = molt_core::ChatMessage::text(sid, "dora".to_string(), "⚖ #4 ⊘ …".to_string(), crate::now_secs())
+            .with_channel(molt_core::ChannelRef::Patch { id: ProposalId(4) })
+            .with_kind(molt_core::ChatKind::System);
+        wire(&mut walter, "dora", 2, WorkspaceEvent::Chat(copy));
+        assert_eq!(summaries(&walter), 1, "concurrent posters collapse to one line");
+    }
+
     /// D1: a decline binds the payload the decliner SAW, not a bare id —
     /// two proposers minting the same id in one gossip round-trip must
     /// not let a voice register against a proposal the decliner never

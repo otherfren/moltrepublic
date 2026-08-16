@@ -47,6 +47,24 @@ pub(crate) fn sanitize_emoji(emoji: &str) -> Option<String> {
     Some(emoji.to_string())
 }
 
+/// Deterministic id of a decision-summary line (D5): every node that tips
+/// a vote mints the SAME id, so the receive-side duplicate-id drop
+/// collapses concurrent posters into one line per discussion. The outcome
+/// byte keeps a rejected line from ever colliding with an accepted one
+/// (the chain wins over a local Rejected by design).
+pub(crate) fn decision_summary_id(republic_id: &str, proposal: u64, declined: bool) -> MessageId {
+    use sha2::Digest as _;
+    let mut h = sha2::Sha256::new();
+    h.update(b"molt-decision-summary-v1\0");
+    h.update(republic_id.as_bytes());
+    h.update(proposal.to_le_bytes());
+    h.update([u8::from(declined)]);
+    let d = h.finalize();
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&d[..16]);
+    MessageId(id)
+}
+
 impl State {
     /// Refuse a local write into the discussion of a DECIDED vote: a
     /// `Patch` channel is read-only iff its proposal is known here and no
@@ -106,6 +124,21 @@ impl State {
         kind: ChatKind,
     ) -> Result<MessageId, MoltError> {
         let id = mint_message_id()?;
+        self.post_message_with_kind_id(from, body, quote_id, channel, kind, id)
+    }
+
+    /// [`Self::post_message_with_kind`] under a CALLER-CHOSEN id (D5: the
+    /// deterministic decision line). The caller owns dedup — posting an id
+    /// the log already holds would shadow the existing message.
+    pub(crate) fn post_message_with_kind_id(
+        &mut self,
+        from: MemberId,
+        body: String,
+        quote_id: Option<MessageId>,
+        channel: ChannelRef,
+        kind: ChatKind,
+        id: MessageId,
+    ) -> Result<MessageId, MoltError> {
         // a quote only sticks when it points at a known message
         let quote_id = quote_id.filter(|q| self.chat_pos.contains_key(q));
         let mut msg = ChatMessage::text(id, from.clone(), body.clone(), now_secs())
