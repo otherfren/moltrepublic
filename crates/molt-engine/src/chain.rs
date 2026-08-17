@@ -845,6 +845,40 @@ pub(crate) fn walk_chain(blocks: &[ChainBlock]) -> Result<ChainWalk, String> {
 /// the same trust model a full-chain import has. Hard-reject,
 /// all-or-nothing; returns the verified head plus the founding
 /// constitution the workspace materializes from.
+/// The chain-ratified relay pool as SERVED MATERIAL folds it: the blob's
+/// (else the genesis') pool plus every applied `set_relays` edit in the
+/// verified run — the recovery gate's authority. A Welcome minted after a
+/// pool vote carries the GOVERNED pool, so comparing it against the
+/// founding pool refuses every recovery on a republic that ever voted its
+/// relays (field find 2026-08-17). Same fold as [`State::effective_relays`],
+/// for a caller that holds served blocks instead of a projection.
+pub(crate) fn effective_relays_of_served(
+    checkpoint: Option<&molt_core::CheckpointState>,
+    blocks: &[ChainBlock],
+) -> Vec<String> {
+    let mut pool = match checkpoint {
+        Some(blob) => blob.relays.clone(),
+        None => blocks
+            .first()
+            .and_then(|b| match &b.change {
+                ChainChange::Genesis { relays, .. } => Some(relays.clone()),
+                _ => None,
+            })
+            .unwrap_or_default(),
+    };
+    for b in blocks {
+        if let ChainChange::Applied { payload, .. } = &b.change {
+            if payload.get("op").and_then(serde_json::Value::as_str) == Some("set_relays") {
+                State::fold_pool_edit(
+                    &mut pool,
+                    payload.get("value").and_then(serde_json::Value::as_str).unwrap_or_default(),
+                );
+            }
+        }
+    }
+    pool
+}
+
 pub(crate) fn verify_served(
     checkpoint: Option<&molt_core::CheckpointState>,
     blocks: &[ChainBlock],

@@ -204,6 +204,98 @@ async fn found_republic(
     (a, b, petra_phrase)
 }
 
+/// Field keystone (found 2026-08-17, recovery attempt 3g of the incident
+/// rerun): a seat can still be recovered AFTER the republic sealed a
+/// `set_relays` edit. The recovery gate compared the Welcome's relay set
+/// against the GENESIS roster's — but the Welcome (rightly) carries the
+/// GOVERNED pool, so on any republic that ever voted its pool the gate
+/// refused every recovery forever ("names a different relay set than the
+/// republic ratified"). The authority must be the served chain's own
+/// fold: genesis (or blob) pool plus every applied `set_relays` block.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_recovery_still_verifies_after_a_sealed_pool_edit() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .try_init();
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let relay2 = MockRelay::run().await.expect("second relay");
+    let url2 = relay2.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, petra_phrase) = found_republic(tmp.path(), &url, 2).await;
+
+    // the republic GOVERNS its pool: both voices seal url + url2. walter
+    // never confirms url2 locally (the field case) — his dialable subset
+    // stays [url], while the ratified pool is [url, url2].
+    a.execute(Command::Propose {
+        surface: molt_core::Surface::Organization,
+        payload: serde_json::json!({"op": "set_relays", "value": format!("{url} {url2}")}),
+    })
+    .await
+    .expect("propose pool edit");
+    approve_value(&b, &format!("{url} {url2}")).await;
+    wait_for(&a, "the pool edit to seal", |s| {
+        s.workspaces
+            .first()
+            .is_some_and(|w| w.detail.contains("2-of-2") || !w.name.is_empty())
+    })
+    .await;
+    // the seal is observable as the applied entry reaching the proposals
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Reply::Proposals { proposals } =
+            a.execute(Command::ListProposals).await.expect("list")
+        {
+            if proposals.iter().any(|p| p.state == molt_core::ProposalState::Applied) {
+                break;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the pool edit never sealed"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // petra's device dies AFTER the pool vote
+    drop(b);
+    a.execute(Command::RecoverInviteStart {
+        member: "petra".to_string(),
+    })
+    .await
+    .expect("mint");
+    let s = wait_for(&a, "the recovery link", |s| {
+        s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")
+    })
+    .await;
+    let link = s
+        .notice
+        .strip_prefix("recovery-link:")
+        .unwrap_or_else(|| panic!("the mint must succeed: {:?}", s.notice))
+        .to_string();
+    let c = engine(&tmp.path().join("rejoiner"));
+    adopt_relay(&c, &url).await;
+    c.execute(Command::RecoverStart {
+        link,
+        phrase: petra_phrase,
+    })
+    .await
+    .expect("recover start");
+    let s = wait_for(&c, "the recovery to open", |s| {
+        (s.screen == molt_core::Screen::Main && !s.workspaces.is_empty())
+            || s.notice.starts_with("recover-failed:")
+    })
+    .await;
+    assert!(
+        !s.notice.starts_with("recover-failed:"),
+        "a recovery after a sealed pool edit must verify: {:?}",
+        s.notice
+    );
+}
+
 /// Found a real 2-of-3 "Chess Club" over one in-process relay: walter
 /// (founder), petra and vera. Hands back the three live engines plus
 /// petra's recovery phrase.

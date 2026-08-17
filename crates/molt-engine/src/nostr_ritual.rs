@@ -980,7 +980,7 @@ async fn recovery_rejoin(
     // republic's chain, whoever relayed it.
     let mut blob: Option<molt_core::CheckpointState> = None;
     let mut blocks: Vec<molt_core::ChainBlock> = Vec::new();
-    let (head, sealed) = loop {
+    let (head, _sealed) = loop {
         let now = tokio::time::Instant::now();
         if now >= deadline {
             return Err(
@@ -1032,14 +1032,24 @@ async fn recovery_rejoin(
 
     // **Relay honesty, against the CHAIN.** The join twin compares the
     // Welcome's relays to the invite's, which is founding-only ("the two sets
-    // are the same by construction"). Since roster-v4 the pool is governed, so
-    // the authority is the verified anchor — and the check can only run HERE,
-    // after the chain is verified, which is why it is not up with the Welcome.
-    if payload.relays != sealed.relays {
-        return Err(
-            "the Welcome names a different relay set than the republic ratified — \
-             refusing (relay changes are governed by the chain)"
-                .to_string(),
+    // are the same by construction"). Here the Welcome carries the GOVERNED
+    // pool while this node holds only the served anchor material — later
+    // `set_relays` blocks arrive over the ordinary catch-up (§3.1a). An
+    // exact match against the served fold proves honesty; a mismatch is NOT
+    // decidable now — either a lie or a legitimate later vote. Refusing on
+    // it bricked every recovery on a republic that ever voted its pool
+    // (field find 2026-08-17). The mismatch is safe to carry: the Welcome's
+    // relay list is consumed by NOTHING — the recovered pool materializes
+    // from the verified chain alone and every applied `set_relays` block
+    // adopts deterministically — so the chain stays the one authority
+    // either way; a differing set is logged, never trusted.
+    let served_fold = crate::chain::effective_relays_of_served(blob.as_ref(), &blocks);
+    if payload.relays != served_fold {
+        tracing::warn!(
+            welcome = payload.relays.join(" "),
+            served = served_fold.join(" "),
+            "the Welcome's relay set differs from the served anchor's fold — \
+             a later pool vote or a lie; the chain decides on catch-up"
         );
     }
 
