@@ -493,7 +493,16 @@ impl RelayRuntime {
                 "no dialable relay — the pool is empty or gated".into(),
             ));
         }
-        let (tx, rx) = mpsc::channel(256);
+        // The channel must hold the WHOLE bounded stored replay without a
+        // consumer: the ritual legs gate on `sync_state` BEFORE their first
+        // recv, and a replay larger than the channel would park the reader
+        // on a full `send` with the EOSE still unread behind it — the gate
+        // then times out against a healthy relay, and forever, because the
+        // backlog only grows (found 2026-08-17, recovery rerun). The bound
+        // is honest: the reader drops a relay that replays past
+        // `history_bound`, so this can never buffer more than that (+ some
+        // live headroom).
+        let (tx, rx) = mpsc::channel(self.history_bound + 64);
         let (eose_tx, eose_rx) = tokio::sync::watch::channel(0usize);
         let shared = Arc::new(SubShared {
             dialer: self.dialer.clone(),
@@ -627,6 +636,7 @@ async fn place_req(
             cursor.saturating_sub(CURSOR_OVERLAP),
         ));
     }
+    tracing::debug!(relay = %url, filter = %nostr::JsonUtil::as_json(&relay_filter), "placing REQ");
     ws.send(ClientMessage::req(sub_id.clone(), vec![relay_filter]))
         .await
 }
@@ -832,6 +842,7 @@ async fn read_session(
                 }
             }
             Ok(RelayMessage::EndOfStoredEvents(_)) => {
+                tracing::debug!(relay = %url, counted = !*eose_counted, "relay sent EOSE");
                 if !*eose_counted {
                     *eose_counted = true;
                     shared.eose_tx.send_modify(|n| *n += 1);
@@ -887,7 +898,9 @@ async fn read_session(
                 }
             }
             // OK for other events / NOTICE etc. — not subscription traffic
-            Ok(_) => {}
+            Ok(other) => {
+                tracing::debug!(relay = %url, msg = ?other, "relay frame (non-subscription)");
+            }
             // a frame that is not NIP-01 says nothing about the connection —
             // skip it, and do NOT re-arm the keepalive clock with it (a relay
             // dribbling junk would otherwise hold the idle bound open forever)

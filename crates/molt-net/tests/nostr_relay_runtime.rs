@@ -497,6 +497,53 @@ async fn a_dying_relay_reconnects_and_the_gap_is_healed() {
     );
 }
 
+/// Field keystone (found 2026-08-17, recovery attempt 3 of the incident
+/// rerun): a subscription whose stored replay is LARGER than the delivery
+/// channel must still report `synced` to a caller that gates on
+/// `sync_state` BEFORE consuming — the ritual legs (founding inbox,
+/// recovery chain-fetch) do exactly that. With a fixed 256-slot channel
+/// the reader blocks on the 257th replayed event, the EOSE behind the
+/// replay is never read, and the gate times out: the recovery then fails
+/// "not readable on any relay" against a perfectly healthy relay, forever
+/// (the backlog only grows). The channel must carry the whole bounded
+/// replay (`history_bound` caps a hostile one) without a consumer.
+#[tokio::test]
+async fn a_replay_larger_than_the_channel_still_reaches_eose_unconsumed() {
+    use molt_net::relay_runtime::RelayRuntime;
+
+    let relay = MockRelay::run().await.expect("relay");
+    let url = relay.url().await.to_string();
+    let dialer = Dialer::resolve("none", "local", 0).expect("direct dialer");
+    let keys = Keys::generate();
+
+    // stuff the relay with MORE stored events than the delivery channel held
+    let publisher = RelayRuntime::new(dialer.clone(), vec![url.clone()]);
+    for i in 0..300 {
+        let e = h_tagged_event(&keys, "6d6f6c74", &format!("backlog {i}"));
+        publisher.publish(&e).await.expect("publish backlog");
+    }
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(445))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::H), "6d6f6c74");
+    let rt = RelayRuntime::new(dialer, vec![url]);
+    let mut sub = rt.subscribe(filter).await.expect("subscribe");
+    // the ritual gate: sync BEFORE any recv
+    assert!(
+        sub.synced(Duration::from_secs(10)).await,
+        "EOSE must arrive even though nothing consumed the replay yet"
+    );
+    // …and the backlog is intact behind it
+    let mut got = 0;
+    while let Some(_e) = sub.recv(Duration::from_millis(500)).await {
+        got += 1;
+        if got == 300 {
+            break;
+        }
+    }
+    assert_eq!(got, 300, "the gated replay must not lose events");
+}
+
 /// Field keystone (live incident 2026-08-09 §2, found 2026-08-17): a
 /// HALF-DEAD subscription — TCP open, flow silently gone (a dropped Tor
 /// circuit behind a live SOCKS proxy) — must cut at the idle bound and
