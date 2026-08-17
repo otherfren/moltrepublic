@@ -2438,12 +2438,18 @@ impl State {
         if self.chain.len() < AUTO_CHECKPOINT_MIN_LEN {
             return;
         }
-        if self.catchup_from.is_some() || !self.pending_blocks.is_empty() {
-            return;
-        }
         let Some(head) = self.chain_head.as_ref() else {
             return;
         };
+        // Only a buffered block ADJACENT to head pins the cut: it is about
+        // to apply and would stale the checkpoint on arrival. A gap block
+        // cannot apply next, and the buffer accepts claims up to head+4096
+        // — gating on "any buffered block" let one plausible far-future
+        // claim freeze compaction until a drain cleared it (known-debt
+        // refinement, 2026-08-16 list).
+        if self.catchup_from.is_some() || self.pending_blocks.contains_key(&(head.height + 1)) {
+            return;
+        }
         let me = self.member();
         let lowest = head.identities.iter().map(|i| i.member.as_str()).min();
         if lowest != Some(me.as_str()) {
@@ -4485,6 +4491,48 @@ mod tests {
             handle,
         });
         tmp
+    }
+
+    /// **Known-debt refinement (2026-08-16 list): only a buffered block
+    /// ADJACENT to head pins the auto-checkpoint.** The buffer accepts
+    /// claims up to head+4096, so an insider posting one plausible
+    /// near-future height used to freeze compaction until a drain or
+    /// re-serve cleared it. A gap block cannot apply next — only head+1
+    /// says the head is about to move and the cut would be stale.
+    #[test]
+    fn a_far_future_buffered_block_does_not_pin_the_auto_checkpoint() {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        for i in 1..=32 {
+            b.commit_applied(i, &["petra", "walter"]);
+        }
+        let head_h = b.blocks.last().expect("blocks").height;
+        let mut dummy = b.blocks[1].clone();
+
+        // a far-future claim in the buffer must NOT hold the compaction
+        let mut peer = chain_peer("petra", &b, b.blocks.clone());
+        dummy.height = head_h + 2;
+        peer.pending_blocks.insert(head_h + 2, dummy.clone());
+        peer.maybe_auto_checkpoint();
+        assert!(
+            peer.proposal_changes
+                .values()
+                .any(|c| matches!(c, ChainChange::Checkpoint { .. })),
+            "a gap block cannot apply next — the cut must still be proposed"
+        );
+
+        // …but a block adjacent to head still pins it: the head is about
+        // to move and the cut would be stale on arrival
+        let mut peer = chain_peer("petra", &b, b.blocks.clone());
+        dummy.height = head_h + 1;
+        peer.pending_blocks.insert(head_h + 1, dummy);
+        peer.maybe_auto_checkpoint();
+        assert!(
+            !peer
+                .proposal_changes
+                .values()
+                .any(|c| matches!(c, ChainChange::Checkpoint { .. })),
+            "an adjacent buffered block keeps pinning the auto-checkpoint"
+        );
     }
 
     /// **H3 second half (total_review.md): the governance broadcast waits

@@ -23,14 +23,6 @@ ternary; `vt_reveal`/`vt_hide` duplicates `set_token_show/hide` — name
 neutrally and share; align the reveal UX with the established peek idiom
 (no auto-remask).
 
-## Auto-checkpoint gate can still be pinned inside the buffer window
-
-`maybe_auto_checkpoint` refuses while any future block is buffered; L3's
-window cap bounds the freeze to head+4096 heights, but an insider
-claiming a plausible near-future height still delays compaction until
-the drain or a re-serve clears it. Refine the gate to "a buffered block
-ADJACENT to head" if it ever bites.
-
 ## Window-build spike: slint-build `experimental-module-builds`
 
 The ~400k-line generated module is one compilation unit because
