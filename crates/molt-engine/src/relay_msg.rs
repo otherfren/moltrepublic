@@ -431,8 +431,10 @@ mod tests {
             assert!(!s.is_empty(), "empty shape");
             let first = s[0].chars().next().expect("prefix is non-empty");
             assert!(glyphs.contains(&first), "shape without a tone glyph: {s:?}");
-            for mid in &s[1..s.len().saturating_sub(1)] {
-                assert!(!mid.is_empty(), "empty middle in {s:?}");
+            if s.len() >= 2 {
+                for mid in &s[1..s.len() - 1] {
+                    assert!(!mid.is_empty(), "empty middle in {s:?}");
+                }
             }
             assert!(seen.insert(s.join("\u{0}")), "duplicate shape {s:?}");
         }
