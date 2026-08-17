@@ -1,7 +1,8 @@
 # Kanban — planning, scheduling and the gated board
 
-**Status: CONCEPT for discussion (2026-08-16). The mock rework of §6 is being
-built; the state model and ops (§2-§5) are a proposal awaiting ratification.**
+**Status: CONCEPT for discussion (2026-08-16). The §6 mock rework is BUILT
+(landed 2026-08-16); the state model and ops (§2-§5) are a proposal awaiting
+ratification — the §8 questions gate any backend build (§7).**
 
 The ask: the Quests surface (GUI label **"Kanban"**, wire key `quests` —
 `docs_archive/ritual/charter_features.md` §5.1; there is no `kanban` feature
