@@ -1,10 +1,15 @@
 # Live incident 2026-08-09 — three-node Nostr test, post-recovery divergence
 
-Status: **one item open — FIELD VERIFICATION of the 2026-08-15 fixes
-(§2 heal round, §3 PublishPool) on the live three-node setup with a new
-binary; everything else in this document is addressed on master** (five
-defects fixed 2026-08-09, §2/§3 closed 2026-08-15, the §4 footnote
-answered 2026-08-16 — rayon/openmls, see below). Source: the user's real three-node setup (Albert =
+Status: **CLOSED — field verification done 2026-08-17** (§8: a fresh
+three-node republic over real relays via local Tor, headless over MCP,
+including a triple recovery of the same seat; §3 PublishPool and the §2
+heal machinery verified working, and FOUR further defects the rerun
+surfaced are fixed on master with red-verified keystones — e8c8db7,
+4855bff, ac7fd57, f2b606c). Five defects were fixed 2026-08-09, §2/§3
+closed 2026-08-15, the §4 footnote answered 2026-08-16 (rayon/openmls,
+see below). The user's real workspaces pick the fixes up with the next
+normally-built binary; nothing in them needs migration.
+Source: the user's real three-node setup (Albert =
 `config.toml`, Eduard = `config2.toml`, Veronica = `config3.toml`; republic
 "Our Software Company", 2-of-3, relays `wss://nos.lol` + one onion, via local
 Tor). All findings were taken from the LIVE engines over MCP and from headless
@@ -229,6 +234,71 @@ reconstructs applied cards with no vote data at all.
 sealed block by proposal id and reports its signers (count, pills,
 `approved_by_me`); a pruned block (WP4) honestly leaves the pills open.
 Keystone: `chain.rs::an_applied_card_reports_the_block_signers`.
+
+## 8. Field rerun 2026-08-17 — verification DONE, four more defects found and fixed
+
+Setup: a fresh 2-of-3 republic ("Feldprobe", albert/eduard/veronica),
+three headless moltd driven over MCP, real relay `wss://nos.lol` (later
++`relay.damus.io` by a sealed `set_relays` vote) through local Tor —
+the incident topology, reproduced end to end: founding (~9 s), reopen
+under Tor, chat all directions, a sealed `add_note` block, and THREE
+recoveries of the same seat on fresh devices.
+
+**Verified working:** §3 PublishPool — the whole traffic phase ran on
+ONE subscription runtime + ONE persistent publish channel per node
+(pre-fix: 44–76 runtime builds in minutes); §1/§5 — reopens resurrected
+no cards and the sealed pool edit survived; §2 — chains converged
+identically on all three nodes after every recovery (the rejoiner now
+holds his own Restored blocks), and after the fixes below chat
+converges in all six directions, a fresh survivor→rejoiner message in
+~5 s.
+
+**The rerun surfaced four further defects, each now fixed on master
+with a red-verified keystone:**
+
+1. **A half-dead subscription never cut** (e8c8db7). The reader's idle
+   verdict was armed by its own ping SENDS, which succeed into the OS
+   buffer forever on a dropped Tor circuit — veronica sat inbound-deaf
+   25+ minutes with zero log lines while her own publishes kept
+   landing: the §2 "permanent deafness" facet the clean repro never
+   showed. `RelayWs` now keeps a received-frames clock (`idle_for`) and
+   the reader cuts on it, loudly.
+   Keystone: `nostr_relay_runtime.rs::a_half_dead_subscription_cuts_at_the_idle_bound_and_heals`.
+2. **The accept-window reset was not ordered before the new
+   incarnation's frames** (4855bff). A bystander's reset rode OTHER
+   senders' events (coordinator announce, Restored block) — per-sender
+   ordering only, so a batch catch-up could deliver the rejoiner's
+   colliding seqs first: swallowed as the lost incarnation's duplicates
+   AND falsely acked (veronica permanently lost exactly one rejoiner
+   message this way). The reset now rides the re-key commit MERGE
+   itself (`MlsIncoming::Commit{readmitted}` → `EngineSink::rekeyed` →
+   `NetPeerRekeyed`), which FutureEpoch holding orders before every
+   decryptable new-epoch frame, structurally.
+   Keystone: `nostr_recovery.rs::a_bystander_that_slept_through_a_recovery_still_hears_the_rejoiner`
+   (28 of 30 batch messages swallowed without it).
+3. **The subscription channel deadlocked the ritual EOSE gates**
+   (ac7fd57). The ritual legs gate on `sync_state` BEFORE consuming;
+   with a 256-slot channel a stored replay larger than that parked the
+   reader with the EOSE unread behind it — five recovery attempts in a
+   row failed "not readable on any relay" against a healthy relay once
+   the window's resend traffic crossed 256 events (isolated with the
+   new `req_probe` example: fantasy tag answered instantly, the real
+   window tag never). The channel now sizes to `history_bound` +
+   headroom, which the reader's hostile-replay drop honestly caps.
+   Keystone: `nostr_relay_runtime.rs::a_replay_larger_than_the_channel_still_reaches_eose_unconsumed`.
+4. **The recovery relay-honesty gate compared against the GENESIS
+   pool** (f2b606c). The Welcome rightly carries the governed pool, so
+   after the republic's first sealed `set_relays` vote every recovery
+   was refused, forever. The gate now folds the served material
+   (`chain::effective_relays_of_served`); an undecidable difference (a
+   later, not-yet-served vote) is logged, never trusted, and never
+   adopted — the chain stays the one pool authority.
+   Keystone: `nostr_recovery.rs::a_recovery_still_verifies_after_a_sealed_pool_edit`.
+
+Also observed, by design: a survivor whose resend budget a churny hour
+had spent delivers its held tail on the next heal round (minutes), while
+fresh messages flow immediately — the §2 budget semantics working as
+specified.
 
 ## Repro assets
 

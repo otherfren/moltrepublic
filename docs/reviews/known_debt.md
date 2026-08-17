@@ -52,7 +52,3 @@ Experimental upstream — pin the behavior before relying on it. Cheap
 companion win either way: dedup the mock components (the vault KANN
 list) — codegen scales with element count.
 
-## Field verification of the 2026-08-15/16 fixes
-
-`docs/transport/live_incident_2026-08-09.md` — the live three-node rerun
-with a fresh binary is the one item that needs the user's hardware.
