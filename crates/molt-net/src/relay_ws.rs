@@ -159,6 +159,11 @@ pub struct RelayWs {
     /// re-placement (after NIP-42) overwrites it instead of opening a
     /// second subscription.
     sub_id: Option<nostr::SubscriptionId>,
+    /// When the relay last sent ANY frame (NIP-01, pong, junk). The only
+    /// honest liveness clock: outbound writes (pings included) "succeed"
+    /// into the OS buffer on a half-dead flow forever, so a liveness
+    /// verdict must never be armed by a send — see [`Self::idle_for`].
+    last_rx: tokio::time::Instant,
 }
 
 impl RelayWs {
@@ -211,7 +216,18 @@ impl RelayWs {
         let (ws, _resp) = tokio_tungstenite::client_async_with_config(url, stream, Some(config))
             .await
             .map_err(|e| NetError::Unreachable(format!("ws upgrade {url}: {e}")))?;
-        Ok(Self { ws, sub_id: None })
+        Ok(Self { ws, sub_id: None, last_rx: tokio::time::Instant::now() })
+    }
+
+    /// How long the relay has sent NOTHING — no event, no pong, not a
+    /// single frame. A caller pinging every keepalive interval reads a
+    /// healthy connection here as "< keepalive + pong latency"; a value
+    /// past its idle bound means the inbound flow is dead even though
+    /// writes still succeed (dropped Tor circuit, NAT half-close) — cut
+    /// and redial, nothing else ever notices.
+    #[must_use]
+    pub fn idle_for(&self) -> Duration {
+        self.last_rx.elapsed()
     }
 
     /// Send a WebSocket Ping — the keepalive that makes a silently dropped
@@ -250,6 +266,7 @@ impl RelayWs {
                 }
                 Ok(Some(Ok(frame))) => frame,
             };
+            self.last_rx = tokio::time::Instant::now();
             match frame {
                 Message::Text(text) => {
                     // RelayMessage's Deserialize is lifetime-unconstrained

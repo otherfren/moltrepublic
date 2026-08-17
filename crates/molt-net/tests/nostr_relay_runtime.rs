@@ -324,6 +324,7 @@ async fn nip11_probe_reads_the_relay_cap() {
 mod proxy {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::Mutex;
 
@@ -331,6 +332,40 @@ mod proxy {
         pub port: u16,
         enabled: Arc<AtomicBool>,
         forwards: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+        /// Per-connection "swallow everything" flags — one per live forward.
+        darks: Arc<Mutex<Vec<Arc<AtomicBool>>>>,
+    }
+
+    /// One direction of a forward. While `dark` is set the pump keeps
+    /// READING (so the sender's TCP writes keep succeeding) but discards
+    /// every byte — the half-dead flow a dropped Tor circuit produces.
+    async fn pump(mut from: TcpStream, mut to: TcpStream, dark: Arc<AtomicBool>) {
+        let (mut fr, mut fw) = from.split();
+        let (mut tr, mut tw) = to.split();
+        let mut a = [0u8; 16384];
+        let mut b = [0u8; 16384];
+        loop {
+            tokio::select! {
+                r = fr.read(&mut a) => match r {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if !dark.load(Ordering::SeqCst)
+                            && tw.write_all(&a[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                },
+                r = tr.read(&mut b) => match r {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if !dark.load(Ordering::SeqCst)
+                            && fw.write_all(&b[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                },
+            }
+        }
     }
 
     impl Cuttable {
@@ -340,24 +375,27 @@ mod proxy {
             let enabled = Arc::new(AtomicBool::new(true));
             let forwards: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> =
                 Arc::new(Mutex::new(Vec::new()));
+            let darks: Arc<Mutex<Vec<Arc<AtomicBool>>>> = Arc::new(Mutex::new(Vec::new()));
             let on = enabled.clone();
             let fw = forwards.clone();
+            let dk = darks.clone();
             tokio::spawn(async move {
-                while let Ok((mut inbound, _)) = listener.accept().await {
+                while let Ok((inbound, _)) = listener.accept().await {
                     if !on.load(Ordering::SeqCst) {
                         drop(inbound); // refuse while cut
                         continue;
                     }
                     let target = target.clone();
+                    let dark = Arc::new(AtomicBool::new(false));
+                    dk.lock().await.push(dark.clone());
                     fw.lock().await.push(tokio::spawn(async move {
-                        if let Ok(mut outbound) = TcpStream::connect(&target).await {
-                            let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound)
-                                .await;
+                        if let Ok(outbound) = TcpStream::connect(&target).await {
+                            pump(inbound, outbound, dark).await;
                         }
                     }));
                 }
             });
-            Self { port, enabled, forwards }
+            Self { port, enabled, forwards, darks }
         }
 
         pub async fn cut(&self) {
@@ -365,10 +403,20 @@ mod proxy {
             for f in self.forwards.lock().await.drain(..) {
                 f.abort();
             }
+            self.darks.lock().await.clear();
         }
 
         pub fn restore(&self) {
             self.enabled.store(true, Ordering::SeqCst);
+        }
+
+        /// Go half-dead: every LIVE forward keeps its sockets open but
+        /// silently swallows both directions from now on. New connections
+        /// forward normally — a redial gets a healthy circuit.
+        pub async fn blackhole(&self) {
+            for dark in self.darks.lock().await.drain(..) {
+                dark.store(true, Ordering::SeqCst);
+            }
         }
     }
 }
@@ -447,6 +495,62 @@ async fn a_dying_relay_reconnects_and_the_gap_is_healed() {
         Some(&RelayHealth::Up),
         "the healed relay reads Up"
     );
+}
+
+/// Field keystone (live incident 2026-08-09 §2, found 2026-08-17): a
+/// HALF-DEAD subscription — TCP open, flow silently gone (a dropped Tor
+/// circuit behind a live SOCKS proxy) — must cut at the idle bound and
+/// redial. The trap: a WS Ping on such a flow "succeeds" forever (the bytes
+/// land in the OS buffer), so an idle clock re-armed by ping SENDS never
+/// expires and the node stays inbound-deaf for good. The idle verdict may
+/// only ever come from RECEIVED frames.
+#[tokio::test]
+async fn a_half_dead_subscription_cuts_at_the_idle_bound_and_heals() {
+    use molt_net::relay_runtime::RelayRuntime;
+
+    let relay = MockRelay::run().await.expect("relay");
+    let direct = relay.url().await.to_string();
+    let target = direct.trim_start_matches("ws://").to_string();
+    let proxy = proxy::Cuttable::run(target).await;
+    let proxied = format!("ws://127.0.0.1:{}", proxy.port);
+
+    let dialer = Dialer::resolve("none", "local", 0).expect("direct dialer");
+    let keys = Keys::generate();
+    let filter = Filter::new()
+        .kind(Kind::Custom(445))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::H), "6d6f6c74");
+
+    let rt = RelayRuntime::new(dialer.clone(), vec![proxied.clone()])
+        .with_backoff(Duration::from_millis(100), Duration::from_millis(400))
+        .with_sub_timing(Duration::from_millis(200), Duration::from_millis(800));
+    let publisher = RelayRuntime::new(dialer, vec![direct]);
+
+    let mut sub = rt.subscribe(filter).await.expect("subscribe via proxy");
+    assert!(sub.synced(RECV_TIMEOUT).await, "initial sync through the proxy");
+
+    let e1 = h_tagged_event(&keys, "6d6f6c74", "while the flow is alive");
+    publisher.publish(&e1).await.expect("publish e1");
+    assert_eq!(sub.recv(RECV_TIMEOUT).await.expect("e1 arrives").id, e1.id);
+
+    // the circuit dies silently: the socket stays open, nothing flows
+    proxy.blackhole().await;
+    let e2 = h_tagged_event(&keys, "6d6f6c74", "into the black hole");
+    publisher.publish(&e2).await.expect("publish e2 while dark");
+
+    // the reader must notice pure inbound silence (pings keep "succeeding"),
+    // cut at the idle bound, redial through a fresh forward and replay the
+    // gap from the cursor
+    let mut got_gap = false;
+    for _ in 0..100 {
+        if let Some(ev) = sub.recv(Duration::from_millis(200)).await {
+            if ev.id == e2.id {
+                got_gap = true;
+                break;
+            }
+            assert_eq!(ev.id, e1.id, "only e1 may be redelivered");
+        }
+    }
+    assert!(got_gap, "a half-dead subscription must heal via the idle bound");
 }
 
 /// Step 9 KEYSTONE — NIP-42 on the SUBSCRIBE connection: an auth-required

@@ -21,9 +21,12 @@ use crate::NetError;
 /// Per-relay deadline for one publish attempt (dial + upgrade + OK).
 const PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A subscription reader's per-frame idle bound: with a keepalive Ping every
-/// [`KEEPALIVE`], a healthy connection is never this quiet, so silence past
-/// it means the flow died invisibly (NAT/middlebox) — cut and reconnect.
+/// A subscription reader's INBOUND idle bound: with a keepalive Ping every
+/// [`KEEPALIVE`] a healthy relay ponges, so a relay from which not one frame
+/// arrived for this long is dead even if our writes still "succeed" (dropped
+/// Tor circuit behind a live SOCKS proxy) — cut and reconnect. Measured on
+/// [`RelayWs::idle_for`] (received frames only): armed by anything else the
+/// bound can never fire, and an inbound-dead node stays deaf for good.
 const SUB_IDLE_TIMEOUT: Duration = Duration::from_secs(150);
 
 /// Idle interval after which the reader pings the relay, so a silently
@@ -134,6 +137,9 @@ pub struct RelayRuntime {
     history_bound: usize,
     /// Reconnect backoff (initial, cap) — overridable for tests.
     backoff: (Duration, Duration),
+    /// Subscription (keepalive interval, idle bound) — overridable for
+    /// tests; defaults [`KEEPALIVE`] / [`SUB_IDLE_TIMEOUT`].
+    sub_timing: (Duration, Duration),
     /// NIP-42 identity for the SUBSCRIBE connections (the per-republic
     /// transport anchor). Publishing never authenticates — an authenticated
     /// publish channel would link every ephemeral-key event to the member
@@ -201,6 +207,7 @@ impl RelayRuntime {
             backoff: (Duration::from_secs(1), Duration::from_secs(60)),
             auth_keys: None,
             history_bound: MAX_STORED_EVENTS_PER_REQ,
+            sub_timing: (KEEPALIVE, SUB_IDLE_TIMEOUT),
         }
     }
 
@@ -216,6 +223,13 @@ impl RelayRuntime {
     #[must_use]
     pub fn with_backoff(self, initial: Duration, cap: Duration) -> Self {
         Self { backoff: (initial, cap), ..self }
+    }
+
+    /// Override the subscription keepalive interval and idle bound
+    /// ([`KEEPALIVE`], [`SUB_IDLE_TIMEOUT`] — tests use milliseconds).
+    #[must_use]
+    pub fn with_sub_timing(self, keepalive: Duration, idle: Duration) -> Self {
+        Self { sub_timing: (keepalive, idle), ..self }
     }
 
     /// Override [`MAX_STORED_EVENTS_PER_REQ`] (tests use a small number — a
@@ -460,6 +474,8 @@ struct SubShared {
     backoff: (Duration, Duration),
     auth_keys: Option<nostr::Keys>,
     history_bound: usize,
+    /// (keepalive interval, idle bound) — see [`KEEPALIVE`] / [`SUB_IDLE_TIMEOUT`].
+    sub_timing: (Duration, Duration),
 }
 
 impl RelayRuntime {
@@ -490,6 +506,7 @@ impl RelayRuntime {
             backoff: self.backoff,
             auth_keys: self.auth_keys.clone(),
             history_bound: self.history_bound,
+            sub_timing: self.sub_timing,
         });
         // the FIRST connects run CONCURRENTLY and bounded: sequentially, one
         // relay that accepts TCP but never answers the WS upgrade would wedge
@@ -753,6 +770,7 @@ async fn read_session(
     mut ws: RelayWs,
     eose_counted: &mut bool,
 ) -> std::ops::ControlFlow<()> {
+    let (keepalive, idle_bound) = shared.sub_timing;
     let mut last_ping = tokio::time::Instant::now();
     let mut pending_auth: Option<nostr::EventId> = None;
     // stored events this relay has replayed for this REQ. Counted only while
@@ -763,13 +781,13 @@ async fn read_session(
     loop {
         // keepalive: a flow silently dropped by a NAT/middlebox otherwise
         // reads as a healthy-but-quiet connection until the idle bound
-        if last_ping.elapsed() >= KEEPALIVE {
+        if last_ping.elapsed() >= keepalive {
             if ws.ping().await.is_err() {
                 return std::ops::ControlFlow::Continue(());
             }
             last_ping = tokio::time::Instant::now();
         }
-        match ws.recv(KEEPALIVE.min(SUB_IDLE_TIMEOUT)).await {
+        match ws.recv(keepalive.min(idle_bound)).await {
             Ok(RelayMessage::Event { event, .. }) => {
                 // a relay that keeps replaying past the bound is hostile or
                 // broken; either way we stop reading from it rather than
@@ -884,10 +902,21 @@ async fn read_session(
                 tracing::warn!(relay = %url, error = %e, "relay connection died");
                 return std::ops::ControlFlow::Continue(());
             }
-            // a timeout is just the keepalive window elapsing — ping and keep
-            // reading, unless the connection has been silent past the idle bound
+            // a timeout is just the keepalive window elapsing — ping and
+            // keep reading, unless the RELAY has been silent past the idle
+            // bound. The verdict must come from `idle_for` (time since the
+            // last RECEIVED frame): a ping SEND "succeeds" into the OS
+            // buffer even on a half-dead flow (dropped Tor circuit behind a
+            // live SOCKS proxy), so a clock re-armed by our own pings never
+            // expires and the node stays inbound-deaf for good (live
+            // incident 2026-08-09 §2, field rerun 2026-08-17).
             Err(RecvFail::TimedOut) => {
-                if last_ping.elapsed() >= SUB_IDLE_TIMEOUT {
+                if ws.idle_for() >= idle_bound {
+                    tracing::warn!(
+                        relay = %url,
+                        idle_s = ws.idle_for().as_secs(),
+                        "relay sent nothing past the idle bound — reconnecting"
+                    );
                     return std::ops::ControlFlow::Continue(());
                 }
                 if ws.ping().await.is_err() {
