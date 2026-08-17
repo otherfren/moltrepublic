@@ -2931,6 +2931,284 @@ fn localize_recover_failed(lang: i32, e: &str) -> String {
     e.to_string()
 }
 
+/// Match one engine log-shape (`molt_engine::LogShape` semantics: constant
+/// parts in order, slots between them) against a line; returns the slot
+/// values on a hit. The first part anchors the start, the last the end,
+/// middles bind leftmost-in-order.
+fn match_shape<'a>(parts: &[&str], line: &'a str) -> Option<Vec<&'a str>> {
+    let rest = line.strip_prefix(parts[0])?;
+    if parts.len() == 1 {
+        return rest.is_empty().then(Vec::new);
+    }
+    let last = parts[parts.len() - 1];
+    if !rest.ends_with(last) {
+        return None;
+    }
+    let mut body = &rest[..rest.len() - last.len()];
+    let mut slots = Vec::with_capacity(parts.len() - 1);
+    for mid in &parts[1..parts.len() - 1] {
+        let at = body.find(mid)?;
+        slots.push(&body[..at]);
+        body = &body[at + mid.len()..];
+    }
+    slots.push(body);
+    Some(slots)
+}
+
+/// One run-log line → German (E5): the engine's shape inventory paired
+/// with German constant parts (same slot count — pinned); slots (names,
+/// counts, URLs, free-text errors) carry over verbatim, the tone glyph
+/// survives, and an unmatched line renders as itself.
+fn localize_log_line(lang: i32, line: &str) -> String {
+    if lang != 1 {
+        return line.to_string();
+    }
+    for (en, de) in LOG_SHAPES_DE {
+        if let Some(slots) = match_shape(en, line) {
+            let mut out = String::new();
+            for (i, part) in de.iter().enumerate() {
+                out.push_str(part);
+                if let Some(s) = slots.get(i) {
+                    out.push_str(s);
+                }
+            }
+            return out;
+        }
+    }
+    line.to_string()
+}
+
+/// The German renderings, one pair per engine shape (set-equality with
+/// `molt_engine::known_log_shapes()` is pinned by test). German arms
+/// follow the compact-text rule and write "-" for the em dash.
+static LOG_SHAPES_DE: &[(&[&str], &[&str])] = &[
+    (
+        &["→ restore started · way ", " · ", ""],
+        &["→ Restore gestartet · Weg ", " · ", ""],
+    ),
+    (
+        &["✓ chain verified · height ", " · ", "-of-", ""],
+        &["✓ Chain verifiziert · Höhe ", " · ", "-von-", ""],
+    ),
+    (
+        &["✓ backup from unix ", " (", " day(s) old) · workspace “", "” materialized"],
+        &["✓ Backup von Unix ", " (", " Tag(e) alt) · Workspace “", "” materialisiert"],
+    ),
+    (
+        &["→ the blob's seed does not anchor this seat's identity in the verified roster — knowledge-only restore"],
+        &["→ der Seed des Blobs verankert die Identität dieses Sitzes nicht im verifizierten Roster - nur Wissen wird wiederhergestellt"],
+    ),
+    (
+        &["→ knowledge is restored, membership is NOT — the workspace opens detached; rejoin the live republic via a recovery link"],
+        &["→ Wissen ist wiederhergestellt, Mitgliedschaft NICHT - der Workspace öffnet abgekoppelt; der lebenden Republik per Recovery-Link neu beitreten"],
+    ),
+    (&["✗ restore failed: ", ""], &["✗ Restore fehlgeschlagen: ", ""]),
+    (&["→ fs: read ", ""], &["→ fs: lese ", ""]),
+    (&["→ s3: list ", ""], &["→ s3: liste ", ""]),
+    (&["→ s3: GET ", ""], &["→ s3: hole ", ""]),
+    (&["↓ ", " of ", " bytes"], &["↓ ", " von ", " Bytes"]),
+    (
+        &["→ decrypting + validating the blob"],
+        &["→ entschlüssle + validiere den Blob"],
+    ),
+    (
+        &["→ staged · ", " chain block(s) await verification"],
+        &["→ bereitgestellt · ", " Chain-Block/Blöcke warten auf Verifikation"],
+    ),
+    (
+        &["→ ritual opened · ", " (founder) · ", "-of-", " · ", " invite(s) minted"],
+        &["→ Ritual eröffnet · ", " (Gründer) · ", "-von-", " · ", " Einladung(en) erzeugt"],
+    ),
+    (
+        &["→ SIMULATION — no real network in this build (the Nostr transport lands with N4): this node auto-activates and signs for every member. Nothing was shared off-band."],
+        &["→ SIMULATION - kein echtes Netz in diesem Build (der Nostr-Transport kommt mit N4): dieser Knoten aktiviert und signiert für jedes Mitglied automatisch. Nichts wurde off-band geteilt."],
+    ),
+    (
+        &["→ share each link off-band, over a private channel — the ritual waits for members to activate"],
+        &["→ jeden Link off-band über einen privaten Kanal teilen - das Ritual wartet auf die Aktivierungen"],
+    ),
+    (
+        &["✓ roster sealed by everyone · workspace created"],
+        &["✓ Roster von allen versiegelt · Workspace erstellt"],
+    ),
+    (&["✗ founding failed: ", ""], &["✗ Gründung fehlgeschlagen: ", ""]),
+    (&["✓ recovery phrase backed up"], &["✓ Recovery-Phrase gesichert"]),
+    (
+        &["⚠ the relay pool changed — the invites already minted still name the OLD relays. Cancel and re-mint to hand out links that carry this pool."],
+        &["⚠ der Relay-Pool hat sich geändert - bereits erzeugte Einladungen nennen noch die ALTEN Relays. Abbrechen und neu erzeugen, damit die Links diesen Pool tragen."],
+    ),
+    (
+        &["→ this node has ", " dialable relays; the invite and the Welcome carry the first ", " (the pool order is the priority — reorder in Settings to change which)"],
+        &["→ dieser Knoten hat ", " wählbare Relays; Einladung und Welcome tragen die ersten ", " (die Pool-Reihenfolge ist die Priorität - unter Einstellungen umsortieren)"],
+    ),
+    (
+        &["✗ ", " does not reach ", " of ", " pool relays - ", ""],
+        &["✗ ", " erreicht ", " von ", " Pool-Relays nicht - ", ""],
+    ),
+    (
+        &["⚠ ", " landed on ", " of ", " relays — ", ""],
+        &["⚠ ", " landete auf ", " von ", " Relays - ", ""],
+    ),
+    (
+        &["✓ direct mesh established · ", " peer(s)"],
+        &["✓ direktes Mesh steht · ", " Peer(s)"],
+    ),
+    (
+        &["→ the group is born · welcomes sent to every member"],
+        &["→ die Gruppe ist geboren · Welcomes an alle Mitglieder gesendet"],
+    ),
+    (
+        &["✗ invite ", ": a second activation by ", " did not verify — ignored"],
+        &["✗ Einladung ", ": eine zweite Aktivierung durch ", " verifizierte nicht - ignoriert"],
+    ),
+    (
+        &["✗ invite ", ": this founding has already formed its group around the first activation — cancel and re-mint to let ", " back in"],
+        &["✗ Einladung ", ": diese Gründung hat ihre Gruppe um die erste Aktivierung gebildet - abbrechen und neu erzeugen, um ", " wieder hereinzulassen"],
+    ),
+    (
+        &["✗ invite ", " was activated a second time (by ", ") — that link is spent; they need their own, unused link"],
+        &["✗ Einladung ", " wurde ein zweites Mal aktiviert (durch ", ") - dieser Link ist verbraucht; ein eigener, unbenutzter Link ist nötig"],
+    ),
+    (
+        &["· invite ", " activated by ", " — checking"],
+        &["· Einladung ", " aktiviert durch ", " - prüfe"],
+    ),
+    (
+        &["✗ invite ", ": the request claims a transport key it did not sign with — refused (possible impersonation)"],
+        &["✗ Einladung ", ": die Anfrage nennt einen Transport-Schlüssel, mit dem sie nicht signiert hat - abgelehnt (mögliche Impersonation)"],
+    ),
+    (
+        &["✗ invite ", ": the ticket code does not match — refused (wrong or edited link, or a link from a different founding)"],
+        &["✗ Einladung ", ": der Ticket-Code passt nicht - abgelehnt (falscher oder veränderter Link, oder ein Link aus einer anderen Gründung)"],
+    ),
+    (
+        &["✗ invite ", ": malformed transport key (", ") — refused; the ticket stays usable for a correct retry"],
+        &["✗ Einladung ", ": fehlgeformter Transport-Schlüssel (", ") - abgelehnt; das Ticket bleibt für einen korrekten Versuch nutzbar"],
+    ),
+    (
+        &["✗ invite ", ": the name ", " is already taken in this founding — refused (every seat must be distinguishable, and the founder's own name is reserved)"],
+        &["✗ Einladung ", ": der Name ", " ist in dieser Gründung schon vergeben - abgelehnt (jeder Sitz muss unterscheidbar sein, und der Name des Gründers ist reserviert)"],
+    ),
+    (
+        &["✗ invite ", ": that transport key is already used by another seat — refused (two seats may never share one)"],
+        &["✗ Einladung ", ": dieser Transport-Schlüssel wird schon von einem anderen Sitz benutzt - abgelehnt (zwei Sitze teilen nie einen)"],
+    ),
+    (
+        &["✗ invite ", ": no usable reply address in the request — refused"],
+        &["✗ Einladung ", ": keine nutzbare Antwort-Adresse in der Anfrage - abgelehnt"],
+    ),
+    (
+        &["✗ invite ", ": the encryption key package does not match the identity in the request — refused"],
+        &["✗ Einladung ", ": das Verschlüsselungs-Key-Package passt nicht zur Identität in der Anfrage - abgelehnt"],
+    ),
+    (
+        &["· invite ", " re-activated by ", " — the earlier attempt is replaced"],
+        &["· Einladung ", " erneut aktiviert durch ", " - der frühere Versuch ist ersetzt"],
+    ),
+    (
+        &["→ ", " activated invite ", " · key received"],
+        &["→ ", " aktivierte Einladung ", " · Schlüssel empfangen"],
+    ),
+    (
+        &["→ every member has joined · propose the charter to seal"],
+        &["→ alle Mitglieder sind beigetreten · zum Versiegeln die Charter vorschlagen"],
+    ),
+    (
+        &["→ charter proposed · awaiting every member's ratification"],
+        &["→ Charter vorgeschlagen · warte auf die Ratifikation aller Mitglieder"],
+    ),
+    (
+        &["✗ a decline for invite ", " came from ", ", who does not hold that seat — ignored"],
+        &["✗ eine Ablehnung für Einladung ", " kam von ", ", das diesen Sitz nicht hält - ignoriert"],
+    ),
+    (
+        &["✗ ", " declined the charter · cancel and re-mint to change it"],
+        &["✗ ", " hat die Charter abgelehnt · zum Ändern abbrechen und neu erzeugen"],
+    ),
+    (
+        &["✗ the ritual is over — this republic must be founded anew (close and re-mint)"],
+        &["✗ das Ritual ist vorbei - diese Republik muss neu gegründet werden (schließen und neu erzeugen)"],
+    ),
+    (
+        &["→ charter proposed · sealing the roster for ratification"],
+        &["→ Charter vorgeschlagen · versiegle den Roster zur Ratifikation"],
+    ),
+    (
+        &["✓ ", " signed the roster · seat sealed"],
+        &["✓ ", " hat den Roster signiert · Sitz versiegelt"],
+    ),
+    (
+        &["✓ ", " secured their key"],
+        &["✓ ", " hat den Schlüssel gesichert"],
+    ),
+    (
+        &["✓ the group channel is back"],
+        &["✓ der Gruppenkanal ist zurück"],
+    ),
+    (
+        &["⚠ cannot hear the group channel — ", " · still retrying"],
+        &["⚠ der Gruppenkanal ist nicht hörbar - ", " · versuche weiter"],
+    ),
+    (
+        &["⧗ waiting for the genesis · ", ""],
+        &["⧗ warte auf die Genesis · ", ""],
+    ),
+    (
+        &["✓ recovery phrase backed up · waiting for the others"],
+        &["✓ Recovery-Phrase gesichert · warte auf die anderen"],
+    ),
+    (
+        &["✓ sealed - back up your recovery phrase to enter"],
+        &["✓ versiegelt - zum Eintreten die Recovery-Phrase sichern"],
+    ),
+    (&["✗ join failed: ", ""], &["✗ Beitritt fehlgeschlagen: ", ""]),
+    (
+        &["✓ the founder accepted your join · waiting for the deliberation"],
+        &["✓ der Gründer hat den Beitritt angenommen · warte auf die Beratung"],
+    ),
+    (
+        &["→ charter proposed: “", "” · review and confirm to join"],
+        &["→ Charter vorgeschlagen: “", "” · prüfen und bestätigen zum Beitritt"],
+    ),
+    (
+        &["✓ you ratified the charter · sealing your signature"],
+        &["✓ Charter ratifiziert · versiegle die Signatur"],
+    ),
+    (
+        &["→ save your recovery phrase - re-type it to confirm"],
+        &["→ Recovery-Phrase sichern - zur Bestätigung erneut eintippen"],
+    ),
+    (&["✗ you declined the charter"], &["✗ Charter abgelehnt"]),
+    (
+        &["✗ the ritual is over — this republic must be founded anew"],
+        &["✗ das Ritual ist vorbei - diese Republik muss neu gegründet werden"],
+    ),
+    (&["→ dialable here: ", ""], &["→ hier wählbar: ", ""]),
+    (&["→ ", "  dialable"], &["→ ", "  wählbar"]),
+    (&["→ ", "  not in relay pool"], &["→ ", "  nicht im Relay-Pool"]),
+    (&["→ ", "  not confirmed"], &["→ ", "  nicht bestätigt"]),
+    (
+        &["→ ", "  clearnet/local dialing off"],
+        &["→ ", "  Clearnet/Lokal-Dialing aus"],
+    ),
+];
+
+/// Copy one run log into its Slint model, localized line-wise (E5). The
+/// TONE model keeps reading the engine lines — the glyph survives
+/// localization (pinned) — so both stay in step.
+fn sync_log_localized(
+    lang: i32,
+    current: &ModelRc<slint::SharedString>,
+    items: &[String],
+    set: impl FnOnce(ModelRc<slint::SharedString>),
+) {
+    sync_rows(
+        current,
+        items.iter().map(|l| localize_log_line(lang, l).into()).collect(),
+        set,
+    );
+}
+
 fn issue_then_toast(
     rt: &Handle,
     wallet: &WalletHandle,
@@ -3617,7 +3895,9 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     ui.set_rw_target(sv.restore.target.clone().into());
     ui.set_rw_progress(f32::from(sv.restore.run.progress_pct) / 100.0);
     ui.set_rw_outcome(i32::from(sv.restore.run.outcome));
-    sync_strings(&ui.get_rw_log(), &sv.restore.run.log, |m| ui.set_rw_log(m));
+    sync_log_localized(ui.get_lang_index(), &ui.get_rw_log(), &sv.restore.run.log, |m| {
+        ui.set_rw_log(m)
+    });
     sync_log_tones(&ui.get_rw_log_tone(), &sv.restore.run.log, |m| ui.set_rw_log_tone(m));
     ui.set_rw_headline(localize_headline(ui.get_lang_index(), &sv.restore.run.headline).into());
 
@@ -3635,7 +3915,9 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
         )
         .into(),
     );
-    sync_strings(&ui.get_cw_log(), &sv.create.run.log, |m| ui.set_cw_log(m));
+    sync_log_localized(ui.get_lang_index(), &ui.get_cw_log(), &sv.create.run.log, |m| {
+        ui.set_cw_log(m)
+    });
     sync_log_tones(&ui.get_cw_log_tone(), &sv.create.run.log, |m| ui.set_cw_log_tone(m));
     ui.set_cw_headline(localize_headline(ui.get_lang_index(), &sv.create.run.headline).into());
     // a declined seat switches the failure banner to "the founding is over"
@@ -3734,7 +4016,9 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     ui.set_jw_feat_quests(jw_feat("quests"));
     ui.set_jw_feat_vault(jw_feat("vault"));
     ui.set_jw_feat_wallet(jw_feat("wallet"));
-    sync_strings(&ui.get_jw_log(), &sv.join.run.log, |m| ui.set_jw_log(m));
+    sync_log_localized(ui.get_lang_index(), &ui.get_jw_log(), &sv.join.run.log, |m| {
+        ui.set_jw_log(m)
+    });
     sync_log_tones(&ui.get_jw_log_tone(), &sv.join.run.log, |m| ui.set_jw_log_tone(m));
     ui.set_jw_headline(localize_headline(ui.get_lang_index(), &sv.join.run.headline).into());
 }
@@ -8478,6 +8762,55 @@ lexicon! {
 
 #[cfg(test)]
 mod tests {
+    /// E5 coverage: the German log table covers EXACTLY the engine's
+    /// shape inventory (set-equal both ways); every rendering keeps the
+    /// tone glyph and the slot count, a synthesized line round-trips
+    /// with its slots intact, and unknown lines / non-German languages
+    /// pass through verbatim.
+    #[test]
+    fn every_log_shape_has_a_german_rendering() {
+        use std::collections::BTreeSet;
+        let engine: BTreeSet<Vec<&str>> = molt_engine::known_log_shapes()
+            .iter()
+            .map(|s| s.to_vec())
+            .collect();
+        let gui: BTreeSet<Vec<&str>> = super::LOG_SHAPES_DE
+            .iter()
+            .map(|(en, _)| en.to_vec())
+            .collect();
+        assert_eq!(engine, gui, "engine shapes and the German table diverge");
+        for (en, de) in super::LOG_SHAPES_DE {
+            assert_eq!(en.len(), de.len(), "slot count differs: {en:?}");
+            assert_eq!(
+                en[0].chars().next(),
+                de[0].chars().next(),
+                "tone glyph lost: {en:?}"
+            );
+            let mut line = String::new();
+            let mut want = String::new();
+            for (i, (e, d)) in en.iter().zip(de.iter()).enumerate() {
+                line.push_str(e);
+                want.push_str(d);
+                if i + 1 < en.len() {
+                    let slot = format!("S{i}");
+                    line.push_str(&slot);
+                    want.push_str(&slot);
+                }
+            }
+            assert_eq!(
+                super::localize_log_line(1, &line),
+                want,
+                "round-trip failed for {en:?}"
+            );
+            assert_ne!(want, line, "German rendering equals English: {en:?}");
+            assert_eq!(super::localize_log_line(0, &line), line);
+        }
+        assert_eq!(
+            super::localize_log_line(1, "→ some brand new line"),
+            "→ some brand new line"
+        );
+    }
+
     /// E6: the transport-pill reason, S3 verdicts, Tor details and the
     /// recovery status lines render German part-wise; machine states and
     /// free-text error tails ride verbatim.

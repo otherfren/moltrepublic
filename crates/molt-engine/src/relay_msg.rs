@@ -215,6 +215,91 @@ pub fn known_headlines() -> &'static [&'static str] {
     ]
 }
 
+/// One run-log line SHAPE (E5): the constant parts of the line in order.
+/// The first entry is the prefix (it starts with the tone glyph the GUI
+/// colours by), the last the suffix (empty when a dynamic tail ends the
+/// line), and every gap between two entries is a dynamic slot — a member
+/// name, a count, a URL, a free-text error. A fully static line is a
+/// single-entry shape.
+pub type LogShape = &'static [&'static str];
+
+/// Every run-log line the create/join/restore legs push (E5), as shapes.
+/// The GUI localizes a line by matching these constants and carrying the
+/// slots over; its coverage test walks exactly this list, so a shape
+/// without a German rendering goes red. The producers and this list move
+/// together — a new `log.push` without a shape stays English (the honest
+/// fallback), which is a review finding.
+pub fn known_log_shapes() -> &'static [LogShape] {
+    &[
+        // the restore leg (lifecycles.rs + restore_task)
+        &["→ restore started · way ", " · ", ""],
+        &["✓ chain verified · height ", " · ", "-of-", ""],
+        &["✓ backup from unix ", " (", " day(s) old) · workspace “", "” materialized"],
+        &["→ the blob's seed does not anchor this seat's identity in the verified roster — knowledge-only restore"],
+        &["→ knowledge is restored, membership is NOT — the workspace opens detached; rejoin the live republic via a recovery link"],
+        &["✗ restore failed: ", ""],
+        &["→ fs: read ", ""],
+        &["→ s3: list ", ""],
+        &["→ s3: GET ", ""],
+        &["↓ ", " of ", " bytes"],
+        &["→ decrypting + validating the blob"],
+        &["→ staged · ", " chain block(s) await verification"],
+        // the create leg (lifecycles.rs, session.rs, founding.rs)
+        &["→ ritual opened · ", " (founder) · ", "-of-", " · ", " invite(s) minted"],
+        &["→ SIMULATION — no real network in this build (the Nostr transport lands with N4): this node auto-activates and signs for every member. Nothing was shared off-band."],
+        &["→ share each link off-band, over a private channel — the ritual waits for members to activate"],
+        &["✓ roster sealed by everyone · workspace created"],
+        &["✗ founding failed: ", ""],
+        &["✓ recovery phrase backed up"],
+        &["⚠ the relay pool changed — the invites already minted still name the OLD relays. Cancel and re-mint to hand out links that carry this pool."],
+        &["→ this node has ", " dialable relays; the invite and the Welcome carry the first ", " (the pool order is the priority — reorder in Settings to change which)"],
+        &["✗ ", " does not reach ", " of ", " pool relays - ", ""],
+        &["⚠ ", " landed on ", " of ", " relays — ", ""],
+        &["✓ direct mesh established · ", " peer(s)"],
+        &["→ the group is born · welcomes sent to every member"],
+        &["✗ invite ", ": a second activation by ", " did not verify — ignored"],
+        &["✗ invite ", ": this founding has already formed its group around the first activation — cancel and re-mint to let ", " back in"],
+        &["✗ invite ", " was activated a second time (by ", ") — that link is spent; they need their own, unused link"],
+        &["· invite ", " activated by ", " — checking"],
+        &["✗ invite ", ": the request claims a transport key it did not sign with — refused (possible impersonation)"],
+        &["✗ invite ", ": the ticket code does not match — refused (wrong or edited link, or a link from a different founding)"],
+        &["✗ invite ", ": malformed transport key (", ") — refused; the ticket stays usable for a correct retry"],
+        &["✗ invite ", ": the name ", " is already taken in this founding — refused (every seat must be distinguishable, and the founder's own name is reserved)"],
+        &["✗ invite ", ": that transport key is already used by another seat — refused (two seats may never share one)"],
+        &["✗ invite ", ": no usable reply address in the request — refused"],
+        &["✗ invite ", ": the encryption key package does not match the identity in the request — refused"],
+        &["· invite ", " re-activated by ", " — the earlier attempt is replaced"],
+        &["→ ", " activated invite ", " · key received"],
+        &["→ every member has joined · propose the charter to seal"],
+        &["→ charter proposed · awaiting every member's ratification"],
+        &["✗ a decline for invite ", " came from ", ", who does not hold that seat — ignored"],
+        &["✗ ", " declined the charter · cancel and re-mint to change it"],
+        &["✗ the ritual is over — this republic must be founded anew (close and re-mint)"],
+        &["→ charter proposed · sealing the roster for ratification"],
+        &["✓ ", " signed the roster · seat sealed"],
+        &["✓ ", " secured their key"],
+        // the group-channel notes both legs share (nostr_ritual.rs)
+        &["✓ the group channel is back"],
+        &["⚠ cannot hear the group channel — ", " · still retrying"],
+        &["⧗ waiting for the genesis · ", ""],
+        // the join leg (lifecycles.rs + relay_msg.rs refusal detail)
+        &["✓ recovery phrase backed up · waiting for the others"],
+        &["✓ sealed - back up your recovery phrase to enter"],
+        &["✗ join failed: ", ""],
+        &["✓ the founder accepted your join · waiting for the deliberation"],
+        &["→ charter proposed: “", "” · review and confirm to join"],
+        &["✓ you ratified the charter · sealing your signature"],
+        &["→ save your recovery phrase - re-type it to confirm"],
+        &["✗ you declined the charter"],
+        &["✗ the ritual is over — this republic must be founded anew"],
+        &["→ dialable here: ", ""],
+        &["→ ", "  dialable"],
+        &["→ ", "  not in relay pool"],
+        &["→ ", "  not confirmed"],
+        &["→ ", "  clearnet/local dialing off"],
+    ]
+}
+
 pub(crate) fn headline_for(error: &str) -> String {
     let e = error.to_ascii_lowercase();
     // the leg's OWN anchored phrases decide first; the network vocabulary is
@@ -333,6 +418,26 @@ fn restore_only_headline(e: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
     use molt_core::relay::diagnose_invite_relays;
+
+    /// E5: the shape list is well-formed — every shape opens with a tone
+    /// glyph (the GUI colours by it), middles are non-empty (an empty
+    /// middle would merge two slots), and no shape repeats.
+    #[test]
+    fn every_log_shape_is_well_formed() {
+        let shapes = known_log_shapes();
+        let glyphs = ['→', '✓', '✗', '⚠', '·', '⧗', '↓'];
+        let mut seen = std::collections::BTreeSet::new();
+        for s in shapes {
+            assert!(!s.is_empty(), "empty shape");
+            let first = s[0].chars().next().expect("prefix is non-empty");
+            assert!(glyphs.contains(&first), "shape without a tone glyph: {s:?}");
+            for mid in &s[1..s.len().saturating_sub(1)] {
+                assert!(!mid.is_empty(), "empty middle in {s:?}");
+            }
+            assert!(seen.insert(s.join("\u{0}")), "duplicate shape {s:?}");
+        }
+        assert!(shapes.len() >= 60, "the inventory shrank to {}", shapes.len());
+    }
 
     fn entry(url: &str, confirmed: bool) -> RelayEntry {
         RelayEntry { url: url.to_string(), confirmed }
