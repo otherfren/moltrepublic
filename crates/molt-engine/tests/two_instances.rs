@@ -4608,7 +4608,9 @@ async fn a_commit_on_one_link_releases_messages_held_on_another() {
         )
         .expect("re-key zoe");
     match b_mls.lock().expect("b mls").decrypt(&commit).expect("b merges") {
-        molt_net::MlsIncoming::Commit => {}
+        molt_net::MlsIncoming::Commit { readmitted } => {
+            assert_eq!(readmitted, vec!["zoe".to_string()], "the re-key commit names the re-added seat");
+        }
         other => panic!("expected a commit, got {other:?}"),
     }
 

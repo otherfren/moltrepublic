@@ -755,8 +755,10 @@ enum Ingest {
     /// and the frames encrypted after it race, and the loser is ordinary.
     FutureEpoch,
     /// A commit merged and the epoch advanced — whatever is being held may
-    /// decode now.
-    EpochAdvanced,
+    /// decode now. Carries the members the commit re-admitted (their accept
+    /// windows must be forgotten BEFORE the hold is retried — the frames in
+    /// the hold are the new incarnation's).
+    EpochAdvanced(Vec<MemberId>),
     /// The engine is gone.
     EngineGone,
 }
@@ -886,7 +888,7 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
         // both used to fall into a catch-all `Nothing`, which held nothing and
         // retried nothing, so a frame arriving ahead of its commit was DROPPED
         MlsDecode::FutureEpoch => Ingest::FutureEpoch,
-        MlsDecode::EpochAdvanced => Ingest::EpochAdvanced,
+        MlsDecode::EpochAdvanced(readmitted) => Ingest::EpochAdvanced(readmitted),
         MlsDecode::Discard => Ingest::Nothing,
     }
 }
@@ -923,6 +925,15 @@ async fn retry_epoch_hold<L: OutboxLog, S: StateStore, K: EngineSink>(
                 Ingest::EngineGone => return Err(()),
                 Ingest::FutureEpoch => still.push((content, at)),
                 Ingest::Opaque => lost += 1,
+                // a held COMMIT merged during the retry: forget the
+                // re-admitted members' windows before their held frames
+                // (later in this very pass) are delivered
+                Ingest::EpochAdvanced(readmitted) => {
+                    for m in &readmitted {
+                        sink.rekeyed(m).await;
+                    }
+                    progress = true;
+                }
                 _ => progress = true,
             }
         }
@@ -1003,7 +1014,12 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
                             );
                         }
                     }
-                    Ingest::EpochAdvanced => {
+                    Ingest::EpochAdvanced(readmitted) => {
+                        // BEFORE the hold retry: the held frames are the new
+                        // incarnation's — its window must be gone first
+                        for m in &readmitted {
+                            sink.rekeyed(m).await;
+                        }
                         match retry_epoch_hold(&mls, &log, &store, &sink, &me, &mut seen, &mut hold).await {
                             Err(()) => return,
                             Ok(0) => {}

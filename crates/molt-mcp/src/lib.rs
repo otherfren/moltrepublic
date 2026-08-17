@@ -1618,7 +1618,7 @@ mod tests {
         // chain, so even a forged internal command cannot materialize an
         // unverified workspace). RestoreTick is gone: there is no simulated
         // restore progress anymore.
-        const INTERNAL: [&str; 55] = [
+        const INTERNAL: [&str; 56] = [
             // ui_publish is the WINDOW reporting what it renders — an
             // agent must not be able to forge what the GUI claims to show
             // (gui_over_mcp.md); reads go through read_ui_state.
@@ -1653,6 +1653,7 @@ mod tests {
             "net_file_wanted_timeout",
             "net_delivered",
             "net_peer_seen",
+            "net_peer_rekeyed",
             "net_send_failed",
             "net_link_up",
             "net_link_down",

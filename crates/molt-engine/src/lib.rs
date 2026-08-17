@@ -1284,6 +1284,9 @@ impl State {
             Command::NetPeerSeen { member, generation } => {
                 self.cmd_net_peer_seen(member, generation)
             }
+            Command::NetPeerRekeyed { member, generation } => {
+                self.cmd_net_peer_rekeyed(member, generation)
+            }
             Command::NetSendFailed {
                 member,
                 reason,

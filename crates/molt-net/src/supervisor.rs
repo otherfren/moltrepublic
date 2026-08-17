@@ -264,9 +264,9 @@ impl MlsChannel {
             // a merged commit advanced the epoch — held future-epoch messages
             // may decrypt now; wake every recv loop of this node (the buffers
             // are per-link, the group is not)
-            Ok(MlsIncoming::Commit) => {
+            Ok(MlsIncoming::Commit { readmitted }) => {
                 self.epoch_bump.send_modify(|n| *n = n.wrapping_add(1));
-                MlsDecode::EpochAdvanced
+                MlsDecode::EpochAdvanced(readmitted)
             }
             // its commit is still in flight — hold the SAME bytes and retry
             Ok(MlsIncoming::FutureEpoch) => MlsDecode::FutureEpoch,
@@ -279,13 +279,13 @@ impl MlsChannel {
             // whatever our own commit carried (a recovery re-key) is gone.
             // Loud, because the member it was for may hold a Welcome for a
             // branch nobody is on — N4 re-issues it against the new epoch.
-            Ok(MlsIncoming::CommitRewound) => {
+            Ok(MlsIncoming::CommitRewound { readmitted }) => {
                 tracing::warn!(
                     "a concurrent commit won the tiebreak — our own commit was rolled back; \
                      any re-key it carried must be re-issued at the new epoch"
                 );
                 self.epoch_bump.send_modify(|n| *n = n.wrapping_add(1));
-                MlsDecode::EpochAdvanced
+                MlsDecode::EpochAdvanced(readmitted)
             }
             // proposals / replays / past-window / garbage: redelivery cannot help
             Ok(MlsIncoming::Proposal) | Err(_) => MlsDecode::Discard,
@@ -314,7 +314,11 @@ pub(crate) enum MlsDecode {
     /// it accepted, per subject. The receiver acts only on its OWN entry.
     GroupAck(MemberId, Box<crate::group_ack::GroupAck>),
     /// A commit merged (epoch advanced) — ack it and retry the epoch buffer.
-    EpochAdvanced,
+    /// `readmitted` names the members the commit ADDED (a recovery re-key):
+    /// the consumer forwards them to the engine BEFORE anything of the new
+    /// epoch, so the engine forgets their old incarnation's accept window
+    /// in-stream (live incident 2026-08-09 §2).
+    EpochAdvanced(Vec<MemberId>),
     /// Encrypted at an epoch this node has not reached — hold it (acks
     /// unfired) and retry after the next commit merges.
     FutureEpoch,
@@ -415,6 +419,17 @@ pub trait EngineSink: Send + Sync + Clone + 'static {
     /// A previously failing send to `member` went through again — the
     /// backoff exit signal. Default no-op (Stage B, additive).
     fn send_ok(&self, member: &MemberId) -> impl std::future::Future<Output = ()> + Send {
+        let _ = member;
+        async {}
+    }
+    /// A merged re-key commit re-admitted `member` as a NEW incarnation
+    /// whose log seq space restarts. The engine must forget its accept
+    /// window for that member BEFORE any frame of the new epoch reaches
+    /// `deliver` — this call rides the same ordered path, which is what
+    /// makes the reset race-free (a bystander otherwise swallows the new
+    /// incarnation's colliding seqs as duplicates and falsely acks them —
+    /// live incident 2026-08-09 §2). Default no-op (additive).
+    fn rekeyed(&self, member: &MemberId) -> impl std::future::Future<Output = ()> + Send {
         let _ = member;
         async {}
     }
@@ -1222,8 +1237,11 @@ async fn drain_epoch_buffer<K: EngineSink>(
                     sink.peer_seen(&peer.member).await;
                     ack_all(held);
                 }
-                MlsDecode::EpochAdvanced => {
+                MlsDecode::EpochAdvanced(readmitted) => {
                     progressed = true;
+                    for m in &readmitted {
+                        sink.rekeyed(m).await;
+                    }
                     ack_all(held);
                 }
                 MlsDecode::FutureEpoch => {
@@ -1523,8 +1541,11 @@ where
                     }
                     ack_all(acks);
                 }
-                MlsDecode::EpochAdvanced => {
+                MlsDecode::EpochAdvanced(readmitted) => {
                     tracing::debug!(peer = %peer.member, "MESHRX decode=EPOCH_ADVANCED (a re-key commit merged)");
+                    for m in &readmitted {
+                        sink.rekeyed(m).await;
+                    }
                     ack_all(acks);
                     if !drain_epoch_buffer(ch, &sink, &peer, &mut epoch_buffer).await {
                         return RecvEnd::EngineGone;

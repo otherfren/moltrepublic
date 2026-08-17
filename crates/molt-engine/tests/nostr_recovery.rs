@@ -204,6 +204,231 @@ async fn found_republic(
     (a, b, petra_phrase)
 }
 
+/// Found a real 2-of-3 "Chess Club" over one in-process relay: walter
+/// (founder), petra and vera. Hands back the three live engines plus
+/// petra's recovery phrase.
+async fn found_three(
+    root: &std::path::Path,
+    url: &str,
+) -> (WalletHandle, WalletHandle, WalletHandle, String) {
+    let a = engine(&root.join("founder"));
+    adopt_relay(&a, url).await;
+    a.execute(Command::CreateStart {
+        name: "Chess Club".to_string(),
+        member: "walter".to_string(),
+        threshold: 2,
+        members: 3,
+        relays: Vec::new(),
+    })
+    .await
+    .expect("founding starts over the confirmed relay");
+
+    let s = wait_for(&a, "both seat links to become joinable v2 links", |s| {
+        s.create.seats.len() == 2
+            && s.create
+                .seats
+                .iter()
+                .all(|seat| molt_engine::FoundingInvite::parse(&seat.link).is_ok())
+    })
+    .await;
+    let links: Vec<String> = s.create.seats.iter().map(|seat| seat.link.clone()).collect();
+
+    let b = engine(&root.join("joiner-petra"));
+    adopt_relay(&b, url).await;
+    b.execute(Command::JoinStart {
+        invite: links[0].clone(),
+        member: "petra".to_string(),
+    })
+    .await
+    .expect("petra joins");
+    let petra_phrase = wait_for(&b, "petra's recovery phrase", |s| !s.join.seed.is_empty())
+        .await
+        .join
+        .seed
+        .clone();
+
+    let v = engine(&root.join("joiner-vera"));
+    adopt_relay(&v, url).await;
+    v.execute(Command::JoinStart {
+        invite: links[1].clone(),
+        member: "vera".to_string(),
+    })
+    .await
+    .expect("vera joins");
+
+    wait_for(&a, "the founder to accept both joins", |s| s.create.can_propose).await;
+    a.execute(Command::CreatePropose {
+        name: "Chess Club".to_string(),
+        agenda: "play chess, decide together".to_string(),
+        features: vec!["memory".to_string()],
+    })
+    .await
+    .expect("charter proposed");
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
+    for w in [&b, &v] {
+        wait_for(w, "the proposed charter", |s| s.join.awaiting_ratify).await;
+        w.execute(Command::JoinConfirmCharter).await.expect("ratify");
+        let seed_ = read_session(w).await.join.seed.clone();
+        w.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("joiner backup confirm");
+    }
+
+    wait_for(&a, "the founding to seal", |s| s.create.run.outcome == 1).await;
+    a.execute(Command::CreateFinish).await.expect("create finish");
+    for w in [&b, &v] {
+        wait_for(w, "the join to seal", |s| {
+            s.join.run.outcome == 1 && !s.join.sealed_id.is_empty()
+        })
+        .await;
+        w.execute(Command::JoinFinish).await.expect("join finish");
+        wait_for(w, "the member to enter", |s| {
+            s.screen == molt_core::Screen::Main && !s.workspaces.is_empty()
+        })
+        .await;
+    }
+    (a, b, v, petra_phrase)
+}
+
+/// **Field keystone (live incident 2026-08-09 §2, field rerun 2026-08-17):
+/// a bystander that was OFFLINE during a seat's recovery must still hear
+/// the rejoiner after catching up.** The trap: the bystander's persisted
+/// accept window for the seat still carries the LOST incarnation's seq
+/// marks, and on Nostr nothing on the bystander resets it — the
+/// coordinator resets its own window in `restore_member`, the mesh reset
+/// rides the recovery announce, but a bystander that merely replays the
+/// backlog classifies every fresh-incarnation envelope as a duplicate,
+/// drops it and ACKS it — the at-least-once guarantee is spent on a
+/// message nobody applied (the field's veronica lost exactly one message
+/// this way, permanently).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bystander_that_slept_through_a_recovery_still_hears_the_rejoiner() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .try_init();
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, v, petra_phrase) = found_three(tmp.path(), &url).await;
+
+    // petra's FIRST incarnation burns a SPAN of its seq space (seqs are log
+    // positions, so a batch of own sends occupies a consecutive stretch),
+    // and vera's accept window records every one of those marks. The new
+    // incarnation's shorter recovered log restarts below that span, so its
+    // batch re-uses seqs the old incarnation actually sent — the collision
+    // the field hit on one message, made unavoidable here.
+    const BATCH: usize = 30;
+    for i in 0..BATCH {
+        b.execute(Command::Chat {
+            body: format!("petra before the loss {i}"),
+            quote: None,
+            channel: molt_core::ChannelRef::default(),
+        })
+        .await
+        .expect("petra sends");
+    }
+    for w in [&a, &v] {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let seen = read_chat_bodies(w).await;
+            if (0..BATCH).all(|i| seen.iter().any(|m| m.contains(&format!("before the loss {i}")))) {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "pre-loss chat never arrived");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    // vera goes offline — a clean close persists her window marks
+    let vera_ws = read_session(&v).await.workspaces[0].id.clone();
+    v.execute(Command::CloseWorkspace).await.expect("vera closes");
+
+    // petra's device dies; walter coordinates the recovery while vera sleeps
+    drop(b);
+    a.execute(Command::RecoverInviteStart {
+        member: "petra".to_string(),
+    })
+    .await
+    .expect("mint");
+    let s = wait_for(&a, "the recovery link", |s| {
+        s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")
+    })
+    .await;
+    let link = s
+        .notice
+        .strip_prefix("recovery-link:")
+        .unwrap_or_else(|| panic!("the mint must succeed: {:?}", s.notice))
+        .to_string();
+    let c = engine(&tmp.path().join("rejoiner"));
+    adopt_relay(&c, &url).await;
+    c.execute(Command::RecoverStart {
+        link,
+        phrase: petra_phrase,
+    })
+    .await
+    .expect("recover start");
+    let s = wait_for(&c, "the recovery to open", |s| {
+        (s.screen == molt_core::Screen::Main && !s.workspaces.is_empty())
+            || s.notice.starts_with("recover-failed:")
+    })
+    .await;
+    assert!(!s.notice.starts_with("recover-failed:"), "recovery: {:?}", s.notice);
+
+    // the new incarnation speaks a batch of its own — its seq span overlaps
+    // the lost incarnation's — and the coordinator hears every message
+    // (its window reset in restore_member)
+    for i in 0..BATCH {
+        c.execute(Command::Chat {
+            body: format!("petra from the comeback {i}"),
+            quote: None,
+            channel: molt_core::ChannelRef::default(),
+        })
+        .await
+        .expect("petra sends again");
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let seen = read_chat_bodies(&a).await;
+        if (0..BATCH).all(|i| seen.iter().any(|m| m.contains(&format!("from the comeback {i}")))) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the coordinator must hear the rejoiner's whole batch"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // vera wakes and catches up — EVERY rejoiner message must arrive; any
+    // seq that collides with the lost incarnation's marks would be
+    // swallowed as a duplicate (and falsely acked) without the reset
+    v.execute(Command::OpenWorkspace { id: vera_ws }).await.expect("vera reopens");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let seen = read_chat_bodies(&v).await;
+        let missing: Vec<usize> = (0..BATCH)
+            .filter(|i| !seen.iter().any(|m| m.contains(&format!("from the comeback {i}"))))
+            .collect();
+        if missing.is_empty() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the sleeping bystander swallowed rejoiner messages as the lost \
+             incarnation's duplicates (accept window never reset) — missing {missing:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 /// A survivor mints a recovery link for a lost seat, over the relays — no
 /// mesh, no queue.
 ///

@@ -8762,7 +8762,7 @@ mod tests {
 
         // the survivor merges the commit and reaches the new epoch
         match survivor.decrypt(&rekey.commit).expect("survivor processes the commit") {
-            molt_net::mls::MlsIncoming::Commit => {}
+            molt_net::mls::MlsIncoming::Commit { .. } => {}
             other => panic!("expected a commit, got {other:?}"),
         }
         returning.join_from_welcome(&rekey.welcome).expect("the seat rejoins");

@@ -3222,6 +3222,20 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
+    /// A merged MLS re-key commit re-admitted a member as a NEW incarnation
+    /// whose log seq space restarts (engine-internal, from the transport's
+    /// ordered inbound path). The engine forgets its accept window for the
+    /// member — BEFORE any of the new incarnation's envelopes arrive, which
+    /// the ordering of the delivery path guarantees (live incident
+    /// 2026-08-09 §2: a bystander otherwise swallows colliding seqs as the
+    /// lost incarnation's duplicates and falsely acks them).
+    NetPeerRekeyed {
+        /// The re-admitted member.
+        member: MemberId,
+        /// Mesh incarnation (see [`Command::NetDelivered`]).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
     /// Periodic presence aging (engine-internal ticker): re-derive the
     /// member pills' 0/1/2 state from their real last-seen stamps so a
     /// silent member ages online → stale → offline without any traffic.

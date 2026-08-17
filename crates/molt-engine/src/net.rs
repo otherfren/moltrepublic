@@ -286,6 +286,15 @@ impl EngineSink for CmdSink {
             .await;
     }
 
+    async fn rekeyed(&self, member: &MemberId) {
+        let _ = self
+            .execute(Command::NetPeerRekeyed {
+                member: member.clone(),
+                generation: self.generation,
+            })
+            .await;
+    }
+
     async fn send_failed(&self, member: &MemberId, reason: &str) {
         let _ = self
             .execute(Command::NetSendFailed {
@@ -2767,6 +2776,27 @@ impl State {
             let now = self.presence_now();
             self.stamp_member_pill(&member, now);
             self.recompute_net_health();
+        }
+        Ok(Reply::Ack)
+    }
+
+    /// A merged re-key commit re-admitted `member` as a new incarnation
+    /// (fresh log seq space): forget its accept window. Arrives over the
+    /// transport's ORDERED inbound path, so the reset lands before any of
+    /// the new incarnation's envelopes — the race the announce-/block-side
+    /// resets could lose on a bystander catching up from a backlog (live
+    /// incident 2026-08-09 §2, field rerun 2026-08-17). A member never in
+    /// the roster carries no window, so no roster check is needed; the own
+    /// seat never rides an add-proposal this node merges about itself
+    /// mid-session.
+    pub(crate) fn cmd_net_peer_rekeyed(
+        &mut self,
+        member: MemberId,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if self.net_generation_current(generation) {
+            tracing::info!(%member, "re-key commit merged — forgetting the seat's old accept window");
+            self.reset_peer_accept_window(&member);
         }
         Ok(Reply::Ack)
     }

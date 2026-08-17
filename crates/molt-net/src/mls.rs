@@ -107,16 +107,27 @@ pub enum MlsIncoming {
         plaintext: Vec<u8>,
     },
     /// A membership change (Add/Remove/Update) was merged — the epoch advanced.
-    /// The MLS-core milestone has no post-founding commits, but decrypt stays
-    /// robust so a future recovery rejoin cannot wedge the receiver.
-    Commit,
+    /// `readmitted` carries the identities the commit ADDED (a recovery
+    /// re-key re-adds the recovered seat): the caller must forget those
+    /// members' accept windows BEFORE it processes anything of the new
+    /// epoch, and this merge is the one point ordered before every frame
+    /// the new incarnation can produce (its frames cannot decrypt earlier —
+    /// live incident 2026-08-09 §2, field rerun 2026-08-17).
+    Commit {
+        /// Member handles the merged commit added to the group.
+        readmitted: Vec<String>,
+    },
     /// We had merged our OWN commit, a concurrent one won the tiebreak, and
     /// we rewound onto it. **The work our commit carried is gone** — a
     /// recovery re-key in particular, whose Welcome the rejoiner may already
     /// hold for a branch nobody is on. The caller must re-issue it against
     /// the new epoch; treating this like an ordinary merge strands the
-    /// member it was for (review finding 2026-07-31).
-    CommitRewound,
+    /// member it was for (review finding 2026-07-31). `readmitted` reports
+    /// the WINNING commit's adds, exactly like [`MlsIncoming::Commit`].
+    CommitRewound {
+        /// Member handles the winning commit added to the group.
+        readmitted: Vec<String>,
+    },
     /// A same-epoch commit that LOST the deterministic tiebreak
     /// ([`CommitKey`]): our own commit stands, this one is superseded. The
     /// sender will rewind to ours; its proposals are re-decided at the new
@@ -576,6 +587,23 @@ impl MlsMember {
                 plaintext: app.into_bytes(),
             }),
             ProcessedMessageContent::StagedCommitMessage(staged) => {
+                // WHO does this commit add, read BEFORE the merge consumes
+                // it: a recovery re-key re-adds the recovered seat, and the
+                // caller must reset that member's accept window in-stream
+                // (see [`MlsIncoming::Commit`]).
+                let readmitted: Vec<String> = staged
+                    .add_proposals()
+                    .map(|add| {
+                        String::from_utf8_lossy(
+                            add.add_proposal()
+                                .key_package()
+                                .leaf_node()
+                                .credential()
+                                .serialized_content(),
+                        )
+                        .into_owned()
+                    })
+                    .collect();
                 let retiring = self.exporter_secret().ok();
                 // BYSTANDERS CONVERGE TOO (review finding 2026-07-31): a node
                 // that authored no commit still has to survive a race — it
@@ -594,7 +622,7 @@ impl MlsMember {
                         self.exporter_ring.truncate(EXPORTER_RING_K);
                     }
                 }
-                Ok(MlsIncoming::Commit)
+                Ok(MlsIncoming::Commit { readmitted })
             }
             ProcessedMessageContent::ProposalMessage(p) => {
                 group
@@ -686,7 +714,7 @@ impl MlsMember {
         self.provider_swap(rewound);
         match self.decrypt_at(winner, created_at) {
             // the winner merged — but say WHOSE work was dropped doing so
-            Ok(MlsIncoming::Commit) => Ok(MlsIncoming::CommitRewound),
+            Ok(MlsIncoming::Commit { readmitted }) => Ok(MlsIncoming::CommitRewound { readmitted }),
             Ok(outcome) => Ok(outcome),
             Err(e) => {
                 // the "winner" did not apply after all — undo the rewind and
@@ -1038,7 +1066,7 @@ mod tests {
 
         // every OTHER existing member merges the commit to advance the epoch
         match founder.decrypt(&commit).expect("founder processes the restore commit") {
-            MlsIncoming::Commit => {}
+            MlsIncoming::Commit { .. } => {}
             other => panic!("expected a commit, got {other:?}"),
         }
         // the rejoiner joins from the welcome
@@ -1103,7 +1131,7 @@ mod tests {
         }
         // ❷ the commit lands …
         match founder.decrypt(&commit).expect("merge the commit") {
-            MlsIncoming::Commit => {}
+            MlsIncoming::Commit { .. } => {}
             other => panic!("expected a commit, got {other:?}"),
         }
         // ❸ … and the SAME ciphertext now decrypts, sender authenticated
@@ -1143,7 +1171,7 @@ mod tests {
         let (commit, _welcome2) =
             cara.restore_member("bob", &bob2.key_package().expect("kp"), NO_CARRIER_STAMP).expect("restore");
         match founder.decrypt(&commit).expect("merge") {
-            MlsIncoming::Commit => {}
+            MlsIncoming::Commit { .. } => {}
             other => panic!("expected a commit, got {other:?}"),
         }
 
@@ -1363,13 +1391,15 @@ mod tests {
             "alice keeps her own winning commit: {to_alice:?}"
         );
         assert!(
-            matches!(to_bob, MlsIncoming::CommitRewound),
+            matches!(to_bob, MlsIncoming::CommitRewound { .. }),
             "bob rewinds onto alice's — and is TOLD his own was rolled back: {to_bob:?}"
         );
         assert!(
             matches!(
                 to_alice,
-                MlsIncoming::Commit | MlsIncoming::CommitSuperseded | MlsIncoming::CommitRewound
+                MlsIncoming::Commit { .. }
+                    | MlsIncoming::CommitSuperseded
+                    | MlsIncoming::CommitRewound { .. }
             ),
             "a same-epoch commit is a known outcome, not an error: {to_alice:?}"
         );
@@ -1669,7 +1699,7 @@ mod tests {
         // bob's stamp is higher, so bob LOSES and must hear about it: the
         // dave re-key he already Welcomed is gone
         assert!(
-            matches!(bob.decrypt_at(&commit_a, 100), Ok(MlsIncoming::CommitRewound)),
+            matches!(bob.decrypt_at(&commit_a, 100), Ok(MlsIncoming::CommitRewound { .. })),
             "a rewound committer must not see an ordinary merge"
         );
         assert!(matches!(
