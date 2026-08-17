@@ -167,6 +167,10 @@ surface lands (the established stepwise-UI modus; never fake, always badged).
   (`AppCheck` + new `enabled` prop for the locked Chat row). Defaults:
   chat ✓ locked, memory ☐, quests ☐, vault ☐, wallet ✓. Labels are the nav
   surface labels (one vocabulary). No explanatory prose.
+  *Amended 2026-08-17 (user decision): wallet is locked OFF in the wizard
+  and in the Organization features modal like quests/vault — the surface
+  ships much later. `set_features` still carries an already-enabled wallet
+  along (enable-only), and MCP keeps the full key set.*
 - **Ratification card:** between agenda and the confirm/decline buttons, the
   five rows with their on/off state — the member sees the whole selection it
   signs, not only the enabled part. Read-only.

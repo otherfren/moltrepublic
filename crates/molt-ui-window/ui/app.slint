@@ -1277,13 +1277,12 @@ export component AppWindow inherits Window {
     // the one charter length limit, engine and UI alike (AGENDA_MAX)
     property <int> cw-agenda-max: 4096;
     // the charter step's feature selection (charter_features.md): chat is
-    // core and not a property; shared memory defaults on, wallet off.
-    // kanban/vault are locked off in the wizard (not built yet) and have
-    // NO properties — re-introduce checkbox + property + Rust read whole
-    // when they ship. Read by the Rust create-propose handler, reset when
-    // a ritual starts.
+    // core and not a property; shared memory defaults on.
+    // kanban/vault/wallet are locked off in the wizard (not built yet) and
+    // have NO properties — re-introduce checkbox + property + Rust read
+    // whole when they ship. Read by the Rust create-propose handler, reset
+    // when a ritual starts.
     in-out property <bool> cw-feat-memory: true;
-    in-out property <bool> cw-feat-wallet: false;
     // the members are in-process simulations (no real network yet): the
     // lobby shows a SIMULATION badge so it is never mistaken for a real
     // off-band exchange
@@ -1539,7 +1538,6 @@ export component AppWindow inherits Window {
     property <bool> of-memory-draft;
     property <bool> of-quests-draft;
     property <bool> of-vault-draft;
-    property <bool> of-wallet-draft;
     property <bool> org-relays-modal-open: false;
     // R6 pool-edit modal: the draft as ROWS plus the space-joined payload
     // string — the Rust side keeps the two in step (set-relay-draft-rows)
@@ -1922,7 +1920,6 @@ export component AppWindow inherits Window {
         root.cw-threshold = 2;
         root.cw-members = 3;
         root.cw-feat-memory = true;
-        root.cw-feat-wallet = false;
     }
 
     init => {
@@ -2978,7 +2975,7 @@ export component AppWindow inherits Window {
                         feat-memory: root.cw-feat-memory;
                         feat-quests: false;
                         feat-vault: false;
-                        feat-wallet: root.cw-feat-wallet;
+                        feat-wallet: false;
                     }
 
                     // ---- deliberation: the phase's current interaction, on
@@ -3044,10 +3041,11 @@ export component AppWindow inherits Window {
                                 horizontal-alignment: right;
                             }
                             // the feature selection, ratified with the
-                            // charter: chat is core (locked on), kanban and
-                            // vault are not built yet (locked off); the rest
-                            // is this republic's choice - enable-only
-                            // forever, so a vote can add but never remove
+                            // charter: chat is core (locked on); kanban,
+                            // vault and wallet are not built yet (locked
+                            // off); the rest is this republic's choice -
+                            // enable-only forever, so a vote can add but
+                            // never remove
                             // content-sized, anchored left - the panel must
                             // not stretch across the step's width
                             HorizontalLayout {
@@ -3079,7 +3077,7 @@ export component AppWindow inherits Window {
                                                 AppCheck { width: 180px; label: Strings.feat-vault; checked: false; enabled: false; }
                                             }
                                             Row {
-                                                AppCheck { width: 180px; label: Strings.feat-wallet; checked <=> root.cw-feat-wallet; }
+                                                AppCheck { width: 180px; label: Strings.feat-wallet; checked: false; enabled: false; }
                                             }
                                         }
                                     }
@@ -5416,7 +5414,6 @@ export component AppWindow inherits Window {
                                                 root.of-memory-draft = root.org-feat-memory;
                                                 root.of-quests-draft = root.org-feat-quests;
                                                 root.of-vault-draft = root.org-feat-vault;
-                                                root.of-wallet-draft = root.org-feat-wallet;
                                                 root.org-features-modal-open = true;
                                             }
                                         }
@@ -8158,8 +8155,7 @@ export component AppWindow inherits Window {
         confirm-label: Strings.oc-propose;
         confirm-enabled: (root.of-memory-draft && !root.org-feat-memory)
             || (root.of-quests-draft && !root.org-feat-quests)
-            || (root.of-vault-draft && !root.org-feat-vault)
-            || (root.of-wallet-draft && !root.org-feat-wallet);
+            || (root.of-vault-draft && !root.org-feat-vault);
         dismissed => {
             root.org-features-modal-open = false;
         }
@@ -8169,11 +8165,13 @@ export component AppWindow inherits Window {
             // modal is open, and the stale draft would then propose a set
             // omitting it - refused by the engine for a box the user never
             // touched (review 2026-08-12)
+            // wallet has no draft (locked below) — but an ALREADY enabled
+            // wallet must ride along: the target set is enable-only
             root.org-propose("set_features",
                 (root.of-memory-draft || root.org-feat-memory ? " memory" : "")
                 + (root.of-quests-draft || root.org-feat-quests ? " quests" : "")
                 + (root.of-vault-draft || root.org-feat-vault ? " vault" : "")
-                + (root.of-wallet-draft || root.org-feat-wallet ? " wallet" : ""));
+                + (root.org-feat-wallet ? " wallet" : ""));
         }
         VerticalLayout {
             spacing: 4px;
@@ -8193,10 +8191,12 @@ export component AppWindow inherits Window {
                 checked <=> root.of-vault-draft;
                 enabled: !root.org-feat-vault;
             }
+            // wallet is not built yet: locked here exactly like in the
+            // founding wizard (an already enabled one stays shown)
             AppCheck {
                 label: Strings.feat-wallet;
-                checked <=> root.of-wallet-draft;
-                enabled: !root.org-feat-wallet;
+                checked: root.org-feat-wallet;
+                enabled: false;
             }
         }
     }

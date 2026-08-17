@@ -1131,12 +1131,9 @@ pub fn run_app(
             let features = weak
                 .upgrade()
                 .map(|ui| {
-                    // quests/vault have no wizard checkbox (locked off,
-                    // not built) — no property to read until they ship
-                    [
-                        (ui.get_cw_feat_memory(), "memory"),
-                        (ui.get_cw_feat_wallet(), "wallet"),
-                    ]
+                    // quests/vault/wallet have no wizard checkbox (locked
+                    // off, not built) — no property to read until they ship
+                    [(ui.get_cw_feat_memory(), "memory")]
                     .into_iter()
                     .filter(|(on, _)| *on)
                     .map(|(_, key)| key.to_string())
