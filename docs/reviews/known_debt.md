@@ -4,15 +4,6 @@ Status: **OPEN WORK.** The surviving deferred items whose home documents
 were executed and archived. One entry per item, with its fix direction;
 an item leaves in the change that closes it.
 
-## H3 second half — the governance broadcast does not wait for durable persist
-
-From `docs_archive/reviews/total_review.md` (H3, fixed 2026-08-07 except
-this half). A threshold-signed block is broadcast independently of the
-persist outcome; re-ordering Append → Persist → Broadcast in `chain.rs`
-is a state-model change and needs its own session with the chain design
-beside it. The failure is loud today (storage-failed notice), not
-silent.
-
 ## Story 14 remainder — real backends for Kanban and Vault
 
 From `docs_archive/ui/mock_todo.md` §14. Memory is REAL

@@ -2154,16 +2154,33 @@ impl State {
         if !self.append_committed_block(block.clone()) {
             return;
         }
-        self.persist_chain_now();
+        let durable = self.persist_chain_now();
         self.after_block_applied(&block);
-        let me = self.member();
-        let env = self.make_env(me, WorkspaceEvent::Committed(block.clone()));
-        self.record(env);
         // clean up the proposal we just committed — a Membership block carries
         // no proposal id for after_block_applied to key on, so drop it here
         self.stash_voted(proposal_id);
         self.pending_sigs.remove(&proposal_id);
         self.proposal_changes.remove(&proposal_id);
+        // **H3 second half (total_review.md): broadcast only what is
+        // durable.** The block stays appended and projected — the m
+        // signatures are real, and the peers seal the byte-identical block
+        // from the same approval gossip themselves — but a node whose disk
+        // did not take it must not spread it as republic history: after a
+        // crash it would be asking the group for the very block it
+        // announced. The writer's failed flag turns the next record into
+        // the operator's storage-failed notice.
+        if !durable {
+            tracing::error!(
+                height = block.height,
+                proposal = proposal_id,
+                "sealed block held back from broadcast — not durable; \
+                 peers seal it from the gossip themselves"
+            );
+            return;
+        }
+        let me = self.member();
+        let env = self.make_env(me, WorkspaceEvent::Committed(block.clone()));
+        self.record(env);
         // an accepted VOTE posts its summary into its discussion (story
         // 2026-08-09) — minted exactly once, by the sealer (a passively
         // applied broadcast/catch-up block receives this message over the
@@ -2187,7 +2204,9 @@ impl State {
         self.maybe_auto_checkpoint();
     }
 
-    /// Write the chain as it stands.
+    /// Write the chain as it stands. Returns whether it is DURABLE — the
+    /// seal path gates its broadcast on this (H3 second half); a state
+    /// without storage has promised nothing, so it reports `true`.
     ///
     /// **Once per accepted batch, never per block.** The round-trip is
     /// synchronous — `persist_chain_blocking` waits on the writer's ack — so
@@ -2195,16 +2214,16 @@ impl State {
     /// whole-chain writes inside one uninterruptible actor turn. Losing a
     /// batch to a crash costs a re-fetch and nothing else: any survivor
     /// re-serves the blocks on the next catch-up.
-    fn persist_chain_now(&self) {
+    fn persist_chain_now(&self) -> bool {
         #[cfg(test)]
         CHAIN_PERSISTS.with(|c| c.set(c.get() + 1));
         let Some(active) = &self.active else {
-            return;
+            return true;
         };
-        if !active
+        let durable = active
             .handle
-            .persist_chain_blocking(self.checkpoint_blob.clone(), self.chain.clone())
-        {
+            .persist_chain_blocking(self.checkpoint_blob.clone(), self.chain.clone());
+        if !durable {
             // The writer also raises its `failed` flag, which the next
             // `record` turns into the operator's "storage-failed" notice.
             // Named here as well because THIS is the write whose loss
@@ -2213,6 +2232,7 @@ impl State {
             // for again after a crash.
             tracing::error!("the chain did not reach the disk — it is only in memory");
         }
+        durable
     }
 
     /// Verify a block as the extension of our chain, append it, and re-project
@@ -4424,6 +4444,88 @@ mod tests {
         }
         peer.receive_block(forged);
         assert_eq!(peer.chain.len(), 2, "a tampered block is hard-rejected");
+    }
+
+    /// Attach real (temp-dir) storage to a test peer; `dead_writer` closes
+    /// the writer first, so every blocking persist honestly reports `false`.
+    fn attach_storage(peer: &mut crate::State, dead_writer: bool) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed =
+            molt_storage::seed_entropy(&molt_storage::generate_seed_phrase().expect("phrase"))
+                .expect("entropy");
+        let genesis = molt_core::EventEnvelope {
+            prev_seq: 0,
+            seq: 1,
+            ts: 10,
+            by: "walter".to_string(),
+            body: molt_core::WorkspaceEvent::Founded {
+                name: "Chess Club".to_string(),
+                rule_m: 2,
+                rule_n: 2,
+                member: "walter".to_string(),
+                roster: vec!["petra".to_string(), "walter".to_string()],
+                identities: Vec::new(),
+                attestations: Vec::new(),
+                republic_id: String::new(),
+                agenda: String::new(),
+                relays: Vec::new(),
+                features: None,
+            },
+        };
+        let ws = molt_storage::create_workspace(tmp.path(), &seed, &genesis).expect("create");
+        let dir = ws.dir().to_path_buf();
+        let handle = molt_storage::start_writer(ws);
+        if dead_writer {
+            handle.clone().close(None);
+        }
+        peer.active = Some(crate::ActiveStorage {
+            id: "w-h3".to_string(),
+            dir,
+            prefs: molt_core::WorkspacePrefs::default(),
+            handle,
+        });
+        tmp
+    }
+
+    /// **H3 second half (total_review.md): the governance broadcast waits
+    /// for the durable persist.** A threshold-sealed block whose write did
+    /// NOT reach the disk is still appended and projected locally — the
+    /// signatures are real — but it is NOT broadcast: no `Committed`
+    /// envelope, no decision summary. The peers seal the byte-identical
+    /// block from the approval gossip themselves; this node must not
+    /// spread history it does not durably hold. A durable seal broadcasts
+    /// exactly as before.
+    #[test]
+    fn a_block_that_missed_the_disk_is_not_broadcast() {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        let genesis = b.blocks.clone();
+        b.commit_applied(1, &["petra", "walter"]);
+        let block = b.blocks[1].clone();
+
+        // (1) the writer is gone — sealed, appended, NOT broadcast
+        let mut peer = chain_peer("walter", &b, genesis.clone());
+        let _tmp = attach_storage(&mut peer, true);
+        let seq_before = peer.next_seq;
+        let chat_before = peer.chat.len();
+        peer.adopt_committed_block(block.clone(), 1);
+        assert_eq!(peer.chain.len(), 2, "the sealed block is appended locally");
+        assert_eq!(
+            peer.next_seq, seq_before,
+            "no envelope may be minted for a block the disk never took"
+        );
+        assert_eq!(peer.chat.len(), chat_before, "no decision summary either");
+
+        // (2) the writer lives — durable, broadcast as before
+        let mut peer = chain_peer("petra", &b, genesis);
+        let _tmp = attach_storage(&mut peer, false);
+        let seq_before = peer.next_seq;
+        peer.adopt_committed_block(block, 1);
+        assert_eq!(peer.chain.len(), 2);
+        assert!(
+            peer.next_seq > seq_before,
+            "a durable seal broadcasts its Committed envelope"
+        );
+        peer.active.take().expect("active").handle.close(None);
     }
 
     /// A 2-member chain-governed peer holding only the genesis `b` roots.
