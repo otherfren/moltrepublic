@@ -2662,6 +2662,275 @@ fn localize_wiki_err(lang: i32, e: &str) -> &str {
     }
 }
 
+/// The header pill's transport reason (E6): engine-composed parts joined
+/// with "; ", each a known phrase around a member name, a count or a
+/// free-text error tail — localized part-wise; unknown tails ride verbatim.
+fn localize_net_reason(lang: i32, reason: &str) -> String {
+    if lang != 1 || reason.is_empty() {
+        return reason.to_string();
+    }
+    let part_de = |part: &str| -> String {
+        if let Some((m, r)) = part.strip_prefix("link to ").and_then(|r| r.split_once(": ")) {
+            return format!("Verbindung zu {m}: {}", net_phrase_de(r));
+        }
+        if let Some((m, r)) = part.strip_prefix("sends to ").and_then(|r| r.split_once(": ")) {
+            return format!("Zustellung an {m}: {}", net_phrase_de(r));
+        }
+        if let Some(why) = part.strip_prefix("relays: ") {
+            return format!("Relays: {}", net_phrase_de(why));
+        }
+        if let Some(n) = part.strip_suffix(" frames past the key ring") {
+            return format!("{n} Frames jenseits des Schlüsselrings");
+        }
+        net_phrase_de(part)
+    };
+    reason.split("; ").map(part_de).collect::<Vec<_>>().join("; ")
+}
+
+/// One inner transport phrase → German. Statics match by prefix (the
+/// engine composes them with line continuations); free-text NetError
+/// tails fall through verbatim.
+fn net_phrase_de(p: &str) -> String {
+    if let Some(n) = p
+        .strip_prefix("no live relay connection (0 of ")
+        .and_then(|r| r.strip_suffix(" up, reconnecting)"))
+    {
+        return format!("keine lebende Relay-Verbindung (0 von {n} erreichbar, verbinde neu)");
+    }
+    if p.starts_with("no relay channel") {
+        return "kein Relay-Kanal - Relays dieser Republik unter Einstellungen prüfen; \
+                lokal geht alles, Gepuffertes liefert, sobald eines erreichbar ist"
+            .into();
+    }
+    if p.starts_with("offline: no queue credentials") {
+        return "offline: keine Queue-Credentials auf der Platte - das Mesh kann auf \
+                diesem Sitz nicht weiterlaufen (harter Stopp vor dem Mesh-Start oder \
+                ein Vor-Fix-Build); lokal geht alles, nichts erreicht die Peers; per \
+                Recovery-Link neu beitreten"
+            .into();
+    }
+    if p.starts_with("offline: no MLS group snapshot") {
+        return "offline: kein MLS-Gruppen-Snapshot auf der Platte - das Mesh kann \
+                nicht weiterlaufen; per Recovery-Link neu beitreten"
+            .into();
+    }
+    if p.starts_with("offline: no mesh links") {
+        return "offline: keine Mesh-Links auf der Platte - das Mesh kann nicht \
+                weiterlaufen; per Recovery-Link neu beitreten"
+            .into();
+    }
+    if p.starts_with("offline: resuming the persisted mesh") {
+        return "offline: das persistierte Mesh ließ sich nicht fortsetzen - lokal \
+                geht alles, nichts erreicht die Peers"
+            .into();
+    }
+    match p {
+        "connecting" => "verbinde".into(),
+        "inbound subscription ended — resubscribing" => {
+            "Eingangs-Subscription endete - erneuere".into()
+        }
+        "deliveries keep going unacknowledged — still resending" => {
+            "Zustellungen bleiben unbestätigt - sende weiter".into()
+        }
+        "not acknowledging deliveries — still resending" => {
+            "bestätigt keine Zustellungen - sende weiter".into()
+        }
+        "no relay accepted the frame" => "kein Relay nahm den Frame an".into(),
+        "no relay accepted the subscription" => "kein Relay nahm die Subscription an".into(),
+        "no 445 subscription" => "keine 445-Subscription".into(),
+        other => other.to_string(),
+    }
+}
+
+/// The S3 verdicts (E6): "" / "testing" / "listing" / "ok" are machine
+/// states the .slint switches on — they pass through untouched; only the
+/// "error: {shell}: {tail}" form localizes. Tails ride verbatim.
+fn localize_s3_verdict(lang: i32, v: &str) -> String {
+    if lang != 1 {
+        return v.to_string();
+    }
+    match v.strip_prefix("error: ") {
+        Some(e) => format!("Fehler: {}", s3_error_de(e)),
+        None => v.to_string(),
+    }
+}
+
+/// One `S3Error` rendering → German: the five shells by prefix, per shell
+/// the known payload phrases; everything unrecognized rides verbatim.
+fn s3_error_de(e: &str) -> String {
+    if let Some(t) = e.strip_prefix("endpoint: ") {
+        return format!("Endpunkt: {}", s3_endpoint_de(t));
+    }
+    if let Some(t) = e.strip_prefix("connect: ") {
+        return format!("Verbindung: {t}");
+    }
+    if let Some(t) = e.strip_prefix("tls: ") {
+        return format!("TLS: {t}");
+    }
+    if let Some(t) = e.strip_prefix("protocol: ") {
+        return format!("Protokoll: {t}");
+    }
+    if let Some((status, hint)) = e.strip_prefix("http ").and_then(|r| r.split_once(": ")) {
+        return format!("HTTP {status}: {}", s3_hint_de(hint));
+    }
+    e.to_string()
+}
+
+fn s3_endpoint_de(t: &str) -> String {
+    if let Some(p) = t.strip_prefix("bad port ") {
+        return format!("ungültiger Port {p}");
+    }
+    if let Some(h) = t.strip_prefix("bad host ") {
+        return format!("ungültiger Host {h}");
+    }
+    match t {
+        "no endpoint configured" => "kein Endpunkt konfiguriert".into(),
+        "no access key configured" => "kein Access-Key konfiguriert".into(),
+        "no secret key configured" => "kein Secret-Key konfiguriert".into(),
+        "no bucket configured" => "kein Bucket konfiguriert".into(),
+        "no host in endpoint" => "kein Host im Endpunkt".into(),
+        "unterminated [IPv6] literal" => "unabgeschlossenes [IPv6]-Literal".into(),
+        other => other.to_string(),
+    }
+}
+
+/// An HTTP-status hint → German. The engine may append " ({S3 code})" —
+/// matched by prefix so the code rides along verbatim.
+fn s3_hint_de(hint: &str) -> String {
+    let map: [(&str, &str); 6] = [
+        (
+            "the local clock is too far from the server's — fix the system time",
+            "die lokale Uhr weicht zu weit von der des Servers ab - Systemzeit korrigieren",
+        ),
+        (
+            "bucket lives at another endpoint/region (redirect)",
+            "der Bucket liegt an einem anderen Endpunkt/einer anderen Region (Redirect)",
+        ),
+        (
+            "bad request — often a region mismatch for this endpoint",
+            "Bad Request - oft ein Region-Mismatch für diesen Endpunkt",
+        ),
+        (
+            "access denied — check access key and secret",
+            "Zugriff verweigert - Access-Key und Secret prüfen",
+        ),
+        ("unexpected status", "unerwarteter Status"),
+        ("bucket `", "Bucket `"),
+    ];
+    for (en, de) in map {
+        if let Some(rest) = hint.strip_prefix(en) {
+            let rest = if en == "bucket `" {
+                match rest.strip_suffix("` not found") {
+                    Some(b) => return format!("Bucket `{b}` nicht gefunden"),
+                    None => rest,
+                }
+            } else {
+                rest
+            };
+            return format!("{de}{rest}");
+        }
+    }
+    hint.to_string()
+}
+
+/// The Tor probe's detail sentence (E6): the engine-/probe-authored
+/// verdict phrases localize by prefix, the four TargetGap clauses get
+/// their own arms, and rung tails (socket errors, hosts) ride verbatim.
+fn localize_tor_detail(lang: i32, d: &str) -> String {
+    if lang != 1 || d.is_empty() {
+        return d.to_string();
+    }
+    if let Some(g) = d.strip_prefix("no circuit was proven — ") {
+        return format!("kein Circuit bewiesen - {}", tor_gap_de(g));
+    }
+    if let Some(g) = d.strip_prefix("nothing about Tor could be established — ") {
+        return format!("nichts über Tor feststellbar - {}", tor_gap_de(g));
+    }
+    if let Some(net) = d
+        .strip_prefix("the configured anonymity network is ")
+        .and_then(|r| r.strip_suffix(", not tor — nothing was sent"))
+    {
+        return format!("das konfigurierte Anonymitätsnetz ist {net}, nicht tor - nichts wurde gesendet");
+    }
+    if d == "the resolved transport does not route over Tor" {
+        return "der aufgelöste Transport routet nicht über Tor".into();
+    }
+    if d == "Tor is not enabled — nothing was sent" {
+        return "Tor ist nicht aktiv - nichts wurde gesendet".into();
+    }
+    if d.starts_with("nothing was routed through the proxy") {
+        return "nichts lief durch den Proxy, also ist kein Circuit bewiesen - kein \
+                Relay aus dem Pool war über Tor erreichbar (die Relay-Einstellungen \
+                zeigen, welche dieser Knoten wählen darf)"
+            .into();
+    }
+    if d.starts_with("no SOCKS proxy to probe") {
+        return "kein SOCKS-Proxy zu prüfen und kein Relay, das dieser Knoten über \
+                Tor wählen darf - nichts über Tor feststellbar"
+            .into();
+    }
+    d.to_string()
+}
+
+/// The four `TargetGap` clauses → German (pinned distinct, like the
+/// English originals).
+fn tor_gap_de(g: &str) -> String {
+    match g {
+        "no relay is configured" => "kein Relay konfiguriert".into(),
+        "no relay is confirmed yet" => "noch kein Relay bestätigt".into(),
+        "the confirmed relays need non-onion dialing, which is switched off" => {
+            "die bestätigten Relays brauchen Nicht-Onion-Dialing, und das ist abgeschaltet".into()
+        }
+        "only local relays are configured, and those bypass Tor" => {
+            "nur lokale Relays konfiguriert, und die umgehen Tor".into()
+        }
+        other => other.to_string(),
+    }
+}
+
+/// The rejoiner's recovery status line (E6): three known note phrases and
+/// the failure prefixes localize; free-text error tails ride verbatim.
+fn localize_recover_note(lang: i32, n: &str) -> String {
+    if lang != 1 {
+        return n.to_string();
+    }
+    if let Some(m) = n
+        .strip_prefix("waiting for the coordinator's Welcome (")
+        .and_then(|r| r.strip_suffix(" min)"))
+    {
+        return format!("warte auf das Welcome des Koordinators ({m} min)");
+    }
+    match n {
+        "request sent - waiting for the coordinator's Welcome" => {
+            "Anfrage gesendet - warte auf das Welcome des Koordinators".into()
+        }
+        "welcomed back - fetching the chain anchor" => {
+            "willkommen zurück - hole den Chain-Anker".into()
+        }
+        other => other.to_string(),
+    }
+}
+
+/// The rejoiner's recovery FAILURE line (E6): the wrapper prefixes and
+/// the timeout sentence localize, the wrapped error rides verbatim.
+fn localize_recover_failed(lang: i32, e: &str) -> String {
+    if lang != 1 {
+        return e.to_string();
+    }
+    if let Some(t) = e.strip_prefix("recovery request: ") {
+        return format!("Recovery-Anfrage: {t}");
+    }
+    if let Some(t) = e.strip_prefix("mls welcome: ") {
+        return format!("MLS-Welcome: {t}");
+    }
+    if e.starts_with("no Welcome arrived within 15 minutes") {
+        return "kein Welcome binnen 15 Minuten - der Koordinator muss laufen und \
+                die Rückkehr bestätigen"
+            .into();
+    }
+    e.to_string()
+}
+
 fn issue_then_toast(
     rt: &Handle,
     wallet: &WalletHandle,
@@ -3025,10 +3294,10 @@ fn apply_session(
     // a failed write carries its detail in the notice; split it off so the
     // settings footer can render it in the error tone without string ops
     ui.set_notice_failed(
-        if sv.notice.starts_with("save-failed") {
-            sv.notice.clone()
-        } else {
-            String::new()
+        match sv.notice.strip_prefix("save-failed: ") {
+            Some(d) if lang == 1 => format!("Speichern fehlgeschlagen: {d}"),
+            _ if sv.notice.starts_with("save-failed") => sv.notice.clone(),
+            _ => String::new(),
         }
         .into(),
     );
@@ -3078,11 +3347,11 @@ fn apply_session(
             }
             RecoverNotice::Failed(error) => {
                 ui.set_rv_running(false);
-                ui.set_rv_error(error.into());
+                ui.set_rv_error(localize_recover_failed(lang, &error).into());
                 ui.set_rv_note("".into());
             }
             RecoverNotice::Note(line) => {
-                ui.set_rv_note(line.into());
+                ui.set_rv_note(localize_recover_note(lang, &line).into());
             }
             RecoverNotice::Done(_) => {
                 // the engine flips to Main itself — just clear the peer-way
@@ -3132,8 +3401,8 @@ fn apply_session(
     // the S3 test status is transient and lives outside the settings draft,
     // so push it on every update — even while the user has an unsaved field
     // open and `settings_changed` is suppressed
-    ui.set_cfg_s3_test(sv.s3_test.clone().into());
-    ui.set_cfg_bk_list(sv.s3_list.clone().into());
+    ui.set_cfg_s3_test(localize_s3_verdict(lang, &sv.s3_test).into());
+    ui.set_cfg_bk_list(localize_s3_verdict(lang, &sv.s3_list).into());
     // …and the same for the Tor probe's verdict. The rung's key drives the
     // "testing" affordance, the sentence and its tone come from Rust so the
     // "only a proven circuit is green" rule stays a tested statement, and the
@@ -3165,14 +3434,14 @@ fn apply_session(
         tor_verdict_copy_for(lang, sv.tor_test.state, session_locked).into(),
     );
     ui.set_cfg_tor_test_tone(tor_test_tone(sv.tor_test.state));
-    ui.set_cfg_tor_test_detail(tor_test_detail(&sv.tor_test).into());
+    ui.set_cfg_tor_test_detail(tor_test_detail(lang, &sv.tor_test).into());
 
     // transport health for the header "chat" pill: tone (green/amber/red) plus
     // the engine's reason string as the hover tooltip (P6). Pushed on every
     // update so a dial outcome repaints the pill regardless of settings edits.
     let (net_tone, net_reason) = net_health_pill(&sv.net_health);
     ui.set_net_health_tone(net_tone);
-    ui.set_net_health_reason(net_reason.into());
+    ui.set_net_health_reason(localize_net_reason(lang, &net_reason).into());
 
     // the create screen's read-only "Network" line: the EFFECTIVE global
     // anonymity network. NOT a draft field (the user never types it), so it
@@ -6519,9 +6788,9 @@ fn tor_verdict_copy(lang: i32, state: molt_core::TorTestState) -> &'static str {
 /// The technical second line under a Tor verdict: the SOCKS address that was
 /// probed, the relay that was dialed, the circuit's dial time and the engine's
 /// own reason — every part omitted when the engine did not report it, so the
-/// line can never suggest a probe that did not happen. Deliberately English
-/// and untranslated (it is engine diagnostics, not product copy).
-fn tor_test_detail(t: &molt_core::TorTest) -> String {
+/// line can never suggest a probe that did not happen. The verdict phrases
+/// localize (E6); raw rung tails (socket errors, hosts) stay verbatim.
+fn tor_test_detail(lang: i32, t: &molt_core::TorTest) -> String {
     let mut parts: Vec<String> = Vec::new();
     if !t.proxy.is_empty() {
         parts.push(format!("socks {}", t.proxy));
@@ -6535,7 +6804,7 @@ fn tor_test_detail(t: &molt_core::TorTest) -> String {
         parts.push(format!("{} ms", t.ms));
     }
     if !t.detail.is_empty() {
-        parts.push(t.detail.clone());
+        parts.push(localize_tor_detail(lang, &t.detail));
     }
     parts.join(" · ")
 }
@@ -8209,6 +8478,85 @@ lexicon! {
 
 #[cfg(test)]
 mod tests {
+    /// E6: the transport-pill reason, S3 verdicts, Tor details and the
+    /// recovery status lines render German part-wise; machine states and
+    /// free-text error tails ride verbatim.
+    #[test]
+    fn e6_maps_render_german_and_keep_tails() {
+        use super::{
+            localize_net_reason, localize_recover_failed, localize_recover_note,
+            localize_s3_verdict, localize_tor_detail, tor_gap_de,
+        };
+        // net reason: compound parts — member, count and free tail survive
+        let r = "link to walter: connecting; sends to mara: io: broken pipe; \
+                 relays: no relay accepted the subscription; 3 frames past the key ring";
+        assert_eq!(
+            localize_net_reason(1, r),
+            "Verbindung zu walter: verbinde; Zustellung an mara: io: broken pipe; \
+             Relays: kein Relay nahm die Subscription an; 3 Frames jenseits des Schlüsselrings"
+        );
+        assert_eq!(localize_net_reason(0, r), r);
+        assert_eq!(
+            localize_net_reason(1, "no live relay connection (0 of 3 up, reconnecting)"),
+            "keine lebende Relay-Verbindung (0 von 3 erreichbar, verbinde neu)"
+        );
+        // the offline statics match by prefix (the engine wraps their tails)
+        assert!(localize_net_reason(
+            1,
+            "offline: no mesh links on disk — the mesh cannot resume; rejoin via a recovery link"
+        )
+        .starts_with("offline: keine Mesh-Links"));
+        // s3: machine states untouched; shells + hints localized, code rides
+        assert_eq!(localize_s3_verdict(1, "testing"), "testing");
+        assert_eq!(localize_s3_verdict(1, "ok"), "ok");
+        assert_eq!(
+            localize_s3_verdict(1, "error: endpoint: no bucket configured"),
+            "Fehler: Endpunkt: kein Bucket konfiguriert"
+        );
+        assert_eq!(
+            localize_s3_verdict(
+                1,
+                "error: http 403: access denied — check access key and secret (AccessDenied)"
+            ),
+            "Fehler: HTTP 403: Zugriff verweigert - Access-Key und Secret prüfen (AccessDenied)"
+        );
+        assert_eq!(
+            localize_s3_verdict(1, "error: http 404: bucket `media` not found"),
+            "Fehler: HTTP 404: Bucket `media` nicht gefunden"
+        );
+        // tor: the four gap clauses stay distinct; rung tails verbatim
+        let gaps = [
+            "no relay is configured",
+            "no relay is confirmed yet",
+            "the confirmed relays need non-onion dialing, which is switched off",
+            "only local relays are configured, and those bypass Tor",
+        ];
+        let mut des: Vec<String> = gaps.iter().map(|g| tor_gap_de(g)).collect();
+        for (g, d) in gaps.iter().zip(&des) {
+            assert_ne!(d, g, "gap clause without a German arm: {g}");
+        }
+        des.sort();
+        des.dedup();
+        assert_eq!(des.len(), 4, "gap renderings collide");
+        assert_eq!(
+            localize_tor_detail(1, "no circuit was proven — no relay is confirmed yet"),
+            "kein Circuit bewiesen - noch kein Relay bestätigt"
+        );
+        assert_eq!(
+            localize_tor_detail(1, "no relay handshake through Tor to x.onion: timed out"),
+            "no relay handshake through Tor to x.onion: timed out"
+        );
+        // recovery: known notes + failure prefixes, tails verbatim
+        assert_eq!(
+            localize_recover_note(1, "waiting for the coordinator's Welcome (7 min)"),
+            "warte auf das Welcome des Koordinators (7 min)"
+        );
+        assert_eq!(
+            localize_recover_failed(1, "recovery request: relay refused"),
+            "Recovery-Anfrage: relay refused"
+        );
+    }
+
     /// E6: every wiki-side refusal literal renders German — pinned against
     /// the SOURCE, so a new `Err("…")` in wiki.rs goes red here until it
     /// gets an arm in `localize_wiki_err`.
@@ -10263,7 +10611,7 @@ mod tests {
     #[test]
     fn the_tor_detail_line_states_only_what_was_probed() {
         use molt_core::{TorTest, TorTestState as S};
-        assert_eq!(tor_test_detail(&TorTest::default()), "");
+        assert_eq!(tor_test_detail(0, &TorTest::default()), "");
         let probed = TorTest {
             state: S::ProxyOnly,
             detail: "no confirmed relay to dial".into(),
@@ -10271,7 +10619,7 @@ mod tests {
             target: String::new(),
             ms: 0,
         };
-        let line = tor_test_detail(&probed);
+        let line = tor_test_detail(0, &probed);
         assert!(line.contains("127.0.0.1:9050"), "the probed SOCKS address is named");
         assert!(line.contains("no confirmed relay to dial"), "the engine's reason rides along");
         assert!(!line.contains("ms"), "no duration where none was measured");
@@ -10282,13 +10630,13 @@ mod tests {
             target: "wss://relay.onion".into(),
             ms: 812,
         };
-        let line = tor_test_detail(&circuit);
+        let line = tor_test_detail(0, &circuit);
         assert!(line.contains("wss://relay.onion"), "the relay that was reached is named");
         assert!(line.contains("812 ms"), "the circuit's dial time");
         // a duration measured on a rung that never completed a circuit is NOT
         // shown — it would read as a working connection
         let failed = TorTest { state: S::CircuitFailed, ms: 812, ..circuit.clone() };
-        assert!(!tor_test_detail(&failed).contains("812 ms"));
+        assert!(!tor_test_detail(0, &failed).contains("812 ms"));
     }
 
     /// The panel's button tests the DRAFT, not the saved settings: changing
