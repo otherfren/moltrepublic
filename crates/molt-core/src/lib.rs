@@ -3414,7 +3414,7 @@ pub enum Command {
     /// summarized pre-cut entries rebuilt from its checkpoint blob.
     ReadChain,
     /// The GUI publishes what its window currently shows
-    /// (`docs/ui/gui_over_mcp.md`) — the read half of driving the GUI
+    /// (`docs_archive/ui/gui_over_mcp.md`) — the read half of driving the GUI
     /// from MCP. ENGINE-INTERNAL in spirit: only the window may speak it
     /// (an agent must not forge what the window claims to show).
     UiPublish {
@@ -3424,7 +3424,7 @@ pub enum Command {
     /// Read the GUI's last published [`UiSnapshot`] (empty when no window
     /// runs, or none was published yet).
     ReadUiState,
-    /// Request one GUI interaction (`docs/ui/gui_over_mcp.md`): stored by
+    /// Request one GUI interaction (`docs_archive/ui/gui_over_mcp.md`): stored by
     /// the engine, announced as [`Event::UiActionRequested`], performed by
     /// the window's live mirror — which then publishes again, so the
     /// caller reads the effect back with [`Command::ReadUiState`].
@@ -4627,7 +4627,7 @@ impl Command {
 
 /// The synchronous answer to a [`Command`]. Streaming changes arrive separately
 /// as [`Event`]s on the broadcast channel.
-/// What the WINDOW claims to show (`docs/ui/gui_over_mcp.md`): published
+/// What the WINDOW claims to show (`docs_archive/ui/gui_over_mcp.md`): published
 /// by the GUI at the end of every live-mirror pass — so what it publishes
 /// is what it rendered — and read back over MCP so an agent can test the
 /// window the way it already tests the engine. Counts and a few strings,
@@ -4679,7 +4679,7 @@ pub struct UiSnapshot {
     pub generation: u64,
 }
 
-/// One requested GUI interaction (`docs/ui/gui_over_mcp.md`): a domain
+/// One requested GUI interaction (`docs_archive/ui/gui_over_mcp.md`): a domain
 /// VERB naming an affordance a human can reach (never a widget
 /// coordinate), performed by the window's live mirror. `args` shape is
 /// per-verb; unknown verbs are performed as no-ops and reported via the
@@ -4887,7 +4887,7 @@ pub struct ChannelInfo {
     pub unread: usize,
 }
 
-/// **What the GUI window is showing right now** (`docs/ui/gui_over_mcp.md`).
+/// **What the GUI window is showing right now** (`docs_archive/ui/gui_over_mcp.md`).
 ///
 /// Published by the GUI at the end of every live-mirror pass — the same
 /// place it applies a bundle, so this describes what was RENDERED, not what

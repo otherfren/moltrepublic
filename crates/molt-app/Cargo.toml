@@ -24,6 +24,11 @@ embedded-tor = ["molt-net/embedded-tor"]
 # Dev-only GUI iteration: Slint live-preview stubs + runtime .slint hot reload.
 # Use via scripts/dev-ui.sh, never as a default. Passes through to molt-ui.
 live-preview = ["molt-ui/live-preview"]
+# Dev-only headless GUI (docs_archive/ui/gui_over_mcp.md step 2): the real window on
+# the Slint testing backend — no display, full event loop — so the whole
+# program is drivable over MCP. Opt-in per build AND per run
+# (MOLT_UI_TESTING=1); never a default.
+ui-testing = ["dep:i-slint-backend-testing"]
 
 [dependencies]
 molt-core.workspace = true
@@ -38,3 +43,9 @@ clap.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# lockstep with the workspace's slint version (molt-ui pins the same pairing)
+i-slint-backend-testing = { version = "1.17", optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+serde_json.workspace = true

@@ -360,6 +360,15 @@ fn main() -> anyhow::Result<()> {
     } else {
         // UI mode (default): GUI on main thread; fall back to headless stdio
         // MCP if it can't start.
+        #[cfg(feature = "ui-testing")]
+        if std::env::var_os("MOLT_UI_TESTING").is_some_and(|v| v == "1") {
+            // docs_archive/ui/gui_over_mcp.md step 2: the real window on the Slint
+            // testing backend — no display, but the full event loop, so the
+            // live mirror publishes and `ui_action` drives it over MCP.
+            // Must run on this (main) thread, before the window is created.
+            i_slint_backend_testing::init_integration_test_with_system_time();
+            tracing::info!("mode: UI (testing backend, no display)");
+        }
         tracing::info!("mode: UI (GUI on main thread)");
         // The GUI greys the embedded tor-mode row unless this binary was built
         // with the in-process arti dialer (the `embedded-tor` feature, P3).

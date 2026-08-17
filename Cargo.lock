@@ -4599,6 +4599,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "clap",
+ "i-slint-backend-testing",
  "molt-config",
  "molt-core",
  "molt-engine",
@@ -4606,6 +4607,8 @@ dependencies = [
  "molt-net",
  "molt-storage",
  "molt-ui",
+ "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

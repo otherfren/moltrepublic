@@ -1,6 +1,19 @@
 # Error codes: making every engine-composed string localizable
 
-Status: **E1–E3 BUILT (2026-08-16); E4–E6 open.** E1 landed in compiler
+Status: **EXECUTED — E1–E6 BUILT (E1–E3 2026-08-16, E4–E6 2026-08-17).**
+E5 landed as a GENERALIZED phrase-as-key, not per-producer keys: the
+real inventory was 62 lines (not ~28), ~40 of them carrying dynamic
+slots, some tail-leading — so the engine exports SHAPES
+(`molt_engine::known_log_shapes`: constant parts with slots between),
+the GUI matches a line and re-renders it from German constants with the
+slots carried verbatim, and set-equality both ways plus a per-shape
+synthesis round-trip pin it (`every_log_shape_has_a_german_rendering`;
+engine-side well-formedness in `relay_msg.rs`). The wire and the engine
+tests stay English. E6 delivered: the net-health reason (part-wise), S3
+test/list verdicts (shells + HTTP hints), the Tor probe detail incl.
+the four TargetGap clauses, the rejoiner's recovery note/failure lines,
+the save-failed footer, the wiki pane's own refusals (source-scan
+pinned), and the two propose-toast funnel bypasses. E1 landed in compiler
 form: `molt-ui::localize_error` matches every `MoltError` variant with NO
 wildcard, so a new variant fails compilation until it gets a German arm
 (EN stays the engine `Display` verbatim — MCP parity; free-text tails ride

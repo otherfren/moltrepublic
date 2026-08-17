@@ -1,10 +1,18 @@
 # Driving and reading the GUI from MCP
 
-**Status: steps 1, 3 and 4 are BUILT (2026-08-16); steps 2 and 5 are
-open.** Step 1: `Command::UiPublish` (INTERNAL) + `ReadUiState` + the
+**Status: EXECUTED — all five steps are BUILT (2026-08-17).**
+Step 1: `Command::UiPublish` (INTERNAL) + `ReadUiState` + the
 `read_ui_state` tool; the GUI publishes at the end of every live-mirror
-pass, pinned by `the_ui_snapshot_claims_what_the_window_holds` (headless)
-and `the_ui_snapshot_roundtrips_and_actions_are_announced` (engine).
+pass — since 2026-08-17 the SURFACES pass included (before that, a
+chat message arriving left the published snapshot stale until the next
+session push; the walk script found it). Pinned by
+`the_ui_snapshot_claims_what_the_window_holds` (headless) and
+`the_ui_snapshot_roundtrips_and_actions_are_announced` (engine).
+Step 2: the `ui-testing` feature on molt-app + `MOLT_UI_TESTING=1`
+brings the real window up on the Slint testing backend (no display,
+full event loop) — pinned end-to-end by
+`molt-app/tests/headless_ui.rs` (spawns the real binary, reads the
+snapshot back over MCP TCP).
 Step 3 resolved itself during the wizard work: the cold-open bug was the
 layout-timing re-pin described below, fixed in the chat Flickable's
 `changed height` handler (`app.slint`, with the explanation in place).
@@ -12,8 +20,14 @@ Step 4: `Command::UiAction` + the `ui_action` tool with the first verb
 set (`select_view` · `select_channel` · `open_workspace` ·
 `close_workspace` · `chat_send`) performed by the live mirror through
 the SAME Slint callbacks a click takes; the snapshot's `generation`
-answers "did it land". Open: step 2 (a dev-only headless `moltd` run on
-the testing backend) and step 5 (the walk script), which depends on 2.
+answers "did it land".
+Step 5: `scripts/gui_walk.py` — two testing-backend nodes found a
+2-of-2 over a dev relay and the script walks founding, chat, topic
+channels (the view semantics asserted both ways), a proposal card
+through approve, the surfaces and close, asserting the WINDOW mirrors
+every phase. Verified green 2026-08-17. Known headless caveat:
+`chat_in_view` depends on layout-change timing and may stay false
+without a real draw pass (the script notes rather than asserts it).
 
 ## Why, concretely
 

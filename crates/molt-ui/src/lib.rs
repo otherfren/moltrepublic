@@ -5056,9 +5056,10 @@ async fn push_surfaces(
     let Some((my_gen, bundle)) = gather_surfaces(wallet, chat_ui).await else {
         return;
     };
-    let weak = weak.clone();
+    let weak2 = weak.clone();
     let chat_ui = chat_ui.clone();
     let _ = slint::invoke_from_event_loop(move || {
+        let weak = weak2;
         // the generation may have moved between the bundle build and this
         // closure running on the UI thread — a stale bundle must not land
         // (it would revert the visible pane until the next engine event)
@@ -5079,6 +5080,12 @@ async fn push_surfaces(
             );
         }
     });
+    // the snapshot must claim what this pass just rendered
+    // (gui_over_mcp.md): the publish closure queues AFTER the apply
+    // closure above, so it reads the fresh models — without this, a
+    // surfaces-only change (a chat message arriving) left the published
+    // snapshot stale until the next SESSION push
+    publish_ui_state(wallet, weak).await;
 }
 
 /// Build the Slint surface models from a bundle (on the UI thread). The rows

@@ -52,12 +52,6 @@ Experimental upstream — pin the behavior before relying on it. Cheap
 companion win either way: dedup the mock components (the vault KANN
 list) — codegen scales with element count.
 
-## GUI-over-MCP steps 2+5 · i18n E4–E6
-
-Tracked in their own live plans: `docs/ui/gui_over_mcp.md` (headless
-moltd run + walk script), `docs/ui/i18n_error_codes_plan.md` (typed
-notices, run-log lines, remaining lexicon fill).
-
 ## Field verification of the 2026-08-15/16 fixes
 
 `docs/transport/live_incident_2026-08-09.md` — the live three-node rerun
