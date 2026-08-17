@@ -8145,8 +8145,8 @@ lexicon! {
     field_mcp_token: "API token", "API-Token";
     set_rotate: "Rotate", "Rotieren";
     set_token_note: "Sent by clients as the token in initialize. Rotate writes a fresh token to config.toml; it takes effect on restart.", "Von Clients als token im initialize gesendet. Rotieren schreibt ein frisches Token in die config.toml; es gilt ab dem Neustart.";
-    set_token_show: "Reveal", "Anzeigen";
-    set_token_hide: "Hide", "Verbergen";
+    peek_show: "Reveal", "Anzeigen";
+    peek_hide: "Hide", "Verbergen";
     field_headless: "Headless (MCP only, no GUI)", "Headless (nur MCP, keine GUI)";
     cw_title: "Found a new Republic", "Neue Republik gründen";
     cw_grp_republic: "Workspace", "Workspace";
@@ -8737,8 +8737,6 @@ lexicon! {
     vt_hint_unsealed: "Every grant is on record - the content opens only for the elected reader.", "Jede Erteilung steht im Protokoll - der Inhalt öffnet sich nur für den gewählten Leser.";
     vt_only_you: "readable only by you", "nur für dich lesbar";
     vt_only_by: "readable only by", "lesbar nur für";
-    vt_reveal: "Reveal", "Anzeigen";
-    vt_hide: "Hide", "Verbergen";
     wl_title_balance: "Treasury balance", "Kassenstand";
     wl_hint_balance: "The shared Monero multisig wallet - no single member can spend from it.", "Die gemeinsame Monero-Multisig-Wallet - kein einzelnes Mitglied kann daraus ausgeben.";
     wl_unlocked: "unlocked", "verfügbar";

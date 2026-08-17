@@ -886,3 +886,26 @@ export component DotLabel inherits HorizontalLayout {
         overflow: elide;
     }
 }
+
+// The one masked-content well (settings token, vault secret): an inset
+// panel showing `text` when revealed and a fixed mask band otherwise.
+export component InsetWell inherits Rectangle {
+    in property <string> text;
+    in property <bool> revealed: true;
+    // char-wrap for token-like content, word-wrap for prose
+    in property <bool> char-wrap: false;
+    background: Theme.bg;
+    border-radius: Theme.win95 ? 0px : 6px;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    height: max(38px, ct.preferred-height + 16px);
+    ct := Text {
+        x: 10px;
+        y: 8px;
+        width: parent.width - 20px;
+        text: root.text == "" ? "-" : (root.revealed ? root.text : "••••••••••••••••");
+        color: root.revealed && root.text != "" ? Theme.text : Theme.faint;
+        font-size: Theme.fs-cap;
+        wrap: root.char-wrap ? TextWrap.char-wrap : TextWrap.word-wrap;
+    }
+}

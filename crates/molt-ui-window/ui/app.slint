@@ -23,7 +23,7 @@ import "assets/fonts/Twemoji.Mozilla.ttf";
 import { Theme, Strings, HintTip, WikiState, PatchView, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, InvitePreview, LinkPreview, BackupRow, ChainRow, RelayItem, RelayPick } from "theme.slint";
 import {
     AppButton, AppField, AppArea, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
-    ConfirmModal, DotLabel
+    ConfirmModal, DotLabel, InsetWell
 } from "components.slint";
 import {
     BusyModal, ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, SeedConfirmStep, RunView, RitualLog, WizardFrame, CharterView, SealedPanel, ProposalCard, DecisionTable, Spinner, DiffViewer
@@ -7419,23 +7419,11 @@ export component AppWindow inherits Window {
                                     // leaving the tab drops this branch, so the
                                     // token re-masks on its own
                                     property <bool> token-shown: false;
-                                    Rectangle {
+                                    InsetWell {
                                         horizontal-stretch: 1;
-                                        background: Theme.panel;
-                                        border-radius: Theme.radius;
-                                        border-width: Theme.border-w;
-                                        border-color: Theme.line;
-                                        height: max(38px, token-text.preferred-height + 20px);
-                                        token-text := Text {
-                                            x: 12px;
-                                            y: 10px;
-                                            width: parent.width - 24px;
-                                            text: root.cfg-mcp-token == "" ? "-"
-                                                : (tok-row.token-shown ? root.cfg-mcp-token : "****************");
-                                            color: Theme.text;
-                                            font-size: Theme.fs-cap;
-                                            wrap: char-wrap;
-                                        }
+                                        text: root.cfg-mcp-token;
+                                        revealed: tok-row.token-shown;
+                                        char-wrap: true;
                                     }
                                     AppButton {
                                         pad: 10px;
@@ -7443,7 +7431,7 @@ export component AppWindow inherits Window {
                                         icon-set: true;
                                         primary: tok-row.token-shown;
                                         enabled: root.cfg-mcp-token != "";
-                                        tooltip: tok-row.token-shown ? Strings.set-token-hide : Strings.set-token-show;
+                                        tooltip: tok-row.token-shown ? Strings.peek-hide : Strings.peek-show;
                                         clicked => {
                                             tok-row.token-shown = !tok-row.token-shown;
                                         }
