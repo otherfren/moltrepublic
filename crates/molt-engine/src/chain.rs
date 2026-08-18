@@ -4960,15 +4960,35 @@ mod tests {
             peer.cmd_net_delivered(from.to_string(), env, None)
                 .expect("a wire drop acks, never errors");
         };
-        // petra claiming walter's description: dropped
+        // A profile op arriving under ANOTHER member's link is the normal
+        // WP2 shape, not a forgery: `serve_open_governance` re-serves every
+        // open card under the SERVING peer's identity (make_env(me, body)),
+        // so a catching-up holder meets walter's edit with from = petra.
+        // Dropping on `payload.member != from` blinded exactly that holder -
+        // it could never see, let alone vote on, another seat's profile
+        // proposal. Authorship is unauthenticated by design here
+        // (`ProposalRecord.by` is a DISPLAY hint); the self-edit rule is
+        // enforced where it IS decidable, at the propose gate.
         deliver(&mut peer, 20, "petra", json!({ "op": "set_member_desc", "member": "walter", "value": "hi" }));
         assert!(
-            !peer.proposals.contains_key(&20),
-            "a profile op claiming another seat must never become a pending proposal"
+            peer.proposals.contains_key(&20),
+            "a re-served profile card must reach a catching-up holder"
         );
         // petra editing her own: recorded
         deliver(&mut peer, 21, "petra", json!({ "op": "set_member_desc", "member": "petra", "value": "hi" }));
         assert!(peer.proposals.contains_key(&21), "a member's own profile edit is recorded");
+        // what IS node-independently decidable: the seat must exist. A
+        // profile op for a stranger could never fold onto anything
+        deliver(&mut peer, 26, "petra", json!({ "op": "set_member_desc", "member": "ghost", "value": "hi" }));
+        assert!(
+            !peer.proposals.contains_key(&26),
+            "a profile op for a seat that is not in the roster is dropped"
+        );
+        deliver(&mut peer, 27, "petra", json!({ "op": "set_member_desc", "value": "hi" }));
+        assert!(
+            !peer.proposals.contains_key(&27),
+            "a profile op naming no seat is dropped"
+        );
         // the picture ops carry the square rule onto the wire
         let square = base64::engine::general_purpose::STANDARD
             .encode(crate::tests::tiny_bmp_header(2, 2));

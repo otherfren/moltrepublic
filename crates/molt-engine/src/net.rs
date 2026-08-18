@@ -1442,19 +1442,29 @@ impl State {
                     tracing::warn!(from = %from, "dropping a set_relays proposal with an empty pool");
                     return Ok(Reply::Ack);
                 }
-                // (4) a member profile belongs to its member: the link
-                // identity is the only proof of authorship, so a profile op
-                // claiming another seat is dropped
-                // (`member_profiles_plan.md` §2 — the wire twin of the
-                // cmd_propose gate)
+                // (4) a profile op must name a SEAT. That is the part every
+                // holder decides identically — and it is ALL this door can
+                // decide. Authorship is not checkable here: WP2's
+                // `serve_open_governance` re-serves every open card under the
+                // SERVING peer's identity (`make_env(me, body)`), so a
+                // legitimate re-serve and a forged claim have the same shape
+                // on the wire, and `ProposalRecord.by` is a display hint by
+                // design. Dropping on `payload.member != from` therefore
+                // blinded exactly the catching-up holder WP2 exists for: it
+                // never saw another seat's open profile card, so it could
+                // never vote on it. The self-edit rule lives where the seat
+                // IS known — the propose gate (`cmd_propose`); past that,
+                // the threshold governs, as it does for every org change.
                 if surface == molt_core::Surface::Organization
                     && crate::proposals::is_member_profile_op(&payload)
-                    && payload.get("member").and_then(serde_json::Value::as_str)
-                        != Some(from.as_str())
+                    && !payload
+                        .get("member")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|m| self.roster().iter().any(|s| s == m))
                 {
                     let claimed =
                         payload.get("member").and_then(serde_json::Value::as_str).unwrap_or("");
-                    tracing::warn!(from = %from, claimed = %claimed, "dropping a profile proposal for another member");
+                    tracing::warn!(from = %from, claimed = %claimed, "dropping a profile proposal for an unknown seat");
                     return Ok(Reply::Ack);
                 }
                 // (5) the description cap is that same one contract: a
