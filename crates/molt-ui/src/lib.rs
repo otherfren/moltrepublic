@@ -2685,6 +2685,17 @@ fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
                 other => other,
             }
         ),
+        E::WikiExport(t) => format!(
+            "Wiki-Export: {}",
+            match *t {
+                "a target directory is required" => "Zielordner fehlt",
+                "an export is already running" => "läuft bereits",
+                "the wiki is empty" => "Wiki ist leer",
+                "proof needs chain governance" => "Nachweis braucht Chain-Governance",
+                "proof needs the genesis block" => "Nachweis braucht den Genesis-Block",
+                other => other,
+            }
+        ),
         E::Engine(t) => format!("Engine: {t}"),
     }
 }
