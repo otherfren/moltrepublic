@@ -249,6 +249,17 @@ impl MlsChannel {
                         return MlsDecode::Discard;
                     }
                 }
+                // a poke: its own tag for the same reason as the acks — the
+                // tag IS the version boundary, and an older build that
+                // predates it lands in the NUL discard below
+                match crate::poke::Poke::from_frame(&plaintext) {
+                    Ok(poke) => return MlsDecode::Poke(from, Box::new(poke)),
+                    Err(crate::poke::PokeError::NotAPoke) => {}
+                    Err(e) => {
+                        tracing::debug!(error = %e, "dropping an unusable poke");
+                        return MlsDecode::Discard;
+                    }
+                }
                 // the `\x00molt-mesh-*` space is reserved for control frames; a
                 // JSON envelope never starts with NUL. An unknown control tag (a
                 // newer control frame this build predates) is dropped as a no-op,
@@ -313,6 +324,10 @@ pub(crate) enum MlsDecode {
     /// A BROADCAST claim sheet (N5.3): the authenticated sender reports what
     /// it accepted, per subject. The receiver acts only on its OWN entry.
     GroupAck(MemberId, Box<crate::group_ack::GroupAck>),
+    /// A poke: an ephemeral, directed nudge. Everyone in the group decrypts
+    /// it, only the named target reacts — and only behind that node's own
+    /// opt-in. Carries no state, so it is deliberately NOT a log event.
+    Poke(MemberId, Box<crate::poke::Poke>),
     /// A commit merged (epoch advanced) — ack it and retry the epoch buffer.
     /// `readmitted` names the members the commit ADDED (a recovery re-key):
     /// the consumer forwards them to the engine BEFORE anything of the new
@@ -394,6 +409,13 @@ pub trait EngineSink: Send + Sync + Clone + 'static {
     ) -> impl std::future::Future<Output = Result<(), NetError>> + Send;
     /// Passive presence: authenticated traffic from `member` arrived.
     fn peer_seen(&self, member: &MemberId) -> impl std::future::Future<Output = ()> + Send;
+    /// An authenticated poke from `member` addressed at `to`. Default no-op
+    /// so existing sinks keep compiling (additive). The engine decides
+    /// whether it is for this seat and whether this node reacts at all.
+    fn poked(&self, member: &MemberId, to: &MemberId) -> impl std::future::Future<Output = ()> + Send {
+        let _ = (member, to);
+        async {}
+    }
     /// Sends to `member` keep failing; the outbox is backing off.
     fn send_failed(
         &self,
@@ -1227,6 +1249,13 @@ async fn drain_epoch_buffer<K: EngineSink>(
                 // and no use for one, and acting on it would apply a broadcast
                 // claim through pairwise bookkeeping
                 MlsDecode::GroupAck(_, _) => {}
+                // a nudge held across an epoch advance is stale by the time it
+                // lands: stamp presence, drop the nudge (a late poke is noise)
+                MlsDecode::Poke(_, _) => {
+                    progressed = true;
+                    sink.peer_seen(&peer.member).await;
+                    ack_all(held);
+                }
                 MlsDecode::Ack(_, _) => {
                     // an ack held across an epoch advance: stamp presence and
                     // let it go — its window is stale by now, and the peer's
@@ -1495,6 +1524,19 @@ where
                     ack_all(acks);
                 }
                 MlsDecode::GroupAck(..) => {
+                    ack_all(acks);
+                }
+                // a poke on a queue leg: only the LINK's member may speak for
+                // itself, exactly like an ack — then hand it to the engine,
+                // which owns the opt-in, the target check and the cooldown
+                MlsDecode::Poke(from, poke) => {
+                    tracing::debug!(peer = %peer.member, %from, to = %poke.to, "MESHRX decode=POKE");
+                    sink.peer_seen(&peer.member).await;
+                    if from == peer.member && poke.by == from {
+                        sink.poked(&from, &poke.to).await;
+                    } else {
+                        tracing::warn!(peer = %peer.member, claimed = %poke.by, "a poke disowns its link - dropped");
+                    }
                     ack_all(acks);
                 }
                 MlsDecode::Ack(from, win) => {

@@ -343,6 +343,17 @@ pub fn run_app(
                 return;
             };
             let settings = read_settings_draft(&ui, stored_file_cap(&last));
+            // the wake command has its own door — the settings paths refuse
+            // it, so that no surface but this one (and config.toml) can plant
+            // a shell command. One click, two commands.
+            issue(
+                &rt,
+                &w,
+                &ui.as_weak(),
+                Command::SetWakeCommand {
+                    command: ui.get_cfg_poke_wake().to_string(),
+                },
+            );
             issue(&rt, &w, &ui.as_weak(), Command::SaveSettings { settings });
         });
     }
@@ -3486,6 +3497,11 @@ fn apply_session(
     ui.set_screen(from_screen(sv.screen));
     ui.set_selected_surface(sv.surface.as_str().into());
     ui.set_selected_view(sv.view.as_str().into());
+    // What the poke menus gate on: the APPLIED value, never the settings
+    // draft. A ticked-but-unsaved checkbox would otherwise offer a menu whose
+    // command the engine refuses (and an unticked one would hide a menu that
+    // still works).
+    ui.set_node_poke_on(sv.settings.poke_enabled);
 
     // the Open screen's list mirrors the session's workspaces, re-applying
     // whatever column sort the user picked
@@ -8533,6 +8549,8 @@ lexicon! {
     sound_off: "off", "aus";
     field_poking: "Poking", "Anstupsen";
     set_poke_enabled: "Enable poking", "Anstupsen aktivieren";
+    field_wake: "Agent wake", "Agenten wecken";
+    wake_hint: "Runs on a poke or a vote waiting for you. Empty = off.", "Läuft bei einem Stups oder wartender Abstimmung. Leer = aus.";
     field_poke_wake: "Wake command", "Weck-Kommando";
     mem_poke: "Poke member", "Mitglied anstupsen";
     toast_poked: "poked you", "hat dich angestupst";

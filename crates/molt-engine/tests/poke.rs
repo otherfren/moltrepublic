@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #![allow(missing_docs)]
 
-//! **Poke, end to end over the mesh**: a directed nudge crosses the wire
-//! like chat, and the target reacts only behind its own opt-in — an emitted
-//! [`Event::Poked`] (what a GUI toasts and sounds) plus the configured wake
-//! command (how a sleeping agent harness gets its prompt).
+//! **Poke, end to end over the mesh**: the nudge crosses the wire as a
+//! CONTROL FRAME (never a log event — that is what keeps an older build able
+//! to open the workspace), and the target reacts only behind its own opt-in:
+//! an emitted [`Event::Poked`] (what a GUI toasts and sounds) plus the
+//! configured wake command (how a sleeping agent harness gets its prompt).
 
 mod common;
 
@@ -12,13 +13,19 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::{found_with_mesh, CaptureSink};
-use molt_core::{Command, Event, EventEnvelope, WorkspaceEvent};
+use molt_core::{Command, Event, WorkspaceEvent};
 use molt_net::supervisor::{self, MemLog, MemStateStore, NetConfig};
 use molt_net::{MlsChannel, MlsMember, PeerLink};
 use tokio::sync::watch;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_poke_crosses_the_mesh_and_wakes_the_opted_in_target() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .try_init();
     let tmp = tempfile::tempdir().expect("tmp");
     let root_a = tmp.path().join("founder");
     let (a, hub, member_mesh, member_mls, _id) = found_with_mesh(&root_a).await;
@@ -55,46 +62,74 @@ async fn a_poke_crosses_the_mesh_and_wakes_the_opted_in_target() {
     assert!(refused.is_err(), "poking without the opt-in must refuse");
 
     let marker = tmp.path().join("wake-marker");
+    let wake = format!(
+        "echo \"$MOLT_WAKE_REASON $MOLT_WAKE_BY\" > '{}'",
+        marker.display()
+    );
+    // the wake command has its own door: the wholesale settings paths refuse
+    // it, so an MCP client can never plant a shell command
+    assert!(
+        a.execute(Command::PatchSettings {
+            patch: serde_json::json!({ "poke_wake_command": wake.clone() }),
+        })
+        .await
+        .is_err(),
+        "patch_settings must not be able to set a shell command"
+    );
     a.execute(Command::PatchSettings {
-        patch: serde_json::json!({
-            "poke_enabled": true,
-            "poke_wake_command":
-                format!("echo \"$MOLT_WAKE_REASON $MOLT_WAKE_BY\" > '{}'", marker.display()),
-        }),
+        patch: serde_json::json!({ "poke_enabled": true }),
     })
     .await
-    .expect("enable poking + arm the wake hook");
+    .expect("enable poking");
+    a.execute(Command::SetWakeCommand {
+        command: wake.clone(),
+    })
+    .await
+    .expect("arm the wake hook");
+
     a.execute(Command::Poke {
         member: "member-b".to_string(),
     })
     .await
     .expect("poke member-b");
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    while !member_sink.messages().iter().any(|(from, env)| {
-        from == "founder-a"
-            && matches!(&env.body, WorkspaceEvent::Poked { to } if to == "member-b")
-    }) {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the poke never crossed the mesh"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    // the poke leaves as a CONTROL FRAME: nothing lands in the log, and the
+    // member's sink (which only ever sees application envelopes) stays empty
+    // of it. What proves the wire crossing is the inbound leg below.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !member_sink
+            .messages()
+            .iter()
+            .any(|(_, env)| !matches!(&env.body, WorkspaceEvent::Chat(_))),
+        "a poke must not appear as an application envelope"
+    );
 
-    // inbound leg: member-b pokes the founder — the founder's engine emits
-    // Event::Poked (toast + sound in a GUI) and runs the wake command
+    // inbound leg: member-b pokes the founder over the SAME control-frame
+    // path the engine uses — the founder's engine emits Event::Poked (toast
+    // + sound in a GUI) and runs the wake command
     let mut ev = a.subscribe();
-    member_feed.push(EventEnvelope {
-        prev_seq: 0,
-        seq: 9,
-        ts: 9,
-        by: "member-b".to_string(),
-        body: WorkspaceEvent::Poked {
-            to: "founder-a".to_string(),
-        },
-    });
-    let _ = member_wake.send(9);
+    let frame = molt_net::poke::Poke::new("member-b".to_string(), "founder-a".to_string())
+        .to_frame();
+    let ct = member_group
+        .lock()
+        .expect("mls lock")
+        .encrypt(&frame)
+        .expect("encrypt the poke");
+    let founder_link = molt_net::PeerLink::from_mesh(
+        member_mesh.first().expect("the member's mesh link"),
+    )
+    .expect("peer link");
+    molt_net::supervisor::send_framed(
+        &hub,
+        founder_link.snd0(),
+        &founder_link.wrap_out,
+        molt_net::MsgId([9u8; 16]),
+        &ct,
+    )
+    .await
+    .expect("send the poke frame");
+    let _ = (&member_feed, &member_wake);
 
     let by = tokio::time::timeout(Duration::from_secs(20), async {
         loop {

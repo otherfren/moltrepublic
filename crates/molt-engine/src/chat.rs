@@ -34,6 +34,11 @@ pub(crate) const POKE_COOLDOWN_SECS: u64 = 60;
 /// the wake command once, then the woken agent reads the full state anyway.
 pub(crate) const WAKE_HOLDOFF_SECS: u64 = 300;
 
+/// Is a wake command running right now? One at a time, process-wide: the
+/// per-sender cooldown bounds each POKER, not the total, and an agent that
+/// is already awake needs no second nudge.
+static WAKE_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Mint a fresh random message id (chat-bus pin P1: 128-bit CSPRNG, minted
 /// by the engine — never `mockrand`, never in `molt-core`).
 pub(crate) fn mint_message_id() -> Result<MessageId, MoltError> {
@@ -793,16 +798,46 @@ impl State {
         if !self.roster().contains(&member) {
             return Err(MoltError::Poke("unknown member"));
         }
-        let env = self.make_env(
-            from.clone(),
-            WorkspaceEvent::Poked { to: member.clone() },
-        );
-        self.record(env);
+        self.send_poke(&from, &member)?;
         self.emit(Event::Poked {
             by: from,
             to: member,
         });
         Ok(Reply::Ack)
+    }
+
+    /// Put one poke onto the wire as a CONTROL FRAME — never a log event.
+    ///
+    /// A nudge carries no state: recording it would cost an older build the
+    /// whole workspace (an unknown `WorkspaceEvent` variant refuses to open,
+    /// `session.rs`) and would pin this node's acked floor against any peer
+    /// that cannot decode it. The control-frame space is explicitly
+    /// forward-compatible instead — `supervisor::decode` drops an unknown
+    /// `\x00molt-…` tag as a no-op.
+    fn send_poke(&mut self, from: &MemberId, to: &MemberId) -> Result<(), MoltError> {
+        let poke = molt_net::poke::Poke::new(from.clone(), to.clone());
+        // production transport: one broadcast frame for the whole republic
+        if let Some(group) = self.group_net.as_ref() {
+            group.handle.publish_poke(poke);
+            return Ok(());
+        }
+        // queue mesh (the test transport): straight onto the target's leg
+        let Some(net) = self.net.as_ref() else {
+            return Err(MoltError::Poke("no transport"));
+        };
+        let (Some(transport), Some(group)) = (net.runtime_transport(), net.group_arc()) else {
+            return Err(MoltError::Poke("no transport"));
+        };
+        let Some(peer) = net
+            .mesh()
+            .iter()
+            .filter_map(molt_net::PeerLink::from_mesh)
+            .find(|p| p.member == *to)
+        else {
+            return Err(MoltError::Poke("no link to that member"));
+        };
+        tokio::spawn(Self::send_ping(transport, group, peer, poke.to_frame()));
+        Ok(())
     }
 
     /// React to a poke that arrived over the wire (`from` is the
@@ -811,6 +846,11 @@ impl State {
     /// wake command — at most once per sender per [`POKE_COOLDOWN_SECS`].
     pub(crate) fn receive_poke(&mut self, from: &str, to: &MemberId) {
         if *to != self.member() || !self.session.settings.poke_enabled {
+            tracing::debug!(
+                %from, %to, me = %self.member(),
+                enabled = self.session.settings.poke_enabled,
+                "poke not for this seat, or poking is off"
+            );
             return;
         }
         let now = self.presence_now();
@@ -862,27 +902,47 @@ impl State {
         if cmd.is_empty() {
             return;
         }
+        // ONE wake at a time, republic-wide. The per-sender cooldown alone
+        // does not bound this: n members poking once each spawn n processes
+        // per minute, and a realistic wake (an agent turn) runs for minutes.
+        // The flag is released by the reaper thread, so a wake that is still
+        // running simply swallows further nudges - which is also the honest
+        // semantics: the agent is already awake.
+        if WAKE_RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            tracing::debug!(reason, "a wake is already running - nudge swallowed");
+            return;
+        }
         let by = by.to_string();
         let workspace = self.session.active_workspace.clone();
         tracing::info!(reason, %by, "wake command spawned");
-        std::thread::spawn(move || {
-            match std::process::Command::new("sh")
-                .arg("-c")
-                .arg(&cmd)
-                .env("MOLT_WAKE_REASON", reason)
-                .env("MOLT_WAKE_BY", &by)
-                .env("MOLT_WAKE_WORKSPACE", &workspace)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-            {
-                Ok(mut child) => {
-                    let _ = child.wait();
+        // `Builder::spawn`, never `thread::spawn`: the latter PANICS when the
+        // OS refuses a thread, and this runs on the single-owner actor - one
+        // exhausted thread table would take the whole engine down.
+        let spawned = std::thread::Builder::new()
+            .name("molt-wake".to_string())
+            .spawn(move || {
+                match std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(&cmd)
+                    .env("MOLT_WAKE_REASON", reason)
+                    .env("MOLT_WAKE_BY", &by)
+                    .env("MOLT_WAKE_WORKSPACE", &workspace)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                {
+                    Ok(mut child) => {
+                        let _ = child.wait();
+                    }
+                    Err(e) => tracing::warn!(error = %e, "wake command failed to spawn"),
                 }
-                Err(e) => tracing::warn!(error = %e, "wake command failed to spawn"),
-            }
-        });
+                WAKE_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+            });
+        if let Err(e) = spawned {
+            WAKE_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+            tracing::warn!(error = %e, "no thread for the wake command");
+        }
     }
 }
 
@@ -1570,20 +1630,41 @@ mod tests {
             "a poke needs a roster member"
         );
 
-        let mut ev = st.subscribe_events();
-        st.cmd_poke("peer-1".to_string()).expect("a valid poke");
+        // a valid poke needs a transport to leave on, and says so honestly
+        // rather than pretending it went out (plain_state has none)
         assert!(
             matches!(
-                ev.try_recv(),
-                Ok(crate::Event::Poked { by, to }) if by == "me" && to == "peer-1"
+                st.cmd_poke("peer-1".to_string()),
+                Err(MoltError::Poke("no transport"))
             ),
-            "the sender's node confirms the poke"
+            "a poke without a transport is refused, not silently swallowed"
         );
-        assert!(
-            crate::net::crosses_wire(&WorkspaceEvent::Poked {
-                to: "peer-1".to_string()
-            }),
-            "a poke must reach the outbox"
+    }
+
+    /// **A poke is never a log event.** It is a control frame, and that is
+    /// what keeps an OLDER build able to open this workspace: an unknown
+    /// `WorkspaceEvent` variant refuses the whole open, while an unknown
+    /// control tag is dropped as a no-op. Recording a nudge would also pin
+    /// this node's acked floor against every peer that cannot decode it.
+    #[test]
+    fn a_poke_never_becomes_a_log_event() {
+        let mut st = plain_state();
+        st.session.settings.poke_enabled = true;
+        let before = st.dump();
+        let _ = st.cmd_poke("peer-1".to_string());
+        let after = st.dump();
+        assert_eq!(
+            before.chat.len(),
+            after.chat.len(),
+            "a poke must not append to the log"
+        );
+        // and the receive side records nothing either
+        let me = st.member();
+        st.receive_poke("peer-1", &me);
+        assert_eq!(
+            st.dump().chat.len(),
+            after.chat.len(),
+            "a received poke must not append to the log"
         );
     }
 

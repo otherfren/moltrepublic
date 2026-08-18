@@ -1663,6 +1663,9 @@ export component AppWindow inherits Window {
     in-out property <int> cfg-sound-poke-index: 0;
     in-out property <bool> cfg-poke-enabled: false;
     in-out property <string> cfg-poke-wake;
+    // the APPLIED poking switch (not the settings draft): what the poke
+    // context menus gate on, so the menu and the engine never disagree
+    in property <bool> node-poke-on: false;
     // send (and show) per-message chat read receipts — a local privacy
     // switch, seeded from the applied session so the chat's receipt rows
     // track it live (the settings checkbox binds to it, save persists it).
@@ -4574,7 +4577,7 @@ export component AppWindow inherits Window {
                                         y: Math.floor(i / pgrid.cols) * (pgrid.chip-h + pgrid.gap);
                                         width: pgrid.chip-w;
                                         m: m;
-                                        pokable: root.cfg-poke-enabled && m.name != root.node-member;
+                                        pokable: root.node-poke-on && m.name != root.node-member;
                                         clicked => {
                                             root.select-view("organization", "members");
                                         }
@@ -5684,7 +5687,7 @@ export component AppWindow inherits Window {
                                             // the row, so the menu receives the
                                             // right-click natively (no show() dance)
                                             ContextMenuArea {
-                                                enabled: root.cfg-poke-enabled && m.name != root.node-member;
+                                                enabled: root.node-poke-on && m.name != root.node-member;
                                                 Menu {
                                                     MenuItem {
                                                         title: Strings.mem-poke;
@@ -6850,15 +6853,27 @@ export component AppWindow inherits Window {
                                     checked <=> root.cfg-read-receipts;
                                 }
                             }
-                            // poking: reacting to pokes (toast, sound, wake
-                            // command) is an explicit opt-in; the wake command
-                            // is what nudges a sleeping agent harness
+                            // poking: reacting to pokes (toast, sound) and
+                            // offering the poke menu is an explicit opt-in
                             DetailGroup {
                                 pack: true;
                                 title: Strings.field-poking;
                                 AppCheck {
                                     label: Strings.set-poke-enabled;
                                     checked <=> root.cfg-poke-enabled;
+                                }
+                            }
+                            // the wake hook is its OWN switch: a headless seat
+                            // may want to be woken for pending votes without
+                            // taking part in poking at all. Empty = off.
+                            DetailGroup {
+                                pack: true;
+                                title: Strings.field-wake;
+                                Text {
+                                    text: Strings.wake-hint;
+                                    color: Theme.dim;
+                                    font-size: Theme.fs-cap;
+                                    wrap: word-wrap;
                                 }
                                 FieldLabel {
                                     label: Strings.field-poke-wake;

@@ -361,15 +361,23 @@ pub struct SessionSettings {
     /// Alert sound for an incoming poke, same vocabulary.
     #[serde(default = "default_sound")]
     pub sound_poke: String,
-    /// Whether this node reacts to pokes at all (toast, sound, wake
-    /// command) and offers poking in its own UI. **Off by default — an
-    /// explicit opt-in.**
+    /// Whether this node reacts to pokes at all (toast, sound, and the wake
+    /// hook when poked) and offers poking in its own UI. **Off by default —
+    /// an explicit opt-in.** It does NOT gate the pending-vote wake, which
+    /// is its own opt-in (a non-empty [`Self::poke_wake_command`]): a
+    /// headless seat may want to be woken for votes without taking part in
+    /// poking at all.
     #[serde(default)]
     pub poke_enabled: bool,
     /// Command this node runs (via `sh -c`) when its seat is poked or new
     /// work awaits its vote — the wake hook for a sleeping agent harness.
-    /// Empty = off. Wire content never reaches the command line; context
-    /// arrives as `MOLT_WAKE_*` env vars only.
+    /// Empty = off, one wake runs at a time. Wire content never reaches the
+    /// command line; context arrives as `MOLT_WAKE_*` env vars only.
+    ///
+    /// Settable ONLY through [`Command::SetWakeCommand`] (the GUI) or
+    /// `config.toml`: the wholesale settings paths refuse it, because a
+    /// surface that could plant a shell command would turn republic access
+    /// into code execution on the operator's machine.
     #[serde(default)]
     pub poke_wake_command: String,
     /// Send (and show) per-message chat read receipts. A local per-node
@@ -2443,16 +2451,6 @@ pub enum WorkspaceEvent {
         id: ProposalId,
         /// The withdrawing proposer.
         by: MemberId,
-    },
-    /// A member **poked another member** — a directed nudge (the poker is the
-    /// envelope's `by`). Ephemeral and coordination-only, like the transport
-    /// frames: it rides the sender's log to reach the outbox, `apply`/replay
-    /// is a no-op, and only the TARGET's live ingest reacts (toast, sound,
-    /// wake command — all behind that node's own opt-in). Additive: an old
-    /// reader simply does not react.
-    Poked {
-        /// The poked member.
-        to: MemberId,
     },
 }
 
@@ -4663,6 +4661,29 @@ pub enum Command {
     Poke {
         /// The roster member to poke (not this seat itself).
         member: MemberId,
+    },
+    /// An authenticated poke arrived over the transport (engine-internal —
+    /// the transport speaks to the engine; an MCP agent must not be able to
+    /// forge a nudge from another member). `from` is the MLS-authenticated
+    /// sender, `to` the member the frame names.
+    NetPoked {
+        /// The authenticated poker.
+        from: MemberId,
+        /// The member the poke is addressed at.
+        to: MemberId,
+        /// Transport incarnation (stale commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// Set (or clear) this node's **wake command** — the local shell hook a
+    /// poke or pending vote runs. Deliberately NOT an MCP tool: the string is
+    /// executed by the node, so an agent that could set it would grant itself
+    /// code execution on the operator's machine (the same reasoning that
+    /// keeps the clearnet switch off the settings surface). The GUI and
+    /// `config.toml` are its only doors.
+    SetWakeCommand {
+        /// The command line, run via `sh -c`. Empty clears it.
+        command: String,
     },
 }
 

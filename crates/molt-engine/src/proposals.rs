@@ -1656,6 +1656,14 @@ impl State {
         if p.state != ProposalState::Proposed {
             return false;
         }
+        // a member who DECLINED has voted: the card stays open until the
+        // declines can outvote the threshold, but it awaits nobody's voice
+        // twice. Without this the members table counts a decided seat as
+        // pending forever, and the wake hook nudges an agent on every open
+        // for work it already answered.
+        if p.decliners.iter().any(|d| d == member) {
+            return false;
+        }
         if self.is_chain_governed() {
             !self
                 .pending_sigs

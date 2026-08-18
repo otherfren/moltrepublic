@@ -414,8 +414,7 @@ impl State {
             | WorkspaceEvent::MeshAnnounced { .. }
             | WorkspaceEvent::FileRequested { .. }
             | WorkspaceEvent::FileWanted { .. }
-            | WorkspaceEvent::FileServed { .. }
-            | WorkspaceEvent::Poked { .. } => {
+            | WorkspaceEvent::FileServed { .. } => {
                 // chain transport/coordination frames (a broadcast block, a
                 // catch-up request, a raw MLS re-key commit, a relayed mesh
                 // announce, a file fetch request) ride the log only to reach

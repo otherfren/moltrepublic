@@ -286,6 +286,16 @@ impl EngineSink for CmdSink {
             .await;
     }
 
+    async fn poked(&self, member: &MemberId, to: &MemberId) {
+        let _ = self
+            .execute(Command::NetPoked {
+                from: member.clone(),
+                to: to.clone(),
+                generation: self.generation,
+            })
+            .await;
+    }
+
     async fn rekeyed(&self, member: &MemberId) {
         let _ = self
             .execute(Command::NetPeerRekeyed {
@@ -418,7 +428,6 @@ pub(crate) fn crosses_wire(event: &WorkspaceEvent) -> bool {
             | WorkspaceEvent::FileRequested { .. }
             | WorkspaceEvent::FileWanted { .. }
             | WorkspaceEvent::FileServed { .. }
-            | WorkspaceEvent::Poked { .. }
     )
 }
 
@@ -961,7 +970,7 @@ impl State {
     /// workspace switch, must never reach the new context's (possibly
     /// persisted!) log. This is the transport twin of the old simulator's
     /// "session-only workspaces only" guard.
-    fn net_generation_current(&self, generation: Option<u64>) -> bool {
+    pub(crate) fn net_generation_current(&self, generation: Option<u64>) -> bool {
         match generation {
             None => true,
             Some(g) => self.net.as_ref().is_some_and(|n| n.generation == g),
@@ -1664,11 +1673,6 @@ impl State {
                         }
                     }
                 }
-            }
-            WorkspaceEvent::Poked { to } => {
-                // consumed, never re-recorded: only the target's live ingest
-                // reacts (chat.rs::receive_poke gates opt-in + cooldown)
-                self.receive_poke(&from, &to);
             }
             other => {
                 tracing::debug!(%from, kind = ?std::mem::discriminant(&other), "event over the wire not acted on here");
@@ -3076,7 +3080,7 @@ impl State {
     /// `peer`'s inbound queue (best-effort). The single send path for the
     /// control frames — today [`molt_net::MESH_ACK_TAG`]`‖window` (the
     /// delivery guarantee's ACK, §4.3).
-    async fn send_ping(
+    pub(crate) async fn send_ping(
         transport: crate::founding::RitualTransport,
         group: Arc<Mutex<molt_net::MlsMember>>,
         peer: PeerLink,

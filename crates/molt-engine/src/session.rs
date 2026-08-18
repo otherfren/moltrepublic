@@ -128,6 +128,31 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// The wake command's ONE door (besides hand-editing `config.toml`).
+    ///
+    /// It is a local shell hook, so it deliberately has no MCP tool: an agent
+    /// that could set it would grant itself code execution as the node's
+    /// user. The wholesale settings paths refuse it for the same reason
+    /// (`cmd_save_settings` re-merges the stored value, `cmd_patch_settings`
+    /// names it) — exactly how the clearnet decision is protected.
+    pub(crate) fn cmd_set_wake_command(&mut self, command: String) -> Result<Reply, MoltError> {
+        let command = command.trim().to_string();
+        if command.len() > 4096 {
+            return Err(MoltError::Settings(
+                "wake command: too long (max 4096)".to_string(),
+            ));
+        }
+        if command.contains('\n') || command.contains('\0') {
+            return Err(MoltError::Settings(
+                "wake command: one line, no NUL".to_string(),
+            ));
+        }
+        self.session.settings.poke_wake_command = command;
+        self.persist_settings(false);
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
     /// Add a relay: validated + normalized, appended at the lowest priority,
     /// unconfirmed. Adding never connects — see `docs_archive/transport/relay_pool.md`.
     /// A live founding minted its invites from the pool as it was at
@@ -421,6 +446,14 @@ impl State {
                     "`{k}` is set by the relay commands, not here"
                 )));
             }
+            // the wake command is executed by this node: an agent that could
+            // set it here would grant itself code execution as the node's
+            // user. Its one door is the GUI / config.toml.
+            if k == "poke_wake_command" {
+                return Err(MoltError::Settings(
+                    "`poke_wake_command` is set in the GUI or config.toml, not here".to_string(),
+                ));
+            }
             if !base_map.contains_key(&k) {
                 return Err(MoltError::Settings(format!("unknown setting `{k}`")));
             }
@@ -461,6 +494,11 @@ impl State {
         settings.font_app = self.session.settings.font_app;
         settings.font_nav = self.session.settings.font_nav;
         settings.font_editor = self.session.settings.font_editor;
+        // …and the wake command has its own door too (`SetWakeCommand`): it
+        // is a local SHELL hook, so a wholesale settings replacement must not
+        // be able to plant one — that would turn any surface that can call
+        // save_settings into code execution on the operator's machine.
+        settings.poke_wake_command = std::mem::take(&mut self.session.settings.poke_wake_command);
         self.session.settings = settings;
         self.mark_restart_required();
         if self.store.is_some() {

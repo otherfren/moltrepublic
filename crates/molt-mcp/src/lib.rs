@@ -534,10 +534,11 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
             .get("poke_enabled")
             .and_then(Value::as_bool)
             .unwrap_or(d.poke_enabled),
-        poke_wake_command: args
-            .get("poke_wake_command")
-            .and_then(Value::as_str)
-            .map_or(d.poke_wake_command, str::to_string),
+        // NOT settable here — the wake command is a local SHELL hook, and an
+        // agent that could plant one would grant itself code execution as the
+        // node's user. Carried through unchanged; the engine re-merges the
+        // stored value, exactly like the clearnet decision above.
+        poke_wake_command: d.poke_wake_command,
         read_receipts: flag("read_receipts")?,
         mcp_port: port("mcp_port")?,
         mcp_allow: text("mcp_allow")?,
@@ -613,7 +614,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "poke",
             command: "poke",
-            description: "Poke a member - a directed nudge with NO governance meaning (never a vote, never a block). The target's node reacts only if it enabled poking: a toast naming you, its configured sound, and its wake command (how a sleeping agent harness gets woken). Rate-limited on the receive side (one reaction per sender per minute); a poke to a member who disabled poking simply does nothing there. Needs poking enabled on THIS node too (settings poke_enabled).",
+            description: "Poke a member - an ephemeral nudge with NO governance meaning (never a vote, never a block, never stored). It rides the group channel, so every member sees who poked whom; only the named target reacts, and only if it enabled poking: a toast naming you, its configured sound, and its wake command (how a sleeping agent harness gets woken). Fire-and-forget: a poke to an offline member is lost, not queued. Rate-limited on the receive side (one reaction per sender per minute). Needs poking enabled on THIS node too (settings poke_enabled).",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1020,7 +1021,6 @@ pub fn tools() -> Vec<ToolDef> {
                     "sound_vote": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
                     "sound_poke": { "type": "string", "enum": ["none", "bell", "chime", "pop"], "description": "optional; absent = \"none\"" },
                     "poke_enabled": { "type": "boolean", "description": "optional; absent = false (react to pokes and offer poking)" },
-                    "poke_wake_command": { "type": "string", "description": "optional; absent = \"\" (command run via sh -c on a poke or pending vote; context in MOLT_WAKE_* env vars)" },
                     "read_receipts": { "type": "boolean", "description": "send/show per-message chat read receipts (local privacy switch)" },
                     "mcp_port": { "type": "integer" },
                     "mcp_allow": { "type": "string", "description": "client IP allowlist: \"127.0.0.1\" | \"0.0.0.0\" | comma-separated" },
@@ -1064,7 +1064,6 @@ pub fn tools() -> Vec<ToolDef> {
                     "sound_vote": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
                     "sound_poke": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
                     "poke_enabled": { "type": "boolean" },
-                    "poke_wake_command": { "type": "string" },
                     "read_receipts": { "type": "boolean" },
                     "mcp_port": { "type": "integer" },
                     "mcp_allow": { "type": "string" },
@@ -1654,7 +1653,15 @@ mod tests {
         // chain, so even a forged internal command cannot materialize an
         // unverified workspace). RestoreTick is gone: there is no simulated
         // restore progress anymore.
-        const INTERNAL: [&str; 56] = [
+        // net_poked is the transport handing over an MLS-AUTHENTICATED poke
+        // (poke is the tool; an agent must not be able to forge a nudge that
+        // claims to come from another member).
+        // set_wake_command is the ONE door of the local shell hook the wake
+        // feature runs, and it is deliberately GUI/config-only: a tool for it
+        // would let any MCP client execute code as the node's user, which is
+        // a different thing entirely from acting inside the republic. The
+        // wholesale settings paths refuse the key for the same reason.
+        const INTERNAL: [&str; 58] = [
             // ui_publish is the WINDOW reporting what it renders — an
             // agent must not be able to forge what the GUI claims to show
             // (gui_over_mcp.md); reads go through read_ui_state.
@@ -1729,6 +1736,8 @@ mod tests {
             "net_join_declined",
             "net_mesh_announced",
             "net_mesh_ready",
+            "net_poked",
+            "set_wake_command",
             "reload_settings",
             "config_notice",
         ];

@@ -43,6 +43,7 @@ pub mod dial;
 pub mod envelope;
 pub mod file_plane;
 pub mod group_ack;
+pub mod poke;
 pub mod group_runtime;
 pub mod invite;
 pub mod kinds;

@@ -25,7 +25,7 @@
 use std::time::Duration;
 
 use molt_core::{MemberId, TransportState};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 use crate::ritual_net::{GroupChannel, GroupRecv};
 use crate::supervisor::{EngineSink, MlsChannel, MlsDecode, OutboxLog, StateStore};
@@ -118,9 +118,15 @@ pub struct GroupHandle {
     /// sheet supersedes an unsent one by construction — no queue to drain and
     /// no coalescing logic to get wrong.
     acks: watch::Sender<Option<crate::group_ack::GroupAck>>,
+    /// Pokes awaiting publication. An mpsc, NOT a watch: a poke is an event,
+    /// not state — two nudges at two members must both go out, so a newer
+    /// one may never supersede an unsent one. Bounded and dropped-when-full,
+    /// because a nudge is worth exactly one best-effort attempt.
+    pokes: mpsc::Sender<crate::poke::Poke>,
     outbox: Option<tokio::task::JoinHandle<()>>,
     inbox: Option<tokio::task::JoinHandle<()>>,
     ack: Option<tokio::task::JoinHandle<()>>,
+    poke: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl GroupHandle {
@@ -139,6 +145,11 @@ impl GroupHandle {
         if let Some(ack) = self.ack.take() {
             let _ = ack.await;
         }
+        // the poke task is outbound as well; its sender lives on this handle,
+        // so dropping it ends the loop on its own
+        if let Some(poke) = self.poke.take() {
+            let _ = poke.await;
+        }
     }
 
     /// Queue the latest claim sheet for publication.
@@ -148,6 +159,17 @@ impl GroupHandle {
     /// loses nothing.
     pub fn publish_ack(&self, ack: crate::group_ack::GroupAck) {
         let _ = self.acks.send(Some(ack));
+    }
+
+    /// Queue one poke for publication (best-effort, non-blocking).
+    ///
+    /// `try_send`, so the engine actor never awaits and a full queue drops
+    /// the nudge instead of applying backpressure to the actor. Losing a
+    /// poke is the designed failure mode: it is a nudge, not a message.
+    pub fn publish_poke(&self, poke: crate::poke::Poke) {
+        if self.pokes.try_send(poke).is_err() {
+            tracing::debug!("the poke queue is full or closed - nudge dropped");
+        }
     }
 }
 
@@ -232,6 +254,16 @@ where
         acks_rx,
         stop_rx.clone(),
     ));
+    // a FOURTH task, for the same reason the ack has its own: a nudge must
+    // not queue behind the outbox's retry chain, and the outbox must not
+    // wait for a nudge
+    let (pokes, pokes_rx) = mpsc::channel(crate::poke::POKE_QUEUE);
+    let poke = tokio::spawn(poke_loop(
+        channel.clone(),
+        mls.clone(),
+        pokes_rx,
+        stop_rx.clone(),
+    ));
     let outbox = tokio::spawn(outbox_loop(
         channel.clone(),
         mls.clone(),
@@ -257,9 +289,38 @@ where
     GroupHandle {
         stop,
         acks,
+        pokes,
         outbox: Some(outbox),
         inbox: Some(inbox),
         ack: Some(ack),
+        poke: Some(poke),
+    }
+}
+
+/// Publish pokes as they are handed over. One attempt each, no retry chain:
+/// a nudge that could not go out now is stale by the time a retry would
+/// land, and the operator can always poke again.
+async fn poke_loop(
+    channel: GroupChannel,
+    mls: MlsChannel,
+    mut rx: mpsc::Receiver<crate::poke::Poke>,
+    mut stop: watch::Receiver<bool>,
+) {
+    loop {
+        let poke = tokio::select! {
+            got = rx.recv() => match got {
+                Some(p) => p,
+                None => return, // the handle is gone
+            },
+            _ = stop.changed() => return,
+        };
+        let Some(frame) = mls.group_control_frame(&poke.to_frame()) else {
+            tracing::error!("framing a poke failed - skipped");
+            continue;
+        };
+        if let Err(e) = channel.publish_frame(&frame.exporter, &frame.ciphertext).await {
+            tracing::warn!(error = %e, "publishing a poke failed");
+        }
     }
 }
 
@@ -850,7 +911,11 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
     // a ring hit there would swallow it.
     if matches!(
         outcome,
-        MlsDecode::Deliver(..) | MlsDecode::Ack(..) | MlsDecode::GroupAck(..) | MlsDecode::Discard
+        MlsDecode::Deliver(..)
+            | MlsDecode::Ack(..)
+            | MlsDecode::GroupAck(..)
+            | MlsDecode::Poke(..)
+            | MlsDecode::Discard
     ) {
         seen.note(content);
     }
@@ -883,6 +948,17 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
             }
             apply_group_ack(log, store, me, &from, &ack).await;
             Ingest::Acked
+        }
+        MlsDecode::Poke(from, poke) => {
+            sink.peer_seen(&from).await;
+            // `by` is SELF-DESCRIPTION, the MLS credential is the
+            // authentication — the same rule the claim sheet follows
+            if poke.by != from {
+                tracing::warn!(%from, claimed = %poke.by, "a poke disowns its sender - dropped");
+                return Ingest::Nothing;
+            }
+            sink.poked(&from, &poke.to).await;
+            Ingest::Nothing
         }
         // the two arms the mesh supervisor implements and this loop did not:
         // both used to fall into a catch-all `Nothing`, which held nothing and

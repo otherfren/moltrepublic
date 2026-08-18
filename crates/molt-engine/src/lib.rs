@@ -1164,6 +1164,21 @@ impl State {
                 self.cmd_mark_channel_read(channel, up_to)
             }
             Command::Poke { member } => self.cmd_poke(member),
+            Command::NetPoked {
+                from,
+                to,
+                generation,
+            } => {
+                // the MESH generation, like every other supervisor-sourced
+                // command (the sink carries `net_generation`, not the
+                // workspace scope) — a torn-down mesh's late nudge is dropped
+                if !self.net_generation_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.receive_poke(&from, &to);
+                Ok(Reply::Ack)
+            }
+            Command::SetWakeCommand { command } => self.cmd_set_wake_command(command),
             // file-transfer task feedback (engine-internal, scope-guarded)
             Command::NetFileShared {
                 name,

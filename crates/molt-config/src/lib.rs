@@ -599,8 +599,11 @@ headless = {headless}
 # React to pokes (toast, sound, wake command) and offer poking in the UI.
 poke_enabled = {poke_enabled}
 # Command run via `sh -c` when this seat is poked or new work awaits its
-# vote — wakes a sleeping agent harness. Context arrives as MOLT_WAKE_*
-# env vars; the poked state is read over MCP. "" = off.
+# vote — wakes a sleeping agent harness. "" = off. Context arrives as the
+# env vars MOLT_WAKE_REASON (poked|vote_pending), MOLT_WAKE_BY and
+# MOLT_WAKE_WORKSPACE; always QUOTE them ("$MOLT_WAKE_BY"). One wake runs
+# at a time. Only this file and the GUI set it: it is executed here, so no
+# MCP client may plant one.
 poke_wake_command = {poke_wake_command}
 
 [storage]
