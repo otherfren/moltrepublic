@@ -1,6 +1,14 @@
 # Member profiles: picture + description, vote-gated, with poke everywhere
 
-**Status: BUILT (2026-08-18), pending the change-set's window build and review. The poke rollout (§ "Username render sites") shipped first (all nine sites, gated by the `Poke` global), then §1-4 (ops, validation, per-member LWW slots, avatar files, `MemberView.image`/`description`, `StatusView.image_budget`) and §5 (the two-line members table, the two edit modals, the avatar cache, the picture fit, the proposal cards). Keystones 1-6 are green. Archive this document once the change-set lands on master.**
+**Status: EXECUTED - landed on master 2026-08-19.** The poke rollout
+(§ "Username render sites") shipped first (all nine sites, gated by the `Poke`
+global), then §1-4 (ops, validation, per-member LWW slots, avatar files,
+`MemberView.image`/`description`, `StatusView.image_budget`) and §5 (the
+two-line members table, the two edit modals, the avatar cache, the picture
+fit, the proposal cards). Keystones 1-6 green, window build clean, the
+adversarial review's findings worked in. **The shipping behaviour is the code
+and its tests** - where this document and the code disagree the code is right,
+and §2 below carries the one correction that matters.
 
 ## Goal
 
@@ -271,11 +279,25 @@ from the threshold alone).
 - **Self-edit, local**: in `cmd_propose`, a member-profile op whose
   `payload.member != self.member()` refuses:
   `BadPayload("only {member} can edit this profile")` — compact, one line.
-- **Self-edit, wire**: drop (4) in the net.rs:1385 Proposed arm — a
-  member-profile op with `payload.member != from` is dropped with a
-  structured warn (`from=… claimed=…`), node-independent like drops 1-3.
-  Wire twin of the square/decodable/fits checks: extend drop (2)'s condition
-  to `set_member_image` (decodable + square).
+- **Self-edit, wire — CORRECTED WHEN BUILT (2026-08-19).** This document
+  asked for drop (4) to reject a member-profile op whose `payload.member`
+  differs from the sending link. That was built, and it was WRONG: WP2's
+  `serve_open_governance` re-serves every open card under the SERVING peer's
+  identity (`make_env(me, body)`), so a catching-up holder meets another
+  seat's legitimate profile card with exactly that shape. The drop blinded
+  the very holder WP2 exists for - it could never see, let alone vote on,
+  another member's open profile proposal. A re-serve and a forged claim are
+  indistinguishable on the wire, which is why `ProposalRecord.by` is a
+  DISPLAY hint by design.
+  What ships: drop (4) checks the one thing every holder decides identically,
+  that the named seat is in the roster. The self-edit rule lives where the
+  seat IS known, at the propose gate; past it the threshold governs, as for
+  every other org change. Drop (5) carries the description cap onto the wire,
+  and drop (2)'s twin covers `set_member_image` (decodable + square).
+  **Open product question this leaves:** a peer can put a profile card for
+  another seat in front of honest voters. The subject sees it and can decline,
+  and m-of-n still gates it - but whether a profile op should REQUIRE its
+  subject's approval is a governance rule this plan never specified.
 - `validate_payload_fits` (198): extend the image-wording condition (209-210)
   to `set_member_image` so an oversized avatar refusal names the image, not
   the payload.

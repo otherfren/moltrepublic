@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #![allow(missing_docs)]
 
-//! **The wiki export** (`docs/memory/wiki_export_plan.md`): the Shared-Memory
+//! **The wiki export** (`docs_archive/memory/wiki_export_plan.md`): the Shared-Memory
 //! tree written to a user-picked directory as plain files, optionally with the
 //! proof bundle that lets an OUTSIDER verify it — no moltd, no workspace key,
 //! no trust in the exporter.
@@ -321,46 +321,54 @@ async fn proof_without_chain_governance_is_refused_and_files_still_export() {
 /// provably arrives while the first is still in flight.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_second_export_while_one_runs_is_refused() {
+async fn a_bad_target_fails_the_export_instead_of_wedging_the_slot() {
     let tmp = tempfile::tempdir().expect("tmp");
     let dest = tmp.path().join("out");
     std::fs::create_dir_all(dest.join("wiki")).expect("dest");
+    // a FIFO parks std::fs::write in open(O_WRONLY) until a reader shows up.
+    // Without a type check the export task would block forever and leave
+    // `running` set, so EVERY later export is refused for the lifetime of
+    // the process - the feature would be dead until a restart.
     let fifo = dest.join("wiki").join("a.md");
-    let made = std::process::Command::new("mkfifo")
-        .arg(&fifo)
-        .status()
-        .expect("mkfifo runs");
-    assert!(made.success(), "mkfifo created the blocking target");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo runs")
+            .success(),
+        "mkfifo created the blocking target"
+    );
 
     let w = spawn_solo();
     apply_wiki_patch(&w, ADD_A).await;
-
-    // the rescue reader runs no matter how the assertions below end, so a
-    // failure cannot leave the writer blocked forever
-    let fifo_path = fifo.clone();
-    let rescue = tokio::task::spawn_blocking(move || {
-        std::thread::sleep(Duration::from_millis(300));
-        let _ = std::fs::read(&fifo_path);
-    });
-
     w.execute(Command::WikiExport {
         dest: dest.display().to_string(),
         proof: false,
     })
     .await
-    .expect("the first export starts");
-    let err = w
-        .execute(Command::WikiExport {
-            dest: dest.display().to_string(),
-            proof: false,
-        })
-        .await
-        .expect_err("one export at a time");
-    assert_eq!(err.to_string(), "wiki export: an export is already running");
-
-    rescue.await.expect("rescue reader");
+    .expect("the export starts");
     let outcome = await_wiki_export(&w).await;
+    assert!(
+        outcome.result.starts_with("error: ") && outcome.result.contains("a.md"),
+        "the unwritable target must fail the export honestly: {outcome:?}"
+    );
     assert!(!outcome.running, "the slot is free again: {outcome:?}");
+
+    // and the feature still works: a clean target exports right after
+    let good = tmp.path().join("good");
+    w.execute(Command::WikiExport {
+        dest: good.display().to_string(),
+        proof: false,
+    })
+    .await
+    .expect("a later export is not blocked by the failed one");
+    let outcome = await_wiki_export(&w).await;
+    assert_eq!(outcome.result, "ok", "{outcome:?}");
+    assert_eq!(
+        std::fs::read_to_string(good.join("wiki").join("a.md")).expect("the document"),
+        "hello\nworld\n",
+        "the later export carries the real document"
+    );
 }
 
 // ---- the real export, and the round trip -----------------------------------
@@ -456,4 +464,82 @@ async fn a_symlink_in_the_target_path_is_refused() {
         "not the export's business",
         "nothing is written through the link"
     );
+}
+
+/// **A reviewer must not be told "ok" about a tree it could not read.**
+/// `read_tree` walked directories and regular files; anything else - a
+/// symlink, a FIFO, a device node - fell through both arms and vanished.
+/// A planted `wiki/extra.md` link was therefore invisible to the fold
+/// comparison, so the verifier certified a tree that carries a document
+/// nobody ever approved.
+#[test]
+fn an_entry_the_reader_cannot_read_fails_the_export_instead_of_vanishing() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path().join("export");
+    std::fs::create_dir_all(dir.join("wiki")).expect("wiki dir");
+    std::fs::create_dir_all(dir.join("proof")).expect("proof dir");
+    std::fs::write(dir.join("proof").join("bundle.json"), "{}").expect("bundle");
+    std::fs::write(dir.join("wiki").join("a.md"), "hello\n").expect("a.md");
+
+    let (_, tree) = molt_engine::read_wiki_export(&dir).expect("a plain tree reads");
+    assert_eq!(tree.len(), 1, "the honest export reads as one document");
+
+    let outside = tmp.path().join("outside.md");
+    std::fs::write(&outside, "never approved\n").expect("outside");
+    std::os::unix::fs::symlink(&outside, dir.join("wiki").join("extra.md")).expect("symlink");
+
+    let err = molt_engine::read_wiki_export(&dir)
+        .expect_err("an unreadable entry must fail the read, never be skipped");
+    assert!(err.contains("extra.md"), "the fault names the entry: {err}");
+}
+
+/// **An export must not report "ok" for a tree its own verifier rejects.**
+/// Nothing is deleted inside a folder the user picked, so a document left
+/// over from an earlier export survives - and the verifier then calls the
+/// honest export forged ("not in the folded patches"). The target is refused
+/// before a single byte is written instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_target_holding_an_earlier_export_is_refused_before_writing() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dest = tmp.path().join("out");
+    let w = spawn_solo();
+    apply_wiki_patch(&w, ADD_A).await;
+
+    w.execute(Command::WikiExport {
+        dest: dest.display().to_string(),
+        proof: false,
+    })
+    .await
+    .expect("the first export starts");
+    assert_eq!(await_wiki_export(&w).await.result, "ok");
+
+    // a document from an earlier state of the wiki, still lying there
+    std::fs::write(dest.join("wiki").join("gone.md"), "withdrawn long ago\n").expect("stale");
+    w.execute(Command::WikiExport {
+        dest: dest.display().to_string(),
+        proof: false,
+    })
+    .await
+    .expect("the second export starts");
+    let outcome = await_wiki_export(&w).await;
+    assert!(
+        outcome.result.starts_with("error: ") && outcome.result.contains("earlier export"),
+        "the stale target must be named, not silently shipped: {outcome:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dest.join("wiki").join("gone.md")).expect("still there"),
+        "withdrawn long ago\n",
+        "the export deletes nothing in a folder the user picked"
+    );
+    // re-exporting the SAME tree into its own earlier output stays fine
+    let same = tmp.path().join("same");
+    for _ in 0..2 {
+        w.execute(Command::WikiExport {
+            dest: same.display().to_string(),
+            proof: false,
+        })
+        .await
+        .expect("export");
+        assert_eq!(await_wiki_export(&w).await.result, "ok");
+    }
 }

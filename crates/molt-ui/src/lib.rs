@@ -12660,7 +12660,7 @@ mod gui_tests {
         );
     }
 
-    // ---- wiki export (docs/memory/wiki_export_plan.md, keystone 5) -------
+    // ---- wiki export (docs_archive/memory/wiki_export_plan.md, keystone 5) -------
 
     /// The 💾 button writes the APPROVED tree, so the gate is the folded
     /// base - never the local stack, which the export deliberately leaves

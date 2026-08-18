@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! **The wiki export** (`docs/memory/wiki_export_plan.md`): the Shared-Memory
+//! **The wiki export** (`docs_archive/memory/wiki_export_plan.md`): the Shared-Memory
 //! tree written to a user-picked directory as plain files, optionally with the
 //! threshold signatures that make it verifiable by an outsider — no moltd, no
 //! workspace key, no trust in the exporter.
@@ -110,19 +110,29 @@ fn safe_relative(path: &str) -> Result<PathBuf, String> {
     Ok(out)
 }
 
-/// Refuse a target whose path crosses a SYMLINK below `<dest>`: writing
-/// through one puts wiki content into a file the user never picked, which is
-/// exactly the escape [`safe_relative`] exists to prevent — a planted link
-/// gets there without a single `..`. `<dest>` itself is the user's own choice
-/// and may legitimately be a link; everything the export creates under it may
-/// not be one.
-fn check_no_symlink(dest: &Path, rel: &Path) -> Result<(), String> {
+/// Refuse a target the export must not write to. Two faults, one door:
+///
+/// - a SYMLINK anywhere below `<dest>`: writing through one puts wiki content
+///   into a file the user never picked, exactly the escape [`safe_relative`]
+///   exists to prevent — a planted link gets there without a single `..`.
+///   `<dest>` itself is the user's own choice and may legitimately be a link;
+///   nothing the export creates under it may be one.
+/// - an existing target that is NOT a plain file: a FIFO at `wiki/a.md` parks
+///   `std::fs::write` in `open(O_WRONLY)` until a reader appears, and the
+///   export slot the caller set stays `running` for the lifetime of the
+///   process - every later export is then refused with "an export is already
+///   running". A destination that cannot be written honestly must fail fast,
+///   not hang.
+fn check_writable_target(dest: &Path, rel: &Path) -> Result<(), String> {
     let mut at = dest.to_path_buf();
     for component in rel.components() {
         at.push(component);
         if std::fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink()) {
             return Err(format!("{}: symlink in the target path", rel.display()));
         }
+    }
+    if std::fs::symlink_metadata(&at).is_ok_and(|m| !m.file_type().is_file()) {
+        return Err(format!("{}: not a regular file", rel.display()));
     }
     Ok(())
 }
@@ -131,9 +141,13 @@ fn check_no_symlink(dest: &Path, rel: &Path) -> Result<(), String> {
 /// `<dest>/proof/bundle.json` + `<dest>/proof/README.md`. Blocking — the
 /// caller runs it off the actor.
 ///
-/// Existing files of the same name are overwritten; nothing is deleted. A
-/// leftover file from an earlier export therefore stays, and the verifier
-/// says so (it compares the shipped tree against the fold, both ways).
+/// Existing files of the same name are overwritten and NOTHING is deleted -
+/// deleting inside a folder the user picked is not this feature's business.
+/// The consequence is refused up front instead: a target that already holds
+/// documents this export does not carry would ship a tree its own verifier
+/// rejects ("<path> is not in the folded patches"), so the export would
+/// report "ok" and hand the reviewer a bundle that fails. Fail before
+/// writing, and let the user pick an empty folder.
 pub(crate) fn write_wiki_export(
     dest: &Path,
     tree: &std::collections::BTreeMap<String, String>,
@@ -141,13 +155,21 @@ pub(crate) fn write_wiki_export(
 ) -> Result<WikiExportOutcome, String> {
     let mut out = WikiExportOutcome::default();
     let wiki = dest.join("wiki");
+    if wiki.exists() {
+        let mut present = std::collections::BTreeMap::new();
+        read_tree(&wiki, "", 0, &mut present)?;
+        let stale = present.keys().filter(|p| !tree.contains_key(*p)).count();
+        if stale > 0 {
+            return Err(format!("wiki/: {stale} file(s) from an earlier export"));
+        }
+    }
     for (path, content) in tree {
         let rel = Path::new("wiki").join(safe_relative(path)?);
         let file = dest.join(&rel);
         if !file.starts_with(&wiki) {
             return Err(format!("unsafe path: {path}"));
         }
-        check_no_symlink(dest, &rel)?;
+        check_writable_target(dest, &rel)?;
         if let Some(parent) = file.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("wiki/{path}: {e}"))?;
         }
@@ -160,10 +182,10 @@ pub(crate) fn write_wiki_export(
         std::fs::create_dir_all(&proof).map_err(|e| format!("proof: {e}"))?;
         let json = serde_json::to_string_pretty(bundle)
             .map_err(|e| format!("proof/bundle.json: {e}"))?;
-        check_no_symlink(dest, Path::new("proof/bundle.json"))?;
+        check_writable_target(dest, Path::new("proof/bundle.json"))?;
         std::fs::write(proof.join("bundle.json"), &json)
             .map_err(|e| format!("proof/bundle.json: {e}"))?;
-        check_no_symlink(dest, Path::new("proof/README.md"))?;
+        check_writable_target(dest, Path::new("proof/README.md"))?;
         std::fs::write(proof.join("README.md"), PROOF_README)
             .map_err(|e| format!("proof/README.md: {e}"))?;
         out.bytes = out
@@ -223,6 +245,13 @@ fn read_tree(
             let content = std::fs::read_to_string(entry.path())
                 .map_err(|e| format!("{path}: {e}"))?;
             out.insert(path, content);
+        } else {
+            // Anything else - a symlink, a FIFO, a device node - is REFUSED,
+            // never skipped. Skipping it hid the entry from the fold
+            // comparison, so a planted link certified as "ok" while the
+            // exported folder carried a document nobody approved. A reviewer
+            // must not be told a tree verifies when part of it was unread.
+            return Err(format!("{path}: not a regular file"));
         }
     }
     Ok(())

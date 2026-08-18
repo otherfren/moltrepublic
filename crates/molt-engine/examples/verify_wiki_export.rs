@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! **Verify a wiki export** (`docs/memory/wiki_export_plan.md`):
+//! **Verify a wiki export** (`docs_archive/memory/wiki_export_plan.md`):
 //!
 //! ```text
 //! cargo run -p molt-engine --example verify_wiki_export -- <export directory>

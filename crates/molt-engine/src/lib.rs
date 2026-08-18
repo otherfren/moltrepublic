@@ -1647,6 +1647,20 @@ mod tests {
 
     /// A bare actor state for unit tests of the event applier (no runtime,
     /// no storage, no config store).
+    /// **One export at a time** - and the rule is decidable without any I/O.
+    /// The integration twin proved this by parking the writer on a FIFO, i.e.
+    /// on the very wedge `check_writable_target` now refuses, and it rode a
+    /// 300 ms sleep besides. The guard itself needs neither.
+    #[test]
+    fn a_second_wiki_export_while_one_runs_is_refused() {
+        let mut st = plain_state();
+        st.session.wiki_export.running = true;
+        let err = st
+            .cmd_wiki_export("/tmp/anywhere".to_string(), false)
+            .expect_err("one export at a time");
+        assert_eq!(err.to_string(), "wiki export: an export is already running");
+    }
+
     pub(crate) fn plain_state() -> State {
         let (ev_tx, _keep) = broadcast::channel::<Event>(8);
         let (cmd_tx, _cmd_rx) = mpsc::channel::<Envelope>(8);

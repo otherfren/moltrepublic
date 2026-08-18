@@ -1911,7 +1911,7 @@ impl State {
         Ok(Reply::Ack)
     }
 
-    /// **Wiki export** (`docs/memory/wiki_export_plan.md`): the Shared-Memory
+    /// **Wiki export** (`docs_archive/memory/wiki_export_plan.md`): the Shared-Memory
     /// tree onto disk as plain files, optionally with the proof bundle an
     /// outsider verifies it with. Synchronous validation, then the blocking
     /// write runs OFF the actor (`spawn_blocking`); the real outcome returns

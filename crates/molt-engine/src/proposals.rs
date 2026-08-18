@@ -335,8 +335,28 @@ pub(crate) struct MemberProfile<'a> {
 /// The per-member avatar file name: readable slug plus a stable hash of the
 /// exact member name, so two seats whose slugs collide ("Anna B" / "anna-b")
 /// still get their own file. A file name, never key material.
+///
+/// The slug is trimmed to the ASCII that `molt_storage`'s file-name guard
+/// accepts. `slugify` keeps every UNICODE alphanumeric and lowercases it,
+/// and some lowercase expansions add a combining mark - Turkish dotted I
+/// becomes "i\u{307}" - which the guard refuses, so that seat's picture
+/// would fail to materialize on every node, forever. A name with no ASCII at
+/// all (CJK) keeps just the hash: the slug is readability, the hash is
+/// identity.
 pub(crate) fn avatar_stem(member: &str) -> String {
-    format!("{}-{:016x}", molt_core::slugify(member), molt_core::fnv1a64(member))
+    let slug: String = molt_core::slugify(member)
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    // sha256, not fnv1a64: the suffix is what keeps two seats apart, and
+    // fnv is step-invertible - a member choosing their own handle at join
+    // could meet-in-the-middle onto another seat's suffix and, with a
+    // colliding slug, capture or destroy that member's picture file.
+    let hash = &molt_storage::content_hash(member.as_bytes())[..24];
+    match slug.trim_matches('-') {
+        "" => hash.to_string(),
+        s => format!("{s}-{hash}"),
+    }
 }
 
 /// `avatar-<stem>.<ext>` — the fold and the writer must derive the SAME
@@ -2411,6 +2431,18 @@ mod size_gate_tests {
             avatar_stem("anna-b"),
             "colliding slugs must not share a file"
         );
+        // The stem has to satisfy molt-storage's file-name guard for EVERY
+        // roster name, or that seat's picture fails to materialize on every
+        // node, forever. Turkish dotted I is the trap: `to_lowercase()`
+        // expands U+0130 into "i" + U+0307, a combining MARK that the guard
+        // refuses - and the slug happily carried it.
+        for member in ["İhsan", "北京", "Anna B", "../../etc/pas swd", "-- --"] {
+            let stem = avatar_stem(member);
+            assert!(
+                !stem.is_empty() && stem.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+                "storage refuses this avatar name for {member:?}: {stem:?}"
+            );
+        }
     }
 
     /// The served budget is a PROMISE: an image fitted to it is accepted,

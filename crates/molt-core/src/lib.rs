@@ -3757,7 +3757,7 @@ pub enum Command {
         error: String,
     },
     /// Write the Shared-Memory wiki to a directory on disk as plain files
-    /// (`docs/memory/wiki_export_plan.md`): `<dest>/wiki/<path>` per folded
+    /// (`docs_archive/memory/wiki_export_plan.md`): `<dest>/wiki/<path>` per folded
     /// document, and with `proof` the verification bundle
     /// (`<dest>/proof/bundle.json` + `README.md`) that lets an OUTSIDER check
     /// the tree is the fold of patches a real m-of-n of the sealed roster

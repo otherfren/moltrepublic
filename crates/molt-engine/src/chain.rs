@@ -9648,6 +9648,32 @@ mod tests {
         );
     }
 
+    /// **The ascending-height rule needs a fixture that isolates it.** In the
+    /// shared fixture a reversed bundle already dies for another reason (the
+    /// last patch's signer JOINED later, so against the genesis roster it
+    /// falls below m) and a duplicate dies on the double-apply guard - delete
+    /// the order check and both still fail, which is a keystone proving
+    /// someone else's rule. Two patches approved by the SAME roster isolate
+    /// it: each verifies on its own and even the fold is order-independent,
+    /// so nothing but the ORDER is wrong.
+    #[test]
+    fn two_patches_of_one_roster_must_still_arrive_in_order() {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        commit_wiki(&mut b, 1, WIKI_ADD_A, &["petra", "walter"]);
+        commit_wiki(&mut b, 2, WIKI_ADD_B, &["petra", "walter"]);
+        let tree = wiki_fixture_tree();
+        let base = crate::wiki_export::bundle_from_chain(&b.blocks).expect("the chain has a genesis");
+        assert!(
+            verify_wiki_export(&serde_json::to_string(&base).expect("serialize"), &tree).is_ok(),
+            "the fixture itself must verify in order"
+        );
+        let mut swapped = base;
+        swapped.blocks.reverse();
+        let err = verify_wiki_export(&serde_json::to_string(&swapped).expect("serialize"), &tree)
+            .expect_err("blocks must arrive in ascending height order");
+        assert!(err.contains("heights must ascend"), "the fault names the rule: {err}");
+    }
+
     #[test]
     fn reordered_or_duplicate_heights_fail_verification() {
         let b = wiki_fixture();

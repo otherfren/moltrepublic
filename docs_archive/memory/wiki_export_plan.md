@@ -1,10 +1,25 @@
 # Wiki export to disk, with externally verifiable patch signatures
 
-**Status: engine + MCP side BUILT 2026-08-18** (`Command::WikiExport`, the
-writer, `proof/bundle.json` + `README.md`, `verify_wiki_export` and its
-example binary, keystones 1-4). **Open: the GUI** (§GUI, keystone 5) — the
-button, the dialog and the i18n entries. The doc leaves for the archive with
-that last item.
+**Status: EXECUTED - landed on master 2026-08-19.** Engine and MCP
+(`Command::WikiExport`, the writer, `proof/bundle.json` + `README.md`,
+`verify_wiki_export` and its example binary) plus the GUI (the navigator's
+sixth button, the dialog with the ratified proof default, the outcome toast,
+EN/DE). Keystones 1-5 green, window build clean.
+
+Hardened by the adversarial review after this plan was written, each fix
+pinned by a test: the reader REFUSES a non-regular entry under `wiki/`
+instead of skipping it (a planted symlink made the verifier certify a tree
+carrying a document nobody approved); a target that already holds documents
+this export does not carry is refused before writing (it would have shipped
+a tree its own verifier rejects); and an unwritable target fails fast rather
+than parking the writer and wedging the export slot for the lifetime of the
+process.
+
+**Known limit, unresolved:** a holder whose chain was compacted past the
+genesis cannot build a bundle (`proof needs the genesis block`); the
+files-only export still works. Anchoring the proof in the checkpoint state
+instead is a product decision, and the 32-block auto-checkpoint makes this
+the normal case on a long-lived republic.
 
 ## Goal
 
