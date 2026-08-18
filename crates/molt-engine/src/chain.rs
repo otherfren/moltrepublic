@@ -8456,6 +8456,80 @@ mod tests {
         );
     }
 
+    /// **A cut must not carry every superseded avatar forever**
+    /// (`member_profiles_plan.md` §3): the profile ops hold per-member LWW
+    /// slots, so the summary keeps the LATEST picture and description per
+    /// seat — one seat's edit never drops another's — and the fold over the
+    /// summarized entries equals the fold over the full chain.
+    #[test]
+    fn a_checkpoint_cut_keeps_only_the_latest_avatar_per_member() {
+        let pool = vec!["wss://relay.one".to_string()];
+        let mut b = Builder::new_on_relays(&["petra", "walter"], 2, pool);
+        let entries = [
+            ("set_member_image", "petra", "old.png", "b2xk"),
+            ("set_member_desc", "petra", "typo", ""),
+            ("set_member_image", "walter", "walter.png", "d2FsdGVy"),
+            ("set_member_image", "petra", "new.png", "bmV3"),
+            ("set_member_desc", "petra", "keeps the bees", ""),
+        ];
+        for (h, (op, member, value, bytes)) in entries.iter().enumerate() {
+            let height = u64::try_from(h + 1).expect("small height");
+            let mut payload = serde_json::json!({ "op": op, "member": member, "value": value });
+            if !bytes.is_empty() {
+                payload["bytes_b64"] = serde_json::Value::String((*bytes).to_string());
+            }
+            let block = b.seal(
+                height,
+                ChainChange::Applied {
+                    proposal_id: height,
+                    surface: Surface::Organization,
+                    payload,
+                },
+                &["petra", "walter"],
+            );
+            b.push(block);
+        }
+        let state = checkpoint_state(&b.blocks, 5).expect("summary");
+        let org: Vec<(Option<u64>, serde_json::Value)> = state
+            .applied
+            .iter()
+            .find(|(s, _)| *s == Surface::Organization)
+            .map(|(_, e)| e.iter().map(|(id, p)| (Some(*id), p.clone())).collect())
+            .expect("organization summary");
+        let kept: Vec<&str> = org
+            .iter()
+            .filter_map(|(_, p)| p.get("value").and_then(serde_json::Value::as_str))
+            .collect();
+        assert_eq!(
+            kept,
+            vec!["walter.png", "new.png", "keeps the bees"],
+            "the cut must keep exactly the latest entry per member and field"
+        );
+
+        // the post-cut fold is the live fold
+        let full = chain_signer("walter", &b, b.blocks.clone());
+        let live: Vec<(String, String, String)> = full
+            .member_profiles()
+            .iter()
+            .map(|(m, p)| ((*m).to_string(), p.image.clone(), p.desc.to_string()))
+            .collect();
+        let mut cut = chain_signer("walter", &b, vec![b.blocks[0].clone()]);
+        cut.chain_applied.insert(Surface::Organization, org);
+        let after: Vec<(String, String, String)> = cut
+            .member_profiles()
+            .iter()
+            .map(|(m, p)| ((*m).to_string(), p.image.clone(), p.desc.to_string()))
+            .collect();
+        assert_eq!(after, live, "a cut must not change what the profiles fold to");
+        assert_eq!(
+            live,
+            vec![
+                ("petra".to_string(), "new.png".to_string(), "keeps the bees".to_string()),
+                ("walter".to_string(), "walter.png".to_string(), String::new()),
+            ]
+        );
+    }
+
     /// D7: the engine refuses selecting and proposing on a surface the
     /// charter has not enabled — the co-equal twin of the nav hiding it —
     /// and an enabling block opens the same gate for every holder.

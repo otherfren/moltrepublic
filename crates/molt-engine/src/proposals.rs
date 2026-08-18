@@ -242,6 +242,25 @@ pub(crate) fn logo_ext(value: &str) -> String {
     }
 }
 
+/// The file-name room the served image budget reserves. A picture proposal
+/// also carries its display name, and the budget is quoted BEFORE the name
+/// is known — so the probe pays for a long one and the promise stays keepable
+/// for any name up to this length. The propose gate remains the authority.
+const AVATAR_NAME_ALLOWANCE: usize = 64;
+
+/// Decoded picture bytes a `set_member_image` still fits in a republic of
+/// this roster — what [`molt_core::StatusView::image_budget`] serves the
+/// frontends as their downscale target (`member_profiles_plan.md` (a)).
+/// Conservative by [`AVATAR_NAME_ALLOWANCE`]: what it promises is accepted.
+pub(crate) fn member_image_budget(member: &str, roster: &[molt_core::MemberId]) -> usize {
+    let probe = serde_json::json!({
+        "op": "set_member_image",
+        "member": member,
+        "value": "x".repeat(AVATAR_NAME_ALLOWANCE),
+    });
+    image_headroom(Surface::Organization, &probe, roster)
+}
+
 /// The member description's character cap (`member_profiles_plan.md` (d)):
 /// a table column, not a charter. The payload gate alone would allow tens
 /// of thousands of characters.
@@ -299,6 +318,31 @@ pub(crate) fn image_dimensions(bytes: &[u8]) -> Result<(u32, u32), MoltError> {
         )));
     }
     Ok((w, h))
+}
+
+/// One member's EFFECTIVE profile, folded from the applied log. The
+/// description is BORROWED out of the log entry; the image is the reference
+/// the frontends render (a materialized file path, or the display value on
+/// a session-only open) — never the bytes.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct MemberProfile<'a> {
+    /// The applied picture's local file path ("" = none).
+    pub image: String,
+    /// The applied description ("" = none).
+    pub desc: &'a str,
+}
+
+/// The per-member avatar file name: readable slug plus a stable hash of the
+/// exact member name, so two seats whose slugs collide ("Anna B" / "anna-b")
+/// still get their own file. A file name, never key material.
+pub(crate) fn avatar_stem(member: &str) -> String {
+    format!("{}-{:016x}", molt_core::slugify(member), molt_core::fnv1a64(member))
+}
+
+/// `avatar-<stem>.<ext>` — the fold and the writer must derive the SAME
+/// name, so both go through here (the org twin is `logo.<ext>`).
+pub(crate) fn avatar_file_name(member: &str, value: &str) -> String {
+    format!("avatar-{}.{}", avatar_stem(member), logo_ext(value))
 }
 
 /// Is this an Organization payload editing ONE member's profile? The three
@@ -1222,7 +1266,12 @@ impl State {
         } else {
             Self::operator_approved(p)
         };
-        let (current, proposed) = change_summary(&self.org_effective(), p);
+        let (mut current, proposed) = change_summary(&self.org_effective(), p);
+        // a member-profile op's Ist-Stand comes from the per-member fold,
+        // not from the org state (`member_profiles_plan.md` §4)
+        if let Some(now) = self.member_profile_current(p) {
+            current = now;
+        }
         // the voting row: one stance per roster member, roster order. Chain
         // governance knows exactly who signed; the single-operator path
         // claims only what it knows — this node's own vote. (A legacy log
@@ -1420,6 +1469,73 @@ impl State {
             }
         }
         eff
+    }
+
+    /// The EFFECTIVE per-member profile state: fold the applied
+    /// Organization log for the member-profile ops, last write per seat and
+    /// field (`member_profiles_plan.md` §4). Only members with something
+    /// applied appear.
+    ///
+    /// Borrowed like [`State::org_effective`]'s fold — a `set_member_image`
+    /// entry carries the base64 picture, so nothing here clones a payload.
+    pub(crate) fn member_profiles(&self) -> std::collections::BTreeMap<&str, MemberProfile<'_>> {
+        let mut out: std::collections::BTreeMap<&str, MemberProfile<'_>> =
+            std::collections::BTreeMap::new();
+        for v in self.applied_org_entries() {
+            let Some(member) = v.get("member").and_then(Value::as_str).filter(|m| !m.is_empty())
+            else {
+                continue;
+            };
+            let op = v.get("op").and_then(Value::as_str).unwrap_or_default();
+            if !matches!(op, "set_member_image" | "remove_member_image" | "set_member_desc") {
+                continue;
+            }
+            let value = v.get("value").and_then(Value::as_str).unwrap_or_default();
+            let entry = out.entry(member).or_default();
+            match op {
+                // the org image rule, per seat: with a storage dir the
+                // reference is the materialized avatar file (what
+                // `sync_avatar_files` writes), else the display value
+                "set_member_image" => {
+                    let has_bytes = v
+                        .get("bytes_b64")
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| !s.is_empty());
+                    entry.image = match (&self.active, has_bytes) {
+                        (Some(active), true) => active
+                            .dir
+                            .join(avatar_file_name(member, value))
+                            .display()
+                            .to_string(),
+                        _ => value.to_string(),
+                    };
+                }
+                "remove_member_image" => entry.image.clear(),
+                _ => entry.desc = value,
+            }
+        }
+        out
+    }
+
+    /// The Ist-Stand of a member-profile proposal: the targeted seat's
+    /// applied picture reference or description. `None` for every other op,
+    /// so [`change_summary`]'s org rule stays the one rule.
+    pub(crate) fn member_profile_current(
+        &self,
+        p: &molt_core::ProposalRecord,
+    ) -> Option<String> {
+        if p.surface != Surface::Organization || !is_member_profile_op(&p.payload) {
+            return None;
+        }
+        let member = p.payload.get("member").and_then(Value::as_str)?;
+        let profiles = self.member_profiles();
+        let profile = profiles.get(member);
+        Some(match p.payload.get("op").and_then(Value::as_str) {
+            Some("set_member_desc") => {
+                profile.map(|x| x.desc.to_string()).unwrap_or_default()
+            }
+            _ => profile.map(|x| x.image.clone()).unwrap_or_default(),
+        })
     }
 
     /// The applied Organization entries, BORROWED (single-operator projection
@@ -1780,6 +1896,7 @@ impl State {
             .iter()
             .find(|w| w.id == self.session.active_workspace);
         let splits = self.relay_splits();
+        let profiles = self.member_profiles();
         self.roster()
             .into_iter()
             .map(|member| {
@@ -1813,7 +1930,10 @@ impl State {
                     let own = self.member_relays(&member).first().cloned().unwrap_or_default();
                     format!("no shared relay with {} ({own})", others.join(", "))
                 };
+                let profile = profiles.get(member.as_str());
                 MemberView {
+                    image: profile.map(|p| p.image.clone()).unwrap_or_default(),
+                    description: profile.map(|p| p.desc.to_string()).unwrap_or_default(),
                     open_proposals: self
                         .proposals
                         .iter()
@@ -1969,6 +2089,9 @@ impl State {
             // a recovery link is FOR an unreachable member)
             chain_governed: self.is_chain_governed(),
             features: self.effective_features(),
+            // the honest downscale target a frontend fits a picture to
+            // before proposing — this republic's own derived headroom
+            image_budget: u64::try_from(member_image_budget(&me, &self.roster())).unwrap_or(0),
         }
     }
 }
@@ -2258,6 +2381,25 @@ mod size_gate_tests {
         // the cap counts CHARACTERS, not bytes
         validate_org_payload(Surface::Organization, &desc("ä".repeat(DESC_MAX)))
             .expect("a multi-byte description is measured in characters");
+    }
+
+    /// The served budget is a PROMISE: an image fitted to it is accepted,
+    /// file name included — that is what the reserved name allowance buys.
+    #[test]
+    fn what_the_served_image_budget_promises_is_accepted() {
+        let roster = roster();
+        let budget = member_image_budget("hannelore-von-und-zu", &roster);
+        assert!(budget >= 32 * 1024, "the served budget is unusably small: {budget} B");
+        let payload = json!({
+            "op": "set_member_image",
+            "member": "hannelore-von-und-zu",
+            "value": "x".repeat(AVATAR_NAME_ALLOWANCE),
+            "bytes_b64": base64::engine::general_purpose::STANDARD.encode(padded_bmp(budget)),
+        });
+        assert!(
+            payload_fits(Surface::Organization, &payload, &roster),
+            "the served budget of {budget} B is not itself accepted"
+        );
     }
 
     /// The decided-vote chat line names the seat, never the picture bytes

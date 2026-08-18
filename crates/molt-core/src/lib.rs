@@ -5175,6 +5175,16 @@ pub struct MemberView {
     /// and the relay that would bridge. Empty = no split.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub split: String,
+    /// This member's vote-gated profile picture: the LOCAL file path the
+    /// applied `set_member_image` materialized ("" = none, or cleared by an
+    /// applied `remove_member_image`). Like the org logo, the reference
+    /// every view shows is that file (`member_profiles_plan.md` §4).
+    #[serde(default)]
+    pub image: String,
+    /// This member's vote-gated description ("" = none). Set by the seat
+    /// itself through an applied `set_member_desc`, capped engine-side.
+    #[serde(default)]
+    pub description: String,
 }
 
 /// A live download's progress, per share (requester side): what the
@@ -5311,6 +5321,12 @@ pub struct StatusView {
     /// MCP agent meets the same gate the nav renders (co-equality).
     #[serde(default)]
     pub features: Vec<String>,
+    /// Decoded image bytes a `set_member_image` proposal can still carry in
+    /// THIS republic (the derived transport headroom, which shrinks as the
+    /// roster grows). The honest downscale target for a frontend fitting a
+    /// picture before proposing — the engine stays the authority.
+    #[serde(default)]
+    pub image_budget: u64,
 }
 
 /// The chat-retention default: 7 days, the window every republic starts

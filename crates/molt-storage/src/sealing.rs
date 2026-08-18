@@ -92,8 +92,9 @@ pub fn seal_at_rest(ws_dir: &Path, phrase: &str) -> Result<(), StorageError> {
     // honest corruption and `unseal_at_rest` repairs (it rewrites both).
     secure_remove(&ws_dir.join(&manifest.crypto.key_file))?;
     secure_remove(&ws_dir.join("keys").join("seed.sealed"))?;
-    // the materialized logo is republic CONTENT in plaintext (an applied
-    // org image, mirrored out of the encrypted log for display) — it must
+    // the materialized logo and the member avatars are republic CONTENT in
+    // plaintext (applied images, mirrored out of the encrypted log for
+    // display) — they must
     // not stay readable in a sealed dir. Deleting it is safe: the log
     // replays it and `sync_logo_file` rebuilds the file at the next open
     // after a decrypt. The manifest (name, m/n) deliberately stays — the
@@ -205,16 +206,16 @@ fn chain_version_floor(ws_dir: &Path, key: &[u8; 32], id: &[u8; 32]) -> u32 {
     }
 }
 
-/// Remove every materialized `logo.*` file (plaintext republic content
-/// mirrored out of the encrypted log; rebuilt by `sync_logo_file` at the
-/// next open after a decrypt).
+/// Remove every materialized `logo.*` and `avatar-*` file (plaintext
+/// republic content mirrored out of the encrypted log; rebuilt by
+/// `sync_logo_file` / `sync_avatar_files` at the next open after a decrypt).
 fn remove_logo_files(ws_dir: &Path) -> Result<(), StorageError> {
     let Ok(rd) = fs::read_dir(ws_dir) else {
         return Ok(());
     };
     for entry in rd.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with("logo.") {
+        if name.starts_with("logo.") || name.starts_with("avatar-") {
             secure_remove(&entry.path())?;
         }
     }
@@ -439,15 +440,22 @@ mod tests {
 
     /// The materialized plaintext logo is republic content — it must not
     /// stay readable in a sealed dir (it is rebuilt from the log at the
-    /// next open after a decrypt).
+    /// next open after a decrypt). A member's avatar is exactly the same
+    /// class of content and leaves with it.
     #[test]
     fn sealing_removes_the_plaintext_logo() {
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("workspaces");
         let (dir, phrase, _id) = make_ws(&root);
         fs::write(dir.join("logo.png"), b"the republic's face").expect("logo");
+        fs::write(dir.join("avatar-petra-0123456789abcdef.png"), b"a member's face")
+            .expect("avatar");
         seal_at_rest(&dir, &phrase).expect("seal");
         assert!(!dir.join("logo.png").exists(), "content removed while sealed");
+        assert!(
+            !dir.join("avatar-petra-0123456789abcdef.png").exists(),
+            "a member picture is republic content too"
+        );
     }
 
     /// A damaged (present-but-unreadable) chain.state must keep the PRUNED

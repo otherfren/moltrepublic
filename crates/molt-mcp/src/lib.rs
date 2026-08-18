@@ -212,7 +212,9 @@ withdraw pulls back an OWN pending proposal. 5) any *_start/backup/test call \
 returns immediately - poll read_session for the outcome. propose payloads \
 {\"op\": ...}: organization set_name/set_charter/set_chat_retention {value}, \
 set_image {value,bytes_b64}, remove_image, set_relays {value: \"wss://a wss://b\"}, \
-set_features {value: \"memory quests\"}; memory add_note {title}, wiki_patch \
+set_features {value: \"memory quests\"}, set_member_image {member,value,bytes_b64} \
+/remove_member_image/set_member_desc {member,value} (own seat only, square \
+picture); memory add_note {title}, wiki_patch \
 {value: git-format patch, summary}; quests/vault/wallet add_quest/seal_secret/ \
 transfer {title}. Traps: founding/join/recovery need a confirmed relay \
 (relay_add, then confirm); mark_channel_read moves your PRIVATE cursor while \
@@ -750,7 +752,7 @@ pub fn tools() -> Vec<ToolDef> {
                 "type": "object",
                 "properties": {
                     "surface": { "type": "string", "enum": gated_enum() },
-                    "payload": { "type": "object", "description": "surface-specific transition {\"op\": ...}: organization set_name/set_charter/set_chat_retention {value}, set_image {value, bytes_b64}, remove_image, set_relays {value: \"wss://a wss://b\"}, set_features {value: \"memory quests\"}; memory add_note {title}, wiki_patch {value: git-format patch, summary}; quests add_quest {title}; vault seal_secret {title}; wallet transfer {title}" }
+                    "payload": { "type": "object", "description": "surface-specific transition {\"op\": ...}: organization set_name/set_charter/set_chat_retention {value}, set_image {value, bytes_b64}, remove_image, set_relays {value: \"wss://a wss://b\"}, set_features {value: \"memory quests\"}, set_member_image {member, value, bytes_b64}/remove_member_image/set_member_desc {member, value} (own seat only, square picture); memory add_note {title}, wiki_patch {value: git-format patch, summary}; quests add_quest {title}; vault seal_secret {title}; wallet transfer {title}" }
                 },
                 "required": ["surface", "payload"]
             }),
@@ -848,7 +850,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "read_members",
             command: "read_members",
-            description: "The Organization → Members table: one row per roster member with its anchored identity key (+ fingerprint; empty on demo workspaces), real presence (`last_seen` = unix seconds of the last authenticated traffic from that member, 0 = never seen by this install; `presence` aged from it: 0 online ≤5 min, 1 stale ≤30 min, 2 offline/unreachable), how many pending proposals still await that member's vote, and how many files it shared into the chat.",
+            description: "The Organization → Members table: one row per roster member with its anchored identity key (+ fingerprint; empty on demo workspaces), real presence (`last_seen` = unix seconds of the last authenticated traffic from that member, 0 = never seen by this install; `presence` aged from it: 0 online ≤5 min, 1 stale ≤30 min, 2 offline/unreachable), how many pending proposals still await that member's vote, how many files it shared into the chat, and its vote-gated profile (`image` = local file path of the applied picture, `description`).",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ReadMembers),
         },

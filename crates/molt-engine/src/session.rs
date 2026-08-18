@@ -1368,6 +1368,7 @@ impl State {
         // rebuild the logo file from the replayed log if it went missing
         // (crash, restore) — deterministic, the bytes live in the payload
         self.sync_logo_file();
+        self.sync_avatar_files();
         // re-adopt MY shares' source paths from prefs, filtered to shares
         // that replayed as mine and still available — this node keeps
         // serving downloads across restarts
@@ -1465,6 +1466,7 @@ impl State {
             }
         }
         self.sync_logo_file();
+        self.sync_avatar_files();
         self.emit_session(SessionScope::Full);
     }
 
@@ -1497,6 +1499,52 @@ impl State {
             }
         }
         active.handle.set_logo(want);
+    }
+
+    /// The per-member twin of [`State::sync_logo_file`]: reconcile every
+    /// roster seat's `avatar-<stem>.<ext>` with the applied profile log.
+    /// A seat with no applied picture (or a `remove_member_image`) gets
+    /// `None`, so a stale file leaves. Idempotent — also run at open, so a
+    /// crashed or restored workspace rebuilds every avatar deterministically
+    /// from the log. The writes happen on the storage writer thread.
+    pub(crate) fn sync_avatar_files(&self) {
+        let Some(active) = &self.active else {
+            return;
+        };
+        // scan the BORROWED entries in reverse: the LAST picture op per seat
+        // decides, and only that one payload is decoded
+        let mut want: std::collections::BTreeMap<&str, Option<(String, Vec<u8>)>> =
+            std::collections::BTreeMap::new();
+        for v in self.applied_org_entries().collect::<Vec<_>>().into_iter().rev() {
+            let Some(member) = v
+                .get("member")
+                .and_then(serde_json::Value::as_str)
+                .filter(|m| !m.is_empty())
+            else {
+                continue;
+            };
+            let op = v.get("op").and_then(serde_json::Value::as_str).unwrap_or_default();
+            if !matches!(op, "set_member_image" | "remove_member_image")
+                || want.contains_key(member)
+            {
+                continue;
+            }
+            let value = v.get("value").and_then(serde_json::Value::as_str).unwrap_or_default();
+            let entry = match op {
+                "set_member_image" => crate::proposals::image_bytes(v)
+                    .map(|bytes| (crate::proposals::logo_ext(value), bytes)),
+                _ => None, // the picture was cleared
+            };
+            want.insert(member, entry);
+        }
+        // every roster seat is reconciled, including the ones that never had
+        // a picture — that is what drops a file the log no longer backs
+        for member in self.roster() {
+            let avatar = want.remove(member.as_str()).flatten();
+            active
+                .handle
+                .set_avatar(crate::proposals::avatar_stem(&member), avatar);
+        }
     }
 
     /// Flush + closing snapshot + LOCK release for the open workspace (if

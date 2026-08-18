@@ -1404,6 +1404,36 @@ impl OpenedWorkspace {
         Ok(())
     }
 
+    /// The per-member twin of [`WorkspaceStore::set_logo`]: reconcile ONE
+    /// member's `avatar-<stem>.<ext>` with its applied profile picture,
+    /// dropping any other file of that stem. `None` removes it. The stem
+    /// is the engine's stable per-member name — nothing here parses it back.
+    pub fn set_avatar(
+        &mut self,
+        stem: &str,
+        avatar: Option<(String, Vec<u8>)>,
+    ) -> Result<(), StorageError> {
+        let prefix = format!("avatar-{stem}.");
+        let want_name = avatar.as_ref().map(|(ext, _)| format!("{prefix}{ext}"));
+        // drop this member's stale avatar files (an older extension, or all)
+        if let Ok(entries) = fs::read_dir(&self.dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with(&prefix) && Some(&name) != want_name.as_ref() {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+        if let (Some(name), Some((_, bytes))) = (want_name, avatar) {
+            let path = self.dir.join(&name);
+            if read_capped(&path, READ_CAP_CONTENT, "avatar").is_ok_and(|have| have == bytes) {
+                return Ok(()); // already materialized
+            }
+            write_atomic(&self.dir, &name, &bytes, false)?;
+        }
+        Ok(())
+    }
+
     /// Persist new prefs for this workspace.
     pub fn set_prefs(&mut self, p: WorkspacePrefs) -> Result<(), StorageError> {
         write_prefs(&self.dir, &p)?;
@@ -2358,6 +2388,9 @@ enum WriterMsg {
     /// `Some((ext, bytes))` materializes `logo.<ext>` (removing any other
     /// `logo.*`), `None` removes it. Idempotent.
     Logo(Option<(String, Vec<u8>)>),
+    /// The per-member twin of [`WriterMsg::Logo`]: reconcile ONE member's
+    /// `avatar-<stem>.<ext>` with its applied profile picture. Idempotent.
+    Avatar(String, Option<(String, Vec<u8>)>),
     Snapshot(WorkspaceSnapshot),
     /// Outbox read: every envelope with `seq >= from`. Served by the
     /// writer thread so reads are consistently ordered with queued appends
@@ -2462,6 +2495,12 @@ impl StorageHandle {
     /// (`Some((ext, bytes))` materializes, `None` removes). Fire-and-forget.
     pub fn set_logo(&self, logo: Option<(String, Vec<u8>)>) {
         let _ = self.tx.send(WriterMsg::Logo(logo));
+    }
+
+    /// Reconcile ONE member's avatar file with its applied profile picture
+    /// (`Some((ext, bytes))` materializes, `None` removes). Fire-and-forget.
+    pub fn set_avatar(&self, stem: String, avatar: Option<(String, Vec<u8>)>) {
+        let _ = self.tx.send(WriterMsg::Avatar(stem, avatar));
     }
 
     /// Force everything queued so far to disk and wait for it. Call before
@@ -2824,6 +2863,11 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                     Ok(WriterMsg::Logo(logo)) => {
                         if let Err(e) = ws.set_logo(logo) {
                             fail(&failed_flag, "logo write", &e);
+                        }
+                    }
+                    Ok(WriterMsg::Avatar(stem, avatar)) => {
+                        if let Err(e) = ws.set_avatar(&stem, avatar) {
+                            fail(&failed_flag, "avatar write", &e);
                         }
                     }
                     Ok(WriterMsg::ReadFrom(from_seq, reply)) => {
