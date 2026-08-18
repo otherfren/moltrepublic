@@ -497,6 +497,20 @@ export global HintTip {
     in-out property <length> ay;
 }
 
+// Poking is one cross-cutting affordance: every site that renders a member
+// name offers "Poke member" on right-click. The gate lives HERE, once - a
+// prop chain through ChatRow/ProposalCard/DecisionTable would let the nine
+// sites drift apart. `on` is the APPLIED switch (never the settings draft),
+// so a menu and the engine can never disagree.
+export global Poke {
+    in property <bool> on: false;
+    in property <string> me; // the own seat (never pokable)
+    callback go(string);
+    public pure function can(who: string) -> bool {
+        return root.on && who != "" && who != root.me;
+    }
+}
+
 export global Palettes {
     // Classic — clean Office-style layout in the moltrepublic.ai brand orange
     // (#e65515): off-white surfaces, charcoal text, a teal-green "good" that

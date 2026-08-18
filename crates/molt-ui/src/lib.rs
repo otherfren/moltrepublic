@@ -1883,8 +1883,9 @@ pub fn run_app(
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
-        // right-click on a member: the directed nudge (co-equal MCP tool: poke)
-        ui.on_poke(move |member| {
+        // right-click on a member: the directed nudge (co-equal MCP tool: poke).
+        // One door for all nine name sites — the Poke global (theme.slint).
+        ui.global::<Poke>().on_go(move |member| {
             issue(
                 &rt,
                 &w,
@@ -3501,7 +3502,7 @@ fn apply_session(
     // draft. A ticked-but-unsaved checkbox would otherwise offer a menu whose
     // command the engine refuses (and an unticked one would hide a menu that
     // still works).
-    ui.set_node_poke_on(sv.settings.poke_enabled);
+    ui.global::<Poke>().set_on(sv.settings.poke_enabled);
 
     // the Open screen's list mirrors the session's workspaces, re-applying
     // whatever column sort the user picked
@@ -5158,6 +5159,9 @@ async fn push_surfaces(
 /// and with it drop the keyboard focus out of the chat compose box mid-typing.
 fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     ui.set_node_member(b.member.clone().into());
+    // the poke menus need the own seat too: every site gates "never myself"
+    // through Poke.can()
+    ui.global::<Poke>().set_me(b.member.clone().into());
     // the Chain-History panel: paged at 20, newest first (rows arrive
     // newest-first from read_chain)
     {
@@ -11261,6 +11265,120 @@ mod gui_tests {
         g.invoke_cs_revert();
         assert_eq!(g.get_cs_rows().row_count(), 0);
         assert_eq!(g.get_cs_added(), 0);
+    }
+
+    /// **The 0px-collapse trap, pinned.** Seven of the nine poke sites wrap
+    /// an existing Text in a `ContextMenuArea`, and three of those wrappers
+    /// sit inside a LAYOUT — where an element contributes its children's
+    /// size constraints or nothing at all. Nothing at all means an
+    /// invisible, unclickable name. This measures the real geometry of the
+    /// chat author's name after a live mirror pass.
+    #[test]
+    fn the_chat_author_name_keeps_its_width_inside_the_poke_menu_wrapper() {
+        i_slint_backend_testing::init_no_event_loop();
+        let tmp = tempfile::tempdir().expect("tmp");
+        let rt = rt();
+        let _guard = rt.enter();
+        let (w, _) = node_with_chat(tmp.path());
+        let ui = AppWindow::new().expect("headless window");
+        let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+        let last: Arc<Mutex<Option<SessionSettings>>> = Arc::new(Mutex::new(None));
+        ui.window()
+            .set_size(slint::PhysicalSize::new(1200, 800));
+
+        rt.block_on(async {
+            w.execute(Command::CreateStart {
+                name: "DevTest".to_string(),
+                member: "walter".to_string(),
+                threshold: 1,
+                members: 1,
+                relays: Vec::new(),
+            })
+            .await
+            .ok();
+            w.execute(Command::Chat {
+                body: "hello group".to_string(),
+                quote: None,
+                channel: ChannelRef::Group,
+            })
+            .await
+            .ok();
+            mirror(&w, &ui, &last, &chat_ui).await;
+        });
+        assert!(chat_rows(&ui) > 0, "no chat row, nothing to measure");
+        // the repeaters only materialize on a shown window in the main screen
+        ui.set_screen(AppScreen::Main);
+        ui.set_selected_surface("chat".into());
+        ui.show().expect("show headless");
+
+        let names: Vec<_> =
+            i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "ChatRow::author-name")
+                .collect();
+        let menus: Vec<_> =
+            i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "ChatRow::author-menu")
+                .collect();
+        assert!(!names.is_empty(), "the author header must render");
+        assert_eq!(names.len(), menus.len(), "every name carries its menu area");
+        for (n, m) in names.iter().zip(menus.iter()) {
+            assert!(
+                n.size().width > 1.0,
+                "author name collapsed to {}px",
+                n.size().width
+            );
+            // the CLICK area is what breaks silently: a wrapper that
+            // contributes no size constraint is invisible to the pointer
+            assert!(
+                m.size().width >= n.size().width && m.size().height >= n.size().height,
+                "menu area {}x{} does not cover the name {}x{}",
+                m.size().width,
+                m.size().height,
+                n.size().width,
+                n.size().height
+            );
+        }
+    }
+
+    /// The poke gate lives in ONE place (`Poke.can`, theme.slint) because
+    /// nine sites render a member name and each offers the menu. This pins
+    /// what every one of them inherits: off means no menu anywhere, the own
+    /// seat is never a target, and an empty name (system lines, tombstone-
+    /// free rows) never is either.
+    #[test]
+    fn the_poke_gate_refuses_the_own_seat_the_empty_name_and_the_off_switch() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("headless window");
+        let poke = ui.global::<Poke>();
+        poke.set_me("walter".into());
+
+        poke.set_on(false);
+        assert!(!poke.invoke_can("petra".into()), "off: no menu anywhere");
+
+        poke.set_on(true);
+        assert!(poke.invoke_can("petra".into()), "on: another seat pokable");
+        assert!(!poke.invoke_can("walter".into()), "never the own seat");
+        assert!(!poke.invoke_can("".into()), "no name, no target");
+    }
+
+    /// The menus gate on the APPLIED switch, never the settings draft: a
+    /// ticked-but-unsaved checkbox would offer a menu the engine refuses.
+    #[test]
+    fn the_poke_gate_follows_the_applied_setting_not_the_draft() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("headless window");
+        let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+        let sv = SessionView {
+            settings: molt_core::SessionSettings {
+                poke_enabled: true,
+                ..molt_core::SessionSettings::default()
+            },
+            ..SessionView::default()
+        };
+        apply_session(&ui, &sv, true, &chat_ui);
+        assert!(ui.global::<Poke>().get_on(), "applied switch reaches the menus");
+
+        // the draft alone must not move it
+        ui.set_cfg_poke_enabled(false);
+        assert!(ui.global::<Poke>().get_on(), "the draft does not gate the menu");
     }
 
     /// A node with storage, a founded workspace, and chat in it — the state
