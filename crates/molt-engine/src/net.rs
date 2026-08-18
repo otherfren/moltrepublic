@@ -1405,13 +1405,24 @@ impl State {
                     tracing::warn!(from = %from, surface = ?surface, "dropping a proposal too large to publish");
                     return Ok(Reply::Ack);
                 }
-                // (2) a set_image must decode as a picture (WP3)
+                // (2) a set_image must decode as a picture (WP3); a
+                // set_member_image must also be square (the wire twin of
+                // the propose gate — one contract, both doors)
                 if surface == molt_core::Surface::Organization
                     && payload.get("op").and_then(serde_json::Value::as_str) == Some("set_image")
                     && !crate::proposals::image_bytes(&payload)
                         .is_some_and(|b| crate::proposals::image_decodable(&b).is_ok())
                 {
                     tracing::warn!(from = %from, "dropping a set_image proposal without valid, decodable bytes");
+                    return Ok(Reply::Ack);
+                }
+                if surface == molt_core::Surface::Organization
+                    && payload.get("op").and_then(serde_json::Value::as_str)
+                        == Some("set_member_image")
+                    && !crate::proposals::image_bytes(&payload)
+                        .is_some_and(|b| crate::proposals::member_image_ok(&b).is_ok())
+                {
+                    tracing::warn!(from = %from, "dropping a set_member_image proposal without valid, square bytes");
                     return Ok(Reply::Ack);
                 }
                 // (3) a set_relays with no relay at all could only ever fold
@@ -1429,6 +1440,21 @@ impl State {
                         .map_or(true, |v| v.split_whitespace().next().is_none())
                 {
                     tracing::warn!(from = %from, "dropping a set_relays proposal with an empty pool");
+                    return Ok(Reply::Ack);
+                }
+                // (4) a member profile belongs to its member: the link
+                // identity is the only proof of authorship, so a profile op
+                // claiming another seat is dropped
+                // (`member_profiles_plan.md` §2 — the wire twin of the
+                // cmd_propose gate)
+                if surface == molt_core::Surface::Organization
+                    && crate::proposals::is_member_profile_op(&payload)
+                    && payload.get("member").and_then(serde_json::Value::as_str)
+                        != Some(from.as_str())
+                {
+                    let claimed =
+                        payload.get("member").and_then(serde_json::Value::as_str).unwrap_or("");
+                    tracing::warn!(from = %from, claimed = %claimed, "dropping a profile proposal for another member");
                     return Ok(Reply::Ack);
                 }
                 // announce only a genuinely NEW proposal: a WP2 re-serve or

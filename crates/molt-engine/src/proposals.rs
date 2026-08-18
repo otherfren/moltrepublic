@@ -207,7 +207,10 @@ fn validate_payload_fits(
     // may happen to carry a `bytes_b64`, and telling its author to shrink an
     // image they never proposed is a message that costs them the fix
     let is_set_image = surface == Surface::Organization
-        && payload.get("op").and_then(Value::as_str) == Some("set_image");
+        && matches!(
+            payload.get("op").and_then(Value::as_str),
+            Some("set_image" | "set_member_image")
+        );
     if let Some(bytes) = image_bytes(payload).filter(|_| is_set_image) {
         return Err(MoltError::BadPayload(format!(
             "the image is {} KiB — this republic's relays carry {} KiB",
@@ -239,6 +242,11 @@ pub(crate) fn logo_ext(value: &str) -> String {
     }
 }
 
+/// The member description's character cap (`member_profiles_plan.md` (d)):
+/// a table column, not a charter. The payload gate alone would allow tens
+/// of thousands of characters.
+pub(crate) const DESC_MAX: usize = 500;
+
 /// The dimension ceiling of the decodability sniff — the same 8192² the
 /// molt-ui preview decoder enforces, so the engine never accepts an image
 /// the GUI could not render.
@@ -254,6 +262,13 @@ const IMAGE_MAX_DIM: u32 = 8192;
 /// proposing — deliberate duplication: the UI really renders, this engine
 /// gate is the co-equal contract every frontend and the wire fold share.)
 pub(crate) fn image_decodable(bytes: &[u8]) -> Result<(), MoltError> {
+    image_dimensions(bytes).map(|_| ())
+}
+
+/// [`image_decodable`]'s sniff, with the header dimensions it already read
+/// handed back — so a caller that also judges the SHAPE (the square rule
+/// for a member picture) reads them once, not twice.
+pub(crate) fn image_dimensions(bytes: &[u8]) -> Result<(u32, u32), MoltError> {
     let refuse = || {
         MoltError::BadPayload(
             "the image cannot be decoded (png/jpeg/webp/gif/bmp)".into(),
@@ -281,6 +296,31 @@ pub(crate) fn image_decodable(bytes: &[u8]) -> Result<(), MoltError> {
     if w == 0 || h == 0 || w > IMAGE_MAX_DIM || h > IMAGE_MAX_DIM {
         return Err(MoltError::BadPayload(format!(
             "the image is {w}x{h} — the limit is {IMAGE_MAX_DIM}x{IMAGE_MAX_DIM}"
+        )));
+    }
+    Ok((w, h))
+}
+
+/// Is this an Organization payload editing ONE member's profile? The three
+/// ops that carry a `member` and may only ever be proposed by that member
+/// (`member_profiles_plan.md` §2) — the propose gate and the wire drop share
+/// this one answer.
+pub(crate) fn is_member_profile_op(payload: &Value) -> bool {
+    matches!(
+        payload.get("op").and_then(Value::as_str),
+        Some("set_member_image" | "remove_member_image" | "set_member_desc")
+    )
+}
+
+/// A member picture must also be SQUARE (`member_profiles_plan.md` (h)):
+/// every frontend renders it in a square box, so a non-square one would be
+/// cropped differently per client — the contract belongs in the engine, not
+/// in one frontend. The org logo keeps taking any shape.
+pub(crate) fn member_image_ok(bytes: &[u8]) -> Result<(), MoltError> {
+    let (w, h) = image_dimensions(bytes)?;
+    if w != h {
+        return Err(MoltError::BadPayload(format!(
+            "the image is {w}x{h} - it must be square"
         )));
     }
     Ok(())
@@ -359,6 +399,25 @@ fn validate_org_payload(surface: Surface, payload: &Value) -> Result<(), MoltErr
             // WP3: the bytes must also decode as a picture
             Some(bytes) => image_decodable(&bytes),
         },
+        // the same rule for a member picture, plus the square shape. The
+        // seat this names is checked in `cmd_propose` (it needs the roster).
+        "set_member_image" => match image_bytes(payload) {
+            None => Err(MoltError::BadPayload(
+                "a set_member_image proposal must embed the image (base64 `bytes_b64`)".into(),
+            )),
+            Some(bytes) => member_image_ok(&bytes),
+        },
+        // a table column, not a charter — the refusal names the limit; an
+        // empty value clears the description
+        "set_member_desc" => {
+            let len = value.trim().chars().count();
+            if len > DESC_MAX {
+                return Err(MoltError::BadPayload(format!(
+                    "the description is {len} characters - the limit is {DESC_MAX}"
+                )));
+            }
+            Ok(())
+        }
         // a feature edit — space-separated optional-surface keys, every one
         // known (an applied entry is forever; the enable-only gate sits in
         // cmd_propose, the union fold makes it deterministic)
@@ -445,6 +504,25 @@ impl State {
             Some("restore_member" | "add_member")
         ) {
             return Err(MoltError::BadPayload("reserved op".into()));
+        }
+        // a member profile belongs to its member (`member_profiles_plan.md`
+        // §2): the seat must exist, and only its own node may propose the
+        // edit. The roster read is why this sits here and not in the
+        // stateless payload validation; the wire twin is the drop in
+        // `cmd_net_delivered`, where the link identity is the proof.
+        if surface == Surface::Organization && is_member_profile_op(&payload) {
+            let member = payload.get("member").and_then(Value::as_str).unwrap_or_default();
+            if member.is_empty() {
+                return Err(MoltError::BadPayload("the profile op needs a member".into()));
+            }
+            if !self.roster().iter().any(|m| m == member) {
+                return Err(MoltError::BadPayload(format!("{member}: not in the roster")));
+            }
+            if member != self.member() {
+                return Err(MoltError::BadPayload(format!(
+                    "only {member} can edit this profile"
+                )));
+            }
         }
         validate_org_payload(surface, &payload)?;
         validate_payload_fits(surface, &payload, &self.roster())?;
@@ -978,13 +1056,27 @@ impl State {
             "set_relays" => "Relay pool",
             "set_features" => "Features",
             "wiki_patch" => "Wiki",
+            "set_member_image" => "Member picture",
+            "remove_member_image" => "Member picture removed",
+            "set_member_desc" => "Member description",
             other => other,
         };
         // the decided content, capped — a charter is long, the image ops
         // carry base64 and a wiki patch carries a raw diff; none of those
         // belongs in a chat line (the card's raw-patch button shows it)
+        let member = payload.get("member").and_then(Value::as_str).unwrap_or("");
         let content = match op {
             "set_image" | "remove_image" => String::new(),
+            // the seat, never its picture bytes
+            "set_member_image" | "remove_member_image" => member.to_string(),
+            "set_member_desc" => {
+                let v = payload.get("value").and_then(Value::as_str).unwrap_or("");
+                let mut c: String = v.chars().take(160).collect();
+                if v.chars().count() > 160 {
+                    c.push('…');
+                }
+                format!("{member}: {c}")
+            }
             "wiki_patch" => payload
                 .get("summary")
                 .and_then(Value::as_str)
@@ -2056,5 +2148,166 @@ mod size_gate_tests {
             "50 seats ({large} B) left as much room as 3 ({small} B) — the block's \
              own signatures are not being counted"
         );
+    }
+
+    // ---- member profiles (`member_profiles_plan.md` §2) ----------------
+
+    fn member_image_payload(bytes: &[u8]) -> Value {
+        json!({
+            "op": "set_member_image",
+            "member": "walter",
+            "value": "face.png",
+            "bytes_b64": base64::engine::general_purpose::STANDARD.encode(bytes),
+        })
+    }
+
+    /// A profile picture is gated by the SAME derived ceiling as the org
+    /// logo — no second, chosen cap — and the headroom is the real edge.
+    #[test]
+    fn a_member_image_rides_the_same_derived_ceiling() {
+        let roster = roster();
+        let headroom = image_headroom(Surface::Organization, &member_image_payload(&[]), &roster);
+        assert!(
+            payload_fits(
+                Surface::Organization,
+                &member_image_payload(&padded_bmp(headroom)),
+                &roster
+            ),
+            "the advertised headroom of {headroom} B is not itself accepted"
+        );
+        assert!(
+            !payload_fits(
+                Surface::Organization,
+                &member_image_payload(&padded_bmp(headroom + 3)),
+                &roster
+            ),
+            "the headroom leaves slack, so it is not the derived edge"
+        );
+    }
+
+    /// …and an oversized avatar's refusal names the IMAGE and the size that
+    /// would fit, like the org logo's does.
+    #[test]
+    fn the_member_image_refusal_names_the_size_that_would_fit() {
+        let roster = roster();
+        let headroom = image_headroom(Surface::Organization, &member_image_payload(&[]), &roster);
+        let payload = member_image_payload(&padded_bmp(headroom * 2));
+        let err = validate_payload_fits(Surface::Organization, &payload, &roster)
+            .expect_err("an oversized avatar is refused");
+        let MoltError::BadPayload(msg) = err else {
+            panic!("expected BadPayload");
+        };
+        assert!(msg.contains("image"), "the refusal must name the image: {msg}");
+        assert!(
+            msg.contains(&format!("{} KiB", headroom / 1024)),
+            "the refusal does not say what fits: {msg}"
+        );
+    }
+
+    /// A profile picture is rendered in a square box on every frontend, so
+    /// the engine refuses a non-square one (h) — naming the dimensions it
+    /// actually got. The org logo stays unconstrained.
+    #[test]
+    fn a_member_image_must_be_square() {
+        let mut wide = crate::tests::tiny_bmp_header(4, 2);
+        wide.resize(wide.len() + 8, 0);
+        let err = validate_org_payload(Surface::Organization, &member_image_payload(&wide))
+            .expect_err("a non-square avatar is refused");
+        let MoltError::BadPayload(msg) = err else {
+            panic!("expected BadPayload");
+        };
+        assert!(msg.contains("4x2"), "the refusal must name the dimensions: {msg}");
+        // …the square twin passes, and the org logo keeps taking any shape
+        validate_org_payload(Surface::Organization, &member_image_payload(&padded_bmp(64)))
+            .expect("a square avatar is accepted");
+        let org = json!({
+            "op": "set_image",
+            "value": "logo.png",
+            "bytes_b64": base64::engine::general_purpose::STANDARD.encode(&wide),
+        });
+        validate_org_payload(Surface::Organization, &org)
+            .expect("the org logo has no square rule");
+    }
+
+    /// Sign-what-you-see: an avatar proposal without the bytes is refused.
+    #[test]
+    fn a_member_image_must_embed_its_bytes() {
+        let payload = json!({ "op": "set_member_image", "member": "walter", "value": "face.png" });
+        validate_org_payload(Surface::Organization, &payload)
+            .expect_err("an avatar proposal without bytes is refused");
+    }
+
+    /// A table column is not a charter: the description is capped, and the
+    /// refusal names the limit. An empty value clears it.
+    #[test]
+    fn a_long_description_is_refused_naming_the_limit() {
+        let desc = |v: String| json!({ "op": "set_member_desc", "member": "walter", "value": v });
+        validate_org_payload(Surface::Organization, &desc("x".repeat(DESC_MAX)))
+            .expect("the limit itself is accepted");
+        validate_org_payload(Surface::Organization, &desc(String::new()))
+            .expect("an empty description clears it");
+        let err = validate_org_payload(Surface::Organization, &desc("x".repeat(DESC_MAX + 1)))
+            .expect_err("one character over the limit is refused");
+        let MoltError::BadPayload(msg) = err else {
+            panic!("expected BadPayload");
+        };
+        assert!(
+            msg.contains(&DESC_MAX.to_string()),
+            "the refusal does not name the limit: {msg}"
+        );
+        // the cap counts CHARACTERS, not bytes
+        validate_org_payload(Surface::Organization, &desc("ä".repeat(DESC_MAX)))
+            .expect("a multi-byte description is measured in characters");
+    }
+
+    /// The decided-vote chat line names the seat, never the picture bytes
+    /// (the 987 rule: base64 does not belong in a chat line).
+    #[test]
+    fn the_decision_line_names_the_seat_never_the_bytes() {
+        let img = json!({
+            "op": "set_member_image",
+            "member": "walter",
+            "value": "face.png",
+            "bytes_b64": "QUJDREVGRw==",
+        });
+        let line = State::decision_summary(7, &img, None);
+        assert!(line.contains("Member picture"), "{line}");
+        assert!(line.contains("walter"), "{line}");
+        assert!(!line.contains("QUJD"), "the image bytes leaked into a chat line: {line}");
+
+        let removed = json!({ "op": "remove_member_image", "member": "walter" });
+        let line = State::decision_summary(8, &removed, None);
+        assert!(line.contains("Member picture removed"), "{line}");
+        assert!(line.contains("walter"), "{line}");
+
+        let desc = json!({ "op": "set_member_desc", "member": "walter", "value": "keeps the bees" });
+        let line = State::decision_summary(9, &desc, None);
+        assert!(line.contains("Member description"), "{line}");
+        assert!(line.contains("walter: keeps the bees"), "{line}");
+    }
+
+    /// **Self-edit, local**: a profile op is refused unless it names THIS
+    /// node's own seat, and the seat must be in the roster.
+    #[test]
+    fn a_profile_op_for_another_member_is_refused() {
+        let mut st = crate::tests::plain_state();
+        let op = |m: &str| json!({ "op": "set_member_desc", "member": m, "value": "hi" });
+        let err = st
+            .cmd_propose(Surface::Organization, op("peer-1"))
+            .expect_err("editing another member's profile is refused");
+        assert_eq!(format!("{err}"), "bad payload: only peer-1 can edit this profile");
+        let err = st
+            .cmd_propose(Surface::Organization, op("ghost"))
+            .expect_err("a profile op for a non-seat is refused");
+        assert_eq!(format!("{err}"), "bad payload: ghost: not in the roster");
+        let err = st
+            .cmd_propose(
+                Surface::Organization,
+                json!({ "op": "set_member_desc", "value": "hi" }),
+            )
+            .expect_err("a profile op without a member is refused");
+        assert_eq!(format!("{err}"), "bad payload: the profile op needs a member");
+        st.cmd_propose(Surface::Organization, op("me"))
+            .expect("a member may edit its own profile");
     }
 }

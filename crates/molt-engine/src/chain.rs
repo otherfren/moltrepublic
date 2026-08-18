@@ -4773,6 +4773,52 @@ mod tests {
         );
     }
 
+    /// **Self-edit, on the wire** (`member_profiles_plan.md` §2): a member
+    /// profile belongs to its member, and the link identity is the only
+    /// proof of authorship — so a profile proposal claiming ANOTHER seat is
+    /// dropped, never recorded. Node-independent like the drops beside it,
+    /// so every honest holder drops the same frame. The picture ops carry
+    /// the decodable+square verdict onto the wire too.
+    #[test]
+    fn a_profile_proposal_claiming_another_member_is_dropped() {
+        use base64::Engine as _;
+        let b = Builder::new(&["petra", "walter"], 2);
+        let mut peer = chain_peer("walter", &b, b.blocks.clone());
+        let deliver = |peer: &mut crate::State, id: u64, from: &str, payload: serde_json::Value| {
+            let env = molt_core::EventEnvelope {
+                prev_seq: 0,
+                seq: 300 + id,
+                ts: 1_751_000_000,
+                by: from.to_string(),
+                body: WorkspaceEvent::Proposed {
+                    id: ProposalId(id),
+                    surface: Surface::Organization,
+                    payload,
+                },
+            };
+            peer.cmd_net_delivered(from.to_string(), env, None)
+                .expect("a wire drop acks, never errors");
+        };
+        // petra claiming walter's description: dropped
+        deliver(&mut peer, 20, "petra", json!({ "op": "set_member_desc", "member": "walter", "value": "hi" }));
+        assert!(
+            !peer.proposals.contains_key(&20),
+            "a profile op claiming another seat must never become a pending proposal"
+        );
+        // petra editing her own: recorded
+        deliver(&mut peer, 21, "petra", json!({ "op": "set_member_desc", "member": "petra", "value": "hi" }));
+        assert!(peer.proposals.contains_key(&21), "a member's own profile edit is recorded");
+        // the picture ops carry the square rule onto the wire
+        let square = base64::engine::general_purpose::STANDARD
+            .encode(crate::tests::tiny_bmp_header(2, 2));
+        let wide = base64::engine::general_purpose::STANDARD
+            .encode(crate::tests::tiny_bmp_header(4, 2));
+        deliver(&mut peer, 22, "petra", json!({ "op": "set_member_image", "member": "petra", "value": "f.bmp", "bytes_b64": wide }));
+        assert!(!peer.proposals.contains_key(&22), "a non-square peer avatar is dropped");
+        deliver(&mut peer, 23, "petra", json!({ "op": "set_member_image", "member": "petra", "value": "f.bmp", "bytes_b64": square }));
+        assert!(peer.proposals.contains_key(&23), "a square, decodable peer avatar is recorded");
+    }
+
     /// A 2-of-3 chain peer holding the FULL three-member roster (the shared
     /// `chain_peer` pins the founding pair).
     fn chain_peer_3(member: &str, b: &Builder) -> crate::State {
