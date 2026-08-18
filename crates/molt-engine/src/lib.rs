@@ -44,6 +44,7 @@ pub use relay_msg::known_headlines;
 pub use relay_msg::{known_log_shapes, LogShape};
 mod session;
 mod transfer;
+mod wiki_export;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -51,6 +52,9 @@ use std::path::PathBuf;
 pub use configstore::ConfigStoreHandle;
 #[doc(hidden)]
 pub use chain::{verify_chain, ChainHead};
+/// The public wiki-export verifier — the reference implementation an external
+/// reviewer runs (`cargo run -p molt-engine --example verify_wiki_export`).
+pub use chain::{verify_wiki_export, WikiExportReport};
 #[doc(hidden)]
 pub use recovery::RecoveryInvite;
 #[doc(hidden)]
