@@ -273,6 +273,7 @@ pub fn run_app(
     let (wiki_model, wiki_last) = wire_wiki(&ui);
     wire_wiki_vote(&ui, &rt, &wallet, &wiki_model, &wiki_last);
     wire_patch_view(&ui);
+    wire_wiki_export(&ui, &rt, &wallet);
 
     // --- actions: each becomes a Command on the shared engine ---
     {
@@ -3016,8 +3017,10 @@ fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
                 "a target directory is required" => "Zielordner fehlt",
                 "an export is already running" => "läuft bereits",
                 "the wiki is empty" => "Wiki ist leer",
-                "proof needs chain governance" => "Nachweis braucht Chain-Governance",
-                "proof needs the genesis block" => "Nachweis braucht den Genesis-Block",
+                // the dialog's checkbox says "Prüfpaket beilegen" — the
+                // refusal has to name the same thing the user just ticked
+                "proof needs chain governance" => "Prüfpaket braucht Chain-Governance",
+                "proof needs the genesis block" => "Prüfpaket braucht den Genesis-Block",
                 other => other,
             }
         ),
@@ -3953,6 +3956,29 @@ fn apply_session(
         ui.set_export_note(note.into());
         ui.set_export_failed(failed);
         ui.set_export_ws(ex.workspace.as_str().into());
+    }
+
+    // the wiki export's honest outcome, EDGE-triggered: the session
+    // re-pushes unchanged, so a toast per push would repeat the same result
+    // forever. A started export clears the mark, which is what lets the very
+    // same export toast a second time.
+    {
+        let ex = &sv.wiki_export;
+        let mark = if ex.running {
+            String::new()
+        } else {
+            format!("{}|{}|{}|{}", ex.dest, ex.result, ex.files, ex.bytes)
+        };
+        if ui.get_wiki_export_seen() != mark.as_str() {
+            ui.set_wiki_export_seen(mark.as_str().into());
+            if let Some((msg, failed)) = wiki_export_toast(lang, ex) {
+                if failed {
+                    ui.invoke_show_toast_error(msg.into());
+                } else {
+                    ui.invoke_show_toast(msg.into());
+                }
+            }
+        }
     }
 
     apply_runs(ui, sv);
@@ -8450,6 +8476,84 @@ fn wire_patch_view(ui: &AppWindow) {
     });
 }
 
+/// The wiki export's outcome as toast copy, or `None` while it is idle or
+/// still running. Pure on purpose: the caller edge-triggers it, so a
+/// re-pushed session never re-toasts the same result.
+fn wiki_export_toast(lang: i32, ex: &molt_core::ExportState) -> Option<(String, bool)> {
+    if ex.running || ex.result.is_empty() {
+        return None;
+    }
+    let l = if lang == 1 { Lexicon::de() } else { Lexicon::en() };
+    if let Some(reason) = ex.result.strip_prefix("error: ") {
+        return Some((format!("⚠ {} {reason}", l.mem_ex_failed), true));
+    }
+    if ex.result == "ok" {
+        let unit = if ex.files == 1 {
+            l.mem_ex_file
+        } else {
+            l.mem_ex_files
+        };
+        return Some((format!("{} {} {unit}", l.mem_ex_done, ex.files), false));
+    }
+    None
+}
+
+/// The export dialog's two doors: the native folder picker, and the command
+/// itself. `WikiExport` answers `Ack` — the REAL outcome lands
+/// asynchronously in `SessionView::wiki_export` (toasted from the mirror),
+/// so only an immediate refusal (no target, empty wiki, a proof without a
+/// chain) toasts from here.
+fn wire_wiki_export(ui: &AppWindow, rt: &Handle, wallet: &WalletHandle) {
+    {
+        let rt = rt.clone();
+        let weak = ui.as_weak();
+        ui.on_mem_export_pick(move || {
+            let weak = weak.clone();
+            // only the property read runs on the UI thread; the stat in
+            // browse_start_dir moves to a blocking task
+            let draft = weak
+                .upgrade()
+                .map(|ui| ui.get_mem_export_dir().to_string())
+                .unwrap_or_default();
+            rt.spawn(async move {
+                let start_dir = tokio::task::spawn_blocking(move || browse_start_dir(&draft))
+                    .await
+                    .ok()
+                    .flatten();
+                let mut picker = rfd::AsyncFileDialog::new();
+                if let Some(dir) = start_dir {
+                    picker = picker.set_directory(dir);
+                }
+                let Some(folder) = picker.pick_folder().await else {
+                    return; // cancelled
+                };
+                let path = folder.path().display().to_string();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_mem_export_dir(path.into());
+                    }
+                });
+            });
+        });
+    }
+    {
+        let rt = rt.clone();
+        let weak = ui.as_weak();
+        let wallet = wallet.clone();
+        ui.on_wiki_export(move |dest, proof| {
+            issue(
+                &rt,
+                &wallet,
+                &weak,
+                Command::WikiExport {
+                    dest: dest.to_string(),
+                    proof,
+                },
+            );
+        });
+    }
+}
+
 /// Wire the changeset panel's "start vote" — the one wiki verb that talks
 /// to the engine. The stack is reprocessed into the NET patch; a net-empty
 /// changeset just clears (every action cancelled out). Otherwise the patch
@@ -9134,6 +9238,17 @@ lexicon! {
     mem_toast_link_md: "Link markup copied", "Link-Markup kopiert";
     mem_changed_hint: "changed", "geändert";
     mem_tb_revert_doc: "Discard this file's changes", "Änderungen dieser Datei verwerfen";
+    mem_tb_export: "Export wiki", "Wiki exportieren";
+    mem_ex_title: "Export wiki", "Wiki exportieren";
+    mem_ex_body: "The approved wiki, as plain files.", "Das freigegebene Wiki, als einfache Dateien.";
+    mem_ex_confirm: "Export", "Exportieren";
+    mem_ex_proof: "Include verification bundle", "Prüfpaket beilegen";
+    mem_ex_reveals: "Reveals member names, keys, transport anchors, relays, the charter and each patch's signers.", "Zeigt Mitgliedsnamen, Schlüssel, Transport-Anker, Relays, die Charta und die Unterzeichner jedes Patches.";
+    mem_ex_drafts: "local changes stay local", "lokale Änderungen bleiben lokal";
+    mem_ex_done: "wiki exported:", "Wiki exportiert:";
+    mem_ex_file: "file", "Datei";
+    mem_ex_files: "files", "Dateien";
+    mem_ex_failed: "wiki export failed:", "Wiki-Export fehlgeschlagen:";
     ed_copy: "Copy", "Kopieren";
     ed_cut: "Cut", "Ausschneiden";
     ed_paste: "Paste", "Einfügen";
@@ -12496,5 +12611,294 @@ mod gui_tests {
             card.id,
             card.text
         );
+    }
+
+    // ---- wiki export (docs/memory/wiki_export_plan.md, keystone 5) -------
+
+    /// The 💾 button writes the APPROVED tree, so the gate is the folded
+    /// base - never the local stack, which the export deliberately leaves
+    /// behind. One place decides it (`WikiState.has-base`), because the
+    /// toolbar button and the dialog must never disagree.
+    #[test]
+    fn the_wiki_export_button_follows_the_approved_base_tree() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("headless window");
+        let g = ui.global::<WikiState>();
+
+        g.set_base_docs(ModelRc::new(VecModel::from(Vec::<WikiBase>::new())));
+        assert!(!g.invoke_has_base(), "an empty base has nothing to export");
+
+        // a local draft alone must NOT arm the button: drafts stay local
+        g.set_cs_rows(ModelRc::new(VecModel::from(vec![WikiChangeRow {
+            kind: 0,
+            label: "notes.md".into(),
+        }])));
+        assert!(!g.invoke_has_base(), "a local draft is not an approved tree");
+
+        g.set_base_docs(ModelRc::new(VecModel::from(vec![WikiBase {
+            path: "charter.md".into(),
+            content: "hello".into(),
+        }])));
+        assert!(g.invoke_has_base(), "one approved doc arms the export");
+    }
+
+    /// The dialog's drafts line appears only when there IS a local stack -
+    /// telling a user with nothing pending that nothing pending stays local
+    /// is noise.
+    #[test]
+    fn the_export_dialog_counts_only_a_non_empty_local_stack() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("headless window");
+        let g = ui.global::<WikiState>();
+
+        g.set_cs_rows(ModelRc::new(VecModel::from(Vec::<WikiChangeRow>::new())));
+        assert_eq!(g.invoke_draft_count(), 0, "no stack, no line");
+
+        g.set_cs_rows(ModelRc::new(VecModel::from(vec![
+            WikiChangeRow {
+                kind: 0,
+                label: "a.md".into(),
+            },
+            WikiChangeRow {
+                kind: 5,
+                label: "b.md".into(),
+            },
+        ])));
+        assert_eq!(g.invoke_draft_count(), 2, "the line names the real count");
+    }
+
+    /// The outcome toast is built from the engine's own export state, in
+    /// both languages, and stays silent while the export is idle or still
+    /// running (a toast per session push would repeat forever).
+    #[test]
+    fn the_wiki_export_toast_carries_the_real_outcome() {
+        let idle = molt_core::ExportState::default();
+        assert!(
+            super::wiki_export_toast(0, &idle).is_none(),
+            "nothing happened yet"
+        );
+
+        let running = molt_core::ExportState {
+            running: true,
+            dest: "/tmp/x".to_string(),
+            ..molt_core::ExportState::default()
+        };
+        assert!(
+            super::wiki_export_toast(0, &running).is_none(),
+            "no verdict while it runs"
+        );
+
+        let ok = molt_core::ExportState {
+            result: "ok".to_string(),
+            files: 12,
+            ..molt_core::ExportState::default()
+        };
+        let (msg, failed) = super::wiki_export_toast(0, &ok).expect("a verdict");
+        assert!(!failed);
+        assert_eq!(msg, "wiki exported: 12 files");
+        let (de, _) = super::wiki_export_toast(1, &ok).expect("a verdict");
+        assert_eq!(de, "Wiki exportiert: 12 Dateien");
+
+        // the singular is not "1 files"
+        let one = molt_core::ExportState {
+            result: "ok".to_string(),
+            files: 1,
+            ..molt_core::ExportState::default()
+        };
+        assert_eq!(
+            super::wiki_export_toast(0, &one).expect("a verdict").0,
+            "wiki exported: 1 file"
+        );
+        assert_eq!(
+            super::wiki_export_toast(1, &one).expect("a verdict").0,
+            "Wiki exportiert: 1 Datei"
+        );
+
+        // a failure is surfaced verbatim, in the error tone
+        let bad = molt_core::ExportState {
+            result: "error: dest is not a directory".to_string(),
+            ..molt_core::ExportState::default()
+        };
+        let (msg, failed) = super::wiki_export_toast(0, &bad).expect("a verdict");
+        assert!(failed, "a failure toasts in the error tone");
+        assert!(
+            msg.contains("dest is not a directory"),
+            "the real reason survives: {msg}"
+        );
+    }
+
+    /// The same outcome must toast ONCE: `apply_session` runs on every
+    /// engine change, and a settled export state stays settled.
+    #[test]
+    fn a_settled_wiki_export_toasts_once_not_on_every_push() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("headless window");
+        let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+        let sv = SessionView {
+            wiki_export: molt_core::ExportState {
+                result: "ok".to_string(),
+                dest: "/tmp/out".to_string(),
+                files: 3,
+                bytes: 90,
+                ..molt_core::ExportState::default()
+            },
+            ..SessionView::default()
+        };
+        apply_session(&ui, &sv, true, &chat_ui);
+        assert_eq!(ui.get_toast_text().as_str(), "wiki exported: 3 files");
+
+        // a second, unchanged push must not speak again
+        ui.invoke_show_toast("something else".into());
+        apply_session(&ui, &sv, true, &chat_ui);
+        assert_eq!(
+            ui.get_toast_text().as_str(),
+            "something else",
+            "an unchanged export state re-toasted"
+        );
+    }
+
+    /// **The dialog's Confirm reaches the engine with what the user picked.**
+    /// Both halves are pinned: the destination (the tree lands exactly
+    /// there) and the proof flag (this workspace has no chain, so a
+    /// `proof: true` export is REFUSED - if the flag were dropped the very
+    /// same call would write a tree).
+    #[test]
+    fn the_export_dialog_issues_the_command_with_the_picked_path_and_the_proof_flag() {
+        i_slint_backend_testing::init_no_event_loop();
+        let tmp = tempfile::tempdir().expect("tmp");
+        let rt = rt();
+        let _guard = rt.enter();
+
+        // a single-operator group: propose + one approval applies the patch
+        let w = molt_engine::spawn(
+            GroupConfig {
+                member: "me".to_string(),
+                members: vec!["me".to_string()],
+                threshold: 1,
+                self_cosign: false,
+            },
+            SessionView::default(),
+        );
+        rt.block_on(async {
+            let id = match w
+                .execute(Command::Propose {
+                    surface: Surface::Memory,
+                    payload: serde_json::json!({
+                        "op": "wiki_patch",
+                        "summary": "a.md",
+                        "value": "diff --git a/a.md b/a.md\nnew file mode 100644\n--- /dev/null\n+++ b/a.md\n@@ -0,0 +1,1 @@\n+hello\n",
+                    }),
+                })
+                .await
+                .expect("propose")
+            {
+                Reply::Proposed { id } => id,
+                other => panic!("unexpected: {other:?}"),
+            };
+            w.execute(Command::Approve { proposal: id })
+                .await
+                .expect("approve");
+        });
+
+        let ui = AppWindow::new().expect("headless window");
+        wire_wiki_export(&ui, rt.handle(), &w);
+
+        // --- the proof flag: no chain here, so the engine must refuse
+        let refused = tmp.path().join("refused");
+        ui.invoke_wiki_export(refused.display().to_string().into(), true);
+
+        // --- the destination: the same call without the bundle writes
+        let dest = tmp.path().join("out");
+        ui.invoke_wiki_export(dest.display().to_string().into(), false);
+        rt.block_on(async {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+            loop {
+                let Ok(Reply::Session(s)) = w.execute(Command::ReadSession).await else {
+                    panic!("read session");
+                };
+                if !s.wiki_export.running && !s.wiki_export.result.is_empty() {
+                    assert_eq!(s.wiki_export.result, "ok", "the export failed: {s:?}");
+                    assert_eq!(s.wiki_export.dest, dest.display().to_string());
+                    break;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the export never settled: {:?}",
+                    s.wiki_export
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        });
+        assert_eq!(
+            std::fs::read_to_string(dest.join("wiki/a.md")).expect("the exported doc"),
+            "hello\n"
+        );
+        assert!(
+            !dest.join("proof").exists(),
+            "proof: false must write no bundle"
+        );
+        // the refused call ran first and left nothing behind
+        assert!(
+            !refused.exists(),
+            "a proof export without a chain must be refused, not written"
+        );
+    }
+
+    /// i18n: every wiki-export string carries a real English AND a real
+    /// German arm (an empty or identical pair is a missing translation),
+    /// and none of them smuggles in an em dash.
+    #[test]
+    fn every_wiki_export_string_reads_in_both_languages() {
+        let en = Lexicon::en();
+        let de = Lexicon::de();
+        let pairs = [
+            ("mem_tb_export", en.mem_tb_export, de.mem_tb_export),
+            ("mem_ex_title", en.mem_ex_title, de.mem_ex_title),
+            ("mem_ex_body", en.mem_ex_body, de.mem_ex_body),
+            ("mem_ex_confirm", en.mem_ex_confirm, de.mem_ex_confirm),
+            ("mem_ex_proof", en.mem_ex_proof, de.mem_ex_proof),
+            ("mem_ex_reveals", en.mem_ex_reveals, de.mem_ex_reveals),
+            ("mem_ex_drafts", en.mem_ex_drafts, de.mem_ex_drafts),
+            ("mem_ex_done", en.mem_ex_done, de.mem_ex_done),
+            ("mem_ex_file", en.mem_ex_file, de.mem_ex_file),
+            ("mem_ex_files", en.mem_ex_files, de.mem_ex_files),
+            ("mem_ex_failed", en.mem_ex_failed, de.mem_ex_failed),
+        ];
+        for (key, e, d) in pairs {
+            assert!(!e.is_empty() && !d.is_empty(), "{key}: an empty arm");
+            assert_ne!(e, d, "{key}: untranslated");
+            assert!(!e.contains('—') && !d.contains('—'), "{key}: em dash");
+        }
+        // the disclosure names what the bundle actually reveals
+        for l in [en, de] {
+            let line = l.mem_ex_reveals.to_lowercase();
+            for token in ["relay", "chart"] {
+                assert!(
+                    line.contains(token),
+                    "the disclosure drops {token}: {}",
+                    l.mem_ex_reveals
+                );
+            }
+        }
+    }
+
+    /// The engine's export refusals reach the user in German too - the
+    /// `localize_error` match carries no wildcard, so a new phrase is a
+    /// compile-time reminder, but a phrase without an arm would silently
+    /// stay English.
+    #[test]
+    fn the_wiki_export_refusals_render_in_german() {
+        for phrase in [
+            "a target directory is required",
+            "an export is already running",
+            "the wiki is empty",
+            "proof needs chain governance",
+            "proof needs the genesis block",
+        ] {
+            let e = molt_core::MoltError::WikiExport(phrase);
+            let de = super::localize_error(1, &e);
+            assert!(de.starts_with("Wiki-Export: "), "{de}");
+            assert!(!de.contains(phrase), "phrase without a German arm: {de}");
+        }
     }
 }

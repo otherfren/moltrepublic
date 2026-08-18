@@ -559,6 +559,8 @@ export component MemoryPane inherits VerticalLayout {
     // "discard all" asks first — the modal lives at the app root (a
     // layout child here could not overlay the pane)
     callback confirm-revert();
+    // 💾 raises the export dialog, which lives at the app root too
+    callback wiki-export();
     spacing: 8px;
 
     // Everything the wiki KNOWS lives in the Rust model behind WikiState
@@ -749,12 +751,13 @@ export component MemoryPane inherits VerticalLayout {
             vertical-stretch: 1;
             spacing: 0px;
             property <length> avail: self.width - 8px;
-            // ONE clamp for layout and drag: navigator ≥ 180px (the
-            // five-button toolbar's floor), content ≥ 300px (below their
-            // sum the navigator floor wins — the window is far below any
-            // usable width there anyway)
+            // ONE clamp for layout and drag: navigator ≥ 213px (the
+            // SIX-button toolbar's floor — 6*30 + 5*3 + 10 = 205, plus the
+            // 8px slack the five-button floor carried), content ≥ 300px
+            // (below their sum the navigator floor wins — the window is far
+            // below any usable width there anyway)
             pure function clamp-nav(w: length) -> length {
-                return max(180px, min(self.avail - 300px, w));
+                return max(213px, min(self.avail - 300px, w));
             }
             property <length> nav-w: self.clamp-nav(root.split * self.avail);
 
@@ -812,6 +815,16 @@ export component MemoryPane inherits VerticalLayout {
                             enabled: WikiState.has-marked;
                             clicked => {
                                 WikiState.delete-marked();
+                            }
+                        }
+                        ToolBtn {
+                            glyph: "💾";
+                            name: Strings.mem-tb-export;
+                            // an export writes the APPROVED tree, so an
+                            // empty base has nothing to write
+                            enabled: WikiState.has-base();
+                            clicked => {
+                                root.wiki-export();
                             }
                         }
                         Rectangle {
