@@ -2430,6 +2430,17 @@ fn avatar_cache_key(path: &str) -> String {
     format!("{path}|{}|{stamp}", meta.len())
 }
 
+/// Whether the republic's picture must be decoded again, and under which
+/// key. The engine materializes it as `logo.<ext>`, so REPLACING the picture
+/// with the same format leaves the path byte-identical - a reload guarded on
+/// the path string alone then shows the old picture until the app restarts.
+/// The member avatars carry the same trap and are keyed by content for
+/// exactly this reason.
+fn logo_needs_reload(shown_key: &str, image_ref: &str) -> Option<String> {
+    let key = avatar_cache_key(image_ref);
+    (key != shown_key).then_some(key)
+}
+
 /// The decoded member avatars, keyed by [`avatar_cache_key`].
 ///
 /// [`sync_rows`] rewrites EVERY row on EVERY mirror push, so a decode
@@ -2466,6 +2477,9 @@ impl AvatarCache {
 thread_local! {
     /// The window's one avatar cache. `apply_surfaces` runs on the UI
     /// thread only, so it needs no lock.
+    /// What the window's republic picture was decoded from.
+    static LOGO_KEY: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+
     static AVATARS: std::cell::RefCell<AvatarCache> =
         std::cell::RefCell::new(AvatarCache::default());
 }
@@ -5853,7 +5867,11 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     // peer-supplied display value and must not decide the format. On a
     // session-only workspace the reference is no local file — the read
     // fails quietly and the placeholder mark stays.
-    if ui.get_org_img_path().as_str() != b.org_stats.image {
+    if let Some(key) = logo_needs_reload(
+        &LOGO_KEY.with_borrow(std::clone::Clone::clone),
+        &b.org_stats.image,
+    ) {
+        LOGO_KEY.with_borrow_mut(|k| *k = key);
         ui.set_org_img_path(b.org_stats.image.as_str().into());
         let loaded = (!b.org_stats.image.is_empty())
             .then(|| std::fs::read(&b.org_stats.image).ok())
@@ -9819,7 +9837,7 @@ mod tests {
 
     /// A `w x h` picture with incompressible content: a flat colour would
     /// fit any budget at any edge and prove nothing about the downscale.
-    fn noisy_png(w: u32, h: u32) -> Vec<u8> {
+    pub(super) fn noisy_png(w: u32, h: u32) -> Vec<u8> {
         let mut img = image::RgbImage::new(w, h);
         let mut seed: u32 = 0x1234_5678;
         for p in img.pixels_mut() {
@@ -9907,6 +9925,35 @@ mod tests {
     /// (`avatar-<stem>.<ext>`), so a path-only cache key would keep
     /// showing the old face until the app restarts. The key carries the
     /// file's identity, not just its name.
+    /// The republic's picture must survive a REPLACEMENT: same file name,
+    /// new content. A path compare says "unchanged" and the window keeps the
+    /// old logo until a restart - the bug this rule replaced.
+    #[test]
+    fn a_replaced_logo_forces_a_reload_although_its_path_is_unchanged() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let logo = tmp.path().join("logo.png");
+        let path = logo.display().to_string();
+        std::fs::write(&logo, noisy_png(8, 8)).expect("write the first logo");
+
+        let first = super::logo_needs_reload("", &path).expect("a first picture always loads");
+        assert_eq!(
+            super::logo_needs_reload(&first, &path),
+            None,
+            "an unchanged picture must not be decoded again on every push"
+        );
+
+        std::fs::write(&logo, noisy_png(16, 16)).expect("replace the logo");
+        let second = super::logo_needs_reload(&first, &path)
+            .expect("a replaced picture must reload behind its unchanged path");
+        assert_ne!(first, second, "the key moves with the content");
+
+        assert_eq!(
+            super::logo_needs_reload("", ""),
+            None,
+            "a republic without a picture never reloads one"
+        );
+    }
+
     #[test]
     fn the_avatar_cache_key_moves_when_the_file_content_does() {
         let tmp = tempfile::tempdir().expect("tmp");
