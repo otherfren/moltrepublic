@@ -422,6 +422,15 @@ export global WikiState {
     in-out property <int> cs-moved;
     in-out property <int> cs-lines;
     in-out property <[WikiChangeRow]> cs-rows;
+    // The export gate, in ONE place: an export writes the APPROVED base
+    // tree, so an empty base means there is nothing to export - the local
+    // stack is a separate question the dialog answers with draft-count().
+    public pure function has-base() -> bool {
+        return root.base-docs.length > 0;
+    }
+    public pure function draft-count() -> int {
+        return root.cs-rows.length;
+    }
     callback nav-mark(int);
     callback nav-open(int);
     callback nav-toggle-folder(string);
@@ -1210,6 +1219,18 @@ export global Strings {
     in property <string> mem-toast-link-md;
     in property <string> mem-changed-hint;
     in property <string> mem-tb-revert-doc;
+    // Memory: export the wiki to disk (wiki_export_plan.md)
+    in property <string> mem-tb-export;
+    in property <string> mem-ex-title;
+    in property <string> mem-ex-body;
+    in property <string> mem-ex-confirm;
+    in property <string> mem-ex-proof;
+    in property <string> mem-ex-reveals;
+    in property <string> mem-ex-drafts;
+    in property <string> mem-ex-done;
+    in property <string> mem-ex-file;
+    in property <string> mem-ex-files;
+    in property <string> mem-ex-failed;
     in property <string> ed-copy;
     in property <string> ed-cut;
     in property <string> ed-paste;

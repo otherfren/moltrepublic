@@ -1103,6 +1103,7 @@ export component AppWindow inherits Window {
         || root.decrypt-modal-open
         || root.charter-view-open
         || root.mem-cs-confirm-open
+        || root.mem-export-open
         || root.patch-view-open
         || root.relay-clearnet-modal-open
         || root.nt-open
@@ -1153,6 +1154,22 @@ export component AppWindow inherits Window {
     property <bool> confirm-close-open: false;
     // the wiki changeset panel's "discard all" confirmation
     property <bool> mem-cs-confirm-open: false;
+    // modal: export the wiki to a chosen folder (wiki_export_plan.md).
+    // The destination survives the dialog (re-exporting to the same folder
+    // is the common case); the proof box is re-armed on every open, so a
+    // previous run's unticked box never silently drops the bundle.
+    property <bool> mem-export-open: false;
+    // in-out: the native folder picker (Rust, mem-export-pick) writes here,
+    // and the field stays hand-editable as a fallback
+    in-out property <string> mem-export-dir;
+    in-out property <bool> mem-export-proof: true;
+    callback mem-export-pick();
+    // (destination, include the verification bundle) -> Command::WikiExport
+    callback wiki-export(string, bool);
+    // the last wiki-export outcome this window already toasted - the
+    // session re-pushes unchanged, and a toast per push would repeat the
+    // same result forever
+    in-out property <string> wiki-export-seen;
     // the raw-patch modal of a wiki_patch proposal (read-only + copy)
     property <bool> patch-view-open: false;
     property <string> patch-view-text;
@@ -1874,6 +1891,8 @@ export component AppWindow inherits Window {
             root.charter-view-open = false;
         } else if (root.mem-cs-confirm-open) {
             root.mem-cs-confirm-open = false;
+        } else if (root.mem-export-open) {
+            root.mem-export-open = false;
         } else if (root.patch-view-open) {
             root.patch-view-open = false;
         } else if (root.org-retention-modal-open) {
@@ -6412,6 +6431,10 @@ export component AppWindow inherits Window {
                             confirm-revert => {
                                 root.mem-cs-confirm-open = true;
                             }
+                            wiki-export => {
+                                root.mem-export-proof = true;
+                                root.mem-export-open = true;
+                            }
                         }
                         if s.key == "quests" && root.selected-view != "proposals": QuestsPane {
                             view: root.selected-view;
@@ -8605,6 +8628,73 @@ export component AppWindow inherits Window {
                     root.ws-dir-pick();
                 }
             }
+        }
+    }
+
+    // =================================================================
+    // Modal: export the Multisig-Wiki to a folder on disk
+    // (docs/memory/wiki_export_plan.md). Four short lines: where, whether
+    // the verification bundle rides along, what that bundle reveals, and
+    // what stays local. The engine writes the APPROVED fold - drafts never
+    // leave this node.
+    // =================================================================
+    if root.mem-export-open: mex-dlg := ConfirmModal {
+        dialog-width: 460px;
+        title: Strings.mem-ex-title;
+        body: Strings.mem-ex-body;
+        confirm-label: Strings.mem-ex-confirm;
+        confirm-enabled: root.mem-export-dir != "";
+        dismissed => {
+            root.mem-export-open = false;
+        }
+        confirmed => {
+            root.mem-export-open = false;
+            root.wiki-export(root.mem-export-dir, root.mem-export-proof);
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            AppField {
+                text <=> root.mem-export-dir;
+                placeholder: "~/wiki-export";
+                horizontal-stretch: 1;
+                accepted => {
+                    if (mex-dlg.confirm-enabled) {
+                        mex-dlg.confirmed();
+                    }
+                }
+            }
+            AppButton {
+                height: 38px;
+                pad: 10px;
+                icon: @image-url("assets/folder.svg");
+                icon-set: true;
+                label: Strings.set-ws-dir-browse;
+                clicked => {
+                    root.mem-export-pick();
+                }
+            }
+        }
+        AppCheck {
+            label: Strings.mem-ex-proof;
+            checked <=> root.mem-export-proof;
+        }
+        // the price of verifiability - shown only while the bundle is in,
+        // because with it out nothing of this leaves the node
+        if root.mem-export-proof: Text {
+            text: Strings.mem-ex-reveals;
+            color: Theme.faint;
+            font-size: Theme.fs-cap;
+            wrap: word-wrap;
+            // a wrapping Text reports its UNwrapped line as preferred
+            // width, which would balloon the dialog to the window edge
+            preferred-width: 0;
+        }
+        if WikiState.draft-count() > 0: Text {
+            text: "\{WikiState.draft-count()} \{Strings.mem-ex-drafts}";
+            color: Theme.faint;
+            font-size: Theme.fs-cap;
+            wrap: word-wrap;
+            preferred-width: 0;
         }
     }
 
