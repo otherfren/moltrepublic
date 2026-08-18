@@ -9594,6 +9594,61 @@ mod tests {
         );
     }
 
+    /// **The `Strings`/`lexicon!` pairing is guarded in ONE direction
+    /// only**: an entry whose field has no property fails to compile, but
+    /// a property with no entry compiles and renders as an EMPTY string in
+    /// both languages. This scans the two sources against each other, so a
+    /// forgotten pair goes red here instead of shipping a blank label.
+    #[test]
+    fn every_strings_property_has_an_english_and_a_german_arm() {
+        // filled from Rust at runtime, not from the lexicon: the settings
+        // tabs' width floors are computed per title (`tab_title_floor`)
+        const COMPUTED: &[&str] = &[
+            "set-tab-general-floor",
+            "set-tab-workspace-floor",
+            "set-tab-backup-floor",
+            "set-tab-anon-floor",
+            "set-tab-relays-floor",
+            "set-tab-mcp-floor",
+            "set-tab-node-floor",
+            "set-tab-chain-floor",
+        ];
+        let theme = include_str!("../../molt-ui-window/ui/theme.slint");
+        let lex = include_str!("lib.rs");
+        // the Strings global alone - Theme, HintTip and Poke declare
+        // string properties of their own
+        let block = theme
+            .split("export global Strings {")
+            .nth(1)
+            .expect("the Strings global")
+            .split("\n}")
+            .next()
+            .expect("the global closes");
+        let mut keys = 0;
+        for line in block.lines() {
+            let trimmed = line.trim();
+            let Some(rest) = trimmed.split_once("property <string> ") else {
+                continue;
+            };
+            let key = rest
+                .1
+                .split([';', ':'])
+                .next()
+                .expect("a property name")
+                .trim();
+            keys += 1;
+            if COMPUTED.contains(&key) {
+                continue;
+            }
+            let field = key.replace('-', "_");
+            assert!(
+                lex.contains(&format!("\n    {field}: \"")),
+                "Strings.{key} has no lexicon! entry - it renders EMPTY"
+            );
+        }
+        assert!(keys > 500, "the Strings scan found only {keys} properties");
+    }
+
     // ---------------------------------------------------------------
     // Member profiles (`member_profiles_plan.md` §5): the picture a seat
     // proposes for itself is fitted HERE - square and inside this
