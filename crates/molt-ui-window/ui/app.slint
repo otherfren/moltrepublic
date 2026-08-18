@@ -1518,6 +1518,9 @@ export component AppWindow inherits Window {
     // in-out: the native picker (Rust, mp-img-pick) writes the chosen path
     in-out property <string> mp-img-draft;
     in-out property <string> mp-desc-draft;
+    // what the seat's description says NOW - an unchanged draft must not
+    // cost the republic a vote
+    property <string> mp-desc-was;
     // the engine's own cap (proposals.rs DESC_MAX) — the counter and the
     // confirm button share it, so a refused description is never proposed
     property <int> mp-desc-max: 500;
@@ -5922,6 +5925,7 @@ export component AppWindow inherits Window {
                                                         clicked => {
                                                             root.mp-member = m.name;
                                                             root.mp-desc-draft = m.desc;
+                                                            root.mp-desc-was = m.desc;
                                                             root.mp-desc-open = true;
                                                         }
                                                     }
@@ -8432,7 +8436,8 @@ export component AppWindow inherits Window {
         title: Strings.mp-desc-title;
         body: Strings.mp-desc-body;
         confirm-label: Strings.oc-propose;
-        confirm-enabled: root.mp-desc-draft.character-count <= root.mp-desc-max;
+        confirm-enabled: root.mp-desc-draft != root.mp-desc-was
+            && root.mp-desc-draft.character-count <= root.mp-desc-max;
         dismissed => {
             root.mp-desc-open = false;
         }
