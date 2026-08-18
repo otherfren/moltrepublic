@@ -2144,6 +2144,163 @@ fn image_from_bytes(bytes: &[u8]) -> Option<slint::Image> {
     slint::Image::load_from_svg_data(bytes).ok()
 }
 
+/// Why a picked picture cannot become a member-picture proposal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageFitError {
+    /// The file is not a picture this build can read.
+    Undecodable,
+    /// Even the smallest allowed avatar stays over the republic's budget.
+    TooLarge,
+}
+
+/// A picture ready to ride a `set_member_image` proposal.
+struct FittedImage {
+    /// The bytes that travel (base64-encoded by the caller).
+    bytes: Vec<u8>,
+    /// What those bytes REALLY are. The engine derives the avatar file's
+    /// name from the proposal's display value (`proposals.rs::logo_ext`),
+    /// so a re-encode must rename with it - "holiday.gif" carrying JPEG
+    /// bytes would materialize a file whose extension lies.
+    ext: &'static str,
+}
+
+/// Where the downscale starts, and where it stops. 512px is a generous
+/// avatar on any display; below 128px a picture is no longer one, so the
+/// honest answer there is a refusal, not a thumbnail.
+const AVATAR_EDGE_START: u32 = 512;
+const AVATAR_EDGE_MIN: u32 = 128;
+
+/// Fit a picked picture into what a `set_member_image` may carry: SQUARE
+/// (the engine refuses any other shape - `proposals.rs::member_image_ok`)
+/// and within `budget`, the republic's own transport headroom as the
+/// engine serves it (`StatusView::image_budget`).
+///
+/// A picture that already satisfies both travels untouched - re-encoding
+/// what already fits only costs quality. Otherwise: centre-crop to the
+/// shorter edge, then step the edge down until the encoded bytes fit.
+/// PNG is preferred (lossless, and the only choice with real
+/// transparency); a photo that PNG cannot squeeze goes JPEG.
+fn fit_member_image(bytes: &[u8], budget: usize) -> Result<FittedImage, ImageFitError> {
+    let format = image::guess_format(bytes).ok();
+    let source = decode_capped(bytes).ok_or(ImageFitError::Undecodable)?;
+    let (w, h) = (source.width(), source.height());
+    if w == 0 || h == 0 {
+        return Err(ImageFitError::Undecodable);
+    }
+    if let Some(ext) = format.and_then(|f| f.extensions_str().first().copied()) {
+        if w == h && bytes.len() <= budget {
+            return Ok(FittedImage {
+                bytes: bytes.to_vec(),
+                ext,
+            });
+        }
+    }
+    let edge = w.min(h);
+    let square = source.crop_imm((w - edge) / 2, (h - edge) / 2, edge, edge);
+    let mut target = edge.min(AVATAR_EDGE_START);
+    loop {
+        let scaled = if target < edge {
+            square.resize(target, target, image::imageops::FilterType::Lanczos3)
+        } else {
+            square.clone()
+        };
+        // transparency survives only in PNG - flattening it onto JPEG's
+        // black is a visible corruption, not a smaller picture
+        let transparent = scaled.color().has_alpha()
+            && scaled.to_rgba8().pixels().any(|p| p.0[3] != u8::MAX);
+        for fmt in [image::ImageFormat::Png, image::ImageFormat::Jpeg] {
+            if fmt == image::ImageFormat::Jpeg && transparent {
+                continue;
+            }
+            let encoded = match fmt {
+                image::ImageFormat::Jpeg => encode(
+                    &image::DynamicImage::ImageRgb8(scaled.to_rgb8()),
+                    fmt,
+                ),
+                _ => encode(&scaled, fmt),
+            };
+            if let Some(out) = encoded.filter(|out| out.len() <= budget) {
+                return Ok(FittedImage {
+                    bytes: out,
+                    ext: if fmt == image::ImageFormat::Jpeg {
+                        "jpg"
+                    } else {
+                        "png"
+                    },
+                });
+            }
+        }
+        if target <= AVATAR_EDGE_MIN {
+            return Err(ImageFitError::TooLarge);
+        }
+        target = (target * 3 / 4).max(AVATAR_EDGE_MIN);
+    }
+}
+
+/// Decode with the same 8192² ceiling [`image_from_bytes`] enforces - a
+/// picked file is as untrusted as a proposed one (a tiny compressed bomb
+/// balloons in memory either way).
+fn decode_capped(bytes: &[u8]) -> Option<image::DynamicImage> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    reader.format()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(8192);
+    limits.max_image_height = Some(8192);
+    reader.limits(limits);
+    reader.decode().ok()
+}
+
+/// Encode into memory. `write_to` needs `Write + Seek`, which a bare `Vec`
+/// is not.
+fn encode(img: &image::DynamicImage, fmt: image::ImageFormat) -> Option<Vec<u8>> {
+    let mut out = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut out, fmt).ok()?;
+    Some(out.into_inner())
+}
+
+/// The decoded member avatars, keyed by the local file path the engine
+/// materialized for each applied picture.
+///
+/// [`sync_rows`] rewrites EVERY row on EVERY mirror push, so a decode
+/// inside the row mapping would re-decode the whole roster on every engine
+/// event. This remembers the answer - the miss included, so a picture
+/// whose file is not on this device does not re-read per push either.
+#[derive(Default)]
+struct AvatarCache {
+    by_path: HashMap<String, Option<slint::Image>>,
+}
+
+impl AvatarCache {
+    /// The image for `path`, loading it at most once.
+    fn get(
+        &mut self,
+        path: &str,
+        load: impl FnOnce(&str) -> Option<slint::Image>,
+    ) -> Option<slint::Image> {
+        if let Some(hit) = self.by_path.get(path) {
+            return hit.clone();
+        }
+        let loaded = load(path);
+        self.by_path.insert(path.to_string(), loaded.clone());
+        loaded
+    }
+
+    /// Forget every path the roster no longer references - a replaced or
+    /// removed picture, or another workspace's members.
+    fn retain_live(&mut self, live: &std::collections::HashSet<&str>) {
+        self.by_path.retain(|p, _| live.contains(p.as_str()));
+    }
+}
+
+thread_local! {
+    /// The window's one avatar cache. `apply_surfaces` runs on the UI
+    /// thread only, so it needs no lock.
+    static AVATARS: std::cell::RefCell<AvatarCache> =
+        std::cell::RefCell::new(AvatarCache::default());
+}
+
 /// Map a session workspace into the Slint-side row struct. Member chips
 /// render the relative age from the real stamp; a never-seen member (all
 /// of them, on a closed workspace) shows a bare chip.
@@ -2685,6 +2842,7 @@ fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
                 other => other,
             }
         ),
+        E::WikiExport(t) => format!("Wiki-Export: {t}"),
         E::Engine(t) => format!("Engine: {t}"),
     }
 }
@@ -5912,7 +6070,12 @@ fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRowData {
         } else {
             p.proposed.clone()
         },
-        image_op: matches!(op, "set_image" | "remove_image"),
+        // a member picture rides the org logo's card: inline preview and
+        // the save path, both driven off the payload's bytes
+        image_op: matches!(
+            op,
+            "set_image" | "remove_image" | "set_member_image" | "remove_member_image"
+        ),
         img_b64: p
             .payload
             .get("bytes_b64")
@@ -6749,6 +6912,23 @@ fn display_title(lang: i32, v: &serde_json::Value) -> String {
             (_, "restore_member") => format!("Restore seat: {member}"),
             (1, _) => format!("Sitz hinzufügen: {member}"),
             (_, _) => format!("Add seat: {member}"),
+        };
+    }
+    // a member-profile change is about ONE seat, so the title names it.
+    // These cannot go through `org_op_label` (op-only): the member lives
+    // in the payload (`member_profiles_plan.md` §5)
+    if let (
+        Some(op @ ("set_member_image" | "remove_member_image" | "set_member_desc")),
+        Some(member),
+    ) = (op, v.get("member").and_then(serde_json::Value::as_str))
+    {
+        return match (lang, op) {
+            (1, "set_member_image") => format!("Bild: {member}"),
+            (_, "set_member_image") => format!("Picture: {member}"),
+            (1, "remove_member_image") => format!("Bild entfernen: {member}"),
+            (_, "remove_member_image") => format!("Remove picture: {member}"),
+            (1, _) => format!("Beschreibung: {member}"),
+            (_, _) => format!("Description: {member}"),
         };
     }
     // a wiki changeset vote: localized label + the language-neutral
@@ -9232,6 +9412,182 @@ mod tests {
             proposal_image_from_b64(&garbage).is_none(),
             "valid base64, but not an image"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Member profiles (`member_profiles_plan.md` §5): the picture a seat
+    // proposes for itself is fitted HERE - square and inside this
+    // republic's served budget - before the engine ever sees it.
+    // ---------------------------------------------------------------
+
+    /// A `w x h` picture with incompressible content: a flat colour would
+    /// fit any budget at any edge and prove nothing about the downscale.
+    fn noisy_png(w: u32, h: u32) -> Vec<u8> {
+        let mut img = image::RgbImage::new(w, h);
+        let mut seed: u32 = 0x1234_5678;
+        for p in img.pixels_mut() {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *p = image::Rgb([(seed >> 16) as u8, (seed >> 8) as u8, seed as u8]);
+        }
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .expect("encode png");
+        out.into_inner()
+    }
+
+    /// The engine refuses a non-square member picture (every frontend
+    /// renders it in a square box), so the fit crops from the CENTRE -
+    /// a top-left crop would behead every portrait.
+    #[test]
+    fn a_wide_picture_is_center_cropped_to_a_square() {
+        use image::GenericImageView as _;
+        let wide = noisy_png(40, 20);
+        let fitted = fit_member_image(&wide, 1 << 20).expect("a small picture fits");
+        let out = image::load_from_memory(&fitted.bytes).expect("the fit stays a picture");
+        assert_eq!(
+            out.width(),
+            out.height(),
+            "the engine refuses a non-square picture"
+        );
+        assert_eq!(out.width(), 20, "the square is the shorter edge");
+        let src = image::load_from_memory(&wide).expect("source decodes");
+        assert_eq!(
+            out.get_pixel(0, 0),
+            src.get_pixel(10, 0),
+            "the crop starts at the middle, not at the left edge"
+        );
+    }
+
+    /// The served budget is the promise the engine keeps; a picture over
+    /// it is stepped down until it fits, not sent to be refused.
+    #[test]
+    fn an_oversized_picture_lands_inside_the_budget() {
+        let big = noisy_png(1024, 1024);
+        let budget = 40 * 1024;
+        assert!(big.len() > budget, "the fixture must actually be oversized");
+        let fitted = fit_member_image(&big, budget).expect("a downscale fits it");
+        assert!(
+            fitted.bytes.len() <= budget,
+            "{} bytes over a {budget} byte budget",
+            fitted.bytes.len()
+        );
+        image::load_from_memory(&fitted.bytes).expect("the fit stays a picture");
+    }
+
+    /// A picture that is already square and already small travels as the
+    /// bytes the user picked - a re-encode would only lose quality.
+    #[test]
+    fn a_picture_that_already_fits_is_proposed_untouched() {
+        let small = noisy_png(64, 64);
+        let fitted = fit_member_image(&small, 1 << 20).expect("it fits");
+        assert_eq!(fitted.bytes, small, "no re-encode when none is needed");
+        assert_eq!(fitted.ext, "png", "the name must not lie about the format");
+    }
+
+    /// Below the floor the honest answer is a refusal: a 128px avatar that
+    /// still does not fit means the republic has no room for a picture.
+    #[test]
+    fn a_budget_below_the_floor_is_refused_honestly() {
+        let big = noisy_png(1024, 1024);
+        assert!(
+            matches!(fit_member_image(&big, 400), Err(ImageFitError::TooLarge)),
+            "an unreachable budget must refuse, never ship a 1px avatar"
+        );
+    }
+
+    /// Undecodable bytes are caught by the frontend's real decoder, the
+    /// same pre-check `on_org_propose` runs for the logo.
+    #[test]
+    fn undecodable_bytes_never_reach_the_proposal() {
+        assert!(matches!(
+            fit_member_image(b"not an image at all", 1 << 20),
+            Err(ImageFitError::Undecodable)
+        ));
+    }
+
+    /// `sync_rows` rewrites EVERY row on EVERY mirror push, so a decode
+    /// inside the row mapping would re-decode the whole roster per tick.
+    #[test]
+    fn an_avatar_decodes_once_per_path_and_forgets_the_gone_ones() {
+        let mut cache = AvatarCache::default();
+        let loads = std::cell::Cell::new(0);
+        let load = |_p: &str| {
+            loads.set(loads.get() + 1);
+            Some(slint::Image::default())
+        };
+        assert!(cache.get("/w/avatar-a.png", load).is_some());
+        assert!(cache.get("/w/avatar-a.png", load).is_some());
+        assert_eq!(loads.get(), 1, "one decode per path, not per push");
+        // a miss is remembered too - a picture whose file is not on this
+        // device must not re-stat on every tick either
+        let missing = |_p: &str| {
+            loads.set(loads.get() + 1);
+            None
+        };
+        assert!(cache.get("/w/gone.png", missing).is_none());
+        assert!(cache.get("/w/gone.png", missing).is_none());
+        assert_eq!(loads.get(), 2, "the miss is cached like the hit");
+        let live: std::collections::HashSet<&str> = ["/w/avatar-a.png"].into_iter().collect();
+        cache.retain_live(&live);
+        assert!(cache.get("/w/gone.png", missing).is_none());
+        assert_eq!(loads.get(), 3, "a dropped path decodes again");
+    }
+
+    /// One `ProposalView` carrying a member-profile payload.
+    fn profile_view(op: &str, member: &str) -> ProposalView {
+        let mut v = view_of(1, "", ProposalState::Proposed);
+        v.surface = Surface::Organization;
+        v.payload = serde_json::json!({ "op": op, "member": member });
+        v
+    }
+
+    /// A member picture rides the same inline-preview and save path the
+    /// org logo has - the bytes are in the payload either way.
+    #[test]
+    fn a_member_picture_proposal_offers_the_preview() {
+        for op in ["set_member_image", "remove_member_image"] {
+            assert!(
+                proposal_row(0, &profile_view(op, "walter")).image_op,
+                "{op} must render as a picture change"
+            );
+        }
+        assert!(
+            !proposal_row(0, &profile_view("set_member_desc", "walter")).image_op,
+            "a description carries no picture"
+        );
+        let mut v = profile_view("set_member_image", "walter");
+        v.payload["bytes_b64"] = serde_json::json!("QUJD");
+        assert_eq!(
+            proposal_row(0, &v).img_b64,
+            "QUJD",
+            "the bytes reach the preview"
+        );
+    }
+
+    /// A profile change is about ONE seat - the card says whose.
+    #[test]
+    fn member_profile_titles_name_the_seat_in_both_languages() {
+        for (op, en, de) in [
+            ("set_member_image", "Picture: walter", "Bild: walter"),
+            (
+                "set_member_desc",
+                "Description: walter",
+                "Beschreibung: walter",
+            ),
+            (
+                "remove_member_image",
+                "Remove picture: walter",
+                "Bild entfernen: walter",
+            ),
+        ] {
+            let payload = serde_json::json!({ "op": op, "member": "walter" });
+            assert_eq!(display_title(0, &payload), en);
+            assert_eq!(display_title(1, &payload), de);
+        }
+        // a profile payload without a seat cannot claim one
+        let anon = serde_json::json!({ "op": "set_member_desc", "value": "hi" });
+        assert!(!display_title(0, &anon).contains("Description:"));
     }
 
     /// An engine-authored System-kind message maps onto the same per-line
