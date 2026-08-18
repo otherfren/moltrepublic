@@ -678,7 +678,9 @@ fn fold_one(state: &mut molt_core::CheckpointState, block: &ChainBlock) -> Resul
                 // folding onto a summarized blob reaches the same state as a
                 // full holder folding from the genesis.
                 if let Some(slot) = molt_core::applied_lww_slot(*surface, payload) {
-                    list.retain(|(_, p)| molt_core::applied_lww_slot(*surface, p) != Some(slot));
+                    list.retain(|(_, p)| {
+                        molt_core::applied_lww_slot(*surface, p).as_deref() != Some(slot.as_str())
+                    });
                 }
                 list.push((*proposal_id, payload.clone()));
             }

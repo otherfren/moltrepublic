@@ -415,19 +415,37 @@ pub struct CheckpointState {
 ///
 /// `set_image` and `remove_image` share ONE slot — a removal supersedes the
 /// image it removes, which is precisely what "last write wins" means here.
+///
+/// The member-profile ops (`member_profiles_plan.md` §3) name the member in
+/// their slot: such an edit supersedes only that seat's own picture or
+/// description, so the slot is DYNAMIC — which is why this returns an owned
+/// `String`. A profile payload without a `member` names no slot and
+/// accumulates, so a malformed entry can never collapse two seats into one.
 #[must_use]
-pub fn applied_lww_slot(surface: Surface, payload: &Value) -> Option<&'static str> {
+pub fn applied_lww_slot(surface: Surface, payload: &Value) -> Option<String> {
     if surface != Surface::Organization {
         return None;
     }
+    let member = || {
+        payload
+            .get("member")
+            .and_then(Value::as_str)
+            .filter(|m| !m.is_empty())
+    };
     match payload.get("op").and_then(Value::as_str)? {
-        "set_name" => Some("organization.name"),
-        "set_charter" => Some("organization.charter"),
-        "set_chat_retention" => Some("organization.retention"),
-        "set_image" | "remove_image" => Some("organization.image"),
+        "set_name" => Some("organization.name".to_string()),
+        "set_charter" => Some("organization.charter".to_string()),
+        "set_chat_retention" => Some("organization.retention".to_string()),
+        "set_image" | "remove_image" => Some("organization.image".to_string()),
         // R6: the governed pool is a state, not a history — the latest edit
         // IS the pool
-        "set_relays" => Some("organization.relays"),
+        "set_relays" => Some("organization.relays".to_string()),
+        // one seat's picture, one slot — the `:` keeps the string injective
+        // for member names carrying dots
+        "set_member_image" | "remove_member_image" => {
+            member().map(|m| format!("member.image:{m}"))
+        }
+        "set_member_desc" => member().map(|m| format!("member.desc:{m}")),
         _ => None,
     }
 }
@@ -914,6 +932,54 @@ mod tests {
                     "{s:?} must accumulate — a checkpoint is a summary, not a delete"
                 );
             }
+        }
+    }
+
+    /// **Member profiles are per-member slots** (`member_profiles_plan.md`
+    /// §3). A profile edit supersedes only that member's own state, so the
+    /// slot carries the member: two members' pictures must never collapse
+    /// into one another, while `set_member_image`/`remove_member_image`
+    /// share one slot the way the org image ops do. A profile payload
+    /// WITHOUT a member names no slot and accumulates — the conservative
+    /// direction, so a malformed entry can never mis-collapse two seats.
+    #[test]
+    fn member_profile_ops_occupy_per_member_slots() {
+        let op = |o: &str, m: &str| json!({ "op": o, "member": m, "value": "x" });
+        let slot = |v: &Value| applied_lww_slot(Surface::Organization, v);
+
+        assert_eq!(
+            slot(&op("set_member_image", "walter")),
+            slot(&op("remove_member_image", "walter")),
+            "a removal must land in the same slot as the picture it removes"
+        );
+        assert_ne!(
+            slot(&op("set_member_image", "walter")),
+            slot(&op("set_member_image", "petra")),
+            "two members' pictures must not share a slot"
+        );
+        assert_ne!(
+            slot(&op("set_member_desc", "walter")),
+            slot(&op("set_member_image", "walter")),
+            "picture and description are two independent votes, two slots"
+        );
+        assert_ne!(
+            slot(&op("set_member_desc", "walter")),
+            slot(&op("set_member_desc", "petra")),
+            "two members' descriptions must not share a slot"
+        );
+        // the separator keeps the slot injective for names carrying dots
+        assert_ne!(
+            slot(&op("set_member_image", "a.b")),
+            slot(&op("set_member_image", "a")),
+            "the slot string must stay injective for arbitrary member names"
+        );
+        // a profile payload without a member accumulates
+        for o in ["set_member_image", "remove_member_image", "set_member_desc"] {
+            assert_eq!(
+                applied_lww_slot(Surface::Organization, &json!({ "op": o })),
+                None,
+                "{o} without a member must accumulate"
+            );
         }
     }
 
