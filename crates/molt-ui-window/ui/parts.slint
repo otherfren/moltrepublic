@@ -881,44 +881,65 @@ export component StatusPill inherits Rectangle {
 // the pills into a grid; clicking jumps to Organization → Members.
 export component MemberPill inherits Rectangle {
     in property <MemberSync> m;
+    // right-click offers "Poke member" (poking enabled and not the own seat)
+    in property <bool> pokable: false;
     callback clicked();
+    callback poke();
     height: 28px;
     background: mp-ta.has-hover ? Theme.raised : Theme.panel-2;
     border-radius: Theme.win95 ? 0px : 6px;
     border-width: Theme.border-w;
     border-color: Theme.line;
-    HorizontalLayout {
-        padding-left: 9px;
-        padding-right: 9px;
-        spacing: 6px;
-        alignment: start;
-        Rectangle {
-            width: 8px;
-            height: 8px;
-            border-radius: 4px;
-            y: (parent.height - self.height) / 2;
-            background: root.m.state == 0 ? Theme.good : (root.m.state == 1 ? Theme.warn : Theme.faint);
+    mpmenu := ContextMenuArea {
+        enabled: root.pokable;
+        Menu {
+            MenuItem {
+                title: Strings.mem-poke;
+                activated => {
+                    root.poke();
+                }
+            }
         }
-        Text {
-            text: root.m.name;
-            color: Theme.text;
-            font-size: Theme.fs-cap;
-            font-weight: 600;
-            vertical-alignment: center;
+        HorizontalLayout {
+            padding-left: 9px;
+            padding-right: 9px;
+            spacing: 6px;
+            alignment: start;
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                y: (parent.height - self.height) / 2;
+                background: root.m.state == 0 ? Theme.good : (root.m.state == 1 ? Theme.warn : Theme.faint);
+            }
+            Text {
+                text: root.m.name;
+                color: Theme.text;
+                font-size: Theme.fs-cap;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+            Text {
+                text: root.m.last;
+                color: Theme.faint;
+                font-size: Theme.fs-cap;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
         }
-        Text {
-            text: root.m.last;
-            color: Theme.faint;
-            font-size: Theme.fs-cap;
-            vertical-alignment: center;
-            horizontal-stretch: 1;
-            overflow: elide;
-        }
-    }
-    mp-ta := TouchArea {
-        mouse-cursor: MouseCursor.pointer;
-        clicked => {
-            root.clicked();
+        mp-ta := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => {
+                root.clicked();
+            }
+            pointer-event(ev) => {
+                // the TouchArea sits ABOVE the ContextMenuArea and eats the
+                // right click - open the menu explicitly
+                if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right && root.pokable) {
+                    mpmenu.show({ x: self.mouse-x, y: self.mouse-y });
+                }
+            }
         }
     }
 }
@@ -1109,7 +1130,8 @@ export component DecisionTable inherits Rectangle {
     // column geometry, shared by header and rows so the cells align; the
     // value column takes the surplus and elides — the window never has to
     // scroll horizontally
-    property <length> col-title: max(120px, self.width * 0.24);
+    // floor fits the widest surface label ("Shared Memory") - 120px cut it
+    property <length> col-title: max(160px, self.width * 0.24);
     property <length> col-votes: 110px;
     property <length> col-when: 108px;
     // emoji-only jump button (a localized label overflowed the cell);

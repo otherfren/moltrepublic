@@ -1872,6 +1872,22 @@ pub fn run_app(
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
+        // right-click on a member: the directed nudge (co-equal MCP tool: poke)
+        ui.on_poke(move |member| {
+            issue(
+                &rt,
+                &w,
+                &weak,
+                Command::Poke {
+                    member: member.to_string(),
+                },
+            );
+        });
+    }
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
         ui.on_withdraw(move |id| {
             issue(
                 &rt,
@@ -1938,6 +1954,26 @@ pub fn run_app(
                     Ok(Event::Proposed { by, .. }) => {
                         alert_unless_own(&last_settings, |s| s.sound_vote.clone(), &weak, by);
                         push_surfaces(&w, &weak, &chat_ui).await;
+                    }
+                    // a poke addressed to THIS seat toasts who poked and
+                    // rings its own sound (the engine already gated opt-in +
+                    // cooldown); the sender side confirms quietly. No
+                    // push_surfaces — a poke changes no surface state.
+                    Ok(Event::Poked { by, to }) => {
+                        alert_unless_own(&last_settings, |s| s.sound_poke.clone(), &weak, by.clone());
+                        let weak2 = weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            let Some(ui) = weak2.upgrade() else { return };
+                            let st = ui.global::<Strings>();
+                            let me = ui.get_node_member();
+                            if to.as_str() == me.as_str() {
+                                ui.invoke_show_toast(format!("{by} {}", st.get_toast_poked()).into());
+                            } else if by.as_str() == me.as_str() {
+                                ui.invoke_show_toast(
+                                    format!("{} {to}", st.get_toast_poke_sent()).into(),
+                                );
+                            }
+                        });
                     }
                     // WP4b: checkpoint lifecycle closure for the operator —
                     // sealed toasts the height, stale tells them to re-cut
@@ -2519,6 +2555,9 @@ fn read_settings_draft(ui: &AppWindow, stored_cap: u64) -> SessionSettings {
         download_dir: ui.get_cfg_download_dir().to_string(),
         sound_message: sound_name(ui.get_cfg_sound_message_index()),
         sound_vote: sound_name(ui.get_cfg_sound_vote_index()),
+        sound_poke: sound_name(ui.get_cfg_sound_poke_index()),
+        poke_enabled: ui.get_cfg_poke_enabled(),
+        poke_wake_command: ui.get_cfg_poke_wake().to_string(),
         read_receipts: ui.get_cfg_read_receipts(),
         s3_backup: ui.get_cfg_s3_backup(),
         s3_endpoint: ui.get_cfg_s3_endpoint().to_string(),
@@ -2625,6 +2664,15 @@ fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
         E::Create(t) => format!("Gründung: {t}"),
         E::Join(t) => format!("Beitritt: {t}"),
         E::Recover(t) => format!("Recovery: {t}"),
+        E::Poke(t) => format!(
+            "Anstupsen: {}",
+            match *t {
+                "not enabled" => "nicht aktiviert",
+                "cannot poke yourself" => "nicht dich selbst",
+                "unknown member" => "unbekanntes Mitglied",
+                other => other,
+            }
+        ),
         E::Engine(t) => format!("Engine: {t}"),
     }
 }
@@ -3851,6 +3899,9 @@ fn apply_settings_fields(ui: &AppWindow, s: &SessionSettings) {
     ui.set_cfg_mcp_token(s.mcp_token.clone().into());
     ui.set_cfg_sound_message_index(sound_index(&s.sound_message));
     ui.set_cfg_sound_vote_index(sound_index(&s.sound_vote));
+    ui.set_cfg_sound_poke_index(sound_index(&s.sound_poke));
+    ui.set_cfg_poke_enabled(s.poke_enabled);
+    ui.set_cfg_poke_wake(s.poke_wake_command.clone().into());
     ui.set_cfg_read_receipts(s.read_receipts);
     ui.set_cfg_network_index(net_index(&s.anonymity));
     ui.set_cfg_tor_mode_index(mode_index(&s.tor_mode));
@@ -6716,7 +6767,7 @@ fn surface_name(lang: i32, sf: Surface) -> &'static str {
             Surface::Chat => "Chat",
             Surface::Memory => "Shared Memory",
             Surface::Quests => "Kanban",
-            Surface::Vault => "Vault",
+            Surface::Vault => "Secrets Vault",
             Surface::Wallet => "Wallet",
         }
     }
@@ -6732,7 +6783,7 @@ fn view_label(lang: i32, key: &str, en: &str) -> String {
     }
     match key {
         "members" => "Mitglieder",
-        "uploads" => "Uploads",
+        "uploads" => "Temporäre Uploads",
         "pending" => "Ausstehend",
         "declined" => "Abgelehnt",
         "today" => "Allgemein",
@@ -8212,7 +8263,7 @@ lexicon! {
     feat_chat: "Chat", "Chat";
     feat_memory: "Shared Memory", "Shared Memory";
     feat_quests: "Kanban", "Kanban";
-    feat_vault: "Vault", "Tresor";
+    feat_vault: "Secrets Vault", "Tresor";
     feat_wallet: "Wallet", "Wallet";
     jw_back_to_start: "Back to start", "Zurück zum Start";
     jw_ratify_title: "Ratify the charter", "Satzung ratifizieren";
@@ -8288,7 +8339,7 @@ lexicon! {
     om_coarse: "Presence over relays is coarse: last seen at the last message, not pinged live.", "Präsenz über Relays ist grob: zuletzt gesehen bei der letzten Nachricht, kein Live-Ping.";
     cs_files_off: "File sharing is not available over relays yet", "Dateifreigabe über Relays gibt es noch nicht";
     ocr_title: "Change chat deletion period", "Chat-Löschfrist ändern";
-    ocr_body: "Chat is ephemeral: messages older than this are deleted on every member. Changing the period is a gated change - the draft becomes a proposal the members approve by threshold. (Applying it is not wired yet.)", "Chat ist flüchtig: ältere Nachrichten werden bei allen Mitgliedern gelöscht. Die Frist zu ändern ist eine geschützte Änderung - der Entwurf wird ein Vorschlag, dem die Mitglieder per Schwelle zustimmen. (Das Anwenden ist noch nicht verdrahtet.)";
+    ocr_body: "Chat is ephemeral: messages older than this are deleted on every member.", "Chat ist flüchtig: ältere Nachrichten werden bei allen Mitgliedern gelöscht.";
     ou_note: "Only metadata is shared - the bytes move user-to-user over an encrypted transfer when a member downloads, as long as the sharer keeps the file. The share expires with the chat retention window.", "Geteilt werden nur Metadaten - die Bytes wandern user-to-user über eine verschlüsselte Übertragung, wenn ein Mitglied lädt, solange der Teilende die Datei behält. Der Share läuft mit dem Chat-Aufbewahrungsfenster ab.";
     ow_title: "Open local workspace", "Lokalen Workspace öffnen";
     ow_empty: "No local workspaces found.", "Keine lokalen Workspaces gefunden.";
@@ -8478,7 +8529,14 @@ lexicon! {
     set_panel_sounds: "Sound alerts", "Benachrichtigungstöne";
     field_sound_message: "New message", "Neue Nachricht";
     field_sound_vote: "New vote", "Neue Abstimmung";
+    field_sound_poke: "Poke", "Anstupsen";
     sound_off: "off", "aus";
+    field_poking: "Poking", "Anstupsen";
+    set_poke_enabled: "Enable poking", "Anstupsen aktivieren";
+    field_poke_wake: "Wake command", "Weck-Kommando";
+    mem_poke: "Poke member", "Mitglied anstupsen";
+    toast_poked: "poked you", "hat dich angestupst";
+    toast_poke_sent: "Poked:", "Angestupst:";
     set_tor_embedded_missing: "\"embedded\" needs a build with --features embedded-tor - use a local Tor daemon instead.", "\"embedded\" braucht einen Build mit --features embedded-tor - nutze stattdessen einen lokalen Tor-Daemon.";
     // settings → Anonymity network: the Tor connectivity probe. The ladder's
     // rungs are worded so that NONE of them can be mistaken for a working Tor
@@ -9019,7 +9077,7 @@ mod tests {
         assert!(
             row.relay_changes
                 .iter()
-                .any(|(sign, label)| *sign == RELAY_ROW_KEPT && label == "Vault"),
+                .any(|(sign, label)| *sign == RELAY_ROW_KEPT && label == "Secrets Vault"),
             "the racing enable renders as kept, labelled: {:?}",
             row.relay_changes
         );

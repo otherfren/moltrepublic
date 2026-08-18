@@ -169,6 +169,7 @@ component SoundPickerRow inherits FieldLabel {
 component SoundAlertsGroup inherits DetailGroup {
     in-out property <int> message-index;
     in-out property <int> vote-index;
+    in-out property <int> poke-index;
     callback test-sound(string);
     title: Strings.set-panel-sounds;
     SoundPickerRow {
@@ -181,6 +182,13 @@ component SoundAlertsGroup inherits DetailGroup {
     SoundPickerRow {
         label: Strings.field-sound-vote;
         index <=> root.vote-index;
+        test(s) => {
+            root.test-sound(s);
+        }
+    }
+    SoundPickerRow {
+        label: Strings.field-sound-poke;
+        index <=> root.poke-index;
         test(s) => {
             root.test-sound(s);
         }
@@ -915,6 +923,7 @@ export component AppWindow inherits Window {
     callback relays-draft-remove(int);
     callback approve(int);
     callback decline(int);
+    callback poke(string);
     callback withdraw(int); // pull back an OWN pending proposal
     // select the main-view surface (routed to a SelectSurface command; the
     // sub-view resets to the surface's default)
@@ -1651,6 +1660,9 @@ export component AppWindow inherits Window {
     // alert sounds (0 none, 1 bell, 2 chime, 3 pop)
     in-out property <int> cfg-sound-message-index: 0;
     in-out property <int> cfg-sound-vote-index: 0;
+    in-out property <int> cfg-sound-poke-index: 0;
+    in-out property <bool> cfg-poke-enabled: false;
+    in-out property <string> cfg-poke-wake;
     // send (and show) per-message chat read receipts — a local privacy
     // switch, seeded from the applied session so the chat's receipt rows
     // track it live (the settings checkbox binds to it, save persists it).
@@ -4562,8 +4574,12 @@ export component AppWindow inherits Window {
                                         y: Math.floor(i / pgrid.cols) * (pgrid.chip-h + pgrid.gap);
                                         width: pgrid.chip-w;
                                         m: m;
+                                        pokable: root.cfg-poke-enabled && m.name != root.node-member;
                                         clicked => {
                                             root.select-view("organization", "members");
+                                        }
+                                        poke => {
+                                            root.poke(m.name);
                                         }
                                     }
                                 }
@@ -5662,6 +5678,21 @@ export component AppWindow inherits Window {
                                             background: Theme.panel-2;
                                             border-width: 1px;
                                             border-color: m.name == root.node-member ? Theme.accent : Theme.line;
+                                            // right-click: poke the member. Only
+                                            // with poking enabled and never the
+                                            // own seat; no opaque TouchArea covers
+                                            // the row, so the menu receives the
+                                            // right-click natively (no show() dance)
+                                            ContextMenuArea {
+                                                enabled: root.cfg-poke-enabled && m.name != root.node-member;
+                                                Menu {
+                                                    MenuItem {
+                                                        title: Strings.mem-poke;
+                                                        activated => {
+                                                            root.poke(m.name);
+                                                        }
+                                                    }
+                                                }
                                             HorizontalLayout {
                                                 padding-left: 12px;
                                                 padding-right: 12px;
@@ -5805,6 +5836,7 @@ export component AppWindow inherits Window {
                                                         }
                                                     }
                                                 }
+                                            }
                                             }
                                         }
                                     }
@@ -6780,6 +6812,7 @@ export component AppWindow inherits Window {
                                     pack: true;
                                     message-index <=> root.cfg-sound-message-index;
                                     vote-index <=> root.cfg-sound-vote-index;
+                                    poke-index <=> root.cfg-sound-poke-index;
                                     test-sound(s) => {
                                         root.test-sound(s);
                                     }
@@ -6799,6 +6832,7 @@ export component AppWindow inherits Window {
                                 SoundAlertsGroup {
                                     message-index <=> root.cfg-sound-message-index;
                                     vote-index <=> root.cfg-sound-vote-index;
+                                    poke-index <=> root.cfg-sound-poke-index;
                                     test-sound(s) => {
                                         root.test-sound(s);
                                     }
@@ -6814,6 +6848,24 @@ export component AppWindow inherits Window {
                                 AppCheck {
                                     label: Strings.set-read-receipts;
                                     checked <=> root.cfg-read-receipts;
+                                }
+                            }
+                            // poking: reacting to pokes (toast, sound, wake
+                            // command) is an explicit opt-in; the wake command
+                            // is what nudges a sleeping agent harness
+                            DetailGroup {
+                                pack: true;
+                                title: Strings.field-poking;
+                                AppCheck {
+                                    label: Strings.set-poke-enabled;
+                                    checked <=> root.cfg-poke-enabled;
+                                }
+                                FieldLabel {
+                                    label: Strings.field-poke-wake;
+                                    AppField {
+                                        text <=> root.cfg-poke-wake;
+                                        placeholder: "claude -p '...'";
+                                    }
                                 }
                             }
                         }
@@ -8242,6 +8294,14 @@ export component AppWindow inherits Window {
         body: "";
         cancel-label: "";
         confirm-label: Strings.cv-shrink;
+        // edit next to shrink: closes the reader and opens the charter edit
+        // modal, exactly like the pencil on the status card
+        alt-label: Strings.org-edit;
+        alted => {
+            root.charter-view-open = false;
+            root.org-charter-draft = root.active-agenda;
+            root.org-charter-modal-open = true;
+        }
         dismissed => {
             root.charter-view-open = false;
         }
@@ -8442,6 +8502,9 @@ export component AppWindow inherits Window {
         HorizontalLayout {
             spacing: 8px;
             AppStepper {
+                // Rectangle-based, so its default stretch would spread the
+                // value area across the dialog - keep the control compact
+                width: 120px;
                 value <=> root.org-retention-draft;
                 minimum: 1;
                 maximum: 365;

@@ -751,6 +751,10 @@ export component ConfirmModal inherits Rectangle {
                 color: Theme.dim;
                 font-size: Theme.fs-body;
                 wrap: word-wrap;
+                // a wrapping Text reports its UNwrapped line as preferred
+                // width, which would balloon the dialog to the window edge
+                // on a long body - wrap at dialog-width instead of driving it
+                preferred-width: 0;
             }
             @children
             Rectangle {
