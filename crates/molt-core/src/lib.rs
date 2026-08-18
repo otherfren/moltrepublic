@@ -2958,6 +2958,10 @@ pub struct ExportState {
     /// named so the user sees what was left out.
     #[serde(default)]
     pub skipped: Vec<String>,
+    /// Files written (the wiki export's document count; 0 for the
+    /// single-blob workspace export, which writes one file by definition).
+    #[serde(default)]
+    pub files: u64,
 }
 
 /// Transport-health state surfaced on the header "chat" pill (transport
@@ -3158,6 +3162,11 @@ pub struct SessionView {
     /// The manual-export lifecycle (real; additive).
     #[serde(default)]
     pub export: ExportState,
+    /// The wiki-export lifecycle (real; additive). Its OWN slot: a wiki
+    /// export and a workspace export must never overwrite each other's
+    /// outcome.
+    #[serde(default)]
+    pub wiki_export: ExportState,
     /// The founding lifecycle (real over SMP).
     pub create: CreateState,
     /// The join-via-invite lifecycle (real over SMP).
@@ -3190,6 +3199,7 @@ impl Default for SessionView {
             active_workspace: String::new(),
             restore: RestoreState::default(),
             export: ExportState::default(),
+            wiki_export: ExportState::default(),
             create: CreateState::default(),
             join: JoinState::default(),
             net_health: NetHealth::default(),
@@ -3743,6 +3753,42 @@ pub enum Command {
     NetExportFailed {
         /// The workspace whose export failed.
         id: WorkspaceId,
+        /// The failure, honestly.
+        error: String,
+    },
+    /// Write the Shared-Memory wiki to a directory on disk as plain files
+    /// (`docs/memory/wiki_export_plan.md`): `<dest>/wiki/<path>` per folded
+    /// document, and with `proof` the verification bundle
+    /// (`<dest>/proof/bundle.json` + `README.md`) that lets an OUTSIDER check
+    /// the tree is the fold of patches a real m-of-n of the sealed roster
+    /// approved. The bundle carries the genesis, every membership block and
+    /// every applied wiki patch — nothing else, and no local drafts. It
+    /// necessarily reveals member names, identity and transport anchors, the
+    /// relay pool, the charter and each patch's signer set. Refused on a
+    /// workspace without chain governance (there are no signatures to prove
+    /// anything with — a files-only export stays available). Runs off the
+    /// actor; the honest outcome lands in [`SessionView::wiki_export`].
+    WikiExport {
+        /// Target directory (`~` is expanded; parents are created; existing
+        /// files of the same name are overwritten).
+        dest: String,
+        /// Include the verification bundle.
+        proof: bool,
+    },
+    /// The wiki export task finished the write (engine-internal, from the
+    /// off-actor task — an MCP agent must not be able to forge an export
+    /// success).
+    NetWikiExportDone {
+        /// The directory written.
+        dest: String,
+        /// Wiki documents written.
+        files: u64,
+        /// Total bytes written, the proof bundle included.
+        bytes: u64,
+    },
+    /// The wiki export task failed (engine-internal); the real reason is
+    /// surfaced verbatim — never a fake success.
+    NetWikiExportFailed {
         /// The failure, honestly.
         error: String,
     },
@@ -5639,6 +5685,10 @@ pub enum MoltError {
     /// A poke was refused (feature off, unknown target, or self-poke).
     #[error("poke: {0}")]
     Poke(&'static str),
+    /// A wiki export was refused (empty wiki, no target, no chain behind a
+    /// proof, or one already running).
+    #[error("wiki export: {0}")]
+    WikiExport(&'static str),
     /// The engine task is gone or did not answer.
     #[error("engine: {0}")]
     Engine(String),

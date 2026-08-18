@@ -13,6 +13,8 @@
 //! The verifier is [`crate::verify_wiki_export`], beside `verify_chain` — it
 //! reuses the real byte layouts, so writer and verifier cannot drift.
 
+use std::path::{Component, Path, PathBuf};
+
 use molt_core::{ChainBlock, ChainChange, Surface};
 use serde::{Deserialize, Serialize};
 
@@ -68,3 +70,272 @@ pub(crate) fn bundle_from_chain(chain: &[ChainBlock]) -> Option<WikiExportBundle
         blocks,
     })
 }
+
+/// What one export actually wrote.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct WikiExportOutcome {
+    /// Wiki documents written.
+    pub files: u64,
+    /// Total bytes written, the proof files included.
+    pub bytes: u64,
+}
+
+/// A written length as the report's `u64` (a `usize` always fits on the
+/// platforms this runs on; the saturating fallback keeps the count honest
+/// rather than panicking over a display number).
+fn byte_count(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
+
+/// One document path, re-validated at the WRITE (never trust the fold to have
+/// stayed the only producer): the fold's own rule — relative, at most eight
+/// segments, no empty/dot/backslash segment — plus the platform check that
+/// every segment is exactly one plain path component. A segment that any
+/// platform reads as a root, a prefix or a parent link is refused, so the
+/// joined path cannot leave `<dest>/wiki`.
+fn safe_relative(path: &str) -> Result<PathBuf, String> {
+    if !molt_core::wiki_fold::valid_path(path) {
+        return Err(format!("unsafe path: {path}"));
+    }
+    let mut out = PathBuf::new();
+    for segment in path.split('/') {
+        let mut components = Path::new(segment).components();
+        match (components.next(), components.next()) {
+            (Some(Component::Normal(c)), None) if c == std::ffi::OsStr::new(segment) => {
+                out.push(c);
+            }
+            _ => return Err(format!("unsafe path: {path}")),
+        }
+    }
+    Ok(out)
+}
+
+/// Write the export: `<dest>/wiki/<path>` per document and, with a bundle,
+/// `<dest>/proof/bundle.json` + `<dest>/proof/README.md`. Blocking — the
+/// caller runs it off the actor.
+///
+/// Existing files of the same name are overwritten; nothing is deleted. A
+/// leftover file from an earlier export therefore stays, and the verifier
+/// says so (it compares the shipped tree against the fold, both ways).
+pub(crate) fn write_wiki_export(
+    dest: &Path,
+    tree: &std::collections::BTreeMap<String, String>,
+    bundle: Option<&WikiExportBundle>,
+) -> Result<WikiExportOutcome, String> {
+    let mut out = WikiExportOutcome::default();
+    let wiki = dest.join("wiki");
+    for (path, content) in tree {
+        let file = wiki.join(safe_relative(path)?);
+        if !file.starts_with(&wiki) {
+            return Err(format!("unsafe path: {path}"));
+        }
+        if let Some(parent) = file.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("wiki/{path}: {e}"))?;
+        }
+        std::fs::write(&file, content).map_err(|e| format!("wiki/{path}: {e}"))?;
+        out.files += 1;
+        out.bytes = out.bytes.saturating_add(byte_count(content.len()));
+    }
+    if let Some(bundle) = bundle {
+        let proof = dest.join("proof");
+        std::fs::create_dir_all(&proof).map_err(|e| format!("proof: {e}"))?;
+        let json = serde_json::to_string_pretty(bundle)
+            .map_err(|e| format!("proof/bundle.json: {e}"))?;
+        std::fs::write(proof.join("bundle.json"), &json)
+            .map_err(|e| format!("proof/bundle.json: {e}"))?;
+        std::fs::write(proof.join("README.md"), PROOF_README)
+            .map_err(|e| format!("proof/README.md: {e}"))?;
+        out.bytes = out
+            .bytes
+            .saturating_add(byte_count(json.len()))
+            .saturating_add(byte_count(PROOF_README.len()));
+    }
+    Ok(out)
+}
+
+/// Read an export back: the raw `proof/bundle.json` and the shipped `wiki/`
+/// tree, keyed by `/`-joined relative path. The I/O half of
+/// [`crate::verify_wiki_export`] — what the example binary and any other
+/// reviewer's tool needs before the pure check runs.
+pub fn read_wiki_export(
+    dir: &Path,
+) -> Result<(String, std::collections::BTreeMap<String, String>), String> {
+    let bundle = dir.join("proof").join("bundle.json");
+    let json = std::fs::read_to_string(&bundle)
+        .map_err(|e| format!("{}: {e}", bundle.display()))?;
+    let mut tree = std::collections::BTreeMap::new();
+    read_tree(&dir.join("wiki"), "", 0, &mut tree)?;
+    Ok((json, tree))
+}
+
+/// The `wiki/` walk. Symlinked directories are not descended (the entry's own
+/// file type decides, never the target's) and the depth is capped, so a
+/// hostile export directory cannot walk the reviewer's machine.
+fn read_tree(
+    dir: &Path,
+    prefix: &str,
+    depth: usize,
+    out: &mut std::collections::BTreeMap<String, String>,
+) -> Result<(), String> {
+    if depth > 16 {
+        return Err(format!("{}: nested too deep", dir.display()));
+    }
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let path = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let kind = entry.file_type().map_err(|e| format!("{path}: {e}"))?;
+        if kind.is_dir() {
+            read_tree(&entry.path(), &path, depth + 1, out)?;
+        } else if kind.is_file() {
+            let content = std::fs::read_to_string(entry.path())
+                .map_err(|e| format!("{path}: {e}"))?;
+            out.insert(path, content);
+        }
+    }
+    Ok(())
+}
+
+/// `<dest>/proof/README.md`: the external reviewer's document. It states the
+/// algorithm, the exact byte layouts (so an independent implementation is
+/// possible without this code), what the bundle necessarily discloses, and
+/// what it does NOT prove.
+const PROOF_README: &str = r#"# Verifying this wiki export
+
+`wiki/` is the republic's Shared-Memory tree. `proof/bundle.json` carries the
+signatures that prove it: every file here is the deterministic fold of patches
+that a threshold (m-of-n) of the republic's sealed roster approved.
+
+Verifying needs no republic membership, no key, and no trust in whoever handed
+you this directory.
+
+## Run the reference verifier
+
+    cargo run -p molt-engine --example verify_wiki_export -- <this directory>
+
+It prints a verdict per step and exits non-zero on any failure. The sections
+below specify the same check exactly enough to reimplement it.
+
+## What the bundle contains
+
+    { "format": "molt-wiki-export-v1",
+      "genesis": <block 0>,
+      "blocks":  [ <block>, ... ] }
+
+`blocks` holds every membership block and every applied wiki patch, ascending
+by height. It is a SUBSET of the republic's chain: other block kinds (and
+their content) are not exported, so the usual `prev` hash links and contiguous
+heights are absent by construction. That costs nothing, because every member
+signature is position-bound: it covers the block's height, so each block
+stands on its own against the roster valid at that height.
+
+Each block is `{ height, prev, change, sigs }`; `sigs` is a list of
+`{ member, sig }` with a lowercase-hex Ed25519 signature. `prev` is not part
+of any signature and is not checked here.
+
+## The check
+
+1. **Genesis.** `change` is the founding table (`kind: "genesis"`): name,
+   republic_id, rule_m, rule_n, identities, agenda, relays, optional features.
+   Re-derive `republic_id` from the content (below) and require equality.
+   Require `0 < rule_m <= rule_n`, `rule_n == identities.len()`, and a valid
+   signature from EVERY identity over the genesis bytes (n-of-n).
+2. **Roster walk.** Walk `blocks` in order, requiring strictly ascending
+   heights. A `kind: "membership"` block with op `joined` appends its
+   `(member, identity_pk)` to the roster; op `restored` must repeat the
+   member's already anchored `identity_pk` (a recovery re-keys the transport,
+   never the roster identity) and changes the roster in no other way.
+3. **Every block.** Count the DISTINCT roster members with a valid signature
+   over the block's bytes (below); an unknown signer, a bad signature and a
+   repeated member all count once or not at all. On a `restored` block the
+   returning member's own `consent` counts as one further signer if it
+   verifies against its anchored key over the consent bytes and that member
+   does not also appear in `sigs`. Require at least `rule_m`. Refuse any block
+   that is neither a membership block nor an applied wiki patch, and refuse a
+   proposal id that appears twice.
+4. **Fold.** Apply the patches in height order (below) and compare the result
+   with `wiki/` byte for byte, in both directions: a missing file, an extra
+   file and a changed byte all fail.
+
+## Byte layouts
+
+Framing: `le32(n)` is a 4-byte little-endian length, `le64(n)` an 8-byte one.
+`F(x)` means `le32(len(x))` followed by the UTF-8 bytes of `x`. Tags include
+their trailing NUL byte. Signatures are Ed25519 (strict verification) over the
+byte string, with keys and signatures as lowercase hex.
+
+**Block bytes** (what each `sigs` entry signs), for an applied change:
+
+    "molt-chain-change-v2\0" F(republic_id) le64(height) 0x01
+    le64(proposal_id) F(surface) F(payload)
+
+`surface` is `memory` for a wiki patch. `payload` is the JSON object
+serialized canonically: no whitespace, object keys sorted ascending by byte.
+
+For a membership change:
+
+    "molt-chain-change-v2\0" F(republic_id) le64(height) 0x02
+    op F(member) F(identity_pk) nostr relays consent
+
+with `op` = `0x00` joined / `0x01` restored; `nostr` = `0x00` when absent,
+else `0x01 F(nostr_pk)`; `relays` is EMPTY when the block declares none, else
+`0x01 le64(count)` followed by `F(relay)` per entry; `consent` is EMPTY when
+absent, else `0x02 F(consent)`.
+
+**Genesis bytes** are the founding roster table:
+
+    "molt-roster-v4\0"          (no feature set)
+    "molt-roster-v5\0"          (feature set present)
+    F(republic_id) rule_m rule_n le32(count)
+    per identity in table order: F(member) F(identity_pk) F(nostr_pk)
+    F(agenda) le32(relay count) per relay: F(relay)
+    [ le32(feature count) per feature: F(feature) ]
+
+`rule_m` and `rule_n` are single bytes. The feature run is written only when
+the genesis carries one, which is also what selects the tag.
+
+**republic_id** is the lowercase hex SHA-256 of
+
+    "molt-republic-id-v2\0" F(name) rule_m rule_n le32(count)
+    per pair: F(identity_pk) F(nostr_pk)
+
+over the `(identity_pk, nostr_pk)` pairs of the genesis identities, sorted
+ascending as byte strings (identity_pk first, nostr_pk as tie-break).
+
+**Consent bytes** (a restored seat's own co-signature):
+
+    "molt-restore-consent-v1\0" F(republic_id) F(member) F(identity_pk)
+    0x00                        (empty transport anchor)
+    0x01 F(nostr_pk)            (otherwise)
+
+## The fold
+
+Each wiki patch payload is `{"op":"wiki_patch","value":<git-format patch>}`.
+Apply the values in height order, starting from an empty tree, with a STRICT
+apply: hunks must match at their exact old-side line positions and with exact
+context, and either a whole patch applies or none of it does. A patch that
+does not apply is void and is skipped - it moves nothing. Paths are relative,
+at most eight segments, without empty, `.` or `..` segments.
+
+## What this discloses
+
+The bundle necessarily reveals the republic's name, charter, feature set,
+member names, their Ed25519 identity keys, their transport anchors, the
+ratified relay pool, and which members signed each patch. None of it is
+redactable: those bytes are what the signatures cover.
+
+## What this does NOT prove
+
+Completeness. The signatures prove that every file here comes from patches the
+republic really approved - not that they are the LATEST ones. Whoever produced
+this export could have left the newest patches out and shipped an older, fully
+genuine state. There is no way to tell from this directory alone; compare two
+exports, or obtain one from another member, if freshness matters.
+
+Local, unapplied drafts are never exported: what you see is the approved fold.
+"#;

@@ -55,6 +55,8 @@ pub use chain::{verify_chain, ChainHead};
 /// The public wiki-export verifier — the reference implementation an external
 /// reviewer runs (`cargo run -p molt-engine --example verify_wiki_export`).
 pub use chain::{verify_wiki_export, WikiExportReport};
+/// Reading an export directory back: the I/O half of [`verify_wiki_export`].
+pub use wiki_export::read_wiki_export;
 #[doc(hidden)]
 pub use recovery::RecoveryInvite;
 #[doc(hidden)]
@@ -1392,6 +1394,11 @@ impl State {
                 self.cmd_net_export_done(id, dest, bytes, skipped)
             }
             Command::NetExportFailed { id, error } => self.cmd_net_export_failed(id, error),
+            Command::WikiExport { dest, proof } => self.cmd_wiki_export(dest, proof),
+            Command::NetWikiExportDone { dest, files, bytes } => {
+                self.cmd_net_wiki_export_done(dest, files, bytes)
+            }
+            Command::NetWikiExportFailed { error } => self.cmd_net_wiki_export_failed(error),
 
             // backup.rs (story 12: the auto-backup ticker + manual trigger)
             Command::BackupNow { id } => self.cmd_backup_now(id),

@@ -1788,6 +1788,7 @@ impl State {
             dest: dest_str.clone(),
             result: String::new(),
             bytes: 0,
+            files: 0,
             skipped: Vec::new(),
         };
         self.emit_session(SessionScope::Full);
@@ -1837,6 +1838,7 @@ impl State {
             dest,
             result: "ok".to_string(),
             bytes,
+            files: 0,
             skipped,
         };
         self.emit_session(SessionScope::Full);
@@ -1857,6 +1859,114 @@ impl State {
         ex.result = format!("error: {error}");
         ex.bytes = 0;
         ex.skipped = Vec::new();
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
+    /// **Wiki export** (`docs/memory/wiki_export_plan.md`): the Shared-Memory
+    /// tree onto disk as plain files, optionally with the proof bundle an
+    /// outsider verifies it with. Synchronous validation, then the blocking
+    /// write runs OFF the actor (`spawn_blocking`); the real outcome returns
+    /// as [`molt_core::Command::NetWikiExportDone`] / `NetWikiExportFailed`.
+    ///
+    /// Its own session slot ([`molt_core::SessionView::wiki_export`]) — a
+    /// workspace export in flight must not have its outcome overwritten, nor
+    /// overwrite this one.
+    ///
+    /// `proof` needs real threshold governance: without a chain there are no
+    /// signatures to prove anything with, and a bundle that claimed otherwise
+    /// would be a fake proof. The files-only export stays available.
+    pub(crate) fn cmd_wiki_export(
+        &mut self,
+        dest: String,
+        proof: bool,
+    ) -> Result<Reply, MoltError> {
+        self.require_feature(Surface::Memory)?;
+        let dest = dest.trim();
+        if dest.is_empty() {
+            return Err(MoltError::WikiExport("a target directory is required"));
+        }
+        if self.session.wiki_export.running {
+            return Err(MoltError::WikiExport("an export is already running"));
+        }
+        // the wiki IS the open workspace's state: no workspace open, no tree
+        let tree = self.wiki_tree();
+        if tree.is_empty() {
+            return Err(MoltError::WikiExport("the wiki is empty"));
+        }
+        let bundle = if proof {
+            if !self.is_chain_governed() {
+                return Err(MoltError::WikiExport("proof needs chain governance"));
+            }
+            Some(
+                crate::wiki_export::bundle_from_chain(&self.chain)
+                    .ok_or(MoltError::WikiExport("proof needs the genesis block"))?,
+            )
+        } else {
+            None
+        };
+        let dest_path = molt_storage::expand_tilde(dest);
+        let dest_str = dest_path.display().to_string();
+        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+            return Err(MoltError::Engine("engine is shutting down".to_string()));
+        };
+        self.session.wiki_export = molt_core::ExportState {
+            running: true,
+            workspace: self.session.active_workspace.clone(),
+            dest: dest_str.clone(),
+            result: String::new(),
+            bytes: 0,
+            files: 0,
+            skipped: Vec::new(),
+        };
+        self.emit_session(SessionScope::Full);
+        tokio::spawn(async move {
+            let res = tokio::task::spawn_blocking(move || {
+                crate::wiki_export::write_wiki_export(&dest_path, &tree, bundle.as_ref())
+            })
+            .await;
+            let cmd = match res {
+                Ok(Ok(outcome)) => molt_core::Command::NetWikiExportDone {
+                    dest: dest_str,
+                    files: outcome.files,
+                    bytes: outcome.bytes,
+                },
+                Ok(Err(e)) => molt_core::Command::NetWikiExportFailed { error: e },
+                Err(e) => molt_core::Command::NetWikiExportFailed {
+                    error: format!("export task failed: {e}"),
+                },
+            };
+            let (reply, _rx) = tokio::sync::oneshot::channel();
+            let _ = cmd_tx.send(crate::Envelope { cmd, reply }).await;
+        });
+        Ok(Reply::Ack)
+    }
+
+    /// The wiki export task wrote the tree (engine-internal).
+    pub(crate) fn cmd_net_wiki_export_done(
+        &mut self,
+        dest: String,
+        files: u64,
+        bytes: u64,
+    ) -> Result<Reply, MoltError> {
+        let ex = &mut self.session.wiki_export;
+        ex.running = false;
+        ex.dest = dest;
+        ex.result = "ok".to_string();
+        ex.files = files;
+        ex.bytes = bytes;
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
+    /// The wiki export task failed (engine-internal) — the reason is surfaced
+    /// verbatim; a previous success does not survive it.
+    pub(crate) fn cmd_net_wiki_export_failed(&mut self, error: String) -> Result<Reply, MoltError> {
+        let ex = &mut self.session.wiki_export;
+        ex.running = false;
+        ex.result = format!("error: {error}");
+        ex.files = 0;
+        ex.bytes = 0;
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }
