@@ -5654,6 +5654,11 @@ export component AppWindow inherits Window {
                                                 preferred-width: 0px;
                                                 overflow: elide;
                                             }
+                                            // the row's description-edit
+                                            // pencil sits here - without the
+                                            // spacer every column behind it
+                                            // would drift out of the grid
+                                            Rectangle { width: 22px; }
                                             SortHeader {
                                                 label: Strings.om-col-id;
                                                 active: root.om-sort-column == "id";

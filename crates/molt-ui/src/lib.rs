@@ -1712,11 +1712,17 @@ pub fn run_app(
         let weak = ui.as_weak();
         ui.on_member_propose(move |op, member, value| {
             if op.as_str() != "set_member_image" {
-                let payload = serde_json::json!({
-                    "op": op.as_str(),
-                    "member": member.as_str(),
-                    "value": value.as_str(),
-                });
+                // a removal carries no value at all - the payload is what
+                // the members sign, so it says only what it changes
+                let payload = if op.as_str() == "remove_member_image" {
+                    serde_json::json!({ "op": op.as_str(), "member": member.as_str() })
+                } else {
+                    serde_json::json!({
+                        "op": op.as_str(),
+                        "member": member.as_str(),
+                        "value": value.as_str(),
+                    })
+                };
                 let msg = weak
                     .upgrade()
                     .map(|ui| ui.global::<Strings>().get_toast_proposed().to_string())
@@ -2325,7 +2331,10 @@ fn fit_member_image(bytes: &[u8], budget: usize) -> Result<FittedImage, ImageFit
         return Err(ImageFitError::Undecodable);
     }
     if let Some(ext) = format.and_then(|f| f.extensions_str().first().copied()) {
-        if w == h && bytes.len() <= budget {
+        // …but only up to the start edge: a highly compressible 6000²
+        // picture would fit the budget and then cost every member's
+        // window 144 MB of decoded avatar
+        if w == h && w <= AVATAR_EDGE_START && bytes.len() <= budget {
             return Ok(FittedImage {
                 bytes: bytes.to_vec(),
                 ext,
@@ -2334,6 +2343,11 @@ fn fit_member_image(bytes: &[u8], budget: usize) -> Result<FittedImage, ImageFit
     }
     let edge = w.min(h);
     let square = source.crop_imm((w - edge) / 2, (h - edge) / 2, edge, edge);
+    // transparency survives only in PNG - flattening it onto JPEG's black
+    // is a visible corruption, not a smaller picture. Read once: a resize
+    // does not invent or lose an alpha channel
+    let transparent =
+        square.color().has_alpha() && square.to_rgba8().pixels().any(|p| p.0[3] != u8::MAX);
     let mut target = edge.min(AVATAR_EDGE_START);
     loop {
         let scaled = if target < edge {
@@ -2341,10 +2355,6 @@ fn fit_member_image(bytes: &[u8], budget: usize) -> Result<FittedImage, ImageFit
         } else {
             square.clone()
         };
-        // transparency survives only in PNG - flattening it onto JPEG's
-        // black is a visible corruption, not a smaller picture
-        let transparent = scaled.color().has_alpha()
-            && scaled.to_rgba8().pixels().any(|p| p.0[3] != u8::MAX);
         for fmt in [image::ImageFormat::Png, image::ImageFormat::Jpeg] {
             if fmt == image::ImageFormat::Jpeg && transparent {
                 continue;
@@ -2397,8 +2407,29 @@ fn encode(img: &image::DynamicImage, fmt: image::ImageFormat) -> Option<Vec<u8>>
     Some(out.into_inner())
 }
 
-/// The decoded member avatars, keyed by the local file path the engine
-/// materialized for each applied picture.
+/// The [`AvatarCache`] key for a materialized avatar file: its path plus
+/// what identifies THIS version of it.
+///
+/// A seat that replaces its picture keeps the same file name
+/// (`avatar-<stem>.<ext>`), so a path-only key would keep serving the old
+/// decode forever. Runs a stat, so it belongs in the off-UI-thread gather
+/// pass, never in the row mapping.
+fn avatar_cache_key(path: &str) -> String {
+    if path.is_empty() {
+        return String::new();
+    }
+    let Ok(meta) = std::fs::metadata(path) else {
+        return path.to_string();
+    };
+    let stamp = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    format!("{path}|{}|{stamp}", meta.len())
+}
+
+/// The decoded member avatars, keyed by [`avatar_cache_key`].
 ///
 /// [`sync_rows`] rewrites EVERY row on EVERY mirror push, so a decode
 /// inside the row mapping would re-decode the whole roster on every engine
@@ -4591,8 +4622,11 @@ struct MemberRowData {
     /// R4 relay-split marker, pre-built by the engine ("" = none).
     split: String,
     /// The LOCAL file the engine materialized for this seat's applied
-    /// picture ("" = none). Keyed by path, decoded through [`AvatarCache`].
+    /// picture ("" = none).
     image: String,
+    /// That file's [`avatar_cache_key`] - the stat runs in the gather
+    /// pass, off the UI thread, so the row mapping only looks it up.
+    image_key: String,
     /// The seat's applied description ("" = none).
     desc: String,
 }
@@ -5096,6 +5130,7 @@ async fn gather_surfaces(
                 state: i32::from(m.presence),
                 uploads: i32::try_from(m.uploads).unwrap_or(i32::MAX),
                 split: m.split,
+                image_key: avatar_cache_key(&m.image),
                 image: m.image,
                 desc: m.description,
             })
@@ -5693,7 +5728,7 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     // the path-keyed cache: `sync_rows` below rewrites EVERY row on EVERY
     // push, so decoding here would re-decode the whole roster per tick
     let members: Vec<MemberRow> = AVATARS.with_borrow_mut(|cache| {
-        cache.retain_live(&b.members.iter().map(|m| m.image.as_str()).collect());
+        cache.retain_live(&b.members.iter().map(|m| m.image_key.as_str()).collect());
         b.members
             .iter()
             .map(|m| {
@@ -5702,8 +5737,10 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                 // (the name's extension comes from a peer-supplied value)
                 let avatar = (!m.image.is_empty())
                     .then(|| {
-                        cache.get(&m.image, |p| {
-                            std::fs::read(p).ok().and_then(|b| image_from_bytes(&b))
+                        cache.get(&m.image_key, |_| {
+                            std::fs::read(&m.image)
+                                .ok()
+                                .and_then(|b| image_from_bytes(&b))
                         })
                     })
                     .flatten();
@@ -9741,6 +9778,29 @@ mod tests {
         ));
     }
 
+    /// A seat that REPLACES its picture keeps the same file name
+    /// (`avatar-<stem>.<ext>`), so a path-only cache key would keep
+    /// showing the old face until the app restarts. The key carries the
+    /// file's identity, not just its name.
+    #[test]
+    fn the_avatar_cache_key_moves_when_the_file_content_does() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("avatar-walter.png");
+        std::fs::write(&path, noisy_png(8, 8)).expect("write");
+        let p = path.display().to_string();
+        let first = avatar_cache_key(&p);
+        assert!(first.starts_with(&p), "the key still names the file: {first}");
+        assert_eq!(first, avatar_cache_key(&p), "an untouched file keys the same");
+        // the same NAME, a different picture
+        std::fs::write(&path, noisy_png(16, 16)).expect("rewrite");
+        assert_ne!(
+            first,
+            avatar_cache_key(&p),
+            "a replaced picture must invalidate the cached decode"
+        );
+        assert_eq!(avatar_cache_key(""), "", "no picture, no key");
+    }
+
     /// `sync_rows` rewrites EVERY row on EVERY mirror push, so a decode
     /// inside the row mapping would re-decode the whole roster per tick.
     #[test]
@@ -11199,6 +11259,7 @@ mod tests {
             uploads,
             split: String::new(),
             image: String::new(),
+            image_key: String::new(),
             desc: String::new(),
         }
     }
