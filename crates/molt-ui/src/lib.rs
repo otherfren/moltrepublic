@@ -8706,7 +8706,7 @@ lexicon! {
     om_col_uploads: "Uploads", "Uploads";
     om_me: "(that's me)", "(das bin ich)";
     om_col_recovery: "Recovery link", "Recovery-Link";
-    mp_col_desc: "About", "Über";
+    mp_col_desc: "Description", "Beschreibung";
     mp_img_edit: "Edit picture", "Bild bearbeiten";
     mp_desc_edit: "Edit description", "Beschreibung bearbeiten";
     mp_img_title: "Your picture", "Dein Bild";

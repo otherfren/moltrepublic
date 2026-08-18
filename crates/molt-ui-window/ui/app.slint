@@ -8389,6 +8389,9 @@ export component AppWindow inherits Window {
                         text: root.mp-img-path == "" ? Strings.ol-none : root.mp-img-path;
                         color: Theme.dim;
                         font-size: Theme.fs-cap;
+                        // a long path must elide, never widen the dialog
+                        // (dialog-width is a FLOOR, components.slint:727)
+                        preferred-width: 0px;
                         overflow: elide;
                     }
                 }
@@ -8441,6 +8444,8 @@ export component AppWindow inherits Window {
             spacing: 6px;
             AppArea {
                 height: 110px;
+                // same floor rule: the draft must not drive the dialog
+                preferred-width: 0px;
                 text <=> root.mp-desc-draft;
                 placeholder: Strings.mp-desc-ph;
             }
