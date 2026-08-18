@@ -87,6 +87,42 @@ async fn a_poke_crosses_the_mesh_and_wakes_the_opted_in_target() {
     .await
     .expect("arm the wake hook");
 
+    // The founding itself reaches member-b as an ordinary application
+    // envelope, and the delivery tick decides WHEN — so "the poke crossed no
+    // application envelope" only means something against a settled inbound
+    // leg. A fixed sleep just races the backlog (that raced 6 runs in 25).
+    // Wait for the founding, let the leg go quiet, THEN snapshot and poke.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if member_sink
+            .messages()
+            .iter()
+            .any(|(_, env)| matches!(&env.body, WorkspaceEvent::Founded { .. }))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the founding never reached member-b"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let settled = {
+        let mut last = usize::MAX;
+        loop {
+            let now = member_sink.messages().len();
+            if now == last {
+                break now;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the member's inbound backlog never settled"
+            );
+            last = now;
+            tokio::time::sleep(Duration::from_millis(1_200)).await;
+        }
+    };
+
     a.execute(Command::Poke {
         member: "member-b".to_string(),
     })
@@ -94,15 +130,19 @@ async fn a_poke_crosses_the_mesh_and_wakes_the_opted_in_target() {
     .expect("poke member-b");
 
     // the poke leaves as a CONTROL FRAME: nothing lands in the log, and the
-    // member's sink (which only ever sees application envelopes) stays empty
-    // of it. What proves the wire crossing is the inbound leg below.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(
-        !member_sink
-            .messages()
+    // member's sink (which only ever sees application envelopes) gains
+    // NOTHING. What proves the wire crossing is the inbound leg below.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let after = member_sink.messages();
+    assert_eq!(
+        after.len(),
+        settled,
+        "a poke must not appear as an application envelope: {:?}",
+        after
             .iter()
-            .any(|(_, env)| !matches!(&env.body, WorkspaceEvent::Chat(_))),
-        "a poke must not appear as an application envelope"
+            .skip(settled)
+            .map(|(_, env)| &env.body)
+            .collect::<Vec<_>>()
     );
 
     // inbound leg: member-b pokes the founder over the SAME control-frame
