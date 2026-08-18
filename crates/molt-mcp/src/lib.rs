@@ -1361,6 +1361,23 @@ pub fn tools() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "wiki_export",
+            command: "wiki_export",
+            description: "Write the Shared-Memory wiki to a directory on disk as plain files: <dest>/wiki/<path> per document, the deterministic fold of the applied wiki patches (local unapplied drafts are NEVER exported). With proof=true (the default) it also writes <dest>/proof/bundle.json + README.md - the genesis, every membership block and every applied wiki patch, so an OUTSIDER can verify the tree is exactly what a real m-of-n of the sealed roster approved, without moltd and without any key (cargo run -p molt-engine --example verify_wiki_export -- <dest>). CAUTION: the bundle necessarily reveals member names, identity keys, transport anchors, the relay pool, the charter and each patch's signer set; proof=false writes only wiki/. It proves authenticity and threshold provenance, NOT completeness (an export can omit the newest patches). Refused when the wiki is empty, and proof is refused on a workspace without chain governance (no signatures to prove anything with). Async kickoff - the honest outcome (ok with the file count, or the real error) lands in read_session's `wiki_export` state.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "dest": { "type": "string", "description": "target directory (~ is expanded, parents are created, files of the same name are overwritten)" },
+                    "proof": { "type": "boolean", "description": "include the verification bundle (default true)" }
+                },
+                "required": ["dest"]
+            }),
+            build: |args| Ok(Command::WikiExport {
+                dest: str_arg(args, "dest")?,
+                proof: args.get("proof").and_then(Value::as_bool).unwrap_or(true),
+            }),
+        },
+        ToolDef {
             name: "restore_start",
             command: "restore_start",
             description: "Begin a REAL restore from an encrypted molt-export-v1 backup blob. way=file reads a *.molt.enc file; way=s3 downloads from the CONFIGURED bucket (saved settings, Tor-capable fail-closed transport) — target is then the workspace-id pseudonym from the backup table (the newest object is used) or a full molt/<id>/<ts>.molt.enc object key. The blob is decrypted and staged off the actor, then the engine HARD-VERIFIES the threshold-signed chain before anything materializes (an unverifiable chain restores nothing). Progress and log lines in read_session's restore state report only what actually happened. The restored workspace opens DETACHED: knowledge (history, verified chain, prefs) is restored, live membership (MLS group, mesh) is NOT — rejoining the live republic is the recovery ritual (recover_start). Same-id collision refuses unless replace=true (which moves the existing dir to the recoverable trash first). NOTE: way=file has no GUI panel - this tool is the only surface offering it (the GUI's Restore wizard carries the link and S3 ways).",
@@ -1663,7 +1680,7 @@ mod tests {
         // would let any MCP client execute code as the node's user, which is
         // a different thing entirely from acting inside the republic. The
         // wholesale settings paths refuse the key for the same reason.
-        const INTERNAL: [&str; 58] = [
+        const INTERNAL: [&str; 60] = [
             // ui_publish is the WINDOW reporting what it renders — an
             // agent must not be able to forge what the GUI claims to show
             // (gui_over_mcp.md); reads go through read_ui_state.
@@ -1685,6 +1702,12 @@ mod tests {
             "net_restore_failed",
             "net_export_done",
             "net_export_failed",
+            // the off-actor WIKI export task reporting its real outcome
+            // (wiki_export is the tool; an agent must not be able to forge
+            // an export success, least of all one that claims a proof
+            // bundle was written)
+            "net_wiki_export_done",
+            "net_wiki_export_failed",
             "net_file_shared",
             "net_file_share_failed",
             "net_file_request_ready",

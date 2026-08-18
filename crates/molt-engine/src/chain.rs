@@ -375,6 +375,67 @@ thread_local! {
     pub(crate) static CHAIN_PERSISTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// The distinct members whose voices back ONE block against `identities` —
+/// the block's own signatures plus, on a restore, the returning seat's
+/// consent. Position-bound: [`approval_bytes`] folds `block.height` in, so
+/// this answers "who approved THIS change at THIS height" and nothing else,
+/// which is why it also serves the detached bundle verifier
+/// ([`verify_wiki_export`]) where the chain's `prev` links are absent.
+///
+/// The consent rules are hard and fail-closed: it belongs to `Restored`
+/// blocks only, must verify against the member's ANCHORED key over
+/// [`molt_core::chain::restore_consent_bytes`], and the member must not ALSO
+/// appear in `sigs` (one member, one voice). Counting it is what lets an
+/// m = n republic recover a seat (recovery approval design, 2026-08-08).
+fn block_signers(
+    republic_id: &str,
+    identities: &[MemberIdentity],
+    block: &ChainBlock,
+) -> Result<BTreeSet<String>, String> {
+    let bytes = approval_bytes(republic_id, block.height, &block.change);
+    let mut signers = valid_signers(identities, &bytes, &block.sigs);
+    if let ChainChange::Membership {
+        op,
+        member,
+        nostr_pk,
+        consent: Some(consent),
+        ..
+    } = &block.change
+    {
+        if *op != MembershipOp::Restored {
+            return Err(format!(
+                "block {} carries a consent on a non-restore membership change",
+                block.height
+            ));
+        }
+        if signers.contains(member) {
+            return Err(format!(
+                "block {} counts {member} twice — consent plus a roster signature",
+                block.height
+            ));
+        }
+        let anchored = identities
+            .iter()
+            .find(|i| i.member == *member)
+            .map(|i| i.identity_pk.clone())
+            .ok_or_else(|| format!("block {} restores an unknown member", block.height))?;
+        let consent_bytes = molt_core::chain::restore_consent_bytes(
+            republic_id,
+            member,
+            &anchored,
+            nostr_pk.as_deref().unwrap_or(""),
+        );
+        if !molt_storage::identity_verify(&anchored, &consent_bytes, consent) {
+            return Err(format!(
+                "block {} carries a consent that does not verify for {member}",
+                block.height
+            ));
+        }
+        signers.insert(member.clone());
+    }
+    Ok(signers)
+}
+
 /// Verify one post-genesis block against the current head. Returns the
 /// advanced head and — for a gated change — the proposal id the caller must
 /// record as consumed, so a proposal cannot be committed twice.
@@ -431,54 +492,7 @@ fn verify_next(
             }
         }
     }
-    let bytes = approval_bytes(&head.republic_id, block.height, &block.change);
-    let mut signers = valid_signers(&head.identities, &bytes, &block.sigs);
-    // the restored member's consent counts as ONE distinct signer (recovery
-    // approval design, 2026-08-08) — what lets an m = n republic recover a
-    // seat. Hard rules, all fail-closed: consent belongs to Restored blocks
-    // only, must verify against the member's ANCHORED key over the
-    // consent bytes, and the member must not ALSO appear in `sigs` (the
-    // distinctness rule — one member, one voice).
-    if let ChainChange::Membership {
-        op,
-        member,
-        nostr_pk,
-        consent: Some(consent),
-        ..
-    } = &block.change
-    {
-        if *op != MembershipOp::Restored {
-            return Err(format!(
-                "block {} carries a consent on a non-restore membership change",
-                block.height
-            ));
-        }
-        if signers.contains(member) {
-            return Err(format!(
-                "block {} counts {member} twice — consent plus a roster signature",
-                block.height
-            ));
-        }
-        let anchored = head
-            .identities
-            .iter()
-            .find(|i| i.member == *member)
-            .map(|i| i.identity_pk.clone())
-            .ok_or_else(|| format!("block {} restores an unknown member", block.height))?;
-        let consent_bytes = molt_core::chain::restore_consent_bytes(
-            &head.republic_id,
-            member,
-            &anchored,
-            nostr_pk.as_deref().unwrap_or(""),
-        );
-        if !molt_storage::identity_verify(&anchored, &consent_bytes, consent) {
-            return Err(format!(
-                "block {} carries a consent that does not verify for {member}",
-                block.height
-            ));
-        }
-        signers.insert(member.clone());
-    }
+    let signers = block_signers(&head.republic_id, &head.identities, block)?;
     if signers.len() < usize::from(head.rule_m) {
         return Err(format!(
             "block {} has {} valid approvals, threshold is {}",
@@ -791,6 +805,153 @@ pub(crate) fn checkpoint_state_hash(state: &molt_core::CheckpointState) -> Strin
 /// — a rejoiner that trusted a prefix could fork the republic's state).
 pub fn verify_chain(blocks: &[ChainBlock]) -> Result<ChainHead, String> {
     Ok(walk_chain(blocks)?.head)
+}
+
+/// What a verified wiki export proved — the facts a reviewer reads off the
+/// bundle, none of them taken on trust from the exporter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WikiExportReport {
+    /// The content-derived republic id, re-derived from the genesis roster.
+    pub republic_id: String,
+    /// The republic's founding display name.
+    pub name: String,
+    /// Approval threshold m every exported patch had to reach.
+    pub rule_m: u8,
+    /// Founding member count n (the genesis is n-of-n).
+    pub rule_n: u8,
+    /// The roster after the exported membership blocks, in chain order.
+    pub members: Vec<String>,
+    /// Membership blocks walked (the identity history).
+    pub membership_blocks: usize,
+    /// Wiki patches verified. A patch whose hunks no longer applied is VOID
+    /// in the fold — it counts here but moves no file, exactly as in the
+    /// republic's own state.
+    pub patches: usize,
+    /// Files in the verified tree.
+    pub files: usize,
+}
+
+/// **Verify a wiki export against the tree it shipped** (`docs/memory/
+/// wiki_export_plan.md`): the outsider's check — no moltd, no workspace key,
+/// no trust in the exporter.
+///
+/// The bundle is a SUBSET of the chain, so `prev` links and contiguous
+/// heights are gone by construction; what carries the proof is that every
+/// member signature is position-bound ([`approval_bytes`] folds `height` in),
+/// so each block stands on its own against the roster valid at its height.
+///
+/// Four steps, all hard-reject:
+/// 1. the genesis seals n-of-n and its `republic_id` re-derives from its own
+///    roster content ([`verify_genesis`]),
+/// 2. the roster walk applies every `Membership` block in height order, each
+///    one itself threshold-signed,
+/// 3. every wiki patch carries ≥ m distinct valid signatures against the
+///    roster valid at ITS height, heights ascend, no proposal applies twice,
+/// 4. [`molt_core::wiki_fold::wiki_fold`] over the patch payloads equals
+///    `tree` exactly.
+///
+/// **What it does NOT prove: completeness.** An exporter can omit trailing
+/// patches and ship an older, still genuinely approved state. Freshness needs
+/// a second export or another member's copy (`proof/README.md` says so).
+pub fn verify_wiki_export(
+    bundle_json: &str,
+    tree: &std::collections::BTreeMap<String, String>,
+) -> Result<WikiExportReport, String> {
+    let bundle: crate::wiki_export::WikiExportBundle =
+        serde_json::from_str(bundle_json).map_err(|e| format!("bundle: {e}"))?;
+    if bundle.format != crate::wiki_export::WIKI_EXPORT_FORMAT {
+        return Err(format!(
+            "bundle format {} is not {}",
+            bundle.format,
+            crate::wiki_export::WIKI_EXPORT_FORMAT
+        ));
+    }
+    // 1. the genesis seal (n-of-n over the roster bytes + the id re-derivation)
+    let head = verify_genesis(&bundle.genesis).map_err(|e| format!("genesis: {e}"))?;
+    let ChainChange::Genesis { name, rule_n, .. } = &bundle.genesis.change else {
+        return Err("genesis: block 0 is not a genesis".to_string());
+    };
+
+    // 2 + 3. the roster walk and the per-patch threshold check, one pass
+    let mut identities = head.identities.clone();
+    let mut membership_blocks = 0usize;
+    let mut payloads: Vec<serde_json::Value> = Vec::new();
+    let mut seen: BTreeSet<u64> = BTreeSet::new();
+    let mut last_height = 0u64;
+    for block in &bundle.blocks {
+        if block.height <= last_height {
+            return Err(format!("block {}: heights must ascend", block.height));
+        }
+        last_height = block.height;
+        let membership = matches!(block.change, ChainChange::Membership { .. });
+        if !membership && !crate::wiki_export::is_wiki_patch(&block.change) {
+            return Err(format!(
+                "block {}: only membership blocks and wiki patches are exported",
+                block.height
+            ));
+        }
+        let signers = block_signers(&head.republic_id, &identities, block)?;
+        if signers.len() < usize::from(head.rule_m) {
+            return Err(format!(
+                "block {}: {} valid approvals, threshold is {}",
+                block.height,
+                signers.len(),
+                head.rule_m
+            ));
+        }
+        match &block.change {
+            ChainChange::Membership {
+                op,
+                member,
+                identity_pk,
+                ..
+            } => {
+                apply_membership(&mut identities, *op, member, identity_pk)
+                    .map_err(|e| format!("block {}: {e}", block.height))?;
+                membership_blocks += 1;
+            }
+            ChainChange::Applied {
+                proposal_id,
+                payload,
+                ..
+            } => {
+                if !seen.insert(*proposal_id) {
+                    return Err(format!(
+                        "block {}: proposal {proposal_id} is applied twice",
+                        block.height
+                    ));
+                }
+                payloads.push(payload.clone());
+            }
+            _ => unreachable!("admission above accepts only membership and applied blocks"),
+        }
+    }
+
+    // 4. the fold IS the tree — same function the republic runs on its own state
+    let folded = molt_core::wiki_fold::wiki_fold(&payloads);
+    for (path, content) in &folded {
+        match tree.get(path) {
+            None => return Err(format!("tree: {path} is missing from the export")),
+            Some(shipped) if shipped != content => {
+                return Err(format!("tree: {path} differs from the folded patches"))
+            }
+            Some(_) => {}
+        }
+    }
+    if let Some(extra) = tree.keys().find(|p| !folded.contains_key(*p)) {
+        return Err(format!("tree: {extra} is not in the folded patches"));
+    }
+
+    Ok(WikiExportReport {
+        republic_id: head.republic_id,
+        name: name.clone(),
+        rule_m: head.rule_m,
+        rule_n: *rule_n,
+        members: identities.into_iter().map(|i| i.member).collect(),
+        membership_blocks,
+        patches: payloads.len(),
+        files: tree.len(),
+    })
 }
 
 /// [`verify_chain`], keeping the walk it built — what a holder caches so the
@@ -9239,6 +9400,288 @@ mod tests {
             blocks[3].signers,
             vec!["petra".to_string(), "walter".to_string()],
             "the genesis view rebuilds from the blob's founding table"
+        );
+    }
+
+    // ---- the wiki export bundle verifier (wiki_export_plan.md) ------------
+    //
+    // The bundle is a SUBSET of the chain (genesis + every Membership block +
+    // every applied wiki patch), so `prev` links and contiguous heights are
+    // gone by construction. What survives is what each block's own m
+    // signatures cover: `republic_id ‖ height ‖ change` against the roster
+    // valid at that height. These pin exactly that, and the fold equality.
+
+    /// One `wiki_patch` payload in the shape a Memory proposal carries.
+    fn wiki_payload(patch: &str) -> serde_json::Value {
+        json!({ "op": "wiki_patch", "value": patch })
+    }
+
+    const WIKI_ADD_A: &str = "diff --git a/a.md b/a.md\nnew file mode 100644\n--- /dev/null\n+++ b/a.md\n@@ -0,0 +1,2 @@\n+hello\n+world\n";
+    const WIKI_ADD_B: &str = "diff --git a/notes/b.md b/notes/b.md\nnew file mode 100644\n--- /dev/null\n+++ b/notes/b.md\n@@ -0,0 +1,1 @@\n+second\n";
+
+    /// Commit an applied `wiki_patch` block at the next height.
+    fn commit_wiki(b: &mut Builder, proposal_id: u64, patch: &str, signers: &[&str]) {
+        let height = u64::try_from(b.blocks.len()).expect("small chain");
+        let change = ChainChange::Applied {
+            proposal_id,
+            surface: Surface::Memory,
+            payload: wiki_payload(patch),
+        };
+        let block = b.seal(height, change, signers);
+        b.push(block);
+    }
+
+    /// The fixture every bundle test shares: a real 2-of-2 chain that
+    /// carries both things the bundle must survive — a non-wiki block in
+    /// the middle (dropped from the bundle, so heights have gaps) and a
+    /// roster that MOVES (a recovery with consent, then a joined seat whose
+    /// key signs the second patch).
+    ///
+    /// h0 genesis · h1 wiki patch · h2 org edit · h3 restored (consent) ·
+    /// h4 joined dora · h5 wiki patch signed by dora.
+    fn wiki_fixture() -> Builder {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        commit_wiki(&mut b, 1, WIKI_ADD_A, &["petra", "walter"]);
+        b.commit_org(2, "set_name", "Chess Club 2", &["petra", "walter"]);
+        // walter recovers: petra signs, walter's own consent is the second
+        // voice (the m = n recovery path)
+        let consent = identity_sign(
+            b.key("walter"),
+            &molt_core::chain::restore_consent_bytes(
+                &b.republic_id,
+                "walter",
+                &b.pk("walter"),
+                "dd".repeat(32).as_str(),
+            ),
+        );
+        let height = u64::try_from(b.blocks.len()).expect("small chain");
+        let restored = b.seal(
+            height,
+            ChainChange::Membership {
+                op: MembershipOp::Restored,
+                member: "walter".to_string(),
+                identity_pk: b.pk("walter"),
+                nostr_pk: Some("dd".repeat(32)),
+                relays: Vec::new(),
+                consent: Some(consent),
+            },
+            &["petra"],
+        );
+        b.push(restored);
+        // dora joins with her own key and co-signs the second patch
+        let (dora_sk, dora_pk) = derive_identity_key(&[9u8; 32], "dora");
+        let height = u64::try_from(b.blocks.len()).expect("small chain");
+        let joined = b.seal(
+            height,
+            ChainChange::Membership {
+                op: MembershipOp::Joined,
+                member: "dora".to_string(),
+                identity_pk: dora_pk,
+                nostr_pk: None,
+                relays: Vec::new(),
+                consent: None,
+            },
+            &["petra", "walter"],
+        );
+        b.push(joined);
+        b.keys.push(("dora".to_string(), dora_sk));
+        commit_wiki(&mut b, 3, WIKI_ADD_B, &["walter", "dora"]);
+        b
+    }
+
+    /// The tree the fixture's two patches fold to.
+    fn wiki_fixture_tree() -> std::collections::BTreeMap<String, String> {
+        std::collections::BTreeMap::from([
+            ("a.md".to_string(), "hello\nworld\n".to_string()),
+            ("notes/b.md".to_string(), "second\n".to_string()),
+        ])
+    }
+
+    /// Serialize the bundle the writer would ship for `blocks`.
+    fn bundle_json(blocks: &[ChainBlock]) -> String {
+        let bundle = crate::wiki_export::bundle_from_chain(blocks).expect("the chain has a genesis");
+        serde_json::to_string(&bundle).expect("bundle serializes")
+    }
+
+    #[test]
+    fn a_wiki_export_bundle_verifies_against_its_tree() {
+        let b = wiki_fixture();
+        verify_chain(&b.blocks).expect("the fixture is a real chain");
+        let json = bundle_json(&b.blocks);
+        let report = verify_wiki_export(&json, &wiki_fixture_tree()).expect("the bundle verifies");
+        assert_eq!(report.republic_id, b.republic_id);
+        assert_eq!(report.name, "Chess Club");
+        assert_eq!((report.rule_m, report.rule_n), (2, 2));
+        assert_eq!(report.patches, 2, "both wiki patches ride along");
+        assert_eq!(report.membership_blocks, 2, "restored + joined ride along");
+        assert_eq!(report.files, 2);
+        assert_eq!(
+            report.members,
+            vec!["petra".to_string(), "walter".to_string(), "dora".to_string()],
+            "the roster walk ends at the post-join roster"
+        );
+        // the org edit is NOT in the bundle: its content never leaves
+        assert!(
+            !json.contains("set_name"),
+            "only wiki patches and membership blocks are exported"
+        );
+    }
+
+    #[test]
+    fn a_tampered_file_in_the_tree_fails_verification() {
+        let b = wiki_fixture();
+        let json = bundle_json(&b.blocks);
+        let mut tree = wiki_fixture_tree();
+        tree.insert("a.md".to_string(), "hello\nWORLD\n".to_string());
+        let err = verify_wiki_export(&json, &tree).expect_err("a flipped byte must fail");
+        assert!(err.contains("a.md"), "the fault names the file: {err}");
+        // an EXTRA file the fold never produced is caught too
+        let mut tree = wiki_fixture_tree();
+        tree.insert("stray.md".to_string(), "smuggled".to_string());
+        assert!(verify_wiki_export(&json, &tree).is_err(), "a stray file must fail");
+    }
+
+    #[test]
+    fn a_tampered_patch_payload_fails_verification() {
+        let mut b = wiki_fixture();
+        // rewrite the first patch's content without re-signing
+        if let ChainChange::Applied { payload, .. } = &mut b.blocks[1].change {
+            *payload = wiki_payload(WIKI_ADD_A.replace("world", "welt").as_str());
+        }
+        let json = bundle_json(&b.blocks);
+        assert!(
+            verify_wiki_export(&json, &wiki_fixture_tree()).is_err(),
+            "the m signatures cover the patch bytes"
+        );
+    }
+
+    #[test]
+    fn a_forged_or_removed_signature_fails_verification() {
+        // removed: the patch drops below the threshold
+        let mut b = wiki_fixture();
+        b.blocks[5].sigs.truncate(1);
+        assert!(
+            verify_wiki_export(&bundle_json(&b.blocks), &wiki_fixture_tree()).is_err(),
+            "one signature is below m = 2"
+        );
+        // forged: a signature that does not verify counts for nobody
+        let mut b = wiki_fixture();
+        b.blocks[5].sigs[0].sig = "00".repeat(64);
+        assert!(
+            verify_wiki_export(&bundle_json(&b.blocks), &wiki_fixture_tree()).is_err(),
+            "a forged signature must not count"
+        );
+        // a signer outside the roster cannot lift a block to threshold
+        let mut b = wiki_fixture();
+        let (mallory_sk, _) = derive_identity_key(&[42u8; 32], "mallory");
+        let bytes = approval_bytes(&b.republic_id, 5, &b.blocks[5].change);
+        b.blocks[5].sigs[0] = RosterAttestation {
+            member: "mallory".to_string(),
+            sig: identity_sign(&mallory_sk, &bytes),
+        };
+        assert!(
+            verify_wiki_export(&bundle_json(&b.blocks), &wiki_fixture_tree()).is_err(),
+            "a stranger's signature is not a roster approval"
+        );
+    }
+
+    #[test]
+    fn a_forged_recovery_consent_fails_verification() {
+        let mut b = wiki_fixture();
+        if let ChainChange::Membership { consent, .. } = &mut b.blocks[3].change {
+            *consent = Some("11".repeat(64));
+        }
+        assert!(
+            verify_wiki_export(&bundle_json(&b.blocks), &wiki_fixture_tree()).is_err(),
+            "a consent that does not verify is not the second voice"
+        );
+    }
+
+    #[test]
+    fn an_omitted_membership_block_fails_the_later_patch() {
+        let b = wiki_fixture();
+        let mut bundle =
+            crate::wiki_export::bundle_from_chain(&b.blocks).expect("the chain has a genesis");
+        // drop the Joined block — dora's signature on the last patch then
+        // belongs to nobody in the roster
+        bundle.blocks.retain(|block| {
+            !matches!(
+                &block.change,
+                ChainChange::Membership { op: MembershipOp::Joined, .. }
+            )
+        });
+        let json = serde_json::to_string(&bundle).expect("bundle serializes");
+        assert!(
+            verify_wiki_export(&json, &wiki_fixture_tree()).is_err(),
+            "without the identity history the later patch cannot verify"
+        );
+    }
+
+    #[test]
+    fn reordered_or_duplicate_heights_fail_verification() {
+        let b = wiki_fixture();
+        let base =
+            crate::wiki_export::bundle_from_chain(&b.blocks).expect("the chain has a genesis");
+        // reordered
+        let mut bundle = base.clone();
+        bundle.blocks.reverse();
+        assert!(
+            verify_wiki_export(
+                &serde_json::to_string(&bundle).expect("serialize"),
+                &wiki_fixture_tree()
+            )
+            .is_err(),
+            "blocks must arrive in ascending height order"
+        );
+        // duplicated
+        let mut bundle = base.clone();
+        let dup = bundle.blocks[0].clone();
+        bundle.blocks.insert(1, dup);
+        assert!(
+            verify_wiki_export(
+                &serde_json::to_string(&bundle).expect("serialize"),
+                &wiki_fixture_tree()
+            )
+            .is_err(),
+            "a repeated block must not fold twice"
+        );
+    }
+
+    #[test]
+    fn a_non_wiki_block_in_the_bundle_is_refused() {
+        let b = wiki_fixture();
+        let mut bundle =
+            crate::wiki_export::bundle_from_chain(&b.blocks).expect("the chain has a genesis");
+        bundle.blocks.push(b.blocks[2].clone()); // the org edit
+        assert!(
+            verify_wiki_export(
+                &serde_json::to_string(&bundle).expect("serialize"),
+                &wiki_fixture_tree()
+            )
+            .is_err(),
+            "the bundle carries wiki patches and membership blocks, nothing else"
+        );
+    }
+
+    #[test]
+    fn a_forged_genesis_id_fails_the_bundle() {
+        let mut b = wiki_fixture();
+        if let ChainChange::Genesis { republic_id, .. } = &mut b.blocks[0].change {
+            *republic_id = "deadbeef".to_string();
+        }
+        assert!(
+            verify_wiki_export(&bundle_json(&b.blocks), &wiki_fixture_tree()).is_err(),
+            "the genesis id must re-derive from the roster content"
+        );
+    }
+
+    #[test]
+    fn a_foreign_bundle_format_is_refused() {
+        let b = wiki_fixture();
+        let json = bundle_json(&b.blocks).replace("molt-wiki-export-v1", "molt-wiki-export-v9");
+        assert!(
+            verify_wiki_export(&json, &wiki_fixture_tree()).is_err(),
+            "an unknown format tag is not verified on hope"
         );
     }
 }

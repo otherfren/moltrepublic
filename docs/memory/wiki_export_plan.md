@@ -1,6 +1,10 @@
 # Wiki export to disk, with externally verifiable patch signatures
 
-**Status: PLAN (decided 2026-08-18) — not built; all forks resolved with the user, ready to execute**
+**Status: engine + MCP side BUILT 2026-08-18** (`Command::WikiExport`, the
+writer, `proof/bundle.json` + `README.md`, `verify_wiki_export` and its
+example binary, keystones 1-4). **Open: the GUI** (§GUI, keystone 5) — the
+button, the dialog and the i18n entries. The doc leaves for the archive with
+that last item.
 
 ## Goal
 
