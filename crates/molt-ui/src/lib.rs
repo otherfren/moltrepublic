@@ -11273,6 +11273,15 @@ mod gui_tests {
     /// size constraints or nothing at all. Nothing at all means an
     /// invisible, unclickable name. This measures the real geometry of the
     /// chat author's name after a live mirror pass.
+    ///
+    /// **Runs on the dev-ui chain only** — `ElementHandle` queries need the
+    /// element names Slint keeps under `SLINT_EMIT_DEBUG_INFO`, which the
+    /// interpreter path carries anyway while the code generator would put
+    /// them into the ~400k-line module (a build that already peaks at ~9 GiB).
+    /// The layout engine under test is the same in both paths. Run it with
+    /// `CARGO_TARGET_DIR=target/dev-ui SLINT_LIVE_PREVIEW=1 cargo test
+    /// -p molt-ui --lib --features molt-ui/live-preview`.
+    #[cfg(feature = "live-preview")]
     #[test]
     fn the_chat_author_name_keeps_its_width_inside_the_poke_menu_wrapper() {
         i_slint_backend_testing::init_no_event_loop();
