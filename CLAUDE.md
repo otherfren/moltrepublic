@@ -355,20 +355,27 @@ both verified red-without/green-with).
   build). Headless vs GUI is a runtime choice, not a separate build.
 - **The Slint-generated window lives in its own crate, `molt-ui-window`, as a
   compile-time firewall** (2026-07-13): `ui/app.slint` compiles to a ~400k-line
-  Rust module whose single rustc peaks at ~6 GiB / ~4 min — that cost is now
-  paid ONLY when a `.slint` file changes. GUI-logic edits (`molt-ui`) rebuild
-  in ~2 s at <1 GiB. Debuginfo reduction does NOT help (measured: ~2%), and a
-  SIGKILL during the window compile is the kernel OOM-killer — never run two
-  window-scale builds concurrently (e.g. an agent's test run next to the
-  user's `cargo build`); when RAM is tight build with `-j 1`. GUI changes are
-  validated by a clean `cargo build -p molt-ui-window` (Slint compiler) plus
-  `-p molt-ui` (logic against the generated API).
-- **GUI iteration goes through `scripts/dev-ui.sh` — NOT the 6-GiB build.**
+  Rust module whose single rustc **peaked at 8.66 GiB RSS / 12m50s — measured
+  2026-08-18 on the 15 GiB box, rustc 1.95.0 + Slint 1.17, `cargo build -j 1`,
+  dev profile** (the older ~6 GiB / ~4 min figure predates those versions;
+  re-measure and re-date this line after a toolchain or Slint bump rather than
+  trusting it). That cost is paid ONLY when a `.slint` file changes; GUI-logic
+  edits (`molt-ui`) rebuild in ~2 s at <1 GiB. Debuginfo reduction does NOT
+  help (measured: ~2%), and a SIGKILL during the window compile is the kernel
+  OOM-killer. **Build the window with `-j 1`** — this is not a tight-RAM
+  special case: plain `-j 2` puts the lib and test rustc side by side and died
+  by SIGKILL here (2026-08-18, with a second session on the box). Never run two
+  window-scale builds concurrently — and note that a worktree agent with its
+  OWN target dir is NOT serialized by cargo's build lock against a build in
+  the main checkout. GUI changes are validated by a clean `cargo build -p
+  molt-ui-window` (Slint compiler) plus `-p molt-ui` (logic against the
+  generated API).
+- **GUI iteration goes through `scripts/dev-ui.sh` — NOT the 9-GiB build.**
   It sets `SLINT_LIVE_PREVIEW=1` + the `live-preview` feature chain
   (molt-app → molt-ui → molt-ui-window → `slint/live-preview`, Slint ≥ 1.13):
   slint-build then emits ~2.6k-line interpreter-backed stubs with the identical
   API instead of the ~400k-line module — measured 2026-07-14: a .slint edit
-  recompiles in **~2 s at <1 GiB** instead of ~4 min / ~6 GiB. `dev-ui.sh run`
+  recompiles in **~2 s at <1 GiB** instead of the full window build. `dev-ui.sh run`
   starts moltd with runtime .slint hot-reload (properties/models/callbacks
   survive a save; an *incompatible* interface change panics the running app —
   restart it, still no recompile). The script uses its own `target/dev-ui`
