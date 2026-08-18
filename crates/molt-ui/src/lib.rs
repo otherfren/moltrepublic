@@ -1701,6 +1701,143 @@ pub fn run_app(
             );
         });
     }
+    // Organization → Members: the OWN seat's profile. `set_member_image`
+    // reads the picked file OFF the UI thread, fits it to what this
+    // republic still carries (square + budget) and embeds the bytes;
+    // everything else is a plain payload. The engine refuses a profile op
+    // proposed for another seat, so `member` is always the own one.
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
+        ui.on_member_propose(move |op, member, value| {
+            if op.as_str() != "set_member_image" {
+                let payload = serde_json::json!({
+                    "op": op.as_str(),
+                    "member": member.as_str(),
+                    "value": value.as_str(),
+                });
+                let msg = weak
+                    .upgrade()
+                    .map(|ui| ui.global::<Strings>().get_toast_proposed().to_string())
+                    .unwrap_or_default();
+                issue_then_toast(
+                    &rt,
+                    &w,
+                    &weak,
+                    Command::Propose {
+                        surface: Surface::Organization,
+                        payload,
+                    },
+                    msg,
+                );
+                return;
+            }
+            let budget = weak
+                .upgrade()
+                .map(|ui| usize::try_from(ui.get_mp_img_budget()).unwrap_or(0))
+                .unwrap_or(0);
+            let w = w.clone();
+            let weak = weak.clone();
+            let member = member.to_string();
+            let path = value.to_string();
+            rt.spawn(async move {
+                let read = tokio::task::spawn_blocking({
+                    let path = path.clone();
+                    move || std::fs::read(&path)
+                })
+                .await;
+                let Ok(Ok(bytes)) = read else {
+                    // no Debug dump at the user: the one important thing is
+                    // WHICH file did not read
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak.upgrade() {
+                            let msg = format!(
+                                "\u{26a0} {} {path}",
+                                ui.global::<Strings>().get_toast_file_unreadable()
+                            );
+                            ui.invoke_show_toast_error(msg.into());
+                        }
+                    });
+                    return;
+                };
+                // the crop/downscale is CPU work on a picture up to 8192²
+                let fitted =
+                    tokio::task::spawn_blocking(move || fit_member_image(&bytes, budget)).await;
+                let fitted = match fitted {
+                    Ok(Ok(fitted)) => fitted,
+                    Ok(Err(why)) => {
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak.upgrade() {
+                                let s = ui.global::<Strings>();
+                                ui.invoke_show_toast_error(match why {
+                                    ImageFitError::Undecodable => s.get_pc_img_missing(),
+                                    ImageFitError::TooLarge => s.get_mp_img_too_big(),
+                                });
+                            }
+                        });
+                        return;
+                    }
+                    Err(_) => return,
+                };
+                use base64::Engine as _;
+                // the name must match the bytes: the engine derives the
+                // avatar file's extension from this display value
+                let stem = std::path::Path::new(&path)
+                    .file_stem()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| member.clone());
+                let payload = serde_json::json!({
+                    "op": "set_member_image",
+                    "member": member,
+                    "value": format!("{stem}.{}", fitted.ext),
+                    "bytes_b64":
+                        base64::engine::general_purpose::STANDARD.encode(fitted.bytes),
+                });
+                // the confirmation belongs to the OUTCOME: the engine's own
+                // gates (square, budget, the seat) still run after this
+                let outcome = w
+                    .execute(Command::Propose {
+                        surface: Surface::Organization,
+                        payload,
+                    })
+                    .await;
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    match outcome {
+                        Ok(_) => {
+                            let msg = ui.global::<Strings>().get_toast_proposed();
+                            ui.invoke_show_toast(msg);
+                        }
+                        Err(e) => ui.invoke_show_toast_error(error_toast(&ui, &e)),
+                    }
+                });
+            });
+        });
+    }
+    // pick the own seat's picture — same picker set as the republic image
+    {
+        let rt = rt.clone();
+        let weak = ui.as_weak();
+        ui.on_mp_img_pick(move || {
+            let weak = weak.clone();
+            rt.spawn(async move {
+                let picker = rfd::AsyncFileDialog::new()
+                    // no "svg": the engine refuses it, and a square check
+                    // on a vector is meaningless
+                    .add_filter("Image", &["png", "jpg", "jpeg", "webp", "gif", "bmp"]);
+                let Some(file) = picker.pick_file().await else {
+                    return; // cancelled
+                };
+                let path = file.path().display().to_string();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_mp_img_draft(path.into());
+                    }
+                });
+            });
+        });
+    }
     // sound preview in the settings panel — plays the picked alert once
     {
         ui.on_test_sound(move |kind| {
@@ -4429,6 +4566,9 @@ struct OrgStats {
     /// which optional surfaces get a nav row and read as active under
     /// Organization › charter.
     features: Vec<String>,
+    /// Decoded picture bytes a member picture may still carry here (engine
+    /// `StatusView.image_budget`) - what the fit before proposing aims at.
+    image_budget: u64,
 }
 
 /// One rendered row of the Organization → Members table.
@@ -4450,6 +4590,11 @@ struct MemberRowData {
     uploads: i32,
     /// R4 relay-split marker, pre-built by the engine ("" = none).
     split: String,
+    /// The LOCAL file the engine materialized for this seat's applied
+    /// picture ("" = none). Keyed by path, decoded through [`AvatarCache`].
+    image: String,
+    /// The seat's applied description ("" = none).
+    desc: String,
 }
 
 /// One rendered row of the Organization → Uploads table (labels are
@@ -4886,6 +5031,7 @@ async fn gather_surfaces(
                 chain_governed: s.chain_governed,
                 relays: s.relays,
                 features: s.features,
+                image_budget: s.image_budget,
             },
         ),
         _ => return None,
@@ -4950,6 +5096,8 @@ async fn gather_surfaces(
                 state: i32::from(m.presence),
                 uploads: i32::try_from(m.uploads).unwrap_or(i32::MAX),
                 split: m.split,
+                image: m.image,
+                desc: m.description,
             })
             .collect(),
         _ => Vec::new(),
@@ -5541,20 +5689,40 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         }
     }
 
-    // the Organization tables (Members / Uploads)
-    let members: Vec<MemberRow> = b
-        .members
-        .iter()
-        .map(|m| MemberRow {
-            name: m.name.as_str().into(),
-            id: m.id.as_str().into(),
-            pk: m.pk.as_str().into(),
-            last: m.last.as_str().into(),
-            state: m.state,
-            uploads: m.uploads,
-            split: m.split.as_str().into(),
-        })
-        .collect();
+    // the Organization tables (Members / Uploads). The avatars go through
+    // the path-keyed cache: `sync_rows` below rewrites EVERY row on EVERY
+    // push, so decoding here would re-decode the whole roster per tick
+    let members: Vec<MemberRow> = AVATARS.with_borrow_mut(|cache| {
+        cache.retain_live(&b.members.iter().map(|m| m.image.as_str()).collect());
+        b.members
+            .iter()
+            .map(|m| {
+                // the picture rode the applied proposal, so the engine
+                // materialized the file on every device; decode by CONTENT
+                // (the name's extension comes from a peer-supplied value)
+                let avatar = (!m.image.is_empty())
+                    .then(|| {
+                        cache.get(&m.image, |p| {
+                            std::fs::read(p).ok().and_then(|b| image_from_bytes(&b))
+                        })
+                    })
+                    .flatten();
+                MemberRow {
+                    name: m.name.as_str().into(),
+                    id: m.id.as_str().into(),
+                    pk: m.pk.as_str().into(),
+                    last: m.last.as_str().into(),
+                    state: m.state,
+                    uploads: m.uploads,
+                    split: m.split.as_str().into(),
+                    avatar_set: avatar.is_some(),
+                    avatar: avatar.unwrap_or_default(),
+                    avatar_path: m.image.as_str().into(),
+                    desc: m.desc.as_str().into(),
+                }
+            })
+            .collect()
+    });
     sync_rows(&ui.get_org_members(), members, |m| ui.set_org_members(m));
     let uploads: Vec<UploadRow> = b
         .uploads
@@ -5621,6 +5789,9 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         ui.set_org_img_set(loaded.is_some());
         ui.set_org_img(loaded.unwrap_or_default());
     }
+    // the picture budget this republic still carries: the engine stays the
+    // authority, this is what the member-picture fit aims at
+    ui.set_mp_img_budget(i32::try_from(b.org_stats.image_budget).unwrap_or(i32::MAX));
 }
 
 /// Render a chat timestamp as `2026-06-02 13:37 (~20 minutes ago)` in the
@@ -8498,6 +8669,15 @@ lexicon! {
     om_col_uploads: "Uploads", "Uploads";
     om_me: "(that's me)", "(das bin ich)";
     om_col_recovery: "Recovery link", "Recovery-Link";
+    mp_col_desc: "About", "Über";
+    mp_img_edit: "Edit picture", "Bild bearbeiten";
+    mp_desc_edit: "Edit description", "Beschreibung bearbeiten";
+    mp_img_title: "Your picture", "Dein Bild";
+    mp_img_body: "The members approve it.", "Die Mitglieder stimmen zu.";
+    mp_desc_title: "Your description", "Deine Beschreibung";
+    mp_desc_body: "The members approve it.", "Die Mitglieder stimmen zu.";
+    mp_desc_ph: "One line about you", "Eine Zeile über dich";
+    mp_img_too_big: "Picture too large for this republic", "Bild zu groß für diese Republik";
     ou_col_user: "User", "Nutzer";
     ou_col_date: "Date", "Datum";
     ou_col_file: "Filename", "Dateiname";
@@ -10963,6 +11143,8 @@ mod tests {
             state,
             uploads,
             split: String::new(),
+            image: String::new(),
+            desc: String::new(),
         }
     }
 

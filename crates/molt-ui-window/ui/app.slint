@@ -1107,6 +1107,8 @@ export component AppWindow inherits Window {
         || root.relay-clearnet-modal-open
         || root.nt-open
         || root.recover-link-open
+        || root.mp-img-open
+        || root.mp-desc-open
         || root.wizard-log-open;
     changed any-modal-open => {
         if (!root.any-modal-open) {
@@ -1502,6 +1504,30 @@ export component AppWindow inherits Window {
     in property <bool> org-img-set: false;
     // pick a new image via the real (rfd) file dialog — fills org-logo-draft
     callback org-logo-pick();
+    // Organization → Members: the OWN seat's profile edits. Both modals
+    // carry the seat explicitly (mp-member) — the engine refuses a profile
+    // op proposed for anybody else, so the pencils only ever open on the
+    // own row (member_profiles_plan.md §5)
+    property <bool> mp-img-open: false;
+    property <bool> mp-desc-open: false;
+    property <string> mp-member;
+    // the row's current picture, copied in when the pencil opens
+    property <image> mp-img;
+    property <bool> mp-img-set: false;
+    property <string> mp-img-path;
+    // in-out: the native picker (Rust, mp-img-pick) writes the chosen path
+    in-out property <string> mp-img-draft;
+    in-out property <string> mp-desc-draft;
+    // the engine's own cap (proposals.rs DESC_MAX) — the counter and the
+    // confirm button share it, so a refused description is never proposed
+    property <int> mp-desc-max: 500;
+    // decoded picture bytes this republic still carries (engine
+    // StatusView.image_budget) — what the Rust side fits a picked file to
+    in property <int> mp-img-budget: 0;
+    callback mp-img-pick();
+    // (op, member, value) — Rust reads the picked file, fits the picture
+    // to the served budget and proposes on the Organization surface
+    callback member-propose(string, string, string);
     // image preview overlay: a proposed image decoded locally from the
     // voted-on payload bytes (no download involved)
     // inline proposed-image viewer: ONE decoded image at a time, keyed by
@@ -1866,6 +1892,10 @@ export component AppWindow inherits Window {
             root.ws-dir-modal-open = false;
         } else if (root.org-logo-modal-open) {
             root.org-logo-modal-open = false;
+        } else if (root.mp-img-open) {
+            root.mp-img-open = false;
+        } else if (root.mp-desc-open) {
+            root.mp-desc-open = false;
         } else if (root.org-charter-modal-open) {
             root.org-charter-modal-open = false;
         } else if (root.org-name-modal-open) {
@@ -5592,14 +5622,17 @@ export component AppWindow inherits Window {
                                             padding-right: 12px;
                                             spacing: 10px;
                                             Rectangle { width: 9px; }
+                                            // the picture column carries no
+                                            // header - the pictures say it
+                                            Rectangle { width: 56px; }
                                             // Name outweighs the identity
                                             // columns: when space gets tight
                                             // ID and key give way first.
                                             // Every data column sorts on
                                             // click (the ▲/▼ marks the
-                                            // active one); only the
-                                            // recovery action column stays
-                                            // a plain label.
+                                            // active one); the profile and
+                                            // recovery action columns stay
+                                            // plain labels.
                                             SortHeader {
                                                 label: Strings.ow-col-name;
                                                 active: root.om-sort-column == "name";
@@ -5609,6 +5642,17 @@ export component AppWindow inherits Window {
                                                 clicked => {
                                                     root.sort-members("name");
                                                 }
+                                            }
+                                            Text {
+                                                text: Strings.mp-col-desc;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                horizontal-stretch: 2;
+                                                min-width: 90px;
+                                                // a header must never drive
+                                                // the column's width
+                                                preferred-width: 0px;
+                                                overflow: elide;
                                             }
                                             SortHeader {
                                                 label: Strings.om-col-id;
@@ -5664,7 +5708,10 @@ export component AppWindow inherits Window {
                                             background: Theme.line;
                                         }
                                         for m in root.org-members: Rectangle {
-                                            height: 40px;
+                                            // two lines: the seat on the
+                                            // first, its description across
+                                            // both (56px picture + 2*12px)
+                                            height: 80px;
                                             border-radius: Theme.win95 ? 0px : 6px;
                                             // the own seat stands out: accent
                                             // border and a "(das bin ich)"
@@ -5691,16 +5738,94 @@ export component AppWindow inherits Window {
                                             HorizontalLayout {
                                                 padding-left: 12px;
                                                 padding-right: 12px;
+                                                padding-top: 12px;
+                                                padding-bottom: 12px;
                                                 spacing: 10px;
+                                                // TOP-PACKED: dot, picture
+                                                // and name share the first
+                                                // line, only the description
+                                                // spans both. Centring a
+                                                // child with `y: (parent.height
+                                                // - self.height) / 2` here
+                                                // would centre it against the
+                                                // 80px ROW, i.e. beside the
+                                                // second line (the idiom above
+                                                // at the chain-history row)
+                                                cross-axis-alignment: start;
+                                                // the dot centres against the
+                                                // NAME line; the box has its
+                                                // own fixed size, so the
+                                                // anchored child inside it
+                                                // stays out of the collapse trap
                                                 Rectangle {
                                                     width: 9px;
-                                                    height: 9px;
-                                                    border-radius: 4.5px;
-                                                    y: (parent.height - self.height) / 2;
-                                                    background: m.state == 0 ? Theme.good : (m.state == 1 ? Theme.warn : Theme.faint);
+                                                    height: Theme.fs-body * 1.4;
+                                                    Rectangle {
+                                                        width: 9px;
+                                                        height: 9px;
+                                                        border-radius: 4.5px;
+                                                        x: 0;
+                                                        y: (parent.height - self.height) / 2;
+                                                        background: m.state == 0 ? Theme.good : (m.state == 1 ? Theme.warn : Theme.faint);
+                                                    }
+                                                }
+                                                // the seat's vote-gated
+                                                // picture, in the republic
+                                                // logo's visual language; the
+                                                // pencil belongs to the own
+                                                // seat alone (the engine
+                                                // refuses any other proposer)
+                                                Rectangle {
+                                                    width: 56px;
+                                                    height: 56px;
+                                                    border-radius: Theme.win95 ? 0px : 8px;
+                                                    background: Theme.accent-soft;
+                                                    border-width: 1px;
+                                                    border-color: Theme.accent;
+                                                    // the clip lives on an
+                                                    // INNER rect so the
+                                                    // pencil's tooltip can
+                                                    // spill past the picture
+                                                    Rectangle {
+                                                        width: 100%;
+                                                        height: 100%;
+                                                        border-radius: parent.border-radius;
+                                                        clip: true;
+                                                        if !m.avatar-set: Image {
+                                                            source: @image-url("assets/users.svg");
+                                                            colorize: Theme.accent;
+                                                            width: 28px;
+                                                            height: 28px;
+                                                            x: (parent.width - self.width) / 2;
+                                                            y: (parent.height - self.height) / 2;
+                                                        }
+                                                        if m.avatar-set: Image {
+                                                            source: m.avatar;
+                                                            width: 100%;
+                                                            height: 100%;
+                                                            image-fit: cover;
+                                                        }
+                                                    }
+                                                    if m.name == root.node-member: AppButton {
+                                                        width: 22px;
+                                                        height: 22px;
+                                                        pad: 0px;
+                                                        x: parent.width - self.width + 6px;
+                                                        y: parent.height - self.height + 6px;
+                                                        label: "✎";
+                                                        tooltip: Strings.mp-img-edit;
+                                                        clicked => {
+                                                            root.mp-member = m.name;
+                                                            root.mp-img = m.avatar;
+                                                            root.mp-img-set = m.avatar-set;
+                                                            root.mp-img-path = m.avatar-path;
+                                                            root.mp-img-draft = "";
+                                                            root.mp-img-open = true;
+                                                        }
+                                                    }
                                                 }
                                                 VerticalLayout {
-                                                    alignment: center;
+                                                    alignment: start;
                                                     horizontal-stretch: 3;
                                                     min-width: 100px;
                                                     Text {
@@ -5719,6 +5844,83 @@ export component AppWindow inherits Window {
                                                         overflow: elide;
                                                     }
                                                 }
+                                                // the seat's own description:
+                                                // two lines, elided, the full
+                                                // text on hover
+                                                md-menu := ContextMenuArea {
+                                                    horizontal-stretch: 2;
+                                                    min-width: 90px;
+                                                    // a wrapping Text reports
+                                                    // its UNwrapped line as
+                                                    // preferred width - it must
+                                                    // not drive this column
+                                                    preferred-width: 0px;
+                                                    height: Theme.fs-cap * 2.7;
+                                                    enabled: Poke.can(m.name);
+                                                    Menu {
+                                                        MenuItem {
+                                                            title: Strings.mem-poke;
+                                                            activated => {
+                                                                Poke.go(m.name);
+                                                            }
+                                                        }
+                                                    }
+                                                    Text {
+                                                        width: 100%;
+                                                        height: 100%;
+                                                        text: m.desc;
+                                                        color: Theme.dim;
+                                                        font-size: Theme.fs-cap;
+                                                        wrap: word-wrap;
+                                                        overflow: elide;
+                                                    }
+                                                    // hover shows the full
+                                                    // text; the right-click has
+                                                    // to open the menu
+                                                    // explicitly here - this
+                                                    // TouchArea sits ABOVE the
+                                                    // row's own menu area and
+                                                    // would eat it
+                                                    md-ta := TouchArea {
+                                                        changed has-hover => {
+                                                            if (self.has-hover && m.desc != "") {
+                                                                HintTip.label = m.desc;
+                                                                HintTip.ax = self.absolute-position.x;
+                                                                HintTip.ay = self.absolute-position.y + self.height + 6px;
+                                                            } else if (HintTip.ax == self.absolute-position.x
+                                                                && HintTip.ay == self.absolute-position.y + self.height + 6px) {
+                                                                HintTip.label = "";
+                                                            }
+                                                        }
+                                                        pointer-event(ev) => {
+                                                            if (ev.kind == PointerEventKind.down
+                                                                && ev.button == PointerEventButton.right
+                                                                && Poke.can(m.name)) {
+                                                                md-menu.show({ x: self.mouse-x, y: self.mouse-y });
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                // the own seat edits its line;
+                                                // the column keeps the room on
+                                                // every row so the table stays
+                                                // in one grid
+                                                Rectangle {
+                                                    width: 22px;
+                                                    height: 22px;
+                                                    if m.name == root.node-member: AppButton {
+                                                        width: 22px;
+                                                        height: 22px;
+                                                        pad: 0px;
+                                                        label: "✎";
+                                                        tooltip: Strings.mp-desc-edit;
+                                                        clicked => {
+                                                            root.mp-member = m.name;
+                                                            root.mp-desc-draft = m.desc;
+                                                            root.mp-desc-open = true;
+                                                        }
+                                                    }
+                                                }
                                                 // identity anchor: fingerprint +
                                                 // full key ("—" on a workspace
                                                 // without anchored identities),
@@ -5728,11 +5930,11 @@ export component AppWindow inherits Window {
                                                     min-width: 40px;
                                                     max-width: 130px;
                                                     spacing: 4px;
+                                                    cross-axis-alignment: center;
                                                     Text {
                                                         text: m.id == "" ? "-" : m.id;
                                                         color: Theme.dim;
                                                         font-size: Theme.fs-cap;
-                                                        vertical-alignment: center;
                                                         horizontal-stretch: 1;
                                                         overflow: elide;
                                                     }
@@ -5740,7 +5942,6 @@ export component AppWindow inherits Window {
                                                         width: 24px;
                                                         height: 22px;
                                                         pad: 0px;
-                                                        y: (parent.height - self.height) / 2;
                                                         icon: @image-url("assets/copy.svg");
                                                         icon-set: true;
                                                         tooltip: Strings.ow-copy;
@@ -5755,11 +5956,11 @@ export component AppWindow inherits Window {
                                                     min-width: 40px;
                                                     max-width: 130px;
                                                     spacing: 4px;
+                                                    cross-axis-alignment: center;
                                                     Text {
                                                         text: m.pk == "" ? "-" : m.pk;
                                                         color: Theme.faint;
                                                         font-size: Theme.fs-cap;
-                                                        vertical-alignment: center;
                                                         horizontal-stretch: 1;
                                                         overflow: elide;
                                                     }
@@ -5767,7 +5968,6 @@ export component AppWindow inherits Window {
                                                         width: 24px;
                                                         height: 22px;
                                                         pad: 0px;
-                                                        y: (parent.height - self.height) / 2;
                                                         icon: @image-url("assets/copy.svg");
                                                         icon-set: true;
                                                         tooltip: Strings.ow-copy;
@@ -5781,8 +5981,9 @@ export component AppWindow inherits Window {
                                                     text: m.last;
                                                     color: Theme.faint;
                                                     font-size: Theme.fs-cap;
-                                                    vertical-alignment: center;
                                                     width: 100px;
+                                                    height: Theme.fs-body * 1.4;
+                                                    vertical-alignment: center;
                                                     overflow: elide;
                                                 }
                                                 // only a button when the member
@@ -5794,10 +5995,10 @@ export component AppWindow inherits Window {
                                                 HorizontalLayout {
                                                     width: 70px;
                                                     alignment: end;
+                                                    cross-axis-alignment: center;
                                                     if m.uploads > 0: AppButton {
                                                         height: 28px;
                                                         pad: 10px;
-                                                        y: (parent.height - self.height) / 2;
                                                         label: "📎 \{m.uploads}";
                                                         clicked => {
                                                             root.jump-member-uploads(m.name);
@@ -5820,10 +6021,10 @@ export component AppWindow inherits Window {
                                                 HorizontalLayout {
                                                     width: 180px;
                                                     alignment: end;
+                                                    cross-axis-alignment: center;
                                                     if root.org-chain-governed && m.name != root.node-member: AppButton {
                                                         height: 28px;
                                                         pad: 10px;
-                                                        y: (parent.height - self.height) / 2;
                                                         label: Strings.om-recover-link;
                                                         clicked => {
                                                             root.recover-link-member = m.name;
@@ -8111,6 +8312,138 @@ export component AppWindow inherits Window {
                         root.org-logo-pick();
                     }
                 }
+            }
+        }
+    }
+
+    // =================================================================
+    // Modal: the OWN seat's picture (Organization → Members). Same shape
+    // as the republic's image one row above: the picked file's bytes ride
+    // the proposal, fitted to this republic's served budget first, and
+    // the members approve it. Remove is offered only while one is applied.
+    // =================================================================
+    if root.mp-img-open: mp-dlg := ConfirmModal {
+        dialog-width: 460px;
+        title: Strings.mp-img-title;
+        body: Strings.mp-img-body;
+        confirm-label: Strings.oc-propose;
+        confirm-enabled: root.mp-img-draft != "";
+        alt-label: root.mp-img-path == "" ? "" : Strings.ol-remove;
+        dismissed => {
+            root.mp-img-open = false;
+        }
+        confirmed => {
+            root.mp-img-open = false;
+            // the "Proposed" confirmation rides the OUTCOME (molt-ui's
+            // on_member_propose): the fit can still fail on the decode or
+            // the budget after this click
+            root.member-propose("set_member_image", root.mp-member, root.mp-img-draft);
+        }
+        alted => {
+            root.mp-img-open = false;
+            root.member-propose("remove_member_image", root.mp-member, "");
+        }
+        VerticalLayout {
+            spacing: 12px;
+            HorizontalLayout {
+                spacing: 10px;
+                alignment: start;
+                Rectangle {
+                    width: 64px;
+                    height: 64px;
+                    border-radius: Theme.win95 ? 0px : 8px;
+                    background: Theme.accent-soft;
+                    border-width: 1px;
+                    border-color: Theme.accent;
+                    clip: true;
+                    if !root.mp-img-set: Image {
+                        source: @image-url("assets/users.svg");
+                        colorize: Theme.accent;
+                        width: 32px;
+                        height: 32px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                    }
+                    if root.mp-img-set: Image {
+                        source: root.mp-img;
+                        width: 100%;
+                        height: 100%;
+                        image-fit: cover;
+                    }
+                }
+                VerticalLayout {
+                    spacing: 3px;
+                    alignment: center;
+                    Text {
+                        text: Strings.ol-current;
+                        color: Theme.faint;
+                        font-size: Theme.fs-cap;
+                        font-weight: 600;
+                    }
+                    Text {
+                        text: root.mp-img-path == "" ? Strings.ol-none : root.mp-img-path;
+                        color: Theme.dim;
+                        font-size: Theme.fs-cap;
+                        overflow: elide;
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                AppField {
+                    text <=> root.mp-img-draft;
+                    placeholder: "~/Pictures/me.png";
+                    horizontal-stretch: 1;
+                    accepted => {
+                        if (mp-dlg.confirm-enabled) {
+                            mp-dlg.confirmed();
+                        }
+                    }
+                }
+                AppButton {
+                    height: 38px;
+                    pad: 10px;
+                    icon: @image-url("assets/folder.svg");
+                    icon-set: true;
+                    label: Strings.ol-pick;
+                    clicked => {
+                        root.mp-img-pick();
+                    }
+                }
+            }
+        }
+    }
+
+    // =================================================================
+    // Modal: the OWN seat's description (Organization → Members). One
+    // gated line about the member; the counter runs against the engine's
+    // own cap, so the confirm button never proposes a refused length.
+    // =================================================================
+    if root.mp-desc-open: ConfirmModal {
+        dialog-width: 520px;
+        title: Strings.mp-desc-title;
+        body: Strings.mp-desc-body;
+        confirm-label: Strings.oc-propose;
+        confirm-enabled: root.mp-desc-draft.character-count <= root.mp-desc-max;
+        dismissed => {
+            root.mp-desc-open = false;
+        }
+        confirmed => {
+            root.mp-desc-open = false;
+            root.member-propose("set_member_desc", root.mp-member, root.mp-desc-draft);
+        }
+        VerticalLayout {
+            spacing: 6px;
+            AppArea {
+                height: 110px;
+                text <=> root.mp-desc-draft;
+                placeholder: Strings.mp-desc-ph;
+            }
+            Text {
+                text: "\{root.mp-desc-draft.character-count} / \{root.mp-desc-max}";
+                color: root.mp-desc-draft.character-count > root.mp-desc-max ? Theme.bad : Theme.faint;
+                font-size: Theme.fs-cap;
+                horizontal-alignment: right;
             }
         }
     }
