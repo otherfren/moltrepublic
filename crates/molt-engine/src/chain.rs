@@ -4978,6 +4978,17 @@ mod tests {
         assert!(!peer.proposals.contains_key(&22), "a non-square peer avatar is dropped");
         deliver(&mut peer, 23, "petra", json!({ "op": "set_member_image", "member": "petra", "value": "f.bmp", "bytes_b64": square }));
         assert!(peer.proposals.contains_key(&23), "a square, decodable peer avatar is recorded");
+        // the length cap is a contract, not a local preference: a description
+        // the propose gate refuses must not walk in through the wire door
+        let long = "x".repeat(crate::proposals::DESC_MAX + 1);
+        deliver(&mut peer, 24, "petra", json!({ "op": "set_member_desc", "member": "petra", "value": long }));
+        assert!(
+            !peer.proposals.contains_key(&24),
+            "an over-long description is dropped at the wire too"
+        );
+        let edge = "x".repeat(crate::proposals::DESC_MAX);
+        deliver(&mut peer, 25, "petra", json!({ "op": "set_member_desc", "member": "petra", "value": edge }));
+        assert!(peer.proposals.contains_key(&25), "a description at the limit is recorded");
     }
 
     /// A 2-of-3 chain peer holding the FULL three-member roster (the shared

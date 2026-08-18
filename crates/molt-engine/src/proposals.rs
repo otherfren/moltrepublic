@@ -360,6 +360,19 @@ pub(crate) fn is_member_profile_op(payload: &Value) -> bool {
 /// every frontend renders it in a square box, so a non-square one would be
 /// cropped differently per client — the contract belongs in the engine, not
 /// in one frontend. The org logo keeps taking any shape.
+/// A description is a table column, not a charter. ONE rule for both doors:
+/// the propose gate and the wire drop call this, so a peer can never post a
+/// description the local gate would refuse (`member_profiles_plan.md` §2).
+pub(crate) fn member_desc_ok(value: &str) -> Result<(), MoltError> {
+    let len = value.trim().chars().count();
+    if len > DESC_MAX {
+        return Err(MoltError::BadPayload(format!(
+            "the description is {len} characters - the limit is {DESC_MAX}"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn member_image_ok(bytes: &[u8]) -> Result<(), MoltError> {
     let (w, h) = image_dimensions(bytes)?;
     if w != h {
@@ -453,15 +466,7 @@ fn validate_org_payload(surface: Surface, payload: &Value) -> Result<(), MoltErr
         },
         // a table column, not a charter — the refusal names the limit; an
         // empty value clears the description
-        "set_member_desc" => {
-            let len = value.trim().chars().count();
-            if len > DESC_MAX {
-                return Err(MoltError::BadPayload(format!(
-                    "the description is {len} characters - the limit is {DESC_MAX}"
-                )));
-            }
-            Ok(())
-        }
+        "set_member_desc" => member_desc_ok(value),
         // a feature edit — space-separated optional-surface keys, every one
         // known (an applied entry is forever; the enable-only gate sits in
         // cmd_propose, the union fold makes it deterministic)

@@ -1457,6 +1457,20 @@ impl State {
                     tracing::warn!(from = %from, claimed = %claimed, "dropping a profile proposal for another member");
                     return Ok(Reply::Ack);
                 }
+                // (5) the description cap is that same one contract: a
+                // length the propose gate refuses must not walk in through
+                // the wire door (node-independent, like every drop here)
+                if surface == molt_core::Surface::Organization
+                    && payload.get("op").and_then(serde_json::Value::as_str)
+                        == Some("set_member_desc")
+                    && crate::proposals::member_desc_ok(
+                        payload.get("value").and_then(serde_json::Value::as_str).unwrap_or(""),
+                    )
+                    .is_err()
+                {
+                    tracing::warn!(from = %from, "dropping a set_member_desc proposal over the length cap");
+                    return Ok(Reply::Ack);
+                }
                 // announce only a genuinely NEW proposal: a WP2 re-serve or
                 // an id-collision refusal must not (re-)ring frontends
                 if self.receive_proposed(id.0, surface, payload, &from) {
