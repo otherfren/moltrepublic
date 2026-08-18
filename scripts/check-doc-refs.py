@@ -59,6 +59,7 @@ NO_BARE_SCAN_FILES = {
     "crates/molt-core/src/wiki_fold.rs": "fold keystone fixtures",
     "crates/molt-core/src/lib.rs": "WikiDoc doc-comment path examples",
     "crates/molt-engine/src/chain.rs": "supersede-walk keystone fixtures",
+    "crates/molt-engine/tests/wiki_export.rs": "wiki export keystone fixtures",
 }
 
 PATH_RE = re.compile(r"(?<![\w/-])((?:docs|docs_archive)/[A-Za-z0-9_./-]+\.md)")

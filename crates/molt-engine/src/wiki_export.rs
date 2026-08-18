@@ -110,6 +110,23 @@ fn safe_relative(path: &str) -> Result<PathBuf, String> {
     Ok(out)
 }
 
+/// Refuse a target whose path crosses a SYMLINK below `<dest>`: writing
+/// through one puts wiki content into a file the user never picked, which is
+/// exactly the escape [`safe_relative`] exists to prevent — a planted link
+/// gets there without a single `..`. `<dest>` itself is the user's own choice
+/// and may legitimately be a link; everything the export creates under it may
+/// not be one.
+fn check_no_symlink(dest: &Path, rel: &Path) -> Result<(), String> {
+    let mut at = dest.to_path_buf();
+    for component in rel.components() {
+        at.push(component);
+        if std::fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(format!("{}: symlink in the target path", rel.display()));
+        }
+    }
+    Ok(())
+}
+
 /// Write the export: `<dest>/wiki/<path>` per document and, with a bundle,
 /// `<dest>/proof/bundle.json` + `<dest>/proof/README.md`. Blocking — the
 /// caller runs it off the actor.
@@ -125,10 +142,12 @@ pub(crate) fn write_wiki_export(
     let mut out = WikiExportOutcome::default();
     let wiki = dest.join("wiki");
     for (path, content) in tree {
-        let file = wiki.join(safe_relative(path)?);
+        let rel = Path::new("wiki").join(safe_relative(path)?);
+        let file = dest.join(&rel);
         if !file.starts_with(&wiki) {
             return Err(format!("unsafe path: {path}"));
         }
+        check_no_symlink(dest, &rel)?;
         if let Some(parent) = file.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("wiki/{path}: {e}"))?;
         }
@@ -141,8 +160,10 @@ pub(crate) fn write_wiki_export(
         std::fs::create_dir_all(&proof).map_err(|e| format!("proof: {e}"))?;
         let json = serde_json::to_string_pretty(bundle)
             .map_err(|e| format!("proof/bundle.json: {e}"))?;
+        check_no_symlink(dest, Path::new("proof/bundle.json"))?;
         std::fs::write(proof.join("bundle.json"), &json)
             .map_err(|e| format!("proof/bundle.json: {e}"))?;
+        check_no_symlink(dest, Path::new("proof/README.md"))?;
         std::fs::write(proof.join("README.md"), PROOF_README)
             .map_err(|e| format!("proof/README.md: {e}"))?;
         out.bytes = out
@@ -161,16 +182,22 @@ pub fn read_wiki_export(
     dir: &Path,
 ) -> Result<(String, std::collections::BTreeMap<String, String>), String> {
     let bundle = dir.join("proof").join("bundle.json");
-    let json = std::fs::read_to_string(&bundle)
-        .map_err(|e| format!("{}: {e}", bundle.display()))?;
+    let json = std::fs::read_to_string(&bundle).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => {
+            format!("{}: no proof bundle in this export", dir.display())
+        }
+        _ => format!("{}: {e}", bundle.display()),
+    })?;
     let mut tree = std::collections::BTreeMap::new();
     read_tree(&dir.join("wiki"), "", 0, &mut tree)?;
     Ok((json, tree))
 }
 
-/// The `wiki/` walk. Symlinked directories are not descended (the entry's own
-/// file type decides, never the target's) and the depth is capped, so a
-/// hostile export directory cannot walk the reviewer's machine.
+/// The `wiki/` walk. The entry's OWN file type decides, never the target's:
+/// symlinks and device nodes are skipped rather than followed (a FIFO here
+/// would otherwise hang the reviewer's verifier forever) and the depth is
+/// capped. A skipped entry is not silently forgiven — the tree then differs
+/// from the fold, which is a failure.
 fn read_tree(
     dir: &Path,
     prefix: &str,
@@ -331,11 +358,18 @@ redactable: those bytes are what the signatures cover.
 
 ## What this does NOT prove
 
-Completeness. The signatures prove that every file here comes from patches the
-republic really approved - not that they are the LATEST ones. Whoever produced
-this export could have left the newest patches out and shipped an older, fully
-genuine state. There is no way to tell from this directory alone; compare two
-exports, or obtain one from another member, if freshness matters.
+**Completeness.** The signatures prove that every file here comes from patches
+the republic really approved - not that they are ALL of them, and not that
+they are the latest ones. Whoever produced this export could have left patches
+out and shipped an older or partial, but entirely genuine, state (a patch
+whose predecessor is missing simply goes void). There is no way to tell from
+this directory alone; compare two exports, or obtain one from another member,
+if that matters.
+
+**Whose republic this is.** The check runs against the roster inside the
+bundle. It proves that THAT roster approved these patches - anyone can found a
+republic and export a bundle from it. Compare the republic id and the member
+keys the verifier prints with the ones you expect.
 
 Local, unapplied drafts are never exported: what you see is the approved fold.
 "#;

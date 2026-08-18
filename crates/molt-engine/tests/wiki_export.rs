@@ -424,3 +424,36 @@ async fn a_chain_governed_export_verifies_against_what_it_wrote() {
     let err = molt_engine::verify_wiki_export(&bundle, &tree).expect_err("tampered");
     assert!(err.contains("a.md"), "the fault names the file: {err}");
 }
+
+/// A symlink planted in the target path is an ESCAPE from `<dest>`: writing
+/// through it puts wiki content into a file the user never picked. Refuse it,
+/// and leave the linked file untouched.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_symlink_in_the_target_path_is_refused() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let outside = tmp.path().join("outside.txt");
+    std::fs::write(&outside, "not the export's business").expect("outside file");
+    let dest = tmp.path().join("out");
+    std::fs::create_dir_all(dest.join("wiki")).expect("dest");
+    std::os::unix::fs::symlink(&outside, dest.join("wiki").join("a.md")).expect("symlink");
+
+    let w = spawn_solo();
+    apply_wiki_patch(&w, ADD_A).await;
+    w.execute(Command::WikiExport {
+        dest: dest.display().to_string(),
+        proof: false,
+    })
+    .await
+    .expect("the export starts");
+    let outcome = await_wiki_export(&w).await;
+    assert!(
+        outcome.result.starts_with("error: ") && outcome.result.contains("a.md"),
+        "the symlink must fail the export honestly: {outcome:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&outside).expect("the linked file"),
+        "not the export's business",
+        "nothing is written through the link"
+    );
+}
