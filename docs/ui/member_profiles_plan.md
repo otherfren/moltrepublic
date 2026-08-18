@@ -1,6 +1,6 @@
 # Member profiles: picture + description, vote-gated, with poke everywhere
 
-**Status: PLAN (decided 2026-08-18) — not built; all forks resolved with the user, ready to execute**
+**Status: PARTLY BUILT (2026-08-18) — the poke rollout (§ "Username render sites") is DONE: all nine sites ship the menu, gated by the `Poke` global. The member profiles themselves (picture + description) are still PLAN; all forks resolved with the user, ready to execute.**
 
 ## Goal
 
@@ -188,31 +188,42 @@ lives in the engine. Recommendation: engine refuses non-square
   last, uploads, recovery column); molt-ui row mapping 5367-5380 with
   in-place `sync_rows` (molt-ui:2050 — never swap the ModelRc wholesale).
 
-### The two poke menu patterns (landed today)
+### The two poke menu patterns (BUILT)
 
-- `Command::Poke { member }` (molt-core:4663), MCP tool `poke`,
-  GUI callback `root.poke(string)` (app.slint:926) — all exist; reuse only.
-- **Pattern A — plain `ContextMenuArea` with `enabled:` gating** (no opaque
-  TouchArea over the region): Members row, app.slint:5686-5695 —
-  `enabled: root.cfg-poke-enabled && m.name != root.node-member`.
+- `Command::Poke { member }` (molt-core:4663), MCP tool `poke` — reuse only.
+- **The gate is the `Poke` global** (theme.slint): `on` (the APPLIED
+  setting, written by `apply_session`), `me` (the own seat, written by
+  `apply_surfaces`), `go(string)` (the one GUI door into `Command::Poke`)
+  and `can(who)`. The root's `node-poke-on` property and `poke(string)`
+  callback are GONE — a prop chain through ChatRow/ProposalCard/
+  DecisionTable would have let nine sites drift apart. Pinned by
+  `the_poke_gate_refuses_the_own_seat_the_empty_name_and_the_off_switch`
+  and `the_poke_gate_follows_the_applied_setting_not_the_draft`.
+- **Pattern A — plain `ContextMenuArea` with `enabled: Poke.can(name)`** (no
+  opaque TouchArea over the region). In a LAYOUT this is safe: an element
+  without its own layout info inherits its children's, so the wrapped Text
+  keeps its width (i-slint-compiler `default_geometry::gen_layout_info_prop`)
+  — the 0px-collapse trap needs an x/y-anchored child, which none of these
+  have.
 - **Pattern B — explicit `show()` dance** (an opaque TouchArea eats the
-  right-click): `MemberPill`, `crates/molt-ui-window/ui/parts.slint:893-943`
-  — `pointer-event` down+right → `mpmenu.show({x: mouse-x, y: mouse-y})`;
-  `pokable` prop threaded in at app.slint:4577-4582.
+  right-click): `pointer-event` down+right → `menu.show({x: mouse-x,
+  y: mouse-y})`, guarded by the same `Poke.can(name)`.
 
 ### Username render sites — the poke rollout inventory
+
+All nine shipped 2026-08-18 (this table is the record, not open work).
 
 | # | Site | Where | Pattern | Note |
 |---|------|-------|---------|------|
 | 1 | Members table row | app.slint:5671 | done (A) | shipped 46d312e |
 | 2 | Presence-strip MemberPill | parts.slint:882-945 | done (B) | shipped 46d312e |
-| 3 | Chat author header (`line.lead`, `line.first` only) | parts.slint:536-551 | **A** | no TouchArea covers the header layout (verified: ChatRow's TouchAreas are the quote teaser, body TextInput, and right-edge action buttons, parts.slint:786-830); wrap the header HorizontalLayout; gate `pokable && !line.own && !line.system` — thread a `pokable` prop + `poke()` callback through ChatRow like MemberPill |
-| 4 | Read-receipt dots (`rc.name` in HintTip) | parts.slint:695-720 | **B** | `dot-ta` TouchArea exists for the tooltip → `pointer-event` + show() |
-| 5 | Proposal-card vote pills (`v.member`) | parts.slint:1648-1687 | **A** | the pill Rectangle has no TouchArea; per-pill menu; also covers the decision-chat header card (same component) |
-| 6 | Decided-votes table dots (`v.member` in HintTip) | parts.slint:1235-1260 | **B** | `vd-ta` TouchArea exists |
-| 7 | Uploads table sharer cell (`u.user`) | app.slint:6037-6055 | **A** | row has no covering TouchArea (download is a per-cell button) |
-| 8 | Chat tombstone "deleted by X" | parts.slint:621-622 | **A** | wrap the one Text |
-| 9 | Card "declined by X" label | parts.slint:1410-1426 | **A** | wrap the one Text |
+| 3 | Chat author header (`line.lead`, `line.first` only) | parts.slint | done (A) | wrapped the NAME Text, not the header layout, so the menu is not offered next to the timestamp; `Poke.can(line.lead)` is the whole gate (own message ⇒ lead IS the own seat, a system line has no author) |
+| 4 | Read-receipt dots (`rc.name` in HintTip) | parts.slint:695-720 | done (B) | `dot-ta` TouchArea exists for the tooltip → `pointer-event` + show() |
+| 5 | Proposal-card vote pills (`v.member`) | parts.slint:1648-1687 | done (A) | the pill Rectangle has no TouchArea; per-pill menu; also covers the decision-chat header card (same component) |
+| 6 | Decided-votes table dots (`v.member` in HintTip) | parts.slint:1235-1260 | done (B) | `vd-ta` TouchArea exists |
+| 7 | Uploads table sharer cell (`u.user`) | app.slint:6037-6055 | done (A) | row has no covering TouchArea (download is a per-cell button) |
+| 8 | Chat tombstone "deleted by X" | parts.slint:621-622 | done (A) | wrap the one Text |
+| 9 | Card "declined by X" label | parts.slint:1410-1426 | done (A) | wrap the one Text |
 | — | Chain-history signers | theme.slint:65 | skip | engine pre-joins "petra, walter" into ONE string — no per-name target without an engine change; low value |
 | — | Quote teaser "author: body" | parts.slint:513-519 | skip | combined teaser string; click already jumps to the original |
 | — | Wizard/ritual seats, invite previews | — | skip | pre-founding: no open workspace, `Poke` refuses |
@@ -379,8 +390,8 @@ from the threshold alone).
   plain `-` only): `mp-img-title`, `mp-desc-title`, `mp-col-desc`,
   `mp-desc-count`, plus reuse of `ol-current`/`ol-none`/`ol-pick`/
   `ol-remove`/`oc-propose` where the meaning is identical.
-- **Poke rollout**: work the site table above; Pattern A/B per site;
-  `pokable` + poke callback threading for ChatRow, receipts row, vote pills,
+- **Poke rollout**: DONE — all nine sites, both patterns, one `Poke` global
+  instead of the prop threading this line planned for ChatRow, receipts row, vote pills,
   decided-table dots.
 
 ## TDD keystones (write red first, in this order)

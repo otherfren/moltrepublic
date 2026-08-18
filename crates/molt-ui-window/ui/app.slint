@@ -20,7 +20,7 @@
 // the nav sub-view icons, the reaction pills and the emoji palette.
 import "assets/fonts/Twemoji.Mozilla.ttf";
 
-import { Theme, Strings, HintTip, WikiState, PatchView, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, InvitePreview, LinkPreview, BackupRow, ChainRow, RelayItem, RelayPick } from "theme.slint";
+import { Theme, Strings, HintTip, WikiState, PatchView, Poke, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, InvitePreview, LinkPreview, BackupRow, ChainRow, RelayItem, RelayPick } from "theme.slint";
 import {
     AppButton, AppField, AppArea, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
     ConfirmModal, DotLabel, InsetWell
@@ -32,7 +32,7 @@ import {
 // .slint-side only; the real governance views stay below in this file)
 import { MemoryPane, QuestsPane, VaultPane, WalletPane } from "surfaces.slint";
 
-export { Strings, Theme, WikiState, PatchView }
+export { Strings, Theme, WikiState, PatchView, Poke }
 
 // A settings form group: caption sitting tight above its control(s), so a
 // label+field pair reads as one unit inside the wider panel rhythm.
@@ -923,7 +923,6 @@ export component AppWindow inherits Window {
     callback relays-draft-remove(int);
     callback approve(int);
     callback decline(int);
-    callback poke(string);
     callback withdraw(int); // pull back an OWN pending proposal
     // select the main-view surface (routed to a SelectSurface command; the
     // sub-view resets to the surface's default)
@@ -1663,9 +1662,6 @@ export component AppWindow inherits Window {
     in-out property <int> cfg-sound-poke-index: 0;
     in-out property <bool> cfg-poke-enabled: false;
     in-out property <string> cfg-poke-wake;
-    // the APPLIED poking switch (not the settings draft): what the poke
-    // context menus gate on, so the menu and the engine never disagree
-    in property <bool> node-poke-on: false;
     // send (and show) per-message chat read receipts — a local privacy
     // switch, seeded from the applied session so the chat's receipt rows
     // track it live (the settings checkbox binds to it, save persists it).
@@ -4577,12 +4573,8 @@ export component AppWindow inherits Window {
                                         y: Math.floor(i / pgrid.cols) * (pgrid.chip-h + pgrid.gap);
                                         width: pgrid.chip-w;
                                         m: m;
-                                        pokable: root.node-poke-on && m.name != root.node-member;
                                         clicked => {
                                             root.select-view("organization", "members");
-                                        }
-                                        poke => {
-                                            root.poke(m.name);
                                         }
                                     }
                                 }
@@ -5687,12 +5679,12 @@ export component AppWindow inherits Window {
                                             // the row, so the menu receives the
                                             // right-click natively (no show() dance)
                                             ContextMenuArea {
-                                                enabled: root.node-poke-on && m.name != root.node-member;
+                                                enabled: Poke.can(m.name);
                                                 Menu {
                                                     MenuItem {
                                                         title: Strings.mem-poke;
                                                         activated => {
-                                                            root.poke(m.name);
+                                                            Poke.go(m.name);
                                                         }
                                                     }
                                                 }
@@ -6048,14 +6040,29 @@ export component AppWindow inherits Window {
                                                 padding-left: 12px;
                                                 padding-right: 12px;
                                                 spacing: 10px;
-                                                Text {
-                                                    text: u.user;
-                                                    color: u.user == root.node-member ? Theme.accent : Theme.text;
-                                                    font-size: Theme.fs-body;
-                                                    font-weight: 700;
-                                                    vertical-alignment: center;
+                                                // the sharer's name is a poke
+                                                // target like every other one
+                                                ContextMenuArea {
                                                     width: 110px;
-                                                    overflow: elide;
+                                                    enabled: Poke.can(u.user);
+                                                    Menu {
+                                                        MenuItem {
+                                                            title: Strings.mem-poke;
+                                                            activated => {
+                                                                Poke.go(u.user);
+                                                            }
+                                                        }
+                                                    }
+                                                    Text {
+                                                        text: u.user;
+                                                        color: u.user == root.node-member ? Theme.accent : Theme.text;
+                                                        font-size: Theme.fs-body;
+                                                        font-weight: 700;
+                                                        vertical-alignment: center;
+                                                        // the column width lives on the menu area above
+                                                        width: 100%;
+                                                        overflow: elide;
+                                                    }
                                                 }
                                                 Text {
                                                     text: u.date;
@@ -6783,7 +6790,18 @@ export component AppWindow inherits Window {
                     border-radius: Theme.radius;
                     border-width: Theme.border-w;
                     border-color: Theme.line;
-                    VerticalLayout {
+                    // every tab scrolls: a pane too short for the tab's
+                    // form clips it otherwise, and the last rows (poking, the
+                    // wake hook) are the ones that disappear. viewport =
+                    // max(content, pane) so a list tab still claims the
+                    // leftover height instead of collapsing its own scroller.
+                    clip: true;
+                    set-fl := Flickable {
+                        width: 100%;
+                        height: 100%;
+                        viewport-width: self.width;
+                        viewport-height: max(set-body.preferred-height, self.height);
+                        set-body := VerticalLayout {
                         padding: 20px;
                         spacing: 14px;
                         if root.set-tab == 0: VerticalLayout {
@@ -7196,6 +7214,9 @@ export component AppWindow inherits Window {
                             }
                             Rectangle {
                                 vertical-stretch: 1;
+                                // the table shrinks before the form above it
+                                // does: below this the settings pane scrolls
+                                min-height: 100px;
                                 background: Theme.panel-2;
                                 border-radius: Theme.radius;
                                 border-width: Theme.border-w;
@@ -7578,6 +7599,9 @@ export component AppWindow inherits Window {
                             }
                             Rectangle {
                                 vertical-stretch: 1;
+                                // same floor as the backup table: shrink to
+                                // this, then the pane scrolls
+                                min-height: 100px;
                                 clip: true;
                                 ch-fl := Flickable {
                                     VerticalLayout {
@@ -7671,6 +7695,13 @@ export component AppWindow inherits Window {
                             font-size: Theme.fs-cap;
                             wrap: word-wrap;
                         }
+                    }
+                    }
+                    ScrollHint {
+                        x: parent.width - 7px;
+                        view-h: set-fl.height;
+                        content-h: set-fl.viewport-height;
+                        scroll-y: set-fl.viewport-y;
                     }
                 }
                 HorizontalLayout {

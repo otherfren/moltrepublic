@@ -4,7 +4,7 @@
 // Strings globals and its own properties — no AppWindow state. The window
 // (app.slint) composes these into the actual screens.
 
-import { Theme, Strings, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, MemberSync, ProposalRow, HintTip, PatchView } from "theme.slint";
+import { Theme, Strings, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, MemberSync, ProposalRow, HintTip, PatchView, Poke } from "theme.slint";
 import { AppButton, AppField, AppCheck, ScrollHint, HoverTip, DotLabel } from "components.slint";
 
 // A large clickable option card used on the first-run choice screen. The
@@ -536,11 +536,25 @@ export component ChatRow inherits Rectangle {
         if root.line.first: HorizontalLayout {
             spacing: 8px;
             alignment: start;
-            Text {
-                text: root.line.lead;
-                color: root.line.own ? Theme.accent : Theme.text;
-                font-size: Theme.fs-cap;
-                font-weight: 700;
+            // right-click the author: poke them. Poke.can() carries the whole
+            // gate - the switch, and never the own seat (own message => lead
+            // IS the own seat; a system line has no author at all)
+            author-menu := ContextMenuArea {
+                enabled: Poke.can(root.line.lead);
+                Menu {
+                    MenuItem {
+                        title: Strings.mem-poke;
+                        activated => {
+                            Poke.go(root.line.lead);
+                        }
+                    }
+                }
+                author-name := Text {
+                    text: root.line.lead;
+                    color: root.line.own ? Theme.accent : Theme.text;
+                    font-size: Theme.fs-cap;
+                    font-weight: 700;
+                }
             }
             Text {
                 text: root.line.when;
@@ -617,12 +631,24 @@ export component ChatRow inherits Rectangle {
         if root.line.deleted-by == "" && root.line.has-file: Rectangle {
             height: 3px;
         }
-        // deleted: the text is gone, only the tombstone remains
-        if root.line.deleted-by != "": Text {
-            text: "⌫ \{Strings.mv-deleted-by} \{root.line.deleted-by}";
-            color: Theme.faint;
-            font-size: Theme.fs-body;
-            font-italic: true;
+        // deleted: the text is gone, only the tombstone remains - the name
+        // in it is still a poke target
+        if root.line.deleted-by != "": ContextMenuArea {
+            enabled: Poke.can(root.line.deleted-by);
+            Menu {
+                MenuItem {
+                    title: Strings.mem-poke;
+                    activated => {
+                        Poke.go(root.line.deleted-by);
+                    }
+                }
+            }
+            Text {
+                text: "⌫ \{Strings.mv-deleted-by} \{root.line.deleted-by}";
+                color: Theme.faint;
+                font-size: Theme.fs-body;
+                font-italic: true;
+            }
         }
         // the reaction row hangs directly off the text. Its height is
         // EXPLICIT: repeated fixed-height pills don't reliably feed the
@@ -703,18 +729,36 @@ export component ChatRow inherits Rectangle {
                         // green = read, yellow/amber = not yet (the
                         // presence-dot idiom)
                         background: rc.read ? Theme.good : Theme.warn;
-                        dot-ta := TouchArea {
-                            // the member name goes through the window-topmost
-                            // HintTip overlay (never clipped, grabs no input,
-                            // so no strobe)
-                            changed has-hover => {
-                                if (self.has-hover) {
-                                    HintTip.label = rc.name;
-                                    HintTip.ax = self.absolute-position.x;
-                                    HintTip.ay = self.absolute-position.y + self.height + 6px;
-                                } else if (HintTip.ax == self.absolute-position.x
-                                    && HintTip.ay == self.absolute-position.y + self.height + 6px) {
-                                    HintTip.label = "";
+                        rcmenu := ContextMenuArea {
+                            enabled: Poke.can(rc.name);
+                            Menu {
+                                MenuItem {
+                                    title: Strings.mem-poke;
+                                    activated => {
+                                        Poke.go(rc.name);
+                                    }
+                                }
+                            }
+                            dot-ta := TouchArea {
+                                // the member name goes through the window-topmost
+                                // HintTip overlay (never clipped, grabs no input,
+                                // so no strobe)
+                                changed has-hover => {
+                                    if (self.has-hover) {
+                                        HintTip.label = rc.name;
+                                        HintTip.ax = self.absolute-position.x;
+                                        HintTip.ay = self.absolute-position.y + self.height + 6px;
+                                    } else if (HintTip.ax == self.absolute-position.x
+                                        && HintTip.ay == self.absolute-position.y + self.height + 6px) {
+                                        HintTip.label = "";
+                                    }
+                                }
+                                pointer-event(ev) => {
+                                    // the TouchArea sits ABOVE the ContextMenuArea
+                                    // and eats the right click - open explicitly
+                                    if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right && Poke.can(rc.name)) {
+                                        rcmenu.show({ x: self.mouse-x, y: self.mouse-y });
+                                    }
                                 }
                             }
                         }
@@ -881,22 +925,19 @@ export component StatusPill inherits Rectangle {
 // the pills into a grid; clicking jumps to Organization → Members.
 export component MemberPill inherits Rectangle {
     in property <MemberSync> m;
-    // right-click offers "Poke member" (poking enabled and not the own seat)
-    in property <bool> pokable: false;
     callback clicked();
-    callback poke();
     height: 28px;
     background: mp-ta.has-hover ? Theme.raised : Theme.panel-2;
     border-radius: Theme.win95 ? 0px : 6px;
     border-width: Theme.border-w;
     border-color: Theme.line;
     mpmenu := ContextMenuArea {
-        enabled: root.pokable;
+        enabled: Poke.can(root.m.name);
         Menu {
             MenuItem {
                 title: Strings.mem-poke;
                 activated => {
-                    root.poke();
+                    Poke.go(root.m.name);
                 }
             }
         }
@@ -936,7 +977,7 @@ export component MemberPill inherits Rectangle {
             pointer-event(ev) => {
                 // the TouchArea sits ABOVE the ContextMenuArea and eats the
                 // right click - open the menu explicitly
-                if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right && root.pokable) {
+                if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right && Poke.can(root.m.name)) {
                     mpmenu.show({ x: self.mouse-x, y: self.mouse-y });
                 }
             }
@@ -1245,18 +1286,34 @@ export component DecisionTable inherits Rectangle {
                                 border-width: 1px;
                                 border-color: v.vote == 1 ? Theme.good
                                     : (v.vote == 2 ? Theme.bad : Theme.line);
-                                vd-ta := TouchArea {
-                                    // the member name goes through the
-                                    // window-topmost HintTip overlay (never
-                                    // clipped, grabs no input, so no strobe)
-                                    changed has-hover => {
-                                        if (self.has-hover) {
-                                            HintTip.label = v.member;
-                                            HintTip.ax = self.absolute-position.x;
-                                            HintTip.ay = self.absolute-position.y + self.height + 6px;
-                                        } else if (HintTip.ax == self.absolute-position.x
-                                            && HintTip.ay == self.absolute-position.y + self.height + 6px) {
-                                            HintTip.label = "";
+                                vdmenu := ContextMenuArea {
+                                    enabled: Poke.can(v.member);
+                                    Menu {
+                                        MenuItem {
+                                            title: Strings.mem-poke;
+                                            activated => {
+                                                Poke.go(v.member);
+                                            }
+                                        }
+                                    }
+                                    vd-ta := TouchArea {
+                                        // the member name goes through the
+                                        // window-topmost HintTip overlay (never
+                                        // clipped, grabs no input, so no strobe)
+                                        changed has-hover => {
+                                            if (self.has-hover) {
+                                                HintTip.label = v.member;
+                                                HintTip.ax = self.absolute-position.x;
+                                                HintTip.ay = self.absolute-position.y + self.height + 6px;
+                                            } else if (HintTip.ax == self.absolute-position.x
+                                                && HintTip.ay == self.absolute-position.y + self.height + 6px) {
+                                                HintTip.label = "";
+                                            }
+                                        }
+                                        pointer-event(ev) => {
+                                            if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right && Poke.can(v.member)) {
+                                                vdmenu.show({ x: self.mouse-x, y: self.mouse-y });
+                                            }
                                         }
                                     }
                                 }
@@ -1416,18 +1473,31 @@ export component ProposalCard inherits Rectangle {
                 font-size: 22px;
                 vertical-alignment: center;
             }
-            Text {
-                text: root.p.withdrawn
-                    ? (root.p.declined-when == "" ? "↩ \{Strings.pc-withdrawn}"
-                        : "↩ \{Strings.pc-withdrawn} · \{root.p.declined-when}")
-                    : (root.p.superseded ? Strings.pc-superseded
-                    : (root.p.declined-when == ""
-                        ? "\{Strings.pc-declined-by} \{root.p.declined-by}"
-                        : "\{Strings.pc-declined-by} \{root.p.declined-by} · \{root.p.declined-when}"));
-                color: root.p.withdrawn || root.p.superseded ? Theme.moved : Theme.bad;
-                font-size: Theme.fs-body;
-                font-weight: 700;
-                vertical-alignment: center;
+            // only a DECLINE names a member (withdraw/supersede read
+            // mechanical), so only that verdict is a poke target
+            ContextMenuArea {
+                enabled: !root.p.withdrawn && !root.p.superseded && Poke.can(root.p.declined-by);
+                Menu {
+                    MenuItem {
+                        title: Strings.mem-poke;
+                        activated => {
+                            Poke.go(root.p.declined-by);
+                        }
+                    }
+                }
+                Text {
+                    text: root.p.withdrawn
+                        ? (root.p.declined-when == "" ? "↩ \{Strings.pc-withdrawn}"
+                            : "↩ \{Strings.pc-withdrawn} · \{root.p.declined-when}")
+                        : (root.p.superseded ? Strings.pc-superseded
+                        : (root.p.declined-when == ""
+                            ? "\{Strings.pc-declined-by} \{root.p.declined-by}"
+                            : "\{Strings.pc-declined-by} \{root.p.declined-by} · \{root.p.declined-when}"));
+                    color: root.p.withdrawn || root.p.superseded ? Theme.moved : Theme.bad;
+                    font-size: Theme.fs-body;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
             }
         }
         // Ist-Stand / Soll-Stand, when the engine knows them (the
@@ -1655,34 +1725,45 @@ export component ProposalCard inherits Rectangle {
                                 : (v.vote == 2 ? Theme.bad.transparentize(0.45) : Theme.line);
                             background: v.vote == 1 ? Theme.good.transparentize(0.86)
                                 : (v.vote == 2 ? Theme.bad.transparentize(0.86) : Theme.panel);
-                            vp-pill := HorizontalLayout {
-                                x: 12px;
-                                height: 100%;
-                                spacing: 7px;
-                                alignment: start;
-                                // thumbs render in the colorful Twemoji font
-                                // (a plain-text glyph falls back to a thin
-                                // monochrome outline); the open "?" is a
-                                // deliberate TEXT glyph, bold and warn-tinted
-                                if v.vote == 0: Text {
-                                    text: "?";
-                                    color: Theme.warn;
-                                    font-size: 26px;
-                                    font-weight: 800;
-                                    vertical-alignment: center;
+                            ContextMenuArea {
+                                enabled: Poke.can(v.member);
+                                Menu {
+                                    MenuItem {
+                                        title: Strings.mem-poke;
+                                        activated => {
+                                            Poke.go(v.member);
+                                        }
+                                    }
                                 }
-                                if v.vote != 0: Text {
-                                    text: v.vote == 1 ? "👍" : "👎";
-                                    font-family: "Twemoji Mozilla";
-                                    font-size: 24px;
-                                    vertical-alignment: center;
-                                }
-                                Text {
-                                    text: v.member;
-                                    color: Theme.dim;
-                                    font-size: Theme.fs-cap;
-                                    font-weight: 600;
-                                    vertical-alignment: center;
+                                vp-pill := HorizontalLayout {
+                                    x: 12px;
+                                    height: 100%;
+                                    spacing: 7px;
+                                    alignment: start;
+                                    // thumbs render in the colorful Twemoji font
+                                    // (a plain-text glyph falls back to a thin
+                                    // monochrome outline); the open "?" is a
+                                    // deliberate TEXT glyph, bold and warn-tinted
+                                    if v.vote == 0: Text {
+                                        text: "?";
+                                        color: Theme.warn;
+                                        font-size: 26px;
+                                        font-weight: 800;
+                                        vertical-alignment: center;
+                                    }
+                                    if v.vote != 0: Text {
+                                        text: v.vote == 1 ? "👍" : "👎";
+                                        font-family: "Twemoji Mozilla";
+                                        font-size: 24px;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: v.member;
+                                        color: Theme.dim;
+                                        font-size: Theme.fs-cap;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
                                 }
                             }
                         }
