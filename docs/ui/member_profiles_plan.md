@@ -1,6 +1,6 @@
 # Member profiles: picture + description, vote-gated, with poke everywhere
 
-**Status: PARTLY BUILT (2026-08-18) — the poke rollout (§ "Username render sites") is DONE: all nine sites ship the menu, gated by the `Poke` global. The member profiles themselves (picture + description) are still PLAN; all forks resolved with the user, ready to execute.**
+**Status: BUILT (2026-08-18), pending the change-set's window build and review. The poke rollout (§ "Username render sites") shipped first (all nine sites, gated by the `Poke` global), then §1-4 (ops, validation, per-member LWW slots, avatar files, `MemberView.image`/`description`, `StatusView.image_budget`) and §5 (the two-line members table, the two edit modals, the avatar cache, the picture fit, the proposal cards). Keystones 1-6 are green. Archive this document once the change-set lands on master.**
 
 ## Goal
 

@@ -162,6 +162,11 @@ export struct MemberRow {
     state: int, // 0 = synced, 1 = syncing, 2 = offline (mock presence)
     uploads: int, // files this member shared into the chat
     split: string, // R4 relay-split marker, pre-built by the engine ("" = none)
+    // the seat's own vote-gated profile (member_profiles_plan.md §5)
+    avatar: image, // the decoded picture (empty while none is applied)
+    avatar-set: bool, // whether `avatar` really carries one
+    avatar-path: string, // the local file the engine materialized ("" = none)
+    desc: string, // the seat's description ("" = none)
 }
 
 // One row of the Organization → Uploads table (engine ReadUploads — the
@@ -784,6 +789,16 @@ export global Strings {
     in property <string> om-col-last;
     in property <string> om-col-uploads;
     in property <string> om-col-recovery;
+    // Organization → Members: the seat's own vote-gated profile
+    in property <string> mp-col-desc;
+    in property <string> mp-img-edit; // pencil on the own row's picture
+    in property <string> mp-desc-edit; // pencil on the own row's description
+    in property <string> mp-img-title;
+    in property <string> mp-img-body;
+    in property <string> mp-desc-title;
+    in property <string> mp-desc-body;
+    in property <string> mp-desc-ph;
+    in property <string> mp-img-too-big; // over the republic's picture budget
     // Organization → Uploads table
     in property <string> ou-col-user;
     in property <string> ou-col-date;
