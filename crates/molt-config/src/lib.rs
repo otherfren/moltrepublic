@@ -53,6 +53,14 @@ pub struct NodeConfig {
     /// Start without a GUI (MCP-only).
     #[serde(default)]
     pub headless: bool,
+    /// React to pokes (toast, sound, wake command) and offer poking in the
+    /// UI. Off by default — an explicit opt-in.
+    #[serde(default)]
+    pub poke_enabled: bool,
+    /// Command run via `sh -c` when this seat is poked or new work awaits
+    /// its vote (context in `MOLT_WAKE_*` env vars). Empty = off.
+    #[serde(default)]
+    pub poke_wake_command: String,
 }
 
 /// Local storage settings (`[storage]`).
@@ -97,6 +105,9 @@ pub struct StorageConfig {
     /// Alert sound for a new incoming vote, same vocabulary.
     #[serde(default = "default_sound")]
     pub sound_vote: String,
+    /// Alert sound for an incoming poke, same vocabulary.
+    #[serde(default = "default_sound")]
+    pub sound_poke: String,
     /// Send (and show) per-message chat read receipts (local privacy switch,
     /// on by default). Mirrors `molt_core::SessionSettings::read_receipts`.
     #[serde(default = "default_true")]
@@ -135,6 +146,7 @@ impl Default for StorageConfig {
             file_cap_bytes: default_file_cap_bytes(),
             sound_message: default_sound(),
             sound_vote: default_sound(),
+            sound_poke: default_sound(),
             read_receipts: true,
         }
     }
@@ -436,6 +448,12 @@ pub struct Settings {
     pub sound_message: String,
     /// Alert sound for a new incoming vote.
     pub sound_vote: String,
+    /// Alert sound for an incoming poke.
+    pub sound_poke: String,
+    /// React to pokes and offer poking in the UI (explicit opt-in).
+    pub poke_enabled: bool,
+    /// Wake command run when this seat is poked or new work awaits its vote.
+    pub poke_wake_command: String,
     /// Send (and show) per-message chat read receipts (local privacy switch).
     pub read_receipts: bool,
     /// Anonymity network: `"tor" | "none"`.
@@ -483,6 +501,9 @@ impl Default for Settings {
             file_cap_bytes: default_file_cap_bytes(),
             sound_message: default_sound(),
             sound_vote: default_sound(),
+            sound_poke: default_sound(),
+            poke_enabled: false,
+            poke_wake_command: String::new(),
             read_receipts: true,
             anonymity: "none".to_string(),
             tor_mode: "local".to_string(),
@@ -540,6 +561,9 @@ impl From<&Config> for Settings {
             file_cap_bytes: c.storage.file_cap_bytes,
             sound_message: c.storage.sound_message.clone(),
             sound_vote: c.storage.sound_vote.clone(),
+            sound_poke: c.storage.sound_poke.clone(),
+            poke_enabled: c.node.poke_enabled,
+            poke_wake_command: c.node.poke_wake_command.clone(),
             read_receipts: c.storage.read_receipts,
             anonymity: c.transport.anonymity.network.as_str().to_string(),
             tor_mode: c.transport.anonymity.tor.mode.as_str().to_string(),
@@ -572,6 +596,12 @@ pub fn render(settings: &Settings) -> String {
 [node]
 # true = headless (MCP-only, no GUI).
 headless = {headless}
+# React to pokes (toast, sound, wake command) and offer poking in the UI.
+poke_enabled = {poke_enabled}
+# Command run via `sh -c` when this seat is poked or new work awaits its
+# vote — wakes a sleeping agent harness. Context arrives as MOLT_WAKE_*
+# env vars; the poked state is read over MCP. "" = off.
+poke_wake_command = {poke_wake_command}
 
 [storage]
 # Per-group workspace root. "~" = $HOME.
@@ -594,6 +624,7 @@ file_cap_bytes = {file_cap_bytes}
 # Alert sounds: "none" | "bell" | "chime" | "pop".
 sound_message = {sound_message}
 sound_vote = {sound_vote}
+sound_poke = {sound_poke}
 # Send (and show) per-message chat read receipts. false = this node reveals no
 # read confirmations and hides others' from its chat view (symmetric).
 read_receipts = {read_receipts}
@@ -643,6 +674,8 @@ font_nav = {font_nav}
 font_editor = {font_editor}
 "#,
         headless = settings.headless,
+        poke_enabled = settings.poke_enabled,
+        poke_wake_command = toml_str(&settings.poke_wake_command),
         workspace_dir = toml_str(&settings.workspace_dir),
         s3_backup = settings.s3_backup,
         s3_endpoint = toml_str(&settings.s3_endpoint),
@@ -655,6 +688,7 @@ font_editor = {font_editor}
         file_cap_bytes = settings.file_cap_bytes,
         sound_message = toml_str(&settings.sound_message),
         sound_vote = toml_str(&settings.sound_vote),
+        sound_poke = toml_str(&settings.sound_poke),
         read_receipts = settings.read_receipts,
         mcp_port = settings.mcp_port,
         mcp_allow = toml_str(&settings.mcp_allow),
@@ -707,6 +741,14 @@ pub fn salvage(text: &str) -> Settings {
     {
         s.headless = headless;
     }
+    if let Some(node) = value.get("node") {
+        if let Some(b) = node.get("poke_enabled").and_then(toml::Value::as_bool) {
+            s.poke_enabled = b;
+        }
+        if let Some(v) = node.get("poke_wake_command").and_then(toml::Value::as_str) {
+            s.poke_wake_command = v.to_string();
+        }
+    }
     if let Some(storage) = value.get("storage") {
         if let Some(dir) = storage.get("workspace_dir").and_then(toml::Value::as_str) {
             s.workspace_dir = dir.to_string();
@@ -755,6 +797,11 @@ pub fn salvage(text: &str) -> Settings {
         if let Some(v) = storage.get("sound_vote").and_then(toml::Value::as_str) {
             if valid_sound(v) {
                 s.sound_vote = v.to_string();
+            }
+        }
+        if let Some(v) = storage.get("sound_poke").and_then(toml::Value::as_str) {
+            if valid_sound(v) {
+                s.sound_poke = v.to_string();
             }
         }
         if let Some(b) = storage.get("read_receipts").and_then(toml::Value::as_bool) {
@@ -985,6 +1032,8 @@ pub fn update(text: &str, settings: &Settings) -> Result<String, toml_edit::Toml
 pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
     let node = table_at(doc.as_table_mut(), &["node"]);
     set_bool(node, "headless", settings.headless);
+    set_bool(node, "poke_enabled", settings.poke_enabled);
+    set_str(node, "poke_wake_command", &settings.poke_wake_command);
 
     let storage = table_at(doc.as_table_mut(), &["storage"]);
     set_str(storage, "workspace_dir", &settings.workspace_dir);
@@ -1011,6 +1060,7 @@ pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
     );
     set_str(storage, "sound_message", &settings.sound_message);
     set_str(storage, "sound_vote", &settings.sound_vote);
+    set_str(storage, "sound_poke", &settings.sound_poke);
     set_bool(storage, "read_receipts", settings.read_receipts);
 
     let mcp = table_at(doc.as_table_mut(), &["mcp"]);
@@ -1286,6 +1336,9 @@ mod tests {
             s3_keep_copies: 9,
             sound_message: "chime".to_string(),
             sound_vote: "pop".to_string(),
+            sound_poke: "bell".to_string(),
+            poke_enabled: true,
+            poke_wake_command: "claude -p 'check your seat'".to_string(),
             read_receipts: false,
             anonymity: "tor".to_string(),
             tor_mode: "whonix".to_string(),

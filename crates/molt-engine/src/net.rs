@@ -418,6 +418,7 @@ pub(crate) fn crosses_wire(event: &WorkspaceEvent) -> bool {
             | WorkspaceEvent::FileRequested { .. }
             | WorkspaceEvent::FileWanted { .. }
             | WorkspaceEvent::FileServed { .. }
+            | WorkspaceEvent::Poked { .. }
     )
 }
 
@@ -1424,6 +1425,9 @@ impl State {
                 // announce only a genuinely NEW proposal: a WP2 re-serve or
                 // an id-collision refusal must not (re-)ring frontends
                 if self.receive_proposed(id.0, surface, payload, &from) {
+                    // wake a sleeping agent harness if this seat's vote is
+                    // now awaited (debounced; no-op without a wake command)
+                    self.maybe_wake_pending(&from);
                     self.emit(molt_core::Event::Proposed { id, surface, by: from });
                     // a retraction that outran the card stands now
                     if matches!(
@@ -1660,6 +1664,11 @@ impl State {
                         }
                     }
                 }
+            }
+            WorkspaceEvent::Poked { to } => {
+                // consumed, never re-recorded: only the target's live ingest
+                // reacts (chat.rs::receive_poke gates opt-in + cooldown)
+                self.receive_poke(&from, &to);
             }
             other => {
                 tracing::debug!(%from, kind = ?std::mem::discriminant(&other), "event over the wire not acted on here");

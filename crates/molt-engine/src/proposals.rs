@@ -1652,7 +1652,7 @@ impl State {
     /// the only recordable approval is the local member's own, so a peer's
     /// approval is honestly always still outstanding — nothing can ever
     /// deliver it in a context without chain governance.
-    fn waits_on(&self, id: u64, p: &ProposalRecord, member: &str) -> bool {
+    pub(crate) fn waits_on(&self, id: u64, p: &ProposalRecord, member: &str) -> bool {
         if p.state != ProposalState::Proposed {
             return false;
         }

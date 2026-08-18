@@ -25,6 +25,15 @@ use molt_core::{
 
 use crate::{now_secs, State};
 
+/// Minimum seconds between REACTED pokes per sender: inside the window a
+/// repeat is dropped quietly, so a flooding member cannot ring this node's
+/// sound or spawn its wake command in a loop.
+pub(crate) const POKE_COOLDOWN_SECS: u64 = 60;
+
+/// Global holdoff for the pending-vote auto-wake: a proposal burst nudges
+/// the wake command once, then the woken agent reads the full state anyway.
+pub(crate) const WAKE_HOLDOFF_SECS: u64 = 300;
+
 /// Mint a fresh random message id (chat-bus pin P1: 128-bit CSPRNG, minted
 /// by the engine — never `mockrand`, never in `molt-core`).
 pub(crate) fn mint_message_id() -> Result<MessageId, MoltError> {
@@ -767,6 +776,114 @@ impl State {
         let index = u64::try_from(pos).map_err(|_| MoltError::UnknownMessage(*id))?;
         Ok((index, msg))
     }
+
+    // ---- Poke: a directed nudge with no governance meaning ----------------
+
+    /// Poke another member (`Command::Poke`). Ephemeral like chat: the event
+    /// rides this node's log to the outbox, no shared state changes, and only
+    /// the TARGET's live ingest reacts — behind that node's own opt-in.
+    pub(crate) fn cmd_poke(&mut self, member: MemberId) -> Result<Reply, MoltError> {
+        if !self.session.settings.poke_enabled {
+            return Err(MoltError::Poke("not enabled"));
+        }
+        let from = self.member();
+        if member == from {
+            return Err(MoltError::Poke("cannot poke yourself"));
+        }
+        if !self.roster().contains(&member) {
+            return Err(MoltError::Poke("unknown member"));
+        }
+        let env = self.make_env(
+            from.clone(),
+            WorkspaceEvent::Poked { to: member.clone() },
+        );
+        self.record(env);
+        self.emit(Event::Poked {
+            by: from,
+            to: member,
+        });
+        Ok(Reply::Ack)
+    }
+
+    /// React to a poke that arrived over the wire (`from` is the
+    /// authenticated link identity): if it targets THIS seat and poking is
+    /// enabled, emit [`Event::Poked`] (toast + sound in a GUI) and run the
+    /// wake command — at most once per sender per [`POKE_COOLDOWN_SECS`].
+    pub(crate) fn receive_poke(&mut self, from: &str, to: &MemberId) {
+        if *to != self.member() || !self.session.settings.poke_enabled {
+            return;
+        }
+        let now = self.presence_now();
+        if let Some(last) = self.poke_at.get(from) {
+            if now.saturating_sub(*last) < POKE_COOLDOWN_SECS {
+                tracing::debug!(%from, "poke inside the cooldown - dropped");
+                return;
+            }
+        }
+        self.poke_at.insert(from.to_string(), now);
+        tracing::info!(%from, "poked");
+        self.emit(Event::Poked {
+            by: from.to_string(),
+            to: to.clone(),
+        });
+        self.spawn_wake("poked", from);
+    }
+
+    /// Fire the wake command when open work awaits THIS seat's vote —
+    /// debounced by [`WAKE_HOLDOFF_SECS`] so a proposal burst nudges once.
+    pub(crate) fn maybe_wake_pending(&mut self, by: &str) {
+        if self.session.settings.poke_wake_command.trim().is_empty() {
+            return;
+        }
+        let me = self.member();
+        let waiting = self
+            .proposals
+            .iter()
+            .any(|(id, p)| self.waits_on(*id, p, &me));
+        if !waiting {
+            return;
+        }
+        let now = self.presence_now();
+        if let Some(last) = self.wake_at {
+            if now.saturating_sub(last) < WAKE_HOLDOFF_SECS {
+                return;
+            }
+        }
+        self.wake_at = Some(now);
+        self.spawn_wake("vote_pending", by);
+    }
+
+    /// Spawn the configured wake command, fire-and-forget (a detached thread
+    /// reaps it). The command string comes ONLY from the local config; wire
+    /// content never reaches the command line — context rides `MOLT_WAKE_*`
+    /// env vars, and the woken agent reads the actual state over MCP.
+    fn spawn_wake(&self, reason: &'static str, by: &str) {
+        let cmd = self.session.settings.poke_wake_command.trim().to_string();
+        if cmd.is_empty() {
+            return;
+        }
+        let by = by.to_string();
+        let workspace = self.session.active_workspace.clone();
+        tracing::info!(reason, %by, "wake command spawned");
+        std::thread::spawn(move || {
+            match std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&cmd)
+                .env("MOLT_WAKE_REASON", reason)
+                .env("MOLT_WAKE_BY", &by)
+                .env("MOLT_WAKE_WORKSPACE", &workspace)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(mut child) => {
+                    let _ = child.wait();
+                }
+                Err(e) => tracing::warn!(error = %e, "wake command failed to spawn"),
+            }
+        });
+    }
 }
 
 #[cfg(test)]
@@ -1422,5 +1539,189 @@ mod tests {
             vec!["peer-2".to_string()],
             "the parked receipt applied on arrival, bound to the link identity"
         );
+    }
+
+    // ---- Poke ----------------------------------------------------------
+
+    /// Sending a poke needs the local opt-in, a roster target, and not the
+    /// own seat; a valid one emits [`crate::Event::Poked`] and crosses the
+    /// wire like chat.
+    #[test]
+    fn poking_needs_the_opt_in_a_real_target_and_not_yourself() {
+        let mut st = plain_state();
+        let err = st
+            .cmd_poke("peer-1".to_string())
+            .expect_err("poking is an explicit opt-in");
+        assert!(matches!(err, MoltError::Poke("not enabled")), "{err:?}");
+
+        st.session.settings.poke_enabled = true;
+        assert!(
+            matches!(
+                st.cmd_poke("me".to_string()),
+                Err(MoltError::Poke("cannot poke yourself"))
+            ),
+            "self-poke is refused"
+        );
+        assert!(
+            matches!(
+                st.cmd_poke("nobody".to_string()),
+                Err(MoltError::Poke("unknown member"))
+            ),
+            "a poke needs a roster member"
+        );
+
+        let mut ev = st.subscribe_events();
+        st.cmd_poke("peer-1".to_string()).expect("a valid poke");
+        assert!(
+            matches!(
+                ev.try_recv(),
+                Ok(crate::Event::Poked { by, to }) if by == "me" && to == "peer-1"
+            ),
+            "the sender's node confirms the poke"
+        );
+        assert!(
+            crate::net::crosses_wire(&WorkspaceEvent::Poked {
+                to: "peer-1".to_string()
+            }),
+            "a poke must reach the outbox"
+        );
+    }
+
+    /// The receive side reacts once per sender per cooldown window — a
+    /// flooding member cannot ring the sound or spawn the wake command in a
+    /// loop, and the cooldown is per SENDER, not global.
+    #[test]
+    fn a_received_poke_reacts_once_per_sender_inside_the_cooldown() {
+        let mut st = plain_state();
+        st.session.settings.poke_enabled = true;
+        st.clock_override = Some(1_000);
+        let mut ev = st.subscribe_events();
+        let me = st.member();
+
+        st.receive_poke("peer-1", &me);
+        assert!(
+            matches!(ev.try_recv(), Ok(crate::Event::Poked { by, .. }) if by == "peer-1"),
+            "the first poke reacts"
+        );
+        st.clock_override = Some(1_010);
+        st.receive_poke("peer-1", &me);
+        assert!(
+            ev.try_recv().is_err(),
+            "a repeat inside the cooldown stays silent"
+        );
+        st.receive_poke("peer-2", &me);
+        assert!(
+            matches!(ev.try_recv(), Ok(crate::Event::Poked { by, .. }) if by == "peer-2"),
+            "the cooldown is per sender"
+        );
+        st.clock_override = Some(1_000 + super::POKE_COOLDOWN_SECS);
+        st.receive_poke("peer-1", &me);
+        assert!(
+            matches!(ev.try_recv(), Ok(crate::Event::Poked { by, .. }) if by == "peer-1"),
+            "the cooldown expires"
+        );
+    }
+
+    /// A poke not addressed to this seat, or arriving without the local
+    /// opt-in, does nothing at all.
+    #[test]
+    fn a_poke_not_for_this_seat_or_without_the_opt_in_stays_silent() {
+        let mut st = plain_state();
+        let mut ev = st.subscribe_events();
+        let me = st.member();
+        st.receive_poke("peer-1", &me);
+        assert!(ev.try_recv().is_err(), "no reaction without the opt-in");
+
+        st.session.settings.poke_enabled = true;
+        st.receive_poke("peer-1", &"peer-2".to_string());
+        assert!(ev.try_recv().is_err(), "someone else's poke is not ours");
+    }
+
+    /// A poke runs the configured wake command with its context env vars —
+    /// the hook that wakes a sleeping agent harness.
+    #[test]
+    fn the_wake_command_fires_on_a_poke_with_context_env() {
+        let mut st = plain_state();
+        st.session.settings.poke_enabled = true;
+        let marker = std::env::temp_dir().join(format!("molt-poke-wake-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        st.session.settings.poke_wake_command = format!(
+            "echo \"$MOLT_WAKE_REASON $MOLT_WAKE_BY\" > '{}'",
+            marker.display()
+        );
+        let me = st.member();
+        st.receive_poke("peer-1", &me);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let content = loop {
+            if let Ok(c) = std::fs::read_to_string(&marker) {
+                if !c.is_empty() {
+                    break c;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the wake command never ran"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert_eq!(content.trim(), "poked peer-1");
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    /// New work awaiting this seat's vote fires the wake command once per
+    /// holdoff window — and not at all while nothing waits.
+    #[test]
+    fn pending_work_wakes_once_inside_the_holdoff() {
+        let mut st = plain_state();
+        st.clock_override = Some(5_000);
+        let marker = std::env::temp_dir().join(format!("molt-vote-wake-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        st.session.settings.poke_wake_command = format!("echo woke >> '{}'", marker.display());
+
+        // nothing pending: no wake
+        st.maybe_wake_pending("peer-1");
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert!(!marker.exists(), "no pending work, no wake");
+
+        // a foreign proposal this seat has not approved
+        st.apply(&EventEnvelope {
+            prev_seq: 0,
+            seq: 1,
+            ts: 1,
+            by: "peer-1".to_string(),
+            body: WorkspaceEvent::Proposed {
+                id: molt_core::ProposalId(7),
+                surface: molt_core::Surface::Memory,
+                payload: serde_json::json!({}),
+            },
+        });
+        let lines = |p: &std::path::Path| {
+            std::fs::read_to_string(p)
+                .map(|c| c.lines().count())
+                .unwrap_or(0)
+        };
+        let await_lines = |p: &std::path::Path, want: usize| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while lines(p) < want {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the wake command never ran"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        };
+        st.maybe_wake_pending("peer-1");
+        await_lines(&marker, 1);
+
+        st.clock_override = Some(5_010);
+        st.maybe_wake_pending("peer-1");
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert_eq!(lines(&marker), 1, "inside the holdoff: one nudge only");
+
+        st.clock_override = Some(5_000 + super::WAKE_HOLDOFF_SECS);
+        st.maybe_wake_pending("peer-1");
+        await_lines(&marker, 2);
+        let _ = std::fs::remove_file(&marker);
     }
 }

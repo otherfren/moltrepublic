@@ -1199,6 +1199,9 @@ impl State {
         // seat's read cursors
         self.adopt_read_cursors();
         self.emit_session(SessionScope::Full);
+        // work queued up while this node was offline: nudge the wake hook
+        // once (no-op without a wake command; debounced like any wake)
+        self.maybe_wake_pending("open");
         Ok(Reply::Ack)
     }
 

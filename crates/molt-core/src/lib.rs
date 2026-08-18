@@ -131,7 +131,7 @@ impl Surface {
                 ("status", "Status"),
                 ("members", "Members"),
                 // every file shared into the chat (the uploads table)
-                ("uploads", "Uploads"),
+                ("uploads", "Temporary Uploads"),
                 // in-voting organization changes (charter / name / image /
                 // retention); the GUI shows this entry only while non-empty
                 ("pending", "Pending"),
@@ -358,6 +358,20 @@ pub struct SessionSettings {
     /// Alert sound for a new incoming vote (proposal), same vocabulary.
     #[serde(default = "default_sound")]
     pub sound_vote: String,
+    /// Alert sound for an incoming poke, same vocabulary.
+    #[serde(default = "default_sound")]
+    pub sound_poke: String,
+    /// Whether this node reacts to pokes at all (toast, sound, wake
+    /// command) and offers poking in its own UI. **Off by default — an
+    /// explicit opt-in.**
+    #[serde(default)]
+    pub poke_enabled: bool,
+    /// Command this node runs (via `sh -c`) when its seat is poked or new
+    /// work awaits its vote — the wake hook for a sleeping agent harness.
+    /// Empty = off. Wire content never reaches the command line; context
+    /// arrives as `MOLT_WAKE_*` env vars only.
+    #[serde(default)]
+    pub poke_wake_command: String,
     /// Send (and show) per-message chat read receipts. A local per-node
     /// privacy switch, on by default; while off this node broadcasts no
     /// receipts and hides others' from its chat view (symmetric).
@@ -454,6 +468,9 @@ impl Default for SessionSettings {
             file_cap_bytes: default_file_cap_bytes(),
             sound_message: default_sound(),
             sound_vote: default_sound(),
+            sound_poke: default_sound(),
+            poke_enabled: false,
+            poke_wake_command: String::new(),
             read_receipts: true,
             font_app: default_font_app(),
             font_nav: default_font_nav(),
@@ -2426,6 +2443,16 @@ pub enum WorkspaceEvent {
         id: ProposalId,
         /// The withdrawing proposer.
         by: MemberId,
+    },
+    /// A member **poked another member** — a directed nudge (the poker is the
+    /// envelope's `by`). Ephemeral and coordination-only, like the transport
+    /// frames: it rides the sender's log to reach the outbox, `apply`/replay
+    /// is a no-op, and only the TARGET's live ingest reacts (toast, sound,
+    /// wake command — all behind that node's own opt-in). Additive: an old
+    /// reader simply does not react.
+    Poked {
+        /// The poked member.
+        to: MemberId,
     },
 }
 
@@ -4629,6 +4656,14 @@ pub enum Command {
     },
     /// Abandon the join (idle again) and return to the choice screen.
     JoinCancel,
+    /// **Poke a member** — a directed, ephemeral nudge with no governance
+    /// meaning: the target's node (if it enabled poking) shows who poked,
+    /// plays its configured sound and runs its wake command. A human
+    /// decision, so it is a tool on both surfaces.
+    Poke {
+        /// The roster member to poke (not this seat itself).
+        member: MemberId,
+    },
 }
 
 impl Command {
@@ -5462,6 +5497,15 @@ pub enum Event {
         /// How much of the session changed.
         scope: SessionScope,
     },
+    /// A poke — emitted on the poker's node (`by` = this seat) as the send
+    /// confirmation and on the target's node (`to` = this seat) as the
+    /// nudge a GUI toasts and sounds. Never re-emitted on replay.
+    Poked {
+        /// The poking member.
+        by: MemberId,
+        /// The poked member.
+        to: MemberId,
+    },
 }
 
 /// The reach of a [`Event::SessionChanged`].
@@ -5571,6 +5615,9 @@ pub enum MoltError {
     /// A recovery action was invalid or arrived in the wrong lifecycle state.
     #[error("recover: {0}")]
     Recover(String),
+    /// A poke was refused (feature off, unknown target, or self-poke).
+    #[error("poke: {0}")]
+    Poke(&'static str),
     /// The engine task is gone or did not answer.
     #[error("engine: {0}")]
     Engine(String),

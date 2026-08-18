@@ -414,7 +414,8 @@ impl State {
             | WorkspaceEvent::MeshAnnounced { .. }
             | WorkspaceEvent::FileRequested { .. }
             | WorkspaceEvent::FileWanted { .. }
-            | WorkspaceEvent::FileServed { .. } => {
+            | WorkspaceEvent::FileServed { .. }
+            | WorkspaceEvent::Poked { .. } => {
                 // chain transport/coordination frames (a broadcast block, a
                 // catch-up request, a raw MLS re-key commit, a relayed mesh
                 // announce, a file fetch request) ride the log only to reach
@@ -649,6 +650,8 @@ impl State {
         self.recovery_tickets.clear();
         self.recovery_mesh_window.clear();
         self.mesh_extension_at.clear();
+        self.poke_at.clear();
+        self.wake_at = None;
         // the accept windows belong to the OLD workspace's senders — leaking
         // them would dedup-drop the NEXT workspace's fresh envelopes
         self.accepted.clear();

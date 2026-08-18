@@ -681,6 +681,15 @@ pub(crate) struct State {
     /// the window is ignored — one rotation per member per minute is ample,
     /// and it caps the churn a misbehaving member can inflict.
     pub(crate) mesh_extension_at: std::collections::HashMap<MemberId, u64>,
+    /// Per-sender cooldown for accepted pokes (`member → presence_now of the
+    /// last reacted poke`): a poke inside the window is dropped quietly, so
+    /// a flooding member cannot ring this node's sound or spawn its wake
+    /// command in a loop. Active-workspace scope.
+    pub(crate) poke_at: std::collections::HashMap<MemberId, u64>,
+    /// Global holdoff stamp for the pending-vote auto-wake (`presence_now`
+    /// of the last fired wake): new proposals inside the window do not
+    /// re-spawn the wake command — one nudge, then the agent reads state.
+    pub(crate) wake_at: Option<u64>,
     /// Per SENDER: which of that sender's log seqs this engine has accepted
     /// (delivery guarantee §4.2 — the envelope-level dedup twin of the mesh
     /// ACK payload). Loaded from `transport.state` at open, mutated on every
@@ -994,6 +1003,8 @@ impl State {
             recovery_tickets: std::collections::HashSet::new(),
             recovery_mesh_window: std::collections::HashSet::new(),
             mesh_extension_at: std::collections::HashMap::new(),
+            poke_at: std::collections::HashMap::new(),
+            wake_at: None,
             accepted: std::collections::BTreeMap::new(),
             accepted_dirty: false,
             accepted_saved_at: 0,
@@ -1152,6 +1163,7 @@ impl State {
             Command::MarkChannelRead { channel, up_to } => {
                 self.cmd_mark_channel_read(channel, up_to)
             }
+            Command::Poke { member } => self.cmd_poke(member),
             // file-transfer task feedback (engine-internal, scope-guarded)
             Command::NetFileShared {
                 name,

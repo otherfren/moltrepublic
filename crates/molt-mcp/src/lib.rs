@@ -523,6 +523,21 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
         s3_keep_copies: port("s3_keep_copies")?,
         sound_message: text("sound_message")?,
         sound_vote: text("sound_vote")?,
+        // added after the everything-required contract froze: optional, and
+        // absent FAILS SAFE (poking off, no wake command, silent) — partial
+        // changes go through patch_settings like everywhere else
+        sound_poke: args
+            .get("sound_poke")
+            .and_then(Value::as_str)
+            .map_or(d.sound_poke, str::to_string),
+        poke_enabled: args
+            .get("poke_enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(d.poke_enabled),
+        poke_wake_command: args
+            .get("poke_wake_command")
+            .and_then(Value::as_str)
+            .map_or(d.poke_wake_command, str::to_string),
         read_receipts: flag("read_receipts")?,
         mcp_port: port("mcp_port")?,
         mcp_allow: text("mcp_allow")?,
@@ -593,6 +608,21 @@ pub fn tools() -> Vec<ToolDef> {
                 body: str_arg(args, "body")?,
                 quote: opt_id_arg(args, "quote")?,
                 channel: channel_arg(args)?.unwrap_or_default(),
+            }),
+        },
+        ToolDef {
+            name: "poke",
+            command: "poke",
+            description: "Poke a member - a directed nudge with NO governance meaning (never a vote, never a block). The target's node reacts only if it enabled poking: a toast naming you, its configured sound, and its wake command (how a sleeping agent harness gets woken). Rate-limited on the receive side (one reaction per sender per minute); a poke to a member who disabled poking simply does nothing there. Needs poking enabled on THIS node too (settings poke_enabled).",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "member": { "type": "string", "description": "the roster member to poke (not this seat itself)" }
+                },
+                "required": ["member"]
+            }),
+            build: |args| Ok(Command::Poke {
+                member: str_arg(args, "member")?,
             }),
         },
         ToolDef {
@@ -988,6 +1018,9 @@ pub fn tools() -> Vec<ToolDef> {
                     "s3_keep_copies": { "type": "integer" },
                     "sound_message": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
                     "sound_vote": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
+                    "sound_poke": { "type": "string", "enum": ["none", "bell", "chime", "pop"], "description": "optional; absent = \"none\"" },
+                    "poke_enabled": { "type": "boolean", "description": "optional; absent = false (react to pokes and offer poking)" },
+                    "poke_wake_command": { "type": "string", "description": "optional; absent = \"\" (command run via sh -c on a poke or pending vote; context in MOLT_WAKE_* env vars)" },
                     "read_receipts": { "type": "boolean", "description": "send/show per-message chat read receipts (local privacy switch)" },
                     "mcp_port": { "type": "integer" },
                     "mcp_allow": { "type": "string", "description": "client IP allowlist: \"127.0.0.1\" | \"0.0.0.0\" | comma-separated" },
@@ -1029,6 +1062,9 @@ pub fn tools() -> Vec<ToolDef> {
                     "file_cap_bytes": { "type": "integer", "description": "per-file byte cap for sharing over relays; 0 = sharing off" },
                     "sound_message": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
                     "sound_vote": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
+                    "sound_poke": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
+                    "poke_enabled": { "type": "boolean" },
+                    "poke_wake_command": { "type": "string" },
                     "read_receipts": { "type": "boolean" },
                     "mcp_port": { "type": "integer" },
                     "mcp_allow": { "type": "string" },
