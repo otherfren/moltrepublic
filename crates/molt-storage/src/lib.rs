@@ -1413,6 +1413,11 @@ impl OpenedWorkspace {
         stem: &str,
         avatar: Option<(String, Vec<u8>)>,
     ) -> Result<(), StorageError> {
+        // the stem lands in a file name: keep the path-escape door shut here
+        // too, not only at the (single, sanitizing) caller
+        if stem.is_empty() || !stem.chars().all(|c| c.is_alphanumeric() || c == '-') {
+            return Err(StorageError::BadFile(format!("bad avatar name: {stem}")));
+        }
         let prefix = format!("avatar-{stem}.");
         let want_name = avatar.as_ref().map(|(ext, _)| format!("{prefix}{ext}"));
         // drop this member's stale avatar files (an older extension, or all)

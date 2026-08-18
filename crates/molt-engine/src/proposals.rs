@@ -534,6 +534,15 @@ impl State {
             payload["value"] =
                 Value::String(canon.into_iter().collect::<Vec<_>>().join(" "));
         }
+        // set_member_desc: store the TRIMMED value — one spelling per
+        // description, so whitespace-only input clears the field instead of
+        // rendering blanks (same canonicalize-at-propose rule as above)
+        if surface == Surface::Organization
+            && payload.get("op").and_then(Value::as_str) == Some("set_member_desc")
+        {
+            let raw = payload.get("value").and_then(Value::as_str).unwrap_or_default();
+            payload["value"] = Value::String(raw.trim().to_string());
+        }
         if !payload.is_object() {
             return Err(MoltError::BadPayload(
                 "payload must be a JSON object".into(),
@@ -2383,6 +2392,22 @@ mod size_gate_tests {
             .expect("a multi-byte description is measured in characters");
     }
 
+    /// The avatar file name is derived from a member-controlled string, so
+    /// it must stay a NAME: no separator, no traversal, and two seats whose
+    /// slugs collide still get their own file.
+    #[test]
+    fn the_avatar_file_name_stays_a_path_safe_name() {
+        let name = avatar_file_name("../../etc/pas swd", "x.PNG");
+        assert!(!name.contains('/'), "{name}");
+        assert!(!name.contains(".."), "{name}");
+        assert!(name.starts_with("avatar-") && name.ends_with(".png"), "{name}");
+        assert_ne!(
+            avatar_stem("Anna B"),
+            avatar_stem("anna-b"),
+            "colliding slugs must not share a file"
+        );
+    }
+
     /// The served budget is a PROMISE: an image fitted to it is accepted,
     /// file name included — that is what the reserved name allowance buys.
     #[test]
@@ -2451,5 +2476,27 @@ mod size_gate_tests {
         assert_eq!(format!("{err}"), "bad payload: the profile op needs a member");
         st.cmd_propose(Surface::Organization, op("me"))
             .expect("a member may edit its own profile");
+    }
+
+    /// One spelling per description: the stored value is trimmed, so
+    /// whitespace-only input clears instead of rendering blanks (the
+    /// set_relays/set_features canonicalization precedent).
+    #[test]
+    fn a_proposed_description_is_stored_trimmed() {
+        let mut st = crate::tests::plain_state();
+        let Reply::Proposed { id } = st
+            .cmd_propose(
+                Surface::Organization,
+                json!({ "op": "set_member_desc", "member": "me", "value": "  keeps the bees \n" }),
+            )
+            .expect("propose")
+        else {
+            panic!("expected Proposed");
+        };
+        let stored = st.proposals.get(&id.0).expect("recorded");
+        assert_eq!(
+            stored.payload.get("value").and_then(Value::as_str),
+            Some("keeps the bees")
+        );
     }
 }
