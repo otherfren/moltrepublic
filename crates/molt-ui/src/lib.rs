@@ -7247,7 +7247,9 @@ fn surface_name(lang: i32, sf: Surface) -> &'static str {
             Surface::Memory => "Shared Memory",
             // user-decided 2026-08-11: the board is named for what it shows
             Surface::Quests => "Kanban",
-            Surface::Vault => "Tresor",
+            // user-decided 2026-08-19: the surface is named "Vault" in
+            // both languages - it is the product's word for it
+            Surface::Vault => "Vault",
             Surface::Wallet => "Wallet",
         }
     } else {
@@ -7256,7 +7258,7 @@ fn surface_name(lang: i32, sf: Surface) -> &'static str {
             Surface::Chat => "Chat",
             Surface::Memory => "Shared Memory",
             Surface::Quests => "Kanban",
-            Surface::Vault => "Secrets Vault",
+            Surface::Vault => "Vault",
             Surface::Wallet => "Wallet",
         }
     }
@@ -8773,7 +8775,7 @@ lexicon! {
     feat_chat: "Chat", "Chat";
     feat_memory: "Shared Memory", "Shared Memory";
     feat_quests: "Kanban", "Kanban";
-    feat_vault: "Secrets Vault", "Tresor";
+    feat_vault: "Vault", "Vault";
     feat_wallet: "Wallet", "Wallet";
     jw_back_to_start: "Back to start", "Zurück zum Start";
     jw_ratify_title: "Ratify the charter", "Satzung ratifizieren";
@@ -9324,6 +9326,18 @@ lexicon! {
     vt_hint_unsealed: "Every grant is on record - the content opens only for the elected reader.", "Jede Erteilung steht im Protokoll - der Inhalt öffnet sich nur für den gewählten Leser.";
     vt_only_you: "readable only by you", "nur für dich lesbar";
     vt_only_by: "readable only by", "lesbar nur für";
+    vt_unsealed_word: "unsealed", "entsiegelt";
+    vt_request_unseal: "Request unseal", "Beantragen";
+    vt_seal_body: "Deposited encrypted - every seat guards one key share.", "Verschlüsselt hinterlegt - jeder Sitz hütet einen Schlüssel-Anteil.";
+    vt_seal_confirm: "Seal", "Versiegeln";
+    vt_f_title: "Title", "Titel";
+    vt_f_title_ph: "Treasury seed phrase", "Treasury-Seed-Phrase";
+    vt_f_desc: "Description", "Beschreibung";
+    vt_f_desc_ph: "optional", "optional";
+    vt_f_icon: "Icon", "Icon";
+    vt_f_secret: "Secret", "Geheimnis";
+    vt_f_secret_ph: "the text that gets sealed", "der Text, der versiegelt wird";
+    vt_mock_note: "Mock - nothing was sent", "Mock - nichts gesendet";
     wl_title_balance: "Treasury balance", "Kassenstand";
     wl_hint_balance: "The shared Monero multisig wallet - no single member can spend from it.", "Die gemeinsame Monero-Multisig-Wallet - kein einzelnes Mitglied kann daraus ausgeben.";
     wl_unlocked: "unlocked", "verfügbar";
@@ -9609,7 +9623,7 @@ mod tests {
         assert!(
             row.relay_changes
                 .iter()
-                .any(|(sign, label)| *sign == RELAY_ROW_KEPT && label == "Secrets Vault"),
+                .any(|(sign, label)| *sign == RELAY_ROW_KEPT && label == "Vault"),
             "the racing enable renders as kept, labelled: {:?}",
             row.relay_changes
         );
@@ -12370,6 +12384,67 @@ mod gui_tests {
             );
         }
         assert_eq!(rows_at(&ui).len(), 2, "700px needs a second row");
+    }
+
+    /// The Vault mock's secrets list, headless: the deposits render, and a
+    /// click on "Seal a secret" opens the dialog it was given (the button
+    /// used to be dead, with a "not yet" tooltip).
+    #[cfg(feature = "live-preview")]
+    #[test]
+    fn the_vault_seal_button_opens_its_dialog() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("headless window");
+        ui.window().set_size(slint::PhysicalSize::new(1400, 900));
+        ui.set_screen(AppScreen::Main);
+        ui.set_selected_surface("vault".into());
+        ui.set_selected_view("secrets".into());
+        ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+            key: "vault".into(),
+            ..SurfaceTab::default()
+        }])));
+        apply_strings(&ui, 0);
+        ui.show().expect("show headless");
+
+        let cards: Vec<_> =
+            i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "SecretCard")
+                .collect();
+        eprintln!("secret cards: {}", cards.len());
+        assert!(cards.len() >= 6, "the sample deposits must render");
+        assert!(
+            i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "ConfirmModal")
+                .next()
+                .is_none(),
+            "no dialog before the click"
+        );
+
+        let button = i_slint_backend_testing::ElementHandle::find_by_element_id(
+            &ui,
+            "VaultPane::vt-seal-btn",
+        )
+        .next()
+        .expect("the seal button must render");
+        let pos = button.absolute_position();
+        let size = button.size();
+        let at = slint::LogicalPosition::new(
+            pos.x + size.width / 2.0,
+            pos.y + size.height / 2.0,
+        );
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at });
+        ui.window().dispatch_event(slint::platform::WindowEvent::PointerPressed {
+            position: at,
+            button: slint::platform::PointerEventButton::Left,
+        });
+        ui.window().dispatch_event(slint::platform::WindowEvent::PointerReleased {
+            position: at,
+            button: slint::platform::PointerEventButton::Left,
+        });
+        assert!(
+            i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "ConfirmModal")
+                .next()
+                .is_some(),
+            "the seal dialog must open"
+        );
     }
 
     /// Organization → Members with two seats, rendered headless. `on` is

@@ -1082,6 +1082,7 @@ export component AppWindow inherits Window {
         || root.recover-link-open
         || root.mp-img-open
         || root.mp-desc-open
+        || root.vt-seal-open
         || root.wizard-log-open;
     changed any-modal-open => {
         if (!root.any-modal-open) {
@@ -1386,6 +1387,17 @@ export component AppWindow inherits Window {
     // state, a non-empty error is the failed state
     in-out property <string> recovery-link;
     in-out property <string> recovery-link-error;
+    // Vault (design mock): the seal dialog's draft and the one deposit a
+    // confirmed seal has produced in this session
+    property <bool> vt-seal-open: false;
+    property <string> vt-seal-title;
+    property <string> vt-seal-desc;
+    property <string> vt-seal-secret;
+    property <string> vt-seal-glyph: "🔑";
+    property <bool> vt-new-set: false;
+    property <string> vt-new-name;
+    property <string> vt-new-desc;
+    property <string> vt-new-glyph;
     in-out property <bool> recover-link-open: false;
     // Closing the link dialog ACKNOWLEDGES the notice that opened it: the
     // session keeps a notice until something replaces it, so an unacknowledged
@@ -1896,6 +1908,11 @@ export component AppWindow inherits Window {
             root.mp-img-open = false;
         } else if (root.mp-desc-open) {
             root.mp-desc-open = false;
+        } else if (root.vt-seal-open) {
+            // like every other field dialog: once a field holds the focus its
+            // own Escape bubbles here, so this branch is what keeps the dialog
+            // cancellable by keyboard
+            root.vt-seal-open = false;
         } else if (root.org-charter-modal-open) {
             root.org-charter-modal-open = false;
         } else if (root.org-name-modal-open) {
@@ -6613,6 +6630,20 @@ export component AppWindow inherits Window {
                         }
                         if s.key == "vault" && root.selected-view != "proposals": VaultPane {
                             view: root.selected-view;
+                            me: root.node-member;
+                            new-set: root.vt-new-set;
+                            new-name: root.vt-new-name;
+                            new-desc: root.vt-new-desc;
+                            new-glyph: root.vt-new-glyph;
+                            seal-clicked => {
+                                root.vt-seal-title = "";
+                                root.vt-seal-desc = "";
+                                root.vt-seal-secret = "";
+                                root.vt-seal-open = true;
+                            }
+                            unseal-requested(secret, reader) => {
+                                root.show-toast("\{Strings.vt-mock-note}: \{secret} → \{reader}");
+                            }
                         }
                         if s.key == "wallet" && root.selected-view != "status": WalletPane {
                             view: root.selected-view;
@@ -8491,6 +8522,77 @@ export component AppWindow inherits Window {
                     clicked => {
                         root.mp-img-pick();
                     }
+                }
+            }
+        }
+    }
+
+    // =================================================================
+    // Modal: seal a secret (Vault — DESIGN MOCK, like the pane it opens
+    // from). Title, one describing line, a pictogram and the text itself;
+    // confirming deposits it into the pane's list and says, in the toast,
+    // that nothing left this window.
+    // =================================================================
+    if root.vt-seal-open: ConfirmModal {
+        dialog-width: 520px;
+        title: Strings.vt-seal-new;
+        body: Strings.vt-seal-body;
+        confirm-label: Strings.vt-seal-confirm;
+        confirm-enabled: root.vt-seal-title != "" && root.vt-seal-secret != "";
+        dismissed => {
+            root.vt-seal-open = false;
+        }
+        confirmed => {
+            root.vt-seal-open = false;
+            root.vt-new-name = root.vt-seal-title;
+            root.vt-new-desc = root.vt-seal-desc;
+            root.vt-new-glyph = root.vt-seal-glyph;
+            root.vt-new-set = true;
+            root.show-toast(Strings.vt-mock-note);
+        }
+        VerticalLayout {
+            spacing: 12px;
+            FieldLabel {
+                label: Strings.vt-f-title;
+                AppField {
+                    text <=> root.vt-seal-title;
+                    placeholder: Strings.vt-f-title-ph;
+                }
+            }
+            FieldLabel {
+                label: Strings.vt-f-desc;
+                AppField {
+                    text <=> root.vt-seal-desc;
+                    placeholder: Strings.vt-f-desc-ph;
+                }
+            }
+            FieldLabel {
+                label: Strings.vt-f-icon;
+                // pictograms ride the Twemoji font (AppButton.emoji), never
+                // a plain-text label
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+                    for g in ["🔑", "📄", "🗝️", "🔐", "💳", "🧾"]: AppButton {
+                        width: 44px;
+                        height: 34px;
+                        pad: 0px;
+                        emoji: g;
+                        primary: root.vt-seal-glyph == g;
+                        clicked => {
+                            root.vt-seal-glyph = g;
+                        }
+                    }
+                }
+            }
+            FieldLabel {
+                label: Strings.vt-f-secret;
+                AppArea {
+                    height: 120px;
+                    // a draft must not drive the dialog's width
+                    preferred-width: 0px;
+                    text <=> root.vt-seal-secret;
+                    placeholder: Strings.vt-f-secret-ph;
                 }
             }
         }
