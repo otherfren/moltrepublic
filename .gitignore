@@ -1,4 +1,7 @@
 /target
+# a build dir at any depth: a cargo run from a subdirectory with a
+# relative CARGO_TARGET_DIR drops one there
+target/
 /dist
 **/*.rs.bk
 Cargo.lock.bak

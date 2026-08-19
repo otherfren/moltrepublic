@@ -1169,6 +1169,11 @@ impl State {
             Command::MarkChannelRead { channel, up_to } => {
                 self.cmd_mark_channel_read(channel, up_to)
             }
+            Command::ClearNotice => {
+                self.session.notice = String::new();
+                self.emit_session(SessionScope::Full);
+                Ok(Reply::Ack)
+            }
             Command::Poke { member } => self.cmd_poke(member),
             Command::NetPoked {
                 from,

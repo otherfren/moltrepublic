@@ -2044,6 +2044,17 @@ pub fn run_app(
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
+        // closing the recovery-link dialog acknowledges the notice that
+        // opened it — otherwise the one-shot link re-opens it on the next
+        // fresh window (co-equal MCP tool: clear_notice)
+        ui.on_clear_notice(move || {
+            issue(&rt, &w, &weak, Command::ClearNotice);
+        });
+    }
+    {
+        let rt = rt.clone();
+        let w = wallet.clone();
+        let weak = ui.as_weak();
         ui.on_withdraw(move |id| {
             issue(
                 &rt,
@@ -4173,15 +4184,11 @@ fn apply_session(
 
     if !settings_changed {
         apply_strings(ui, lang);
-        apply_tab_floors(ui);
         return;
     }
     apply_settings_fields(ui, &sv.settings);
 
     apply_strings(ui, lang);
-    // derived from the titles that were just pushed — a tab's wrap floor can
-    // never drift away from its label
-    apply_tab_floors(ui);
 }
 
 /// The relay pool as the Network panel renders it: the entries in priority
@@ -5647,7 +5654,7 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
             let (d_start, d_end, d_page, d_pages) =
                 page_slice(s.declined.len(), d_page, LIST_PAGE_SIZE);
             let declined: Vec<ProposalRow> =
-                s.declined[d_start..d_end].iter().map(to_row).collect();
+                s.declined[d_start..d_end].iter().map(to_decided_row).collect();
             // the Accepted table pages in lockstep with the applied log
             // (same source list, same length — `accepted` is its
             // newest-first projection)
@@ -5657,7 +5664,7 @@ fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                 (0, 0, 0, 1)
             };
             let accepted: Vec<ProposalRow> =
-                s.accepted[ac_start..ac_end].iter().map(to_row).collect();
+                s.accepted[ac_start..ac_end].iter().map(to_decided_row).collect();
             // the surface's sub-views come straight from the shared
             // molt-core vocabulary (same list select_view validates against)
             let views: Vec<ViewItem> = Surface::parse(&s.key)
@@ -6200,6 +6207,26 @@ fn strings_pick(de: bool, en: &str, de_s: &str) -> String {
 /// A free function rather than a per-surface closure: the compact decision
 /// panel above a chat renders the SAME row the Organization pane does, and
 /// two conversions would be two things to keep in step.
+/// One INDEX row of the decided-votes table (Accepted / Declined).
+///
+/// The same projection as the card's, with the value flattened to a single
+/// line: a seat description is typed into a multi-line box, so its value can
+/// carry newlines — rendered verbatim they make a 40px table row three lines
+/// tall and paint over the neighbouring rows. The table is an index (one line
+/// per decision); the full text lives behind the discussion jump.
+fn to_decided_row(p: &ProposalRowData) -> ProposalRow {
+    ProposalRow {
+        current: one_line(&p.current).into(),
+        proposed: one_line(&p.proposed).into(),
+        ..to_proposal_row(p)
+    }
+}
+
+/// Collapse every run of whitespace — newlines included — into one space.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn to_proposal_row(p: &ProposalRowData) -> ProposalRow {
     ProposalRow {
         id: p.id,
@@ -7621,63 +7648,6 @@ fn tor_probe_args(network_index: i32, mode_index: i32, port: i32) -> (String, St
         mode_name(mode_index),
         u16::try_from(port).unwrap_or(0),
     )
-}
-
-/// The settings tab bar is ONE row in which an individual title wraps when it
-/// does not fit. A word-wrapping Slint `Text` reports a min-width of 0, so the
-/// layout would shrink such a tab until its letters are clipped; each tab
-/// therefore carries a hidden "floor" Text whose preferred width — measured in
-/// the real font — is its widest unbreakable chunk.
-///
-/// This turns a title into that floor by placing a real newline at every line
-/// BREAK OPPORTUNITY Slint would use for it (UAX #14): after a space, which
-/// disappears with the break, and after a hyphen, which stays on its line.
-fn tab_title_floor(title: &str) -> String {
-    let mut out = String::with_capacity(title.len() + 4);
-    let mut chars = title.chars().peekable();
-    while let Some(c) = chars.next() {
-        let more = chars.peek().is_some();
-        match c {
-            // a breaking space ends its line and vanishes with it; a run of
-            // spaces yields ONE break, never an empty line
-            ' ' if more && !out.ends_with('\n') => out.push('\n'),
-            ' ' => {}
-            // a hyphen stays on the line it ends (UAX #14 breaks AFTER it)
-            '-' if more => {
-                out.push('-');
-                out.push('\n');
-            }
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
-/// Push each settings tab's wrap floor (see [`tab_title_floor`]) next to its
-/// title. Derived from the titles that were just pushed into `Strings`, so a
-/// renamed or re-translated tab can never drift away from its floor.
-fn apply_tab_floors(ui: &AppWindow) {
-    let s = ui.global::<Strings>();
-    let floors = [
-        s.get_set_tab_general(),
-        s.get_set_tab_workspace(),
-        s.get_set_tab_backup(),
-        s.get_set_tab_anon(),
-        s.get_set_tab_relays(),
-        s.get_set_tab_mcp(),
-        s.get_set_tab_node(),
-        s.get_set_tab_chain(),
-    ]
-    .map(|t| slint::SharedString::from(tab_title_floor(&t)));
-    let [general, workspace, backup, anon, relays, mcp, node, chain] = floors;
-    s.set_set_tab_general_floor(general);
-    s.set_set_tab_workspace_floor(workspace);
-    s.set_set_tab_backup_floor(backup);
-    s.set_set_tab_anon_floor(anon);
-    s.set_set_tab_relays_floor(relays);
-    s.set_set_tab_mcp_floor(mcp);
-    s.set_set_tab_node_floor(node);
-    s.set_set_tab_chain_floor(chain);
 }
 
 /// The tor-mode dropdown's per-row `enabled` flags (parallel to the model
@@ -9781,18 +9751,6 @@ mod tests {
     /// forgotten pair goes red here instead of shipping a blank label.
     #[test]
     fn every_strings_property_has_an_english_and_a_german_arm() {
-        // filled from Rust at runtime, not from the lexicon: the settings
-        // tabs' width floors are computed per title (`tab_title_floor`)
-        const COMPUTED: &[&str] = &[
-            "set-tab-general-floor",
-            "set-tab-workspace-floor",
-            "set-tab-backup-floor",
-            "set-tab-anon-floor",
-            "set-tab-relays-floor",
-            "set-tab-mcp-floor",
-            "set-tab-node-floor",
-            "set-tab-chain-floor",
-        ];
         let theme = include_str!("../../molt-ui-window/ui/theme.slint");
         let lex = include_str!("lib.rs");
         // the Strings global alone - Theme, HintTip and Poke declare
@@ -9817,9 +9775,6 @@ mod tests {
                 .expect("a property name")
                 .trim();
             keys += 1;
-            if COMPUTED.contains(&key) {
-                continue;
-            }
             let field = key.replace('-', "_");
             assert!(
                 lex.contains(&format!("\n    {field}: \"")),
@@ -11731,44 +11686,6 @@ mod tests {
         );
     }
 
-    /// The settings tab bar is ONE row in which an individual title wraps.
-    /// A wrapping Slint `Text` reports min-width 0, so without a floor the
-    /// layout would happily shrink a tab until its letters are clipped. The
-    /// floor is a hidden Text carrying the title with every LINE-BREAK
-    /// OPPORTUNITY turned into a real newline: its preferred width is the
-    /// widest unbreakable chunk, measured in the actual font. This pins the
-    /// derivation — it must match Slint's UAX #14 breaking for our titles
-    /// (after a space, which is dropped, and after a hyphen, which stays).
-    #[test]
-    fn a_tab_title_floor_is_the_title_broken_at_every_break_opportunity() {
-        assert_eq!(tab_title_floor("Anonymitäts-Netzwerk"), "Anonymitäts-\nNetzwerk");
-        assert_eq!(tab_title_floor("Anonymity network"), "Anonymity\nnetwork");
-        assert_eq!(tab_title_floor("Chain-History"), "Chain-\nHistory");
-        assert_eq!(tab_title_floor("Nostr-Relays"), "Nostr-\nRelays");
-        // a title with no break opportunity is its own floor: such a tab can
-        // never wrap, so it must never be shrunk either
-        assert_eq!(tab_title_floor("MCP"), "MCP");
-        assert_eq!(tab_title_floor("Workspace"), "Workspace");
-        // a trailing hyphen/space has nothing after it — no empty last line
-        assert_eq!(tab_title_floor("Chain-"), "Chain-");
-        assert_eq!(tab_title_floor("Chain "), "Chain");
-        assert_eq!(tab_title_floor(""), "");
-        // the floor is the SAME text, only re-broken: dropping the breaking
-        // spaces must be the only edit (a wrong floor either clips letters or
-        // blocks the wrap it exists to allow)
-        for title in ["Anonymitäts-Netzwerk", "Anonymity network", "Chain-History", "MCP"] {
-            assert_eq!(
-                tab_title_floor(title).replace(['\n', ' '], ""),
-                title.replace(' ', ""),
-                "the floor of {title:?} must be the title itself, only re-broken"
-            );
-            assert!(
-                tab_title_floor(title).lines().all(|l| !l.is_empty()),
-                "no empty line in the floor of {title:?}"
-            );
-        }
-    }
-
     /// The honesty invariant of the Tor probe, in colour: ONLY a proven
     /// circuit may read as "good". A SOCKS port that merely answers is amber
     /// (something is there, nothing is proven), and every rung that failed or
@@ -12171,6 +12088,340 @@ mod gui_tests {
                 n.size().height
             );
         }
+    }
+    /// **A right-click must actually OPEN the menu.** Every poke site is a
+    /// `ContextMenuArea`; the operator reported that right-clicking does
+    /// nothing anywhere, while the engine path is provably fine (a poke
+    /// issued over MCP toasts on both nodes). This dispatches a REAL right
+    /// press onto the chat author's menu area and looks for the menu item
+    /// that must appear — checked to be ABSENT before the click, so a
+    /// find that always matches cannot pass for a menu.
+    ///
+    /// **Runs on the dev-ui chain only** (element ids), like its geometry
+    /// sibling above.
+    #[cfg(feature = "live-preview")]
+    #[test]
+    fn a_right_click_on_a_poke_site_opens_the_menu() {
+        i_slint_backend_testing::init_no_event_loop();
+        let tmp = tempfile::tempdir().expect("tmp");
+        let rt = rt();
+        let _guard = rt.enter();
+        let (w, _) = node_with_chat(tmp.path());
+        let ui = AppWindow::new().expect("headless window");
+        let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+        let last: Arc<Mutex<Option<SessionSettings>>> = Arc::new(Mutex::new(None));
+        ui.window().set_size(slint::PhysicalSize::new(1200, 800));
+        rt.block_on(async {
+            w.execute(Command::CreateStart {
+                name: "DevTest".to_string(),
+                member: "walter".to_string(),
+                threshold: 1,
+                members: 1,
+                relays: Vec::new(),
+            })
+            .await
+            .ok();
+            w.execute(Command::Chat {
+                body: "hello group".to_string(),
+                quote: None,
+                channel: ChannelRef::Group,
+            })
+            .await
+            .ok();
+            mirror(&w, &ui, &last, &chat_ui).await;
+        });
+        ui.set_screen(AppScreen::Main);
+        ui.set_selected_surface("chat".into());
+        apply_strings(&ui, 0);
+        ui.show().expect("show headless");
+        // the author is the own seat in this fixture — make it a POKABLE
+        // name so the area is enabled (the gate is what `Poke.can` decides)
+        ui.global::<Poke>().set_me("petra".into());
+        ui.global::<Poke>().set_on(true);
+
+        let label = ui.global::<Strings>().get_mem_poke().to_string();
+        assert!(!label.is_empty(), "the fixture must carry the menu title");
+        assert!(
+            poke_menu_open(&ui, &label).is_none(),
+            "no menu may be findable before the click"
+        );
+        let menu = i_slint_backend_testing::ElementHandle::find_by_element_id(
+            &ui,
+            "ChatRow::author-menu",
+        )
+        .next()
+        .expect("the author menu area must render");
+        right_click(&ui, &menu, 0.5);
+        assert!(
+            poke_menu_open(&ui, &label).is_some(),
+            "right-click opened no menu carrying {label:?}"
+        );
+    }
+
+    /// The SAME right-click, on the site the operator actually uses:
+    /// Organization → Members. Its `ContextMenuArea` wraps the whole row,
+    /// so the press must reach it wherever the row is not covered by a
+    /// control of its own.
+    #[cfg(feature = "live-preview")]
+    #[test]
+    fn a_right_click_on_a_member_row_opens_the_poke_menu() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = members_window(true);
+        let label = ui.global::<Strings>().get_mem_poke().to_string();
+        assert!(!label.is_empty(), "the fixture must carry the menu title");
+        assert!(
+            poke_menu_open(&ui, &label).is_none(),
+            "no menu may be findable before the click"
+        );
+        let rows: Vec<_> =
+            i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "AppWindow::om-row-menu")
+                .collect();
+        assert_eq!(rows.len(), 2, "one menu area per member row");
+        // row 1 is petra — the pokable seat
+        let area = &rows[1];
+        assert!(
+            area.size().width > 1.0 && area.size().height > 1.0,
+            "the menu area collapsed to {:?}",
+            area.size()
+        );
+        right_click(&ui, area, 0.98);
+        assert!(
+            poke_menu_open(&ui, &label).is_some(),
+            "right-click on the member row opened no menu"
+        );
+    }
+
+    /// **Poking off must not make the feature vanish.** An entry that is
+    /// simply absent reads as a dead right-click (that is how the operator
+    /// met it). With the switch off the menu still opens and names the
+    /// action - greyed, so it says "this exists, it is off" instead of
+    /// nothing at all.
+    #[cfg(feature = "live-preview")]
+    #[test]
+    fn with_poking_off_the_member_row_still_offers_the_entry_greyed() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = members_window(false);
+        let label = ui.global::<Strings>().get_mem_poke().to_string();
+        assert!(!label.is_empty(), "the fixture must carry the menu title");
+        assert!(
+            poke_menu_open(&ui, &label).is_none(),
+            "no menu may be findable before the click"
+        );
+        let rows: Vec<_> =
+            i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "AppWindow::om-row-menu")
+                .collect();
+        right_click(&ui, &rows[1], 0.98);
+        assert!(
+            poke_menu_open(&ui, &label).is_some(),
+            "the entry must still be offered, greyed - `Poke.on` is what the \
+             MenuItem binds its `enabled` to, and `can()` (pinned separately) \
+             is what refuses the command"
+        );
+    }
+
+    /// The own seat is never a poke target, switch or no switch: its row
+    /// offers no menu at all.
+    #[cfg(feature = "live-preview")]
+    #[test]
+    fn the_own_seats_row_offers_no_poke_menu() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = members_window(true);
+        let label = ui.global::<Strings>().get_mem_poke().to_string();
+        let rows: Vec<_> =
+            i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "AppWindow::om-row-menu")
+                .collect();
+        // row 0 is walter — this node's own seat
+        right_click(&ui, &rows[0], 0.98);
+        assert!(
+            poke_menu_open(&ui, &label).is_none(),
+            "the own seat must not offer the entry"
+        );
+    }
+
+    /// **Organization → Accepted: the Value column must never overrun its
+    /// cell.** A description change carries a whole sentence as its value;
+    /// an unwrapped `Text` reports that whole line as its PREFERRED width,
+    /// which pushes the row past the table instead of eliding inside it.
+    #[cfg(feature = "live-preview")]
+    #[test]
+    fn a_long_accepted_value_elides_inside_its_cell() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("headless window");
+        ui.window().set_size(slint::PhysicalSize::new(1200, 800));
+        ui.set_screen(AppScreen::Main);
+        ui.set_selected_surface("organization".into());
+        ui.set_selected_view("accepted".into());
+        // a seat description is typed into a multi-line box, so its value
+        // can carry NEWLINES — a table cell that renders them is three
+        // lines tall inside a 40px row and paints over its neighbours
+        let long = "Baut an der Autistenzentrale\nund schreibt die Protokolle,\n\
+             erreichbar meistens nachts, Zeitzone egal, und noch ein Satz \
+             damit die Zelle ganz sicher zu schmal wird";
+        ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+            key: "organization".into(),
+            applied_count: 1,
+            accepted: ModelRc::new(VecModel::from(vec![ProposalRow {
+                id: 1,
+                text: "Member description".into(),
+                proposed: long.into(),
+                ..ProposalRow::default()
+            }])),
+            ..SurfaceTab::default()
+        }])));
+        apply_strings(&ui, 0);
+        ui.show().expect("show headless");
+
+        let table = i_slint_backend_testing::ElementHandle::find_by_element_type_name(
+            &ui,
+            "DecisionTable",
+        )
+        .next()
+        .expect("the decided-votes table must render");
+        let cell = i_slint_backend_testing::ElementHandle::find_by_element_id(
+            &ui,
+            "DecisionTable::dt-value",
+        )
+        .next()
+        .expect("the value cell must render");
+        let right = cell.absolute_position().x + cell.size().width;
+        let edge = table.absolute_position().x + table.size().width;
+        eprintln!(
+            "value cell {:?} w={} right={right} table right={edge}",
+            cell.absolute_position(),
+            cell.size().width
+        );
+        assert!(
+            right <= edge,
+            "the value ran {}px past the table",
+            right - edge
+        );
+    }
+
+    /// The decided-votes table is an INDEX: one line per decision. A seat
+    /// description is typed into a multi-line box (`Ich bin der Peter\n!`
+    /// is what the operator's node actually holds), and rendering that
+    /// newline made the 40px row two lines tall. The CARD keeps the real
+    /// shape — sign-what-you-see reads the value as it will be applied.
+    #[test]
+    fn a_decided_rows_value_reads_as_one_line_while_the_card_keeps_the_shape() {
+        let data = ProposalRowData {
+            current: "Ich bin der Peter\n!".to_string(),
+            proposed: "erste\n\nzweite   dritte".to_string(),
+            ..ProposalRowData::default()
+        };
+        let row = to_decided_row(&data);
+        assert_eq!(row.current.as_str(), "Ich bin der Peter !");
+        assert_eq!(row.proposed.as_str(), "erste zweite dritte");
+        let card = to_proposal_row(&data);
+        assert!(
+            card.proposed.as_str().contains('\n'),
+            "the vote card must show the value as it will be applied"
+        );
+    }
+
+    /// **The settings tab bar wraps, the titles do not.** A tab title must
+    /// never break inside its own tab; when the row cannot hold them all,
+    /// the BAR takes a second row instead. Measured on the real geometry at
+    /// two window widths.
+    #[cfg(feature = "live-preview")]
+    #[test]
+    fn the_settings_tabs_stay_one_line_and_the_bar_wraps_when_it_must() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("headless window");
+        ui.set_screen(AppScreen::Settings);
+        ui.set_active_workspace("w".into());
+        apply_strings(&ui, 1); // German — the widest titles
+        ui.window().set_size(slint::PhysicalSize::new(1600, 900));
+        ui.show().expect("show headless");
+
+        let rows_at = |ui: &AppWindow| -> Vec<f32> {
+            let mut ys: Vec<f32> =
+                i_slint_backend_testing::ElementHandle::find_by_element_type_name(ui, "SettingsTab")
+                    .map(|t| t.absolute_position().y)
+                    .collect();
+            ys.sort_by(|a, b| a.partial_cmp(b).expect("no NaN"));
+            ys.dedup_by(|a, b| (*a - *b).abs() < 1.0);
+            ys
+        };
+        let tabs: Vec<_> =
+            i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "SettingsTab")
+                .collect();
+        assert_eq!(tabs.len(), 8, "eight tabs with a workspace open");
+        for t in &tabs {
+            assert!(
+                t.size().height <= 30.0,
+                "a tab grew to {}px - its title wrapped inside the tab",
+                t.size().height
+            );
+        }
+        assert_eq!(rows_at(&ui).len(), 1, "1600px holds every tab in one row");
+
+        // …and narrow enough, the BAR breaks instead of the titles
+        ui.window().set_size(slint::PhysicalSize::new(700, 900));
+        let narrow: Vec<_> =
+            i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "SettingsTab")
+                .collect();
+        assert_eq!(narrow.len(), 8, "no tab may disappear when the bar wraps");
+        for t in &narrow {
+            assert!(
+                t.size().height <= 30.0,
+                "a tab grew to {}px in the narrow bar",
+                t.size().height
+            );
+        }
+        assert_eq!(rows_at(&ui).len(), 2, "700px needs a second row");
+    }
+
+    /// Organization → Members with two seats, rendered headless. `on` is
+    /// the applied poke switch the menus gate on.
+    #[cfg(feature = "live-preview")]
+    fn members_window(on: bool) -> AppWindow {
+        let ui = AppWindow::new().expect("headless window");
+        ui.window().set_size(slint::PhysicalSize::new(1200, 800));
+        ui.set_screen(AppScreen::Main);
+        ui.set_selected_surface("organization".into());
+        ui.set_selected_view("members".into());
+        ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+            key: "organization".into(),
+            ..SurfaceTab::default()
+        }])));
+        ui.set_node_member("walter".into());
+        ui.set_org_members(ModelRc::new(VecModel::from(vec![
+            MemberRow { name: "walter".into(), ..MemberRow::default() },
+            MemberRow { name: "petra".into(), ..MemberRow::default() },
+        ])));
+        ui.global::<Poke>().set_me("walter".into());
+        ui.global::<Poke>().set_on(on);
+        apply_strings(&ui, 0);
+        ui.show().expect("show headless");
+        ui
+    }
+
+    /// One real right press inside `area`, `fx` across its width (1.0 = the
+    /// right edge) and vertically centred.
+    #[cfg(feature = "live-preview")]
+    fn right_click(ui: &AppWindow, area: &i_slint_backend_testing::ElementHandle, fx: f32) {
+        let pos = area.absolute_position();
+        let size = area.size();
+        let at = slint::LogicalPosition::new(
+            pos.x + (size.width * fx).min(size.width - 2.0),
+            pos.y + size.height / 2.0,
+        );
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at });
+        ui.window().dispatch_event(slint::platform::WindowEvent::PointerPressed {
+            position: at,
+            button: slint::platform::PointerEventButton::Right,
+        });
+    }
+
+    /// The open poke menu, found by the title its single item carries.
+    #[cfg(feature = "live-preview")]
+    fn poke_menu_open(
+        ui: &AppWindow,
+        label: &str,
+    ) -> Option<i_slint_backend_testing::ElementHandle> {
+        i_slint_backend_testing::ElementHandle::find_by_accessible_label(ui, label).next()
     }
 
     /// The poke gate lives in ONE place (`Poke.can`, theme.slint) because

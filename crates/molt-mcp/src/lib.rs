@@ -1245,6 +1245,13 @@ pub fn tools() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "clear_notice",
+            command: "clear_notice",
+            description: "Acknowledge the transient session notice (read_session.notice) - it has been seen. A one-shot notice such as a minted recovery link otherwise stays in the session and re-opens its dialog on the next window.",
+            schema: || json!({ "type": "object", "properties": {} }),
+            build: |_| Ok(Command::ClearNotice),
+        },
+        ToolDef {
             name: "close_workspace",
             command: "close_workspace",
             description: "Close the active workspace and return to the choice screen.",

@@ -195,42 +195,17 @@ component SoundAlertsGroup inherits DetailGroup {
     }
 }
 
-// One button of the Settings tab bar. The bar is ONE row: a tab whose TITLE
-// does not fit wraps its own title onto a second line instead of the bar
-// breaking into two rows.
-//
-// That needs a floor. A word-wrapping Slint Text reports min-width 0, so the
-// row would otherwise shrink every tab — including the single-word ones, which
-// cannot wrap — until the letters are clipped. `floor` is the same title with
-// a newline at every break opportunity (Rust: `tab_title_floor`); an unseen
-// Text of it has exactly the width of the widest unbreakable
-// chunk, measured in the real font, and that plus the padding is this tab's
-// minimum width. So: a single-word tab never shrinks at all, and a wrappable
-// one shrinks only down to its longest word — it wraps, it never clips.
+// One settings tab. Its title is NEVER broken inside the tab - the BAR wraps
+// into a second row instead (below), so a tab is exactly one line high and as
+// wide as its title needs.
 //
 // `pad` is tighter than the default button: eight labels are a lot of width.
 component SettingsTab inherits AppButton {
     in property <int> index;
-    // the title broken at every line-break opportunity — Strings.set-tab-*-floor
-    in property <string> floor;
     in-out property <int> current;
     pad: 8px;
-    wrap-label: true;
-    // room for TWO 14px lines (≈33px) — fixed, so the bar keeps its height
-    // whether or not a title happens to wrap at the current window width
-    height: 38px;
-    min-width: tab-floor.preferred-width + 2 * root.pad;
+    height: 30px;
     primary: root.current == root.index;
-    // Measured, never seen: drawn transparent rather than `visible: false`,
-    // because that lowers to a Clip that expands to the button's geometry —
-    // it would clip nothing away. It carries the SAME font as the label, so
-    // its preferred width is the real floor in the real font.
-    tab-floor := Text {
-        text: root.floor;
-        color: transparent;
-        font-size: Theme.fs-body;
-        font-weight: 600;
-    }
     clicked => {
         root.current = root.index;
     }
@@ -803,19 +778,16 @@ export component AppWindow inherits Window {
     // the default actually shows names rather than eliding them at the floor.
     preferred-width: 1060px;
     preferred-height: 720px;
-    // Raised 760 → 900 for the one-row settings tab bar. Measured (DejaVu Sans
-    // Bold 14px, the default sans here), German — the widest set:
-    // Allgemein 79 · Workspace 87 · Backup 58 · Anonymitäts-Netzwerk 181 ·
-    // Nostr-Relays 101 · MCP 35 · Node 41 · Chain-History 108 = 690px of text,
-    // + 8 tabs × 2 × 8px padding + 7 × 6px spacing = 860px of bar. The bar sits
-    // in the content area: window − 64px icon rail − 2 × 24px pane padding, so
-    // 860px of bar wants 972px of window. Rather than demand that as a MINIMUM,
-    // the minimum buys the row enough width to carry the widest German title on
-    // two lines: 860 − 75 (the wrap saved by "Anonymitäts-|Netzwerk") = 785px of
-    // bar → 897px of window, rounded to 900. Narrower still is safe (the bar's
-    // absolute floor — every wrappable title on two lines — is 686px of bar,
-    // i.e. 798px of window); it just wraps more titles.
-    // …and raised 900 → 990 for the same table. Leaving the minimum at 900
+    // The settings tab bar no longer constrains the minimum: a title never
+    // breaks inside its tab, the BAR takes a second row instead (its own
+    // measurement decides where). For the record, the German set at DejaVu
+    // Sans Bold 14px — Allgemein 79 · Workspace 87 · Backup 58 ·
+    // Anonymitäts-Netzwerk 181 · Nostr-Relays 101 · MCP 35 · Node 41 ·
+    // Chain-History 108 = 690px of text, + 8 tabs × 2 × 8px padding +
+    // 7 × 6px spacing = 860px of bar — fits one row in the content area
+    // (window − 64px icon rail − 2 × 24px pane padding) from 972px of window
+    // and wraps below that.
+    // The minimum comes from the Open screen's table. Leaving the minimum at 900
     // would keep the bug reachable by dragging the window narrow: the
     // Flickable's viewport is `self.width`, so the table does not scroll
     // horizontally, it CLIPS — and Delete is the last column, so it is always
@@ -1415,6 +1387,14 @@ export component AppWindow inherits Window {
     in-out property <string> recovery-link;
     in-out property <string> recovery-link-error;
     in-out property <bool> recover-link-open: false;
+    // Closing the link dialog ACKNOWLEDGES the notice that opened it: the
+    // session keeps a notice until something replaces it, so an unacknowledged
+    // one-shot link would re-open this dialog on the next fresh window.
+    callback clear-notice();
+    function close-recover-link() {
+        root.recover-link-open = false;
+        root.clear-notice();
+    }
     in-out property <string> recover-link-member;
     // the rejoiner's recovery link (the peer way on the Restore screen; the
     // phrase is the shared rw-seed) …
@@ -1884,7 +1864,7 @@ export component AppWindow inherits Window {
         if (root.wizard-log-open) {
             root.wizard-log-open = false;
         } else if (root.recover-link-open) {
-            root.recover-link-open = false;
+            root.close-recover-link();
         } else if (root.confirm-quit-open) {
             root.confirm-quit-open = false;
         } else if (root.confirm-abort-ritual-open) {
@@ -5669,6 +5649,11 @@ export component AppWindow inherits Window {
                                                 text: Strings.mp-col-desc;
                                                 color: Theme.faint;
                                                 font-size: Theme.fs-cap;
+                                                // the plain headers carry the
+                                                // SortHeader's weight - at 400
+                                                // they read as a greyed-out
+                                                // column next to the sortable ones
+                                                font-weight: 700;
                                                 horizontal-stretch: 2;
                                                 min-width: 90px;
                                                 // a header must never drive
@@ -5726,6 +5711,7 @@ export component AppWindow inherits Window {
                                                 text: Strings.om-col-recovery;
                                                 color: Theme.faint;
                                                 font-size: Theme.fs-cap;
+                                                font-weight: 700;
                                                 width: 180px;
                                                 horizontal-alignment: right;
                                             }
@@ -5752,11 +5738,12 @@ export component AppWindow inherits Window {
                                             // own seat; no opaque TouchArea covers
                                             // the row, so the menu receives the
                                             // right-click natively (no show() dance)
-                                            ContextMenuArea {
-                                                enabled: Poke.can(m.name);
+                                            om-row-menu := ContextMenuArea {
+                                                enabled: Poke.shows(m.name);
                                                 Menu {
                                                     MenuItem {
                                                         title: Strings.mem-poke;
+                                                        enabled: Poke.on;
                                                         activated => {
                                                             Poke.go(m.name);
                                                         }
@@ -5872,9 +5859,14 @@ export component AppWindow inherits Window {
                                                     }
                                                 }
                                                 // the seat's own description:
-                                                // two lines, elided, the full
-                                                // text on hover
-                                                md-menu := ContextMenuArea {
+                                                // two lines, elided. NO hover
+                                                // tooltip - a full description
+                                                // makes a bubble too big to
+                                                // read and too sticky to shake
+                                                // off; the row's own menu area
+                                                // gets the right-click, so no
+                                                // TouchArea sits on top here
+                                                Rectangle {
                                                     horizontal-stretch: 2;
                                                     min-width: 90px;
                                                     // a wrapping Text reports
@@ -5883,15 +5875,6 @@ export component AppWindow inherits Window {
                                                     // not drive this column
                                                     preferred-width: 0px;
                                                     height: Theme.fs-cap * 2.7;
-                                                    enabled: Poke.can(m.name);
-                                                    Menu {
-                                                        MenuItem {
-                                                            title: Strings.mem-poke;
-                                                            activated => {
-                                                                Poke.go(m.name);
-                                                            }
-                                                        }
-                                                    }
                                                     Text {
                                                         width: 100%;
                                                         height: 100%;
@@ -5901,44 +5884,22 @@ export component AppWindow inherits Window {
                                                         wrap: word-wrap;
                                                         overflow: elide;
                                                     }
-                                                    // hover shows the full
-                                                    // text; the right-click has
-                                                    // to open the menu
-                                                    // explicitly here - this
-                                                    // TouchArea sits ABOVE the
-                                                    // row's own menu area and
-                                                    // would eat it
-                                                    md-ta := TouchArea {
-                                                        changed has-hover => {
-                                                            if (self.has-hover && m.desc != "") {
-                                                                HintTip.label = m.desc;
-                                                                HintTip.ax = self.absolute-position.x;
-                                                                HintTip.ay = self.absolute-position.y + self.height + 6px;
-                                                            } else if (HintTip.ax == self.absolute-position.x
-                                                                && HintTip.ay == self.absolute-position.y + self.height + 6px) {
-                                                                HintTip.label = "";
-                                                            }
-                                                        }
-                                                        pointer-event(ev) => {
-                                                            if (ev.kind == PointerEventKind.down
-                                                                && ev.button == PointerEventButton.right
-                                                                && Poke.can(m.name)) {
-                                                                md-menu.show({ x: self.mouse-x, y: self.mouse-y });
-                                                            }
-                                                        }
-                                                    }
                                                 }
                                                 // the own seat edits its line;
-                                                // the column keeps the room on
-                                                // every row so the table stays
-                                                // in one grid
+                                                // the pencil sits at the FOOT
+                                                // of the description cell, not
+                                                // at its top edge. The column
+                                                // keeps the room on every row
+                                                // so the table stays in one grid
                                                 Rectangle {
                                                     width: 22px;
-                                                    height: 22px;
+                                                    height: Theme.fs-cap * 2.7;
                                                     if m.name == root.node-member: AppButton {
                                                         width: 22px;
                                                         height: 22px;
                                                         pad: 0px;
+                                                        x: 0px;
+                                                        y: parent.height - self.height;
                                                         label: "✎";
                                                         tooltip: Strings.mp-desc-edit;
                                                         clicked => {
@@ -6273,10 +6234,11 @@ export component AppWindow inherits Window {
                                                 // target like every other one
                                                 ContextMenuArea {
                                                     width: 110px;
-                                                    enabled: Poke.can(u.user);
+                                                    enabled: Poke.shows(u.user);
                                                     Menu {
                                                         MenuItem {
                                                             title: Strings.mem-poke;
+                                                            enabled: Poke.on;
                                                             activated => {
                                                                 Poke.go(u.user);
                                                             }
@@ -6947,70 +6909,155 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-                // The eight tabs, in ONE row. A tab whose title does not fit
-                // wraps THAT title onto a second line (SettingsTab: word-wrap
-                // plus a per-tab minimum width taken from its longest
-                // unbreakable chunk) — the bar itself never breaks into a
-                // second row any more. Slint spreads a shortfall evenly over
-                // the tabs that still have slack, so a narrow pane may wrap
-                // several titles at once; a title with no break opportunity
-                // ("MCP") is never shrunk and therefore never clipped.
-                HorizontalLayout {
-                    spacing: 6px;
-                    SettingsTab {
-                        label: Strings.set-tab-general;
-                        floor: Strings.set-tab-general-floor;
-                        index: 0;
-                        current <=> root.set-tab;
-                    }
-                    SettingsTab {
-                        label: Strings.set-tab-workspace;
-                        floor: Strings.set-tab-workspace-floor;
-                        index: 1;
-                        current <=> root.set-tab;
-                    }
-                    SettingsTab {
-                        label: Strings.set-tab-backup;
-                        floor: Strings.set-tab-backup-floor;
-                        index: 2;
-                        current <=> root.set-tab;
-                    }
-                    SettingsTab {
-                        label: Strings.set-tab-anon;
-                        floor: Strings.set-tab-anon-floor;
-                        index: 3;
-                        current <=> root.set-tab;
-                    }
-                    SettingsTab {
-                        label: Strings.set-tab-relays;
-                        floor: Strings.set-tab-relays-floor;
-                        index: 4;
-                        current <=> root.set-tab;
-                    }
-                    SettingsTab {
-                        label: Strings.set-tab-mcp;
-                        floor: Strings.set-tab-mcp-floor;
-                        index: 5;
-                        current <=> root.set-tab;
-                    }
-                    SettingsTab {
-                        label: Strings.set-tab-node;
-                        floor: Strings.set-tab-node-floor;
-                        index: 6;
-                        current <=> root.set-tab;
-                    }
-                    // only WITH an open workspace: the chain history is that
-                    // workspace's — without one the tab is pure confusion
-                    if root.active-workspace != "": SettingsTab {
-                        label: Strings.set-tab-chain;
-                        floor: Strings.set-tab-chain-floor;
-                        index: 7;
-                        current <=> root.set-tab;
-                    }
-                    // the tabs keep their own width (stretch 0); everything
-                    // left over collects here, so the row stays left-aligned
-                    Rectangle {
-                        horizontal-stretch: 1;
+                // The tabs. A TITLE never breaks inside its tab; the BAR
+                // breaks instead, into a second row, as soon as one row
+                // cannot hold them all. The split is MEASURED, not guessed:
+                // `tm0..tm7` carry the titles in the real font (transparent,
+                // never `visible: false` — that lowers to a Clip that would
+                // clip nothing away), `c1..c8` are the widths a row holding
+                // the first n tabs needs, and `row1` is the largest n that
+                // still fits. Two rows are enough by construction: the window
+                // floor leaves ~878px of bar, and the widest half of the
+                // eight German titles is far below that.
+                set-tabs := Rectangle {
+                    property <length> tgap: 6px;
+                    // 2 × SettingsTab.pad
+                    property <length> tpad: 16px;
+                    property <int> count: root.active-workspace != "" ? 8 : 7;
+                    property <length> w0: tm0.preferred-width + self.tpad;
+                    property <length> w1: tm1.preferred-width + self.tpad;
+                    property <length> w2: tm2.preferred-width + self.tpad;
+                    property <length> w3: tm3.preferred-width + self.tpad;
+                    property <length> w4: tm4.preferred-width + self.tpad;
+                    property <length> w5: tm5.preferred-width + self.tpad;
+                    property <length> w6: tm6.preferred-width + self.tpad;
+                    property <length> w7: tm7.preferred-width + self.tpad;
+                    property <length> c1: self.w0;
+                    property <length> c2: self.c1 + self.tgap + self.w1;
+                    property <length> c3: self.c2 + self.tgap + self.w2;
+                    property <length> c4: self.c3 + self.tgap + self.w3;
+                    property <length> c5: self.c4 + self.tgap + self.w4;
+                    property <length> c6: self.c5 + self.tgap + self.w5;
+                    property <length> c7: self.c6 + self.tgap + self.w6;
+                    property <length> c8: self.c7 + self.tgap + self.w7;
+                    property <int> row1: Math.min(self.count,
+                        self.c8 <= self.width ? 8
+                        : self.c7 <= self.width ? 7
+                        : self.c6 <= self.width ? 6
+                        : self.c5 <= self.width ? 5
+                        : self.c4 <= self.width ? 4
+                        : self.c3 <= self.width ? 3
+                        : self.c2 <= self.width ? 2
+                        : 1);
+                    // x/y-anchored children carry no size constraint, so the
+                    // bar states its own height (30px per row + the gap)
+                    height: self.row1 < self.count ? 66px : 30px;
+                    tm0 := Text { text: Strings.set-tab-general; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
+                    tm1 := Text { text: Strings.set-tab-workspace; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
+                    tm2 := Text { text: Strings.set-tab-backup; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
+                    tm3 := Text { text: Strings.set-tab-anon; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
+                    tm4 := Text { text: Strings.set-tab-relays; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
+                    tm5 := Text { text: Strings.set-tab-mcp; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
+                    tm6 := Text { text: Strings.set-tab-node; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
+                    tm7 := Text { text: Strings.set-tab-chain; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
+                    VerticalLayout {
+                        spacing: 6px;
+                        alignment: start;
+                        HorizontalLayout {
+                            spacing: 6px;
+                            if set-tabs.row1 > 0: SettingsTab {
+                                label: Strings.set-tab-general;
+                                index: 0;
+                                current <=> root.set-tab;
+                            }
+                            if set-tabs.row1 > 1: SettingsTab {
+                                label: Strings.set-tab-workspace;
+                                index: 1;
+                                current <=> root.set-tab;
+                            }
+                            if set-tabs.row1 > 2: SettingsTab {
+                                label: Strings.set-tab-backup;
+                                index: 2;
+                                current <=> root.set-tab;
+                            }
+                            if set-tabs.row1 > 3: SettingsTab {
+                                label: Strings.set-tab-anon;
+                                index: 3;
+                                current <=> root.set-tab;
+                            }
+                            if set-tabs.row1 > 4: SettingsTab {
+                                label: Strings.set-tab-relays;
+                                index: 4;
+                                current <=> root.set-tab;
+                            }
+                            if set-tabs.row1 > 5: SettingsTab {
+                                label: Strings.set-tab-mcp;
+                                index: 5;
+                                current <=> root.set-tab;
+                            }
+                            if set-tabs.row1 > 6: SettingsTab {
+                                label: Strings.set-tab-node;
+                                index: 6;
+                                current <=> root.set-tab;
+                            }
+                            if set-tabs.row1 > 7: SettingsTab {
+                                label: Strings.set-tab-chain;
+                                index: 7;
+                                current <=> root.set-tab;
+                            }
+                            // the tabs keep their own width (stretch 0);
+                            // everything left over collects here, so the row
+                            // stays left-aligned
+                            Rectangle {
+                                horizontal-stretch: 1;
+                            }
+                        }
+                        if set-tabs.row1 < set-tabs.count: HorizontalLayout {
+                            spacing: 6px;
+                            if set-tabs.row1 <= 0: SettingsTab {
+                                label: Strings.set-tab-general;
+                                index: 0;
+                                current <=> root.set-tab;
+                            }
+                            if set-tabs.row1 <= 1: SettingsTab {
+                                label: Strings.set-tab-workspace;
+                                index: 1;
+                                current <=> root.set-tab;
+                            }
+                            if set-tabs.row1 <= 2: SettingsTab {
+                                label: Strings.set-tab-backup;
+                                index: 2;
+                                current <=> root.set-tab;
+                            }
+                            if set-tabs.row1 <= 3: SettingsTab {
+                                label: Strings.set-tab-anon;
+                                index: 3;
+                                current <=> root.set-tab;
+                            }
+                            if set-tabs.row1 <= 4: SettingsTab {
+                                label: Strings.set-tab-relays;
+                                index: 4;
+                                current <=> root.set-tab;
+                            }
+                            if set-tabs.row1 <= 5: SettingsTab {
+                                label: Strings.set-tab-mcp;
+                                index: 5;
+                                current <=> root.set-tab;
+                            }
+                            if set-tabs.row1 <= 6: SettingsTab {
+                                label: Strings.set-tab-node;
+                                index: 6;
+                                current <=> root.set-tab;
+                            }
+                            if set-tabs.count > 7 && set-tabs.row1 <= 7: SettingsTab {
+                                label: Strings.set-tab-chain;
+                                index: 7;
+                                current <=> root.set-tab;
+                            }
+                            Rectangle {
+                                horizontal-stretch: 1;
+                            }
+                        }
                     }
                 }
                 set-pane := Rectangle {
@@ -9064,7 +9111,7 @@ export component AppWindow inherits Window {
         // copy only exists once there is a link to copy
         confirm-enabled: root.recovery-link != "";
         dismissed => {
-            root.recover-link-open = false;
+            root.close-recover-link();
         }
         confirmed => {
             // copy, but keep the dialog open — the link stays readable

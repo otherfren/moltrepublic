@@ -520,8 +520,16 @@ export global Poke {
     in property <bool> on: false;
     in property <string> me; // the own seat (never pokable)
     callback go(string);
+    // Whether a name gets the menu AT ALL. The switch is deliberately NOT
+    // part of this: an operator who has poking off must still SEE the entry
+    // (greyed) - a feature that leaves no trace when it is off cannot be
+    // found, and reads as a dead right-click.
+    public pure function shows(who: string) -> bool {
+        return who != "" && who != root.me;
+    }
+    // Whether the entry can be activated - the applied switch on top.
     public pure function can(who: string) -> bool {
-        return root.on && who != "" && who != root.me;
+        return root.on && root.shows(who);
     }
 }
 
@@ -993,14 +1001,6 @@ export global Strings {
     // Text reports min-width 0, so each tab takes its MINIMUM width from this
     // string's preferred width — its widest unbreakable chunk, measured in the
     // real font. Never shown.
-    in property <string> set-tab-general-floor;
-    in property <string> set-tab-workspace-floor;
-    in property <string> set-tab-backup-floor;
-    in property <string> set-tab-anon-floor;
-    in property <string> set-tab-relays-floor;
-    in property <string> set-tab-mcp-floor;
-    in property <string> set-tab-node-floor;
-    in property <string> set-tab-chain-floor;
     in property <string> set-ws-choose;
     in property <string> set-ws-dir-title;
     in property <string> set-ws-dir-body;

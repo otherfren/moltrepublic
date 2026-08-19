@@ -2275,6 +2275,33 @@ mod patch_tests {
         }
     }
 
+    /// **A one-shot notice is acknowledgeable.** The session keeps a notice
+    /// until something replaces it - which is right for a status line and
+    /// wrong for one that OPENS a dialog: a minted recovery link would
+    /// re-open its modal on every fresh window, forever. `ClearNotice` is
+    /// the operator saying they have seen it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_seen_notice_can_be_acknowledged_away() {
+        let w = node();
+        w.execute(Command::ConfigNotice {
+            notice: "recovery-link:molt://recover/abc".to_string(),
+        })
+        .await
+        .expect("notice");
+        let seen = match w.execute(Command::ReadSession).await.expect("read") {
+            Reply::Session(s) => s.notice.clone(),
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert_eq!(seen, "recovery-link:molt://recover/abc");
+
+        w.execute(Command::ClearNotice).await.expect("clear");
+        let after = match w.execute(Command::ReadSession).await.expect("read") {
+            Reply::Session(s) => s.notice.clone(),
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert!(after.is_empty(), "the acknowledged notice is gone: {after:?}");
+    }
+
     /// **A patch changes what it names and NOTHING else.**
     ///
     /// The hazard it exists for: a full-replace payload defaults every

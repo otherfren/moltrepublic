@@ -540,10 +540,11 @@ export component ChatRow inherits Rectangle {
             // gate - the switch, and never the own seat (own message => lead
             // IS the own seat; a system line has no author at all)
             author-menu := ContextMenuArea {
-                enabled: Poke.can(root.line.lead);
+                enabled: Poke.shows(root.line.lead);
                 Menu {
                     MenuItem {
                         title: Strings.mem-poke;
+                        enabled: Poke.on;
                         activated => {
                             Poke.go(root.line.lead);
                         }
@@ -634,10 +635,11 @@ export component ChatRow inherits Rectangle {
         // deleted: the text is gone, only the tombstone remains - the name
         // in it is still a poke target
         if root.line.deleted-by != "": ContextMenuArea {
-            enabled: Poke.can(root.line.deleted-by);
+            enabled: Poke.shows(root.line.deleted-by);
             Menu {
                 MenuItem {
                     title: Strings.mem-poke;
+                    enabled: Poke.on;
                     activated => {
                         Poke.go(root.line.deleted-by);
                     }
@@ -730,10 +732,11 @@ export component ChatRow inherits Rectangle {
                         // presence-dot idiom)
                         background: rc.read ? Theme.good : Theme.warn;
                         rcmenu := ContextMenuArea {
-                            enabled: Poke.can(rc.name);
+                            enabled: Poke.shows(rc.name);
                             Menu {
                                 MenuItem {
                                     title: Strings.mem-poke;
+                                    enabled: Poke.on;
                                     activated => {
                                         Poke.go(rc.name);
                                     }
@@ -756,7 +759,7 @@ export component ChatRow inherits Rectangle {
                                 pointer-event(ev) => {
                                     // the TouchArea sits ABOVE the ContextMenuArea
                                     // and eats the right click - open explicitly
-                                    if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right && Poke.can(rc.name)) {
+                                    if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right && Poke.shows(rc.name)) {
                                         rcmenu.show({ x: self.mouse-x, y: self.mouse-y });
                                     }
                                 }
@@ -932,10 +935,11 @@ export component MemberPill inherits Rectangle {
     border-width: Theme.border-w;
     border-color: Theme.line;
     mpmenu := ContextMenuArea {
-        enabled: Poke.can(root.m.name);
+        enabled: Poke.shows(root.m.name);
         Menu {
             MenuItem {
                 title: Strings.mem-poke;
+                enabled: Poke.on;
                 activated => {
                     Poke.go(root.m.name);
                 }
@@ -977,7 +981,7 @@ export component MemberPill inherits Rectangle {
             pointer-event(ev) => {
                 // the TouchArea sits ABOVE the ContextMenuArea and eats the
                 // right click - open the menu explicitly
-                if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right && Poke.can(root.m.name)) {
+                if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right && Poke.shows(root.m.name)) {
                     mpmenu.show({ x: self.mouse-x, y: self.mouse-y });
                 }
             }
@@ -1251,7 +1255,7 @@ export component DecisionTable inherits Rectangle {
                     vertical-alignment: center;
                     overflow: elide;
                 }
-                Text {
+                dt-value := Text {
                     // a patch's value IS a multi-line git patch and a
                     // charter is a whole document — as an index cell both
                     // are unreadable noise. The title names the decision
@@ -1287,10 +1291,11 @@ export component DecisionTable inherits Rectangle {
                                 border-color: v.vote == 1 ? Theme.good
                                     : (v.vote == 2 ? Theme.bad : Theme.line);
                                 vdmenu := ContextMenuArea {
-                                    enabled: Poke.can(v.member);
+                                    enabled: Poke.shows(v.member);
                                     Menu {
                                         MenuItem {
                                             title: Strings.mem-poke;
+                                            enabled: Poke.on;
                                             activated => {
                                                 Poke.go(v.member);
                                             }
@@ -1311,7 +1316,7 @@ export component DecisionTable inherits Rectangle {
                                             }
                                         }
                                         pointer-event(ev) => {
-                                            if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right && Poke.can(v.member)) {
+                                            if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right && Poke.shows(v.member)) {
                                                 vdmenu.show({ x: self.mouse-x, y: self.mouse-y });
                                             }
                                         }
@@ -1476,10 +1481,11 @@ export component ProposalCard inherits Rectangle {
             // only a DECLINE names a member (withdraw/supersede read
             // mechanical), so only that verdict is a poke target
             ContextMenuArea {
-                enabled: !root.p.withdrawn && !root.p.superseded && Poke.can(root.p.declined-by);
+                enabled: !root.p.withdrawn && !root.p.superseded && Poke.shows(root.p.declined-by);
                 Menu {
                     MenuItem {
                         title: Strings.mem-poke;
+                        enabled: Poke.on;
                         activated => {
                             Poke.go(root.p.declined-by);
                         }
@@ -1726,10 +1732,11 @@ export component ProposalCard inherits Rectangle {
                             background: v.vote == 1 ? Theme.good.transparentize(0.86)
                                 : (v.vote == 2 ? Theme.bad.transparentize(0.86) : Theme.panel);
                             ContextMenuArea {
-                                enabled: Poke.can(v.member);
+                                enabled: Poke.shows(v.member);
                                 Menu {
                                     MenuItem {
                                         title: Strings.mem-poke;
+                                        enabled: Poke.on;
                                         activated => {
                                             Poke.go(v.member);
                                         }

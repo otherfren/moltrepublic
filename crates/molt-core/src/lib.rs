@@ -4700,6 +4700,12 @@ pub enum Command {
     },
     /// Abandon the join (idle again) and return to the choice screen.
     JoinCancel,
+    /// **Acknowledge the transient session notice** — the operator has seen
+    /// it, so it stops being state. Without this a one-shot notice (a minted
+    /// recovery link above all) lingers in the session for good and re-opens
+    /// its dialog on every fresh window. A human "I have read this", so it is
+    /// a tool on both surfaces.
+    ClearNotice,
     /// **Poke a member** — a directed, ephemeral nudge with no governance
     /// meaning: the target's node (if it enabled poking) shows who poked,
     /// plays its configured sound and runs its wake command. A human
