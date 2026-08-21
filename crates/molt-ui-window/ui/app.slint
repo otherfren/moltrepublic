@@ -214,6 +214,93 @@ component SettingsTab inherits AppButton {
 // Settings → Anonymity network: the anonymity network form group (tor mode + SOCKS
 // port) — factored like the General pair so the wide pane can seat it and
 // a narrow pane shows the SAME content.
+// One S3 bucket: its name, its byte cap, and its own live probe. Endpoint
+// and credentials are configured ONCE above and shared by every bucket
+// (docs/storage/s3_buckets.md).
+component S3BucketGroup inherits DetailGroup {
+    in-out property <string> bucket;
+    // byte cap as whole MiB, "0"/empty = no limit
+    in-out property <string> cap;
+    // "" untested · "testing" · "ok" · "error: …"
+    in property <string> test-state;
+    in property <string> cap-hint;
+    // set on a bucket nothing writes to yet; empty hides the line
+    in property <string> unused-note;
+    in property <string> bucket-placeholder;
+    // the shared account is filled in, so a probe can actually be signed
+    in property <bool> account-ready;
+    callback test();
+    pack: true;
+    // honest first: a bucket with no consumer says so before its fields
+    if root.unused-note != "": Text {
+        text: root.unused-note;
+        color: Theme.warn;
+        font-size: Theme.fs-cap;
+        wrap: word-wrap;
+        preferred-width: 0px;
+    }
+    HorizontalLayout {
+        spacing: 12px;
+        FieldLabel {
+            horizontal-stretch: 1;
+            label: Strings.field-s3-bucket;
+            AppField {
+                text <=> root.bucket;
+                placeholder: root.bucket-placeholder;
+            }
+        }
+        FieldLabel {
+            label: Strings.field-s3-max;
+            AppField {
+                width: 140px;
+                numeric: true;
+                text <=> root.cap;
+                placeholder: "0";
+            }
+        }
+        // bottom-aligned so the button lines up with the fields, not their
+        // labels
+        VerticalLayout {
+            alignment: end;
+            AppButton {
+                height: 38px;
+                icon: @image-url("assets/cloud.svg");
+                icon-set: true;
+                label: Strings.set-s3-test;
+                // honest copy: the probe is a real signed HEAD over the
+                // configured transport (Tor when enabled)
+                tooltip: Strings.s3-test-tip;
+                tooltip-below: true;
+                enabled: root.account-ready && root.bucket != "";
+                clicked => {
+                    root.test();
+                }
+            }
+        }
+    }
+    // the streamed probe verdict (hidden until a test ran); errors carry
+    // their honest class
+    if root.test-state != "": Text {
+        text: root.test-state == "testing" ? Strings.smp-testing
+            : root.test-state == "ok" ? Strings.s3-ok
+            : root.test-state;
+        color: root.test-state == "ok" ? Theme.good
+            : root.test-state == "testing" ? Theme.faint
+            : Theme.bad;
+        font-size: Theme.fs-cap;
+        wrap: word-wrap;
+        preferred-width: 0px;
+    }
+    // the cap rule, stated once under the row it belongs to
+    Text {
+        text: root.cap-hint;
+        color: Theme.faint;
+        font-size: Theme.fs-cap;
+        wrap: word-wrap;
+        preferred-width: 0px;
+    }
+}
+
 component AnonNetworkGroup inherits DetailGroup {
     in-out property <int> network-index;
     in-out property <int> tor-mode-index;
@@ -1662,14 +1749,27 @@ export component AppWindow inherits Window {
         root.relay-clearnet-ack = false;
     }
     in-out property <bool> cfg-s3-backup: false;
+    // ONE S3 account - endpoint and credentials - shared by every bucket
+    // below (docs/storage/s3_buckets.md).
     in-out property <string> cfg-s3-endpoint;
     in-out property <string> cfg-s3-access;
     in-out property <string> cfg-s3-secret;
+    // Bucket 1: workspace backups.
     in-out property <string> cfg-s3-bucket;
+    // byte quota as whole MiB, edited as text: a +/- stepper cannot reach a
+    // realistic bucket size. "0" (or empty) = no limit. Rust converts, and
+    // keeps a stored byte value that still renders as the same MiB unrounded.
+    in-out property <string> cfg-s3-max: "0";
     // pushed from Rust: "" untested · "testing" · "ok" · "error: …"
     in property <string> cfg-s3-test;
-    // run a live signed probe against the S3 target in the draft
-    callback test-s3();
+    // Bucket 2: media. Configured only - nothing writes media to S3 yet, and
+    // the panel says so rather than implying a feature that is not there.
+    in-out property <string> cfg-media-s3-bucket;
+    in-out property <string> cfg-media-s3-max: "0";
+    in property <string> cfg-media-s3-test;
+    // run a live signed probe against ONE bucket in the draft:
+    // "workspaces" | "media"
+    callback test-s3(string);
     // The Tor probe's verdict, pushed from Rust on every session update (it is
     // transient and lives outside the settings draft, like cfg-s3-test).
     // `cfg-tor-test` is the rung's key (molt_core::TorTestState::as_str) —
@@ -1838,7 +1938,7 @@ export component AppWindow inherits Window {
         root.open-seed = "";
         // the chain-history tab exists only WITH a workspace — leave it
         // before it turns into an empty pane
-        if (root.set-tab == 7) {
+        if (root.set-tab == 8) {
             root.set-tab = 0;
         }
     }
@@ -2827,7 +2927,7 @@ export component AppWindow inherits Window {
                                     label: Strings.cw-open-relay-settings;
                                     clicked => {
                                         root.settings-return = AppScreen.create;
-                                        root.set-tab = 4;
+                                        root.set-tab = 5;
                                         root.navigate(AppScreen.settings);
                                     }
                                 }
@@ -2876,7 +2976,7 @@ export component AppWindow inherits Window {
                                     label: Strings.cw-open-net-settings;
                                     clicked => {
                                         root.settings-return = AppScreen.create;
-                                        root.set-tab = 3;
+                                        root.set-tab = 4;
                                         root.navigate(AppScreen.settings);
                                     }
                                 }
@@ -2956,7 +3056,7 @@ export component AppWindow inherits Window {
                                     label: Strings.cw-open-net-settings;
                                     clicked => {
                                         root.settings-return = AppScreen.create;
-                                        root.set-tab = 3;
+                                        root.set-tab = 4;
                                         root.navigate(AppScreen.settings);
                                     }
                                 }
@@ -4388,7 +4488,7 @@ export component AppWindow inherits Window {
                             label: Strings.ow-backup-cfg;
                             clicked => {
                                 root.settings-return = AppScreen.restore;
-                                root.set-tab = 2;
+                                root.set-tab = 3;
                                 root.navigate(AppScreen.settings);
                             }
                         }
@@ -6943,18 +7043,18 @@ export component AppWindow inherits Window {
                 // The tabs. A TITLE never breaks inside its tab; the BAR
                 // breaks instead, into a second row, as soon as one row
                 // cannot hold them all. The split is MEASURED, not guessed:
-                // `tm0..tm7` carry the titles in the real font (transparent,
+                // `tm0..tm8` carry the titles in the real font (transparent,
                 // never `visible: false` — that lowers to a Clip that would
-                // clip nothing away), `c1..c8` are the widths a row holding
+                // clip nothing away), `c1..c9` are the widths a row holding
                 // the first n tabs needs, and `row1` is the largest n that
                 // still fits. Two rows are enough by construction: the window
                 // floor leaves ~878px of bar, and the widest half of the
-                // eight German titles is far below that.
+                // nine German titles is far below that.
                 set-tabs := Rectangle {
                     property <length> tgap: 6px;
                     // 2 × SettingsTab.pad
                     property <length> tpad: 16px;
-                    property <int> count: root.active-workspace != "" ? 8 : 7;
+                    property <int> count: root.active-workspace != "" ? 9 : 8;
                     property <length> w0: tm0.preferred-width + self.tpad;
                     property <length> w1: tm1.preferred-width + self.tpad;
                     property <length> w2: tm2.preferred-width + self.tpad;
@@ -6963,6 +7063,7 @@ export component AppWindow inherits Window {
                     property <length> w5: tm5.preferred-width + self.tpad;
                     property <length> w6: tm6.preferred-width + self.tpad;
                     property <length> w7: tm7.preferred-width + self.tpad;
+                    property <length> w8: tm8.preferred-width + self.tpad;
                     property <length> c1: self.w0;
                     property <length> c2: self.c1 + self.tgap + self.w1;
                     property <length> c3: self.c2 + self.tgap + self.w2;
@@ -6971,8 +7072,10 @@ export component AppWindow inherits Window {
                     property <length> c6: self.c5 + self.tgap + self.w5;
                     property <length> c7: self.c6 + self.tgap + self.w6;
                     property <length> c8: self.c7 + self.tgap + self.w7;
+                    property <length> c9: self.c8 + self.tgap + self.w8;
                     property <int> row1: Math.min(self.count,
-                        self.c8 <= self.width ? 8
+                        self.c9 <= self.width ? 9
+                        : self.c8 <= self.width ? 8
                         : self.c7 <= self.width ? 7
                         : self.c6 <= self.width ? 6
                         : self.c5 <= self.width ? 5
@@ -6986,11 +7089,12 @@ export component AppWindow inherits Window {
                     tm0 := Text { text: Strings.set-tab-general; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
                     tm1 := Text { text: Strings.set-tab-workspace; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
                     tm2 := Text { text: Strings.set-tab-backup; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
-                    tm3 := Text { text: Strings.set-tab-anon; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
-                    tm4 := Text { text: Strings.set-tab-relays; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
-                    tm5 := Text { text: Strings.set-tab-mcp; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
-                    tm6 := Text { text: Strings.set-tab-node; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
-                    tm7 := Text { text: Strings.set-tab-chain; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
+                    tm3 := Text { text: Strings.set-tab-s3; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
+                    tm4 := Text { text: Strings.set-tab-anon; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
+                    tm5 := Text { text: Strings.set-tab-relays; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
+                    tm6 := Text { text: Strings.set-tab-mcp; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
+                    tm7 := Text { text: Strings.set-tab-node; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
+                    tm8 := Text { text: Strings.set-tab-chain; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
                     VerticalLayout {
                         spacing: 6px;
                         alignment: start;
@@ -7012,28 +7116,33 @@ export component AppWindow inherits Window {
                                 current <=> root.set-tab;
                             }
                             if set-tabs.row1 > 3: SettingsTab {
-                                label: Strings.set-tab-anon;
+                                label: Strings.set-tab-s3;
                                 index: 3;
                                 current <=> root.set-tab;
                             }
                             if set-tabs.row1 > 4: SettingsTab {
-                                label: Strings.set-tab-relays;
+                                label: Strings.set-tab-anon;
                                 index: 4;
                                 current <=> root.set-tab;
                             }
                             if set-tabs.row1 > 5: SettingsTab {
-                                label: Strings.set-tab-mcp;
+                                label: Strings.set-tab-relays;
                                 index: 5;
                                 current <=> root.set-tab;
                             }
                             if set-tabs.row1 > 6: SettingsTab {
-                                label: Strings.set-tab-node;
+                                label: Strings.set-tab-mcp;
                                 index: 6;
                                 current <=> root.set-tab;
                             }
                             if set-tabs.row1 > 7: SettingsTab {
-                                label: Strings.set-tab-chain;
+                                label: Strings.set-tab-node;
                                 index: 7;
+                                current <=> root.set-tab;
+                            }
+                            if set-tabs.row1 > 8: SettingsTab {
+                                label: Strings.set-tab-chain;
+                                index: 8;
                                 current <=> root.set-tab;
                             }
                             // the tabs keep their own width (stretch 0);
@@ -7061,28 +7170,33 @@ export component AppWindow inherits Window {
                                 current <=> root.set-tab;
                             }
                             if set-tabs.row1 <= 3: SettingsTab {
-                                label: Strings.set-tab-anon;
+                                label: Strings.set-tab-s3;
                                 index: 3;
                                 current <=> root.set-tab;
                             }
                             if set-tabs.row1 <= 4: SettingsTab {
-                                label: Strings.set-tab-relays;
+                                label: Strings.set-tab-anon;
                                 index: 4;
                                 current <=> root.set-tab;
                             }
                             if set-tabs.row1 <= 5: SettingsTab {
-                                label: Strings.set-tab-mcp;
+                                label: Strings.set-tab-relays;
                                 index: 5;
                                 current <=> root.set-tab;
                             }
                             if set-tabs.row1 <= 6: SettingsTab {
-                                label: Strings.set-tab-node;
+                                label: Strings.set-tab-mcp;
                                 index: 6;
                                 current <=> root.set-tab;
                             }
-                            if set-tabs.count > 7 && set-tabs.row1 <= 7: SettingsTab {
-                                label: Strings.set-tab-chain;
+                            if set-tabs.row1 <= 7: SettingsTab {
+                                label: Strings.set-tab-node;
                                 index: 7;
+                                current <=> root.set-tab;
+                            }
+                            if set-tabs.count > 8 && set-tabs.row1 <= 8: SettingsTab {
+                                label: Strings.set-tab-chain;
+                                index: 8;
                                 current <=> root.set-tab;
                             }
                             Rectangle {
@@ -7354,87 +7468,25 @@ export component AppWindow inherits Window {
                                 height: 1px;
                                 background: Theme.line;
                             }
-                            // compact two-row credential block: endpoint with
-                            // the test button beside it, then the three keys
-                            // sharing one row — the mapping table below keeps
-                            // the height this saves
-                            HorizontalLayout {
+                            // nothing can land anywhere without a bucket, and
+                            // its address lives next door: one line, one jump
+                            if root.cfg-s3-endpoint == "": HorizontalLayout {
                                 vertical-stretch: 0;
-                                spacing: 12px;
-                                FieldLabel {
-                                    horizontal-stretch: 1;
-                                    label: Strings.field-s3-endpoint;
-                                    AppField {
-                                        text <=> root.cfg-s3-endpoint;
-                                        placeholder: "https://s3.example.org · http://….onion";
+                                spacing: 8px;
+                                DotLabel {
+                                    tone: Theme.warn;
+                                    label: Strings.bk-needs-s3;
+                                    label-color: Theme.text;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                AppButton {
+                                    height: 28px;
+                                    pad: 10px;
+                                    label: Strings.set-tab-s3;
+                                    clicked => {
+                                        root.set-tab = 3;
                                     }
                                 }
-                                // bottom-aligned so the button lines up with
-                                // the endpoint field, not its label
-                                VerticalLayout {
-                                    alignment: end;
-                                    AppButton {
-                                        height: 38px;
-                                        icon: @image-url("assets/cloud.svg");
-                                        icon-set: true;
-                                        label: Strings.set-s3-test;
-                                        // honest copy: the probe is a real
-                                        // signed HEAD over the configured
-                                        // transport (Tor when enabled)
-                                        tooltip: Strings.s3-test-tip;
-                                        tooltip-below: true;
-                                        enabled: root.cfg-s3-endpoint != "" && root.cfg-s3-access != "";
-                                        clicked => {
-                                            root.test-s3();
-                                        }
-                                    }
-                                }
-                            }
-                            // the streamed probe verdict (hidden until a
-                            // test ran); errors carry their honest class
-                            if root.cfg-s3-test != "": Text {
-                                vertical-stretch: 0;
-                                text: root.cfg-s3-test == "testing" ? Strings.smp-testing
-                                    : root.cfg-s3-test == "ok" ? Strings.s3-ok
-                                    : root.cfg-s3-test;
-                                color: root.cfg-s3-test == "ok" ? Theme.good
-                                    : root.cfg-s3-test == "testing" ? Theme.faint
-                                    : Theme.bad;
-                                font-size: Theme.fs-cap;
-                                wrap: word-wrap;
-                                preferred-width: 0px;
-                            }
-                            HorizontalLayout {
-                                vertical-stretch: 0;
-                                spacing: 12px;
-                                FieldLabel {
-                                    label: Strings.field-s3-access;
-                                    horizontal-stretch: 1;
-                                    AppField {
-                                        text <=> root.cfg-s3-access;
-                                        placeholder: "AKIA…";
-                                    }
-                                }
-                                FieldLabel {
-                                    label: Strings.field-s3-secret;
-                                    horizontal-stretch: 1;
-                                    AppField {
-                                        secret: true;
-                                        text <=> root.cfg-s3-secret;
-                                    }
-                                }
-                                FieldLabel {
-                                    label: Strings.field-s3-bucket;
-                                    horizontal-stretch: 1;
-                                    AppField {
-                                        text <=> root.cfg-s3-bucket;
-                                        placeholder: "media-archive";
-                                    }
-                                }
-                            }
-                            Rectangle {
-                                height: 1px;
-                                background: Theme.line;
                             }
                             // local ↔ bucket mapping: every row has at least
                             // one side; auto-backup toggles per workspace.
@@ -7669,10 +7721,75 @@ export component AppWindow inherits Window {
                                 wrap: word-wrap;
                             }
                         }
+                        // S3 config: WHERE things go - two fully separate
+                        // targets, each with its own endpoint, credentials,
+                        // bucket and byte cap (docs/storage/s3_buckets.md).
+                        // WHEN and for WHICH workspace a backup is written is
+                        // the Backup tab's errand, not this one's.
+                        if root.set-tab == 3: VerticalLayout {
+                            spacing: 14px;
+                            alignment: start;
+                            // one account, several buckets: the endpoint and
+                            // the credentials are configured exactly once
+                            DetailGroup {
+                                title: Strings.set-s3-grp-account;
+                                pack: true;
+                                FieldLabel {
+                                    label: Strings.field-s3-endpoint;
+                                    AppField {
+                                        text <=> root.cfg-s3-endpoint;
+                                        placeholder: "https://s3.example.org · http://….onion";
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    FieldLabel {
+                                        label: Strings.field-s3-access;
+                                        horizontal-stretch: 1;
+                                        AppField {
+                                            text <=> root.cfg-s3-access;
+                                            placeholder: "AKIA…";
+                                        }
+                                    }
+                                    FieldLabel {
+                                        label: Strings.field-s3-secret;
+                                        horizontal-stretch: 1;
+                                        AppField {
+                                            secret: true;
+                                            text <=> root.cfg-s3-secret;
+                                        }
+                                    }
+                                }
+                            }
+                            S3BucketGroup {
+                                title: Strings.set-s3-grp-backup;
+                                bucket <=> root.cfg-s3-bucket;
+                                cap <=> root.cfg-s3-max;
+                                test-state: root.cfg-s3-test;
+                                cap-hint: Strings.set-s3-max-hint;
+                                bucket-placeholder: "media-archive";
+                                account-ready: root.cfg-s3-endpoint != "" && root.cfg-s3-access != "";
+                                test => {
+                                    root.test-s3("workspaces");
+                                }
+                            }
+                            S3BucketGroup {
+                                title: Strings.set-s3-grp-media;
+                                bucket <=> root.cfg-media-s3-bucket;
+                                cap <=> root.cfg-media-s3-max;
+                                test-state: root.cfg-media-s3-test;
+                                cap-hint: Strings.set-s3-max-hint-media;
+                                unused-note: Strings.set-s3-media-unused;
+                                account-ready: root.cfg-s3-endpoint != "" && root.cfg-s3-access != "";
+                                test => {
+                                    root.test-s3("media");
+                                }
+                            }
+                        }
                         // Anonymity network: a compact form panel like the
                         // other small form tabs — the fields hug the top and
                         // the shared spacer below pushes them up
-                        if root.set-tab == 3: VerticalLayout {
+                        if root.set-tab == 4: VerticalLayout {
                             spacing: 14px;
                             alignment: start;
                             AnonNetworkGroup {
@@ -7736,7 +7853,7 @@ export component AppWindow inherits Window {
                         // Nostr relays: its own tab because the pool needs the
                         // full pane width for the URLs and the leftover height
                         // for the list (same idiom as the backup table)
-                        if root.set-tab == 4: VerticalLayout {
+                        if root.set-tab == 5: VerticalLayout {
                             spacing: 14px;
                             // only the LIST wants the leftover height. With an
                             // empty pool `pack` merely hugs the content inside
@@ -7788,7 +7905,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
-                        if root.set-tab == 5: VerticalLayout {
+                        if root.set-tab == 6: VerticalLayout {
                             spacing: 14px;
                             alignment: start;
                             FieldLabel {
@@ -7858,7 +7975,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
-                        if root.set-tab == 6: VerticalLayout {
+                        if root.set-tab == 7: VerticalLayout {
                             spacing: 14px;
                             alignment: start;
                             // panelled like every other tab's content — no
@@ -7877,7 +7994,7 @@ export component AppWindow inherits Window {
                         // (compacted cuts) included; pre-cut entries a pruned
                         // holder rebuilds from its blob show without height
                         // and signatures (dropped with the history)
-                        if root.set-tab == 7: VerticalLayout {
+                        if root.set-tab == 8: VerticalLayout {
                             spacing: 8px;
                             vertical-stretch: 1;
                             if root.chain-rows.length == 0: Text {
@@ -7966,13 +8083,13 @@ export component AppWindow inherits Window {
                             }
                         }
                         // list tabs claim the leftover height themselves — the
-                        // backup table (2), the chain history (7) and the relay
-                        // pool (4) but only while it HAS rows; every other tab
-                        // (and the empty pool) pushes its fields up. Leaving 7
+                        // backup table (2), the chain history (8) and the relay
+                        // pool (5) but only while it HAS rows; every other tab
+                        // (and the empty pool) pushes its fields up. Leaving 8
                         // out of this list split the height 50/50 between the
                         // chain list and this spacer.
-                        if root.set-tab != 2 && root.set-tab != 7
-                            && !(root.set-tab == 4 && root.relay-rows.length > 0): Rectangle {
+                        if root.set-tab != 2 && root.set-tab != 8
+                            && !(root.set-tab == 5 && root.relay-rows.length > 0): Rectangle {
                             vertical-stretch: 1;
                         }
                         // persistent (not a toast): these values only take

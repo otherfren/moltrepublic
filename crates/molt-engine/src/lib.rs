@@ -1416,7 +1416,8 @@ impl State {
                 object,
                 bytes,
                 prune_error,
-            } => self.cmd_net_backup_done(id, ts, object, bytes, prune_error),
+                quota_error,
+            } => self.cmd_net_backup_done(id, ts, object, bytes, prune_error, quota_error),
             Command::NetBackupFailed { id, error } => self.cmd_net_backup_failed(id, error),
 
             // lifecycles.rs
@@ -1554,12 +1555,15 @@ impl State {
                 generation,
             } => self.cmd_net_recover_link_failed(member, reason, ticket, generation),
             Command::NetTestS3 {
+                target,
                 endpoint,
                 access_key,
                 secret_key,
                 bucket,
-            } => self.cmd_net_test_s3(endpoint, access_key, secret_key, bucket),
-            Command::NetTestS3Result { result } => self.cmd_net_test_s3_result(result),
+            } => self.cmd_net_test_s3(target, endpoint, access_key, secret_key, bucket),
+            Command::NetTestS3Result { target, result } => {
+                self.cmd_net_test_s3_result(target, result)
+            }
             Command::NetTestTor {
                 network,
                 mode,

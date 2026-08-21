@@ -492,6 +492,9 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
     let flag = |key: &str| -> Result<bool, String> {
         args.get(key).and_then(Value::as_bool).ok_or_else(|| missing(key))
     };
+    let bytes = |key: &str| -> Result<u64, String> {
+        args.get(key).and_then(Value::as_u64).ok_or_else(|| missing(key))
+    };
     Ok(SessionSettings {
         headless: flag("headless")?,
         // NOT settable through save_settings — the relay pool and the
@@ -523,6 +526,12 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
         s3_bucket: text("s3_bucket")?,
         s3_interval_min: port("s3_interval_min")?,
         s3_keep_copies: port("s3_keep_copies")?,
+        // required like every other field, and for the same reason: absent
+        // must not silently wipe the operator's media bucket or drop a
+        // configured quota. Partial changes go through patch_settings.
+        s3_max_bytes: bytes("s3_max_bytes")?,
+        media_s3_bucket: text("media_s3_bucket")?,
+        media_s3_max_bytes: bytes("media_s3_max_bytes")?,
         sound_message: text("sound_message")?,
         sound_vote: text("sound_vote")?,
         // added after the everything-required contract froze: optional, and
@@ -1019,6 +1028,9 @@ pub fn tools() -> Vec<ToolDef> {
                     "s3_bucket": { "type": "string" },
                     "s3_interval_min": { "type": "integer" },
                     "s3_keep_copies": { "type": "integer" },
+                    "s3_max_bytes": { "type": "integer", "description": "byte quota for the backup bucket; 0 = no limit" },
+                    "media_s3_bucket": { "type": "string", "description": "a SECOND bucket at the same endpoint/credentials, for media. Configured only: nothing writes media to S3 yet" },
+                    "media_s3_max_bytes": { "type": "integer", "description": "byte quota for the media bucket; 0 = no limit" },
                     "sound_message": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
                     "sound_vote": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
                     "sound_poke": { "type": "string", "enum": ["none", "bell", "chime", "pop"], "description": "optional; absent = \"none\"" },
@@ -1034,7 +1046,8 @@ pub fn tools() -> Vec<ToolDef> {
                 "required": [
                     "headless", "workspace_dir", "s3_backup", "s3_endpoint",
                     "s3_access_key", "s3_secret_key", "s3_bucket",
-                    "s3_interval_min", "s3_keep_copies", "sound_message",
+                    "s3_interval_min", "s3_keep_copies", "s3_max_bytes",
+                    "media_s3_bucket", "media_s3_max_bytes", "sound_message",
                     "sound_vote", "read_receipts", "mcp_port", "mcp_allow",
                     "mcp_token", "anonymity", "tor_mode", "tor_port"
                 ]
@@ -1060,6 +1073,9 @@ pub fn tools() -> Vec<ToolDef> {
                     "s3_bucket": { "type": "string" },
                     "s3_interval_min": { "type": "integer" },
                     "s3_keep_copies": { "type": "integer" },
+                    "s3_max_bytes": { "type": "integer", "description": "byte quota for the backup bucket; 0 = no limit. Over it the oldest copies go first, never a workspace's newest" },
+                    "media_s3_bucket": { "type": "string", "description": "a second bucket at the same endpoint/credentials, for media; configured only, nothing writes media to S3 yet" },
+                    "media_s3_max_bytes": { "type": "integer", "description": "byte quota for the media bucket; 0 = no limit" },
                     "download_dir": { "type": "string" },
                     "file_cap_bytes": { "type": "integer", "description": "per-file byte cap for sharing over relays; 0 = sharing off" },
                     "sound_message": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
@@ -1178,11 +1194,12 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "net_test_s3",
             command: "net_test_s3",
-            description: "Test the S3 backup target (the backup settings panel's Test button): a real SigV4-signed HEAD /bucket probe over the configured transport (Tor when enabled, fail-closed). The result lands in session.s3_test (\"ok\" or \"error: …\" with the honest failure class — connect vs TLS vs 403 bad credentials vs 404 missing bucket). Omit fields to test the saved settings; pass them to test a draft.",
+            description: "Test one of the node's S3 buckets (the settings panel's Test button): a real SigV4-signed HEAD /bucket probe over the configured transport (Tor when enabled, fail-closed). Endpoint and credentials are shared; only the bucket differs. The verdict lands in session.s3_test for target \"workspaces\" (the default) and session.s3_media_test for \"media\" — \"ok\" or \"error: …\" with the honest failure class (connect vs TLS vs 403 bad credentials vs 404 missing bucket). Omit fields to test the saved settings; pass them to test a draft.",
             schema: || json!({
                 "type": "object",
                 "properties": {
-                    "endpoint": { "type": "string", "description": "https://… or http://… endpoint (MinIO/onion supported, path-style); omit to test settings.s3_endpoint" },
+                    "target": { "type": "string", "enum": ["workspaces", "media"], "description": "which bucket to probe; omit = workspaces (the backup bucket)" },
+                    "endpoint": { "type": "string", "description": "https://… or http://… endpoint (MinIO/onion supported, path-style); omit to use settings.s3_endpoint - shared by both buckets" },
                     "access_key": { "type": "string", "description": "access key id; omit to use the saved one" },
                     "secret_key": { "type": "string", "description": "secret key; omit to use the saved one" },
                     "bucket": { "type": "string", "description": "bucket to probe; omit to use the saved one" }
@@ -1190,7 +1207,17 @@ pub fn tools() -> Vec<ToolDef> {
             }),
             build: |args| {
                 let s = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+                let target = match args.get("target").and_then(Value::as_str) {
+                    None | Some("") | Some("workspaces") => molt_core::S3Target::Workspaces,
+                    Some("media") => molt_core::S3Target::Media,
+                    Some(other) => {
+                        return Err(format!(
+                            "unknown target `{other}` - use \"workspaces\" or \"media\""
+                        ))
+                    }
+                };
                 Ok(Command::NetTestS3 {
+                    target,
                     endpoint: s("endpoint"),
                     access_key: s("access_key"),
                     secret_key: s("secret_key"),

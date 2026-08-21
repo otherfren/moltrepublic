@@ -983,6 +983,7 @@ export global Strings {
     in property <string> toast-detached;
     in property <string> toast-backup-failed;
     in property <string> toast-backup-prune;
+    in property <string> toast-backup-quota;
     // mesh self-heal Phase 4 — connection-health banner
     in property <string> banner-reconnecting;
     in property <string> banner-disconnected;
@@ -995,23 +996,27 @@ export global Strings {
     in property <string> set-tab-general;
     in property <string> set-tab-workspace;
     in property <string> set-tab-backup;
-    // Per tab, the same title with a real newline at every line-break
-    // opportunity (derived in Rust: `tab_title_floor`). The tab bar is ONE row
-    // in which a title wraps rather than the bar breaking; a word-wrapping
-    // Text reports min-width 0, so each tab takes its MINIMUM width from this
-    // string's preferred width — its widest unbreakable chunk, measured in the
-    // real font. Never shown.
+    in property <string> set-tab-s3;
     in property <string> set-ws-choose;
     in property <string> set-ws-dir-title;
     in property <string> set-ws-dir-body;
     in property <string> set-ws-dir-browse; // "Browse…" (real rfd picker)
     in property <string> set-ws-found-one;
     in property <string> set-ws-found-many;
+    in property <string> bk-needs-s3;
     in property <string> field-s3-access;
     in property <string> field-s3-secret;
     in property <string> field-s3-bucket;
     in property <string> set-s3-test;
     in property <string> s3-test-tip;
+    // one account, several buckets (docs/storage/s3_buckets.md)
+    in property <string> set-s3-grp-account;
+    in property <string> set-s3-grp-backup;
+    in property <string> set-s3-grp-media;
+    in property <string> set-s3-media-unused;
+    in property <string> field-s3-max;
+    in property <string> set-s3-max-hint;
+    in property <string> set-s3-max-hint-media;
     in property <string> s3-ok;
     in property <string> set-s3-active;
     in property <string> field-read-receipts;

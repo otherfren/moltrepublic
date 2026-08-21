@@ -362,14 +362,23 @@ both verified red-without/green-with).
   trusting it). That cost is paid ONLY when a `.slint` file changes; GUI-logic
   edits (`molt-ui`) rebuild in ~2 s at <1 GiB. Debuginfo reduction does NOT
   help (measured: ~2%), and a SIGKILL during the window compile is the kernel
-  OOM-killer. **Build the window with `-j 1`** — this is not a tight-RAM
-  special case: plain `-j 2` puts the lib and test rustc side by side and died
-  by SIGKILL here (2026-08-18, with a second session on the box). Never run two
-  window-scale builds concurrently — and note that a worktree agent with its
-  OWN target dir is NOT serialized by cargo's build lock against a build in
-  the main checkout. GUI changes are validated by a clean `cargo build -p
-  molt-ui-window` (Slint compiler) plus `-p molt-ui` (logic against the
-  generated API).
+  OOM-killer. **Build the window with `-j 1` AND `CARGO_INCREMENTAL=0`.**
+  `-j 1` is not a tight-RAM special case: plain `-j 2` puts the lib and test
+  rustc side by side and died by SIGKILL here (2026-08-18, with a second
+  session on the box). The incremental cache is the OTHER, bigger lever
+  (2026-08-21): with it warm, the SINGLE window rustc reached **14.4 GiB RSS
+  and was OOM-killed** three runs in a row — no concurrency involved, the
+  kernel log names one process — while `CARGO_INCREMENTAL=0 cargo build -j 1
+  -p molt-ui -p molt-ui-window` finished in 9m33s. On a SIGKILL, switch
+  incremental off before you touch parallelism. Never run two window-scale
+  builds concurrently — and note that a worktree agent with its OWN target
+  dir is NOT serialized by cargo's build lock against a build in the main
+  checkout. GUI changes are validated by a clean `cargo build -p
+  molt-ui-window -p molt-ui` — **one** invocation naming BOTH: `-p
+  molt-ui-window` alone resolves a different `slint` feature set, so a solo
+  window build is thrown away the moment `-p molt-ui` is built after it
+  (`UnitDependencyInfoChanged`, verified 2026-08-21 — it cost a full 10-minute
+  rebuild).
 - **GUI iteration goes through `scripts/dev-ui.sh` — NOT the 9-GiB build.**
   It sets `SLINT_LIVE_PREVIEW=1` + the `live-preview` feature chain
   (molt-app → molt-ui → molt-ui-window → `slint/live-preview`, Slint ≥ 1.13):

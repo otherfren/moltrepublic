@@ -542,18 +542,24 @@ impl State {
         Ok(Reply::Ack)
     }
 
-    /// A changed backup target (endpoint/credentials/bucket) invalidates
-    /// the backup table's bucket side: the orphan rows and the listing
-    /// verdict described the OLD bucket, and an in-flight listing against
-    /// it must not land either (the generation bump drops it). Shared by
-    /// save and reload — the honest reset happens however the settings
-    /// change.
+    /// A changed S3 target invalidates what described the old one: each
+    /// bucket's probe verdict, and for the backup bucket the table's bucket
+    /// side too (the orphan rows and the listing verdict described the OLD
+    /// bucket, and an in-flight listing against it must not land either —
+    /// the generation bump drops it). Shared by save and reload — the honest
+    /// reset happens however the settings change.
     fn invalidate_backup_listing_on_target_change(&mut self, new: &SessionSettings) {
         let old = &self.session.settings;
-        let changed = old.s3_endpoint != new.s3_endpoint
+        // one account, several buckets: an edited endpoint or credential
+        // makes EVERY bucket's verdict stale, an edited bucket name only its
+        // own. A probe verdict describes one bucket at one endpoint.
+        let account_changed = old.s3_endpoint != new.s3_endpoint
             || old.s3_access_key != new.s3_access_key
-            || old.s3_secret_key != new.s3_secret_key
-            || old.s3_bucket != new.s3_bucket;
+            || old.s3_secret_key != new.s3_secret_key;
+        if account_changed || old.media_s3_bucket != new.media_s3_bucket {
+            self.session.s3_media_test = String::new();
+        }
+        let changed = account_changed || old.s3_bucket != new.s3_bucket;
         if !changed {
             return;
         }
@@ -589,6 +595,7 @@ impl State {
     /// [`molt_core::Command::NetTestS3Result`].
     pub(crate) fn cmd_net_test_s3(
         &mut self,
+        target: molt_core::S3Target,
         endpoint: String,
         access_key: String,
         secret_key: String,
@@ -596,16 +603,21 @@ impl State {
     ) -> Result<Reply, MoltError> {
         let s = &self.session.settings;
         let or_saved = |v: String, saved: &str| if v.trim().is_empty() { saved.to_string() } else { v };
+        // one endpoint and one credential pair for every bucket; only the
+        // bucket name is per target
         let endpoint = or_saved(endpoint, &s.s3_endpoint);
         let access_key = or_saved(access_key, &s.s3_access_key);
         let secret_key = or_saved(secret_key, &s.s3_secret_key);
-        let bucket = or_saved(bucket, &s.s3_bucket);
+        let bucket = match target {
+            molt_core::S3Target::Workspaces => or_saved(bucket, &s.s3_bucket),
+            molt_core::S3Target::Media => or_saved(bucket, &s.media_s3_bucket),
+        };
         let config =
             match molt_net::s3::S3Config::from_settings(&endpoint, &access_key, &secret_key, &bucket)
             {
                 Ok(c) => c,
                 Err(e) => {
-                    self.session.s3_test = format!("error: {e}");
+                    self.set_s3_verdict(target, format!("error: {e}"));
                     self.emit_session(SessionScope::Full);
                     return Ok(Reply::Ack);
                 }
@@ -613,12 +625,12 @@ impl State {
         let dialer = match self.dialer_for() {
             Ok(dialer) => dialer,
             Err(e) => {
-                self.session.s3_test = format!("error: {e}");
+                self.set_s3_verdict(target, format!("error: {e}"));
                 self.emit_session(SessionScope::Full);
                 return Ok(Reply::Ack);
             }
         };
-        self.session.s3_test = "testing".to_string();
+        self.set_s3_verdict(target, "testing".to_string());
         self.emit_session(SessionScope::Full);
         if let Some(cmd_tx) = self.cmd_tx.upgrade() {
             tokio::spawn(async move {
@@ -630,7 +642,7 @@ impl State {
                 let (reply, _rx) = tokio::sync::oneshot::channel();
                 let _ = cmd_tx
                     .send(crate::Envelope {
-                        cmd: molt_core::Command::NetTestS3Result { result },
+                        cmd: molt_core::Command::NetTestS3Result { target, result },
                         reply,
                     })
                     .await;
@@ -639,10 +651,22 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// Write a probe verdict into the slot that belongs to `target`.
+    fn set_s3_verdict(&mut self, target: molt_core::S3Target, verdict: String) {
+        match target {
+            molt_core::S3Target::Workspaces => self.session.s3_test = verdict,
+            molt_core::S3Target::Media => self.session.s3_media_test = verdict,
+        }
+    }
+
     /// Record an S3 probe outcome into the session (fed back from the
     /// off-actor probe task).
-    pub(crate) fn cmd_net_test_s3_result(&mut self, result: String) -> Result<Reply, MoltError> {
-        self.session.s3_test = result;
+    pub(crate) fn cmd_net_test_s3_result(
+        &mut self,
+        target: molt_core::S3Target,
+        result: String,
+    ) -> Result<Reply, MoltError> {
+        self.set_s3_verdict(target, result);
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }

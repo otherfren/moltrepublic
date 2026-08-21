@@ -343,7 +343,7 @@ pub fn run_app(
             let Some(ui) = weak.upgrade() else {
                 return;
             };
-            let settings = read_settings_draft(&ui, stored_file_cap(&last));
+            let settings = read_settings_draft(&ui, &stored_settings(&last));
             // the wake command has its own door — the settings paths refuse
             // it, so that no surface but this one (and config.toml) can plant
             // a shell command. One click, two commands.
@@ -376,7 +376,7 @@ pub fn run_app(
                 return;
             };
             ui.set_cfg_mcp_token(token.into());
-            let settings = read_settings_draft(&ui, stored_file_cap(&last));
+            let settings = read_settings_draft(&ui, &stored_settings(&last));
             issue(&rt, &w, &ui.as_weak(), Command::SaveSettings { settings });
         });
     }
@@ -388,19 +388,27 @@ pub fn run_app(
         let rt = rt.clone();
         let w = wallet.clone();
         let weak = ui.as_weak();
-        ui.on_test_s3(move || {
+        ui.on_test_s3(move |target| {
             let Some(ui) = weak.upgrade() else {
                 return;
+            };
+            // one account for every bucket — only the bucket differs, and
+            // all of it comes from the DRAFT so an unsaved edit is probed
+            let (target, bucket) = if target == "media" {
+                (molt_core::S3Target::Media, ui.get_cfg_media_s3_bucket())
+            } else {
+                (molt_core::S3Target::Workspaces, ui.get_cfg_s3_bucket())
             };
             issue(
                 &rt,
                 &w,
                 &ui.as_weak(),
                 Command::NetTestS3 {
+                    target,
                     endpoint: ui.get_cfg_s3_endpoint().to_string(),
                     access_key: ui.get_cfg_s3_access().to_string(),
                     secret_key: ui.get_cfg_s3_secret().to_string(),
-                    bucket: ui.get_cfg_s3_bucket().to_string(),
+                    bucket: bucket.to_string(),
                 },
             );
         });
@@ -626,7 +634,7 @@ pub fn run_app(
             let Some(ui) = weak.upgrade() else {
                 return;
             };
-            let settings = read_settings_draft(&ui, stored_file_cap(&last));
+            let settings = read_settings_draft(&ui, &stored_settings(&last));
             let screen = to_screen(ui.get_settings_return());
             let w = w.clone();
             let weak = ui.as_weak();
@@ -2884,20 +2892,54 @@ fn settings_draft_differs(stored: &SessionSettings, ui: &AppWindow) -> bool {
     stored.font_app = d.font_app;
     stored.font_nav = d.font_nav;
     stored.font_editor = d.font_editor;
-    stored != read_settings_draft(ui, stored.file_cap_bytes)
+    stored != read_settings_draft(ui, &stored)
 }
 
-/// The stored file cap out of the settings mirror — echoed into a wholesale
-/// save so it survives (the draft has no field for it; 0 means OFF, FP4).
-fn stored_file_cap(last: &Arc<Mutex<Option<SessionSettings>>>) -> u64 {
+/// The stored settings out of the mirror — the draft needs them for the
+/// fields it does not own outright: the file cap it echoes verbatim (0 is a
+/// VALUE now, FP4), and the byte quotas whose MiB rendering must not round a
+/// hand-written config value on an unrelated save.
+fn stored_settings(last: &Arc<Mutex<Option<SessionSettings>>>) -> SessionSettings {
     last.lock()
         .ok()
-        .and_then(|l| l.as_ref().map(|s| s.file_cap_bytes))
-        .unwrap_or_else(|| SessionSettings::default().file_cap_bytes)
+        .and_then(|l| l.clone())
+        .unwrap_or_default()
+}
+
+/// One MiB in bytes — the unit the GUI edits byte quotas in. A realistic
+/// bucket size is far out of reach of a +/- stepper, so the field is typed
+/// text and this is the unit it means.
+const MIB: u64 = 1024 * 1024;
+
+/// A byte quota as the whole MiB the field shows. Rounds UP, so the number
+/// displayed is never smaller than the limit actually in force.
+fn mib_label(bytes: u64) -> String {
+    bytes.div_ceil(MIB).to_string()
+}
+
+/// The field's text back to bytes — keeping the STORED byte value whenever
+/// it still renders as the same MiB. A `s3_max_bytes = 500000000` written by
+/// hand shows as 477 MiB and stays 500000000 unless the operator actually
+/// changes the number; without this, saving an unrelated setting would
+/// silently round every quota onto the MiB grid. An emptied field is 0 (no
+/// limit); text that is not a number at all keeps the stored value rather
+/// than inventing one.
+fn mib_text_to_bytes(text: &str, stored: u64) -> u64 {
+    let text = text.trim();
+    if text.is_empty() {
+        return 0;
+    }
+    let Ok(mib) = text.parse::<u64>() else {
+        return stored;
+    };
+    if mib == stored.div_ceil(MIB) {
+        return stored;
+    }
+    mib.saturating_mul(MIB)
 }
 
 /// Gather the config-tab draft properties into a [`SessionSettings`].
-fn read_settings_draft(ui: &AppWindow, stored_cap: u64) -> SessionSettings {
+fn read_settings_draft(ui: &AppWindow, stored: &SessionSettings) -> SessionSettings {
     let d = SessionSettings::default();
     SessionSettings {
         headless: ui.get_cfg_headless(),
@@ -2913,7 +2955,7 @@ fn read_settings_draft(ui: &AppWindow, stored_cap: u64) -> SessionSettings {
         font_editor: d.font_editor,
         // not a config-tab field: the draft echoes the STORED cap so a
         // wholesale save keeps it (0 is a VALUE now — sharing off, FP4)
-        file_cap_bytes: stored_cap,
+        file_cap_bytes: stored.file_cap_bytes,
         workspace_dir: ui.get_cfg_workspace_dir().to_string(),
         download_dir: ui.get_cfg_download_dir().to_string(),
         sound_message: sound_name(ui.get_cfg_sound_message_index()),
@@ -2929,6 +2971,12 @@ fn read_settings_draft(ui: &AppWindow, stored_cap: u64) -> SessionSettings {
         s3_bucket: ui.get_cfg_s3_bucket().to_string(),
         s3_interval_min: ui.get_cfg_s3_interval() as u16,
         s3_keep_copies: ui.get_cfg_s3_copies() as u16,
+        s3_max_bytes: mib_text_to_bytes(&ui.get_cfg_s3_max(), stored.s3_max_bytes),
+        media_s3_bucket: ui.get_cfg_media_s3_bucket().to_string(),
+        media_s3_max_bytes: mib_text_to_bytes(
+            &ui.get_cfg_media_s3_max(),
+            stored.media_s3_max_bytes,
+        ),
         mcp_port: ui.get_cfg_mcp_port() as u16,
         mcp_allow: ui.get_cfg_mcp_allow().to_string(),
         mcp_token: ui.get_cfg_mcp_token().to_string(),
@@ -4106,6 +4154,8 @@ fn apply_session(
             ui.invoke_show_toast_error(format!("{} {err}", s.get_toast_backup_failed()).into());
         } else if let Some(err) = sv.notice.strip_prefix("backup-prune-failed:") {
             ui.invoke_show_toast_error(format!("{} {err}", s.get_toast_backup_prune()).into());
+        } else if let Some(err) = sv.notice.strip_prefix("backup-quota:") {
+            ui.invoke_show_toast_error(format!("{} {err}", s.get_toast_backup_quota()).into());
         } else if let Some(rest) = sv.notice.strip_prefix("relay-refused:") {
             // B4: the probe's one-line verdict — the entry stays unconfirmed
             ui.invoke_show_toast_error(format!("{} {rest}", s.get_toast_relay_refused()).into());
@@ -4129,6 +4179,7 @@ fn apply_session(
     // so push it on every update — even while the user has an unsaved field
     // open and `settings_changed` is suppressed
     ui.set_cfg_s3_test(localize_s3_verdict(lang, &sv.s3_test).into());
+    ui.set_cfg_media_s3_test(localize_s3_verdict(lang, &sv.s3_media_test).into());
     ui.set_cfg_bk_list(localize_s3_verdict(lang, &sv.s3_list).into());
     // …and the same for the Tor probe's verdict. The rung's key drives the
     // "testing" affordance, the sentence and its tone come from Rust so the
@@ -4294,6 +4345,9 @@ fn apply_settings_fields(ui: &AppWindow, s: &SessionSettings) {
     ui.set_cfg_s3_bucket(s.s3_bucket.clone().into());
     ui.set_cfg_s3_interval(i32::from(s.s3_interval_min));
     ui.set_cfg_s3_copies(i32::from(s.s3_keep_copies));
+    ui.set_cfg_s3_max(mib_label(s.s3_max_bytes).into());
+    ui.set_cfg_media_s3_bucket(s.media_s3_bucket.clone().into());
+    ui.set_cfg_media_s3_max(mib_label(s.media_s3_max_bytes).into());
     ui.set_cfg_mcp_port(s.mcp_port as i32);
     ui.set_cfg_mcp_allow(s.mcp_allow.clone().into());
     ui.set_cfg_mcp_token(s.mcp_token.clone().into());
@@ -8747,7 +8801,7 @@ lexicon! {
     cw_provisioning: "Preparing the invite link…", "Invite-Link wird vorbereitet…";
     cw_failed_title: "The founding cannot continue", "Die Gründung kann nicht fortgesetzt werden";
     cw_failed_hint: "Close and found anew once it is resolved.", "Schließen und neu gründen, sobald es behoben ist.";
-    // the button jumps to the anonymity tab (set-tab = 3) — it must not
+    // the button jumps to the anonymity tab (set-tab = 4) — it must not
     // promise the relay settings that now live one tab further
     cw_open_net_settings: "Open anonymity settings", "Anonymitäts-Einstellungen öffnen";
     cw_open_relay_settings: "Relay settings", "Relay-Einstellungen";
@@ -8967,7 +9021,7 @@ lexicon! {
     rw_s3_ok: "reachable", "erreichbar";
     // honest endpoint status: "reachable" is only claimed after a REAL
     // probe (session.s3_test == "ok"); before that the state is untested
-    rw_s3_untested: "not tested - use Test in the backup settings", "ungetestet - Test in den Backup-Einstellungen";
+    rw_s3_untested: "not tested - use Test under Settings → S3 config", "ungetestet - Test unter Einstellungen → S3-Config";
     rw_s3_target_ph: "workspace id from the backup table · or molt/<id>/<ts>.molt.enc", "Workspace-ID aus der Backup-Tabelle · oder molt/<id>/<ts>.molt.enc";
     rw_via_file: "Manual restore", "Manuelles Restore";
     rw_file_pick: "Select", "Auswählen";
@@ -8993,6 +9047,9 @@ lexicon! {
     set_tab_general: "General", "Allgemein";
     set_tab_workspace: "Workspace", "Workspace";
     set_tab_backup: "Backup", "Backup";
+    // the bucket's address and credentials — a separate errand from WHEN
+    // and WHICH workspace is backed up, hence a separate tab
+    set_tab_s3: "S3 config", "S3-Config";
     // the former single "Network" tab is split in two: the anonymity layer
     // (tor/none) and the Nostr relay pool — related, hence adjacent
     set_tab_anon: "Anonymity network", "Anonymitäts-Netzwerk";
@@ -9026,6 +9083,15 @@ lexicon! {
     set_s3_keep: "save up to", "behalte bis zu";
     set_s3_unit_copies: "copies", "Kopien";
     s3_test_tip: "Sends a signed probe to the bucket over the configured transport - Tor when it is enabled.", "Sendet eine signierte Testanfrage an den Bucket über den konfigurierten Transport - via Tor, wenn aktiviert.";
+    // one S3 account, several buckets (docs/storage/s3_buckets.md)
+    set_s3_grp_account: "Endpoint & credentials", "Endpunkt & Zugangsdaten";
+    set_s3_grp_backup: "Workspace backups", "Workspace-Backups";
+    set_s3_grp_media: "Media", "Medien";
+    set_s3_media_unused: "Stored only - nothing writes media here yet.", "Nur gespeichert - hierher schreibt noch nichts.";
+    field_s3_max: "Limit (MiB)", "Limit (MiB)";
+    set_s3_max_hint: "0 = no limit. Oldest copies go first, never a republic's last.", "0 = kein Limit. Älteste Kopien zuerst, nie die letzte einer Republik.";
+    set_s3_max_hint_media: "0 = no limit.", "0 = kein Limit.";
+    toast_backup_quota: "Backup stored, bucket quota:", "Backup gespeichert, Bucket-Limit:";
     s3_ok: "bucket reachable - credentials accepted ✓", "Bucket erreichbar - Zugangsdaten akzeptiert ✓";
     bk_col_local: "Local workspace", "Lokaler Workspace";
     bk_col_remote: "Backup in bucket", "Backup im Bucket";
@@ -9035,6 +9101,8 @@ lexicon! {
     bk_refresh: "Refresh bucket", "Bucket aktualisieren";
     bk_refresh_tip: "Lists the saved bucket's backup objects over the configured transport - Tor when it is enabled. Backups without a local workspace appear as bucket-only rows.", "Listet die Backup-Objekte des gespeicherten Buckets über den konfigurierten Transport - via Tor, wenn aktiviert. Backups ohne lokalen Workspace erscheinen als Nur-Bucket-Zeilen.";
     bk_listing: "listing the bucket…", "Bucket wird gelesen…";
+    // backup tab, when no bucket is configured yet: one line, one jump
+    bk_needs_s3: "No S3 endpoint configured.", "Kein S3-Endpunkt konfiguriert.";
     bk_restore: "Restore", "Wiederherstellen";
     bk_fetched_note: "Restored (still sealed) - open it with its recovery phrase", "Wiederhergestellt (noch versiegelt) - mit der Recovery-Phrase öffnen";
     bk_goto_open: "To the workspace list", "Zur Workspace-Liste";
@@ -11834,6 +11902,80 @@ mod tests {
 }
 
 #[cfg(test)]
+mod s3_target_tests {
+    //! The two S3 targets (`docs/storage/s3_buckets.md`): the byte quotas
+    //! are edited in MiB but stored in bytes, and the two targets share no
+    //! field on the way through the settings draft.
+
+    use super::*;
+
+    /// A quota the operator wrote by hand in bytes must survive a settings
+    /// save that did not touch it - the MiB stepper is a VIEW of the value,
+    /// not a re-quantization of it.
+    #[test]
+    fn an_untouched_byte_quota_is_not_rounded_onto_the_mib_grid() {
+        // rounded UP, so the displayed limit is never smaller than the real one
+        assert_eq!(mib_label(500_000_000), "477");
+        assert_eq!(
+            mib_text_to_bytes("477", 500_000_000),
+            500_000_000,
+            "the field still shows 477 - keep the exact stored bytes"
+        );
+        // …but a real edit converts
+        assert_eq!(mib_text_to_bytes("1000", 500_000_000), 1000 * 1024 * 1024);
+        // 0 is "no limit" on both sides, and clearing one really clears it
+        assert_eq!(mib_label(0), "0");
+        assert_eq!(mib_text_to_bytes("0", 0), 0);
+        assert_eq!(mib_text_to_bytes("0", 500_000_000), 0);
+        // an emptied field means no limit; garbage keeps the stored value
+        // rather than inventing one
+        assert_eq!(mib_text_to_bytes("  ", 500_000_000), 0);
+        assert_eq!(mib_text_to_bytes("-5", 500_000_000), 500_000_000);
+        assert_eq!(mib_text_to_bytes("abc", 500_000_000), 500_000_000);
+        // an absurd number saturates instead of wrapping
+        assert_eq!(mib_text_to_bytes(&u64::MAX.to_string(), 0), u64::MAX);
+    }
+
+    /// Push the account and both buckets into a real headless window and read
+    /// the draft back: the two buckets stay distinct, and the quotas survive.
+    #[test]
+    fn both_buckets_round_trip_through_the_settings_draft() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("headless window");
+        let stored = SessionSettings {
+            s3_endpoint: "https://backup.example.org".to_string(),
+            s3_access_key: "BAK".to_string(),
+            s3_secret_key: "bak-secret".to_string(),
+            s3_bucket: "media-archive".to_string(),
+            s3_max_bytes: 500_000_000,
+            media_s3_bucket: "clips".to_string(),
+            media_s3_max_bytes: 3 * 1024 * 1024 * 1024,
+            ..SessionSettings::default()
+        };
+        apply_settings_fields(&ui, &stored);
+        let draft = read_settings_draft(&ui, &stored);
+        assert_eq!(draft.s3_endpoint, "https://backup.example.org");
+        assert_eq!(draft.s3_bucket, "media-archive");
+        assert_eq!(draft.media_s3_bucket, "clips");
+        assert_eq!(
+            draft.s3_access_key, "BAK",
+            "one account: the credentials are not per bucket"
+        );
+        assert_eq!(
+            draft.s3_max_bytes, 500_000_000,
+            "the hand-written byte quota survives an untouched round trip"
+        );
+        assert_eq!(draft.media_s3_max_bytes, 3 * 1024 * 1024 * 1024);
+        // and the form reports itself clean: an unedited draft must not make
+        // the leave-guard fire
+        assert!(
+            !settings_draft_differs(&stored, &ui),
+            "an untouched draft equals the stored settings"
+        );
+    }
+}
+
+#[cfg(test)]
 mod gui_tests {
     //! **The GUI's own logic, run headless.**
     //!
@@ -12360,7 +12502,7 @@ mod gui_tests {
         let tabs: Vec<_> =
             i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "SettingsTab")
                 .collect();
-        assert_eq!(tabs.len(), 8, "eight tabs with a workspace open");
+        assert_eq!(tabs.len(), 9, "nine tabs with a workspace open");
         for t in &tabs {
             assert!(
                 t.size().height <= 30.0,
@@ -12375,7 +12517,7 @@ mod gui_tests {
         let narrow: Vec<_> =
             i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "SettingsTab")
                 .collect();
-        assert_eq!(narrow.len(), 8, "no tab may disappear when the bar wraps");
+        assert_eq!(narrow.len(), 9, "no tab may disappear when the bar wraps");
         for t in &narrow {
             assert!(
                 t.size().height <= 30.0,
@@ -12384,6 +12526,71 @@ mod gui_tests {
             );
         }
         assert_eq!(rows_at(&ui).len(), 2, "700px needs a second row");
+    }
+
+    /// **Settings: the S3 credentials have their own tab.** "Backup" used
+    /// to carry two errands at once - WHEN/WHICH workspace is backed up,
+    /// and WHERE the bucket is. The endpoint, keys and bucket moved to
+    /// "S3 config"; the schedule stayed. Driven by real clicks on the real
+    /// bar (the tabs are found by type and ordered left to right - the
+    /// bar's transparent measuring texts carry the same titles, so looking
+    /// tabs up by their label would hit those instead).
+    #[cfg(feature = "live-preview")]
+    #[test]
+    fn the_s3_endpoint_moved_out_of_the_backup_tab_onto_its_own() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("headless window");
+        ui.set_screen(AppScreen::Settings);
+        apply_strings(&ui, 0);
+        ui.window().set_size(slint::PhysicalSize::new(1600, 900));
+        ui.show().expect("show headless");
+
+        let shown = |ui: &AppWindow, label: &str| {
+            i_slint_backend_testing::ElementHandle::find_by_accessible_label(ui, label)
+                .next()
+                .is_some()
+        };
+        let click_tab = |ui: &AppWindow, index: usize| {
+            let mut tabs: Vec<_> = i_slint_backend_testing::ElementHandle::find_by_element_type_name(
+                ui,
+                "SettingsTab",
+            )
+            .collect();
+            tabs.sort_by(|a, b| {
+                a.absolute_position()
+                    .x
+                    .partial_cmp(&b.absolute_position().x)
+                    .expect("no NaN")
+            });
+            let tab = tabs.get(index).expect("the tab must render");
+            let pos = tab.absolute_position();
+            let size = tab.size();
+            let at = slint::LogicalPosition::new(
+                pos.x + size.width / 2.0,
+                pos.y + size.height / 2.0,
+            );
+            ui.window()
+                .dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at });
+            ui.window().dispatch_event(slint::platform::WindowEvent::PointerPressed {
+                position: at,
+                button: slint::platform::PointerEventButton::Left,
+            });
+            ui.window().dispatch_event(slint::platform::WindowEvent::PointerReleased {
+                position: at,
+                button: slint::platform::PointerEventButton::Left,
+            });
+        };
+
+        click_tab(&ui, 2); // Backup
+        assert!(shown(&ui, "Automatic S3 backup"), "the schedule stays on Backup");
+        assert!(!shown(&ui, "S3 endpoint"), "the endpoint left the Backup tab");
+        assert!(!shown(&ui, "Access key"), "so did the keys");
+
+        click_tab(&ui, 3); // S3 config
+        assert!(shown(&ui, "S3 endpoint"), "the endpoint lives on the S3 tab");
+        assert!(shown(&ui, "Access key"), "and so do the keys");
+        assert!(shown(&ui, "Bucket"), "and the bucket");
+        assert!(!shown(&ui, "Automatic S3 backup"), "the schedule did not follow");
     }
 
     /// The Vault mock's secrets list, headless: the deposits render, and a

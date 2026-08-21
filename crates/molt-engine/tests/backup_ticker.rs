@@ -116,6 +116,31 @@ fn listing_of(keys: &[String]) -> String {
     format!("<ListBucketResult><IsTruncated>false</IsTruncated>{contents}</ListBucketResult>")
 }
 
+/// Like [`listing_of`], but with a per-object size — the byte quota needs
+/// objects that differ in weight, not the flat 1 KiB.
+fn listing_of_sized(objects: &[(String, u64)]) -> String {
+    let contents: String = objects
+        .iter()
+        .map(|(k, size)| {
+            format!(
+                "<Contents><Key>{k}</Key><LastModified>2013-05-24T00:00:00Z</LastModified>\
+                 <Size>{size}</Size></Contents>"
+            )
+        })
+        .collect();
+    format!("<ListBucketResult><IsTruncated>false</IsTruncated>{contents}</ListBucketResult>")
+}
+
+/// Save the running settings with `s3_max_bytes` set (the byte quota is not
+/// part of the harness' founding settings).
+async fn set_quota(w: &molt_engine::WalletHandle, max_bytes: u64) {
+    let mut settings = session(w).await.settings;
+    settings.s3_max_bytes = max_bytes;
+    w.execute(Command::SaveSettings { settings })
+        .await
+        .expect("quota saved");
+}
+
 async fn session(w: &molt_engine::WalletHandle) -> SessionView {
     let Ok(Reply::Session(sv)) = w.execute(Command::ReadSession).await else {
         panic!("read session failed");
@@ -655,4 +680,106 @@ async fn decrypting_clears_the_sealed_skip_backup_status() {
         "the sealed-skip status is cleared on decrypt"
     );
     assert!(!entry(&sv, &id).encrypted, "decrypted");
+}
+
+/// `docs/storage/s3_buckets.md` §4: a bucket over its byte quota prunes the
+/// OLDEST objects across every workspace it holds - but never a workspace's
+/// newest copy, so no republic is left without a backup.
+#[tokio::test]
+async fn a_full_bucket_prunes_oldest_first_and_never_a_last_copy() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let listing: Arc<Mutex<String>> = Arc::new(Mutex::new(empty_listing()));
+    let route_listing = listing.clone();
+    let (endpoint, log) = stub_server(Arc::new(move |method, _path| match method {
+        "PUT" => (200, String::new(), 0),
+        "DELETE" => (204, String::new(), 0),
+        _ => (200, route_listing.lock().expect("listing").clone(), 0),
+    }))
+    .await;
+    // keep_copies far above the object count: the COUNT retention must not
+    // fire, so every delete below is the byte quota's doing
+    let (w, id, _root) = founded_engine(tmp.path(), &endpoint, 99).await;
+    let other = "cd".repeat(32);
+    let mine: Vec<String> = (1..=4u64).map(|ts| molt_core::backup_key(&id, ts)).collect();
+    // 5 objects x 1000 B = 5000 B. The other republic's SINGLE copy is the
+    // oldest thing in the bucket - and must survive anyway.
+    let mut objects: Vec<(String, u64)> = mine.iter().map(|k| (k.clone(), 1000)).collect();
+    objects.push((molt_core::backup_key(&other, 0), 1000));
+    *listing.lock().expect("listing") = listing_of_sized(&objects);
+    set_quota(&w, 2500).await;
+    w.execute(Command::SetWorkspaceBackup { id: id.clone(), enabled: true })
+        .await
+        .expect("enable");
+    w.execute(Command::BackupTick).await.expect("tick");
+    poll_session(&w, "confirmed upload", |sv| {
+        entry(sv, &id).last_backup_min != WorkspaceInfo::NEVER
+    })
+    .await;
+    for _ in 0..100 {
+        if log.lock().expect("log").iter().filter(|r| r.method == "DELETE").count() >= 3 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let reqs = log.lock().expect("log").clone();
+    let deleted: Vec<String> = reqs
+        .iter()
+        .filter(|r| r.method == "DELETE")
+        .map(|r| r.path.trim_start_matches("/molt-bucket/").to_string())
+        .collect();
+    assert_eq!(
+        deleted,
+        vec![mine[0].clone(), mine[1].clone(), mine[2].clone()],
+        "5000 B down to 2000 B: the three oldest deletable objects go, and \
+         neither newest copy is touched: {reqs:?}"
+    );
+}
+
+/// A quota that cannot be met without eating a workspace's last copy is
+/// REPORTED, never met: the newest copies stay and the notice says so.
+#[tokio::test]
+async fn an_unreachable_quota_is_reported_instead_of_deleting_the_last_copies() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let listing: Arc<Mutex<String>> = Arc::new(Mutex::new(empty_listing()));
+    let route_listing = listing.clone();
+    let (endpoint, log) = stub_server(Arc::new(move |method, _path| match method {
+        "PUT" => (200, String::new(), 0),
+        "DELETE" => (204, String::new(), 0),
+        _ => (200, route_listing.lock().expect("listing").clone(), 0),
+    }))
+    .await;
+    let (w, id, _root) = founded_engine(tmp.path(), &endpoint, 99).await;
+    let other = "cd".repeat(32);
+    let mine: Vec<String> = (1..=2u64).map(|ts| molt_core::backup_key(&id, ts)).collect();
+    let mut objects: Vec<(String, u64)> = mine.iter().map(|k| (k.clone(), 1000)).collect();
+    objects.push((molt_core::backup_key(&other, 7), 1000));
+    *listing.lock().expect("listing") = listing_of_sized(&objects);
+    // 500 B limit against 2000 B of untouchable newest copies
+    set_quota(&w, 500).await;
+    w.execute(Command::SetWorkspaceBackup { id: id.clone(), enabled: true })
+        .await
+        .expect("enable");
+    // the save left "saved" in the one notice slot, and `note_backup` never
+    // overwrites a foreign notice — navigate clears it, as the GUI does
+    w.execute(Command::Navigate { screen: molt_core::Screen::Main })
+        .await
+        .expect("navigate");
+    w.execute(Command::BackupTick).await.expect("tick");
+    let sv = poll_session(&w, "quota notice", |sv| sv.notice.starts_with("backup-quota:")).await;
+    assert!(
+        sv.notice.contains("2000 B of 500 B") && sv.notice.contains("nothing left to prune"),
+        "the notice names the fault once: {:?}",
+        sv.notice
+    );
+    let reqs = log.lock().expect("log").clone();
+    let deleted: Vec<String> = reqs
+        .iter()
+        .filter(|r| r.method == "DELETE")
+        .map(|r| r.path.trim_start_matches("/molt-bucket/").to_string())
+        .collect();
+    assert_eq!(
+        deleted,
+        vec![mine[0].clone()],
+        "only the one deletable object went; both newest copies stay: {reqs:?}"
+    );
 }

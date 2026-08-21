@@ -328,6 +328,24 @@ pub struct SessionSettings {
     /// copies are pruned once a newer one lands).
     #[serde(default = "default_s3_keep_copies")]
     pub s3_keep_copies: u16,
+    /// Byte quota for the backup bucket, counting only the backups THIS
+    /// node wrote (foreign objects are neither counted nor deleted).
+    /// `0` = no limit. Over the limit the oldest copies are pruned - never
+    /// a workspace's newest one (`docs/storage/s3_buckets.md` §4). Note the
+    /// neighbouring `file_cap_bytes` reads 0 as "off"; here 0 is "no limit".
+    #[serde(default)]
+    pub s3_max_bytes: u64,
+    /// The MEDIA bucket at the same endpoint and credentials as the backup
+    /// bucket above - one S3 account, several buckets. No cover-name default
+    /// like the backup bucket: empty means "not configured", not "some name
+    /// nobody chose". Configuration only - nothing writes media to S3 yet
+    /// (`docs/storage/s3_buckets.md` §7), and the GUI says so.
+    #[serde(default)]
+    pub media_s3_bucket: String,
+    /// Byte quota for the media bucket, `0` = no limit. Stored and shown;
+    /// with no writer there is nothing to enforce it against yet.
+    #[serde(default)]
+    pub media_s3_max_bytes: u64,
     /// MCP server TCP port.
     pub mcp_port: u16,
     /// MCP client allowlist (`"127.0.0.1" | "0.0.0.0" | comma-separated`).
@@ -466,6 +484,9 @@ impl Default for SessionSettings {
             s3_bucket: default_s3_bucket(),
             s3_interval_min: default_s3_interval(),
             s3_keep_copies: default_s3_keep_copies(),
+            s3_max_bytes: 0,
+            media_s3_bucket: String::new(),
+            media_s3_max_bytes: 0,
             mcp_port: 4040,
             mcp_allow: "127.0.0.1".to_string(),
             mcp_token: String::new(),
@@ -486,6 +507,30 @@ impl Default for SessionSettings {
             // no relay ships with the app: a fresh install connects nowhere
             relays: Vec::new(),
             clearnet_relays_enabled: false,
+        }
+    }
+}
+
+/// Which of the node's two S3 buckets a command addresses
+/// (`docs/storage/s3_buckets.md`). They share one endpoint and one set of
+/// credentials; the bucket name and the byte quota are per target.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum S3Target {
+    /// The workspace-backup bucket. The default, so an older caller that
+    /// names no target keeps addressing exactly what it used to.
+    #[default]
+    Workspaces,
+    /// The media bucket - configured, no consumer yet.
+    Media,
+}
+
+impl S3Target {
+    /// The wire/word form (`"workspaces"` | `"media"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            S3Target::Workspaces => "workspaces",
+            S3Target::Media => "media",
         }
     }
 }
@@ -3109,6 +3154,10 @@ pub struct SessionView {
     /// flight does not look like an unsaved settings edit.
     #[serde(default)]
     pub s3_test: String,
+    /// The same verdict for the MEDIA target's probe, in its own slot so a
+    /// test of one bucket never overwrites the other's result.
+    #[serde(default)]
+    pub s3_media_test: String,
     /// Transient state of the last bucket listing ([`Command::NetListBackups`]),
     /// same rationale as [`Self::s3_test`]: `""` (never listed), `"listing"`,
     /// `"ok"`, or `"error: …"` (the honest failure class — including "no
@@ -3187,6 +3236,7 @@ impl Default for SessionView {
             theme: "classic".to_string(),
             notice: String::new(),
             s3_test: String::new(),
+            s3_media_test: String::new(),
             s3_list: String::new(),
             tor_test: TorTest::default(),
             restart_required: Vec::new(),
@@ -4109,6 +4159,10 @@ pub enum Command {
     /// the result lands in `session.s3_test`. Safe to expose — it only reads
     /// whether the bucket answers, with the configured credentials.
     NetTestS3 {
+        /// Which target to probe; absent = the workspace-backup bucket, so
+        /// a caller that predates the media bucket keeps its behaviour.
+        #[serde(default)]
+        target: S3Target,
         /// Endpoint URL to test (`https://…` / `http://…`; MinIO and onion
         /// endpoints supported, path-style). Empty tests the saved
         /// `settings.s3_endpoint`.
@@ -4127,7 +4181,12 @@ pub enum Command {
     /// The outcome of a [`Command::NetTestS3`] probe, reported back from the
     /// off-actor probe task (engine-internal, never an MCP tool).
     NetTestS3Result {
-        /// `"ok"` or `"error: …"`; written verbatim into `session.s3_test`.
+        /// Which target this verdict is about - it decides which session
+        /// slot it lands in.
+        #[serde(default)]
+        target: S3Target,
+        /// `"ok"` or `"error: …"`; written verbatim into `session.s3_test`
+        /// (or `session.s3_media_test` for [`S3Target::Media`]).
         result: String,
     },
     /// Test whether Tor is actually there and working (the anonymity settings
@@ -4255,6 +4314,12 @@ pub enum Command {
         /// backup re-prunes.
         #[serde(default)]
         prune_error: String,
+        /// Byte-quota outcome, honestly (empty = the bucket fits its limit,
+        /// or no limit is set). Its own field because it is a different
+        /// story from a failed prune: the quota may be unreachable without
+        /// deleting a workspace's last copy, which is reported, never done.
+        #[serde(default)]
+        quota_error: String,
     },
     /// The backup task failed (engine-internal); the stamp stays untouched
     /// and the real reason is surfaced verbatim — never a fake success.

@@ -142,6 +142,9 @@ export component AppField inherits Rectangle {
     in property <bool> invalid: false;
     // When true the input renders as password dots (secrets).
     in property <bool> secret: false;
+    // Digits only - for the fields that hold a number too large for a
+    // +/- stepper (byte caps).
+    in property <bool> numeric: false;
     // The one field a screen is ABOUT: taller, accent-outlined, and its
     // placeholder readable rather than whispered. A form whose primary
     // input looks like every other grey box makes the user hunt for where
@@ -180,7 +183,8 @@ export component AppField inherits Rectangle {
             font-size: Theme.fs-body;
             vertical-alignment: center;
             single-line: true;
-            input-type: root.secret ? InputType.password : InputType.text;
+            input-type: root.secret ? InputType.password
+                : (root.numeric ? InputType.number : InputType.text);
             accepted => {
                 root.accepted();
             }

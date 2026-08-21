@@ -376,6 +376,7 @@ impl State {
         self.backup_inflight.insert(id.clone());
         let root = self.workspace_root();
         let keep = usize::from(self.session.settings.s3_keep_copies.max(1));
+        let max_bytes = self.session.settings.s3_max_bytes;
         tokio::spawn(async move {
             let ts = now_secs();
             let build_dir = dir.clone();
@@ -417,17 +418,23 @@ impl State {
                         let client = molt_net::s3::S3Client::new(config, dialer);
                         match client.put_object(&object, &blob).await {
                             Ok(()) => {
-                                // retention only AFTER the confirmed upload; a
-                                // prune failure is surfaced, never blocks the
-                                // backup (the next success re-prunes)
+                                // retention only AFTER the confirmed upload;
+                                // a failure is surfaced, never blocks the
+                                // backup (the next success re-prunes). The
+                                // byte quota runs on top of the COUNT
+                                // retention and reports separately - the two
+                                // tell different stories.
                                 let prune_error =
                                     prune_old_copies(&client, &id, keep, &object).await;
+                                let quota_error =
+                                    enforce_quota(&client, max_bytes, &object).await;
                                 Command::NetBackupDone {
                                     id,
                                     ts,
                                     object,
                                     bytes,
                                     prune_error,
+                                    quota_error,
                                 }
                             }
                             Err(e) => Command::NetBackupFailed {
@@ -459,6 +466,7 @@ impl State {
         object: String,
         bytes: u64,
         prune_error: String,
+        quota_error: String,
     ) -> Result<Reply, MoltError> {
         self.backup_inflight.remove(&id);
         // the in-memory last-done is the authoritative fallback: it is set
@@ -475,9 +483,14 @@ impl State {
         }
         self.stamp_backup_time(&id, ts);
         tracing::info!(id, object, bytes, "backup uploaded");
+        // one notice slot, so the count retention wins when both spoke —
+        // its failure is the older, more basic one
         if !prune_error.is_empty() {
             tracing::warn!(id, error = %prune_error, "backup retention pruning failed");
             self.note_backup(format!("backup-prune-failed:{prune_error}"));
+        } else if !quota_error.is_empty() {
+            tracing::warn!(id, error = %quota_error, "backup bucket quota");
+            self.note_backup(format!("backup-quota:{quota_error}"));
         }
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
@@ -604,6 +617,125 @@ fn prune_candidates(mut keys: Vec<String>, keep: usize, just_uploaded: &str) -> 
         .collect()
 }
 
+/// One listed backup object, reduced to what the quota decision needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QuotaObject {
+    /// The full object key.
+    key: String,
+    /// The workspace the object belongs to.
+    id: molt_core::WorkspaceId,
+    /// The object's backup timestamp (parsed from the key, = its age).
+    ts: u64,
+    /// Size in bytes as the listing reported it.
+    size: u64,
+}
+
+/// Hold the backup bucket under `max_bytes` (`docs/storage/s3_buckets.md`
+/// §4), bucket-wide across every workspace this node backs up. `0` = no
+/// limit and no listing round-trip.
+///
+/// Only objects that [`molt_core::parse_backup_key`] accepts are counted or
+/// deleted: a foreign object in the bucket is not ours to prune, and
+/// counting it would make someone else's upload delete our backups.
+/// Returns `""` on success, otherwise the first honest failure - including
+/// the case where the quota cannot be met without eating a workspace's last
+/// copy, which is reported rather than done.
+async fn enforce_quota(
+    client: &molt_net::s3::S3Client,
+    max_bytes: u64,
+    just_uploaded: &str,
+) -> String {
+    if max_bytes == 0 {
+        return String::new();
+    }
+    let listed = match client.list_objects(molt_core::BACKUP_OBJECT_PREFIX).await {
+        Ok(objects) => objects,
+        Err(e) => return format!("listing failed: {e}"),
+    };
+    let objects: Vec<QuotaObject> = listed
+        .into_iter()
+        .filter_map(|o| {
+            molt_core::parse_backup_key(&o.key).map(|(id, ts)| QuotaObject {
+                key: o.key,
+                id,
+                ts,
+                size: o.size,
+            })
+        })
+        .collect();
+    let (delete, remaining) = quota_candidates(objects, max_bytes, just_uploaded);
+    let mut first_error = String::new();
+    for key in delete {
+        if let Err(e) = client.delete_object(&key).await {
+            if first_error.is_empty() {
+                first_error = format!("deleting {key} failed: {e}");
+            }
+        }
+    }
+    if !first_error.is_empty() {
+        return first_error;
+    }
+    if remaining > max_bytes {
+        return format!("{remaining} B of {max_bytes} B, nothing left to prune");
+    }
+    String::new()
+}
+
+/// Pure byte-quota decision (`docs/storage/s3_buckets.md` §4): from every
+/// backup object this node wrote, the oldest to delete so the total fits
+/// `max_bytes`, plus the byte total that remains afterwards.
+///
+/// Three rules make the difference between retention and data loss:
+/// `max_bytes == 0` is NO limit; the **newest copy of every workspace** is
+/// never a candidate (a byte quota must not leave a republic with zero
+/// backups); and neither is `just_uploaded`, the copy the confirming
+/// backup is about — under a clock regression its timestamp sorts oldest.
+/// Age is the PARSED timestamp, not the key order: a key carries the
+/// workspace id before the stamp, so lexicographic order across workspaces
+/// is not age order. An unfittable quota deletes every candidate and
+/// returns a remainder still above the limit — the caller says so rather
+/// than eating into the newest copies.
+fn quota_candidates(
+    objects: Vec<QuotaObject>,
+    max_bytes: u64,
+    just_uploaded: &str,
+) -> (Vec<String>, u64) {
+    let used: u64 = objects.iter().fold(0u64, |acc, o| acc.saturating_add(o.size));
+    if max_bytes == 0 || used <= max_bytes {
+        return (Vec::new(), used);
+    }
+    // the newest copy per workspace, deterministic on a timestamp tie
+    let mut newest: std::collections::HashMap<&str, &QuotaObject> =
+        std::collections::HashMap::new();
+    for o in &objects {
+        newest
+            .entry(o.id.as_str())
+            .and_modify(|cur| {
+                if (o.ts, o.key.as_str()) > (cur.ts, cur.key.as_str()) {
+                    *cur = o;
+                }
+            })
+            .or_insert(o);
+    }
+    let mut candidates: Vec<&QuotaObject> = objects
+        .iter()
+        .filter(|o| o.key != just_uploaded)
+        .filter(|o| newest.get(o.id.as_str()).map_or(true, |n| n.key != o.key))
+        .collect();
+    // oldest first; the key breaks a timestamp tie so the pick is stable
+    candidates.sort_by(|a, b| a.ts.cmp(&b.ts).then_with(|| a.key.cmp(&b.key)));
+    let mut delete = Vec::new();
+    let mut remaining = used;
+    for c in candidates {
+        if remaining <= max_bytes {
+            break;
+        }
+        remaining = remaining.saturating_sub(c.size);
+        delete.push(c.key.clone());
+    }
+    (delete, remaining)
+}
+
 /// A dir the auto-backup path must NOT ship: a chainless (legacy,
 /// pre-chain) workspace has no `chain.state`, so its export carries no
 /// verifiable chain and the restore path rejects it outright
@@ -621,11 +753,22 @@ fn backup_refusal_reason(dir: &std::path::Path) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::prune_candidates;
+    use super::{prune_candidates, quota_candidates, QuotaObject};
 
     fn key(ts: u64) -> String {
         let id = "ab".repeat(32);
         molt_core::backup_key(&id, ts)
+    }
+
+    /// A listed backup object of workspace `n`, timestamp `ts`, `size` bytes.
+    fn obj(n: u8, ts: u64, size: u64) -> QuotaObject {
+        let id = format!("{n:02x}").repeat(32);
+        QuotaObject {
+            key: molt_core::backup_key(&id, ts),
+            id,
+            ts,
+            size,
+        }
     }
 
     #[test]
@@ -652,5 +795,83 @@ mod tests {
         );
         // of the OTHER three, keep 2 newest → only the oldest other (10) goes
         assert_eq!(del, vec![key(10)]);
+    }
+
+    #[test]
+    fn a_quota_of_zero_means_no_limit() {
+        let objects = vec![obj(1, 1, 1_000), obj(1, 2, 1_000), obj(2, 1, 1_000)];
+        let (del, used) = quota_candidates(objects, 0, "");
+        assert!(del.is_empty(), "0 = no limit, nothing is pruned: {del:?}");
+        assert_eq!(used, 3_000);
+    }
+
+    #[test]
+    fn under_the_quota_nothing_is_pruned() {
+        let objects = vec![obj(1, 1, 100), obj(1, 2, 100)];
+        let (del, used) = quota_candidates(objects, 1_000, "");
+        assert!(del.is_empty(), "{del:?}");
+        assert_eq!(used, 200);
+    }
+
+    #[test]
+    fn over_the_quota_the_oldest_go_first_and_it_stops_once_it_fits() {
+        // three generations of one workspace, 100 bytes each, plus a second
+        // workspace's single copy = 400 bytes. Quota 350 → one 100er goes.
+        let objects = vec![
+            obj(1, 1, 100),
+            obj(1, 2, 100),
+            obj(1, 3, 100),
+            obj(2, 9, 100),
+        ];
+        let just = molt_core::backup_key(&"01".repeat(32), 3);
+        let (del, used) = quota_candidates(objects, 350, &just);
+        assert_eq!(del, vec![molt_core::backup_key(&"01".repeat(32), 1)]);
+        assert_eq!(used, 300, "one 100-byte object deleted from 400");
+    }
+
+    #[test]
+    fn age_is_the_timestamp_not_the_key_order() {
+        // workspace 02's copy is OLDER than workspace 01's, but sorts AFTER
+        // it lexicographically (the key carries the id before the stamp). A
+        // key-order pruner would delete the wrong one.
+        let objects = vec![obj(1, 500, 100), obj(1, 501, 100), obj(2, 1, 100)];
+        // 02 has only one copy → it is that workspace's newest and protected,
+        // so the oldest DELETABLE object is 01@500.
+        let (del, _) = quota_candidates(objects, 100, "");
+        assert_eq!(del, vec![molt_core::backup_key(&"01".repeat(32), 500)]);
+    }
+
+    #[test]
+    fn the_newest_copy_of_every_workspace_survives_the_quota() {
+        // far over quota, but each workspace's newest copy is untouchable —
+        // a byte limit must never leave a republic with zero backups.
+        let objects = vec![obj(1, 1, 100), obj(1, 2, 100), obj(2, 1, 100), obj(2, 2, 100)];
+        let (del, used) = quota_candidates(objects, 1, "");
+        assert_eq!(
+            del,
+            vec![
+                molt_core::backup_key(&"01".repeat(32), 1),
+                molt_core::backup_key(&"02".repeat(32), 1),
+            ]
+        );
+        assert_eq!(used, 200, "the two newest copies stay, quota or not");
+    }
+
+    #[test]
+    fn the_just_uploaded_object_is_never_a_quota_candidate() {
+        // clock regression again: the fresh upload sorts oldest by timestamp
+        // and would be the first byte-quota victim.
+        let just = molt_core::backup_key(&"01".repeat(32), 5);
+        let objects = vec![obj(1, 5, 100), obj(1, 10, 100), obj(1, 11, 100)];
+        let (del, _) = quota_candidates(objects, 1, &just);
+        assert!(!del.contains(&just), "{del:?}");
+    }
+
+    #[test]
+    fn an_unfittable_quota_deletes_what_it_can_and_reports_the_remainder() {
+        let objects = vec![obj(1, 1, 100), obj(1, 2, 100), obj(2, 1, 100)];
+        let (del, used) = quota_candidates(objects, 50, "");
+        assert_eq!(del, vec![molt_core::backup_key(&"01".repeat(32), 1)]);
+        assert_eq!(used, 200, "still over 50 — only the newest copies remain");
     }
 }
