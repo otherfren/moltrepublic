@@ -285,7 +285,7 @@ component ToolBtn inherits Rectangle {
     // "on" state with the soft accent field
     in property <bool> active: false;
     callback clicked();
-    width: 30px;
+    width: 30px * Theme.ui-scale;
     border-radius: Theme.win95 ? 0px : 5px;
     background: root.active ? Theme.accent-soft
         : (root.enabled && ta.has-hover ? Theme.raised : transparent);
@@ -625,7 +625,7 @@ export component MemoryPane inherits VerticalLayout {
                 padding: 9px;
                 spacing: 6px;
                 HorizontalLayout {
-                    height: 28px;
+                    height: 28px * Theme.ui-scale;
                     spacing: 10px;
                     Text {
                         text: Strings.mem-cs-title;
@@ -667,7 +667,7 @@ export component MemoryPane inherits VerticalLayout {
                         horizontal-stretch: 1;
                     }
                     AppButton {
-                        height: 28px;
+                        height: 28px * Theme.ui-scale;
                         pad: 10px;
                         label: Strings.mem-cs-undo;
                         clicked => {
@@ -675,7 +675,7 @@ export component MemoryPane inherits VerticalLayout {
                         }
                     }
                     AppButton {
-                        height: 28px;
+                        height: 28px * Theme.ui-scale;
                         pad: 10px;
                         label: Strings.mem-cs-revert;
                         clicked => {
@@ -683,7 +683,7 @@ export component MemoryPane inherits VerticalLayout {
                         }
                     }
                     AppButton {
-                        height: 28px;
+                        height: 28px * Theme.ui-scale;
                         pad: 10px;
                         label: Strings.mem-cs-vote;
                         emoji: "🗳️";
@@ -1343,7 +1343,7 @@ export component MemoryPane inherits VerticalLayout {
                                             vertical-alignment: center;
                                         }
                                         Rectangle {
-                                            width: 16px;
+                                            width: 16px * Theme.ui-scale;
                                             Text {
                                                 text: "×";
                                                 color: close-ta.has-hover ? Theme.bad : Theme.faint;
@@ -1883,7 +1883,7 @@ component KChipToggle inherits Rectangle {
     border-width: root.active ? 0px : 1px;
     border-color: Theme.line;
     width: kt.preferred-width + 16px;
-    height: 26px;
+    height: 26px * Theme.ui-scale;
     kt := Text {
         x: 8px;
         height: 100%;
@@ -3098,7 +3098,7 @@ component SecretCard inherits Rectangle {
                 current-index <=> root.reader;
             }
             AppButton {
-                height: 30px;
+                height: 30px * Theme.ui-scale;
                 pad: 10px;
                 emoji: "🗳️";
                 label: Strings.vt-request-unseal;

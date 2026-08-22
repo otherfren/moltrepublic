@@ -641,9 +641,9 @@ export global Theme {
     // the chat presence strip: the pill lays itself out from these, and the
     // strip measures its column width from the same numbers (MemberPill and
     // `pmeas` in app.slint) - drifting them apart cuts names off
-    out property <length> pill-pad: 9px;
-    out property <length> pill-gap: 6px;
-    out property <length> pill-dot: 8px;
+    out property <length> pill-pad: 9px * self.ui-scale;
+    out property <length> pill-gap: 6px * self.ui-scale;
+    out property <length> pill-dot: 8px * self.ui-scale;
     // GUI font sizes in px, set from the session (config.toml `[ui]`,
     // the set_fonts command): the app size drives the shared tokens
     // below (defaults keep the historical 26/18/14/12 ladder), nav and
@@ -651,6 +651,14 @@ export global Theme {
     in-out property <length> fs-app: 14px;
     in-out property <length> fs-nav: 13px;
     in-out property <length> fs-editor: 14px;
+    // Everything sized in pixels around TEXT scales with the app font: the
+    // size is a setting (9-28px), and a control whose box is a hardcoded
+    // pixel count keeps the 14px-default box while its label grows inside
+    // it (the cut-off "Entschlüsseln" on the Open screen, 2026-08-22).
+    // 1.0 at the default, so the layout is unchanged until the user asks
+    // for a bigger font; never below 1.0 - a small font may leave a button
+    // roomy, but it must never shrink the hit target.
+    out property <float> ui-scale: max(1.0, self.fs-app / 14px);
     out property <length> fs-h1: self.fs-app + 12px;
     out property <length> fs-h2: self.fs-app + 4px;
     out property <length> fs-body: self.fs-app;

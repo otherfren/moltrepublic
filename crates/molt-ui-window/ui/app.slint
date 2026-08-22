@@ -59,8 +59,8 @@ component FontSizeRow inherits FieldLabel {
     HorizontalLayout {
         spacing: 8px;
         AppButton {
-            width: 32px;
-            height: 32px;
+            width: 32px * Theme.ui-scale;
+            height: 32px * Theme.ui-scale;
             pad: 0px;
             label: "-";
             clicked => {
@@ -69,15 +69,17 @@ component FontSizeRow inherits FieldLabel {
         }
         Text {
             text: "\{root.px}px";
-            width: 44px;
+            // the row the operator is ON while raising the font: its own
+            // readout must not be the thing that gets cut off
+            width: 44px * Theme.ui-scale;
             color: Theme.text;
             font-size: Theme.fs-body;
             vertical-alignment: center;
             horizontal-alignment: center;
         }
         AppButton {
-            width: 32px;
-            height: 32px;
+            width: 32px * Theme.ui-scale;
+            height: 32px * Theme.ui-scale;
             pad: 0px;
             label: "+";
             clicked => {
@@ -155,8 +157,8 @@ component SoundPickerRow inherits FieldLabel {
             current-index <=> root.index;
         }
         if root.index > 0: AppButton {
-            width: 32px;
-            height: 32px;
+            width: 32px * Theme.ui-scale;
+            height: 32px * Theme.ui-scale;
             pad: 0px;
             label: "🔊";
             clicked => {
@@ -204,7 +206,7 @@ component SettingsTab inherits AppButton {
     in property <int> index;
     in-out property <int> current;
     pad: 8px;
-    height: 30px;
+    height: 30px * Theme.ui-scale;
     primary: root.current == root.index;
     clicked => {
         root.current = root.index;
@@ -263,7 +265,7 @@ component S3BucketGroup inherits DetailGroup {
         VerticalLayout {
             alignment: end;
             AppButton {
-                height: 38px;
+                height: 38px * Theme.ui-scale;
                 icon: @image-url("assets/cloud.svg");
                 icon-set: true;
                 label: Strings.set-s3-test;
@@ -408,7 +410,7 @@ component RelayRow inherits Rectangle {
     // not in use = faint (an unconfirmed relay is not a problem)
     property <color> tone: root.r.blocked == 1 ? Theme.faint
         : (root.r.blocked == 2 ? Theme.warn : Theme.good);
-    height: 56px;
+    height: 56px * Theme.ui-scale;
     background: Theme.panel;
     border-radius: Theme.win95 ? 0px : 6px;
     border-width: Theme.border-w;
@@ -460,14 +462,14 @@ component RelayRow inherits Rectangle {
         // the clipboard (the row has no field to edit it in; a wrong address
         // is removed and re-added, which is also what re-confirms it)
         AppButton {
-            width: 26px;
-            height: 26px;
+            width: 26px * Theme.ui-scale;
+            height: 26px * Theme.ui-scale;
             pad: 0px;
             icon: @image-url("assets/copy.svg");
             icon-set: true;
             // even icon in an even button: whole-pixel margins, or an
             // icon-only button renders visibly off-centre (AppButton)
-            icon-size: 14px;
+            icon-size: 14px * Theme.ui-scale;
             tooltip: Strings.rp-copy;
             tooltip-left: true;
             clicked => {
@@ -479,7 +481,7 @@ component RelayRow inherits Rectangle {
         AppButton {
             label: "▲";
             pad: 8px;
-            height: 26px;
+            height: 26px * Theme.ui-scale;
             enabled: !root.r.first;
             tooltip: Strings.rp-up;
             tooltip-left: true;
@@ -490,7 +492,7 @@ component RelayRow inherits Rectangle {
         AppButton {
             label: "▼";
             pad: 8px;
-            height: 26px;
+            height: 26px * Theme.ui-scale;
             enabled: !root.r.last;
             tooltip: Strings.rp-down;
             tooltip-left: true;
@@ -501,7 +503,7 @@ component RelayRow inherits Rectangle {
         if !root.r.confirmed: AppButton {
             label: Strings.rp-confirm;
             pad: 10px;
-            height: 26px;
+            height: 26px * Theme.ui-scale;
             primary: true;
             clicked => {
                 root.confirm(root.r.url, root.r.kind);
@@ -510,7 +512,7 @@ component RelayRow inherits Rectangle {
         if root.r.confirmed: AppButton {
             label: Strings.rp-revoke;
             pad: 10px;
-            height: 26px;
+            height: 26px * Theme.ui-scale;
             tooltip: Strings.rp-revoke-tip;
             tooltip-left: true;
             clicked => {
@@ -520,7 +522,7 @@ component RelayRow inherits Rectangle {
         AppButton {
             label: "×";
             pad: 9px;
-            height: 26px;
+            height: 26px * Theme.ui-scale;
             tooltip: Strings.rp-remove;
             tooltip-left: true;
             clicked => {
@@ -696,7 +698,7 @@ component RelayPoolGroup inherits DetailGroup {
                 alignment: start;
                 AppButton {
                     label: root.clearnet-session ? Strings.rp-cn-deactivate : Strings.rp-cn-activate;
-                    height: 28px;
+                    height: 28px * Theme.ui-scale;
                     primary: !root.clearnet-session;
                     clicked => {
                         root.session(!root.clearnet-session);
@@ -719,7 +721,7 @@ component PagerRow inherits HorizontalLayout {
     AppButton {
         label: "‹";
         pad: 10px;
-        height: 26px;
+        height: 26px * Theme.ui-scale;
         enabled: root.page > 1;
         clicked => {
             root.paged(-1);
@@ -734,7 +736,7 @@ component PagerRow inherits HorizontalLayout {
     AppButton {
         label: "›";
         pad: 10px;
-        height: 26px;
+        height: 26px * Theme.ui-scale;
         enabled: root.page < root.pages;
         clicked => {
             root.paged(1);
@@ -771,8 +773,8 @@ component OrgSettingsCard inherits DetailGroup {
                 vertical-alignment: center;
             }
             AppButton {
-                width: 26px;
-                height: 26px;
+                width: 26px * Theme.ui-scale;
+                height: 26px * Theme.ui-scale;
                 pad: 0px;
                 label: "✎";
                 tooltip: Strings.org-edit;
@@ -802,8 +804,8 @@ component OrgSettingsCard inherits DetailGroup {
             vertical-alignment: center;
         }
         AppButton {
-            width: 26px;
-            height: 26px;
+            width: 26px * Theme.ui-scale;
+            height: 26px * Theme.ui-scale;
             pad: 0px;
             label: "✎";
             tooltip: Strings.org-edit;
@@ -2187,7 +2189,7 @@ export component AppWindow inherits Window {
                 brand := Rectangle {
                     // same height as the main view's header bar, so the two
                     // top panels line up
-                    height: 64px;
+                    height: 64px * Theme.ui-scale;
                     // per-letter model of the lockup (o = brand orange, else
                     // the theme teal) — split so a hover can shuffle each
                     // letter's colour between the two brand tones
@@ -2443,7 +2445,8 @@ export component AppWindow inherits Window {
                 // theme / language / settings controls (bottom, centered);
                 // the icon rail keeps just the settings gear
                 Rectangle {
-                    height: 56px;
+                    // the cluster's buttons scale with the font, so does its rail
+                    height: 56px * Theme.ui-scale;
                     if !root.nav-collapsed: HorizontalLayout {
                         padding-left: 10px;
                         padding-right: 10px;
@@ -2560,7 +2563,7 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     alignment: center;
                     VerticalLayout {
-                        width: 520px;
+                        width: 520px * Theme.ui-scale;
                         spacing: 12px;
                         Text {
                             text: Strings.choice-title;
@@ -2576,7 +2579,7 @@ export component AppWindow inherits Window {
                         // is told "already running", and sees nothing that
                         // explains where "already" is.
                         if root.run-banner() != "": Rectangle {
-                            height: 52px;
+                            height: 52px * Theme.ui-scale;
                             border-radius: Theme.radius;
                             background: Theme.accent-soft;
                             border-width: max(2px, Theme.border-w);
@@ -2595,7 +2598,7 @@ export component AppWindow inherits Window {
                                     overflow: elide;
                                 }
                                 AppButton {
-                                    height: 34px;
+                                    height: 34px * Theme.ui-scale;
                                     primary: true;
                                     label: Strings.rw-join-goto;
                                     clicked => {
@@ -2867,7 +2870,7 @@ export component AppWindow inherits Window {
                             // relay this node can dial. A long pool scrolls
                             // inside its own table instead of growing the panel.
                             if root.cw-relay-picks.length > 0: Rectangle {
-                                height: min(130px, root.cw-relay-picks.length * 26px);
+                                height: min(130px, root.cw-relay-picks.length * 26px) * Theme.ui-scale;
                                 background: Theme.panel;
                                 border-radius: Theme.win95 ? 0px : 6px;
                                 border-width: Theme.border-w;
@@ -2883,11 +2886,11 @@ export component AppWindow inherits Window {
                                         padding-right: 10px;
                                         alignment: start;
                                         for r[i] in root.cw-relay-picks: HorizontalLayout {
-                                            height: 24px;
+                                            height: 24px * Theme.ui-scale;
                                             spacing: 8px;
                                             AppButton {
-                                                width: 26px;
-                                                height: 22px;
+                                                width: 26px * Theme.ui-scale;
+                                                height: 22px * Theme.ui-scale;
                                                 pad: 0px;
                                                 emoji: r.picked ? "✅" : "⬜";
                                                 tooltip: Strings.cw-relays-toggle;
@@ -2922,7 +2925,7 @@ export component AppWindow inherits Window {
                             HorizontalLayout {
                                 alignment: start;
                                 AppButton {
-                                    height: 28px;
+                                    height: 28px * Theme.ui-scale;
                                     pad: 10px;
                                     label: Strings.cw-open-relay-settings;
                                     clicked => {
@@ -2971,7 +2974,7 @@ export component AppWindow inherits Window {
                             HorizontalLayout {
                                 alignment: start;
                                 AppButton {
-                                    height: 28px;
+                                    height: 28px * Theme.ui-scale;
                                     pad: 10px;
                                     label: Strings.cw-open-net-settings;
                                     clicked => {
@@ -3051,7 +3054,7 @@ export component AppWindow inherits Window {
                             if !root.cw-declined: HorizontalLayout {
                                 alignment: start;
                                 AppButton {
-                                    height: 28px;
+                                    height: 28px * Theme.ui-scale;
                                     pad: 10px;
                                     label: Strings.cw-open-net-settings;
                                     clicked => {
@@ -3364,7 +3367,7 @@ export component AppWindow inherits Window {
                                                 // copy the link once it is ready
                                                 // (empty until the queue is up)
                                                 if seat.state == 0 && seat.detail != "": AppButton {
-                                                    height: 28px;
+                                                    height: 28px * Theme.ui-scale;
                                                     pad: 10px;
                                                     y: (parent.height - self.height) / 2;
                                                     label: Strings.ow-copy;
@@ -3437,7 +3440,7 @@ export component AppWindow inherits Window {
                     spacing: 10px;
                     Rectangle {
                         horizontal-stretch: 1;
-                        height: 40px;
+                        height: 40px * Theme.ui-scale;
                         background: ow-dir-ta.has-hover ? Theme.raised : Theme.panel;
                         border-radius: Theme.radius;
                         border-width: Theme.border-w;
@@ -3508,7 +3511,7 @@ export component AppWindow inherits Window {
                     // Cell widths mirror the row columns (dot / name / status
                     // / the two fixed-width buttons), so header and rows align.
                     HorizontalLayout {
-                        height: 32px;
+                        height: 32px * Theme.ui-scale;
                         padding-left: 18px;
                         padding-right: 18px;
                         spacing: 12px;
@@ -3545,7 +3548,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         Rectangle {
-                            width: 110px;
+                            width: 110px * Theme.ui-scale;
                             sh-ta := TouchArea {
                                 mouse-cursor: MouseCursor.pointer;
                                 clicked => {
@@ -3583,13 +3586,13 @@ export component AppWindow inherits Window {
                             color: Theme.faint;
                             font-size: Theme.fs-cap;
                             font-weight: 700;
-                            width: 85px;
+                            width: 85px * Theme.ui-scale;
                             vertical-alignment: center;
                         }
                         Rectangle {
                             // Open / Encrypt-Decrypt / Delete buttons zone
-                            // (86 + 12 + 134 + 12 + 86)
-                            width: 330px;
+                            // (86 + 12 + 134 + 12 + 86), scaled with them
+                            width: 330px * Theme.ui-scale;
                         }
                     }
                     Rectangle {
@@ -3609,7 +3612,8 @@ export component AppWindow inherits Window {
                             padding: 6px;
                             spacing: 4px;
                             for w[i] in root.ws-list: Rectangle {
-                                height: 54px;
+                                // the row holds 32px buttons - it scales with them
+                                height: 54px * Theme.ui-scale;
                                 border-radius: Theme.win95 ? 0px : 8px;
                                 background: i == root.open-selected ? Theme.raised : (rw-ta.has-hover ? Theme.panel-2 : transparent);
                                 // Row-wide touch area first, so the per-row Open
@@ -3661,7 +3665,7 @@ export component AppWindow inherits Window {
                                     Text {
                                         // fixed column, aligned under the
                                         // "Last sync" header
-                                        width: 110px;
+                                        width: 110px * Theme.ui-scale;
                                         text: w.status;
                                         color: w.state == 0 ? Theme.good : (w.state == 2 ? Theme.dim : Theme.warn);
                                         font-size: Theme.fs-cap;
@@ -3676,13 +3680,13 @@ export component AppWindow inherits Window {
                                     // first row's tip vanished under the
                                     // clipped table header.
                                     HorizontalLayout {
-                                        width: 120px;
+                                        width: 120px * Theme.ui-scale;
                                         spacing: 6px;
                                         AppButton {
-                                            width: 26px;
-                                            height: 26px;
+                                            width: 26px * Theme.ui-scale;
+                                            height: 26px * Theme.ui-scale;
                                             pad: 0px;
-                                            icon-size: 16px;
+                                            icon-size: 16px * Theme.ui-scale;
                                             y: (parent.height - self.height) / 2;
                                             icon: @image-url("assets/gear.svg");
                                             icon-set: true;
@@ -3707,7 +3711,7 @@ export component AppWindow inherits Window {
                                     // manifest): encrypted = keys removed,
                                     // inactive until decrypted
                                     Text {
-                                        width: 85px;
+                                        width: 85px * Theme.ui-scale;
                                         text: w.encrypted ? Strings.ow-enc : Strings.ow-unenc;
                                         color: w.encrypted ? Theme.warn : Theme.good;
                                         font-size: Theme.fs-cap;
@@ -3715,8 +3719,8 @@ export component AppWindow inherits Window {
                                         overflow: elide;
                                     }
                                     AppButton {
-                                        width: 86px;
-                                        height: 32px;
+                                        width: 86px * Theme.ui-scale;
+                                        height: 32px * Theme.ui-scale;
                                         y: (parent.height - self.height) / 2;
                                         label: Strings.ow-open;
                                         primary: true;
@@ -3728,8 +3732,8 @@ export component AppWindow inherits Window {
                                     }
                                     AppButton {
                                         // wide enough for "Entschlüsseln"
-                                        width: 134px;
-                                        height: 32px;
+                                        width: 134px * Theme.ui-scale;
+                                        height: 32px * Theme.ui-scale;
                                         y: (parent.height - self.height) / 2;
                                         label: w.encrypted ? Strings.ow-decrypt : Strings.ow-encrypt;
                                         clicked => {
@@ -3744,8 +3748,8 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                     AppButton {
-                                        width: 86px;
-                                        height: 32px;
+                                        width: 86px * Theme.ui-scale;
+                                        height: 32px * Theme.ui-scale;
                                         y: (parent.height - self.height) / 2;
                                         label: Strings.ow-delete;
                                         clicked => {
@@ -3850,7 +3854,7 @@ export component AppWindow inherits Window {
                                 alignment: start;
                                 spacing: 8px;
                                 AppButton {
-                                    height: 30px;
+                                    height: 30px * Theme.ui-scale;
                                     pad: 10px;
                                     icon: @image-url("assets/gear.svg");
                                     icon-set: true;
@@ -3864,7 +3868,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
                                 AppButton {
-                                    height: 30px;
+                                    height: 30px * Theme.ui-scale;
                                     pad: 10px;
                                     icon: @image-url("assets/floppy.svg");
                                     icon-set: true;
@@ -3895,7 +3899,7 @@ export component AppWindow inherits Window {
                             if root.open-seed != "": HorizontalLayout {
                                 alignment: start;
                                 AppButton {
-                                    height: 30px;
+                                    height: 30px * Theme.ui-scale;
                                     pad: 10px;
                                     icon: @image-url("assets/eye.svg");
                                     icon-set: true;
@@ -4062,7 +4066,7 @@ export component AppWindow inherits Window {
                                 horizontal-stretch: 1;
                             }
                             AppButton {
-                                height: 38px;
+                                height: 38px * Theme.ui-scale;
                                 pad: 10px;
                                 icon: @image-url("assets/paste.svg");
                                 icon-set: true;
@@ -4116,7 +4120,7 @@ export component AppWindow inherits Window {
                                 // them should not have to copy them out of a
                                 // chat message by hand
                                 if root.jw-preview.missing-relays > 0: AppButton {
-                                    height: 38px;
+                                    height: 38px * Theme.ui-scale;
                                     label: "\{Strings.jw-adopt-relays} (\{root.jw-preview.missing-relays})";
                                     clicked => {
                                         root.adopt-invite-relays(root.jw-invite);
@@ -4278,7 +4282,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                             AppButton {
-                                height: 38px;
+                                height: 38px * Theme.ui-scale;
                                 pad: 10px;
                                 icon: @image-url("assets/paste.svg");
                                 icon-set: true;
@@ -4375,7 +4379,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         AppButton {
-                            height: 48px;
+                            height: 48px * Theme.ui-scale;
                             pad: 12px;
                             primary: root.rv-link == "";
                             icon: @image-url("assets/paste.svg");
@@ -4428,7 +4432,7 @@ export component AppWindow inherits Window {
                         }
                         Rectangle { horizontal-stretch: 1; }
                         AppButton {
-                            height: 38px;
+                            height: 38px * Theme.ui-scale;
                             primary: true;
                             label: Strings.rw-join-goto;
                             clicked => {
@@ -4481,7 +4485,7 @@ export component AppWindow inherits Window {
                             overflow: elide;
                         }
                         AppButton {
-                            height: 38px;
+                            height: 38px * Theme.ui-scale;
                             pad: 10px;
                             icon: @image-url("assets/gear.svg");
                             icon-set: true;
@@ -4532,7 +4536,7 @@ export component AppWindow inherits Window {
                 // transport/sync status displays move into the left nav
                 // (planned), not up here as pills.
                 Rectangle {
-                    height: 64px;
+                    height: 64px * Theme.ui-scale;
                     background: Theme.panel;
                     HorizontalLayout {
                         padding-left: 16px;
@@ -4709,7 +4713,8 @@ export component AppWindow inherits Window {
                                     x: 8px;
                                     y: 8px;
                                     width: parent.width - 16px;
-                                    property <length> chip-h: 28px;
+                                    // the MemberPill's own height (parts.slint), same scale
+                                    property <length> chip-h: 28px * Theme.ui-scale;
                                     property <length> gap: Theme.pill-gap;
                                     // MEASURING ONLY, never painted: a vertical
                                     // layout's preferred width is the MAX over
@@ -4736,7 +4741,8 @@ export component AppWindow inherits Window {
                                     // the column follows the longest seat, floored
                                     // at the old 150px and capped at 320px — past
                                     // that the name elides inside its pill
-                                    property <length> want: min(max(pmeas.preferred-width + 2 * Theme.pill-pad, 150px), 320px);
+                                    property <length> want: min(max(pmeas.preferred-width + 2 * Theme.pill-pad,
+                                        150px * Theme.ui-scale), 320px * Theme.ui-scale);
                                     // as many such columns as fit, then the pills
                                     // stretch to fill the row exactly
                                     property <int> cols: max(1, Math.floor(self.width / (self.want + self.gap)));
@@ -5072,7 +5078,7 @@ export component AppWindow inherits Window {
                                     // has no ballot to jump to (2026-08-15)
                                     if root.selected-channel-votable && !root.selected-channel-closed: Rectangle {
                                         width: jv-t.width + 14px;
-                                        height: 20px;
+                                        height: 20px * Theme.ui-scale;
                                         y: (parent.height - self.height) / 2;
                                         border-radius: Theme.win95 ? 0px : 5px;
                                         border-width: 1px;
@@ -5122,8 +5128,8 @@ export component AppWindow inherits Window {
                                         overflow: elide;
                                     }
                                     Rectangle {
-                                        width: 20px;
-                                        height: 20px;
+                                        width: 20px * Theme.ui-scale;
+                                        height: 20px * Theme.ui-scale;
                                         y: (parent.height - self.height) / 2;
                                         border-radius: Theme.win95 ? 0px : 5px;
                                         background: qx-ta.has-hover ? Theme.raised : transparent;
@@ -5216,8 +5222,8 @@ export component AppWindow inherits Window {
                                 if root.selected-channel == "group": VerticalLayout {
                                     alignment: end;
                                     Rectangle {
-                                        width: 38px;
-                                        height: 38px;
+                                        width: 38px * Theme.ui-scale;
+                                        height: 38px * Theme.ui-scale;
                                         background: root.nt-open ? Theme.accent-soft : (nt-ta.has-hover ? Theme.raised : Theme.panel);
                                         border-radius: Theme.radius;
                                         border-width: Theme.border-w;
@@ -5248,8 +5254,8 @@ export component AppWindow inherits Window {
                                 VerticalLayout {
                                     alignment: end;
                                     Rectangle {
-                                        width: 38px;
-                                        height: 38px;
+                                        width: 38px * Theme.ui-scale;
+                                        height: 38px * Theme.ui-scale;
                                         background: at-ta.has-hover ? Theme.raised : Theme.panel;
                                         border-radius: Theme.radius;
                                         border-width: Theme.border-w;
@@ -5275,8 +5281,8 @@ export component AppWindow inherits Window {
                                 VerticalLayout {
                                     alignment: end;
                                     Rectangle {
-                                        width: 38px;
-                                        height: 38px;
+                                        width: 38px * Theme.ui-scale;
+                                        height: 38px * Theme.ui-scale;
                                         background: em-ta.has-hover ? Theme.raised : Theme.panel;
                                         border-radius: Theme.radius;
                                         border-width: Theme.border-w;
@@ -5312,7 +5318,7 @@ export component AppWindow inherits Window {
                                 VerticalLayout {
                                     alignment: end;
                                     AppButton {
-                                        height: 38px;
+                                        height: 38px * Theme.ui-scale;
                                         label: Strings.mv-send;
                                         primary: true;
                                         clicked => {
@@ -5356,7 +5362,7 @@ export component AppWindow inherits Window {
                                             min-width: 56px;
                                             preferred-width: 56px;
                                             horizontal-stretch: root.org-img-set ? 1 : 0;
-                                            height: 56px;
+                                            height: 56px * Theme.ui-scale;
                                             y: (parent.height - self.height) / 2;
                                             border-radius: Theme.win95 ? 0px : 8px;
                                             background: Theme.accent-soft;
@@ -5392,8 +5398,8 @@ export component AppWindow inherits Window {
                                             // avatar-style corner edit: opens
                                             // the image picker modal
                                             AppButton {
-                                                width: 22px;
-                                                height: 22px;
+                                                width: 22px * Theme.ui-scale;
+                                                height: 22px * Theme.ui-scale;
                                                 pad: 0px;
                                                 x: parent.width - self.width + 6px;
                                                 y: parent.height - self.height + 6px;
@@ -5427,8 +5433,8 @@ export component AppWindow inherits Window {
                                         VerticalLayout {
                                             alignment: start;
                                             AppButton {
-                                                width: 26px;
-                                                height: 26px;
+                                                width: 26px * Theme.ui-scale;
+                                                height: 26px * Theme.ui-scale;
                                                 pad: 0px;
                                                 label: "✎";
                                                 tooltip: Strings.org-edit;
@@ -5553,8 +5559,8 @@ export component AppWindow inherits Window {
                                         // charter changes are gated — the
                                         // edit opens a (mock) proposal draft
                                         AppButton {
-                                            width: 26px;
-                                            height: 26px;
+                                            width: 26px * Theme.ui-scale;
+                                            height: 26px * Theme.ui-scale;
                                             pad: 0px;
                                             label: "✎";
                                             tooltip: Strings.org-edit;
@@ -5590,8 +5596,8 @@ export component AppWindow inherits Window {
                                             }
                                         }
                                         AppButton {
-                                            width: 26px;
-                                            height: 26px;
+                                            width: 26px * Theme.ui-scale;
+                                            height: 26px * Theme.ui-scale;
                                             pad: 0px;
                                             label: "✎";
                                             tooltip: Strings.org-edit;
@@ -5703,7 +5709,7 @@ export component AppWindow inherits Window {
                                                 text: "\{st.pending-count}";
                                                 color: st.pending-count > 0 ? Theme.text : Theme.dim;
                                                 font-size: Theme.fs-body;
-                                                width: 82px;
+                                                width: 82px * Theme.ui-scale;
                                                 horizontal-alignment: center;
                                                 vertical-alignment: center;
                                             }
@@ -5711,10 +5717,10 @@ export component AppWindow inherits Window {
                                             // node's own vote is missing, the
                                             // jump straight into the vote
                                             HorizontalLayout {
-                                                width: 130px;
+                                                width: 130px * Theme.ui-scale;
                                                 alignment: center;
                                                 if st.pending-my-vote-count > 0: AppButton {
-                                                    height: 26px;
+                                                    height: 26px * Theme.ui-scale;
                                                     pad: 8px;
                                                     label: Strings.oa-list-pending;
                                                     clicked => {
@@ -5867,7 +5873,7 @@ export component AppWindow inherits Window {
                                             // two lines: the seat on the
                                             // first, its description across
                                             // both (56px picture + 2*12px)
-                                            height: 80px;
+                                            height: 80px * Theme.ui-scale;
                                             border-radius: Theme.win95 ? 0px : 6px;
                                             // the own seat stands out: accent
                                             // border and a "(das bin ich)"
@@ -5933,8 +5939,8 @@ export component AppWindow inherits Window {
                                                 // seat alone (the engine
                                                 // refuses any other proposer)
                                                 Rectangle {
-                                                    width: 56px;
-                                                    height: 56px;
+                                                    width: 56px * Theme.ui-scale;
+                                                    height: 56px * Theme.ui-scale;
                                                     border-radius: Theme.win95 ? 0px : 8px;
                                                     background: Theme.accent-soft;
                                                     border-width: 1px;
@@ -5964,8 +5970,8 @@ export component AppWindow inherits Window {
                                                         }
                                                     }
                                                     if m.name == root.node-member: AppButton {
-                                                        width: 22px;
-                                                        height: 22px;
+                                                        width: 22px * Theme.ui-scale;
+                                                        height: 22px * Theme.ui-scale;
                                                         pad: 0px;
                                                         x: parent.width - self.width + 6px;
                                                         y: parent.height - self.height + 6px;
@@ -6035,11 +6041,11 @@ export component AppWindow inherits Window {
                                                 // keeps the room on every row
                                                 // so the table stays in one grid
                                                 Rectangle {
-                                                    width: 22px;
+                                                    width: 22px * Theme.ui-scale;
                                                     height: Theme.fs-cap * 2.7;
                                                     if m.name == root.node-member: AppButton {
-                                                        width: 22px;
-                                                        height: 22px;
+                                                        width: 22px * Theme.ui-scale;
+                                                        height: 22px * Theme.ui-scale;
                                                         pad: 0px;
                                                         x: 0px;
                                                         y: parent.height - self.height;
@@ -6071,8 +6077,8 @@ export component AppWindow inherits Window {
                                                         overflow: elide;
                                                     }
                                                     if m.id != "": AppButton {
-                                                        width: 24px;
-                                                        height: 22px;
+                                                        width: 24px * Theme.ui-scale;
+                                                        height: 22px * Theme.ui-scale;
                                                         pad: 0px;
                                                         icon: @image-url("assets/copy.svg");
                                                         icon-set: true;
@@ -6097,8 +6103,8 @@ export component AppWindow inherits Window {
                                                         overflow: elide;
                                                     }
                                                     if m.pk != "": AppButton {
-                                                        width: 24px;
-                                                        height: 22px;
+                                                        width: 24px * Theme.ui-scale;
+                                                        height: 22px * Theme.ui-scale;
                                                         pad: 0px;
                                                         icon: @image-url("assets/copy.svg");
                                                         icon-set: true;
@@ -6125,11 +6131,11 @@ export component AppWindow inherits Window {
                                                 // member (view switch + filter
                                                 // both run through Rust)
                                                 HorizontalLayout {
-                                                    width: 70px;
+                                                    width: 70px * Theme.ui-scale;
                                                     alignment: end;
                                                     cross-axis-alignment: center;
                                                     if m.uploads > 0: AppButton {
-                                                        height: 28px;
+                                                        height: 28px * Theme.ui-scale;
                                                         pad: 10px;
                                                         label: "📎 \{m.uploads}";
                                                         clicked => {
@@ -6151,11 +6157,11 @@ export component AppWindow inherits Window {
                                                 // dialog: pending → link or a
                                                 // calm failed state
                                                 HorizontalLayout {
-                                                    width: 180px;
+                                                    width: 180px * Theme.ui-scale;
                                                     alignment: end;
                                                     cross-axis-alignment: center;
                                                     if root.org-chain-governed && m.name != root.node-member: AppButton {
-                                                        height: 28px;
+                                                        height: 28px * Theme.ui-scale;
                                                         pad: 10px;
                                                         label: Strings.om-recover-link;
                                                         clicked => {
@@ -6197,7 +6203,7 @@ export component AppWindow inherits Window {
                             // all rows); the members table's uploads-jump
                             // pre-fills it with a member name
                             Rectangle {
-                                height: 34px;
+                                height: 34px * Theme.ui-scale;
                                 background: Theme.panel;
                                 border-radius: Theme.win95 ? 0px : 8px;
                                 border-width: Theme.border-w;
@@ -6226,8 +6232,8 @@ export component AppWindow inherits Window {
                                 // while one is set)
                                 if root.ou-filter != "": Rectangle {
                                     x: parent.width - 30px;
-                                    width: 24px;
-                                    height: 24px;
+                                    width: 24px * Theme.ui-scale;
+                                    height: 24px * Theme.ui-scale;
                                     y: (parent.height - self.height) / 2;
                                     border-radius: Theme.win95 ? 0px : 5px;
                                     background: oux-ta.has-hover ? Theme.raised : transparent;
@@ -6363,7 +6369,7 @@ export component AppWindow inherits Window {
                                             font-size: Theme.fs-cap;
                                         }
                                         for u in root.org-uploads: Rectangle {
-                                            height: 40px;
+                                            height: 40px * Theme.ui-scale;
                                             border-radius: Theme.win95 ? 0px : 6px;
                                             background: Theme.panel-2;
                                             border-width: 1px;
@@ -6442,7 +6448,7 @@ export component AppWindow inherits Window {
                                                 // reachable — offline shows
                                                 // the hint instead
                                                 HorizontalLayout {
-                                                    width: 110px;
+                                                    width: 110px * Theme.ui-scale;
                                                     alignment: center;
                                                     spacing: 6px;
                                                     // live download status: the
@@ -6462,7 +6468,7 @@ export component AppWindow inherits Window {
                                                     // gone share says the one word instead of "offline"
                                                     if (u.online || u.availability == "relay-held")
                                                         && u.status-kind != 1: AppButton {
-                                                        height: 28px;
+                                                        height: 28px * Theme.ui-scale;
                                                         pad: 10px;
                                                         y: (parent.height - self.height) / 2;
                                                         label: Strings.ou-download;
@@ -6943,7 +6949,7 @@ export component AppWindow inherits Window {
                                             vertical-alignment: center;
                                         }
                                         if l.patch-id >= 0: AppButton {
-                                            height: 26px;
+                                            height: 26px * Theme.ui-scale;
                                             pad: 8px;
                                             emoji: "💬";
                                             clicked => {
@@ -7390,7 +7396,7 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                     AppButton {
-                                        height: 38px;
+                                        height: 38px * Theme.ui-scale;
                                         icon: @image-url("assets/folder.svg");
                                         icon-set: true;
                                         label: Strings.set-ws-choose;
@@ -7506,7 +7512,7 @@ export component AppWindow inherits Window {
                                 }
                                 Rectangle { horizontal-stretch: 1; }
                                 AppButton {
-                                    height: 28px;
+                                    height: 28px * Theme.ui-scale;
                                     pad: 10px;
                                     label: Strings.set-tab-s3;
                                     clicked => {
@@ -7523,7 +7529,7 @@ export component AppWindow inherits Window {
                                 vertical-stretch: 0;
                                 spacing: 12px;
                                 AppButton {
-                                    height: 30px;
+                                    height: 30px * Theme.ui-scale;
                                     emoji: "🔄";
                                     label: Strings.bk-refresh;
                                     tooltip: Strings.bk-refresh-tip;
@@ -7617,7 +7623,7 @@ export component AppWindow inherits Window {
                                         spacing: 2px;
                                         alignment: start;
                                         for r in root.bk-rows: Rectangle {
-                                            height: 34px;
+                                            height: 34px * Theme.ui-scale;
                                             border-radius: Theme.win95 ? 0px : 4px;
                                             background: bkr-ta.has-hover ? Theme.raised : transparent;
                                             bkr-ta := TouchArea { }
@@ -7647,10 +7653,10 @@ export component AppWindow inherits Window {
                                                 // mirrored state only — the click
                                                 // goes through the engine
                                                 Rectangle {
-                                                    width: 44px;
+                                                    width: 44px * Theme.ui-scale;
                                                     if r.has-local: Rectangle {
-                                                        width: 20px;
-                                                        height: 20px;
+                                                        width: 20px * Theme.ui-scale;
+                                                        height: 20px * Theme.ui-scale;
                                                         x: (parent.width - self.width) / 2;
                                                         y: (parent.height - 20px) / 2;
                                                         border-radius: Theme.win95 ? 0px : 4px;
@@ -7690,7 +7696,7 @@ export component AppWindow inherits Window {
                                                     horizontal-alignment: right;
                                                 }
                                                 Text {
-                                                    width: 108px;
+                                                    width: 108px * Theme.ui-scale;
                                                     text: r.last;
                                                     color: r.last == "never" ? Theme.faint : Theme.dim;
                                                     font-size: Theme.fs-body;
@@ -7701,7 +7707,7 @@ export component AppWindow inherits Window {
                                                 // fetched sealed, opened from the workspace
                                                 // list with its phrase
                                                 if !r.has-local: AppButton {
-                                                    height: 26px;
+                                                    height: 26px * Theme.ui-scale;
                                                     pad: 9px;
                                                     y: (parent.height - self.height) / 2;
                                                     label: Strings.bk-restore;
@@ -7731,7 +7737,7 @@ export component AppWindow inherits Window {
                                 }
                                 Rectangle { horizontal-stretch: 1; }
                                 AppButton {
-                                    height: 28px;
+                                    height: 28px * Theme.ui-scale;
                                     pad: 10px;
                                     primary: true;
                                     label: Strings.bk-goto-open;
@@ -7838,7 +7844,7 @@ export component AppWindow inherits Window {
                                 HorizontalLayout {
                                     alignment: start;
                                     AppButton {
-                                        height: 34px;
+                                        height: 34px * Theme.ui-scale;
                                         emoji: "🧅";
                                         label: Strings.set-tor-test;
                                         tooltip: Strings.tor-test-tip;
@@ -8556,7 +8562,7 @@ export component AppWindow inherits Window {
                     }
                 }
                 AppButton {
-                    height: 38px;
+                    height: 38px * Theme.ui-scale;
                     pad: 10px;
                     icon: @image-url("assets/folder.svg");
                     icon-set: true;
@@ -8657,7 +8663,7 @@ export component AppWindow inherits Window {
                     }
                 }
                 AppButton {
-                    height: 38px;
+                    height: 38px * Theme.ui-scale;
                     pad: 10px;
                     icon: @image-url("assets/folder.svg");
                     icon-set: true;
@@ -8717,8 +8723,8 @@ export component AppWindow inherits Window {
                     spacing: 6px;
                     alignment: start;
                     for g in ["🔑", "📄", "🗝️", "🔐", "💳", "🧾"]: AppButton {
-                        width: 44px;
-                        height: 34px;
+                        width: 44px * Theme.ui-scale;
+                        height: 34px * Theme.ui-scale;
                         pad: 0px;
                         emoji: g;
                         primary: root.vt-seal-glyph == g;
@@ -8816,7 +8822,7 @@ export component AppWindow inherits Window {
                 }
             }
             AppButton {
-                height: 38px;
+                height: 38px * Theme.ui-scale;
                 pad: 10px;
                 icon: @image-url("assets/paste.svg");
                 icon-set: true;
@@ -9128,12 +9134,12 @@ export component AppWindow inherits Window {
             // capped + scrollable so a long pool can never push the modal's
             // buttons off-window (the dialog centers on preferred height)
             Flickable {
-                height: min(260px, root.org-relays-draft-rows.length * 37px);
-                viewport-height: root.org-relays-draft-rows.length * 37px;
+                height: min(260px, root.org-relays-draft-rows.length * 37px) * Theme.ui-scale;
+                viewport-height: root.org-relays-draft-rows.length * 37px * Theme.ui-scale;
                 VerticalLayout {
                     spacing: 5px;
                     for r[i] in root.org-relays-draft-rows: Rectangle {
-                        height: 32px;
+                        height: 32px * Theme.ui-scale;
                         border-radius: Theme.win95 ? 0px : 6px;
                         background: Theme.panel-2;
                         HorizontalLayout {
@@ -9149,8 +9155,8 @@ export component AppWindow inherits Window {
                                 horizontal-stretch: 1;
                             }
                             AppButton {
-                                width: 26px;
-                                height: 26px;
+                                width: 26px * Theme.ui-scale;
+                                height: 26px * Theme.ui-scale;
                                 y: (parent.height - self.height) / 2;
                                 pad: 0px;
                                 label: "✕";
@@ -9259,7 +9265,7 @@ export component AppWindow inherits Window {
                 }
             }
             AppButton {
-                height: 38px;
+                height: 38px * Theme.ui-scale;
                 pad: 10px;
                 icon: @image-url("assets/folder.svg");
                 icon-set: true;
@@ -9304,7 +9310,7 @@ export component AppWindow inherits Window {
                 }
             }
             AppButton {
-                height: 38px;
+                height: 38px * Theme.ui-scale;
                 pad: 10px;
                 icon: @image-url("assets/folder.svg");
                 icon-set: true;

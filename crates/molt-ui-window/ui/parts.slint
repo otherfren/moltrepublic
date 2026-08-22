@@ -20,7 +20,7 @@ export component ChoiceCard inherits Rectangle {
     in property <image> icon;
     in property <bool> marked: false;
     callback chosen();
-    height: 88px;
+    height: 88px * Theme.ui-scale;
     border-radius: Theme.radius;
     background: ta.has-hover || root.marked ? Theme.raised : Theme.panel-2;
     border-width: Theme.border-w;
@@ -134,7 +134,7 @@ export component SurfaceRow inherits Rectangle {
     // staged-out surfaces render greyed and ignore clicks
     in property <bool> enabled: true;
     callback chosen();
-    height: 46px;
+    height: 46px * Theme.ui-scale;
     border-radius: Theme.win95 ? 0px : 8px;
     opacity: root.enabled ? 1.0 : 0.4;
     background: root.selected ? Theme.raised : (root.enabled && ta.has-hover ? Theme.panel-2 : transparent);
@@ -261,7 +261,7 @@ export component ViewRow inherits Rectangle {
     // means "something is waiting for you", and a tally is just a fact.
     in property <string> quorum: "";
     callback chosen();
-    height: 30px;
+    height: 30px * Theme.ui-scale;
     border-radius: Theme.win95 ? 0px : 6px;
     background: root.selected ? Theme.raised : (ta.has-hover ? Theme.panel-2 : transparent);
     HorizontalLayout {
@@ -353,7 +353,7 @@ export component EmojiGrid inherits Rectangle {
         spacing: 4px;
         alignment: center;
         for emoji in ["👍", "👎", "🎉", "✅", "❤️", "🙏", "🤔", "🔥"]: Rectangle {
-            width: 34px;
+            width: 34px * Theme.ui-scale;
             background: e-ta.has-hover ? Theme.raised : transparent;
             border-radius: Theme.win95 ? 0px : 4px;
             clip: true;
@@ -379,7 +379,7 @@ export component ReactionPill inherits Rectangle {
     in property <ReactionItem> r;
     callback clicked();
     width: prow.preferred-width + (root.r.count > 1 ? 12px : 6px);
-    height: 22px;
+    height: 22px * Theme.ui-scale;
     // no chrome at all: the emoji just stands there — a whisper of hover
     // feedback, and the count carries the "mine" accent
     background: pta.has-hover ? Theme.raised : transparent;
@@ -586,7 +586,7 @@ export component ChatRow inherits Rectangle {
         // Clicking downloads from the sharer's disk while the file exists;
         // a removed file stays visible but grey — the history is honest.
         if root.line.deleted-by == "" && root.line.has-file: Rectangle {
-            height: 46px;
+            height: 46px * Theme.ui-scale;
             border-radius: Theme.win95 ? 0px : 6px;
             border-width: 1px;
             border-color: Theme.line;
@@ -663,7 +663,7 @@ export component ChatRow inherits Rectangle {
         // own and foreign messages (the band is the card's LAST line, so
         // the "+" hangs at a constant offset from the bottom everywhere).
         if root.line.deleted-by == "" && !root.line.system && (root.line.reactions.length > 0 || (root.line.mine-emoji == "" && root.line.id != "")): HorizontalLayout {
-            height: 26px;
+            height: 26px * Theme.ui-scale;
             padding-top: 2px;
             padding-bottom: 2px;
             spacing: 4px;
@@ -674,8 +674,8 @@ export component ChatRow inherits Rectangle {
                 }
             }
             if root.line.mine-emoji == "" && root.line.id != "": Rectangle {
-                width: 26px;
-                height: 22px;
+                width: 26px * Theme.ui-scale;
+                height: 22px * Theme.ui-scale;
                 background: plus-ta.has-hover ? Theme.raised : transparent;
                 border-radius: Theme.win95 ? 0px : 11px;
                 border-width: Theme.win95 ? Theme.border-w : 0px;
@@ -884,7 +884,7 @@ export component StatusPill inherits Rectangle {
     // Optional hover hint (e.g. the transport-health reason on the "chat"
     // pill). Empty = no tooltip and the hover area stays pass-through.
     in property <string> tooltip;
-    height: 24px;
+    height: 24px * Theme.ui-scale;
     width: sp-row.preferred-width + 18px;
     background: Theme.panel-2;
     border-radius: Theme.win95 ? 0px : 12px;
@@ -930,7 +930,7 @@ export component StatusPill inherits Rectangle {
 export component MemberPill inherits Rectangle {
     in property <MemberSync> m;
     callback clicked();
-    height: 28px;
+    height: 28px * Theme.ui-scale;
     // last line of defence: a pane too narrow for even the elided name must
     // not paint over its neighbour
     clip: true;
@@ -1202,22 +1202,26 @@ export component DecisionTable inherits Rectangle {
     // scroll horizontally
     // floor fits the widest surface label ("Shared Memory") - 120px cut it
     property <length> col-title: max(160px, self.width * 0.24);
-    property <length> col-votes: 110px;
-    property <length> col-when: 108px;
+    property <length> col-votes: 110px * Theme.ui-scale;
+    property <length> col-when: 108px * Theme.ui-scale;
     // emoji-only jump button (a localized label overflowed the cell);
     // the Denied table fits a second one (the patch rescue)
-    property <length> col-jump: root.with-when ? 88px : 48px;
+    property <length> col-jump: (root.with-when ? 88px : 48px) * Theme.ui-scale;
     background: Theme.panel-2;
     border-radius: Theme.win95 ? 0px : 8px;
     border-width: Theme.border-w;
     border-color: Theme.line;
     clip: true;
     // EXPLICIT height: repeated fixed-height rows don't reliably feed a
-    // layout's preferred height (the ChatRow lesson)
-    height: 34px + rows.length * 40px;
+    // layout's preferred height (the ChatRow lesson). Both numbers ride
+    // `Theme.ui-scale` - the rows carry buttons, and a 40px row cannot
+    // hold them once the operator raises the app font.
+    property <length> head-h: 34px * Theme.ui-scale;
+    property <length> row-h: 40px * Theme.ui-scale;
+    height: root.head-h + rows.length * root.row-h;
     VerticalLayout {
         Rectangle {
-            height: 34px;
+            height: root.head-h;
             background: Theme.raised;
             HorizontalLayout {
                 padding-left: 12px;
@@ -1265,7 +1269,7 @@ export component DecisionTable inherits Rectangle {
             }
         }
         for r[i] in root.rows: Rectangle {
-            height: 40px;
+            height: root.row-h;
             background: Math.mod(i, 2) == 1 ? Theme.zebra : transparent;
             HorizontalLayout {
                 padding-left: 12px;
@@ -1367,7 +1371,7 @@ export component DecisionTable inherits Rectangle {
                         spacing: 4px;
                         alignment: start;
                         if r.id >= 0: AppButton {
-                            height: 28px;
+                            height: 28px * Theme.ui-scale;
                             y: 6px;
                             pad: 8px;
                             emoji: "💬";
@@ -1379,7 +1383,7 @@ export component DecisionTable inherits Rectangle {
                         }
                         // rescue: the patch comes back as local drafts
                         if root.with-when && r.patch-op && r.proposed != "": AppButton {
-                            height: 28px;
+                            height: 28px * Theme.ui-scale;
                             y: 6px;
                             pad: 8px;
                             emoji: "⤵️";
@@ -1477,7 +1481,7 @@ export component ProposalCard inherits Rectangle {
                 horizontal-stretch: 1;
             }
             if root.p.patch-op && root.p.proposed != "": AppButton {
-                height: 26px;
+                height: 26px * Theme.ui-scale;
                 y: 0px;
                 pad: 8px;
                 emoji: "👁️";
@@ -1694,7 +1698,7 @@ export component ProposalCard inherits Rectangle {
                 }
                 // save the original image bytes to disk, right of the card
                 AppButton {
-                    width: 34px;
+                    width: 34px * Theme.ui-scale;
                     pad: 0px;
                     emoji: "💾";
                     tooltip: Strings.pc-img-save;
@@ -1967,7 +1971,7 @@ export component SeedPanel inherits Rectangle {
                     }
                 }
                 AppButton {
-                    height: 30px;
+                    height: 30px * Theme.ui-scale;
                     pad: 10px;
                     y: (parent.height - self.height) / 2;
                     label: Strings.ow-copy;
@@ -2409,7 +2413,7 @@ export component WizardFrame inherits VerticalLayout {
                 padding-right: 16px;
                 spacing: 10px;
                 if root.back-label != "": AppButton {
-                    height: 38px;
+                    height: 38px * Theme.ui-scale;
                     label: root.back-label;
                     enabled: root.back-enabled;
                     clicked => {
@@ -2420,14 +2424,14 @@ export component WizardFrame inherits VerticalLayout {
                     horizontal-stretch: 1;
                 }
                 if root.log-label != "": AppButton {
-                    height: 38px;
+                    height: 38px * Theme.ui-scale;
                     label: root.log-label;
                     clicked => {
                         root.show-log();
                     }
                 }
                 if root.alt-label != "": AppButton {
-                    height: 38px;
+                    height: 38px * Theme.ui-scale;
                     label: root.alt-label;
                     enabled: root.alt-enabled;
                     clicked => {
@@ -2435,7 +2439,7 @@ export component WizardFrame inherits VerticalLayout {
                     }
                 }
                 if root.primary-label != "": AppButton {
-                    height: 38px;
+                    height: 38px * Theme.ui-scale;
                     primary: true;
                     icon: root.primary-icon;
                     icon-set: root.primary-icon-set;
@@ -2579,7 +2583,7 @@ export component DiffViewer inherits Rectangle {
                     spacing: 2px;
                     alignment: start;
                     for r[idx] in PatchView.nav-rows: Rectangle {
-                        height: 26px;
+                        height: 26px * Theme.ui-scale;
                         border-radius: Theme.win95 ? 0px : 5px;
                         background: r.selected ? Theme.accent-soft
                             : (nta.has-hover ? Theme.zebra : transparent);

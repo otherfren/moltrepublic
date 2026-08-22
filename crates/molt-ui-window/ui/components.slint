@@ -39,13 +39,13 @@ export component AppButton inherits Rectangle {
     in property <bool> tooltip-below: false;
     in property <bool> tooltip-left: false;
     // horizontal label padding; lower it for compact in-group buttons
-    in property <length> pad: 14px;
+    in property <length> pad: 14px * Theme.ui-scale;
     // optional leading icon (colorized to the label colour); pick a size
     // whose margins land on whole pixels (icon-only buttons: even icon in
     // an even button, or the icon renders visibly off-center)
     in property <image> icon;
     in property <bool> icon-set: false;
-    in property <length> icon-size: 15px;
+    in property <length> icon-size: 15px * Theme.ui-scale;
     // optional leading emoji glyph, rendered in the colorful Twemoji font
     // (a plain-text emoji in `label` falls back to thin monochrome
     // outlines — never do that for pictographic icons)
@@ -59,7 +59,9 @@ export component AppButton inherits Rectangle {
     in property <bool> wrap-label: false;
     callback clicked();
 
-    height: 34px;
+    // the box follows the font: a fixed height cuts the label off as soon
+    // as the operator raises the app font size
+    height: 34px * Theme.ui-scale;
     border-radius: Theme.radius;
     border-width: Theme.border-w;
     border-color: root.primary ? Theme.accent : (Theme.win95 ? #000000 : Theme.line);
@@ -105,7 +107,7 @@ export component AppButton inherits Rectangle {
         }
         // icon-only buttons drop the label element entirely — even an empty
         // Text skews the centered icon by its residual layout slot
-        if root.label != "": Text {
+        if root.label != "": abtn-label := Text {
             text: root.label;
             color: root.primary ? Theme.accent-ink : Theme.text;
             font-size: Theme.fs-body;
@@ -153,7 +155,8 @@ export component AppField inherits Rectangle {
     callback accepted();
     callback edited();
 
-    height: root.hero ? 48px : 38px;
+    // the box follows the font (Theme.ui-scale), like every control
+    height: (root.hero ? 48px : 38px) * Theme.ui-scale;
     background: root.hero && root.text == "" ? Theme.accent-soft : Theme.panel;
     border-radius: Theme.radius;
     border-width: root.hero ? max(2px, Theme.border-w) : Theme.border-w;
@@ -208,7 +211,7 @@ export component AppDropdown inherits Rectangle {
         root.enabled.length == 0 || root.enabled[i]
     }
 
-    height: 38px;
+    height: 38px * Theme.ui-scale;
     background: Theme.panel;
     border-radius: Theme.radius;
     border-width: Theme.border-w;
@@ -249,7 +252,7 @@ export component AppDropdown inherits Rectangle {
                 padding: 4px;
                 spacing: 1px;
                 for opt[i] in root.model: Rectangle {
-                    height: 30px;
+                    height: 30px * Theme.ui-scale;
                     border-radius: Theme.win95 ? 0px : 4px;
                     background: !root.row-enabled(i) ? transparent : (i == root.current-index ? Theme.accent-soft : (row-ta.has-hover ? Theme.raised : transparent));
                     HorizontalLayout {
@@ -292,7 +295,7 @@ export component AppStepper inherits Rectangle {
     in property <int> maximum: 999;
     callback changed(int);
 
-    height: 38px;
+    height: 38px * Theme.ui-scale;
     background: Theme.panel;
     border-radius: Theme.radius;
     border-width: Theme.border-w;
@@ -301,12 +304,12 @@ export component AppStepper inherits Rectangle {
 
     HorizontalLayout {
         Rectangle {
-            width: 38px;
+            width: 38px * Theme.ui-scale;
             background: minus-ta.has-hover ? Theme.raised : transparent;
             Text {
                 text: "−";
                 color: Theme.text;
-                font-size: 18px;
+                font-size: Theme.fs-body + 4px;
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
@@ -336,12 +339,12 @@ export component AppStepper inherits Rectangle {
             background: Theme.line;
         }
         Rectangle {
-            width: 38px;
+            width: 38px * Theme.ui-scale;
             background: plus-ta.has-hover ? Theme.raised : transparent;
             Text {
                 text: "+";
                 color: Theme.text;
-                font-size: 17px;
+                font-size: Theme.fs-body + 3px;
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
@@ -364,16 +367,16 @@ export component AppCheck inherits Rectangle {
     in-out property <bool> checked: false;
     in property <bool> enabled: true;
     callback toggled(bool);
-    height: 28px;
+    height: 28px * Theme.ui-scale;
     opacity: root.enabled ? 1.0 : 0.45;
 
     HorizontalLayout {
         spacing: 10px;
         alignment: start;
         Rectangle {
-            width: 20px;
-            height: 20px;
-            y: (parent.height - 20px) / 2;
+            width: 20px * Theme.ui-scale;
+            height: self.width;
+            y: (parent.height - self.height) / 2;
             border-radius: Theme.win95 ? 0px : 4px;
             border-width: Theme.border-w;
             border-color: root.checked ? Theme.accent : Theme.line;
@@ -381,7 +384,7 @@ export component AppCheck inherits Rectangle {
             if root.checked: Text {
                 text: "✓";
                 color: Theme.accent-ink;
-                font-size: 14px;
+                font-size: Theme.fs-body;
                 font-weight: 700;
                 horizontal-alignment: center;
                 vertical-alignment: center;
@@ -458,9 +461,9 @@ export component ChromeControls inherits HorizontalLayout {
 
     // ---- theme select button + popup ----
     Rectangle {
-        width: 52px;
-        height: 32px;
-        y: (parent.height - 32px) / 2;
+        width: 52px * Theme.ui-scale;
+        height: 32px * Theme.ui-scale;
+        y: (parent.height - self.height) / 2;
         border-radius: Theme.radius;
         border-width: Theme.border-w;
         border-color: Theme.line;
@@ -485,8 +488,8 @@ export component ChromeControls inherits HorizontalLayout {
         }
         theme-pop := PopupWindow {
             x: 0;
-            y: root.popup-up ? -118px : parent.height + 3px;
-            width: 158px;
+            y: root.popup-up ? -118px * Theme.ui-scale : parent.height + 3px;
+            width: 158px * Theme.ui-scale;
             Rectangle {
                 background: Theme.panel;
                 border-width: Theme.border-w;
@@ -496,7 +499,7 @@ export component ChromeControls inherits HorizontalLayout {
                     padding: 4px;
                     spacing: 2px;
                     for i in 3: Rectangle {
-                        height: 34px;
+                        height: 34px * Theme.ui-scale;
                         border-radius: Theme.win95 ? 0px : 4px;
                         background: i == Theme.theme-index ? Theme.accent-soft : (tr-ta.has-hover ? Theme.raised : transparent);
                         HorizontalLayout {
@@ -528,9 +531,9 @@ export component ChromeControls inherits HorizontalLayout {
 
     // ---- language flag button + popup ----
     Rectangle {
-        width: 52px;
-        height: 32px;
-        y: (parent.height - 32px) / 2;
+        width: 52px * Theme.ui-scale;
+        height: 32px * Theme.ui-scale;
+        y: (parent.height - self.height) / 2;
         border-radius: Theme.radius;
         border-width: Theme.border-w;
         border-color: Theme.line;
@@ -555,8 +558,8 @@ export component ChromeControls inherits HorizontalLayout {
         }
         lang-pop := PopupWindow {
             x: 0;
-            y: root.popup-up ? -78px : parent.height + 3px;
-            width: 138px;
+            y: root.popup-up ? -78px * Theme.ui-scale : parent.height + 3px;
+            width: 138px * Theme.ui-scale;
             Rectangle {
                 background: Theme.panel;
                 border-width: Theme.border-w;
@@ -566,7 +569,7 @@ export component ChromeControls inherits HorizontalLayout {
                     padding: 4px;
                     spacing: 2px;
                     Rectangle {
-                        height: 32px;
+                        height: 32px * Theme.ui-scale;
                         border-radius: Theme.win95 ? 0px : 4px;
                         background: root.lang-index == 0 ? Theme.accent-soft : (en-ta.has-hover ? Theme.raised : transparent);
                         HorizontalLayout {
@@ -591,7 +594,7 @@ export component ChromeControls inherits HorizontalLayout {
                         }
                     }
                     Rectangle {
-                        height: 32px;
+                        height: 32px * Theme.ui-scale;
                         border-radius: Theme.win95 ? 0px : 4px;
                         background: root.lang-index == 1 ? Theme.accent-soft : (de-ta.has-hover ? Theme.raised : transparent);
                         HorizontalLayout {
@@ -622,9 +625,9 @@ export component ChromeControls inherits HorizontalLayout {
 
     // ---- gear -> settings ----
     Rectangle {
-        width: 36px;
-        height: 36px;
-        y: (parent.height - 36px) / 2;
+        width: 36px * Theme.ui-scale;
+        height: 36px * Theme.ui-scale;
+        y: (parent.height - self.height) / 2;
         border-radius: Theme.radius;
         border-width: Theme.border-w;
         border-color: Theme.line;
@@ -632,10 +635,10 @@ export component ChromeControls inherits HorizontalLayout {
         Image {
             source: @image-url("assets/gear.svg");
             colorize: Theme.text;
-            width: 18px;
-            height: 18px;
-            x: (parent.width - 18px) / 2;
-            y: (parent.height - 18px) / 2;
+            width: 18px * Theme.ui-scale;
+            height: self.width;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
         }
         g-ta := TouchArea {
             enabled: root.controls-enabled;

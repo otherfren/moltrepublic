@@ -2563,8 +2563,29 @@ fn seen_label(lang: i32, now: u64, last_seen: u64, never: &str) -> String {
     if last_seen == molt_core::MemberInfo::NEVER {
         return never.to_string();
     }
-    let min = u32::try_from(now.saturating_sub(last_seen) / 60).unwrap_or(u32::MAX);
+    let age = now.saturating_sub(last_seen);
+    // past a week "34 d ago" is arithmetic the reader has to do; the DATE
+    // is the fact the engine remembers, so show that instead
+    if age >= 7 * 86_400 {
+        return date_label(lang, last_seen);
+    }
+    let min = u32::try_from(age / 60).unwrap_or(u32::MAX);
     ago_label(lang, min)
+}
+
+/// A unix stamp as a plain local date - German `22.08.2026`, else ISO
+/// `2026-08-22`. No time of day: the stamp is minute-coarse presence, and
+/// a date is what the reader is actually asking for that far back.
+fn date_label(lang: i32, ts: u64) -> String {
+    let Some(dt) = chrono::DateTime::from_timestamp(i64::try_from(ts).unwrap_or(0), 0) else {
+        return String::new();
+    };
+    let local = dt.with_timezone(&chrono::Local);
+    if lang == 1 {
+        local.format("%d.%m.%Y").to_string()
+    } else {
+        local.format("%Y-%m-%d").to_string()
+    }
 }
 
 /// The honest "never seen" cell text.
@@ -11179,6 +11200,34 @@ mod tests {
         assert!(at(3 * 86_400).ends_with("(~3 days ago)"), "{}", at(259_200));
     }
 
+    /// The presence cell reads a REAL stamp: fresh sightings stay relative,
+    /// and past a week the DATE takes over - "34 d ago" is arithmetic the
+    /// reader should not have to do. Only a seat this install has never had
+    /// any evidence for says so.
+    #[test]
+    fn the_last_seen_cell_goes_from_relative_to_a_plain_date() {
+        let now = 1_787_000_000_u64;
+        assert_eq!(seen_label(0, now, molt_core::MemberInfo::NEVER, "never seen"), "never seen");
+        assert_eq!(seen_label(0, now, now, ""), "just now");
+        assert_eq!(seen_label(0, now, now - 3 * 3600, ""), "3 h ago");
+        assert_eq!(seen_label(1, now, now - 2 * 86_400, ""), "vor 2 Tagen");
+        // the week boundary: one side relative, the other the date itself
+        assert_eq!(seen_label(0, now, now - 6 * 86_400, ""), "6 d ago");
+        let old = now - 30 * 86_400;
+        assert_eq!(seen_label(0, now, old, ""), date_label(0, old));
+        assert_eq!(seen_label(1, now, old, ""), date_label(1, old));
+        // the two spellings, pinned against the same instant
+        let iso = date_label(0, old);
+        let de = date_label(1, old);
+        assert_eq!(iso.len(), 10, "ISO date: {iso}");
+        assert_eq!(de.len(), 10, "German date: {de}");
+        assert_eq!(
+            de,
+            format!("{}.{}.{}", &iso[8..10], &iso[5..7], &iso[0..4]),
+            "the German date is the same day, written the German way"
+        );
+    }
+
     #[test]
     fn sync_status_label_matches_the_demo_prose() {
         assert_eq!(sync_status_label(0, 0, 0, 0), "Synced · just now");
@@ -12583,6 +12632,251 @@ mod gui_tests {
             "x".repeat(300),
             "the elided name must read in full on hover"
         );
+    }
+
+    /// **Every button must survive a bigger font.** The app font is a
+    /// setting (9-28px); a button whose height or width is a hardcoded
+    /// pixel count keeps the box of the 14px default while its label grows
+    /// inside it - which is how the operator met a cut-off "Entschlüsseln"
+    /// on the Open screen. Two invariants, measured on the real layout:
+    /// a button's label stays INSIDE the button, and no two buttons
+    /// overlap (a button taller than its fixed row lands on its neighbour).
+    #[cfg(feature = "live-preview")]
+    #[test]
+    fn every_button_keeps_its_label_at_the_largest_font() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("headless window");
+        ui.window().set_size(slint::PhysicalSize::new(1400, 900));
+        apply_strings(&ui, 1); // German: the longest labels in the app
+        // the biggest size the stepper offers
+        ui.global::<Theme>().set_fs_app(28.0);
+        ui.set_screen(AppScreen::Open);
+        ui.set_ws_list(ModelRc::new(VecModel::from(vec![
+            WorkspaceItem {
+                id: "a".into(),
+                name: "Erste Republik".into(),
+                detail: "2-of-3".into(),
+                status: "Synchronisiert".into(),
+                synced: true,
+                backup: "vor 30 Min.".into(),
+                ..WorkspaceItem::default()
+            },
+            WorkspaceItem {
+                id: "b".into(),
+                name: "Zweite Republik".into(),
+                detail: "3-of-5".into(),
+                status: "Offline".into(),
+                encrypted: true,
+                backup: "nie".into(),
+                ..WorkspaceItem::default()
+            },
+        ])));
+        ui.show().expect("show headless");
+        let mut checked = assert_buttons_scale(&ui, "open");
+        assert!(checked > 3, "the Open screen must render its buttons");
+
+        // the choice screen and the three wizards, step by step
+        ui.set_screen(AppScreen::Choice);
+        checked += assert_buttons_scale(&ui, "choice");
+        for (screen, steps, set) in [
+            (AppScreen::Create, 4, 0),
+            (AppScreen::Join, 3, 1),
+            (AppScreen::Restore, 4, 2),
+        ] {
+            ui.set_screen(screen);
+            for step in 0..steps {
+                match set {
+                    0 => ui.set_cw_step(step),
+                    1 => ui.set_jw_step(step),
+                    _ => ui.set_rw_step(step),
+                }
+                checked += assert_buttons_scale(&ui, &format!("{screen:?} step {step}"));
+            }
+        }
+
+        // the main screen, one pass per surface - WITH rows in them: the
+        // buttons that sit inside chat rows, proposal cards and the members
+        // table are exactly the ones a fixed row height would squash
+        let log = ModelRc::new(VecModel::from(vec![
+            LogLine {
+                id: "aa".repeat(16).into(),
+                lead: "bartholomaeus".into(),
+                text: "Erste Nachricht in der Republik".into(),
+                when: "2026-08-22 13:37 (gerade eben)".into(),
+                first: true,
+                quote: -1,
+                patch_id: -1,
+                ..LogLine::default()
+            },
+            LogLine {
+                id: "bb".repeat(16).into(),
+                lead: "petra".into(),
+                text: "Zweite Nachricht".into(),
+                when: "2026-08-22 13:38 (gerade eben)".into(),
+                first: true,
+                own: true,
+                quote: -1,
+                patch_id: -1,
+                ..LogLine::default()
+            },
+        ]));
+        let votes = ModelRc::new(VecModel::from(vec![
+            ProposalRow {
+                id: 1,
+                text: "Mitgliedsbeschreibung ändern".into(),
+                proposed: "ein neuer Satz".into(),
+                ..ProposalRow::default()
+            },
+            ProposalRow {
+                id: 2,
+                text: "Relais aufnehmen".into(),
+                proposed: "wss://relay.example".into(),
+                ..ProposalRow::default()
+            },
+        ]));
+        let surfaces: Vec<SurfaceTab> = ["chat", "organization", "memory", "vault", "kanban"]
+            .iter()
+            .map(|k| SurfaceTab {
+                key: (*k).into(),
+                log: log.clone(),
+                pending: votes.clone(),
+                accepted: votes.clone(),
+                pending_count: 2,
+                applied_count: 2,
+                ..SurfaceTab::default()
+            })
+            .collect();
+        ui.set_surfaces(ModelRc::new(VecModel::from(surfaces.clone())));
+        ui.set_org_members(ModelRc::new(VecModel::from(vec![
+            MemberRow {
+                name: "bartholomaeus".into(),
+                last: "vor 2 Min.".into(),
+                ..MemberRow::default()
+            },
+            MemberRow {
+                name: "petra".into(),
+                last: "22.07.2026".into(),
+                ..MemberRow::default()
+            },
+        ])));
+        // the tables whose rows carry buttons - uploads, backups, the relay
+        // pickers - are exactly the fixed-height rows a bigger font bursts
+        ui.set_org_uploads(ModelRc::new(VecModel::from(vec![UploadRow {
+            id: "cc".repeat(16).into(),
+            name: "protokoll.pdf".into(),
+            user: "bartholomaeus".into(),
+            date: "2026-08-22".into(),
+            kind: "PDF".into(),
+            size: "1.2 MiB".into(),
+            available: true,
+            online: true,
+            expires: "in 13 Tagen".into(),
+            ..UploadRow::default()
+        }])));
+        ui.set_bk_rows(ModelRc::new(VecModel::from(vec![BackupRow {
+            id: "a".into(),
+            local: "Erste Republik".into(),
+            remote: "erste.molt.enc".into(),
+            has_local: true,
+            size: "1.8 MiB".into(),
+            ..BackupRow::default()
+        }])));
+        ui.set_cw_relay_picks(ModelRc::new(VecModel::from(vec![RelayPick {
+            url: "wss://relay.example".into(),
+            picked: true,
+            ..RelayPick::default()
+        }])));
+        ui.set_screen(AppScreen::Main);
+        for s in &surfaces {
+            ui.set_selected_surface(s.key.clone());
+            for view in ["", "members", "pending", "accepted", "today"] {
+                ui.set_selected_view(view.into());
+                checked += assert_buttons_scale(&ui, &format!("main/{}/{view}", s.key));
+            }
+        }
+
+        // and the settings screen
+        ui.set_screen(AppScreen::Settings);
+        checked += assert_buttons_scale(&ui, "settings");
+        // a sweep that silently stopped finding buttons proves nothing
+        assert!(checked > 40, "only {checked} buttons were measured");
+    }
+
+    /// The measured invariants, so every screen can be checked the same
+    /// way: a label inside its button, and no two buttons overlapping.
+    #[cfg(feature = "live-preview")]
+    fn assert_buttons_scale(ui: &AppWindow, screen: &str) -> usize {
+        let buttons: Vec<_> =
+            i_slint_backend_testing::ElementHandle::find_by_element_type_name(ui, "AppButton")
+                .filter(|b| b.size().width > 0.0 && b.size().height > 0.0)
+                .collect();
+        // the other controls sit in the SAME rows and scale by the same
+        // token: a field that outgrows its row lands on the button next to
+        // it, so they all go into the overlap check
+        let controls: Vec<_> = ["AppField", "AppDropdown", "AppStepper", "AppCheck"]
+            .iter()
+            .flat_map(|t| {
+                i_slint_backend_testing::ElementHandle::find_by_element_type_name(ui, t)
+                    .filter(|c| c.size().width > 0.0 && c.size().height > 0.0)
+                    .collect::<Vec<_>>()
+            })
+            .chain(buttons.iter().cloned())
+            .collect();
+        let labels: Vec<_> =
+            i_slint_backend_testing::ElementHandle::find_by_element_id(ui, "AppButton::abtn-label")
+                .filter(|l| l.size().width > 0.0)
+                .collect();
+        let rect = |e: &i_slint_backend_testing::ElementHandle| {
+            let p = e.absolute_position();
+            let s = e.size();
+            (p.x, p.y, p.x + s.width, p.y + s.height)
+        };
+        for l in &labels {
+            let (lx0, ly0, lx1, ly1) = rect(l);
+            // the button this label belongs to: the label sits on its
+            // line, so take the button whose vertical span holds the
+            // label's middle and whose left edge is the nearest one left
+            // of the label (an overflowing label still STARTS inside)
+            let mid = (ly0 + ly1) / 2.0;
+            let owner = buttons
+                .iter()
+                .filter(|b| {
+                    let (bx0, by0, _, by1) = rect(b);
+                    bx0 <= lx0 + 0.5 && by0 <= mid && mid <= by1
+                })
+                .max_by(|a, b| {
+                    rect(a)
+                        .0
+                        .partial_cmp(&rect(b).0)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            let Some(owner) = owner else { continue };
+            let (bx0, by0, bx1, by1) = rect(owner);
+            assert!(
+                lx1 <= bx1 + 0.5 && ly1 <= by1 + 0.5 && lx0 >= bx0 - 0.5 && ly0 >= by0 - 0.5,
+                "{screen}: the label \"{}\" ({lx0},{ly0})-({lx1},{ly1}) breaks out of its \
+                 button ({bx0},{by0})-({bx1},{by1})",
+                l.accessible_label().unwrap_or_default()
+            );
+        }
+        for (i, a) in controls.iter().enumerate() {
+            for b in controls.iter().skip(i + 1) {
+                let (ax0, ay0, ax1, ay1) = rect(a);
+                let (bx0, by0, bx1, by1) = rect(b);
+                let overlap = ax0 < bx1 - 0.5
+                    && bx0 < ax1 - 0.5
+                    && ay0 < by1 - 0.5
+                    && by0 < ay1 - 0.5;
+                assert!(
+                    !overlap,
+                    "{screen}: two controls overlap - {} ({ax0},{ay0})-({ax1},{ay1}) and \
+                     {} ({bx0},{by0})-({bx1},{by1})",
+                    a.type_name().unwrap_or_default(),
+                    b.type_name().unwrap_or_default()
+                );
+            }
+        }
+        buttons.len()
     }
 
     /// The pill CLIPS - a pane too narrow for even the elided name must not
