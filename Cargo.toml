@@ -181,6 +181,16 @@ overflow-checks = true
 # NOTE: unlike konkinwallet we keep dev unwinding (no panic="abort") so the unit
 # test harness builds on stable. The release posture below mirrors konkin.
 
+# The Slint-generated window is a ~400k-line machine-written module, and the
+# incremental cache costs GiBs of peak RSS on its single rustc: with it on,
+# that one process was OOM-killed three runs in a row at 11.6/13.1/13.7 GiB
+# anon-RSS (kernel log, 2026-08-21/22, 15 GiB box, rustc 1.95.0 + Slint 1.17,
+# no concurrency); with it off the build completes. Off for THIS crate only, so
+# the rest of the workspace keeps its fast incremental rebuilds. Removing this
+# makes `cargo build -p molt-ui-window` die by SIGKILL again.
+[profile.dev.package.molt-ui-window]
+incremental = false
+
 [profile.release]
 overflow-checks = true       # mirror monero-oxide security posture
 panic           = "abort"    # no stack unwinding that could surface secrets
