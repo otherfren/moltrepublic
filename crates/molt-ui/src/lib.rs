@@ -12453,6 +12453,182 @@ mod gui_tests {
         );
     }
 
+    /// **The chat presence strip: the pill follows the name, and the
+    /// last-seen label never leaves it.** A seat name is free text, and an
+    /// unelided `Text` reports the WHOLE name as its preferred width - so a
+    /// long name pushed itself and the last-seen label straight out of the
+    /// fixed 150px pill (reported 2026-08-22). Two things are pinned: the
+    /// column follows the longest name, and inside a pill the NAME is what
+    /// gives way - the last-seen label stays visible.
+    #[cfg(feature = "live-preview")]
+    #[test]
+    fn a_long_member_name_grows_its_pill_and_keeps_the_last_seen_label() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("headless window");
+        ui.window().set_size(slint::PhysicalSize::new(1200, 800));
+        ui.set_screen(AppScreen::Main);
+        ui.set_selected_surface("chat".into());
+        ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+            key: "chat".into(),
+            ..SurfaceTab::default()
+        }])));
+        apply_strings(&ui, 0);
+
+        let seat = |name: &str, last: &str| MemberSync {
+            name: name.into(),
+            last: last.into(),
+            state: 0,
+        };
+        let measure = |ui: &AppWindow| -> Vec<(f32, f32, f32)> {
+            let pills: Vec<_> = i_slint_backend_testing::ElementHandle::find_by_element_type_name(
+                ui,
+                "MemberPill",
+            )
+            .collect();
+            let names: Vec<_> =
+                i_slint_backend_testing::ElementHandle::find_by_element_id(ui, "MemberPill::mp-name")
+                    .collect();
+            let lasts: Vec<_> =
+                i_slint_backend_testing::ElementHandle::find_by_element_id(ui, "MemberPill::mp-last")
+                    .collect();
+            assert_eq!(pills.len(), names.len(), "every pill renders its name");
+            assert_eq!(pills.len(), lasts.len(), "every pill renders its last-seen");
+            pills
+                .iter()
+                .zip(names.iter())
+                .zip(lasts.iter())
+                .map(|((p, n), l)| {
+                    let edge = p.absolute_position().x + p.size().width;
+                    let name_right = n.absolute_position().x + n.size().width;
+                    let last_right = l.absolute_position().x + l.size().width;
+                    eprintln!(
+                        "pill w={} right={edge} | name w={} right={name_right} | last w={} right={last_right}",
+                        p.size().width,
+                        n.size().width,
+                        l.size().width
+                    );
+                    assert!(
+                        name_right <= edge,
+                        "the name ran {}px past its pill",
+                        name_right - edge
+                    );
+                    assert!(
+                        l.size().width > 1.0 && last_right <= edge,
+                        "the last-seen label is {}px wide and ends {}px past the pill",
+                        l.size().width,
+                        last_right - edge
+                    );
+                    // and it is PARKED at the right edge, so the labels line
+                    // up down the grid instead of drifting with the name
+                    assert!(
+                        last_right >= edge - 12.0,
+                        "the last-seen label floats {}px short of the pill edge",
+                        edge - last_right
+                    );
+                    (p.size().width, n.size().width, l.size().width)
+                })
+                .collect()
+        };
+
+        ui.set_active_members(ModelRc::new(VecModel::from(vec![
+            seat("ada", "2 min ago"),
+            seat("bob", "just now"),
+        ])));
+        ui.show().expect("show headless");
+        let short = measure(&ui);
+
+        // a name of ordinary length still fits, but the pill has to GROW for
+        // it instead of cutting it off at the 150px column
+        ui.set_active_members(ModelRc::new(VecModel::from(vec![
+            seat("bartholomaeus-von-habsburg", "2 min ago"),
+            seat("bob", "just now"),
+        ])));
+        let grown = measure(&ui);
+        assert!(
+            grown[0].0 > short[0].0 + 10.0,
+            "the pill did not follow the name: {}px vs {}px",
+            grown[0].0,
+            short[0].0
+        );
+
+        // past every sane cap the NAME elides - the last-seen label stays
+        // (measure() asserts it for every pill)
+        ui.set_active_members(ModelRc::new(VecModel::from(vec![
+            seat(&"x".repeat(300), "2 min ago"),
+            seat("bob", "just now"),
+        ])));
+        let huge = measure(&ui);
+        assert!(
+            huge[0].1 < 2000.0,
+            "the name was not elided: {}px",
+            huge[0].1
+        );
+
+        // a cut name is not a lost name: hovering the pill spells it out in
+        // the window-topmost hint overlay
+        let pill = i_slint_backend_testing::ElementHandle::find_by_element_type_name(
+            &ui,
+            "MemberPill",
+        )
+        .next()
+        .expect("the strip renders its pills");
+        let at = slint::LogicalPosition::new(
+            pill.absolute_position().x + pill.size().width / 2.0,
+            pill.absolute_position().y + pill.size().height / 2.0,
+        );
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at });
+        assert_eq!(
+            ui.global::<HintTip>().get_label().to_string(),
+            "x".repeat(300),
+            "the elided name must read in full on hover"
+        );
+    }
+
+    /// The pill CLIPS - a pane too narrow for even the elided name must not
+    /// paint over its neighbour - and a clipped element must still hand its
+    /// right-click to the poke menu, which renders in the window's popup
+    /// layer rather than inside the pill.
+    #[cfg(feature = "live-preview")]
+    #[test]
+    fn the_clipped_presence_pill_still_opens_its_poke_menu() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("headless window");
+        ui.window().set_size(slint::PhysicalSize::new(1200, 800));
+        ui.set_screen(AppScreen::Main);
+        ui.set_selected_surface("chat".into());
+        ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+            key: "chat".into(),
+            ..SurfaceTab::default()
+        }])));
+        apply_strings(&ui, 0);
+        let poke = ui.global::<Poke>();
+        poke.set_on(true);
+        poke.set_me("walter".into());
+        ui.set_active_members(ModelRc::new(VecModel::from(vec![MemberSync {
+            name: "ada".into(),
+            last: "2 min ago".into(),
+            state: 0,
+        }])));
+        ui.show().expect("show headless");
+
+        let label = ui.global::<Strings>().get_mem_poke().to_string();
+        assert!(!label.is_empty(), "the fixture must carry the menu title");
+        assert!(
+            poke_menu_open(&ui, &label).is_none(),
+            "no menu may be findable before the click"
+        );
+        let pills: Vec<_> =
+            i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "MemberPill")
+                .collect();
+        assert_eq!(pills.len(), 1, "the strip renders the seat");
+        right_click(&ui, &pills[0], 0.5);
+        assert!(
+            poke_menu_open(&ui, &label).is_some(),
+            "right-click on the presence pill opened no menu"
+        );
+    }
+
     /// The decided-votes table is an INDEX: one line per decision. A seat
     /// description is typed into a multi-line box (`Ich bin der Peter\n!`
     /// is what the operator's node actually holds), and rendering that

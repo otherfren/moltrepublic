@@ -32,7 +32,7 @@ import {
 // .slint-side only; the real governance views stay below in this file)
 import { MemoryPane, QuestsPane, VaultPane, WalletPane } from "surfaces.slint";
 
-export { Strings, Theme, WikiState, PatchView, Poke }
+export { Strings, Theme, WikiState, PatchView, Poke, HintTip }
 
 // A settings form group: caption sitting tight above its control(s), so a
 // label+field pair reads as one unit inside the wider panel rhythm.
@@ -4695,10 +4695,10 @@ export component AppWindow inherits Window {
                         if s.key == "chat": VerticalLayout {
                             spacing: 8px;
 
-                            // presence strip: fixed-width pills wrapping into
-                            // as many rows as needed (index-computed grid —
-                            // Slint has no flow layout); a click on a member
-                            // jumps to Organization → Members
+                            // presence strip: pills wrapping into as many rows
+                            // as needed (index-computed grid — Slint has no
+                            // flow layout); a click on a member jumps to
+                            // Organization → Members
                             if root.active-members.length > 0: Rectangle {
                                 height: pgrid.height + 16px;
                                 background: Theme.panel;
@@ -4710,10 +4710,36 @@ export component AppWindow inherits Window {
                                     y: 8px;
                                     width: parent.width - 16px;
                                     property <length> chip-h: 28px;
-                                    property <length> gap: 6px;
-                                    // as many 150px-minimum columns as fit, then the
-                                    // pills stretch to fill the row exactly
-                                    property <int> cols: max(1, Math.floor(self.width / (150px + self.gap)));
+                                    property <length> gap: Theme.pill-gap;
+                                    // MEASURING ONLY, never painted: a vertical
+                                    // layout's preferred width is the MAX over
+                                    // its rows, which is how the column learns
+                                    // the longest seat (dot + name + last-seen)
+                                    pmeas := VerticalLayout {
+                                        visible: false;
+                                        for m in root.active-members: HorizontalLayout {
+                                            spacing: Theme.pill-gap;
+                                            Rectangle {
+                                                width: Theme.pill-dot;
+                                            }
+                                            Text {
+                                                text: m.name;
+                                                font-size: Theme.fs-cap;
+                                                font-weight: 600;
+                                            }
+                                            Text {
+                                                text: m.last;
+                                                font-size: Theme.fs-cap;
+                                            }
+                                        }
+                                    }
+                                    // the column follows the longest seat, floored
+                                    // at the old 150px and capped at 320px — past
+                                    // that the name elides inside its pill
+                                    property <length> want: min(max(pmeas.preferred-width + 2 * Theme.pill-pad, 150px), 320px);
+                                    // as many such columns as fit, then the pills
+                                    // stretch to fill the row exactly
+                                    property <int> cols: max(1, Math.floor(self.width / (self.want + self.gap)));
                                     property <length> chip-w: (self.width - (self.cols - 1) * self.gap) / self.cols;
                                     property <int> rows: Math.ceil(root.active-members.length / self.cols);
                                     height: self.rows * self.chip-h + max(0, self.rows - 1) * self.gap;

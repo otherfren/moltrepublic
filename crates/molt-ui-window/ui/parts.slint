@@ -924,12 +924,16 @@ export component StatusPill inherits Rectangle {
 }
 
 // One member in the chat's presence strip (konkinwallet's members strip):
-// presence dot + name + last-seen label. Fixed width so the strip can wrap
-// the pills into a grid; clicking jumps to Organization → Members.
+// presence dot + name + last-seen label. The strip sizes its columns to the
+// longest seat (`pmeas` in app.slint); clicking jumps to Organization →
+// Members.
 export component MemberPill inherits Rectangle {
     in property <MemberSync> m;
     callback clicked();
     height: 28px;
+    // last line of defence: a pane too narrow for even the elided name must
+    // not paint over its neighbour
+    clip: true;
     background: mp-ta.has-hover ? Theme.raised : Theme.panel-2;
     border-radius: Theme.win95 ? 0px : 6px;
     border-width: Theme.border-w;
@@ -946,31 +950,52 @@ export component MemberPill inherits Rectangle {
             }
         }
         HorizontalLayout {
-            padding-left: 9px;
-            padding-right: 9px;
-            spacing: 6px;
-            alignment: start;
+            padding-left: Theme.pill-pad;
+            padding-right: Theme.pill-pad;
+            spacing: Theme.pill-gap;
             Rectangle {
-                width: 8px;
-                height: 8px;
-                border-radius: 4px;
+                width: Theme.pill-dot;
+                height: self.width;
+                border-radius: self.width / 2;
                 y: (parent.height - self.height) / 2;
                 background: root.m.state == 0 ? Theme.good : (root.m.state == 1 ? Theme.warn : Theme.faint);
             }
-            Text {
+            mp-name := Text {
                 text: root.m.name;
                 color: Theme.text;
                 font-size: Theme.fs-cap;
                 font-weight: 600;
                 vertical-alignment: center;
+                overflow: elide;
+                // a name is free text: its unelided preferred width pushes
+                // itself AND the last-seen label out of the pill. The name
+                // is what gives way - what is left over after the dot, the
+                // paddings and the last-seen label is its ceiling
+                max-width: max(20px, root.width - 2 * Theme.pill-pad - Theme.pill-dot
+                    - 2 * Theme.pill-gap - mp-last.preferred-width);
+                // the cut name reads in full beside the pill (window-topmost
+                // overlay - a local bubble paints under the chat log)
+                property <bool> tip-on: mp-ta.has-hover && self.width < self.preferred-width;
+                changed tip-on => {
+                    if (self.tip-on) {
+                        HintTip.label = root.m.name;
+                        HintTip.ax = root.absolute-position.x + root.width + 8px;
+                        HintTip.ay = root.absolute-position.y + (root.height - 23px) / 2;
+                    } else if (HintTip.ax == root.absolute-position.x + root.width + 8px
+                        && HintTip.ay == root.absolute-position.y + (root.height - 23px) / 2) {
+                        HintTip.label = "";
+                    }
+                }
             }
-            Text {
+            mp-last := Text {
                 text: root.m.last;
                 color: Theme.faint;
                 font-size: Theme.fs-cap;
                 vertical-alignment: center;
+                // never squeezed - the strip is FOR this label - and parked at
+                // the pill's right edge, so the labels line up down the grid
                 horizontal-stretch: 1;
-                overflow: elide;
+                horizontal-alignment: right;
             }
         }
         mp-ta := TouchArea {
