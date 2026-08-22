@@ -1438,6 +1438,13 @@ impl State {
         };
         let eff = self.org_effective();
         let now = self.presence_now();
+        // this node's persisted presence memory (`prefs.last_seen`): what it
+        // knew about every seat before the process started
+        let remembered = self
+            .active
+            .as_ref()
+            .map(|a| a.prefs.last_seen.clone())
+            .unwrap_or_default();
         let Some(active) = &self.active else {
             return;
         };
@@ -1455,17 +1462,23 @@ impl State {
         // members are a projection of the replayed roster — always rebuilt,
         // so a roster grown by MemberJoined never leaves a stale list. The
         // rebuild PRESERVES the real last-seen stamps: the local member is
-        // trivially present, everyone else keeps their stamp (a member new
-        // to the roster honestly starts never-seen).
+        // trivially present, everyone else keeps the NEWEST thing this node
+        // knows — the live stamp, the presence memory persisted in
+        // `prefs.last_seen`, or the founding date, which is a real
+        // observation (every seat signed that genesis with us). Only a seat
+        // this install has no evidence for at all stays never-seen.
         let prev = std::mem::take(&mut ws.members);
         ws.members = roster_members(&replica.roster, now, |m| {
             if m == replica.member {
                 now
             } else {
-                prev.iter()
+                let live = prev
+                    .iter()
                     .find(|p| p.name == m)
                     .map(|p| p.last_seen)
-                    .unwrap_or(molt_core::MemberInfo::NEVER)
+                    .unwrap_or(molt_core::MemberInfo::NEVER);
+                live.max(remembered.get(m).copied().unwrap_or(molt_core::MemberInfo::NEVER))
+                    .max(replica.founded_ts)
             }
         });
         // a send-failure pin survives the rebuild until the next sighting
@@ -1473,6 +1486,37 @@ impl State {
             if self.net_unreachable.contains(&m.name) {
                 m.state = 2;
             }
+        }
+        let seen: Vec<(String, u64)> = ws
+            .members
+            .iter()
+            .filter(|m| m.last_seen != molt_core::MemberInfo::NEVER)
+            .map(|m| (m.name.clone(), m.last_seen))
+            .collect();
+        self.remember_seen(seen);
+    }
+
+    /// Write the presence memory back into `prefs.toml` — the only copy
+    /// that survives a restart. Local knowledge, never history and never on
+    /// the wire; a stamp only ever moves forward, and a no-op change never
+    /// touches the file.
+    pub(crate) fn remember_seen(&mut self, seen: Vec<(String, u64)>) {
+        // never our own seat: it is stamped `now` on every refresh, so
+        // remembering it would rewrite the file on every pass and tell a
+        // restart nothing it does not already know
+        let me = self.member();
+        let Some(a) = &mut self.active else {
+            return;
+        };
+        let mut moved = false;
+        for (name, ts) in seen {
+            if name != me && a.prefs.last_seen.get(&name).copied().unwrap_or(0) < ts {
+                a.prefs.last_seen.insert(name, ts);
+                moved = true;
+            }
+        }
+        if moved {
+            a.handle.set_prefs(a.prefs.clone());
         }
     }
 
@@ -1775,13 +1819,18 @@ impl State {
         let mut members = Vec::new();
         let mut agenda = String::new();
         if let Some(genesis) = molt_storage::peek_genesis(&root, &dir, &id) {
+            let founded = genesis.ts;
             if let WorkspaceEvent::Founded {
                 roster, agenda: a, ..
             } = genesis.body
             {
-                // a closed workspace has no presence knowledge — every
-                // member is honestly never-seen (same as the boot scan)
-                members = roster_members(&roster, 0, |_| molt_core::MemberInfo::NEVER);
+                // a closed workspace has no LIVE presence, but it has this
+                // node's memory of it: the stamps in its prefs, floored at
+                // the founding date every seat signed with us
+                let remembered = molt_storage::read_prefs(&dir).last_seen;
+                members = roster_members(&roster, 0, |m| {
+                    remembered.get(m).copied().unwrap_or(0).max(founded)
+                });
                 agenda = a;
             }
         }

@@ -859,7 +859,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "read_members",
             command: "read_members",
-            description: "The Organization → Members table: one row per roster member with its anchored identity key (+ fingerprint; empty on demo workspaces), real presence (`last_seen` = unix seconds of the last authenticated traffic from that member, 0 = never seen by this install; `presence` aged from it: 0 online ≤5 min, 1 stale ≤30 min, 2 offline/unreachable), how many pending proposals still await that member's vote, how many files it shared into the chat, and its vote-gated profile (`image` = local file path of the applied picture, `description`).",
+            description: "The Organization → Members table: one row per roster member with its anchored identity key (+ fingerprint; empty on demo workspaces), real presence (`last_seen` = unix seconds this node last observed that member - authenticated traffic, or the founding/join it signed with us; 0 = no local evidence at all; `presence` aged from it: 0 online ≤5 min, 1 stale ≤30 min, 2 offline/unreachable), how many pending proposals still await that member's vote, how many files it shared into the chat, and its vote-gated profile (`image` = local file path of the applied picture, `description`).",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ReadMembers),
         },

@@ -569,10 +569,13 @@ fn default_s3_keep_copies() -> u16 {
 pub struct MemberInfo {
     /// Display handle.
     pub name: String,
-    /// Unix seconds this member was last actually observed on the wire
-    /// (authenticated inbound traffic, or completing a ritual with us);
-    /// [`MemberInfo::NEVER`] = never seen by this install. Additive with
-    /// a default: older data honestly reads back as never-seen.
+    /// Unix seconds this member was last actually observed: authenticated
+    /// inbound traffic, or completing a ritual with us - the founding is
+    /// one, which is why a freshly founded republic never reads back as
+    /// never-seen. Sightings are remembered locally in
+    /// [`WorkspacePrefs::last_seen`], so a restart keeps them.
+    /// [`MemberInfo::NEVER`] = no local evidence at all. Additive with a
+    /// default: older data honestly reads back as never-seen.
     #[serde(default)]
     pub last_seen: u64,
     /// 0 = online, 1 = stale, 2 = offline/unreachable — aged from
@@ -593,6 +596,13 @@ impl MemberInfo {
     /// Seen within this many seconds → stale (state 1); older (or never)
     /// → offline (state 2). 30 minutes.
     pub const STALE_SECS: u64 = 1800;
+    /// How long a relay-transport sighting keeps a silent member merely
+    /// STALE instead of dark (engine §6.5: presence over relays is
+    /// traffic-derived and coarse, so short silence is not absence). One
+    /// week - past it silence IS absence, and the dot says so; without the
+    /// bound the founding stamp alone would paint an absent seat yellow
+    /// forever.
+    pub const COARSE_SECS: u64 = 7 * 86_400;
 }
 
 /// Age a member's REAL last-seen stamp into the 0/1/2 pill state — the one
@@ -1569,6 +1579,16 @@ pub struct WorkspacePrefs {
     /// RECEIPTS are a different thing and stay in the log.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub read_cursors: std::collections::BTreeMap<String, String>,
+    /// This node's presence MEMORY: member name → unix seconds it was last
+    /// observed (a real sighting, or the roster event that put it in the
+    /// republic — the founding is one). Local convenience like the rest of
+    /// the prefs: never history, never on the wire, and deliberately NOT
+    /// chained — who was online when is nobody else's business and would
+    /// need no consensus. Without it a restart reads every seat back as
+    /// [`MemberInfo::NEVER`], which on a republic this node founded itself
+    /// is simply false.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub last_seen: std::collections::BTreeMap<String, u64>,
 }
 
 impl Default for WorkspacePrefs {
@@ -1581,6 +1601,7 @@ impl Default for WorkspacePrefs {
             simulated_members: false,
             shared_files: std::collections::BTreeMap::new(),
             read_cursors: std::collections::BTreeMap::new(),
+            last_seen: std::collections::BTreeMap::new(),
         }
     }
 }

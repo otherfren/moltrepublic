@@ -1097,10 +1097,16 @@ impl State {
         } else {
             let s = molt_core::presence_state(now, last_seen);
             // §6.5 (N5.5): presence over relays is traffic-derived and
-            // COARSE — silence is not absence (no keepalives by design), so
-            // a stamped member ages to stale and stays there; only
-            // never-heard shows dark
-            if s == 2 && self.nostr.is_some() && last_seen != molt_core::MemberInfo::NEVER {
+            // COARSE — short silence is not absence (no keepalives by
+            // design), so a stamped member ages to stale. The lift ends at
+            // `COARSE_SECS`: past a week silence IS absence, and a seat
+            // carrying only its founding stamp must not glow yellow for
+            // ever.
+            if s == 2
+                && self.nostr.is_some()
+                && last_seen != molt_core::MemberInfo::NEVER
+                && now.saturating_sub(last_seen) <= molt_core::MemberInfo::COARSE_SECS
+            {
                 1
             } else {
                 s
@@ -2038,6 +2044,133 @@ mod tests {
             let root = tmp.path().join("workspaces");
             assert!(molt_storage::find_workspace_dir(&root, &id).is_none());
             assert!(root.join(".trash").read_dir().expect("trash").count() > 0);
+        });
+    }
+
+    /// **A founded republic never reads as "never seen".** Those seats
+    /// founded it WITH this node - the genesis carries the date they all
+    /// signed - so an install that forgot every stamp is lying, not being
+    /// careful. Presence knowledge is LOCAL (never the chain): it lives in
+    /// the workspace's `prefs.toml`, starts at the founding date, advances
+    /// on every real sighting, and survives close/reopen. A republic
+    /// founded before this memory existed reads its founding date too.
+    #[test]
+    fn the_founding_dates_every_seat_and_the_stamps_survive_a_reopen() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        rt().block_on(async {
+            let root = tmp.path().join("workspaces");
+            let session = SessionView {
+                workspaces: Vec::new(),
+                settings: SessionSettings {
+                    workspace_dir: root.display().to_string(),
+                    ..SessionSettings::default()
+                },
+                ..SessionView::default()
+            };
+            let w = __spawn_sim_founding(GroupConfig::demo(), session, true);
+            w.execute(Command::CreateStart {
+                name: "Seen".to_string(),
+                member: "petra".to_string(),
+                threshold: 2,
+                members: 3,
+                relays: Vec::new(),
+            })
+            .await
+            .expect("create start");
+            await_founding(&w).await;
+            w.execute(Command::CreateFinish).await.expect("finish");
+
+            let id = read_session(&w).await.active_workspace.clone();
+            let founded = match w.execute(Command::Status).await.expect("status") {
+                Reply::Status(st) => st.founded_ts,
+                other => panic!("unexpected: {other:?}"),
+            };
+            assert!(founded > 0, "the genesis carries the founding date");
+
+            async fn seats(w: &WalletHandle, id: &str) -> Vec<(String, u64)> {
+                read_session(w)
+                    .await
+                    .workspaces
+                    .iter()
+                    .find(|x| x.id == id)
+                    .expect("entry")
+                    .members
+                    .iter()
+                    .map(|m| (m.name.clone(), m.last_seen))
+                    .collect()
+            }
+
+            let founding = seats(&w, &id).await;
+            assert_eq!(founding.len(), 3, "a 2-of-3 roster");
+            for (name, last) in &founding {
+                assert_ne!(
+                    *last,
+                    molt_core::MemberInfo::NEVER,
+                    "{name} reads as never seen right after the founding"
+                );
+                assert!(*last >= founded, "{name} is dated before its own founding");
+            }
+
+            // a real sighting advances one seat AND reaches the disk: the
+            // memory is worthless if it only lives in this process
+            let seat = founding
+                .iter()
+                .map(|(n, _)| n.clone())
+                .find(|n| n != "petra")
+                .expect("another seat");
+            w.execute(Command::NetPeerSeen {
+                member: seat.clone(),
+                generation: None,
+            })
+            .await
+            .expect("sighting");
+            w.execute(Command::CloseWorkspace).await.expect("close");
+            let dir = molt_storage::find_workspace_dir(&root, &id).expect("workspace dir");
+            let prefs = molt_storage::read_prefs(&dir);
+            assert!(
+                prefs.last_seen.get(&seat).copied().unwrap_or(0) >= founded,
+                "the sighting never reached prefs.toml: {:?}",
+                prefs.last_seen
+            );
+
+            // a stamp NEWER than the founding is what a reopen must read back
+            // (the founding date is only the floor under it)
+            let later = founded + 4_242;
+            let mut bumped = molt_storage::read_prefs(&dir);
+            bumped.last_seen.insert(seat.clone(), later);
+            molt_storage::write_prefs(&dir, &bumped).expect("bump the stamp");
+
+            // reopening keeps every date - this is where the operator met
+            // "never seen" on a republic he founded himself
+            w.execute(Command::OpenWorkspace { id: id.clone() })
+                .await
+                .expect("reopen");
+            for (name, last) in seats(&w, &id).await {
+                assert_ne!(
+                    last,
+                    molt_core::MemberInfo::NEVER,
+                    "{name} lost its date across the reopen"
+                );
+                if name == seat {
+                    assert_eq!(last, later, "the remembered stamp did not come back");
+                }
+            }
+
+            // a republic founded BEFORE this memory existed carries no
+            // stamps at all - it still reads its founding date
+            w.execute(Command::CloseWorkspace).await.expect("close 2");
+            let mut legacy = molt_storage::read_prefs(&dir);
+            legacy.last_seen.clear();
+            molt_storage::write_prefs(&dir, &legacy).expect("wipe the stamps");
+            w.execute(Command::OpenWorkspace { id: id.clone() })
+                .await
+                .expect("reopen 2");
+            for (name, last) in seats(&w, &id).await {
+                assert!(
+                    last >= founded,
+                    "{name} fell back to never-seen on a stamp-less workspace"
+                );
+            }
         });
     }
 

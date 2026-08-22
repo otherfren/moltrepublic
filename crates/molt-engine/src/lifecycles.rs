@@ -306,9 +306,19 @@ impl State {
             net,
             agenda,
             encrypted: false,
-            members,
+            members: members.clone(),
             restored: false,
         });
+        // the stamps this entry starts with are real observations (the seal
+        // round, the announces a recovery reached) - and presence knowledge
+        // only survives a restart if it reaches the workspace's prefs.toml
+        self.remember_seen(
+            members
+                .into_iter()
+                .filter(|m| m.last_seen != MemberInfo::NEVER)
+                .map(|m| (m.name, m.last_seen))
+                .collect(),
+        );
     }
 
     // ---- restore (real: design §4 / §6.6) ------------------------------

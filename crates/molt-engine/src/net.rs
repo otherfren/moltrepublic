@@ -3184,6 +3184,10 @@ impl State {
         m.state = state;
         m.last_seen = now;
         if state_changed || label_advanced {
+            // the same gate keeps the DISK write down to one per displayed
+            // minute per member: presence is local knowledge, and without
+            // it on disk every restart claims it never saw anyone
+            self.remember_seen(vec![(member.clone(), now)]);
             self.emit_session(SessionScope::Full);
         }
     }
@@ -3216,6 +3220,8 @@ impl State {
                         && is_active
                         && coarse
                         && m.last_seen != molt_core::MemberInfo::NEVER
+                        && now.saturating_sub(m.last_seen)
+                            <= molt_core::MemberInfo::COARSE_SECS
                     {
                         1
                     } else {
@@ -3772,6 +3778,35 @@ mod tests {
         );
         // …but a member NEVER heard from is honestly dark
         assert_eq!(pill(&st, "cid").state, 2, "never-heard stays dark");
+    }
+
+    /// The coarse-Nostr lift covers a QUIET republic, not an absent seat.
+    /// Since the founding date became a real stamp (nobody reads back as
+    /// never-seen), "stamped" alone would paint a member gone for months
+    /// the same yellow as one heard from this morning - so the lift ends
+    /// with [`MemberInfo::COARSE_SECS`] and the dot goes dark again.
+    #[test]
+    fn a_seat_silent_past_the_coarse_window_goes_dark_again() {
+        let mut st = presence_fixture();
+        st.cmd_net_peer_seen("bob".to_string(), None).expect("stamp bob");
+        st.nostr = Some(crate::NostrTransport {
+            sk: zeroize::Zeroizing::new(vec![7u8; 32]),
+            relays: vec!["ws://relay.example".to_string()],
+            rotation_seed: [0u8; 32],
+        });
+        // inside the window: coarse, not dark (the quiet-republic case)
+        st.clock_override = Some(T + MemberInfo::COARSE_SECS - 60);
+        st.cmd_net_presence_tick().expect("tick");
+        assert_eq!(pill(&st, "bob").state, 1, "a quiet week is still stale");
+        // past it: this is not silence any more, it is absence
+        st.clock_override = Some(T + MemberInfo::COARSE_SECS + 60);
+        st.cmd_net_presence_tick().expect("tick");
+        assert_eq!(pill(&st, "bob").state, 2, "months of silence must read dark");
+        assert_eq!(
+            st.presence_of("bob", T, st.presence_now()),
+            2,
+            "the shared derivation agrees (co-equality)"
+        );
     }
 
     /// N5.4 (G4 epoch-ring honesty) + N5.5: on a Nostr workspace the health

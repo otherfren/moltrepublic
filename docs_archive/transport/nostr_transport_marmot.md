@@ -515,6 +515,17 @@ legs to be deaf. `net_health` reports relays, not members; the GUI copy
 relays". This is a real GUI-semantics change, budgeted in N5/N6, not a free
 reuse of the mesh presence model.
 
+**Amendment 2026-08-22 - what "seen" includes, and how long coarse lasts.**
+A member's stamp starts at the RITUAL that put it in the republic (founding
+or join): every seat signed that roster with this node, so reading them back
+as never-seen after a restart was simply false. Stamps are node-local
+knowledge and live in the workspace's `prefs.toml` (`last_seen`) - never in
+the chain, never on the wire - which is what makes them survive a restart.
+The coarse lift (a stamped member ages to *stale*, not dark) now ends at
+`MemberInfo::COARSE_SECS` = 7 days: short silence over relays is not
+absence, months of it is, and a seat carrying only its founding stamp must
+not glow yellow for ever.
+
 ## 7. Metadata comparison + wire-size reality (honest)
 
 | Dimension | SMP (per-pair) | Nostr/NIP-EE |
