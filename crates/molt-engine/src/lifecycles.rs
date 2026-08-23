@@ -1915,6 +1915,37 @@ impl State {
             }
             Some(raw)
         };
+        // A LOCAL copy of this seat must not block its recovery (field flow
+        // 2026-08-24): an S3-restored (detached) workspace — or an earlier
+        // recovery — shares the id `create_workspace` derives, and refusing
+        // on it killed the exact path the detached notice recommends. The
+        // copy retires to the trash (recoverable 30 days); the verified
+        // recovered state replaces it. Closed first when it is the open one.
+        if self.persist {
+            if let Ok(entropy) = molt_storage::seed_entropy(&phrase) {
+                let ws_id = molt_storage::derive_workspace_id(&entropy, &member);
+                let root = self.workspace_root();
+                if let Some(dir) = molt_storage::find_workspace_dir(&root, &ws_id) {
+                    if self.active.as_ref().is_some_and(|a| a.id == ws_id) {
+                        self.close_active_storage();
+                        self.session.active_workspace = String::new();
+                    }
+                    match molt_storage::trash_workspace(&root, &dir) {
+                        Ok(_trashed) => {
+                            self.session.workspaces.retain(|w| w.id != ws_id);
+                            self.reclassify_backups();
+                            tracing::info!(%ws_id, "recovery replaces the local copy — retired to the trash");
+                        }
+                        Err(e) => {
+                            return self.cmd_net_recover_failed(
+                                format!("cannot retire the local copy of this seat: {e}"),
+                                generation,
+                            )
+                        }
+                    }
+                }
+            }
+        }
         // keep copies to stand the queue-mesh supervisor up after
         // materialising (the Nostr group runtime is materialize's own job)
         let net_seed = (mls_blob.clone(), mesh.clone());

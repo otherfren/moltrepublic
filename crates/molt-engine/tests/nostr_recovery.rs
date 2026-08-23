@@ -1294,3 +1294,68 @@ async fn the_founders_own_seat_recovers_over_relays() {
     })
     .await;
 }
+
+/// **Field flow 2026-08-24: a local copy of the seat must not block its
+/// recovery.** An S3-restored (detached) workspace shares the recovered
+/// seat's id — `create_workspace` refused on the existing dir, so the very
+/// path the detached notice recommends ("rejoin via a recovery link") died
+/// with "already exists". A recovery now RETIRES the local copy to the
+/// trash (recoverable 30 days) and materializes the verified state, closing
+/// the copy first when it is the open one. Driven here as a SECOND recovery
+/// on the same node — the same collision class as restore-then-recover.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_recovery_replaces_a_local_copy_of_the_seat() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .try_init();
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, petra_phrase, _) = found_republic(tmp.path(), &url, 2).await;
+    drop(b);
+
+    let c = engine(&tmp.path().join("rejoiner"));
+    adopt_relay(&c, &url).await;
+    for round in 0..2u8 {
+        a.execute(Command::RecoverInviteStart {
+            member: "petra".to_string(),
+        })
+        .await
+        .expect("mint");
+        let s = wait_for(&a, "the recovery link", |s| {
+            s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")
+        })
+        .await;
+        let link = s
+            .notice
+            .strip_prefix("recovery-link:")
+            .unwrap_or_else(|| panic!("the mint must succeed: {:?}", s.notice))
+            .to_string();
+        c.execute(Command::RecoverStart {
+            link,
+            phrase: petra_phrase.clone(),
+        })
+        .await
+        .expect("recover start");
+        let s = wait_for(&c, "the recovery to open", |s| {
+            (s.screen == molt_core::Screen::Main
+                && s.notice.starts_with("recovered:"))
+                || s.notice.starts_with("recover-failed:")
+        })
+        .await;
+        assert!(
+            !s.notice.starts_with("recover-failed:"),
+            "round {round}: the existing local copy must not block the recovery: {:?}",
+            s.notice
+        );
+        assert_eq!(
+            s.workspaces.len(),
+            1,
+            "round {round}: one workspace, never a duplicate id: {:?}",
+            s.workspaces.iter().map(|w| w.id.clone()).collect::<Vec<_>>()
+        );
+    }
+}
