@@ -1631,6 +1631,36 @@ pub fn member_identity(
     Ok(member_identity_from_entropy(&entropy))
 }
 
+/// Resolve the identity keypair a seat's RECOVERY presents
+/// (`recovery_auto_approval.md` WP7, field bug 2026-08-23): the ritual
+/// anchored the FOUNDER's key salted with a name-derived workspace id
+/// ([`State::start_ritual`]) but every joiner's with the fixed "member" tag —
+/// and the phrase alone cannot say which kind of seat it re-derives.
+/// `anchored` (the seat's identity pk, from the recovery link or a verified
+/// chain head) picks the matching convention; an EMPTY hint keeps the legacy
+/// member-convention behavior (old links). A phrase that derives NEITHER is
+/// refused here — locally, before any network round. The restore path's
+/// twin lives at `apply_restore_staged` (both-derivations-verified-head).
+pub(crate) fn seat_identity(
+    phrase: &str,
+    member: &str,
+    anchored: &str,
+) -> Result<(molt_storage::SigningKey, String), String> {
+    let entropy = molt_storage::seed_entropy(phrase).map_err(|e| e.to_string())?;
+    let member_kp = member_identity_from_entropy(&entropy);
+    if anchored.is_empty() || member_kp.1 == anchored {
+        return Ok(member_kp);
+    }
+    // the founder convention: start_ritual salts with the name-derived
+    // workspace id
+    let ws_id = molt_storage::derive_workspace_id(&entropy, member);
+    let founder_kp = molt_storage::derive_identity_key(&entropy, &ws_id);
+    if founder_kp.1 == anchored {
+        return Ok(founder_kp);
+    }
+    Err("the phrase does not derive this seat's identity key".to_string())
+}
+
 /// The entropy-level core of [`member_identity`] — shared with the restore
 /// path, which holds raw seed entropy (from the blob meta) instead of a
 /// typed phrase. ONE salt convention: changing it here changes it for the
@@ -3382,6 +3412,32 @@ mod ritual_ops {
 
 #[cfg(test)]
 mod tests {
+    /// The recovery identity resolver (WP7, field bug 2026-08-23): the
+    /// anchored pk picks the ritual convention — the fixed "member" salt for
+    /// a joiner, the name-derived workspace-id salt for the FOUNDER — and a
+    /// phrase deriving neither is refused locally. An empty hint keeps the
+    /// legacy joiner behavior.
+    #[test]
+    fn seat_identity_resolves_both_ritual_conventions() {
+        let phrase = molt_storage::generate_seed_phrase().expect("phrase");
+        let entropy = molt_storage::seed_entropy(&phrase).expect("entropy");
+        let (_, joiner_pk) = super::member_identity_from_entropy(&entropy);
+        let founder_ws = molt_storage::derive_workspace_id(&entropy, "walter");
+        let (_, founder_pk) = molt_storage::derive_identity_key(&entropy, &founder_ws);
+        assert_ne!(joiner_pk, founder_pk, "the two ritual salts genuinely differ");
+
+        let (_, pk) = super::seat_identity(&phrase, "walter", &joiner_pk).expect("joiner");
+        assert_eq!(pk, joiner_pk);
+        let (_, pk) = super::seat_identity(&phrase, "walter", &founder_pk).expect("founder");
+        assert_eq!(pk, founder_pk, "the founder convention resolves against its anchor");
+        let (_, pk) = super::seat_identity(&phrase, "walter", "").expect("legacy hint");
+        assert_eq!(pk, joiner_pk, "no hint keeps the legacy joiner derivation");
+        assert!(
+            super::seat_identity(&phrase, "walter", &"ab".repeat(32)).is_err(),
+            "a phrase deriving neither convention is refused locally"
+        );
+    }
+
     use super::*;
     use molt_core::{MemberIdentity, RosterAttestation, SealedRoster};
 

@@ -442,6 +442,7 @@ fn a_recovery_handover_round_trips_and_fails_closed() {
 
     let (_, npub) = nostr_identity(b"coordinator-entropy", "rec");
     let h = RecoveryHandoverV2 {
+        identity_pk: String::new(),
         ticket: "ab".repeat(32),
         npub: npub.clone(),
         relays: vec!["wss://relay.example.org".to_string()],

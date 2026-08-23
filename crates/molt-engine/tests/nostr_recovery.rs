@@ -88,7 +88,7 @@ async fn adopt_relay(w: &WalletHandle, url: &str) {
 /// Found a real 2-of-2 "Chess Club" over one in-process relay, exactly as
 /// `nostr_founding.rs`'s capstone does, and hand back both live engines.
 async fn found_two_of_two(root: &std::path::Path, url: &str) -> (WalletHandle, WalletHandle) {
-    let (a, b, _) = found_republic(root, url, 2).await;
+    let (a, b, _, _) = found_republic(root, url, 2).await;
     (a, b)
 }
 
@@ -125,7 +125,7 @@ async fn found_republic(
     root: &std::path::Path,
     url: &str,
     threshold: u8,
-) -> (WalletHandle, WalletHandle, String) {
+) -> (WalletHandle, WalletHandle, String, String) {
     let a = engine(&root.join("founder"));
     adopt_relay(&a, url).await;
     a.execute(Command::CreateStart {
@@ -172,12 +172,13 @@ async fn found_republic(
     .await
     .expect("charter proposed");
     // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
-    {
+    let walter_phrase = {
         let seed_ = read_session(&a).await.create.seed.clone();
-        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_.clone() })
             .await
             .expect("founder backup confirm");
-    }
+        seed_
+    };
 
     wait_for(&b, "petra to see the proposed charter", |s| s.join.awaiting_ratify).await;
     b.execute(Command::JoinConfirmCharter).await.expect("ratify");
@@ -201,7 +202,7 @@ async fn found_republic(
         s.screen == molt_core::Screen::Main && !s.workspaces.is_empty()
     })
     .await;
-    (a, b, petra_phrase)
+    (a, b, petra_phrase, walter_phrase)
 }
 
 /// Field keystone (found 2026-08-17, recovery attempt 3g of the incident
@@ -225,7 +226,7 @@ async fn a_recovery_still_verifies_after_a_sealed_pool_edit() {
     let relay2 = MockRelay::run().await.expect("second relay");
     let url2 = relay2.url().await.to_string();
     let tmp = tempfile::tempdir().expect("tmp");
-    let (a, b, petra_phrase) = found_republic(tmp.path(), &url, 2).await;
+    let (a, b, petra_phrase, _) = found_republic(tmp.path(), &url, 2).await;
 
     // the republic GOVERNS its pool: both voices seal url + url2. walter
     // never confirms url2 locally (the field case) — his dialable subset
@@ -744,7 +745,7 @@ async fn a_lost_seat_rejoins_the_republic_over_relays() {
     let tmp = tempfile::tempdir().expect("tmp");
 
     // 2-of-2: walter's signature + petra's consent seal the Restored block
-    let (a, b, petra_phrase) = found_republic(tmp.path(), &url, 2).await;
+    let (a, b, petra_phrase, _) = found_republic(tmp.path(), &url, 2).await;
 
     // …and the republic keeps governing meanwhile, so the recovery's own
     // Restored block does NOT land at height 1. That gap is the point: the
@@ -859,7 +860,7 @@ async fn a_double_recovery_of_the_same_seat_still_converges_both_ways() {
     let relay = MockRelay::run().await.expect("in-process relay");
     let url = relay.url().await.to_string();
     let tmp = tempfile::tempdir().expect("tmp");
-    let (a, b, petra_phrase) = found_republic(tmp.path(), &url, 2).await;
+    let (a, b, petra_phrase, _) = found_republic(tmp.path(), &url, 2).await;
     drop(b);
 
     // ---- recovery ONE ----
@@ -1009,7 +1010,7 @@ async fn a_request_wrapped_by_another_key_is_refused_and_leaves_the_ticket_unspe
 
     // 2-of-2: the honest tail below still succeeds, because the rejoiner's
     // consent is the second voice (recovery approval design, 2026-08-08)
-    let (a, b, petra_phrase) = found_republic(tmp.path(), &url, 2).await;
+    let (a, b, petra_phrase, _) = found_republic(tmp.path(), &url, 2).await;
     drop(b);
 
     a.execute(Command::RecoverInviteStart {
@@ -1192,7 +1193,7 @@ async fn a_wrong_phrase_fails_the_rejoiner_fast_with_the_reason() {
     let relay = MockRelay::run().await.expect("in-process relay");
     let url = relay.url().await.to_string();
     let tmp = tempfile::tempdir().expect("tmp");
-    let (a, b, _petra_phrase) = found_republic(tmp.path(), &url, 2).await;
+    let (a, b, _petra_phrase, _) = found_republic(tmp.path(), &url, 2).await;
     drop(b);
 
     a.execute(Command::RecoverInviteStart {
@@ -1229,4 +1230,67 @@ async fn a_wrong_phrase_fails_the_rejoiner_fast_with_the_reason() {
     // …and the coordinator still surfaced its own refused notice or kept the
     // link armed: the ticket is NOT spent by a failed proof, so the same link
     // with the RIGHT phrase can still recover the seat.
+}
+
+/// **The FOUNDER's seat recovers too (field bug 2026-08-23).** The founding
+/// ritual salts the founder's identity with a name-derived workspace id
+/// (`start_ritual`), while every joiner uses the fixed "member" tag — and
+/// the rejoin task only ever derived the member convention, so a founder's
+/// correct phrase was refused with "recovery must re-derive the seat's own
+/// identity key" (the field's lnInks). The link now carries the seat's
+/// anchored identity pk and the rejoiner resolves the matching convention —
+/// and rejects a genuinely wrong phrase LOCALLY, before any network round.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_founders_own_seat_recovers_over_relays() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .try_init();
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, _petra_phrase, walter_phrase) = found_republic(tmp.path(), &url, 2).await;
+
+    // the FOUNDER's device dies; the surviving joiner coordinates
+    drop(a);
+    b.execute(Command::RecoverInviteStart {
+        member: "walter".to_string(),
+    })
+    .await
+    .expect("mint");
+    let s = wait_for(&b, "the recovery link", |s| {
+        s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")
+    })
+    .await;
+    let link = s
+        .notice
+        .strip_prefix("recovery-link:")
+        .unwrap_or_else(|| panic!("the mint must succeed: {:?}", s.notice))
+        .to_string();
+
+    let c = engine(&tmp.path().join("rejoiner"));
+    adopt_relay(&c, &url).await;
+    c.execute(Command::RecoverStart {
+        link,
+        phrase: walter_phrase,
+    })
+    .await
+    .expect("recover start");
+    let s = wait_for(&c, "the founder's seat to recover", |s| {
+        (s.screen == molt_core::Screen::Main && !s.workspaces.is_empty())
+            || s.notice.starts_with("recover-failed:")
+    })
+    .await;
+    assert!(
+        !s.notice.starts_with("recover-failed:"),
+        "the founder's correct phrase must recover the seat: {:?}",
+        s.notice
+    );
+    // and the survivor records the return
+    wait_for(&b, "petra to record walter's return", |s| {
+        s.workspaces.iter().any(|w| w.members.len() == 2)
+    })
+    .await;
 }

@@ -2444,12 +2444,21 @@ impl State {
         for old in self.recovery_inboxes.drain(..) {
             old.abort();
         }
+        // the seat's anchored identity pk rides the link (WP7): the rejoiner
+        // needs it to resolve the founder-vs-joiner derivation convention
+        let anchored_pk = self
+            .replica
+            .as_ref()
+            .and_then(|r| r.identities.iter().find(|i| i.member == member))
+            .map(|i| i.identity_pk.clone())
+            .unwrap_or_default();
         let task = crate::nostr_ritual::spawn_recovery_inbox(
             net,
             member,
             ticket,
             republic,
             republic_id,
+            anchored_pk,
             // recovery loops are scoped to the open WORKSPACE
             self.net_scope,
             cmd_tx.downgrade(),

@@ -148,6 +148,11 @@ pub struct RecoveryHandoverV2 {
     pub relays: Vec<String>,
     /// The republic's content-derived id, which the seat proof binds.
     pub republic_id: String,
+    /// The seat's ANCHORED identity pk (public, from the coordinator's
+    /// roster). The rejoiner uses it to resolve WHICH ritual derivation this
+    /// seat's identity used (founder vs joiner salt) and to refuse a wrong
+    /// phrase locally. Additive: empty on links minted by older builds.
+    pub identity_pk: String,
 }
 
 const RECOVERY_HANDOVER_VERSION: u8 = 2;
@@ -159,6 +164,8 @@ struct RecoveryWire {
     npub: String,
     relays: Vec<String>,
     republic_id: String,
+    #[serde(default)]
+    identity_pk: String,
 }
 
 impl RecoveryHandoverV2 {
@@ -177,12 +184,18 @@ impl RecoveryHandoverV2 {
             .map_err(|e| NetError::Framing(format!("npub encode: {e}")))?
             .to_bech32()
             .map_err(|e| NetError::Framing(format!("npub encode: {e}")))?;
+        if !self.identity_pk.is_empty()
+            && (self.identity_pk.len() != 64 || !is_lower_hex(&self.identity_pk))
+        {
+            return Err(NetError::Framing("recovery identity pk is malformed".into()));
+        }
         let wire = RecoveryWire {
             v: RECOVERY_HANDOVER_VERSION,
             ticket: self.ticket.clone(),
             npub,
             relays,
             republic_id: self.republic_id.clone(),
+            identity_pk: self.identity_pk.clone(),
         };
         Ok(hex::encode(
             serde_json::to_string(&wire).map_err(|e| NetError::Framing(e.to_string()))?,
@@ -220,6 +233,11 @@ impl RecoveryHandoverV2 {
         if parsed.republic_id.is_empty() || !is_lower_hex(&parsed.republic_id) {
             return Err(NetError::Framing("recovery republic id is malformed".into()));
         }
+        if !parsed.identity_pk.is_empty()
+            && (parsed.identity_pk.len() != 64 || !is_lower_hex(&parsed.identity_pk))
+        {
+            return Err(NetError::Framing("recovery identity pk is malformed".into()));
+        }
         use nostr::nips::nip19::FromBech32;
         let pk = nostr::PublicKey::from_bech32(&parsed.npub)
             .map_err(|e| NetError::Framing(format!("recovery npub: {e}")))?;
@@ -231,6 +249,7 @@ impl RecoveryHandoverV2 {
             npub,
             relays,
             republic_id: parsed.republic_id,
+            identity_pk: parsed.identity_pk,
         })
     }
 }

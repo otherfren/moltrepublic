@@ -268,12 +268,16 @@ pub(crate) fn spawn_rekey_delivery(
     })
 }
 
+#[allow(clippy::too_many_arguments)] // one mint's handover fields, not a bag
 pub(crate) fn spawn_recovery_inbox(
     net: RitualNet,
     member: String,
     ticket: String,
     republic: String,
     republic_id: String,
+    // the seat's ANCHORED identity pk — rides the link so the rejoiner can
+    // resolve the ritual's derivation convention (founder vs joiner salt)
+    identity_pk: String,
     generation: u64,
     tx: mpsc::WeakSender<Envelope>,
 ) -> tokio::task::JoinHandle<()> {
@@ -311,6 +315,7 @@ pub(crate) fn spawn_recovery_inbox(
             npub: net.pk_hex(),
             relays: net.relays().to_vec(),
             republic_id: republic_id.clone(),
+            identity_pk,
         };
         // encode EXPLICITLY: `RecoveryInvite::render` falls back to the legacy
         // queue shape when the handover cannot encode, and with the empty
@@ -833,10 +838,12 @@ async fn recovery_rejoin(
     let generation = Some(ctx.generation);
     let deadline = tokio::time::Instant::now() + crate::recovery::RECOVERY_WELCOME_TIMEOUT;
 
-    // The seat's identity re-derives from the phrase; its transport anchor is
-    // NEW, salted with the RECOVERY ticket — the founding anchor was salted
-    // with a ticket that died with the device and cannot be re-derived.
-    let (sk, pk) = crate::founding::member_identity(&ctx.phrase)?;
+    // The seat's identity re-derives from the phrase — resolving WHICH ritual
+    // convention anchored it (founder vs joiner salt) via the link's anchored
+    // pk; a wrong phrase is refused HERE, before any network round. The
+    // transport anchor is NEW, salted with the RECOVERY ticket — the founding
+    // anchor was salted with a ticket that died with the device.
+    let (sk, pk) = crate::founding::seat_identity(&ctx.phrase, &ctx.member, &h.identity_pk)?;
     let entropy = molt_storage::seed_entropy(&ctx.phrase).map_err(|e| e.to_string())?;
     let (mut nostr_raw, new_nostr_pk) = molt_net::nostr_identity(&entropy, &h.ticket);
     let nostr_sk = zeroize::Zeroizing::new(nostr_raw.to_vec());

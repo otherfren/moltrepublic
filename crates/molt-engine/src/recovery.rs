@@ -528,7 +528,11 @@ pub async fn run_rejoin_with_timeout<T: Transport>(
     // genesis roster anchors, so the coordinator's seat-proof check passes and
     // the re-keyed leaf keeps the seat's identity (recovery re-keys the leaf,
     // never the roster identity).
-    let (sk, pk) = crate::founding::member_identity(phrase)?;
+    let (sk, pk) = crate::founding::seat_identity(
+        phrase,
+        &inv.member,
+        inv.handover.as_ref().map(|h| h.identity_pk.as_str()).unwrap_or(""),
+    )?;
     // a fresh MLS member from that identity; its credential is the seat handle,
     // so `restore_member` finds and re-keys THIS leaf.
     let mut mls = molt_net::MlsMember::new(&sk, &inv.member).map_err(|e| e.to_string())?;
@@ -951,6 +955,7 @@ mod tests {
                 npub: npub.clone(),
                 relays: vec!["wss://relay.example.org".to_string()],
                 republic_id: "f00dcafe".to_string(),
+                identity_pk: String::new(),
             }),
         };
         let link = inv.render();
@@ -1023,6 +1028,7 @@ mod tests {
                 npub,
                 relays: vec!["wss://relay.example.org".to_string()],
                 republic_id: "f00dcafe".to_string(),
+                identity_pk: String::new(),
             }),
         };
         let legacy = RecoveryInvite {
@@ -1068,6 +1074,7 @@ mod tests {
             npub,
             relays: vec!["wss://relay.example.org".to_string()],
             republic_id: "f00dcafe".to_string(),
+            identity_pk: String::new(),
         };
         let link = format!(
             "molt://recover/Chess-Club/dora/{}/{}",

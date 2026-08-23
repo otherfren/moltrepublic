@@ -1797,18 +1797,26 @@ impl State {
             );
         }
         // the seat's identity re-derives from the phrase exactly as the ritual
-        // anchored it; the VERIFIED HEAD must anchor it (a Membership block may
-        // have evolved the key past the genesis — e.g. this very re-admission)
-        let (sk, pk) = match crate::founding::member_identity(&phrase) {
+        // anchored it — resolving the founder-vs-joiner salt against the
+        // VERIFIED HEAD's anchor (WP7; a Membership block may have evolved
+        // the key past the genesis — e.g. this very re-admission)
+        let Some(anchored) = head
+            .identities
+            .iter()
+            .find(|i| i.member == member)
+            .map(|i| i.identity_pk.clone())
+        else {
+            return self.cmd_net_recover_failed(
+                "the recovered chain does not anchor this seat".to_string(),
+                generation,
+            );
+        };
+        // the resolver guarantees pk == anchored (non-empty hint), so only
+        // the signing key travels on
+        let (sk, _pk) = match crate::founding::seat_identity(&phrase, &member, &anchored) {
             Ok(kp) => kp,
             Err(e) => return self.cmd_net_recover_failed(e, generation),
         };
-        if !head.identities.iter().any(|i| i.member == member && i.identity_pk == pk) {
-            return self.cmd_net_recover_failed(
-                "the recovered chain does not anchor this phrase's identity".to_string(),
-                generation,
-            );
-        }
         // a corrupt MLS snapshot fails the recovery — materializing a workspace
         // whose group can never decrypt is worse than a clean failure
         let mls_blob = if mls.is_empty() {

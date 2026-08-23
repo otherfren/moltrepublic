@@ -5050,6 +5050,7 @@ mod tests {
                 npub: "12".repeat(32),
                 relays: vec!["wss://coordinator.example".to_string()],
                 republic_id: "f00d".to_string(),
+                identity_pk: String::new(),
             }),
         }
         .render();

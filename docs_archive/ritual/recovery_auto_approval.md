@@ -1,6 +1,6 @@
 # Recovery: survivors approve automatically, the rejoiner sees a checklist
 
-**Status: EXECUTED 2026-08-23 — all six WPs are on master, tested green.**
+**Status: EXECUTED 2026-08-23 — all seven WPs are on master, tested green.**
 Keystones: `nostr_recovery.rs::a_recovery_needs_no_human_approval_when_survivors_are_online`
 (3-of-3 recovery, no `Command::Approve`, rejoiner checklist complete —
 verified red without WP1), `chain::tests::{a_consented_restore_is_approved_without_a_human,
@@ -160,6 +160,29 @@ the coordinator's reason; the ticket stays unspent (retry with the right
 phrase works on the same link). Keystone:
 `nostr_recovery.rs::a_wrong_phrase_fails_the_rejoiner_fast_with_the_reason`
 (verified red: the old build waits out the timeout).
+
+## 7b. WP7 — the FOUNDER's seat could never recover (field bug 2026-08-23)
+
+The field's `lnInks` refusal with the CORRECT phrase: `start_ritual` anchors
+the founder's identity salted with a name-derived workspace id, every joiner
+with the fixed "member" tag — and the rejoin task only ever derived the
+joiner convention, so `verify_and_propose_restore` refused every founder
+recovery ("recovery must re-derive the seat's own identity key"). The
+restore path had already solved this (both derivations, verified head
+picks); recovery now does the same:
+
+- `RecoveryHandoverV2` gains `identity_pk` (the seat's ANCHORED pk, public;
+  additive — old links carry none and keep the legacy joiner derivation);
+- `founding::seat_identity(phrase, member, anchored)` resolves the matching
+  convention — and refuses a wrong phrase LOCALLY, before any network round
+  (bonus: instant feedback, no ticket round-trip);
+- `cmd_net_recover_sealed` resolves against the VERIFIED head's anchor
+  instead of assuming the joiner convention.
+
+Keystones: `nostr_recovery.rs::the_founders_own_seat_recovers_over_relays`
+(red before: the exact field refusal), the split wrong-phrase test (local
+fast-fail on a pk-carrying link + the WP6 coordinator answer on a legacy
+link), `founding::tests::seat_identity_resolves_both_ritual_conventions`.
 
 ## 8. Execution order & landing
 
