@@ -686,6 +686,9 @@ impl State {
         for task in self.recovery_inboxes.drain(..) {
             task.abort();
         }
+        if let Some(task) = self.seat_inbox.take() {
+            task.abort();
+        }
         // …and so are the relay-plane file fetches (FP3): private inbound
         // subscriptions; their landing write runs inside spawn_blocking,
         // which an abort never interrupts mid-file

@@ -561,6 +561,14 @@ pub(crate) struct State {
     /// workspace, so a forgotten task would sit on a relay socket forever and
     /// every mint would add another.
     pub(crate) recovery_inboxes: Vec<tokio::task::JoinHandle<()>>,
+    /// The STANDING seat inbox (`detached_reattach.md` §2.1): an open Nostr
+    /// workspace's own-anchor 1059 subscription, so a restored seat can
+    /// announce itself without a minted link. Torn down with the net.
+    pub(crate) seat_inbox: Option<tokio::task::JoinHandle<()>>,
+    /// Self-service reattach cooldown (`detached_reattach.md` §2.2): a
+    /// `(member, new_anchor) → unix stamp` map that swallows relay replays
+    /// of an accepted request (the accept window does not cover 1059 wraps).
+    pub(crate) unsolicited_cooldown: std::collections::HashMap<(String, String), u64>,
     /// The republic's persistent commit-block chain — the converged, verified
     /// governance record (`docs_archive/chain/persistent_chain.md`). Block 0 is the
     /// founding; empty when no chain-aware workspace is open.
@@ -990,6 +998,8 @@ impl State {
             group_net: None,
             last_group_ack: None,
             recovery_inboxes: Vec::new(),
+            seat_inbox: None,
+            unsolicited_cooldown: std::collections::HashMap::new(),
             chain: Vec::new(),
             chain_head: None,
             chain_walk: None,

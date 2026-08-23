@@ -3489,8 +3489,8 @@ static LOG_SHAPES_DE: &[(&[&str], &[&str])] = &[
         &["→ der Seed des Blobs verankert die Identität dieses Sitzes nicht im verifizierten Roster - nur Wissen wird wiederhergestellt"],
     ),
     (
-        &["→ knowledge is restored, membership is NOT — the workspace opens detached; rejoin the live republic via a recovery link"],
-        &["→ Wissen ist wiederhergestellt, Mitgliedschaft NICHT - der Workspace öffnet abgekoppelt; der lebenden Republik per Recovery-Link neu beitreten"],
+        &["→ knowledge is restored — the workspace opens detached and reattaches to the live republic automatically (fallback: a recovery link)"],
+        &["→ Wissen ist wiederhergestellt - der Workspace öffnet abgekoppelt und verbindet sich automatisch wieder mit der lebenden Republik (Fallback: Recovery-Link)"],
     ),
     (&["✗ restore failed: ", ""], &["✗ Restore fehlgeschlagen: ", ""]),
     (&["→ fs: read ", ""], &["→ fs: lese ", ""]),
@@ -4171,6 +4171,10 @@ fn apply_session(
         if sv.notice == "detached" {
             // §4.4: knowledge restored, membership not — say exactly that
             ui.invoke_show_toast_error(s.get_toast_detached());
+        } else if sv.notice == "reattaching" {
+            // detached_reattach.md: the seat announces itself — a calm
+            // in-progress note, not an error
+            ui.invoke_show_toast(s.get_toast_reattaching());
         } else if let Some(err) = sv.notice.strip_prefix("backup-failed:") {
             ui.invoke_show_toast_error(format!("{} {err}", s.get_toast_backup_failed()).into());
         } else if let Some(err) = sv.notice.strip_prefix("backup-prune-failed:") {
@@ -9071,7 +9075,8 @@ lexicon! {
     // the honest §4.4 boundary: knowledge vs membership
     // origin-neutral on purpose: the engine derives "detached" from the
     // directory's state (no group key, no mesh), not from HOW it got there
-    toast_detached: "Workspace is detached - knowledge is readable, live membership is not (no group key, no mesh). Rejoin via a recovery link.", "Workspace ist detached - Wissen lesbar, keine Live-Mitgliedschaft (kein Gruppenschlüssel, kein Mesh). Wiederbeitritt über Recovery-Link.";
+    toast_detached: "Workspace is detached - rejoin via a recovery link.", "Workspace ist detached - Wiederbeitritt über Recovery-Link.";
+    toast_reattaching: "Reconnecting to the republic…", "Verbinde wieder mit der Republik…";
     toast_backup_failed: "Backup failed:", "Backup fehlgeschlagen:";
     toast_backup_prune: "Backup stored, pruning old copies failed:", "Backup gespeichert, Aufräumen alter Kopien fehlgeschlagen:";
     // mesh self-heal Phase 4 — connection-health banner (net_health tone 1/2)

@@ -241,6 +241,7 @@ impl State {
             if self.nostr.is_some() {
                 if let Some(blob) = adopt_mls.as_deref() {
                     self.group_net = self.build_group_net(blob);
+                    self.spawn_seat_inbox_if_nostr();
                 }
             }
             // the FIRST session is as honest as a reopen: green only when the
@@ -643,8 +644,9 @@ impl State {
             );
         }
         r.log.push(
-            "→ knowledge is restored, membership is NOT — the workspace opens \
-             detached; rejoin the live republic via a recovery link"
+            "→ knowledge is restored — the workspace opens detached and \
+             reattaches to the live republic automatically (fallback: a \
+             recovery link)"
                 .to_string(),
         );
         self.emit_session(SessionScope::Full);
@@ -1615,6 +1617,133 @@ impl State {
     /// verified [`Command::NetRecoverSealed`] against that context. Until
     /// N4's Nostr transport lands there is no network to run the rejoin
     /// over, so the production path reports an honest failure right away.
+    /// The self-service reattach (`detached_reattach.md` §2.3): a workspace
+    /// that opened DETACHED with a verified chain announces its seat to the
+    /// survivors' standing inboxes and runs the ordinary rejoiner wait — no
+    /// link, no mint, no human act. One attempt per open; where the material
+    /// is missing (no seed on disk, no anchors, no confirmed ratified relay)
+    /// it returns `false` and the honest detached state stays. The ticketed
+    /// recovery link remains the manual fallback.
+    pub(crate) fn spawn_reattach(&mut self) -> bool {
+        if !self.persist {
+            return false;
+        }
+        let member = self.member();
+        let Some(head) = self.chain_head.as_ref() else {
+            return false;
+        };
+        let Some(anchored) = head
+            .identities
+            .iter()
+            .find(|i| i.member == member)
+            .map(|i| i.identity_pk.clone())
+        else {
+            return false;
+        };
+        let republic_id = head.republic_id.clone();
+        let ratified = self.ratified_relays();
+        if ratified.is_empty() {
+            return false;
+        }
+        // the seat's phrase, revealed from the workspace's sealed seed — a
+        // knowledge-only restore (no seed in the blob) cannot reattach
+        let Some(phrase) = self
+            .session
+            .workspaces
+            .iter()
+            .find(|w| w.id == self.session.active_workspace)
+            .map(|w| w.seed.clone())
+            .filter(|s| !s.is_empty())
+        else {
+            tracing::info!("detached workspace carries no seed — reattach needs the recovery link");
+            return false;
+        };
+        // every OTHER seat's WORKING anchor from the restored chain —
+        // possibly stale; whoever kept theirs answers
+        let targets: Vec<String> = head
+            .identities
+            .iter()
+            .filter(|i| i.member != member)
+            .map(|i| self.working_nostr_pk(&i.member))
+            .filter(|a| !a.is_empty())
+            .collect();
+        if targets.is_empty() {
+            return false;
+        }
+        // ADR-0004: dial only what this operator confirmed
+        let verdicts = molt_core::relay::diagnose_invite_relays(
+            &ratified,
+            &self.session.settings.relays,
+            self.clearnet_session,
+        );
+        let dial_relays: Vec<String> = verdicts
+            .iter()
+            .filter(|v| v.blocked.is_none())
+            .map(|v| v.url.clone())
+            .collect();
+        if dial_relays.is_empty() {
+            tracing::info!("detached workspace: no ratified relay is locally confirmed — staying detached");
+            return false;
+        }
+        let Ok(dialer) = self.dialer_for() else {
+            return false;
+        };
+        let Ok(self_ticket) = molt_net::invite::mint_ticket() else {
+            return false;
+        };
+        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+            return false;
+        };
+        self.recover_generation += 1;
+        let generation = self.recover_generation;
+        if let Some(task) = self.recover_task.take() {
+            task.abort();
+        }
+        let handover = molt_net::invite::RecoveryHandoverV2 {
+            // the SELF-ticket (the founder's third-anchor pattern): salt for
+            // the fresh transport anchor, registered nowhere
+            ticket: self_ticket.clone(),
+            npub: targets[0].clone(),
+            relays: dial_relays.clone(),
+            republic_id: republic_id.clone(),
+            identity_pk: anchored,
+        };
+        let republic = self
+            .replica
+            .as_ref()
+            .map(|r| r.name.clone())
+            .unwrap_or_default();
+        self.recover_ctx = Some((
+            crate::recovery::RecoveryInvite {
+                republic,
+                member: member.clone(),
+                ticket: self_ticket,
+                server: String::new(),
+                queue_id: String::new(),
+                wrap: String::new(),
+                republic_id,
+                handover: Some(handover.clone()),
+            },
+            phrase.clone(),
+        ));
+        self.session.recover = molt_core::RecoverState::default();
+        let extra_targets = targets.get(1..).map(<[String]>::to_vec).unwrap_or_default();
+        self.recover_task = Some(crate::nostr_ritual::spawn_recovery_rejoiner(
+            dialer,
+            crate::nostr_ritual::RecoverCtx {
+                handover,
+                dial_relays,
+                extra_targets,
+                member,
+                phrase,
+                generation,
+            },
+            cmd_tx.downgrade(),
+        ));
+        tracing::info!("detached workspace — reattaching to the republic");
+        true
+    }
+
     pub(crate) fn cmd_recover_start(
         &mut self,
         link: String,
@@ -1733,6 +1862,7 @@ impl State {
             crate::nostr_ritual::RecoverCtx {
                 handover,
                 dial_relays,
+                extra_targets: Vec::new(),
                 member: inv.member.clone(),
                 phrase: task_phrase,
                 generation,

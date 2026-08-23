@@ -236,7 +236,7 @@ pub fn known_log_shapes() -> &'static [LogShape] {
         &["✓ chain verified · height ", " · ", "-of-", ""],
         &["✓ backup from unix ", " (", " day(s) old) · workspace “", "” materialized"],
         &["→ the blob's seed does not anchor this seat's identity in the verified roster — knowledge-only restore"],
-        &["→ knowledge is restored, membership is NOT — the workspace opens detached; rejoin the live republic via a recovery link"],
+        &["→ knowledge is restored — the workspace opens detached and reattaches to the live republic automatically (fallback: a recovery link)"],
         &["✗ restore failed: ", ""],
         &["→ fs: read ", ""],
         &["→ s3: list ", ""],

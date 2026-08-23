@@ -1181,6 +1181,9 @@ impl State {
             if let Some(blob) = transport_state.mls.as_deref() {
                 self.group_net = self.build_group_net(blob);
             }
+            // the standing seat inbox rides the same standup: a restored
+            // seat elsewhere can announce itself (detached_reattach.md §2.1)
+            self.spawn_seat_inbox_if_nostr();
         }
         let resumed = match (&transport_state.mls, &transport_state.smp_queues, &dialer) {
             _ if nostr_kind => None,
@@ -1272,6 +1275,14 @@ impl State {
         } else {
             String::new()
         };
+        // detached with a chain and a ratified relay pool: the seat
+        // reattaches ITSELF (detached_reattach.md §2.3) — the survivors are
+        // notified, never asked. Where the task cannot start (no seed on
+        // disk, no anchors, no confirmed relay) the honest detached state
+        // simply stays.
+        if self.session.notice == "detached" && self.spawn_reattach() {
+            self.session.notice = "reattaching".to_string();
+        }
         // B2: the chat is materialized — load (and, first time, seed) the
         // seat's read cursors
         self.adopt_read_cursors();

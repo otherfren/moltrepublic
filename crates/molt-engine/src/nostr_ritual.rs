@@ -268,6 +268,39 @@ pub(crate) fn spawn_rekey_delivery(
     })
 }
 
+/// The STANDING seat inbox (`detached_reattach.md` §2.1): an open Nostr
+/// workspace listens on its OWN 1059 anchor for the workspace's lifetime,
+/// so a restored seat can announce itself without a minted link. Only
+/// gift-wrapped `Recover` requests are carried across — the actor's ingest
+/// ladder (ticketed AND self-service lanes) stays the one gate. Torn down
+/// with the net teardown; commands are scoped by `generation` (net scope).
+pub(crate) fn spawn_seat_inbox(
+    net: RitualNet,
+    generation: u64,
+    tx: mpsc::WeakSender<Envelope>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut inbox = match net.inbox().await {
+            Ok(i) => i,
+            Err(e) => {
+                tracing::warn!(error = %e, "seat inbox subscribe failed — self-service reattach unavailable this session");
+                return;
+            }
+        };
+        loop {
+            let Some(delivery) = inbox.recv(RECV_SLICE).await else {
+                continue; // idle slice
+            };
+            let RitualDelivery::Msg(RitualMsg::Recover(r), sender) = delivery else {
+                continue;
+            };
+            if !send_cmd(&tx, crate::founding::recover_command(r, sender, generation)).await {
+                return;
+            }
+        }
+    })
+}
+
 #[allow(clippy::too_many_arguments)] // one mint's handover fields, not a bag
 pub(crate) fn spawn_recovery_inbox(
     net: RitualNet,
@@ -771,6 +804,11 @@ pub(crate) struct RecoverCtx {
     /// What THIS node may dial — the handover's relays intersected with this
     /// operator's own confirmed pool (ADR-0004).
     pub dial_relays: Vec<String>,
+    /// FURTHER coordinator anchors beyond `handover.npub` (the reattach
+    /// broadcast, `detached_reattach.md` §2.3): the request goes to all of
+    /// them, and the Welcome/Progress/Refused answers are accepted from any.
+    /// Empty on the ticketed single-coordinator path.
+    pub extra_targets: Vec<String>,
     pub member: String,
     pub phrase: String,
     pub generation: u64,
@@ -893,24 +931,36 @@ async fn recovery_rejoin(
             &new_nostr_pk,
         ),
     );
-    net.send_ritual(
-        &h.npub,
-        &RitualMsg::Recover(invite::RecoverRequest {
-            member: ctx.member.clone(),
-            identity_pk: pk,
-            key_package: kp_hex,
-            ticket: h.ticket.clone(),
-            seat_proof,
-            new_nostr_pk,
-            // R5: what this seat can actually dial — its ledger entry
-            relays: declared,
-            consent,
-            // Nostr replies to the gift-wrap anchor, not to a queue
-            reply: None,
-        }),
-    )
-    .await
-    .map_err(|e| format!("recovery request: {e}"))?;
+    // every coordinator anchor this run addresses; answers are accepted
+    // from any of them (the reattach broadcast — one entry on the ticketed
+    // path, where the link names the one coordinator)
+    let mut targets: Vec<String> = std::iter::once(h.npub.clone())
+        .chain(ctx.extra_targets.iter().cloned())
+        .collect();
+    targets.dedup();
+    let request = RitualMsg::Recover(invite::RecoverRequest {
+        member: ctx.member.clone(),
+        identity_pk: pk,
+        key_package: kp_hex,
+        ticket: h.ticket.clone(),
+        seat_proof,
+        new_nostr_pk,
+        // R5: what this seat can actually dial — its ledger entry
+        relays: declared,
+        consent,
+        // Nostr replies to the gift-wrap anchor, not to a queue
+        reply: None,
+    });
+    let mut sent = 0usize;
+    for to in &targets {
+        match net.send_ritual(to, &request).await {
+            Ok(_report) => sent += 1,
+            Err(e) => tracing::warn!(error = %e, "recovery request to one anchor did not publish"),
+        }
+    }
+    if sent == 0 {
+        return Err("recovery request: no anchor was reachable".to_string());
+    }
 
     // the rejoiner is not silent while it waits (NetRecoverNote): the wait
     // spans the coordinator's HUMAN approval, so the status line is the
@@ -950,22 +1000,22 @@ async fn recovery_rejoin(
             .await;
         }
         match inbox.recv((deadline - now).min(RECV_SLICE)).await {
-            Some(RitualDelivery::Welcome(p, sender)) if sender == h.npub => break p,
+            Some(RitualDelivery::Welcome(p, sender)) if targets.contains(&sender) => break p,
             // the coordinator REFUSED the request (WP6): fail fast with the
             // reason instead of sitting out the 15-minute deadline — the
             // ticket is not spent, so a retry with the right phrase works
             Some(RitualDelivery::Msg(RitualMsg::RecoverRefused { reason, .. }, sender))
-                if sender == h.npub =>
+                if targets.contains(&sender) =>
             {
                 return Err(format!("the coordinator refused the request: {reason}"));
             }
             // the coordinator's checklist (recovery_auto_approval.md §4):
-            // who has approved, from the COORDINATOR's anchor and nobody
-            // else's — display data the session renders live
+            // who has approved, from an ADDRESSED coordinator's anchor and
+            // nobody else's — display data the session renders live
             Some(RitualDelivery::Msg(
                 RitualMsg::RecoverProgress { member, need, roster, approved },
                 sender,
-            )) if sender == h.npub => {
+            )) if targets.contains(&sender) => {
                 let _ = send_cmd(
                     tx,
                     Command::NetRecoverProgress { member, need, roster, approved, generation },

@@ -1359,3 +1359,82 @@ async fn a_recovery_replaces_a_local_copy_of_the_seat() {
         );
     }
 }
+
+/// **Detached reattach keystone (`detached_reattach.md`, user decision
+/// 2026-08-24): a restored workspace reconnects to the live republic with
+/// NO ritual — no link, no `RecoverInviteStart`, nobody clicking.** petra's
+/// workspace is exported, her device dies, a fresh device restores the blob
+/// and merely OPENS it: the seat announces itself to the survivors' standing
+/// inboxes, walter's node verifies + auto-approves + re-keys, and the group
+/// hears the rejoin notice. The survivors are notified, never asked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restored_workspace_reattaches_without_a_ritual() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .try_init();
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, _petra_phrase, _) = found_republic(tmp.path(), &url, 2).await;
+
+    // petra's knowledge leaves the device as a manual export…
+    let ws_id = read_session(&b).await.workspaces[0].id.clone();
+    let blob = tmp.path().join("petra.molt.enc");
+    b.execute(Command::ExportWorkspace {
+        id: ws_id,
+        dest: blob.display().to_string(),
+        passphrase: "super-secret-pass".to_string(),
+    })
+    .await
+    .expect("export kickoff");
+    wait_for(&b, "the export to finish", |s| {
+        !s.export.running && s.export.result == "ok"
+    })
+    .await;
+    // …and the device dies
+    drop(b);
+
+    // a fresh device: restore the blob, then OPEN it — that is ALL
+    let c = engine(&tmp.path().join("restored"));
+    adopt_relay(&c, &url).await;
+    c.execute(Command::RestoreStart {
+        way: "file".to_string(),
+        target: blob.display().to_string(),
+        secret: "super-secret-pass".to_string(),
+        replace: false,
+    })
+    .await
+    .expect("restore start");
+    wait_for(&c, "the restore to stage and verify", |s| s.restore.run.outcome == 1).await;
+    c.execute(Command::RestoreFinish).await.expect("restore finish");
+
+    // the seat comes back by itself: the reattach ends in the recovery seal
+    let s = wait_for(&c, "the reattach to go live", |s| {
+        s.notice.starts_with("recovered:") || s.notice.starts_with("recover-failed:")
+    })
+    .await;
+    assert!(
+        !s.notice.starts_with("recover-failed:"),
+        "the reattach must succeed: {:?}",
+        s.notice
+    );
+    assert_eq!(s.screen, molt_core::Screen::Main);
+
+    // the survivors were NOTIFIED, never asked: walter's group chat carries
+    // the rejoin system line
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let seen = read_chat_bodies(&a).await;
+        if seen.iter().any(|m| m.contains("rejoined the republic after recovery")) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "walter never heard the rejoin notice"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}

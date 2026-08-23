@@ -606,6 +606,9 @@ impl State {
     /// next session-only chat lazily rebuilds it for the current roster.
     pub(crate) fn teardown_net(&mut self) {
         self.net = None;
+        if let Some(task) = self.seat_inbox.take() {
+            task.abort();
+        }
     }
 
     /// Clean-close persist: snapshot a running REAL mesh's crypto (advanced MLS
@@ -2095,12 +2098,35 @@ impl State {
         if !self.net_scope_current(generation) {
             return Ok(Reply::Ack);
         }
-        // Spend-once guard: the ticket must be a live one this node minted (via
-        // a recovery link). An unknown or already-spent ticket — a replay of a
-        // captured request, or a bare-queue probe — is dropped without a trace.
-        if !self.recovery_tickets.contains(&ticket) {
-            tracing::warn!(%member, "recovery request with an unknown or spent ticket — dropped");
-            return Ok(Reply::Ack);
+        // TWO lanes (`detached_reattach.md` §2.2). Ticketed: the ticket must
+        // be a live one this node minted via a recovery link. Self-service:
+        // an unknown ticket is a restored seat announcing itself — accepted
+        // only on an open chain-governed group, only WITH a consent (it is
+        // the authorization), and every failure past here stays a SILENT
+        // drop (no refusal frame — an unauthenticated prober gets no oracle).
+        let ticketed = self.recovery_tickets.contains(&ticket);
+        if !ticketed {
+            if !self.is_chain_governed() || self.group_net.is_none() {
+                tracing::debug!(%member, "unsolicited recovery request without an open group — dropped");
+                return Ok(Reply::Ack);
+            }
+            if consent.is_empty() {
+                tracing::warn!(%member, "unsolicited recovery request without a consent — dropped");
+                return Ok(Reply::Ack);
+            }
+            // one re-admission at a time: a pending Restored proposal for
+            // this member means another receiver (or an earlier frame of
+            // this broadcast) already coordinates
+            if self.proposal_changes.values().any(|c| {
+                matches!(c, molt_core::ChainChange::Membership {
+                    op: molt_core::MembershipOp::Restored,
+                    member: m,
+                    ..
+                } if m == &member)
+            }) {
+                tracing::debug!(%member, "unsolicited recovery request while one is pending — dropped");
+                return Ok(Reply::Ack);
+            }
         }
         // NB: on a verified request, verify_and_propose_restore registers the
         // pending recovery BEFORE proposing (a lone coordinator commits the
@@ -2150,6 +2176,22 @@ impl State {
             );
             return Ok(Reply::Ack);
         }
+        // self-service cooldown: relays replay 1059 wraps on every
+        // resubscribe, and the accept window does not cover them — an
+        // accepted (member, anchor) pair is served once per window
+        const UNSOLICITED_COOLDOWN_SECS: u64 = 1_800;
+        if !ticketed {
+            let now = crate::now_secs();
+            let key = (member.to_string(), canonical.clone());
+            if self
+                .unsolicited_cooldown
+                .get(&key)
+                .is_some_and(|t| now.saturating_sub(*t) < UNSOLICITED_COOLDOWN_SECS)
+            {
+                tracing::debug!(%member, "unsolicited recovery request within the cooldown — dropped");
+                return Ok(Reply::Ack);
+            }
+        }
         match self.verify_and_propose_restore(
             &member,
             &identity_pk,
@@ -2165,13 +2207,20 @@ impl State {
                 // spend the ticket only on a verified request, so a legitimate
                 // member whose first attempt failed (e.g. a truncated proof) can
                 // retry on the still-live queue
-                self.recovery_tickets.remove(&ticket);
-                tracing::info!(%member, "recovery seat proof verified — proposing re-admission");
+                if ticketed {
+                    self.recovery_tickets.remove(&ticket);
+                }
+                let now = crate::now_secs();
+                self.unsolicited_cooldown
+                    .retain(|_, t| now.saturating_sub(*t) < UNSOLICITED_COOLDOWN_SECS);
+                self.unsolicited_cooldown
+                    .insert((member.to_string(), canonical.clone()), now);
+                tracing::info!(%member, ticketed, "recovery seat proof verified — proposing re-admission");
                 // the first checklist frame: the rejoiner learns the roster,
                 // the threshold and the voices already counted
                 self.push_recover_progress(id);
             }
-            Err(e) => {
+            Err(e) if ticketed => {
                 // the operator must SEE the refusal (relay-pool mismatch is
                 // the common honest cause — R5 names the relay to add); a
                 // tracing-only drop left the coordinator staring at a silent
@@ -2193,6 +2242,11 @@ impl State {
                         },
                     );
                 }
+            }
+            Err(e) => {
+                // self-service lane: silent toward the wire (no oracle), one
+                // structured line for the operator's log
+                tracing::warn!(%member, error = %e, "dropping an invalid unsolicited recovery request");
             }
         }
         Ok(Reply::Ack)
@@ -2253,6 +2307,44 @@ impl State {
                 tracing::debug!(error = %e, "recovery frame did not publish");
             }
         });
+    }
+
+    /// Stand the STANDING seat inbox up for the open Nostr workspace
+    /// (`detached_reattach.md` §2.1): subscribe this seat's own 1059 anchor
+    /// so a restored seat can announce itself without a minted link. Called
+    /// wherever the group runtime comes up (open, materialize); replaces a
+    /// previous incarnation. A refusal to spawn (no relays, no key) is
+    /// quiet — the ticketed link path is unaffected.
+    pub(crate) fn spawn_seat_inbox_if_nostr(&mut self) {
+        if let Some(task) = self.seat_inbox.take() {
+            task.abort();
+        }
+        if self.transport_kind != Some(molt_core::TransportKind::Nostr)
+            || !self.is_chain_governed()
+        {
+            return;
+        }
+        let Some(nostr) = self.nostr.as_ref() else {
+            return;
+        };
+        let relays = self.dialable_group_relays();
+        if relays.is_empty() {
+            return;
+        }
+        let Ok(dialer) = self.dialer_for() else {
+            return;
+        };
+        let Ok(net) = molt_net::ritual_net::RitualNet::new(dialer, relays, &nostr.sk) else {
+            return;
+        };
+        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+            return;
+        };
+        self.seat_inbox = Some(crate::nostr_ritual::spawn_seat_inbox(
+            net,
+            self.net_scope,
+            cmd_tx.downgrade(),
+        ));
     }
 
     /// A surviving coordinator mints a recovery link for a member who lost its
