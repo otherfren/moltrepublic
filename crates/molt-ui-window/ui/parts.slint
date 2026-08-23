@@ -196,14 +196,16 @@ export component SurfaceRow inherits Rectangle {
             // through the window-topmost HintTip overlay — a local bubble
             // would paint under the main pane
             property <bool> tip-on: ta.has-hover && self.width < self.preferred-width;
+            // the tip generation this element owns (HintTip.show hands
+            // it out): only its owner may clear the bubble
+            property <int> tip-gen;
             changed tip-on => {
                 if (self.tip-on) {
-                    HintTip.label = root.s.name;
-                    HintTip.ax = root.absolute-position.x + root.width + 8px;
-                    HintTip.ay = root.absolute-position.y + (root.height - 23px) / 2;
-                } else if (HintTip.ax == root.absolute-position.x + root.width + 8px
-                    && HintTip.ay == root.absolute-position.y + (root.height - 23px) / 2) {
-                    HintTip.label = "";
+                    self.tip-gen = HintTip.show(root.s.name,
+                        root.absolute-position.x + root.width + 8px,
+                        root.absolute-position.y + (root.height - 23px) / 2);
+                } else {
+                    HintTip.hide(self.tip-gen);
                 }
             }
         }
@@ -225,15 +227,17 @@ export component SurfaceRow inherits Rectangle {
         }
         // collapsed icon rail: every row names itself beside the rail
         // (same overlay — the old local HoverTip painted under the pane)
+        // the tip generation this element owns (HintTip.show hands
+        // it out): only its owner may clear the bubble
+        property <int> tip-gen;
         changed has-hover => {
             if (root.compact) {
                 if (self.has-hover) {
-                    HintTip.label = root.s.pending-count > 0 ? "\{root.s.name} · \{root.s.pending-count}" : root.s.name;
-                    HintTip.ax = root.absolute-position.x + root.width + 8px;
-                    HintTip.ay = root.absolute-position.y + (root.height - 23px) / 2;
-                } else if (HintTip.ax == root.absolute-position.x + root.width + 8px
-                    && HintTip.ay == root.absolute-position.y + (root.height - 23px) / 2) {
-                    HintTip.label = "";
+                    self.tip-gen = HintTip.show(root.s.pending-count > 0 ? "\{root.s.name} · \{root.s.pending-count}" : root.s.name,
+                        root.absolute-position.x + root.width + 8px,
+                        root.absolute-position.y + (root.height - 23px) / 2);
+                } else {
+                    HintTip.hide(self.tip-gen);
                 }
             }
         }
@@ -297,14 +301,16 @@ export component ViewRow inherits Rectangle {
             // a cut label (long decision titles, big fonts) shows in full
             // beside the row via the window-topmost HintTip overlay
             property <bool> tip-on: ta.has-hover && self.width < self.preferred-width;
+            // the tip generation this element owns (HintTip.show hands
+            // it out): only its owner may clear the bubble
+            property <int> tip-gen;
             changed tip-on => {
                 if (self.tip-on) {
-                    HintTip.label = root.label;
-                    HintTip.ax = root.absolute-position.x + root.width + 8px;
-                    HintTip.ay = root.absolute-position.y + (root.height - 23px) / 2;
-                } else if (HintTip.ax == root.absolute-position.x + root.width + 8px
-                    && HintTip.ay == root.absolute-position.y + (root.height - 23px) / 2) {
-                    HintTip.label = "";
+                    self.tip-gen = HintTip.show(root.label,
+                        root.absolute-position.x + root.width + 8px,
+                        root.absolute-position.y + (root.height - 23px) / 2);
+                } else {
+                    HintTip.hide(self.tip-gen);
                 }
             }
         }
@@ -746,14 +752,16 @@ export component ChatRow inherits Rectangle {
                                 // the member name goes through the window-topmost
                                 // HintTip overlay (never clipped, grabs no input,
                                 // so no strobe)
+                                // the tip generation this element owns (HintTip.show hands
+                                // it out): only its owner may clear the bubble
+                                property <int> tip-gen;
                                 changed has-hover => {
                                     if (self.has-hover) {
-                                        HintTip.label = rc.name;
-                                        HintTip.ax = self.absolute-position.x;
-                                        HintTip.ay = self.absolute-position.y + self.height + 6px;
-                                    } else if (HintTip.ax == self.absolute-position.x
-                                        && HintTip.ay == self.absolute-position.y + self.height + 6px) {
-                                        HintTip.label = "";
+                                        self.tip-gen = HintTip.show(rc.name,
+                                            self.absolute-position.x,
+                                            self.absolute-position.y + self.height + 6px);
+                                    } else {
+                                        HintTip.hide(self.tip-gen);
                                     }
                                 }
                                 pointer-event(ev) => {
@@ -976,14 +984,16 @@ export component MemberPill inherits Rectangle {
                 // the cut name reads in full beside the pill (window-topmost
                 // overlay - a local bubble paints under the chat log)
                 property <bool> tip-on: mp-ta.has-hover && self.width < self.preferred-width;
+                // the tip generation this element owns (HintTip.show hands
+                // it out): only its owner may clear the bubble
+                property <int> tip-gen;
                 changed tip-on => {
                     if (self.tip-on) {
-                        HintTip.label = root.m.name;
-                        HintTip.ax = root.absolute-position.x + root.width + 8px;
-                        HintTip.ay = root.absolute-position.y + (root.height - 23px) / 2;
-                    } else if (HintTip.ax == root.absolute-position.x + root.width + 8px
-                        && HintTip.ay == root.absolute-position.y + (root.height - 23px) / 2) {
-                        HintTip.label = "";
+                        self.tip-gen = HintTip.show(root.m.name,
+                            root.absolute-position.x + root.width + 8px,
+                            root.absolute-position.y + (root.height - 23px) / 2);
+                    } else {
+                        HintTip.hide(self.tip-gen);
                     }
                 }
             }
@@ -1334,14 +1344,16 @@ export component DecisionTable inherits Rectangle {
                                         // the member name goes through the
                                         // window-topmost HintTip overlay (never
                                         // clipped, grabs no input, so no strobe)
+                                        // the tip generation this element owns (HintTip.show hands
+                                        // it out): only its owner may clear the bubble
+                                        property <int> tip-gen;
                                         changed has-hover => {
                                             if (self.has-hover) {
-                                                HintTip.label = v.member;
-                                                HintTip.ax = self.absolute-position.x;
-                                                HintTip.ay = self.absolute-position.y + self.height + 6px;
-                                            } else if (HintTip.ax == self.absolute-position.x
-                                                && HintTip.ay == self.absolute-position.y + self.height + 6px) {
-                                                HintTip.label = "";
+                                                self.tip-gen = HintTip.show(v.member,
+                                                    self.absolute-position.x,
+                                                    self.absolute-position.y + self.height + 6px);
+                                            } else {
+                                                HintTip.hide(self.tip-gen);
                                             }
                                         }
                                         pointer-event(ev) => {

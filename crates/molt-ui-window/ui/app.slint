@@ -765,6 +765,10 @@ component OrgSettingsCard inherits DetailGroup {
                 font-size: Theme.fs-body;
                 vertical-alignment: center;
                 horizontal-stretch: 1;
+                // the row is label + value + pencil in a fixed-width card:
+                // an unelided label reports its whole line as the row's
+                // preferred width and shoves the pencil through the border
+                overflow: elide;
             }
             Text {
                 text: root.relays.length;
@@ -796,6 +800,7 @@ component OrgSettingsCard inherits DetailGroup {
             font-size: Theme.fs-body;
             vertical-alignment: center;
             horizontal-stretch: 1;
+            overflow: elide;
         }
         Text {
             text: "\{root.retention} \{Strings.ocs-days}";
@@ -1121,6 +1126,16 @@ export component AppWindow inherits Window {
     // last screen the default was applied for: `screen` is re-pushed with
     // every session snapshot, so only a REAL change may reset a manual toggle
     property <AppScreen> nav-default-screen: AppScreen.choice;
+    // a nav row that is UNMOUNTED while hovered never gets its hover-out,
+    // so it can never clear its own hint: the two navigations that unmount
+    // rows (the surface switch expands another sub-view list, the rail
+    // toggle rebuilds every row) drop the hint themselves
+    changed selected-surface => {
+        HintTip.label = "";
+    }
+    changed nav-collapsed => {
+        HintTip.label = "";
+    }
     changed screen => {
         // a view switch can unmount a hovered HintTip writer without a
         // hover-out — never carry a hint across screens
@@ -2495,14 +2510,16 @@ export component AppWindow inherits Window {
                             }
                             // through the HintTip overlay — a local bubble
                             // beside the rail paints under the main pane
+                            // the tip generation this element owns (HintTip.show hands it
+                            // out); only its owner may clear the bubble
+                            property <int> tip-gen;
                             changed has-hover => {
                                 if (self.has-hover) {
-                                    HintTip.label = Strings.tip-settings;
-                                    HintTip.ax = parent.absolute-position.x + parent.width + 8px;
-                                    HintTip.ay = parent.absolute-position.y + (parent.height - 23px) / 2;
-                                } else if (HintTip.ax == parent.absolute-position.x + parent.width + 8px
-                                    && HintTip.ay == parent.absolute-position.y + (parent.height - 23px) / 2) {
-                                    HintTip.label = "";
+                                    self.tip-gen = HintTip.show(Strings.tip-settings,
+                                        parent.absolute-position.x + parent.width + 8px,
+                                        parent.absolute-position.y + (parent.height - 23px) / 2);
+                                } else {
+                                    HintTip.hide(self.tip-gen);
                                 }
                             }
                         }
@@ -3426,6 +3443,8 @@ export component AppWindow inherits Window {
                         font-weight: 700;
                         horizontal-stretch: 1;
                         vertical-alignment: center;
+                        // never at the cost of the × beside it
+                        overflow: elide;
                     }
                     AppButton {
                         label: "×";
@@ -5350,6 +5369,13 @@ export component AppWindow inherits Window {
                                     border-color: Theme.line;
                                     HorizontalLayout {
                                         padding: 14px;
+                                        // the banner keeps its roomy inset,
+                                        // but its edit pencil must land on
+                                        // the SAME column as the pencils of
+                                        // the groups below it (DetailGroup
+                                        // insets its content by 10px) - 4px
+                                        // of stagger reads as a mistake
+                                        padding-right: 10px;
                                         spacing: 12px;
                                         // the republic's image stretches to
                                         // ALL surplus width (a banner) once
@@ -5510,7 +5536,7 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                     if os-row.side-settings: OrgSettingsCard {
-                                        width: 300px;
+                                        width: 300px * Theme.ui-scale;
                                         retention: root.org-chat-retention;
                                         relays: root.org-relays;
                                         edit => {
@@ -7064,6 +7090,7 @@ export component AppWindow inherits Window {
                         font-weight: 700;
                         horizontal-stretch: 1;
                         vertical-alignment: center;
+                        overflow: elide;
                     }
                     AppButton {
                         label: "×";
@@ -7541,6 +7568,7 @@ export component AppWindow inherits Window {
                                 }
                                 if root.cfg-bk-list != "": Text {
                                     horizontal-stretch: 1;
+                                    overflow: elide;
                                     text: root.cfg-bk-list == "listing" ? Strings.bk-listing
                                         : root.cfg-bk-list == "ok" ? Strings.bk-list-ok
                                         : root.cfg-bk-list;

@@ -12879,6 +12879,211 @@ mod gui_tests {
         buttons.len()
     }
 
+    /// **A hint must not outlive the pointer.** The nav rows write the
+    /// window-topmost `HintTip` overlay on hover and clear it on leave -
+    /// but the clear was guarded by comparing the tip's ANCHOR to the
+    /// row's current position, so a row that moved while hovered (the nav
+    /// expands its sub-views on a click, a list scrolls) could never
+    /// recognize its own tip again and the bubble stayed on screen for
+    /// good. Pinned here: leaving the row clears it, and so does leaving
+    /// the window - even after the row moved underneath the pointer.
+    #[cfg(feature = "live-preview")]
+    #[test]
+    fn a_nav_hint_disappears_when_the_pointer_leaves_the_row() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("headless window");
+        ui.window().set_size(slint::PhysicalSize::new(1000, 700));
+        apply_strings(&ui, 1);
+        // big font + long names: the nav label elides, which is what makes
+        // the expanded row write a hint at all
+        ui.global::<Theme>().set_fs_app(24.0);
+        let views = ModelRc::new(VecModel::from(vec![
+            ViewItem {
+                key: "status".into(),
+                name: "Status".into(),
+                ..ViewItem::default()
+            },
+            ViewItem {
+                key: "members".into(),
+                name: "Mitglieder".into(),
+                ..ViewItem::default()
+            },
+        ]));
+        ui.set_surfaces(ModelRc::new(VecModel::from(vec![
+            SurfaceTab {
+                key: "organization".into(),
+                name: "Organisation der Republik".into(),
+                views: views.clone(),
+                ..SurfaceTab::default()
+            },
+            SurfaceTab {
+                key: "chat".into(),
+                name: "Unterhaltung und Beschlüsse".into(),
+                views: views.clone(),
+                ..SurfaceTab::default()
+            },
+        ])));
+        ui.set_screen(AppScreen::Main);
+        ui.set_selected_surface("organization".into());
+        ui.show().expect("show headless");
+
+        let rows: Vec<_> =
+            i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "SurfaceRow")
+                .filter(|r| r.size().width > 0.0)
+                .collect();
+        assert!(rows.len() >= 2, "the nav must render its rows");
+        // a hover change reaches the `changed` handlers on the next frame -
+        // headless, that frame is `mock_elapsed_time` (it runs the change
+        // trackers), which the real app gets for free from its render loop
+        let frame = || {
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
+        };
+        let hover = |ui: &AppWindow, e: &i_slint_backend_testing::ElementHandle| {
+            let p = e.absolute_position();
+            let s = e.size();
+            ui.window()
+                .dispatch_event(slint::platform::WindowEvent::PointerMoved {
+                    position: slint::LogicalPosition::new(
+                        p.x + s.width / 2.0,
+                        p.y + s.height / 2.0,
+                    ),
+                });
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
+        };
+        let leave = |ui: &AppWindow| {
+            ui.window()
+                .dispatch_event(slint::platform::WindowEvent::PointerMoved {
+                    position: slint::LogicalPosition::new(900.0, 400.0),
+                });
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
+        };
+        let tip = |ui: &AppWindow| ui.global::<HintTip>().get_label().to_string();
+
+        // 1. plain enter/leave
+        hover(&ui, &rows[1]);
+        assert!(!tip(&ui).is_empty(), "hovering a cut nav label shows its hint");
+        leave(&ui);
+        assert_eq!(tip(&ui), "", "the hint must go when the pointer leaves");
+
+        // 2. the row MOVES while hovered - a bigger font resizes every nav
+        //    row, so the hovered one is somewhere else by the time the
+        //    pointer leaves. This is the case the old anchor-guard could
+        //    not clear (it compared the tip's anchor to the row's CURRENT
+        //    position), and it is deliberately not one of the navigations
+        //    that drop the hint outright.
+        let before = rows[1].absolute_position().y;
+        hover(&ui, &rows[1]);
+        assert!(!tip(&ui).is_empty(), "hint is up again");
+        ui.global::<Theme>().set_fs_app(20.0);
+        frame();
+        let moved: Vec<_> =
+            i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "SurfaceRow")
+                .filter(|r| r.size().width > 0.0)
+                .collect();
+        assert_ne!(
+            moved[1].absolute_position().y,
+            before,
+            "the fixture must actually move the row"
+        );
+        leave(&ui);
+        assert_eq!(tip(&ui), "", "a hint whose row moved must still clear");
+
+        // 3. the pointer leaves the WINDOW (the nav sits at the left edge,
+        //    so this is the ordinary way out of it)
+        hover(&ui, &moved[1]);
+        assert!(!tip(&ui).is_empty(), "hint is up again");
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerExited);
+        frame();
+        assert_eq!(tip(&ui), "", "leaving the window must clear the hint");
+    }
+
+    /// **Organization -> Status: the gated-settings card.** Its rows are
+    /// label + value + pencil inside a 300px card; an unelided label
+    /// reports its whole line as the row's preferred width and shoves the
+    /// pencil through the card's border (reported 2026-08-23). The label
+    /// is what gives way, and the pencils line up on one right edge.
+    #[cfg(feature = "live-preview")]
+    #[test]
+    fn the_org_settings_pencils_stay_inside_the_card_and_line_up() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("headless window");
+        ui.window().set_size(slint::PhysicalSize::new(1400, 900));
+        apply_strings(&ui, 1); // German: the long "Chat löschen nach" line
+        ui.set_screen(AppScreen::Main);
+        ui.set_selected_surface("organization".into());
+        ui.set_selected_view("status".into());
+        ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+            key: "organization".into(),
+            name: "Organisation".into(),
+            ..SurfaceTab::default()
+        }])));
+        ui.set_org_chat_retention(30);
+        ui.set_org_relays(ModelRc::new(VecModel::from(vec![
+            slint::SharedString::from("wss://relay.example"),
+        ])));
+        ui.show().expect("show headless");
+
+        for font in [14.0_f32, 24.0] {
+            ui.global::<Theme>().set_fs_app(font);
+            let card = i_slint_backend_testing::ElementHandle::find_by_element_type_name(
+                &ui,
+                "OrgSettingsCard",
+            )
+            .find(|c| c.size().width > 0.0)
+            .expect("the gated-settings card must render");
+            let edge = card.absolute_position().x + card.size().width;
+            let pencils: Vec<_> =
+                i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "AppButton")
+                    .filter(|b| {
+                        let p = b.absolute_position();
+                        b.size().width > 0.0
+                            && p.x >= card.absolute_position().x - 1.0
+                            && p.y >= card.absolute_position().y - 1.0
+                            && p.y <= card.absolute_position().y + card.size().height + 1.0
+                    })
+                    .collect();
+            assert_eq!(pencils.len(), 2, "font {font}: relays + retention pencil");
+            let mut rights = Vec::new();
+            for b in &pencils {
+                let right = b.absolute_position().x + b.size().width;
+                assert!(
+                    right <= edge,
+                    "font {font}: the pencil ran {}px through the card border",
+                    right - edge
+                );
+                rights.push(right);
+            }
+            assert!(
+                (rights[0] - rights[1]).abs() < 1.0,
+                "font {font}: the pencils are not aligned: {rights:?}"
+            );
+
+            // and EVERY pencil in the pane's right-hand column shares that
+            // edge - they read as one column, so a panel with its own
+            // padding staggers visibly against its neighbours
+            let column: Vec<f32> =
+                i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "AppButton")
+                    .filter(|b| {
+                        let (w, h) = (b.size().width, b.size().height);
+                        let right = b.absolute_position().x + w;
+                        // square = one of the ✎ pencils, not a labelled button
+                        w > 0.0 && (w - h).abs() < 1.0 && (edge - right).abs() < 60.0
+                    })
+                    .map(|b| b.absolute_position().x + b.size().width)
+                    .collect();
+            assert!(column.len() >= 4, "font {font}: found {} pencils", column.len());
+            let (lo, hi) = column.iter().fold((f32::MAX, f32::MIN), |(lo, hi), r| {
+                (lo.min(*r), hi.max(*r))
+            });
+            assert!(
+                hi - lo < 1.0,
+                "font {font}: the pencil column staggers by {}px: {column:?}",
+                hi - lo
+            );
+        }
+    }
+
     /// The pill CLIPS - a pane too narrow for even the elided name must not
     /// paint over its neighbour - and a clipped element must still hand its
     /// right-click to the poke menu, which renders in the window's popup

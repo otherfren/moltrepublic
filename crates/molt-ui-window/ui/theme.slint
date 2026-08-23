@@ -509,6 +509,26 @@ export global HintTip {
     // anchor in window coordinates (from the control's absolute-position)
     in-out property <length> ax;
     in-out property <length> ay;
+    // The generation of the bubble on screen. `show` mints a new one and
+    // hands it back; only the writer holding that number may clear it, so
+    // the row you left cannot wipe the row you just entered. The old guard
+    // compared ANCHORS instead, which broke the moment a writer moved after
+    // opening its tip (the nav expands its sub-views, a list scrolls): it
+    // no longer recognized its own bubble, and the hint stayed on screen
+    // for good (reported 2026-08-23).
+    in-out property <int> gen;
+    public function show(text: string, x: length, y: length) -> int {
+        self.gen += 1;
+        self.label = text;
+        self.ax = x;
+        self.ay = y;
+        return self.gen;
+    }
+    public function hide(mine: int) {
+        if (self.gen == mine) {
+            self.label = "";
+        }
+    }
 }
 
 // Poking is one cross-cutting affordance: every site that renders a member

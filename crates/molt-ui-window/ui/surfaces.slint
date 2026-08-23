@@ -47,16 +47,17 @@ export component MockBadge inherits Rectangle {
     // above everything, never clipped, and — unlike a PopupWindow — grabs
     // no input, so the hover cannot strobe)
     ta := TouchArea {
+        // the tip generation this element owns (HintTip.show hands it out):
+        // only its owner may clear the bubble, so hovering straight onto
+        // another control cannot wipe the hint that control just opened
+        property <int> tip-gen;
         changed has-hover => {
             if (self.has-hover) {
-                HintTip.label = Strings.mock-tip;
-                HintTip.ax = root.absolute-position.x;
-                HintTip.ay = root.absolute-position.y + root.height + 6px;
-            } else if (HintTip.ax == root.absolute-position.x
-                && HintTip.ay == root.absolute-position.y + root.height + 6px) {
-                // only clear our own hint — hovering straight onto another
-                // control may already have replaced it
-                HintTip.label = "";
+                self.tip-gen = HintTip.show(Strings.mock-tip,
+                    root.absolute-position.x,
+                    root.absolute-position.y + root.height + 6px);
+            } else {
+                HintTip.hide(self.tip-gen);
             }
         }
     }
@@ -315,16 +316,17 @@ component ToolBtn inherits Rectangle {
     // clipped, grabs no input — a PopupWindow here strobed the hover).
     ta := TouchArea {
         mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
+        // the tip generation this element owns (HintTip.show hands it out):
+        // only its owner may clear the bubble, so hovering straight onto
+        // another button cannot wipe the hint that button just opened
+        property <int> tip-gen;
         changed has-hover => {
             if (self.has-hover) {
-                HintTip.label = root.name;
-                HintTip.ax = root.absolute-position.x;
-                HintTip.ay = root.absolute-position.y + root.height + 6px;
-            } else if (HintTip.ax == root.absolute-position.x
-                && HintTip.ay == root.absolute-position.y + root.height + 6px) {
-                // only clear our own hint — hovering straight onto another
-                // button may already have replaced it
-                HintTip.label = "";
+                self.tip-gen = HintTip.show(root.name,
+                    root.absolute-position.x,
+                    root.absolute-position.y + root.height + 6px);
+            } else {
+                HintTip.hide(self.tip-gen);
             }
         }
         clicked => {
@@ -940,14 +942,16 @@ export component MemoryPane inherits VerticalLayout {
                                                 // a cut name shows in full beside the
                                                 // row (window-topmost HintTip overlay)
                                                 property <bool> tip-on: fta.has-hover && !root.drag-live && self.width < self.preferred-width;
+                                                // the tip generation this element owns (HintTip.show hands
+                                                // it out): only its owner may clear the bubble
+                                                property <int> tip-gen;
                                                 changed tip-on => {
                                                     if (self.tip-on) {
-                                                        HintTip.label = r.label + "/";
-                                                        HintTip.ax = frow.absolute-position.x + frow.width + 8px;
-                                                        HintTip.ay = frow.absolute-position.y + (frow.height - 23px) / 2;
-                                                    } else if (HintTip.ax == frow.absolute-position.x + frow.width + 8px
-                                                        && HintTip.ay == frow.absolute-position.y + (frow.height - 23px) / 2) {
-                                                        HintTip.label = "";
+                                                        self.tip-gen = HintTip.show(r.label + "/",
+                                                            frow.absolute-position.x + frow.width + 8px,
+                                                            frow.absolute-position.y + (frow.height - 23px) / 2);
+                                                    } else {
+                                                        HintTip.hide(self.tip-gen);
                                                     }
                                                 }
                                             }
@@ -1172,14 +1176,16 @@ export component MemoryPane inherits VerticalLayout {
                                                 // beside the row — but never
                                                 // while a drag is live
                                                 property <bool> tip-on: ta.has-hover && !root.drag-live && self.width < self.preferred-width;
+                                                // the tip generation this element owns (HintTip.show hands
+                                                // it out): only its owner may clear the bubble
+                                                property <int> tip-gen;
                                                 changed tip-on => {
                                                     if (self.tip-on) {
-                                                        HintTip.label = r.label;
-                                                        HintTip.ax = filerow.absolute-position.x + filerow.width + 8px;
-                                                        HintTip.ay = filerow.absolute-position.y + (filerow.height - 23px) / 2;
-                                                    } else if (HintTip.ax == filerow.absolute-position.x + filerow.width + 8px
-                                                        && HintTip.ay == filerow.absolute-position.y + (filerow.height - 23px) / 2) {
-                                                        HintTip.label = "";
+                                                        self.tip-gen = HintTip.show(r.label,
+                                                            filerow.absolute-position.x + filerow.width + 8px,
+                                                            filerow.absolute-position.y + (filerow.height - 23px) / 2);
+                                                    } else {
+                                                        HintTip.hide(self.tip-gen);
                                                     }
                                                 }
                                             }
