@@ -11131,6 +11131,7 @@ mod tests {
             wrap: String::new(),
             republic_id: "d".repeat(64),
             handover: Some(molt_net::invite::RecoveryHandoverV2 {
+                identity_pk: String::new(),
                 ticket: "c".repeat(64),
                 npub: anchor(2),
                 relays: vec!["ws://127.0.0.1:7777".to_string()],
@@ -13567,6 +13568,129 @@ mod gui_tests {
         assert!(!ui.get_bk_restore_open(), "confirm closes the modal");
         assert_eq!(ui.get_bk_restore_seed().as_str(), "", "every way out drops the phrase");
         assert_eq!(navs.borrow().last(), Some(&AppScreen::Restore), "the run view is next");
+    }
+
+    /// One orphan-row session for the backup-table tests (field bug
+    /// 2026-08-24): a bucket-only workspace plus one foreign key.
+    fn sv_backup_orphan() -> (SessionView, String) {
+        let id = "ab".repeat(32);
+        let sv = SessionView {
+            backup_orphans: vec![
+                molt_core::BackupOrphan {
+                    id: id.clone(),
+                    name: String::new(),
+                    size_kib: 480,
+                    last_backup_min: 60,
+                },
+                molt_core::BackupOrphan {
+                    id: String::new(),
+                    name: "molt/leftover.bin".to_string(),
+                    size_kib: 75,
+                    last_backup_min: 43_200,
+                },
+            ],
+            // no demo locals: exactly the two bucket rows render
+            workspaces: Vec::new(),
+            ..SessionView::default()
+        };
+        (sv, id)
+    }
+
+    /// The orphan row's restore affordance lives IN the local column (user
+    /// decision 2026-08-24) and must FIT the row — the old trailing button
+    /// sat beyond the table's column budget and was clipped invisible on
+    /// every build (the "kein Knopf zu sehen" field report), worse under
+    /// ui-scale. Measured at a scaled app font, dev-ui chain.
+    #[cfg(feature = "live-preview")]
+    #[test]
+    fn the_orphan_restore_button_sits_in_the_local_column_and_fits() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("headless window");
+        apply_strings(&ui, 0);
+        ui.global::<Theme>().set_fs_app(20.0); // ui-scale ≈ 1.43, the field setup
+        ui.window().set_size(slint::PhysicalSize::new(1200, 800));
+        let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+        let (sv, _id) = sv_backup_orphan();
+        apply_session(&ui, &sv, true, &chat_ui);
+        ui.set_screen(AppScreen::Settings);
+        ui.set_set_tab(2);
+        ui.show().expect("show headless");
+        let btn = i_slint_backend_testing::ElementHandle::find_by_element_id(
+            &ui,
+            "AppWindow::bkr-btn",
+        )
+        .next()
+        .expect("the orphan row renders its restore button");
+        let rows: Vec<_> = i_slint_backend_testing::ElementHandle::find_by_element_id(
+            &ui,
+            "AppWindow::bk-row",
+        )
+        .collect();
+        assert_eq!(rows.len(), 2, "orphan + foreign row render");
+        let row = &rows[0];
+        let btn_right = btn.absolute_position().x + btn.size().width;
+        let row_right = row.absolute_position().x + row.size().width;
+        assert!(
+            btn.size().width > 0.0 && btn_right <= row_right + 0.5,
+            "the restore button must fit inside its row: button right {btn_right} vs row right {row_right}"
+        );
+        // …and the last COLUMN stays inside too (the pre-fix budget ignored
+        // the ui-scale of the fixed columns, clipping the row's tail)
+        for r in &rows {
+            assert!(
+                r.absolute_position().x + r.size().width <= 1200.0,
+                "a row never overflows the window"
+            );
+        }
+    }
+
+    /// A double-click anywhere on an orphan row arms the same restore modal
+    /// as the button (user decision 2026-08-24); a foreign-key row (no
+    /// workspace id) stays inert.
+    #[cfg(feature = "live-preview")]
+    #[test]
+    fn a_double_click_on_an_orphan_row_arms_the_restore_modal() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("headless window");
+        apply_strings(&ui, 0);
+        ui.window().set_size(slint::PhysicalSize::new(1200, 800));
+        let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+        let (sv, id) = sv_backup_orphan();
+        apply_session(&ui, &sv, true, &chat_ui);
+        ui.set_screen(AppScreen::Settings);
+        ui.set_set_tab(2);
+        ui.show().expect("show headless");
+        let rows: Vec<_> = i_slint_backend_testing::ElementHandle::find_by_element_id(
+            &ui,
+            "AppWindow::bk-row",
+        )
+        .collect();
+        let dclick = |row: &i_slint_backend_testing::ElementHandle| {
+            let at = slint::LogicalPosition::new(
+                // between the columns, not on the button
+                row.absolute_position().x + row.size().width * 0.6,
+                row.absolute_position().y + row.size().height / 2.0,
+            );
+            ui.window()
+                .dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at });
+            for _ in 0..2 {
+                ui.window().dispatch_event(slint::platform::WindowEvent::PointerPressed {
+                    position: at,
+                    button: slint::platform::PointerEventButton::Left,
+                });
+                ui.window().dispatch_event(slint::platform::WindowEvent::PointerReleased {
+                    position: at,
+                    button: slint::platform::PointerEventButton::Left,
+                });
+            }
+        };
+        // the foreign-key row (sorted last) stays inert
+        dclick(&rows[1]);
+        assert!(!ui.get_bk_restore_open(), "a foreign key has nothing to restore");
+        // the orphan row arms the modal with ITS id
+        dclick(&rows[0]);
+        assert!(ui.get_bk_restore_open(), "double-click arms the restore modal");
+        assert_eq!(ui.get_bk_restore_id().as_str(), id, "the row's own id");
     }
 
     /// A node with storage, a founded workspace, and chat in it — the state

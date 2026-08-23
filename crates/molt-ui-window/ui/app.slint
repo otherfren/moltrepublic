@@ -1577,6 +1577,13 @@ export component AppWindow inherits Window {
         }
         return "";
     }
+    // arm the restore modal for one bucket-only workspace (the row button
+    // and the row double-click share this entry)
+    function bk-restore-arm(id: string) {
+        root.bk-restore-id = id;
+        root.bk-restore-seed = "";
+        root.bk-restore-open = true;
+    }
     function run-goto() {
         if (root.jw-running) {
             root.navigate(AppScreen.join);
@@ -1831,7 +1838,9 @@ export component AppWindow inherits Window {
     callback test-sound(string);
     // backup retention: keep at most this many copies per workspace
     in-out property <int> cfg-s3-copies: 5;
-    property <int> set-tab: 0;
+    // in-out: the settings tab index is a test seam (headless geometry
+    // tests drive the backup table directly)
+    in-out property <int> set-tab: 0;
     // the backup tab's local↔bucket mapping table (mirrored, built in Rust)
     in property <[BackupRow]> bk-rows;
     // S7: the fetched-sealed outcome (workspace id / honest failure), from
@@ -7486,7 +7495,7 @@ export component AppWindow inherits Window {
                             // the width — a stretch would distribute by each
                             // row's preferred size and the column edges would
                             // wander per row. 24 = side paddings, 40 = 4 gaps.
-                            property <length> name-w: (self.width - 24px - 44px - 72px - 108px - 40px) / 2;
+                            property <length> name-w: (self.width - 24px - (44px + 108px) * Theme.ui-scale - 72px - 40px) / 2;
                             // section head: plain title, the on/off switch and
                             // the interval sit to its right. The whole form
                             // half is stretch-0: extra window height belongs
@@ -7633,7 +7642,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
                                 SortHeader {
-                                    width: 44px;
+                                    width: 44px * Theme.ui-scale;
                                     label: Strings.bk-col-auto;
                                     active: root.bk-sort-key == "auto";
                                     desc: root.bk-sort-desc;
@@ -7653,7 +7662,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
                                 SortHeader {
-                                    width: 108px;
+                                    width: 108px * Theme.ui-scale;
                                     label: Strings.bk-col-last;
                                     active: root.bk-sort-key == "last";
                                     desc: root.bk-sort-desc;
@@ -7678,16 +7687,27 @@ export component AppWindow inherits Window {
                                         padding: 6px;
                                         spacing: 2px;
                                         alignment: start;
-                                        for r in root.bk-rows: Rectangle {
+                                        for r in root.bk-rows: bk-row := Rectangle {
                                             height: 34px * Theme.ui-scale;
                                             border-radius: Theme.win95 ? 0px : 4px;
                                             background: bkr-ta.has-hover ? Theme.raised : transparent;
-                                            bkr-ta := TouchArea { }
+                                            bkr-ta := TouchArea {
+                                                // the whole orphan row is the affordance too
+                                                double-clicked => {
+                                                    if (!r.has-local && r.id != "") {
+                                                        root.bk-restore-arm(r.id);
+                                                    }
+                                                }
+                                            }
                                             HorizontalLayout {
                                                 padding-left: 6px;
                                                 padding-right: 6px;
                                                 spacing: 10px;
-                                                Text {
+                                                // the local column: the workspace's name — or,
+                                                // for a bucket-only row, the restore button
+                                                // itself (a trailing button sat beyond the
+                                                // column budget and was clipped invisible)
+                                                if r.has-local: Text {
                                                     width: bk-tab.name-w;
                                                     text: r.local == "" ? "-" : r.local;
                                                     color: r.local == "" ? Theme.faint : Theme.text;
@@ -7695,6 +7715,32 @@ export component AppWindow inherits Window {
                                                     vertical-alignment: center;
                                                     horizontal-alignment: left;
                                                     overflow: elide;
+                                                }
+                                                if !r.has-local && r.id != "": Rectangle {
+                                                    width: bk-tab.name-w;
+                                                    bkr-btn := AppButton {
+                                                        x: 0;
+                                                        y: (parent.height - self.height) / 2;
+                                                        width: min(self.preferred-width, parent.width);
+                                                        height: 26px * Theme.ui-scale;
+                                                        pad: 9px;
+                                                        primary: true;
+                                                        label: Strings.bk-restore;
+                                                        clicked => {
+                                                            root.bk-restore-arm(r.id);
+                                                        }
+                                                    }
+                                                }
+                                                // a foreign key (no workspace id): nothing to
+                                                // restore, the raw key names it in the bucket
+                                                // column
+                                                if !r.has-local && r.id == "": Text {
+                                                    width: bk-tab.name-w;
+                                                    text: "-";
+                                                    color: Theme.faint;
+                                                    font-size: Theme.fs-body;
+                                                    vertical-alignment: center;
+                                                    horizontal-alignment: left;
                                                 }
                                                 Text {
                                                     width: bk-tab.name-w;
@@ -7758,21 +7804,6 @@ export component AppWindow inherits Window {
                                                     font-size: Theme.fs-body;
                                                     vertical-alignment: center;
                                                     horizontal-alignment: right;
-                                                }
-                                                // a bucket-only workspace can come HOME:
-                                                // the modal asks the phrase, then the real
-                                                // S3 restore pipeline downloads, verifies
-                                                // the chain and opens it (§7)
-                                                if !r.has-local: AppButton {
-                                                    height: 26px * Theme.ui-scale;
-                                                    pad: 9px;
-                                                    y: (parent.height - self.height) / 2;
-                                                    label: Strings.bk-restore;
-                                                    clicked => {
-                                                        root.bk-restore-id = r.id;
-                                                        root.bk-restore-seed = "";
-                                                        root.bk-restore-open = true;
-                                                    }
                                                 }
                                             }
                                         }

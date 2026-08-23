@@ -194,6 +194,19 @@ workspace list on every delete and restore/fetch (`reclassify_backups`);
 the listing itself still refreshes on entering the Backup tab. Keystone:
 `s3_list_backups.rs::a_deleted_workspace_becomes_a_restorable_orphan_without_a_new_listing`.
 
+## 7d. Follow-up (field, 2026-08-24): the Restore button was never visible
+
+The table's column budget (`name-w`) spent the whole row on the five
+columns — the trailing Restore button sat beyond it and `clip: true` cut it
+off on EVERY build since S7 (the "restore never worked" report), worse
+under `ui-scale` (two fixed columns scale, the budget did not). Decision
+(user): the affordance moves INTO the local column — a bucket-only row
+shows the Restore button where a local row shows its name — and a
+double-click anywhere on the row arms the same modal (foreign-key rows
+inert). The budget now scales its fixed columns. Keystones (dev-ui chain):
+`the_orphan_restore_button_sits_in_the_local_column_and_fits` (geometry at
+ui-scale 1.43), `a_double_click_on_an_orphan_row_arms_the_restore_modal`.
+
 ## 8. Execution order & landing
 
 WP1 → WP2 → WP3+4 (one window build at the end) → WP5. TDD per WP; commit +
