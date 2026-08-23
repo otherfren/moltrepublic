@@ -198,6 +198,13 @@ export struct RitualSeat {
     state: int, // 0 = waiting, 1 = key received, 2 = sealed (green)
 }
 
+// One row of the rejoiner's re-admission checklist: a roster seat and
+// whether its voice (approval or the rejoiner's own consent) is counted.
+export struct RecoverSeatRow {
+    member: string,
+    approved: bool,
+}
+
 // A local workspace/republic shown in the Open screen list.
 export struct WorkspaceItem {
     id: string, // the workspace id — the sole address of workspace verbs
@@ -977,6 +984,8 @@ export global Strings {
     in property <string> rlk-failed-mesh;
     in property <string> rlk-failed-prefix;
     in property <string> rv-running-note;
+    in property <string> rv-approvals;
+    in property <string> rv-auto-note;
     in property <string> rv-failed-hint;
     in property <string> set-token-failed;
     in property <string> rw-title;
@@ -1078,6 +1087,7 @@ export global Strings {
     in property <string> bk-listing;
     in property <string> bk-list-ok;
     in property <string> bk-restore;
+    in property <string> bkr-body;
     in property <string> bk-fetched-note;
     in property <string> bk-goto-open;
     in property <string> set-tab-anon;

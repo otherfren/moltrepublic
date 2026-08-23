@@ -1,7 +1,10 @@
 # Recovery approval: the survivors' vote gets a surface, the rejoiner co-signs
 
 **Status: IMPLEMENTED 2026-08-08 (same session as the ratification), green on
-master.** Keystones: `chain::tests::{a_consented_restore_seals_at_m_equals_n,
+master. Decision (1) — human approval of the membership card — was
+SUPERSEDED 2026-08-23 by `recovery_auto_approval.md`: a consented restore
+auto-approves on every survivor that verifies the consent itself; the card
+stays as the visible record. Decisions (2) and (3) stand.** Keystones: `chain::tests::{a_consented_restore_seals_at_m_equals_n,
 consent_abuse_rejects_the_chain, a_membership_proposal_is_a_visible_approvable_record}`,
 the 2-of-2 `nostr_recovery` capstone, and the migrated `two_instances`
 recovery suite. §2's settle runs in `after_block_applied`

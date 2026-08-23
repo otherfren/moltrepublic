@@ -65,7 +65,8 @@ Three properties follow and shape the whole ritual:
 - `S` — a surviving member that helps `R` back in (the *recovery coordinator*).
   It holds the group's MLS state (with `R`'s stale leaf still in it) and a chain
   at height `H`. Any survivor can be `S`.
-- The other survivors — they approve the re-admission and hold the chain.
+- The other survivors — they hold the chain; their nodes co-sign a consented
+  re-admission automatically (`recovery_auto_approval.md`, 2026-08-23).
 
 The only thing shared a priori is `R`'s phrase (which `R` alone holds) and the
 recovery link `S` mints (§3).
@@ -138,13 +139,17 @@ re-derives it) and binds this exact fresh `KeyPackage` and republic. The ticket
 is spent; a bad or replayed proof is dropped without a trace.
 
 **❹ Re-admit (threshold).** `S` proposes a `Membership{Restored, member, pkᵣ}`
-change; the survivors approve it over the mesh and a block seals at m-of-n
-(`persistent_chain.md` §7). Since 2026-08-08
+change; a block seals at m-of-n (`persistent_chain.md` §7). Since 2026-08-08
 (`recovery_approval_design.md`): the proposal appears as an ordinary
-**proposal card** on every member's surface ("Restore seat: R" —
-approve/decline like any proposal), and `R`'s request carries a **consent
-signature** over `restore_consent_bytes` that counts as one distinct signer —
-which is what lets an m = n republic re-admit a seat at all. The block
+**proposal card** on every member's surface (the visible record), and `R`'s
+request carries a **consent signature** over `restore_consent_bytes` that
+counts as one distinct signer — which is what lets an m = n republic
+re-admit a seat at all. Since 2026-08-23 (`recovery_auto_approval.md`) a
+survivor that verifies that consent ITSELF co-signs automatically — the
+recovery completes as soon as m survivors are online, no card-clicking;
+only a consent-less (legacy) request still waits for human approvals. The
+coordinator reports the vote to the waiting `R` as `RecoverProgress`
+frames (the rejoiner's checklist). The block
 records, tamper-evidently, that the group re-admitted `R` at height `H+1`.
 Because `pkᵣ` equals the already-anchored key, the roster identity is
 unchanged — the block re-keys only the **MLS leaf**, not the roster.

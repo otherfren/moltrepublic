@@ -20,7 +20,7 @@
 // the nav sub-view icons, the reaction pills and the emoji palette.
 import "assets/fonts/Twemoji.Mozilla.ttf";
 
-import { Theme, Strings, HintTip, WikiState, PatchView, Poke, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, InvitePreview, LinkPreview, BackupRow, ChainRow, RelayItem, RelayPick } from "theme.slint";
+import { Theme, Strings, HintTip, WikiState, PatchView, Poke, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, RecoverSeatRow, InvitePreview, LinkPreview, BackupRow, ChainRow, RelayItem, RelayPick } from "theme.slint";
 import {
     AppButton, AppField, AppArea, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
     ConfirmModal, DotLabel, InsetWell
@@ -1169,6 +1169,7 @@ export component AppWindow inherits Window {
         || root.confirm-delete-open
         || root.confirm-delmsg-open
         || root.backup-modal-open
+        || root.bk-restore-open
         || root.ws-dir-modal-open
         || root.org-logo-modal-open
         || root.org-charter-modal-open
@@ -1524,6 +1525,11 @@ export component AppWindow inherits Window {
     // the recovery task's live status line (NetRecoverNote) — a bounded
     // wait must not look dead
     in-out property <string> rv-note;
+    // the re-admission checklist (recovery_auto_approval.md §5): roster
+    // seats with their counted voices, toward rv-need approvals
+    in property <[RecoverSeatRow]> rv-seats;
+    in property <int> rv-have;
+    in property <int> rv-need;
 
     property <string> rw-seed;
     // restore: chosen backup file + picker modal (continues gate themselves
@@ -1910,6 +1916,12 @@ export component AppWindow inherits Window {
     property <bool> backup-modal-open: false;
     property <string> backup-path;
     property <string> backup-pass;
+    // restore-from-backup (recovery_auto_approval.md §7): a bucket-only row's
+    // modal asks the phrase, then the real S3 restore pipeline runs
+    // (in-out so headless tests can assert the state machine)
+    in-out property <bool> bk-restore-open: false;
+    in-out property <string> bk-restore-id;
+    in-out property <string> bk-restore-seed;
     // modal: confirm deleting a workspace (type its name to arm the button;
     // the id is what the delete verb actually addresses)
     property <bool> confirm-delete-open: false;
@@ -2017,6 +2029,9 @@ export component AppWindow inherits Window {
             root.backup-modal-open = false;
             // every way out of the modal drops the typed export passphrase
             root.backup-pass = "";
+        } else if (root.bk-restore-open) {
+            root.bk-restore-open = false;
+            root.bk-restore-seed = "";
         } else if (root.ws-dir-modal-open) {
             root.ws-dir-modal-open = false;
         } else if (root.org-logo-modal-open) {
@@ -2616,6 +2631,7 @@ export component AppWindow inherits Window {
                                 }
                                 AppButton {
                                     height: 34px * Theme.ui-scale;
+                                    y: (parent.height - self.height) / 2;
                                     primary: true;
                                     label: Strings.rw-join-goto;
                                     clicked => {
@@ -4320,8 +4336,9 @@ export component AppWindow inherits Window {
                                 : "\{Strings.rw-link-recover} \{root.rv-kind.republic} · \{root.rv-kind.who}";
                             label-color: Theme.text;
                         }
-                        // a recovery runs from HERE: its wait spans the
-                        // survivors' human approval, so it reports in place
+                        // a recovery runs from HERE: survivors approve
+                        // automatically when online; the checklist shows
+                        // whose voice is still missing
                         if root.rv-running: VerticalLayout {
                             spacing: 4px;
                             DotLabel {
@@ -4329,11 +4346,21 @@ export component AppWindow inherits Window {
                                 label: root.rv-member;
                                 label-color: Theme.text;
                             }
+                            // "Approvals 2/3 - members approve automatically
+                            // when online" once the first report arrived;
+                            // before that, the plain bounded-wait line
                             Text {
-                                text: Strings.rv-running-note;
+                                text: root.rv-need > 0
+                                    ? "\{Strings.rv-approvals} \{root.rv-have}/\{root.rv-need} - \{Strings.rv-auto-note}"
+                                    : Strings.rv-running-note;
                                 color: Theme.dim;
                                 font-size: Theme.fs-cap;
                                 wrap: word-wrap;
+                            }
+                            for seat in root.rv-seats: DotLabel {
+                                tone: seat.approved ? Theme.good : Theme.line;
+                                label: seat.member;
+                                label-color: seat.approved ? Theme.text : Theme.dim;
                             }
                             if root.rv-note != "": Text {
                                 text: root.rv-note;
@@ -4452,6 +4479,7 @@ export component AppWindow inherits Window {
                         Rectangle { horizontal-stretch: 1; }
                         AppButton {
                             height: 38px * Theme.ui-scale;
+                            y: (parent.height - self.height) / 2;
                             primary: true;
                             label: Strings.rw-join-goto;
                             clicked => {
@@ -7731,16 +7759,19 @@ export component AppWindow inherits Window {
                                                     vertical-alignment: center;
                                                     horizontal-alignment: right;
                                                 }
-                                                // S7: a bucket-only workspace can come HOME —
-                                                // fetched sealed, opened from the workspace
-                                                // list with its phrase
+                                                // a bucket-only workspace can come HOME:
+                                                // the modal asks the phrase, then the real
+                                                // S3 restore pipeline downloads, verifies
+                                                // the chain and opens it (§7)
                                                 if !r.has-local: AppButton {
                                                     height: 26px * Theme.ui-scale;
                                                     pad: 9px;
                                                     y: (parent.height - self.height) / 2;
                                                     label: Strings.bk-restore;
                                                     clicked => {
-                                                        root.backup-fetch(r.id);
+                                                        root.bk-restore-id = r.id;
+                                                        root.bk-restore-seed = "";
+                                                        root.bk-restore-open = true;
                                                     }
                                                 }
                                             }
@@ -8497,6 +8528,60 @@ export component AppWindow inherits Window {
             accepted => {
                 if (bk-dlg.confirm-enabled) {
                     bk-dlg.confirmed();
+                }
+            }
+        }
+    }
+
+    // =================================================================
+    // Modal: restore a bucket-only workspace (Settings › Backup, §7): the
+    // phrase both proves the owner and decrypts - confirming runs the REAL
+    // S3 restore pipeline (download, chain-verify, materialize) and leads
+    // to the Restore screen's run view, whose Finish opens the workspace.
+    // =================================================================
+    if root.bk-restore-open: bkr-dlg := ConfirmModal {
+        dialog-width: 440px;
+        title: Strings.rw-title-s3;
+        body: Strings.bkr-body;
+        confirm-label: Strings.bk-restore;
+        confirm-enabled: root.bk-restore-seed != "";
+        dismissed => {
+            root.bk-restore-open = false;
+            root.bk-restore-seed = "";
+        }
+        confirmed => {
+            root.bk-restore-open = false;
+            root.restore-start("s3", root.bk-restore-id, root.bk-restore-seed);
+            root.bk-restore-seed = "";
+            root.rw-mode = "s3";
+            root.navigate(AppScreen.restore);
+        }
+        Text {
+            text: Strings.rw-seed;
+            color: Theme.text;
+            font-size: Theme.fs-body;
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            AppField {
+                text <=> root.bk-restore-seed;
+                secret: true;
+                placeholder: Strings.ph-seed;
+                horizontal-stretch: 1;
+                accepted => {
+                    if (bkr-dlg.confirm-enabled) {
+                        bkr-dlg.confirmed();
+                    }
+                }
+            }
+            AppButton {
+                height: 38px * Theme.ui-scale;
+                pad: 10px;
+                icon: @image-url("assets/paste.svg");
+                icon-set: true;
+                label: Strings.rw-paste;
+                clicked => {
+                    root.bk-restore-seed = root.paste-clipboard();
                 }
             }
         }

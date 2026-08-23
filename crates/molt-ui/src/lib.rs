@@ -4503,6 +4503,23 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     ui.set_cw_can_propose(sv.create.can_propose);
     sync_rows(&ui.get_cw_seats(), seats, |m| ui.set_cw_seats(m));
 
+    // the rejoiner's re-admission checklist (recovery_auto_approval.md §5):
+    // roster seats with their counted voices, toward `need` approvals
+    let rv_seats: Vec<RecoverSeatRow> = sv
+        .recover
+        .seats
+        .iter()
+        .map(|s| RecoverSeatRow {
+            member: s.member.as_str().into(),
+            approved: s.approved,
+        })
+        .collect();
+    ui.set_rv_have(
+        i32::try_from(sv.recover.seats.iter().filter(|s| s.approved).count()).unwrap_or(0),
+    );
+    ui.set_rv_need(i32::try_from(sv.recover.need).unwrap_or(0));
+    sync_rows(&ui.get_rv_seats(), rv_seats, |m| ui.set_rv_seats(m));
+
     // join
     ui.set_jw_step(i32::from(sv.join.run.step));
     // the engine returned the join session to the idle form (join_finish
@@ -9013,7 +9030,9 @@ lexicon! {
     rlk_pending_hint: "The returning member does not need to be online - a recovery link is made for someone who is unreachable.", "Das zurückkehrende Mitglied muss dafür nicht online sein - ein Recovery-Link ist ja gerade für ein unerreichbares Mitglied gedacht.";
     rlk_failed_mesh: "The link could not be created: this device is not on the republic's mesh. Reopen the republic, then try again.", "Der Link konnte nicht erstellt werden: Dieses Gerät ist nicht im Mesh der Republik. Republik neu öffnen, dann erneut versuchen.";
     rlk_failed_prefix: "The link could not be created: ", "Der Link konnte nicht erstellt werden: ";
-    rv_running_note: "Waiting for the surviving members to approve your re-admission. This human step can take a while - it times out after ~15 minutes.", "Warte auf die Zustimmung der verbliebenen Mitglieder zur Wiederaufnahme. Dieser menschliche Schritt kann dauern - Timeout nach ~15 Minuten.";
+    rv_running_note: "Waiting for the survivors - times out after ~15 min.", "Warte auf die verbliebenen Mitglieder - Timeout nach ~15 min.";
+    rv_approvals: "Approvals", "Zustimmungen";
+    rv_auto_note: "members approve automatically when online", "Mitglieder stimmen automatisch zu, sobald sie online sind";
     rv_failed_hint: "Recovery links are single-use - ask any surviving member for a fresh one and try again.", "Recovery-Links sind einmalig - bitte ein verbliebenes Mitglied um einen neuen und versuch es erneut.";
     set_token_failed: "Could not mint a token - the old one still applies.", "Konnte kein Token erzeugen - das alte gilt weiter.";
     rw_title: "(Re)Join / Recovery", "(Re)Join / Recovery";
@@ -9030,7 +9049,7 @@ lexicon! {
     rw_founding_running: "A founding is already running.", "Eine Gründung läuft bereits.";
     rw_recovery_running: "A recovery is already running.", "Eine Wiederherstellung läuft bereits.";
     rw_join_awaits: "A join is waiting for your confirmation.", "Ein Beitritt wartet auf deine Bestätigung.";
-    rw_join_goto: "Go to it", "Dorthin";
+    rw_join_goto: "Show", "Anzeigen";
     rw_link_join: "Invite to", "Einladung zu";
     rw_link_recover: "Recovery for", "Wiederherstellung für";
     rw_link_unknown: "Not a usable molt:// link.", "Kein brauchbarer molt://-Link.";
@@ -9125,6 +9144,7 @@ lexicon! {
     // backup tab, when no bucket is configured yet: one line, one jump
     bk_needs_s3: "No S3 endpoint configured.", "Kein S3-Endpunkt konfiguriert.";
     bk_restore: "Restore", "Wiederherstellen";
+    bkr_body: "The backup is downloaded, chain-verified and decrypted with this phrase; the workspace then opens on this device.", "Das Backup wird geladen, die Chain verifiziert und mit dieser Phrase entschlüsselt; der Workspace öffnet danach auf diesem Gerät.";
     bk_fetched_note: "Restored (still sealed) - open it with its recovery phrase", "Wiederhergestellt (noch versiegelt) - mit der Recovery-Phrase öffnen";
     bk_goto_open: "To the workspace list", "Zur Workspace-Liste";
     bk_list_ok: "bucket listed ✓", "Bucket gelesen ✓";
@@ -13422,6 +13442,131 @@ mod gui_tests {
         // the draft alone must not move it
         ui.set_cfg_poke_enabled(false);
         assert!(ui.global::<Poke>().get_on(), "the draft does not gate the menu");
+    }
+
+    /// The rejoiner's checklist (recovery_auto_approval.md §5): the session's
+    /// `RecoverState` becomes per-seat rows plus the have/need counters, and
+    /// an empty state clears the rows again.
+    #[test]
+    fn the_recover_checklist_maps_seats_and_counts() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("headless window");
+        let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+        let sv = SessionView {
+            recover: molt_core::RecoverState {
+                member: "petra".to_string(),
+                need: 3,
+                seats: vec![
+                    molt_core::RecoverSeat { member: "walter".to_string(), approved: true },
+                    molt_core::RecoverSeat { member: "petra".to_string(), approved: true },
+                    molt_core::RecoverSeat { member: "vera".to_string(), approved: false },
+                ],
+            },
+            ..SessionView::default()
+        };
+        apply_session(&ui, &sv, true, &chat_ui);
+        assert_eq!((ui.get_rv_have(), ui.get_rv_need()), (2, 3));
+        let rows = ui.get_rv_seats();
+        let got: Vec<(String, bool)> = (0..rows.row_count())
+            .filter_map(|i| rows.row_data(i))
+            .map(|r| (r.member.to_string(), r.approved))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("walter".to_string(), true),
+                ("petra".to_string(), true),
+                ("vera".to_string(), false)
+            ],
+            "roster order, per-seat approval"
+        );
+
+        // a fresh recovery clears the list (RecoverStart resets the state)
+        apply_session(&ui, &SessionView::default(), true, &chat_ui);
+        assert_eq!(ui.get_rv_seats().row_count(), 0);
+        assert_eq!((ui.get_rv_have(), ui.get_rv_need()), (0, 0));
+    }
+
+    /// Restore-from-backup (recovery_auto_approval.md §7): the Settings ›
+    /// Backup modal's state machine — a confirm without a phrase starts
+    /// nothing; with one it hands ("s3", the orphan's id, the phrase) to the
+    /// real restore pipeline, leads to the Restore screen, and drops the
+    /// phrase. Runs on the dev-ui chain (`ElementHandle` needs the
+    /// interpreter's debug info).
+    #[cfg(feature = "live-preview")]
+    #[test]
+    fn the_backup_restore_modal_drives_the_s3_pipeline() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("headless window");
+        apply_strings(&ui, 0);
+        ui.window().set_size(slint::PhysicalSize::new(1200, 800));
+        let calls: Rc<RefCell<Vec<(String, String, String)>>> = Rc::new(RefCell::new(Vec::new()));
+        {
+            let c = calls.clone();
+            ui.on_restore_start(move |way, target, secret| {
+                c.borrow_mut().push((way.to_string(), target.to_string(), secret.to_string()));
+            });
+        }
+        let navs: Rc<RefCell<Vec<AppScreen>>> = Rc::new(RefCell::new(Vec::new()));
+        {
+            let n = navs.clone();
+            ui.on_navigate(move |s| n.borrow_mut().push(s));
+        }
+        let label = ui.global::<Strings>().get_bk_restore().to_string();
+        assert!(!label.is_empty(), "the label must be applied before searching");
+        ui.show().expect("show headless");
+        // control BEFORE the modal: nothing wears the label on this screen
+        assert!(
+            i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, label.as_str())
+                .next()
+                .is_none(),
+            "no restore affordance before the modal opens"
+        );
+        // an orphan row opened the modal
+        ui.set_bk_restore_id("cafe01".into());
+        ui.set_bk_restore_open(true);
+        let click = |ui: &AppWindow| {
+            let h = i_slint_backend_testing::ElementHandle::find_by_accessible_label(
+                ui,
+                label.as_str(),
+            )
+            .next()
+            .expect("the modal's confirm button renders");
+            let at = slint::LogicalPosition::new(
+                h.absolute_position().x + h.size().width / 2.0,
+                h.absolute_position().y + h.size().height / 2.0,
+            );
+            ui.window()
+                .dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at });
+            ui.window().dispatch_event(slint::platform::WindowEvent::PointerPressed {
+                position: at,
+                button: slint::platform::PointerEventButton::Left,
+            });
+            ui.window().dispatch_event(slint::platform::WindowEvent::PointerReleased {
+                position: at,
+                button: slint::platform::PointerEventButton::Left,
+            });
+        };
+        // no phrase yet: the confirm is disarmed
+        click(&ui);
+        assert!(calls.borrow().is_empty(), "no phrase, no pipeline");
+        assert!(ui.get_bk_restore_open(), "the modal stays up");
+        // with the phrase: the REAL pipeline is asked, the modal closes,
+        // the phrase is dropped, and the run view is next
+        ui.set_bk_restore_seed("brave mole over the hills".into());
+        click(&ui);
+        assert_eq!(
+            calls.borrow().as_slice(),
+            &[(
+                "s3".to_string(),
+                "cafe01".to_string(),
+                "brave mole over the hills".to_string()
+            )],
+            "confirm hands way/target/phrase to restore-start"
+        );
+        assert!(!ui.get_bk_restore_open(), "confirm closes the modal");
+        assert_eq!(ui.get_bk_restore_seed().as_str(), "", "every way out drops the phrase");
+        assert_eq!(navs.borrow().last(), Some(&AppScreen::Restore), "the run view is next");
     }
 
     /// A node with storage, a founded workspace, and chat in it — the state
