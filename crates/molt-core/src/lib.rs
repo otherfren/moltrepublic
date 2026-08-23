@@ -2982,6 +2982,31 @@ pub struct JoinState {
     pub sealed_id: String,
 }
 
+/// One seat's line on the rejoiner's recovery checklist
+/// (`recovery_auto_approval.md` §4): has this member's voice backed the
+/// re-admission yet?
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoverSeat {
+    /// The seat's member handle.
+    pub member: String,
+    /// Whether its approval (or the rejoiner's own consent) is counted.
+    pub approved: bool,
+}
+
+/// The rejoiner's live view of the re-admission vote, fed by the
+/// coordinator's progress frames (display data — the Welcome stays the only
+/// thing that finishes a rejoin). Reset when a recovery starts; kept after
+/// it ends so the finished checklist stays readable.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoverState {
+    /// The returning seat (empty = no recovery reported yet).
+    pub member: String,
+    /// Approvals needed (the republic's threshold m).
+    pub need: u32,
+    /// The full roster, each with its approval state, in roster order.
+    pub seats: Vec<RecoverSeat>,
+}
+
 /// The restore lifecycle (real: download/read → decrypt+stage →
 /// chain-verify → materialize). Shared session state: any operator can
 /// start it, both watch the same progress and live log — and every line of
@@ -3229,6 +3254,10 @@ pub struct SessionView {
     pub active_workspace: WorkspaceId,
     /// The restore lifecycle (real; see [`RestoreState`]).
     pub restore: RestoreState,
+    /// The rejoiner's recovery-vote checklist (see [`RecoverState`]).
+    /// Additive; empty outside a recovery.
+    #[serde(default)]
+    pub recover: RecoverState,
     /// The manual-export lifecycle (real; additive).
     #[serde(default)]
     pub export: ExportState,
@@ -3269,6 +3298,7 @@ impl Default for SessionView {
             backup_orphans: Vec::new(),
             active_workspace: String::new(),
             restore: RestoreState::default(),
+            recover: RecoverState::default(),
             export: ExportState::default(),
             wiki_export: ExportState::default(),
             create: CreateState::default(),
@@ -4433,6 +4463,23 @@ pub enum Command {
     NetRecoverNote {
         /// The status line (compact, one fact).
         note: String,
+        /// Recovery incarnation.
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// The coordinator's live report of the re-admission vote (engine-
+    /// internal, `recovery_auto_approval.md` §4): who has approved, out of
+    /// which roster, toward which threshold. Display data for the rejoiner's
+    /// checklist — carries no authority (the Welcome finishes a rejoin).
+    NetRecoverProgress {
+        /// The returning seat.
+        member: String,
+        /// Approvals needed (m).
+        need: u32,
+        /// The full roster, in roster order.
+        roster: Vec<String>,
+        /// Members whose voice is counted (approvals + the consent).
+        approved: Vec<String>,
         /// Recovery incarnation.
         #[serde(default)]
         generation: Option<u64>,

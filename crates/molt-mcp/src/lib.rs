@@ -1714,7 +1714,7 @@ mod tests {
         // would let any MCP client execute code as the node's user, which is
         // a different thing entirely from acting inside the republic. The
         // wholesale settings paths refuse the key for the same reason.
-        const INTERNAL: [&str; 60] = [
+        const INTERNAL: [&str; 61] = [
             // ui_publish is the WINDOW reporting what it renders — an
             // agent must not be able to forge what the GUI claims to show
             // (gui_over_mcp.md); reads go through read_ui_state.
@@ -1732,6 +1732,10 @@ mod tests {
             "net_backup_failed",
             "net_backup_fetched",
             "net_restore_progress",
+            // the recovery COORDINATOR's vote report toward the waiting
+            // rejoiner (display data; an agent must not be able to forge
+            // who approved a re-admission)
+            "net_recover_progress",
             "net_restore_staged",
             "net_restore_failed",
             "net_export_done",

@@ -538,6 +538,23 @@ pub enum RitualMsg {
         #[serde(default)]
         welcome: String,
     },
+    /// coordinator → returning member: where the re-admission vote stands
+    /// (`recovery_auto_approval.md` §4) — sent after the verified request and
+    /// again on every arriving approval, so the waiting rejoiner sees a live
+    /// checklist instead of a silent wait. **Display data only**: it carries
+    /// no authority (the `Welcome` finishes a rejoin), and an older rejoiner
+    /// fails to parse it and keeps its silent wait (additive, like
+    /// `LinkSpent`).
+    RecoverProgress {
+        /// The returning seat this vote is about.
+        member: String,
+        /// Approvals needed (the republic's threshold m).
+        need: u32,
+        /// The full roster, in roster order.
+        roster: Vec<String>,
+        /// Members whose voice is counted (approvals + the consent).
+        approved: Vec<String>,
+    },
     /// coordinator → returning member: the MLS **Welcome** that re-admits a
     /// recovered seat (`recovery_ritual.md` §4 ❺–❻), sent on the rejoiner's reply
     /// queue once the `Membership{Restored}` block commits and the coordinator

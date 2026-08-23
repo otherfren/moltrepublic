@@ -1152,6 +1152,20 @@ async fn a_recovery_needs_no_human_approval_when_survivors_are_online() {
     .await;
     assert!(!s.notice.starts_with("recover-failed:"), "recovery: {:?}", s.notice);
 
+    // the rejoiner SAW the vote: the coordinator's progress frames built the
+    // checklist (recovery_auto_approval.md §4), and by Done every voice is
+    // counted (the seal finalizes the list even if the last frame lost the
+    // race against the Welcome)
+    let s = wait_for(&c, "the finished checklist", |s| {
+        s.recover.member == "petra"
+            && s.recover.need == 3
+            && s.recover.seats.len() == 3
+            && s.recover.seats.iter().all(|seat| seat.approved)
+    })
+    .await;
+    let names: Vec<&str> = s.recover.seats.iter().map(|x| x.member.as_str()).collect();
+    assert_eq!(names, vec!["walter", "petra", "vera"], "roster order");
+
     // both survivors agree the seat is back
     for w in [&a, &v] {
         wait_for(w, "the survivor to record petra's return", |s| {

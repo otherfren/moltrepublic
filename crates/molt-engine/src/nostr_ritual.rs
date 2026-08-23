@@ -944,6 +944,20 @@ async fn recovery_rejoin(
         }
         match inbox.recv((deadline - now).min(RECV_SLICE)).await {
             Some(RitualDelivery::Welcome(p, sender)) if sender == h.npub => break p,
+            // the coordinator's checklist (recovery_auto_approval.md §4):
+            // who has approved, from the COORDINATOR's anchor and nobody
+            // else's — display data the session renders live
+            Some(RitualDelivery::Msg(
+                RitualMsg::RecoverProgress { member, need, roster, approved },
+                sender,
+            )) if sender == h.npub => {
+                let _ = send_cmd(
+                    tx,
+                    Command::NetRecoverProgress { member, need, roster, approved, generation },
+                )
+                .await;
+                continue;
+            }
             _ => continue,
         }
     };

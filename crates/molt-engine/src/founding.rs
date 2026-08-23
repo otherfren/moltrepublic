@@ -815,6 +815,7 @@ fn spawn_founder_recv(
                 | invite::RitualMsg::LinkSpent { .. }
                 | invite::RitualMsg::Aborted { .. }
                 | invite::RitualMsg::Recover(_)
+                | invite::RitualMsg::RecoverProgress { .. }
                 | invite::RitualMsg::Welcome { .. } => continue,
             };
             let (reply, _rx) = tokio::sync::oneshot::channel();

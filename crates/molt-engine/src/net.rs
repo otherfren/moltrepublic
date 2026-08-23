@@ -1532,6 +1532,11 @@ impl State {
                     have: self.chain_approval_count(id.0),
                     need: self.threshold(),
                 });
+                // a pending recovery this node coordinates: report the vote
+                // to the waiting rejoiner (no-op for every other proposal;
+                // a sealed block consumed the pending entry already, and the
+                // Welcome supersedes any report)
+                self.push_recover_progress(id.0);
             }
             // a decline is a VOTE and crosses the wire like one (see
             // `crosses_wire`) — without this arm it was acked and DROPPED,
@@ -2156,12 +2161,15 @@ impl State {
             &consent,
             &reply,
         ) {
-            Ok(_id) => {
+            Ok(id) => {
                 // spend the ticket only on a verified request, so a legitimate
                 // member whose first attempt failed (e.g. a truncated proof) can
                 // retry on the still-live queue
                 self.recovery_tickets.remove(&ticket);
                 tracing::info!(%member, "recovery seat proof verified — proposing re-admission");
+                // the first checklist frame: the rejoiner learns the roster,
+                // the threshold and the voices already counted
+                self.push_recover_progress(id);
             }
             Err(e) => {
                 // the operator must SEE the refusal (relay-pool mismatch is
@@ -2174,6 +2182,55 @@ impl State {
             }
         }
         Ok(Reply::Ack)
+    }
+
+    /// Report a coordinated recovery's vote state to its waiting rejoiner
+    /// (`recovery_auto_approval.md` §4): gift-wrap a `RecoverProgress` frame
+    /// to the seat's NEW transport anchor. A no-op unless `id` is a pending
+    /// recovery this node coordinates on a Nostr republic (the loopback test
+    /// transport carries no progress frames). Best-effort display data —
+    /// a lost frame costs a stale checklist, never the recovery.
+    pub(crate) fn push_recover_progress(&mut self, id: u64) {
+        let Some(report) = self.recover_progress_for(id) else {
+            return;
+        };
+        self.send_recover_progress_frame(report);
+    }
+
+    /// The send tail shared by [`Self::push_recover_progress`] (live vote
+    /// updates) and the sealed block's completion report
+    /// (`after_block_applied`).
+    pub(crate) fn send_recover_progress_frame(&mut self, report: crate::chain::RecoverProgressReport) {
+        let Some(to) = report.to.clone().filter(|t| !t.is_empty()) else {
+            return;
+        };
+        if self.transport_kind != Some(molt_core::TransportKind::Nostr) {
+            return;
+        }
+        let Some(nostr) = self.nostr.as_ref() else {
+            return;
+        };
+        let relays = self.dialable_group_relays();
+        if relays.is_empty() {
+            return;
+        }
+        let Ok(dialer) = self.dialer_for() else {
+            return;
+        };
+        let Ok(net) = molt_net::ritual_net::RitualNet::new(dialer, relays, &nostr.sk) else {
+            return;
+        };
+        let msg = molt_net::invite::RitualMsg::RecoverProgress {
+            member: report.member,
+            need: report.need,
+            roster: report.roster,
+            approved: report.approved,
+        };
+        tokio::spawn(async move {
+            if let Err(e) = net.send_ritual(&to, &msg).await {
+                tracing::debug!(error = %e, "recover progress frame did not publish");
+            }
+        });
     }
 
     /// A surviving coordinator mints a recovery link for a member who lost its

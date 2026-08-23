@@ -64,6 +64,24 @@ pub(crate) struct PendingApproval {
 
 /// A recovery in flight on the coordinator: the returning member's fresh MLS
 /// KeyPackage + reply-queue handover, kept keyed by the re-admission proposal id
+/// The coordinator's snapshot of a pending re-admission vote
+/// (`recovery_auto_approval.md` §4) — what [`State::recover_progress_for`]
+/// reports toward the waiting rejoiner's checklist.
+#[derive(Debug, Clone)]
+pub(crate) struct RecoverProgressReport {
+    /// The returning seat.
+    pub member: String,
+    /// Approvals needed (m).
+    pub need: u32,
+    /// The full roster, in roster order.
+    pub roster: Vec<String>,
+    /// Members whose voice is counted (verified approvals + the consent).
+    pub approved: Vec<String>,
+    /// The rejoiner's NEW transport anchor (the gift-wrap address); `None`
+    /// on an anchor-less (loopback) recovery.
+    pub to: Option<String>,
+}
+
 /// until its `Restored` block commits — then the coordinator re-keys the group
 /// (`restore_member`) and sends the Welcome back to `reply`.
 #[derive(Debug, Clone)]
@@ -2170,6 +2188,80 @@ impl State {
         Ok(self.propose_membership(MembershipOp::Restored, member, &anchored, anchor, relays, consent))
     }
 
+    /// The live re-admission vote for a recovery THIS node coordinates
+    /// (`recovery_auto_approval.md` §4): roster, counted voices (verified
+    /// signatures ∪ the consenting seat) and the threshold, plus the
+    /// rejoiner's new transport anchor as the report's address. `None`
+    /// unless `id` is a `Restored` proposal whose member this node holds a
+    /// [`PendingRecovery`] for — only the coordinator can reach the waiting
+    /// rejoiner. Display data; the Welcome stays the only authority.
+    pub(crate) fn recover_progress_for(&self, id: u64) -> Option<RecoverProgressReport> {
+        let Some(ChainChange::Membership {
+            op: MembershipOp::Restored,
+            member,
+            nostr_pk,
+            consent,
+            ..
+        }) = self.proposal_changes.get(&id)
+        else {
+            return None;
+        };
+        if !self.pending_recovery.contains_key(member) {
+            return None;
+        }
+        let head = self.chain_head.as_ref()?;
+        let roster: Vec<String> = head.identities.iter().map(|i| i.member.clone()).collect();
+        let mut approved: BTreeSet<String> = self
+            .pending_sigs
+            .get(&id)
+            .map(|p| p.verified.iter().cloned().collect())
+            .unwrap_or_default();
+        if consent.is_some() {
+            approved.insert(member.clone());
+        }
+        Some(RecoverProgressReport {
+            member: member.clone(),
+            need: u32::from(head.rule_m),
+            roster,
+            approved: approved.into_iter().collect(),
+            to: nostr_pk.clone(),
+        })
+    }
+
+    /// The COMPLETED checklist for a sealed `Restored` block this node
+    /// coordinates: the block's own signers ∪ the consenting seat — the
+    /// proof the threshold passed, reported once at the seal (the live
+    /// per-approval frames stop there; see `after_block_applied`).
+    pub(crate) fn recover_complete_report(&self, block: &ChainBlock) -> Option<RecoverProgressReport> {
+        let ChainChange::Membership {
+            op: MembershipOp::Restored,
+            member,
+            nostr_pk,
+            consent,
+            ..
+        } = &block.change
+        else {
+            return None;
+        };
+        if !self.pending_recovery.contains_key(member) {
+            return None;
+        }
+        let head = self.chain_head.as_ref()?;
+        let roster: Vec<String> = head.identities.iter().map(|i| i.member.clone()).collect();
+        let mut approved: BTreeSet<String> =
+            block.sigs.iter().map(|a| a.member.clone()).collect();
+        if consent.is_some() {
+            approved.insert(member.clone());
+        }
+        Some(RecoverProgressReport {
+            member: member.clone(),
+            need: u32::from(head.rule_m),
+            roster,
+            approved: approved.into_iter().collect(),
+            to: nostr_pk.clone(),
+        })
+    }
+
     /// Distinct collected approvals for a proposal (for the UI progress).
     pub(crate) fn chain_approval_count(&self, id: u64) -> usize {
         // L2: the DISPLAYED count is the verified one — raw collected sigs
@@ -2569,6 +2661,13 @@ impl State {
                 self.settle_membership_records(&block.change);
                 self.mesh_extension_at.remove(member);
                 if self.pending_recovery.contains_key(member) {
+                    // the completed checklist, BEFORE the re-key consumes the
+                    // pending entry: the live per-approval frames stop at the
+                    // seal (`push_recover_progress` reports only while the
+                    // vote is open), so the block itself reports completion
+                    if let Some(report) = self.recover_complete_report(block) {
+                        self.send_recover_progress_frame(report);
+                    }
                     let member = member.clone();
                     self.coordinator_rekey(&member);
                 }
@@ -8420,6 +8519,45 @@ mod tests {
             "the commit settles the record without a human approve"
         );
         verify_chain(&walter.chain).expect("the sealed chain verifies from zero");
+    }
+
+    /// The coordinator's vote report toward the waiting rejoiner
+    /// (recovery_auto_approval.md §4): roster in roster order, the counted
+    /// voices (its own co-signature + the consent), the threshold — and
+    /// nothing for a proposal it does not coordinate.
+    #[test]
+    fn the_coordinator_reports_the_vote_progress_for_a_pending_recovery() {
+        let b = Builder::new(&["petra", "walter", "dora"], 3);
+        let mut coord = chain_signer("petra", &b, b.blocks.clone());
+        let rid = b.republic_id.clone();
+        let ticket = "recovery-ticket-xyz";
+        let kp_hex = "beef";
+        let proof = crate::make_seat_proof(b.key("dora"), ticket, kp_hex, &rid, "", &[]);
+        let consent = consent_for(&b, "dora", "");
+        let id = coord
+            .verify_and_propose_restore(
+                "dora",
+                &b.pk("dora"),
+                kp_hex,
+                ticket,
+                &proof,
+                "",
+                &[],
+                &consent,
+                "",
+            )
+            .expect("a valid request proposes");
+        let report = coord.recover_progress_for(id).expect("a coordinated recovery reports");
+        assert_eq!(report.member, "dora");
+        assert_eq!(report.need, 3);
+        assert_eq!(report.roster, vec!["petra", "walter", "dora"], "roster order");
+        assert_eq!(
+            report.approved,
+            vec!["dora", "petra"],
+            "the coordinator's co-signature and the consent are counted; walter is not"
+        );
+        // a proposal this node does not coordinate reports nothing
+        assert!(coord.recover_progress_for(id + 1).is_none());
     }
 
     /// The auto-approval trusts NOTHING the coordinator claims: a consent

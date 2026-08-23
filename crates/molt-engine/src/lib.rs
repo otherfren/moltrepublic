@@ -1611,6 +1611,9 @@ impl State {
             Command::NetRecoverNote { note, generation } => {
                 self.cmd_net_recover_note(note, generation)
             }
+            Command::NetRecoverProgress { member, need, roster, approved, generation } => {
+                self.cmd_net_recover_progress(member, need, roster, approved, generation)
+            }
             Command::NetRitualPublished {
                 what,
                 accepted,
@@ -5459,6 +5462,35 @@ mod tests {
         assert_eq!(
             st.session.notice,
             "recover-note:waiting for the coordinator's Welcome (2 min)"
+        );
+    }
+
+    /// The rejoiner's checklist (`NetRecoverProgress`): a live incarnation's
+    /// report becomes the session's `RecoverState` with per-seat approval
+    /// flags; a stale incarnation's report is dropped like a stale note.
+    #[test]
+    fn a_recover_progress_builds_the_checklist_for_the_live_incarnation() {
+        let mut st = tests::plain_state();
+        st.recover_generation = 3;
+        let roster = vec!["petra".to_string(), "vera".to_string(), "walter".to_string()];
+        let approved = vec!["petra".to_string(), "walter".to_string()];
+        st.cmd_net_recover_progress("petra".to_string(), 3, roster.clone(), approved.clone(), Some(2))
+            .expect("ack");
+        assert_eq!(
+            st.session.recover,
+            molt_core::RecoverState::default(),
+            "a stale incarnation says nothing"
+        );
+        st.cmd_net_recover_progress("petra".to_string(), 3, roster, approved, Some(3))
+            .expect("ack");
+        let r = &st.session.recover;
+        assert_eq!((r.member.as_str(), r.need), ("petra", 3));
+        let flags: Vec<(&str, bool)> =
+            r.seats.iter().map(|s| (s.member.as_str(), s.approved)).collect();
+        assert_eq!(
+            flags,
+            vec![("petra", true), ("vera", false), ("walter", true)],
+            "roster order, per-seat approval"
         );
     }
 

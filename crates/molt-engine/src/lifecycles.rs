@@ -1663,6 +1663,9 @@ impl State {
         let generation = self.recover_generation;
         let task_phrase = phrase.clone();
         self.recover_ctx = Some((inv.clone(), phrase));
+        // a fresh run starts with a fresh checklist (the old republic's
+        // finished list must not front-run the new coordinator's report)
+        self.session.recover = molt_core::RecoverState::default();
         // a fresh transport slot for this recovery incarnation, the
         // join_transport twin: cmd_net_recover_sealed stands the runtime
         // supervisor up from it when a rejoin task filled it (the two-instance
@@ -2013,6 +2016,14 @@ impl State {
         if let Some(height) = self.chain_head.as_ref().map(|h| h.height) {
             self.request_catchup(height + 1);
         }
+        // the seat is provably back (the Restored block sealed at m) — the
+        // checklist finishes deterministically even when the last progress
+        // frame lost the race against the Welcome
+        if self.session.recover.member == member {
+            for seat in &mut self.session.recover.seats {
+                seat.approved = true;
+            }
+        }
         self.session.notice = format!("recovered:{member}");
         self.session.screen = Screen::Main;
         self.emit_session(SessionScope::Full);
@@ -2135,6 +2146,39 @@ impl State {
         let notice = format!("recover-note:{note}");
         if self.session.notice != notice {
             self.session.notice = notice;
+            self.emit_session(SessionScope::Full);
+        }
+        Ok(Reply::Ack)
+    }
+
+    /// The rejoiner's re-admission checklist ([`Command::NetRecoverProgress`],
+    /// `recovery_auto_approval.md` §4): the coordinator's report of who has
+    /// approved, rendered as [`molt_core::RecoverState`]. Display data only;
+    /// a stale incarnation's report is dropped like a stale note.
+    pub(crate) fn cmd_net_recover_progress(
+        &mut self,
+        member: String,
+        need: u32,
+        roster: Vec<String>,
+        approved: Vec<String>,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if generation != Some(self.recover_generation) {
+            return Ok(Reply::Ack);
+        }
+        let state = molt_core::RecoverState {
+            member,
+            need,
+            seats: roster
+                .into_iter()
+                .map(|m| molt_core::RecoverSeat {
+                    approved: approved.contains(&m),
+                    member: m,
+                })
+                .collect(),
+        };
+        if self.session.recover != state {
+            self.session.recover = state;
             self.emit_session(SessionScope::Full);
         }
         Ok(Reply::Ack)
