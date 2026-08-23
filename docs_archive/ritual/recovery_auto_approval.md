@@ -184,6 +184,16 @@ Keystones: `nostr_recovery.rs::the_founders_own_seat_recovers_over_relays`
 fast-fail on a pk-carrying link + the WP6 coordinator answer on a legacy
 link), `founding::tests::seat_identity_resolves_both_ritual_conventions`.
 
+## 7c. Follow-up (field, 2026-08-24): a deleted workspace's backups surface
+
+Orphans were classified only when a LISTING RESULT landed — deleting the
+local workspace afterwards never reclassified, so its bucket copies showed
+no row and no Restore button. The engine now keeps the last real listing
+(`State.backup_listing`) and re-runs the classification against the CURRENT
+workspace list on every delete and restore/fetch (`reclassify_backups`);
+the listing itself still refreshes on entering the Backup tab. Keystone:
+`s3_list_backups.rs::a_deleted_workspace_becomes_a_restorable_orphan_without_a_new_listing`.
+
 ## 8. Execution order & landing
 
 WP1 → WP2 → WP3+4 (one window build at the end) → WP5. TDD per WP; commit +

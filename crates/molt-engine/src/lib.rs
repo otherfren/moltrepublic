@@ -788,6 +788,12 @@ pub(crate) struct State {
     /// could not be persisted (read-only dir) does not trigger a full-blob
     /// re-upload every minute forever (review finding).
     pub(crate) backup_last_done: std::collections::HashMap<WorkspaceId, u64>,
+    /// The last REAL bucket listing's objects (None until one succeeded, and
+    /// cleared with it). Kept so the orphan classification can be re-run
+    /// against the CURRENT workspace list when it changes (a deleted
+    /// workspace's copies must surface as restorable orphans without a fresh
+    /// network round — field bug 2026-08-24).
+    pub(crate) backup_listing: Option<Vec<molt_core::BackupObject>>,
     /// Restore incarnation (story 13): bumped per `RestoreStart`/cancel so
     /// a superseded task's late progress/staged/failed reports are dropped.
     pub(crate) restore_generation: u64,
@@ -1032,6 +1038,7 @@ impl State {
             tor_test_gen: 0,
             backup_inflight: std::collections::HashSet::new(),
             backup_last_done: std::collections::HashMap::new(),
+            backup_listing: None,
             restore_generation: 0,
             restore_task: None,
             restore_staging: std::sync::Arc::new(std::sync::Mutex::new(None)),

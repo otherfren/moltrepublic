@@ -210,3 +210,42 @@ async fn changing_the_backup_target_resets_the_stale_table() {
     assert!(sv.s3_list.is_empty(), "verdict reset, got {:?}", sv.s3_list);
     assert!(sv.backup_orphans.is_empty(), "old bucket's rows are gone");
 }
+
+/// **Field bug 2026-08-24: deleting a local workspace RECLASSIFIES the last
+/// listing.** Its bucket copies must surface as a restorable orphan row
+/// immediately — before this, orphans were computed only when a listing
+/// result landed, so a later local delete left the bucket copy invisible
+/// (no row, no Restore button) until the user found the manual refresh.
+#[tokio::test]
+async fn a_deleted_workspace_becomes_a_restorable_orphan_without_a_new_listing() {
+    let w = molt_engine::spawn(GroupConfig::demo(), SessionView::default());
+    let sv = session(&w).await;
+    let local = sv.workspaces.first().expect("demo workspaces").id.clone();
+    let body = format!(
+        "<ListBucketResult><IsTruncated>false</IsTruncated>{}</ListBucketResult>",
+        contents(&format!("molt/{local}/001700000000.molt.enc"), 2048),
+    );
+    let endpoint = stub_server(200, body).await;
+    save_target(&w, &endpoint, "molt-bucket").await;
+    let sv = listing_settled(&w).await;
+    assert_eq!(sv.s3_list, "ok");
+    assert!(
+        sv.backup_orphans.is_empty(),
+        "a locally known workspace's copy is no orphan: {:?}",
+        sv.backup_orphans
+    );
+
+    // the local workspace goes away — the SAME listing must now show the
+    // bucket copy as an orphan (which is what carries the Restore button)
+    w.execute(Command::DeleteWorkspace { id: local.clone() })
+        .await
+        .expect("delete");
+    let sv = session(&w).await;
+    assert_eq!(
+        sv.backup_orphans.len(),
+        1,
+        "the deleted workspace's bucket copy surfaces: {:?}",
+        sv.backup_orphans
+    );
+    assert_eq!(sv.backup_orphans[0].id, local, "restorable under its id");
+}

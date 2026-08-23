@@ -574,6 +574,40 @@ impl State {
             self.s3_list_gen += 1;
             self.session.s3_list = String::new();
             self.session.backup_orphans.clear();
+            self.backup_listing = None;
+        }
+    }
+
+    /// Re-run the orphan classification of the LAST real bucket listing
+    /// against the CURRENT workspace list (field bug 2026-08-24): a local
+    /// delete must surface the deleted workspace's bucket copies as
+    /// restorable orphans, and a restore/fetch must retire its orphan row —
+    /// both without a fresh network round. A no-op until a listing landed.
+    pub(crate) fn reclassify_backups(&mut self) {
+        let Some(objects) = self.backup_listing.as_ref() else {
+            return;
+        };
+        let local_ids: Vec<String> = self
+            .session
+            .workspaces
+            .iter()
+            .map(|w| w.id.clone())
+            .collect();
+        self.session.backup_orphans =
+            molt_core::backup_orphans_from_listing(objects, &local_ids, crate::now_secs());
+        // reconcile the LOCAL rows' bucket-side cells with the real
+        // listing: how many backup copies of each local workspace the
+        // bucket actually holds (0 = none seen — never invented)
+        for ws in &mut self.session.workspaces {
+            ws.backup_copies = u32::try_from(
+                objects
+                    .iter()
+                    .filter(|o| {
+                        molt_core::parse_backup_key(&o.key).is_some_and(|(id, _)| id == ws.id)
+                    })
+                    .count(),
+            )
+            .unwrap_or(u32::MAX);
         }
     }
 
@@ -856,6 +890,7 @@ impl State {
                 self.s3_list_gen += 1; // a stale in-flight result must not resurrect rows
                 self.session.s3_list = format!("error: {e}");
                 self.session.backup_orphans.clear();
+                self.backup_listing = None;
                 self.emit_session(SessionScope::Full);
                 return Ok(Reply::Ack);
             }
@@ -920,32 +955,12 @@ impl State {
             return Ok(Reply::Ack);
         }
         if result == "ok" {
-            let local_ids: Vec<String> = self
-                .session
-                .workspaces
-                .iter()
-                .map(|w| w.id.clone())
-                .collect();
-            self.session.backup_orphans =
-                molt_core::backup_orphans_from_listing(&objects, &local_ids, crate::now_secs());
-            // reconcile the LOCAL rows' bucket-side cells with the real
-            // listing: how many backup copies of each local workspace the
-            // bucket actually holds (0 = none seen — never invented)
-            for ws in &mut self.session.workspaces {
-                ws.backup_copies = u32::try_from(
-                    objects
-                        .iter()
-                        .filter(|o| {
-                            molt_core::parse_backup_key(&o.key)
-                                .is_some_and(|(id, _)| id == ws.id)
-                        })
-                        .count(),
-                )
-                .unwrap_or(u32::MAX);
-            }
+            self.backup_listing = Some(objects);
+            self.reclassify_backups();
         } else {
             // a failed listing knows nothing about the bucket — no rows,
             // no per-workspace copy counts
+            self.backup_listing = None;
             self.session.backup_orphans.clear();
             for ws in &mut self.session.workspaces {
                 ws.backup_copies = 0;
@@ -2197,6 +2212,9 @@ impl State {
             }
         }
         self.session.workspaces.retain(|w| w.id != id);
+        // the deleted workspace's bucket copies surface as restorable
+        // orphans NOW, from the last listing (field bug 2026-08-24)
+        self.reclassify_backups();
         // drop the in-memory last-backup stamp: a later restore that reuses
         // this id must not inherit a stale age from the deleted workspace
         self.backup_last_done.remove(&id);

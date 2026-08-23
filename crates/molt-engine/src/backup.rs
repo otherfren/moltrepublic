@@ -339,6 +339,8 @@ impl State {
             // replace-or-push: idempotent against a re-fetch after a delete
             self.session.workspaces.retain(|w| w.id != id);
             self.session.workspaces.push(info);
+            // its orphan row retires against the last listing
+            self.reclassify_backups();
         }
         self.session.notice = format!("backup-fetched:{id}");
         self.emit_session(SessionScope::Full);
