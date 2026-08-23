@@ -2179,6 +2179,20 @@ impl State {
                 self.session.notice = format!("recover-refused:{member}:{e}");
                 self.emit_session(SessionScope::Full);
                 tracing::warn!(%member, error = %e, "dropping an invalid recovery request");
+                // …and so must the REJOINER (WP6, field log 2026-08-23): a
+                // wrong phrase looked like a dead coordinator for 15 minutes.
+                // Answered only here — behind the ticket + PoP gates — so an
+                // unknown ticket stays a silent drop, and the ticket is NOT
+                // spent (the same link with the right phrase still works).
+                if !sender_npub.is_empty() {
+                    self.send_recover_frame(
+                        sender_npub.clone(),
+                        molt_net::invite::RitualMsg::RecoverRefused {
+                            member: member.to_string(),
+                            reason: e,
+                        },
+                    );
+                }
             }
         }
         Ok(Reply::Ack)
@@ -2204,6 +2218,20 @@ impl State {
         let Some(to) = report.to.clone().filter(|t| !t.is_empty()) else {
             return;
         };
+        let msg = molt_net::invite::RitualMsg::RecoverProgress {
+            member: report.member,
+            need: report.need,
+            roster: report.roster,
+            approved: report.approved,
+        };
+        self.send_recover_frame(to, msg);
+    }
+
+    /// Gift-wrap one recovery-side ritual frame to `to` over the group's
+    /// dialable relays — the shared tail of the progress report and the
+    /// refusal answer. Nostr only (the loopback test transport carries no
+    /// recovery side-channel); best-effort, off the actor.
+    fn send_recover_frame(&mut self, to: String, msg: molt_net::invite::RitualMsg) {
         if self.transport_kind != Some(molt_core::TransportKind::Nostr) {
             return;
         }
@@ -2220,15 +2248,9 @@ impl State {
         let Ok(net) = molt_net::ritual_net::RitualNet::new(dialer, relays, &nostr.sk) else {
             return;
         };
-        let msg = molt_net::invite::RitualMsg::RecoverProgress {
-            member: report.member,
-            need: report.need,
-            roster: report.roster,
-            approved: report.approved,
-        };
         tokio::spawn(async move {
             if let Err(e) = net.send_ritual(&to, &msg).await {
-                tracing::debug!(error = %e, "recover progress frame did not publish");
+                tracing::debug!(error = %e, "recovery frame did not publish");
             }
         });
     }

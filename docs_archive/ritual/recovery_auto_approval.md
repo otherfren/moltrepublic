@@ -1,7 +1,12 @@
 # Recovery: survivors approve automatically, the rejoiner sees a checklist
 
-**Status: OPEN — plan agreed 2026-08-23 (user decision), execution in this
-session.** Supersedes product decision (1) of
+**Status: EXECUTED 2026-08-23 — all six WPs are on master, tested green.**
+Keystones: `nostr_recovery.rs::a_recovery_needs_no_human_approval_when_survivors_are_online`
+(3-of-3 recovery, no `Command::Approve`, rejoiner checklist complete —
+verified red without WP1), `chain::tests::{a_consented_restore_is_approved_without_a_human,
+a_forged_consent_never_auto_signs, a_restore_claiming_a_foreign_anchor_never_auto_signs,
+the_coordinator_reports_the_vote_progress_for_a_pending_recovery}`, the
+molt-ui checklist mapping + restore-modal state machine tests. Supersedes product decision (1) of
 `docs_archive/ritual/recovery_approval_design.md` (membership proposals as
 human-approved cards): for a **consented** re-admission the approval is now
 automatic; the card remains as a visible record.
@@ -141,6 +146,20 @@ missing is the entry point the user expects:
 Tests: molt-ui mapping test (orphan rows expose the restore affordance,
 locals do not), modal state machine test; the engine pipeline is already
 pinned by `tests/restore_real.rs`.
+
+## 7a. WP6 — a refused request answers the rejoiner (field log 2026-08-23)
+
+The field showed the missing half of §1: a WRONG PHRASE was refused at the
+coordinator (`recovery must re-derive the seat's own identity key`) while
+the rejoiner sat out the full 15-minute deadline — indistinguishable from a
+dead coordinator. New `RitualMsg::RecoverRefused { member, reason }`
+(additive): sent ONLY from `cmd_net_recover_requested`'s validation-error
+arm — behind the ticket + PoP gates, so an unknown/spent ticket stays a
+silent drop and a probe learns nothing. The rejoiner fails immediately with
+the coordinator's reason; the ticket stays unspent (retry with the right
+phrase works on the same link). Keystone:
+`nostr_recovery.rs::a_wrong_phrase_fails_the_rejoiner_fast_with_the_reason`
+(verified red: the old build waits out the timeout).
 
 ## 8. Execution order & landing
 

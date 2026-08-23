@@ -944,6 +944,14 @@ async fn recovery_rejoin(
         }
         match inbox.recv((deadline - now).min(RECV_SLICE)).await {
             Some(RitualDelivery::Welcome(p, sender)) if sender == h.npub => break p,
+            // the coordinator REFUSED the request (WP6): fail fast with the
+            // reason instead of sitting out the 15-minute deadline — the
+            // ticket is not spent, so a retry with the right phrase works
+            Some(RitualDelivery::Msg(RitualMsg::RecoverRefused { reason, .. }, sender))
+                if sender == h.npub =>
+            {
+                return Err(format!("the coordinator refused the request: {reason}"));
+            }
             // the coordinator's checklist (recovery_auto_approval.md §4):
             // who has approved, from the COORDINATOR's anchor and nobody
             // else's — display data the session renders live

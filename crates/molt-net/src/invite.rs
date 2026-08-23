@@ -555,6 +555,19 @@ pub enum RitualMsg {
         /// Members whose voice is counted (approvals + the consent).
         approved: Vec<String>,
     },
+    /// coordinator → returning member: the recovery request was REFUSED
+    /// (`recovery_auto_approval.md` WP6) — sent only to a sender that passed
+    /// the ticket + proof-of-possession gates (an unknown ticket stays a
+    /// silent drop), so a wrong phrase fails fast instead of looking like a
+    /// dead coordinator for 15 minutes. The ticket is NOT spent: the same
+    /// link with the right phrase still recovers the seat. Additive: an
+    /// older rejoiner fails to parse it and keeps its bounded wait.
+    RecoverRefused {
+        /// The seat the request claimed.
+        member: String,
+        /// Why, verbatim from the coordinator's validation ladder.
+        reason: String,
+    },
     /// coordinator → returning member: the MLS **Welcome** that re-admits a
     /// recovered seat (`recovery_ritual.md` §4 ❺–❻), sent on the rejoiner's reply
     /// queue once the `Membership{Restored}` block commits and the coordinator

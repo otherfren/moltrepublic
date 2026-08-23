@@ -1174,3 +1174,59 @@ async fn a_recovery_needs_no_human_approval_when_survivors_are_online() {
         .await;
     }
 }
+
+/// **WP6 (recovery_auto_approval.md, field log 2026-08-23): a refused
+/// request fails the rejoiner FAST, with the reason.** Before this, only the
+/// coordinator saw `recover-refused:` while the rejoiner sat out the full
+/// 15-minute timeout — a wrong phrase was indistinguishable from a dead
+/// coordinator. The refusal answer goes only to a sender that passed the
+/// ticket + PoP gates (an unknown ticket stays a silent drop).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_wrong_phrase_fails_the_rejoiner_fast_with_the_reason() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .try_init();
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, _petra_phrase) = found_republic(tmp.path(), &url, 2).await;
+    drop(b);
+
+    a.execute(Command::RecoverInviteStart {
+        member: "petra".to_string(),
+    })
+    .await
+    .expect("mint");
+    let s = wait_for(&a, "the recovery link", |s| {
+        s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")
+    })
+    .await;
+    let link = s
+        .notice
+        .strip_prefix("recovery-link:")
+        .unwrap_or_else(|| panic!("the mint must succeed: {:?}", s.notice))
+        .to_string();
+
+    let c = engine(&tmp.path().join("rejoiner"));
+    adopt_relay(&c, &url).await;
+    let wrong = molt_storage::generate_seed_phrase().expect("a valid but foreign phrase");
+    c.execute(Command::RecoverStart { link, phrase: wrong }).await.expect("recover start");
+
+    // the refusal must arrive as an honest failure within the ordinary wait —
+    // never as a silent quarter-hour timeout
+    let s = wait_for(&c, "the refusal to reach the rejoiner", |s| {
+        s.notice.starts_with("recover-failed:")
+    })
+    .await;
+    assert!(
+        s.notice.contains("identity key"),
+        "the coordinator's reason travels verbatim: {:?}",
+        s.notice
+    );
+    // …and the coordinator still surfaced its own refused notice or kept the
+    // link armed: the ticket is NOT spent by a failed proof, so the same link
+    // with the RIGHT phrase can still recover the seat.
+}
