@@ -303,12 +303,21 @@ async fn found_three(
     root: &std::path::Path,
     url: &str,
 ) -> (WalletHandle, WalletHandle, WalletHandle, String) {
+    found_three_at(root, url, 2).await
+}
+
+/// [`found_three`] with a chosen threshold (m-of-3).
+async fn found_three_at(
+    root: &std::path::Path,
+    url: &str,
+    threshold: u8,
+) -> (WalletHandle, WalletHandle, WalletHandle, String) {
     let a = engine(&root.join("founder"));
     adopt_relay(&a, url).await;
     a.execute(Command::CreateStart {
         name: "Chess Club".to_string(),
         member: "walter".to_string(),
-        threshold: 2,
+        threshold,
         members: 3,
         relays: Vec::new(),
     })
@@ -1086,4 +1095,68 @@ async fn a_request_wrapped_by_another_key_is_refused_and_leaves_the_ticket_unspe
         "the refused impostor spent the ticket — the real seat can no longer return: {:?}",
         s.notice
     );
+}
+
+/// **Auto-approval keystone (recovery_auto_approval.md §3): at 3-of-3 a
+/// recovery completes with NO human approval anywhere.** Before this, the
+/// coordinator's signature + the rejoiner's consent reached 2 and the run
+/// hung on a proposal card the third member never saw — the field defect of
+/// 2026-08-23. Now the third member verifies the consent itself on receipt
+/// of the gossiped proposal and signs automatically; no `Command::Approve`
+/// is issued by anyone in this test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_recovery_needs_no_human_approval_when_survivors_are_online() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .try_init();
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    // 3-of-3: every voice is needed — walter + vera + petra's consent
+    let (a, b, v, petra_phrase) = found_three_at(tmp.path(), &url, 3).await;
+
+    // petra's device dies; walter mints while vera merely stays online
+    drop(b);
+    a.execute(Command::RecoverInviteStart {
+        member: "petra".to_string(),
+    })
+    .await
+    .expect("mint");
+    let s = wait_for(&a, "the recovery link", |s| {
+        s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")
+    })
+    .await;
+    let link = s
+        .notice
+        .strip_prefix("recovery-link:")
+        .unwrap_or_else(|| panic!("the mint must succeed: {:?}", s.notice))
+        .to_string();
+
+    let c = engine(&tmp.path().join("rejoiner"));
+    adopt_relay(&c, &url).await;
+    c.execute(Command::RecoverStart {
+        link,
+        phrase: petra_phrase,
+    })
+    .await
+    .expect("recover start");
+
+    // the whole point: nobody calls Command::Approve, and the seat returns
+    let s = wait_for(&c, "the recovery to open with no human vote", |s| {
+        (s.screen == molt_core::Screen::Main && !s.workspaces.is_empty())
+            || s.notice.starts_with("recover-failed:")
+    })
+    .await;
+    assert!(!s.notice.starts_with("recover-failed:"), "recovery: {:?}", s.notice);
+
+    // both survivors agree the seat is back
+    for w in [&a, &v] {
+        wait_for(w, "the survivor to record petra's return", |s| {
+            s.workspaces.iter().any(|w| w.members.len() == 3)
+        })
+        .await;
+    }
 }

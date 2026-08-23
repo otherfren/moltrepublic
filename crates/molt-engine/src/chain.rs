@@ -1908,6 +1908,108 @@ impl State {
         self.proposal_changes.insert(id, change);
         // L2: signatures that OUTRAN this change become displayable now
         self.reverify_pending(id);
+        // recovery_auto_approval.md §3: a consent this node can verify itself
+        // needs no human voice — sign it now, so a recovery completes as soon
+        // as m survivors are online
+        self.auto_approve_restore(id);
+    }
+
+    /// Auto-approve a `Membership{Restored}` proposal whose consent THIS node
+    /// verified itself (recovery_auto_approval.md §3). The checkpoint
+    /// precedent: a correctness attestation, not a product decision — the
+    /// human decision was the survivor's mint of the recovery link, and the
+    /// consent proves the seat's phrase holder asked for the re-admission.
+    /// Everything is re-checked locally; nothing the proposing coordinator
+    /// claims is trusted:
+    ///
+    /// - the change is a consented `Restored` for an ANCHORED seat keeping
+    ///   its anchored identity key (the `apply_membership` invariant);
+    /// - a claimed transport anchor is canonical and collides with no other
+    ///   living seat (the ingest gate's twin — blocks never re-check this);
+    /// - the consent verifies over [`molt_core::chain::restore_consent_bytes`]
+    ///   against the ANCHORED key;
+    /// - replay guard (the checkpoint pattern): at most one signature per
+    ///   member per height, so a re-received frame never amplifies.
+    ///
+    /// A consent-less (legacy) restore and every `Joined` proposal keep the
+    /// human card untouched.
+    fn auto_approve_restore(&mut self, id: u64) {
+        let Some(ChainChange::Membership {
+            op: MembershipOp::Restored,
+            member,
+            identity_pk,
+            nostr_pk,
+            consent: Some(consent),
+            ..
+        }) = self.proposal_changes.get(&id)
+        else {
+            return;
+        };
+        let (member, identity_pk, nostr_pk, consent) = (
+            member.clone(),
+            identity_pk.clone(),
+            nostr_pk.clone(),
+            consent.clone(),
+        );
+        // a settled record must not re-arm (a re-served proposal after the
+        // block applied), and the restored seat itself never counts twice
+        if matches!(self.proposals.get(&id), Some(p) if p.state != ProposalState::Proposed) {
+            return;
+        }
+        let me = self.member();
+        if me == member {
+            return;
+        }
+        let Some(head) = self.chain_head.as_ref() else {
+            return;
+        };
+        let Some(anchored) = head
+            .identities
+            .iter()
+            .find(|i| i.member == member)
+            .map(|i| i.identity_pk.clone())
+        else {
+            return;
+        };
+        if identity_pk != anchored {
+            tracing::warn!(%id, %member, "restore proposal swaps the anchored identity — not auto-signing");
+            return;
+        }
+        if let Some(npk) = &nostr_pk {
+            if molt_net::canonical_nostr_pk(npk).ok().as_deref() != Some(npk.as_str()) {
+                tracing::warn!(%id, %member, "restore proposal carries a non-canonical anchor — not auto-signing");
+                return;
+            }
+            if head
+                .identities
+                .iter()
+                .any(|i| i.member != member && i.nostr_pk == *npk)
+            {
+                tracing::warn!(%id, %member, "restore proposal reuses a living seat's anchor — not auto-signing");
+                return;
+            }
+        }
+        let bytes = molt_core::chain::restore_consent_bytes(
+            &self.republic_id(),
+            &member,
+            &anchored,
+            nostr_pk.as_deref().unwrap_or(""),
+        );
+        if !molt_storage::identity_verify(&anchored, &bytes, &consent) {
+            tracing::warn!(%id, %member, "restore consent does not verify — not auto-signing");
+            return;
+        }
+        // replay guard: one signature per member per height
+        let target = self.chain_head.as_ref().map(|h| h.height + 1).unwrap_or(1);
+        if self
+            .pending_sigs
+            .get(&id)
+            .is_some_and(|p| p.height == target && p.sigs.iter().any(|a| a.member == me))
+        {
+            return;
+        }
+        tracing::info!(%id, %member, "consented re-admission verified — auto-approving");
+        self.chain_sign_and_gossip_approval(id);
     }
 
     /// Whether `id` may register `change`: free unless it already names a
@@ -8140,6 +8242,112 @@ mod tests {
 
     #[test]
     fn a_membership_proposal_is_a_visible_approvable_record() {
+        // CONSENT-LESS (a legacy rejoiner): the one restore shape that still
+        // needs the human vote — auto-approval only ever signs a consent this
+        // node verified itself (recovery_auto_approval.md §2).
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let mut coord = chain_signer("petra", &b, b.blocks.clone());
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        let rid = b.republic_id.clone();
+        let ticket = "recovery-ticket-xyz";
+        let kp_hex = "beef";
+        let proof = crate::make_seat_proof(b.key("dora"), ticket, kp_hex, &rid, "", &[]);
+        let id = coord
+            .verify_and_propose_restore(
+                "dora",
+                &b.pk("dora"),
+                kp_hex,
+                ticket,
+                &proof,
+                "",
+                &[],
+                "",
+                "",
+            )
+            .expect("a valid request proposes");
+
+        // visible on the proposer: a real record with the reserved op
+        let rec = coord.proposals.get(&id).expect("the proposer holds a record");
+        assert_eq!(rec.payload["op"], "restore_member");
+        assert_eq!(rec.payload["member"], "dora");
+        assert_eq!(rec.state, ProposalState::Proposed, "1 of 2 voices — still open");
+
+        // …and on a receiver: the gossip's log event creates the SAME record
+        let env = walter.make_env(
+            "petra".to_string(),
+            WorkspaceEvent::MembershipProposed {
+                id: ProposalId(id),
+                op: MembershipOp::Restored,
+                member: "dora".to_string(),
+                identity_pk: b.pk("dora"),
+                nostr_pk: None,
+                relays: Vec::new(),
+                consent: None,
+            },
+        );
+        walter.apply(&env);
+        walter.receive_membership_proposal(
+            id,
+            MembershipOp::Restored,
+            "dora",
+            &b.pk("dora"),
+            None,
+            Vec::new(),
+            None,
+        );
+        assert_eq!(
+            walter.proposals.get(&id).map(|p| p.state),
+            Some(ProposalState::Proposed),
+            "the receiver sees an open, votable record"
+        );
+        assert!(
+            !walter
+                .pending_sigs
+                .get(&id)
+                .is_some_and(|p| p.sigs.iter().any(|a| a.member == "walter")),
+            "a consent-less restore never auto-signs — the human vote is the content"
+        );
+        let petra_sig = coord
+            .pending_sigs
+            .get(&id)
+            .expect("petra's pending set")
+            .sigs
+            .iter()
+            .find(|a| a.member == "petra")
+            .expect("petra co-signed")
+            .sig
+            .clone();
+        walter.receive_approval(id, "petra", 1, &petra_sig);
+        assert_eq!(
+            walter.chain_head.as_ref().expect("head").height,
+            0,
+            "1 signature + no consent stays open"
+        );
+
+        // the PUBLIC approve — the exact call that answered UnknownProposal
+        // before the record existed
+        walter.cmd_approve(ProposalId(id)).expect("approve accepts the id");
+
+        // petra + walter = 2-of-3: sealed, settled
+        assert_eq!(walter.chain_head.as_ref().expect("head").height, 1);
+        assert_eq!(
+            walter.proposals.get(&id).map(|p| p.state),
+            Some(ProposalState::Applied),
+            "the commit settles the record"
+        );
+        assert!(
+            !walter.pending_sigs.contains_key(&id) && !walter.proposal_changes.contains_key(&id),
+            "the vote bookkeeping is dropped"
+        );
+        verify_chain(&walter.chain).expect("the sealed chain verifies from zero");
+    }
+
+    /// Auto-approval (recovery_auto_approval.md §3): a survivor that RECEIVES
+    /// a `Restored` proposal carrying a consent it can verify itself signs it
+    /// without a human — the recovery completes as soon as m survivors are
+    /// online, no card-clicking required. The seal needs no `cmd_approve`.
+    #[test]
+    fn a_consented_restore_is_approved_without_a_human() {
         let b = Builder::new(&["petra", "walter", "dora", "erika"], 3);
         let mut coord = chain_signer("petra", &b, b.blocks.clone());
         let mut walter = chain_signer("walter", &b, b.blocks.clone());
@@ -8162,13 +8370,6 @@ mod tests {
             )
             .expect("a valid request proposes");
 
-        // visible on the proposer: a real record with the reserved op
-        let rec = coord.proposals.get(&id).expect("the proposer holds a record");
-        assert_eq!(rec.payload["op"], "restore_member");
-        assert_eq!(rec.payload["member"], "dora");
-        assert_eq!(rec.state, ProposalState::Proposed, "2 of 3 voices — still open");
-
-        // …and on a receiver: the gossip's log event creates the SAME record
         let env = walter.make_env(
             "petra".to_string(),
             WorkspaceEvent::MembershipProposed {
@@ -8191,11 +8392,16 @@ mod tests {
             Vec::new(),
             Some(consent),
         );
-        assert_eq!(
-            walter.proposals.get(&id).map(|p| p.state),
-            Some(ProposalState::Proposed),
-            "the receiver sees an open, votable record"
+        // the receipt alone put walter's REAL signature into the pending set
+        assert!(
+            walter
+                .pending_sigs
+                .get(&id)
+                .is_some_and(|p| p.sigs.iter().any(|a| a.member == "walter")),
+            "a verified consent auto-signs on receipt"
         );
+        // …and petra's gossiped signature completes the threshold: petra +
+        // walter + dora's consent = 3-of-4, sealed with no cmd_approve call
         let petra_sig = coord
             .pending_sigs
             .get(&id)
@@ -8207,23 +8413,76 @@ mod tests {
             .sig
             .clone();
         walter.receive_approval(id, "petra", 1, &petra_sig);
-
-        // the PUBLIC approve — the exact call that answered UnknownProposal
-        // before the record existed
-        walter.cmd_approve(ProposalId(id)).expect("approve accepts the id");
-
-        // petra + walter + dora's consent = 3-of-4: sealed, settled
         assert_eq!(walter.chain_head.as_ref().expect("head").height, 1);
         assert_eq!(
             walter.proposals.get(&id).map(|p| p.state),
             Some(ProposalState::Applied),
-            "the commit settles the record"
-        );
-        assert!(
-            !walter.pending_sigs.contains_key(&id) && !walter.proposal_changes.contains_key(&id),
-            "the vote bookkeeping is dropped"
+            "the commit settles the record without a human approve"
         );
         verify_chain(&walter.chain).expect("the sealed chain verifies from zero");
+    }
+
+    /// The auto-approval trusts NOTHING the coordinator claims: a consent
+    /// that does not verify against the seat's anchored key never auto-signs
+    /// (a malicious coordinator would otherwise harvest m unattended
+    /// signatures for a block the verifier then rejects — or worse, for a
+    /// change nobody consented to).
+    #[test]
+    fn a_forged_consent_never_auto_signs() {
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        // signed by the WRONG seat's key (petra's), claiming dora's consent
+        let forged = molt_storage::identity_sign(
+            b.key("petra"),
+            &molt_core::chain::restore_consent_bytes(&b.republic_id, "dora", &b.pk("dora"), ""),
+        );
+        walter.receive_membership_proposal(
+            7,
+            MembershipOp::Restored,
+            "dora",
+            &b.pk("dora"),
+            None,
+            Vec::new(),
+            Some(forged),
+        );
+        assert!(
+            !walter
+                .pending_sigs
+                .get(&7)
+                .is_some_and(|p| p.sigs.iter().any(|a| a.member == "walter")),
+            "a forged consent must wait for a human, never auto-sign"
+        );
+    }
+
+    /// A restore claiming a transport anchor another living seat already
+    /// holds (or one that is not even canonical) never auto-signs — the
+    /// coordinator's ingest checks this, but auto-approval re-checks it
+    /// because it must not trust the coordinator.
+    #[test]
+    fn a_restore_claiming_a_foreign_anchor_never_auto_signs() {
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        // every Builder seat carries this anchor — dora claiming it collides
+        // with petra's and walter's living seats (and a non-canonical string
+        // refuses on the same guard ladder)
+        let taken = "cc".repeat(32);
+        let consent = consent_for(&b, "dora", &taken);
+        walter.receive_membership_proposal(
+            7,
+            MembershipOp::Restored,
+            "dora",
+            &b.pk("dora"),
+            Some(taken),
+            Vec::new(),
+            Some(consent),
+        );
+        assert!(
+            !walter
+                .pending_sigs
+                .get(&7)
+                .is_some_and(|p| p.sigs.iter().any(|a| a.member == "walter")),
+            "an anchor collision must wait for a human, never auto-sign"
+        );
     }
 
     /// R6 — the pool is group state any member can move and no member can
