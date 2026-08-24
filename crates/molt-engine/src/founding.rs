@@ -1135,6 +1135,20 @@ fn check_roster_anchors(identities: &[molt_core::MemberIdentity]) -> Result<(), 
 /// 2026-08-01): the field is fully DERIVABLE from `identities`, so equality
 /// closes the hole with no byte-layout bump and no recompute-site ripple.
 /// Recovery already derives it (`recovery.rs::sealed_roster_from_blob`).
+/// The constitutional numbers must describe the table they ride with:
+/// `n` seats in the identity table and a threshold inside `1..=n` — the
+/// same shape `verify_genesis` enforces, checked here before a member
+/// ratifies and before a joiner writes anything (review 2026-08-25).
+fn check_rule_shape(rule_m: u8, rule_n: u8, seats: usize) -> Result<(), String> {
+    if usize::from(rule_n) != seats {
+        return Err(format!("rule n={rule_n} does not match {seats} seats"));
+    }
+    if rule_m == 0 || rule_m > rule_n {
+        return Err(format!("rule m={rule_m} is outside 1..={rule_n}"));
+    }
+    Ok(())
+}
+
 fn check_roster_matches_identities(
     roster: &[String],
     identities: &[molt_core::MemberIdentity],
@@ -1173,7 +1187,13 @@ pub(crate) fn verify_sealed_roster(s: &molt_core::SealedRoster) -> Result<(), St
     // the unsigned constitutional field: it must be exactly what the signed
     // identity table says, or the member list diverges from what was ratified
     check_roster_matches_identities(&s.roster, &s.identities)?;
-    if s.attestations.len() != s.identities.len() {
+    check_rule_shape(s.rule_m, s.rule_n, s.identities.len())?;
+    // one attestation per DISTINCT member: `[A, A, B]` over three seats is
+    // not "fully signed" (the same rule `verify_genesis` enforces — here it
+    // runs BEFORE anything reaches disk)
+    let signers: std::collections::BTreeSet<&str> =
+        s.attestations.iter().map(|a| a.member.as_str()).collect();
+    if s.attestations.len() != s.identities.len() || signers.len() != s.identities.len() {
         return Err("roster is not fully signed by every member".to_string());
     }
     // one set, one byte form, no key this build cannot render — the same
@@ -1327,6 +1347,7 @@ pub(crate) fn verify_seal_proposal(
     // sign-what-you-see extends to the member list itself: a member must not
     // ratify a table whose roster names a set its identities do not back
     check_roster_matches_identities(&proposal.roster, &proposal.identities)?;
+    check_rule_shape(proposal.rule_m, proposal.rule_n, proposal.identities.len())?;
     let Some(our_seat) = proposal
         .identities
         .iter()
@@ -3688,6 +3709,33 @@ mod tests {
     #[test]
     fn verify_sealed_roster_accepts_a_valid_roster() {
         assert!(verify_sealed_roster(&valid_roster()).is_ok());
+    }
+
+    /// The member-side verifiers were weaker than `verify_genesis`: a table
+    /// signed `[A, A, B]`, or one whose `rule_n` disagrees with its seats,
+    /// passed and was written to disk before the strong check ran.
+    #[test]
+    fn verify_sealed_roster_refuses_duplicate_signers_and_a_lying_n() {
+        let mut dup = valid_roster();
+        assert!(dup.attestations.len() >= 2, "fixture has several signers");
+        dup.attestations[1] = dup.attestations[0].clone();
+        assert!(
+            verify_sealed_roster(&dup).is_err(),
+            "[A, A, ...] is not signed by every member"
+        );
+        let mut lying = valid_roster();
+        lying.rule_n = lying.rule_n.saturating_add(1);
+        lying.republic_id =
+            molt_storage::republic_id(&lying.name, lying.rule_m, lying.rule_n, &lying.identities);
+        assert!(verify_sealed_roster(&lying).is_err(), "n must equal the seat count");
+        let (name, pk, npk) = {
+            let seat = &lying.identities[0];
+            (seat.member.clone(), seat.identity_pk.clone(), seat.nostr_pk.clone())
+        };
+        assert!(
+            verify_seal_proposal(&lying, &name, &pk, &npk).is_err(),
+            "the ratifying member refuses the same table"
+        );
     }
 
     /// SECURITY — `SealedRoster.roster` is a CONSTITUTIONAL field that no
