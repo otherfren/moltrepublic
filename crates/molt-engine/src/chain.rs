@@ -1897,9 +1897,35 @@ impl State {
         relays: Vec<String>,
         consent: Option<String>,
     ) {
+        let change = ChainChange::Membership {
+            op,
+            member: member.to_string(),
+            identity_pk: identity_pk.to_string(),
+            nostr_pk,
+            relays,
+            consent,
+        };
+        if !self.admits_membership_proposal(id, &change) {
+            return;
+        }
+        self.next_id = self.next_id.max(id.saturating_add(1));
+        self.proposal_changes.insert(id, change);
+        // L2: signatures that OUTRAN this change become displayable now
+        self.reverify_pending(id);
+        // recovery_auto_approval.md §3: a consent this node can verify itself
+        // needs no human voice — sign it now, so a recovery completes as soon
+        // as m survivors are online
+        self.auto_approve_restore(id);
+    }
+
+    /// The three gates a wire membership proposal must pass BEFORE anything
+    /// is recorded (the ingest arm calls this first, the registration
+    /// re-checks): a plausible id, the pending cap, and an id that names no
+    /// different change.
+    pub(crate) fn admits_membership_proposal(&self, id: u64, change: &ChainChange) -> bool {
         if !self.plausible_wire_id(id) {
             tracing::warn!(%id, "refusing a membership proposal with an implausible id");
-            return;
+            return false;
         }
         // L3: pending membership changes are bounded by what can ever be
         // open at once — one re-admission per seat plus slack for Joined
@@ -1916,17 +1942,8 @@ impl State {
             .unwrap_or(16);
         if pending_membership >= cap && !self.proposal_changes.contains_key(&id) {
             tracing::warn!(%id, "refusing a membership proposal beyond the pending cap");
-            return;
+            return false;
         }
-        self.next_id = self.next_id.max(id.saturating_add(1));
-        let change = ChainChange::Membership {
-            op,
-            member: member.to_string(),
-            identity_pk: identity_pk.to_string(),
-            nostr_pk,
-            relays,
-            consent,
-        };
         // SECURITY: the id is peer-chosen. `proposal_change` resolves an id
         // to `proposal_changes` first, so registering a Membership under an
         // id that already names a SURFACE proposal (or a different pending
@@ -1934,17 +1951,11 @@ impl State {
         // sign these membership bytes instead — a threshold-gate bypass that
         // injects a roster member with no human ever approving a membership
         // change. Refuse any occupied id that is not this exact change.
-        if !self.id_free_for(id, &change) {
+        if !self.id_free_for(id, change) {
             tracing::warn!(%id, "refusing a membership proposal whose id names a different change");
-            return;
+            return false;
         }
-        self.proposal_changes.insert(id, change);
-        // L2: signatures that OUTRAN this change become displayable now
-        self.reverify_pending(id);
-        // recovery_auto_approval.md §3: a consent this node can verify itself
-        // needs no human voice — sign it now, so a recovery completes as soon
-        // as m survivors are online
-        self.auto_approve_restore(id);
+        true
     }
 
     /// Auto-approve a `Membership{Restored}` proposal whose consent THIS node
@@ -2335,8 +2346,10 @@ impl State {
         let bytes = approval_bytes(&self.republic_id(), height, &change);
         let sig = molt_storage::identity_sign(sk, &bytes);
         let me = self.member();
-        self.collect_sig(id, height, &me, &sig);
+        // the decision register: the ONLY writer (see `rebase_pending_approvals`)
+        self.own_approvals.insert(id);
         // the own signature is genuine by construction (L2)
+        self.collect_sig(id, height, &me, &sig, true);
         if let Some(p) = self.pending_sigs.get_mut(&id) {
             p.verified.insert(me.clone());
         }
@@ -2375,12 +2388,18 @@ impl State {
         }
     }
 
-    /// Collect one signature into a proposal's pending set: dedup by member
-    /// (latest wins), and rebase the set to a newer `height` (dropping stale
-    /// signatures) — a signature for an already-superseded height is ignored.
-    /// A TERMINAL card collects nothing (D6): a post-seal approval must not
-    /// resurrect the ephemeral set the seal just cleared.
-    fn collect_sig(&mut self, id: u64, height: u64, member: &str, sig: &str) {
+    /// Collect one signature into a proposal's pending set: dedup by member,
+    /// and rebase the set to a newer `height` (dropping stale signatures) —
+    /// a signature for an already-superseded height is ignored. A TERMINAL
+    /// card collects nothing (D6): a post-seal approval must not resurrect
+    /// the ephemeral set the seal just cleared.
+    ///
+    /// `verified` is the caller's verdict on THIS signature. Among two for
+    /// one member the later one wins — unless the held one verifies and the
+    /// new one does not: junk under a roster name must never evict a
+    /// genuine approval (one insider could otherwise stall every vote), and
+    /// under the OWN name an unverified signature is never held at all.
+    fn collect_sig(&mut self, id: u64, height: u64, member: &str, sig: &str, verified: bool) {
         if self
             .proposals
             .get(&id)
@@ -2399,12 +2418,18 @@ impl State {
         {
             return;
         }
+        if !verified && member == self.member() {
+            return;
+        }
         let entry = self.pending_sigs.entry(id).or_default();
         if height > entry.height {
             entry.height = height;
             entry.sigs.clear();
             entry.verified.clear();
         } else if height < entry.height {
+            return;
+        }
+        if !verified && entry.verified.contains(member) {
             return;
         }
         entry.sigs.retain(|a| a.member != member);
@@ -3125,7 +3150,6 @@ impl State {
             return;
         };
         let target = head.height + 1;
-        let me = self.member();
         let stale: Vec<u64> = self
             .pending_sigs
             .iter()
@@ -3154,10 +3178,10 @@ impl State {
             self.emit(Event::CheckpointStale { id: ProposalId(id) });
         }
         for id in stale {
-            let mine = self
-                .pending_sigs
-                .get(&id)
-                .is_some_and(|p| p.sigs.iter().any(|a| a.member == me));
+            // the LOCAL decision register, never the wire-collected set: a
+            // peer can put junk under this node's name into `pending_sigs`,
+            // and re-signing from there was a threshold bypass (2026-08-25)
+            let mine = self.own_approvals.contains(&id);
             self.pending_sigs.remove(&id);
             // WP4b: a checkpoint's change is CUT-bound (upto == height - 1,
             // enforced by the verifier) — after the head moved, re-signing
@@ -3421,7 +3445,7 @@ impl State {
     /// registering it (or even bumping `next_id` for it) would poison every
     /// later local mint (a u64::MAX id would freeze proposing for good).
     /// Window shared with the decline park.
-    fn plausible_wire_id(&self, id: u64) -> bool {
+    pub(crate) fn plausible_wire_id(&self, id: u64) -> bool {
         id <= self
             .next_id
             .saturating_add(crate::proposals::PARKED_DECLINE_ID_WINDOW)
@@ -3523,8 +3547,9 @@ impl State {
             tracing::warn!(%id, "dropping an approval for an implausible proposal id");
             return;
         }
-        self.collect_sig(id, height, by, sig);
-        if self.approval_verifies(id, height, by, sig) {
+        let verified = self.approval_verifies(id, height, by, sig);
+        self.collect_sig(id, height, by, sig, verified);
+        if verified {
             if let Some(p) = self.pending_sigs.get_mut(&id) {
                 p.verified.insert(by.to_string());
             }
@@ -6220,6 +6245,138 @@ mod tests {
             1,
             "verification costs no liveness — the block seals"
         );
+    }
+
+    /// **A wire membership proposal passes its gates BEFORE it is recorded.**
+    /// Recording first persisted a phantom card per frame and let one
+    /// `id = u64::MAX - 1` set `next_id = u64::MAX` on every node — after
+    /// which every further proposal in the republic silently vanished
+    /// (review 2026-08-25, HIGH).
+    #[test]
+    fn a_membership_proposal_with_an_implausible_id_is_not_recorded() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        let next_before = walter.next_id;
+        let hostile = u64::MAX - 1;
+        wire(
+            &mut walter,
+            "petra",
+            1,
+            WorkspaceEvent::MembershipProposed {
+                id: ProposalId(hostile),
+                op: MembershipOp::Restored,
+                member: "dora".to_string(),
+                identity_pk: b.pk("dora"),
+                nostr_pk: None,
+                relays: Vec::new(),
+                consent: None,
+            },
+        );
+        assert_eq!(walter.next_id, next_before, "next_id is not poisoned");
+        assert!(!walter.proposals.contains_key(&hostile), "no phantom card");
+        assert!(!walter.proposal_changes.contains_key(&hostile), "nothing registered");
+    }
+
+    /// **A forged approval under THIS node's name is never re-signed.**
+    ///
+    /// Review 2026-08-25 (CRITICAL): "this node approved X" was inferred
+    /// from the wire-collected set, which any member fills with junk under
+    /// any roster name. At the next re-base the node then signed X with its
+    /// REAL key — a threshold bypass by one insider, no human decision.
+    /// The decision register is local: only `cmd_approve`'s own signing
+    /// path writes it.
+    #[test]
+    fn a_forged_own_approval_is_not_re_signed_at_the_rebase() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        let hostile = json!({ "op": "add_note", "id": 1 });
+        wire(
+            &mut walter,
+            "petra",
+            1,
+            WorkspaceEvent::Proposed {
+                id: ProposalId(1),
+                surface: Surface::Memory,
+                payload: hostile.clone(),
+            },
+        );
+        // petra gossips a junk approval UNDER WALTER'S NAME
+        walter.receive_approval(1, "walter", 1, "deadbeef");
+        // an unrelated block seals at height 1 (petra + dora) — the re-base
+        // sweeps every pending set at the old height
+        wire(
+            &mut walter,
+            "petra",
+            2,
+            WorkspaceEvent::Proposed {
+                id: ProposalId(2),
+                surface: Surface::Memory,
+                payload: json!({ "op": "add_note", "id": 2 }),
+            },
+        );
+        b.commit_applied(2, &["petra", "dora"]);
+        walter.receive_block(b.blocks[1].clone());
+        assert_eq!(walter.chain_head.as_ref().expect("head").height, 1);
+        let mine = walter
+            .pending_sigs
+            .get(&1)
+            .is_some_and(|p| p.sigs.iter().any(|a| a.member == "walter"));
+        assert!(!mine, "walter never decided on #1 — the re-base must not sign it");
+        assert_eq!(walter.chain_approval_count(1), 0, "no forged progress");
+    }
+
+    /// **Junk never evicts a verified signature.** "Latest wins" let one
+    /// insider replace every member's genuine approval with garbage at the
+    /// same height — a vote that never reaches m anywhere (review
+    /// 2026-08-25, HIGH).
+    #[test]
+    fn junk_does_not_evict_a_verified_signature() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        let payload = json!({ "op": "add_note", "id": 1 });
+        wire(
+            &mut walter,
+            "petra",
+            1,
+            WorkspaceEvent::Proposed {
+                id: ProposalId(1),
+                surface: Surface::Memory,
+                payload: payload.clone(),
+            },
+        );
+        let change = ChainChange::Applied {
+            proposal_id: 1,
+            surface: Surface::Memory,
+            payload,
+        };
+        let bytes = approval_bytes(&b.republic_id, 1, &change);
+        let genuine = identity_sign(b.key("petra"), &bytes);
+        walter.receive_approval(1, "petra", 1, &genuine);
+        assert_eq!(walter.chain_approval_count(1), 1);
+        // dora (or anyone) gossips junk under petra's name at the same height
+        walter.receive_approval(1, "petra", 1, "deadbeef");
+        assert_eq!(walter.chain_approval_count(1), 1, "the genuine one stands");
+        let kept = walter
+            .pending_sigs
+            .get(&1)
+            .and_then(|p| p.sigs.iter().find(|a| a.member == "petra"))
+            .map(|a| a.sig.clone());
+        assert_eq!(kept.as_deref(), Some(genuine.as_str()));
     }
 
     /// L2 liveness twin: an approval that OUTRAN its card is collected but

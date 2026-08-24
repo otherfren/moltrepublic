@@ -402,7 +402,11 @@ impl State {
                     superseded: false,
                     withdrawn: false,
                 });
-                self.next_id = self.next_id.max(id.0.saturating_add(1));
+                // within the wire id window only: a pre-gate log entry (or a
+                // hostile replay) must not poison the counter on rebuild
+                if self.plausible_wire_id(id.0) {
+                    self.next_id = self.next_id.max(id.0.saturating_add(1));
+                }
                 let _ = self.register_parked_declines(id.0);
                 let _ = self.register_parked_withdrawal(id.0);
             }
@@ -708,6 +712,7 @@ impl State {
         self.pending_served_blob = None;
         self.chain_applied.clear();
         self.pending_sigs.clear();
+        self.own_approvals.clear();
         self.pending_declines.clear();
         self.pending_withdrawals.clear();
         self.file_series.clear();

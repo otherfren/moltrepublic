@@ -2025,7 +2025,7 @@ impl State {
                     kind: f.kind.clone(),
                     size: f.size,
                     available: f.available,
-                    expires_ts: if m.ts == 0 { 0 } else { m.ts + retention_secs },
+                    expires_ts: if m.ts == 0 { 0 } else { m.ts.saturating_add(retention_secs) },
                     online: m.from == me || presence(&m.from) != 2,
                     // the sharer's log-anchored sha256 ("" = legacy share,
                     // honestly unknown) — what a download must reproduce

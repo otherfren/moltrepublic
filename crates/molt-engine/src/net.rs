@@ -70,6 +70,11 @@ const ORDERED_PARK_MAX: usize = 512;
 /// 600 s, so an honest predecessor always lands well inside the window.
 pub(crate) const ORDERED_PARK_GIVEUP_SECS: u64 = 900;
 
+/// How far ahead of this node's clock a peer's stamp may claim to be
+/// (`FileServed` and wire chat): clock skew, not a licence to date a
+/// message into a retention-proof future.
+pub(crate) const WIRE_STAMP_SKEW_SECS: u64 = 900;
+
 /// Demo fan-out jitter (ms): enough to be honest about asynchrony, small
 /// enough to feel live. Real deployments keep the concept's 2 s default.
 const DEMO_JITTER_MS: u64 = 300;
@@ -849,11 +854,35 @@ impl State {
     /// R6 pool-change rebuild hands the running `Arc` straight through (the
     /// `build_real_net_shared` twin): a late encrypt by the dying outbox
     /// advances the SAME ratchet the new runtime continues from.
+    /// Hand the runtime's MLS group the chain's identity table as the ONE
+    /// authority on which signature key a leaf for each member may carry:
+    /// a re-key commit adding a leaf under any other key is dropped before
+    /// the merge (review 2026-08-25). A workspace without a chain sets no
+    /// authority — its adds stay unchecked, as before.
+    fn arm_mls_roster_authority(&self, mls: &std::sync::Arc<std::sync::Mutex<molt_net::MlsMember>>) {
+        let Some(head) = self.chain_head.as_ref() else {
+            return;
+        };
+        let keys: std::collections::BTreeMap<String, Vec<u8>> = head
+            .identities
+            .iter()
+            .filter_map(|i| hex::decode(&i.identity_pk).ok().map(|k| (i.member.clone(), k)))
+            .collect();
+        if keys.len() != head.identities.len() {
+            tracing::warn!("an anchored identity key does not decode — MLS re-key authority not armed");
+            return;
+        }
+        if let Ok(mut m) = mls.lock() {
+            m.set_roster_keys(keys);
+        }
+    }
+
     pub(crate) fn build_group_net_shared(
         &mut self,
         mls_arc: std::sync::Arc<std::sync::Mutex<molt_net::MlsMember>>,
     ) -> Option<crate::GroupNet> {
         let relays = self.dialable_group_relays();
+        self.arm_mls_roster_authority(&mls_arc);
         let active = self.active.as_ref()?;
         let nostr = self.nostr.as_ref()?;
         let dialer = self.dialer_for().ok()?;
@@ -904,6 +933,7 @@ impl State {
         mesh: &[molt_core::MeshLink],
         mls_arc: Arc<Mutex<molt_net::MlsMember>>,
     ) -> Option<NetRuntime> {
+        self.arm_mls_roster_authority(&mls_arc);
         let active = self.active.as_ref()?;
         let links: Vec<PeerLink> = mesh.iter().filter_map(PeerLink::from_mesh).collect();
         if links.is_empty() {
@@ -1285,6 +1315,20 @@ impl State {
                     .channel
                     .normalized()
                     .unwrap_or(molt_core::ChannelRef::Group);
+                // a FRESH message carries no stances: reactions, receipts
+                // and the tombstone travel as their own link-authenticated
+                // events, so inside a body they can only be forged
+                // attributions to other members. The stamp is the sender's
+                // claim: bound it like `FileServed` (no future beyond the
+                // skew window, no "unknown age" that retention never
+                // reaches) — reads add the retention to it
+                msg.reactions.clear();
+                msg.read_by.clear();
+                msg.deleted_by = None;
+                let now = self.presence_now();
+                if msg.ts == 0 || msg.ts > now.saturating_add(WIRE_STAMP_SKEW_SECS) {
+                    msg.ts = now;
+                }
                 // P5: the wire admits each message exactly once, by stable
                 // id — a nil id (pre-chat-bus sender) or an already-known
                 // id (duplicate / replay / mesh-rebuild resend) is dropped
@@ -1618,9 +1662,20 @@ impl State {
                 // UnknownProposal, and an m>=3 recovery stalled. Re-author
                 // and record (the Chat arm's pattern) so the survivor can
                 // vote; `by` stays the link identity, never the body's
-                // claim, and record-first is the order id_free_for was
-                // written for. Membership frames do not cross the wire
-                // (crosses_wire), so this cannot re-gossip.
+                // claim. The GATES run first (review 2026-08-25): recording
+                // before them persisted a phantom card per frame and let one
+                // `id = u64::MAX - 1` poison `next_id` on every node.
+                let change = molt_core::ChainChange::Membership {
+                    op,
+                    member: member.clone(),
+                    identity_pk: identity_pk.clone(),
+                    nostr_pk: nostr_pk.clone(),
+                    relays: relays.clone(),
+                    consent: consent.clone(),
+                };
+                if !self.admits_membership_proposal(id.0, &change) {
+                    return Ok(Reply::Ack);
+                }
                 let env = self.make_env(
                     from.clone(),
                     WorkspaceEvent::MembershipProposed {
@@ -1705,7 +1760,7 @@ impl State {
                 // newer stamp (at-least-once delivery)
                 let from_sharer =
                     matches!(self.chat_by_id(&id), Ok((_, msg)) if msg.from == from);
-                let plausible = at <= crate::now_secs().saturating_add(900);
+                let plausible = at <= crate::now_secs().saturating_add(WIRE_STAMP_SKEW_SECS);
                 let newer = self.file_series.get(&id).map_or(true, |old| at > *old);
                 if from_sharer && plausible && newer {
                     self.file_series.insert(id, at);
@@ -3745,6 +3800,84 @@ mod tests {
         .expect("a wire delivery never errors");
         assert_eq!(st.chat.len(), 1, "the wire message landed");
         assert_eq!(st.chat[0].body, "was in flight");
+    }
+
+    /// **A hostile stamp on a wire chat never panics a read.** `ts` is the
+    /// peer's claim; `uploads_view` added the retention to it, and with
+    /// release overflow checks on, `u64::MAX` took the whole actor down —
+    /// persisted, so every reopen died on the Uploads tab (review
+    /// 2026-08-25). The wire clamps the stamp to a plausible window and
+    /// the read saturates.
+    #[test]
+    fn a_wire_chat_with_a_hostile_stamp_never_panics_the_uploads_view() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let mut st = crate::tests::plain_state();
+        let mut msg = ChatMessage::text(id(8), "peer-1", "share", u64::MAX);
+        msg.file = Some(molt_core::FileMeta {
+            name: "a.bin".to_string(),
+            size: 1,
+            kind: "bin".to_string(),
+            modified: u64::MAX,
+            available: true,
+            checksum: String::new(),
+        });
+        st.cmd_net_delivered(
+            "peer-1".to_string(),
+            EventEnvelope { prev_seq: 0,
+                seq: 1,
+                ts: u64::MAX,
+                by: "peer-1".to_string(),
+                body: WorkspaceEvent::Chat(msg),
+            },
+            None,
+        )
+        .expect("a wire delivery never errors");
+        assert_eq!(st.chat.len(), 1);
+        assert!(
+            st.chat[0].ts <= crate::now_secs().saturating_add(900),
+            "the stamp is clamped to the FileServed plausibility window"
+        );
+        let uploads = st.uploads_view();
+        assert_eq!(uploads.len(), 1, "the share is listed, the read did not panic");
+    }
+
+    /// A wire chat is a FRESH message: the log original carries no
+    /// reactions, receipts or tombstone — those travel as their own
+    /// link-authenticated events. Carrying them inside the body attributed
+    /// forged stances to OTHER members (review 2026-08-25).
+    #[test]
+    fn a_wire_chat_carries_no_foreign_reactions_receipts_or_tombstone() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let mut st = crate::tests::plain_state();
+        let mut msg = ChatMessage::text(id(9), "peer-1", "forged", 0);
+        msg.reactions
+            .insert("👍".to_string(), vec!["peer-2".to_string()]);
+        msg.read_by.insert("peer-2".to_string());
+        msg.deleted_by = Some("peer-2".to_string());
+        st.cmd_net_delivered(
+            "peer-1".to_string(),
+            EventEnvelope { prev_seq: 0,
+                seq: 1,
+                ts: 0,
+                by: "peer-1".to_string(),
+                body: WorkspaceEvent::Chat(msg),
+            },
+            None,
+        )
+        .expect("a wire delivery never errors");
+        let m = &st.chat[0];
+        assert!(m.reactions.is_empty(), "no forged reactions");
+        assert!(m.read_by.is_empty(), "no forged receipts");
+        assert_eq!(m.deleted_by, None, "no forged tombstone");
+        assert_ne!(m.ts, 0, "an unknown age is the arrival time, not 'forever'");
     }
 
     fn id(n: usize) -> MessageId {

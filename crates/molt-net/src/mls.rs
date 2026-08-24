@@ -45,6 +45,7 @@ use openmls_rust_crypto::OpenMlsRustCrypto;
 use openmls_traits::types::SignatureScheme;
 use openmls_traits::OpenMlsProvider;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use tls_codec::{Deserialize as _, Serialize as _};
 
@@ -263,7 +264,19 @@ pub struct MlsMember {
     /// wins the tiebreak — without it, a losing committer would sit in a
     /// state nobody else shares (a silent permanent fork). Cleared as soon
     /// as the epoch moves on.
-    prior: Option<(u64, Vec<u8>, CommitKey)>,
+    /// The fourth element names the leaves that commit REMOVED: a rewind
+    /// onto a commit from one of them is refused (an evicted device would
+    /// otherwise undo its own eviction with a back-dated commit).
+    prior: Option<(u64, Vec<u8>, CommitKey, Vec<String>)>,
+    /// The anchored identity key per roster member — the ONLY signature key
+    /// a leaf added for that member may carry. `None` = no authority set
+    /// (a test group, a workspace without a chain): adds go unchecked, as
+    /// they did before the review 2026-08-25 finding. The engine sets it
+    /// from the chain's identity table at every runtime build.
+    roster_keys: Option<BTreeMap<String, Vec<u8>>>,
+    /// While a rewind is applying the winning commit: the leaves the merged
+    /// commit removed, whose commit must not win (see `prior`).
+    rewind_forbidden: Vec<String>,
     /// The bounded ring of PAST epochs' exporter secrets (newest first), for
     /// the outer envelope layer only — see [`EXPORTER_RING_K`].
     exporter_ring: Vec<[u8; EXPORTER_LEN]>,
@@ -345,6 +358,8 @@ impl MlsMember {
             name: name.to_string(),
             group: None,
             prior: None,
+            roster_keys: None,
+            rewind_forbidden: Vec::new(),
             exporter_ring: Vec::new(),
             exporter_ring_epochs: Vec::new(),
         })
@@ -495,7 +510,7 @@ impl MlsMember {
         // PRIOR-STATE SLOT before we merge our own commit: a concurrent
         // same-epoch commit may win the tiebreak, and then we must rewind to
         // exactly this state instead of forking the group (N3 §1)
-        self.arm_prior_slot(created_at, &commit_bytes)?;
+        self.arm_prior_slot(created_at, &commit_bytes, vec![member.to_string()])?;
         self.retire_exporter();
         let group = self.group.as_mut().ok_or(MlsError::NoGroup)?;
         group
@@ -598,7 +613,7 @@ impl MlsMember {
         // commit would rewind the group into a state that can still read
         // old traffic — the exact hole `max_past_epochs = 0` exists to
         // close. The content type rides in the cleartext framing header.
-        if let Some((prior_epoch, _, own_key)) = &self.prior {
+        if let Some((prior_epoch, _, own_key, _)) = &self.prior {
             if protocol.epoch().as_u64() == *prior_epoch
                 && protocol.content_type() == openmls::framing::ContentType::Commit
             {
@@ -613,6 +628,14 @@ impl MlsMember {
             .process_message(&self.provider, protocol)
             .map_err(|e| MlsError::Wire(format!("processing message: {e:?}")))?;
         let from = String::from_utf8_lossy(processed.credential().serialized_content()).into_owned();
+        // during a REWIND only: the commit we are about to undo removed
+        // these leaves — one of them re-deciding the epoch with a lower
+        // (back-dated, self-chosen) key would undo its own eviction
+        if self.rewind_forbidden.contains(&from) {
+            return Err(MlsError::Wire(format!(
+                "a leaf the merged commit removed ({from}) cannot win the epoch"
+            )));
+        }
         match processed.into_content() {
             // NOTE (review 2026-07-31): application traffic must NOT clear
             // the slot. Doing so re-opened the bystander fork: a member that
@@ -645,6 +668,41 @@ impl MlsMember {
                         .into_owned()
                     })
                     .collect();
+                // AUTHORIZATION, before anything is merged: a leaf added for
+                // a roster member must carry that member's anchored identity
+                // key — the same pairing the founder enforced at join. A
+                // refusal leaves the epoch untouched (the commit was only
+                // staged).
+                if let Some(roster) = &self.roster_keys {
+                    for add in staged.add_proposals() {
+                        let leaf = add.add_proposal().key_package().leaf_node();
+                        let name =
+                            String::from_utf8_lossy(leaf.credential().serialized_content())
+                                .into_owned();
+                        let key = leaf.signature_key().as_slice();
+                        if roster.get(&name).map(Vec::as_slice) != Some(key) {
+                            return Err(MlsError::Wire(format!(
+                                "unauthorized re-key: the leaf added for {name} does not carry its anchored identity key"
+                            )));
+                        }
+                    }
+                }
+                // WHO this commit removes, read BEFORE the merge drops the
+                // leaves: a later rewind must not hand the epoch to one of them
+                let removed: Vec<String> = {
+                    let group = self.group.as_ref().ok_or(MlsError::NoGroup)?;
+                    let gone: Vec<_> = staged
+                        .remove_proposals()
+                        .map(|r| r.remove_proposal().removed())
+                        .collect();
+                    group
+                        .members()
+                        .filter(|m| gone.contains(&m.index))
+                        .map(|m| {
+                            String::from_utf8_lossy(m.credential.serialized_content()).into_owned()
+                        })
+                        .collect()
+                };
                 let retiring = self.exporter_secret().ok();
                 let retiring_epoch = self.epoch();
                 // BYSTANDERS CONVERGE TOO (review finding 2026-07-31): a node
@@ -653,7 +711,7 @@ impl MlsMember {
                 // and without a rewind slot the loser's branch would be its
                 // permanent home. Arming the slot on EVERY merge gives every
                 // node the same rule as the committers.
-                self.arm_prior_slot(created_at, wire)?;
+                self.arm_prior_slot(created_at, wire, removed)?;
                 let group = self.group.as_mut().ok_or(MlsError::NoGroup)?;
                 group
                     .merge_staged_commit(&self.provider, *staged)
@@ -741,10 +799,15 @@ impl MlsMember {
 
     /// Snapshot the CURRENT (pre-merge) state into the prior slot, so a
     /// losing concurrent commit can be rewound (N3 §1).
-    fn arm_prior_slot(&mut self, created_at: u64, commit_bytes: &[u8]) -> Result<(), MlsError> {
+    fn arm_prior_slot(
+        &mut self,
+        created_at: u64,
+        commit_bytes: &[u8],
+        removed: Vec<String>,
+    ) -> Result<(), MlsError> {
         let epoch = self.epoch();
         let snapshot = self.snapshot()?;
-        self.prior = Some((epoch, snapshot, CommitKey::new(created_at, commit_bytes)));
+        self.prior = Some((epoch, snapshot, CommitKey::new(created_at, commit_bytes), removed));
         Ok(())
     }
 
@@ -757,7 +820,7 @@ impl MlsMember {
         winner: &[u8],
         created_at: u64,
     ) -> Result<MlsIncoming, MlsError> {
-        let Some((_, snapshot, _)) = self.prior.clone() else {
+        let Some((_, snapshot, _, removed)) = self.prior.clone() else {
             return Err(MlsError::NoGroup);
         };
         // TRANSACTIONAL: the "winner" is unauthenticated until it processes
@@ -771,7 +834,10 @@ impl MlsMember {
                                        // would send it straight back here
         let rewound = MlsMember::restore(&snapshot)?;
         self.provider_swap(rewound);
-        match self.decrypt_at(winner, created_at) {
+        self.rewind_forbidden = removed;
+        let outcome = self.decrypt_at(winner, created_at);
+        self.rewind_forbidden.clear();
+        match outcome {
             // the winner merged — but say WHOSE work was dropped doing so
             Ok(MlsIncoming::Commit { readmitted }) => Ok(MlsIncoming::CommitRewound { readmitted }),
             Ok(outcome) => Ok(outcome),
@@ -793,6 +859,15 @@ impl MlsMember {
         self.provider = other.provider;
         self.signer = other.signer;
         self.group = other.group;
+    }
+
+    /// The anchored identity signature key per roster member (raw bytes,
+    /// as `key_package_binding` reports them). Once set, a commit that adds
+    /// a leaf for `member` under any OTHER key is refused before the merge:
+    /// without it any current leaf could re-key any seat under a key it
+    /// holds and speak as that member (review 2026-08-25, HIGH).
+    pub fn set_roster_keys(&mut self, keys: BTreeMap<String, Vec<u8>>) {
+        self.roster_keys = Some(keys);
     }
 
     /// This node's own handle.
@@ -904,6 +979,8 @@ impl MlsMember {
             group: Some(group),
             // a restored snapshot has no in-flight commit of its own
             prior: None,
+            roster_keys: None,
+            rewind_forbidden: Vec::new(),
             // v2 blobs carry the ring; a v1 blob restored it empty above
             exporter_ring: snap.exporter_ring,
             exporter_ring_epochs: snap.exporter_ring_epochs,
@@ -1263,6 +1340,98 @@ mod tests {
             !matches!(cara.decrypt(&stolen), Ok(MlsIncoming::Application { .. })),
             "the re-keying coordinator must reject the evicted leaf's sends"
         );
+    }
+
+    /// **A leaf added under a key that is not the member's anchored identity
+    /// key is refused before the merge.** Any current leaf could otherwise
+    /// re-key any seat under a key it holds and speak as that member
+    /// (review 2026-08-25, HIGH). A re-key under the genuine key merges.
+    #[test]
+    fn an_added_leaf_must_carry_the_anchored_identity_key() {
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        let bob = MlsMember::new(&key(2), "bob").expect("bob");
+        let cara = MlsMember::new(&key(3), "cara").expect("cara");
+        founder.create_group().expect("create");
+        let welcome = founder
+            .add_members(&[
+                bob.key_package().expect("bob kp"),
+                cara.key_package().expect("cara kp"),
+            ])
+            .expect("add")
+            .expect("welcome");
+        let mut cara = cara;
+        cara.join_from_welcome(&welcome).expect("cara joins");
+        let roster: BTreeMap<String, Vec<u8>> = [(1u8, "founder"), (2, "bob"), (3, "cara")]
+            .into_iter()
+            .map(|(k, n)| (n.to_string(), key(k).verifying_key().to_bytes().to_vec()))
+            .collect();
+        founder.set_roster_keys(roster);
+
+        // the genuine re-key (bob's new device, same identity) merges
+        let bob2 = MlsMember::new(&key(2), "bob").expect("bob2");
+        let (commit, _) = cara
+            .restore_member("bob", &bob2.key_package().expect("kp"), NO_CARRIER_STAMP)
+            .expect("restore");
+        assert!(matches!(founder.decrypt(&commit), Ok(MlsIncoming::Commit { .. })));
+        let epoch = founder.epoch();
+
+        // cara re-keys bob's seat under HER OWN fresh key: refused, epoch untouched
+        let mallory = MlsMember::new(&key(9), "bob").expect("mallory as bob");
+        let (forged, _) = cara
+            .restore_member("bob", &mallory.key_package().expect("kp"), NO_CARRIER_STAMP)
+            .expect("cara can build it");
+        assert!(
+            founder.decrypt(&forged).is_err(),
+            "a leaf for bob under a foreign key is refused"
+        );
+        assert_eq!(founder.epoch(), epoch, "nothing merged");
+    }
+
+    /// **An evicted leaf cannot undo its eviction with a back-dated commit.**
+    /// The prior slot stays armed until the next epoch change and the
+    /// tiebreak stamp is publisher-chosen: the evicted device published a
+    /// same-epoch commit stamped one second before the re-key and every
+    /// survivor rewound onto it (review 2026-08-25, HIGH).
+    #[test]
+    fn an_evicted_leaf_cannot_undo_its_eviction_with_a_back_dated_commit() {
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        let bob = MlsMember::new(&key(2), "bob").expect("bob");
+        let cara = MlsMember::new(&key(3), "cara").expect("cara");
+        founder.create_group().expect("create");
+        let welcome = founder
+            .add_members(&[
+                bob.key_package().expect("bob kp"),
+                cara.key_package().expect("cara kp"),
+            ])
+            .expect("add")
+            .expect("welcome");
+        let mut bob = bob;
+        let mut cara = cara;
+        bob.join_from_welcome(&welcome).expect("bob joins");
+        cara.join_from_welcome(&welcome).expect("cara joins");
+
+        // the re-key evicts bob's old device at stamp 100
+        let bob2 = MlsMember::new(&key(2), "bob").expect("bob2");
+        let (rekey, _) = cara
+            .restore_member("bob", &bob2.key_package().expect("kp"), 100)
+            .expect("restore");
+        assert!(matches!(founder.decrypt_at(&rekey, 100), Ok(MlsIncoming::Commit { .. })));
+        let epoch = founder.epoch();
+
+        // the evicted device, still at the old epoch, commits with a LOWER
+        // stamp — the tiebreak would hand it the epoch
+        let cara2 = MlsMember::new(&key(3), "cara").expect("cara2");
+        let (undo, _) = bob
+            .restore_member("cara", &cara2.key_package().expect("kp"), 99)
+            .expect("the old device can still build a commit");
+        let outcome = founder.decrypt_at(&undo, 99);
+        assert!(
+            !matches!(outcome, Ok(MlsIncoming::CommitRewound { .. })),
+            "a removed leaf must not win the epoch: {outcome:?}"
+        );
+        assert_eq!(founder.epoch(), epoch, "the re-key stands");
+        let stolen = bob.encrypt(b"still here?").expect("enc");
+        assert!(!matches!(founder.decrypt(&stolen), Ok(MlsIncoming::Application { .. })));
     }
 
     /// **Cross-epoch delivery, backward direction — deliberately NOT

@@ -635,6 +635,12 @@ pub(crate) struct State {
     /// (keyed by proposal id; never persisted, rebuilt from gossip). Once a
     /// proposal gathers m distinct signatures the committer seals a block.
     pub(crate) pending_sigs: HashMap<u64, chain::PendingApproval>,
+    /// The proposals THIS node signed (its own decisions), written only by
+    /// the own signing path. The re-base re-expresses a standing decision
+    /// from here — never from `pending_sigs`, whose entries any peer fills
+    /// under any roster name (review 2026-08-25: a forged own entry made
+    /// the node sign for real).
+    pub(crate) own_approvals: std::collections::BTreeSet<u64>,
     /// Declines waiting for their proposal (keyed by proposal id, one entry
     /// per member with the decline's ts): a decline travels on a different
     /// sender's G7 chain than its proposal, and an own-log decline replays
@@ -1019,6 +1025,7 @@ impl State {
             chain_member_relays: HashMap::new(),
             split_noted: std::collections::HashSet::new(),
             pending_sigs: HashMap::new(),
+            own_approvals: std::collections::BTreeSet::new(),
             pending_declines: HashMap::new(),
             pending_withdrawals: HashMap::new(),
             file_series: HashMap::new(),
