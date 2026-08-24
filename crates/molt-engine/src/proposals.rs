@@ -899,6 +899,7 @@ impl State {
         p.withdrawn = true;
         p.declined_at = ts; // retention + the "when" label; declined_by stays empty
         self.pending_sigs.remove(&id);
+        self.own_approvals.remove(&id);
         self.pending_declines.remove(&id);
         WithdrawOutcome::Withdrawn
     }
@@ -1028,6 +1029,7 @@ impl State {
         ts: u64,
         hash: &str,
     ) -> DeclineOutcome {
+        let is_own = by == self.member();
         let veto_room = self
             .replica
             .as_ref()
@@ -1078,6 +1080,11 @@ impl State {
         if let Some(pending) = self.pending_sigs.get_mut(&id) {
             pending.sigs.retain(|a| a.member != by);
             pending.verified.remove(by);
+        }
+        // …and the OWN decision register with it, or the next re-base would
+        // put the retracted signature straight back (review 2026-08-25)
+        if is_own {
+            self.own_approvals.remove(&id);
         }
         p.decliners.push(by.to_string());
         if p.decliners.len() > veto_room {

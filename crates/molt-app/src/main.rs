@@ -598,7 +598,9 @@ fn repair_config(path: &Path) -> anyhow::Result<()> {
     let settings = salvage(&text);
 
     let backup = backup_path(path);
-    std::fs::copy(path, &backup)
+    // through write_private, not fs::copy: a copy keeps the source's mode,
+    // and the old world-readable file would live on as the backup
+    write_private(&backup, &text)
         .with_context(|| format!("writing backup {} (path not reachable?)", backup.display()))?;
     write_private(path, &render(&settings))
         .with_context(|| format!("writing {}", path.display()))?;

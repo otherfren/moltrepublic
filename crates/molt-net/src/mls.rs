@@ -632,9 +632,7 @@ impl MlsMember {
         // these leaves — one of them re-deciding the epoch with a lower
         // (back-dated, self-chosen) key would undo its own eviction
         if self.rewind_forbidden.contains(&from) {
-            return Err(MlsError::Wire(format!(
-                "a leaf the merged commit removed ({from}) cannot win the epoch"
-            )));
+            return Err(MlsError::Wire(format!("removed leaf {from}: cannot win the epoch")));
         }
         match processed.into_content() {
             // NOTE (review 2026-07-31): application traffic must NOT clear
@@ -682,7 +680,7 @@ impl MlsMember {
                         let key = leaf.signature_key().as_slice();
                         if roster.get(&name).map(Vec::as_slice) != Some(key) {
                             return Err(MlsError::Wire(format!(
-                                "unauthorized re-key: the leaf added for {name} does not carry its anchored identity key"
+                                "re-key refused: leaf for {name} is not its anchored key"
                             )));
                         }
                     }

@@ -91,6 +91,11 @@ pub fn seal_at_rest(ws_dir: &Path, phrase: &str) -> Result<(), StorageError> {
     // first, manifest second — a crash in between leaves a dir whose marker
     // ("device") and key files disagree, which `open_workspace` reports as
     // honest corruption and `unseal_at_rest` repairs (it rewrites both).
+    // the parent too: O_NOFOLLOW guards the last component only, and a
+    // planted `keys` symlink would steer the zero-fill into its target
+    if fs::symlink_metadata(ws_dir.join("keys")).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(StorageError::BadFile("keys is a symlink - refusing to seal".to_string()));
+    }
     secure_remove(&ws_dir.join(&manifest.crypto.key_file))?;
     secure_remove(&ws_dir.join("keys").join("seed.sealed"))?;
     // the materialized logo and the member avatars are republic CONTENT in
@@ -397,6 +402,21 @@ mod tests {
             std::fs::symlink_metadata(dir.join("logo.png")).is_err(),
             "the link itself is gone"
         );
+    }
+
+    /// `O_NOFOLLOW` guards the last path component only: a planted `keys`
+    /// symlink is refused outright, its target untouched.
+    #[test]
+    fn sealing_refuses_a_symlinked_keys_dir() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let (dir, phrase, _id) = make_ws(&root);
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::rename(dir.join("keys"), &elsewhere).expect("move keys");
+        std::os::unix::fs::symlink(&elsewhere, dir.join("keys")).expect("link");
+        let before = std::fs::read(elsewhere.join("workspace.key")).expect("key");
+        assert!(seal_at_rest(&dir, &phrase).is_err(), "refused");
+        assert_eq!(std::fs::read(elsewhere.join("workspace.key")).expect("key"), before);
     }
 
     #[test]

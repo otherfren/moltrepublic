@@ -163,11 +163,13 @@ mod tests {
     /// added segment) instead of a quadratic char diff.
     #[test]
     fn an_overlong_line_pair_renders_whole_instead_of_char_diffed() {
-        let old = "a".repeat(CHAR_DIFF_MAX_LINE + 1);
-        let new = "b".repeat(CHAR_DIFF_MAX_LINE + 1);
+        // a shared prefix: the char diff would say [Plain, Removed, Added]
+        let old = format!("{}a", "x".repeat(CHAR_DIFF_MAX_LINE));
+        let new = format!("{}b", "x".repeat(CHAR_DIFF_MAX_LINE));
         let row = char_diff_row(&old, &new);
         let tones: Vec<SegTone> = row.segs.iter().map(|s| s.tone).collect();
         assert_eq!(tones, vec![SegTone::Removed, SegTone::Added]);
+        assert_eq!(row.segs[0].text, old, "the whole old line, uncut");
         // and a short pair still gets the fine-grained diff
         let fine = char_diff_row("hello", "hallo");
         assert!(fine.segs.len() > 2, "a short pair is char-diffed: {fine:?}");

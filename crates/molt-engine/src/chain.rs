@@ -6335,6 +6335,97 @@ mod tests {
         assert_eq!(walter.chain_approval_count(1), 0, "no forged progress");
     }
 
+    /// **A retracted approval is not re-signed at the re-base.** D2: a
+    /// decline retracts this member's signature; the decision register
+    /// must forget it too, or the next block puts the signature straight
+    /// back while the member is listed as a decliner.
+    #[test]
+    fn a_declined_own_approval_is_not_re_signed_at_the_rebase() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let mut b = Builder::new(&["petra", "walter", "dora", "eve", "finn"], 3);
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        wire(
+            &mut walter,
+            "petra",
+            1,
+            WorkspaceEvent::Proposed {
+                id: ProposalId(1),
+                surface: Surface::Memory,
+                payload: json!({ "op": "add_note", "id": 1 }),
+            },
+        );
+        walter.cmd_approve(ProposalId(1)).expect("walter approves");
+        assert!(walter.own_approvals.contains(&1));
+        walter.cmd_decline(ProposalId(1)).expect("…then retracts");
+        assert!(!walter.own_approvals.contains(&1), "the register forgets");
+        wire(
+            &mut walter,
+            "petra",
+            2,
+            WorkspaceEvent::Proposed {
+                id: ProposalId(2),
+                surface: Surface::Memory,
+                payload: json!({ "op": "add_note", "id": 2 }),
+            },
+        );
+        b.commit_applied(2, &["petra", "dora", "eve"]);
+        walter.receive_block(b.blocks[1].clone());
+        let mine = walter
+            .pending_sigs
+            .get(&1)
+            .is_some_and(|p| p.sigs.iter().any(|a| a.member == "walter"));
+        assert!(!mine, "a retracted approval must not come back at the re-base");
+        assert_eq!(walter.chain_approval_count(1), 0);
+    }
+
+    /// The decision register is ephemeral; an own `Approved` replayed from
+    /// the log (a restart) rebuilds it, an own `Declined` clears it.
+    #[test]
+    fn the_own_log_rebuilds_the_decision_register() {
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let mut walter = chain_peer("walter", &b, b.blocks.clone());
+        walter.apply(&molt_core::EventEnvelope {
+            prev_seq: 0,
+            seq: 1,
+            ts: 1,
+            by: "petra".to_string(),
+            body: WorkspaceEvent::Proposed {
+                id: ProposalId(1),
+                surface: Surface::Memory,
+                payload: json!({ "op": "add_note", "id": 1 }),
+            },
+        });
+        walter.apply(&molt_core::EventEnvelope {
+            prev_seq: 0,
+            seq: 2,
+            ts: 2,
+            by: "walter".to_string(),
+            body: WorkspaceEvent::Approved {
+                id: ProposalId(1),
+                by: "walter".to_string(),
+                height: 1,
+                sig: "irrelevant-for-the-register".to_string(),
+            },
+        });
+        assert!(walter.own_approvals.contains(&1), "an own Approved rebuilds it");
+        walter.apply(&molt_core::EventEnvelope {
+            prev_seq: 0,
+            seq: 3,
+            ts: 3,
+            by: "walter".to_string(),
+            body: WorkspaceEvent::Declined {
+                id: ProposalId(1),
+                by: "walter".to_string(),
+                hash: String::new(),
+            },
+        });
+        assert!(!walter.own_approvals.contains(&1), "an own Declined clears it");
+    }
+
     /// **Junk never evicts a verified signature.** "Latest wins" let one
     /// insider replace every member's genuine approval with garbage at the
     /// same height — a vote that never reaches m anywhere (review

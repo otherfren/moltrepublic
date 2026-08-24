@@ -869,7 +869,7 @@ impl State {
             .filter_map(|i| hex::decode(&i.identity_pk).ok().map(|k| (i.member.clone(), k)))
             .collect();
         if keys.len() != head.identities.len() {
-            tracing::warn!("an anchored identity key does not decode — MLS re-key authority not armed");
+            tracing::warn!(armed = false, "an anchored identity key does not decode");
             return;
         }
         if let Ok(mut m) = mls.lock() {

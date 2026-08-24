@@ -1388,23 +1388,28 @@ mod tests {
     /// relay's copies of the earliest events pass as fresh.
     #[test]
     fn the_dedup_ring_covers_the_history_bound() {
-        let bound = 10usize;
-        let rt = super::RelayRuntime::new(crate::dial::Dialer::Direct, vec![])
-            .with_history_bound(bound);
+        // the production bound: a full replay of it must stay remembered
+        let bound = super::MAX_STORED_EVENTS_PER_REQ;
+        let rt = super::RelayRuntime::new(crate::dial::Dialer::Direct, vec![]);
         let cap = rt.history_bound.saturating_add(64).max(super::DEDUP_CAP);
-        let mut ring = super::DedupRing::with_capacity(cap);
-        let ids: Vec<nostr::EventId> = (0..cap)
+        let ids: Vec<nostr::EventId> = (0..bound)
             .map(|i| {
                 let mut b = [0u8; 32];
                 b[..8].copy_from_slice(&u64::try_from(i).unwrap_or(0).to_le_bytes());
                 nostr::EventId::from_byte_array(b)
             })
             .collect();
+        let mut ring = super::DedupRing::with_capacity(cap);
         for id in &ids {
             assert!(ring.fresh(*id));
         }
-        assert!(cap >= bound, "ring covers the bound");
         assert!(!ring.fresh(ids[0]), "the first id of a full replay is still remembered");
+        // the old fixed ring forgot it — a second relay's copy passed as fresh
+        let mut old = super::DedupRing::with_capacity(super::DEDUP_CAP);
+        for id in &ids {
+            old.fresh(*id);
+        }
+        assert!(old.fresh(ids[0]), "the floor-sized ring is exactly what the bug was");
     }
 
     use super::*;

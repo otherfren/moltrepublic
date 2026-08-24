@@ -317,6 +317,13 @@ impl State {
                 }
             }
             WorkspaceEvent::Approved { id, by, .. } => {
+                // the OWN decision register is ephemeral: an own Approved in
+                // the own log means this node signed (a re-serve re-wraps
+                // under the serving peer), so a restart rebuilds it here —
+                // else the next re-base drops the standing decision
+                if *by == self.member() {
+                    self.own_approvals.insert(id.0);
+                }
                 // D2 replay twin of the live clears: the newest stance wins
                 // — an own log that recorded decline-then-approve must
                 // reconstruct the approve as the standing one

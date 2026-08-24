@@ -30,9 +30,13 @@ roster name (`collect_sig` never verified). After any block sealed, every
 node re-signed X with its genuine key: a threshold bypass by one insider,
 no human decision, `approved_by_me` showing `false` meanwhile.
 Fix: the decision register `State::own_approvals`, written only by the own
-signing path; the re-base reads it and nothing else; `collect_sig` never
-holds an unverified signature under the own name.
-Tests: `a_forged_own_approval_is_not_re_signed_at_the_rebase`.
+signing path, cleared by the own D2 decline retraction and by a withdraw,
+rebuilt from an own `Approved` in the own log at replay (a restart); the
+re-base reads it and nothing else; `collect_sig` never holds an
+unverified signature under the own name.
+Tests: `a_forged_own_approval_is_not_re_signed_at_the_rebase`,
+`a_declined_own_approval_is_not_re_signed_at_the_rebase`,
+`the_own_log_rebuilds_the_decision_register`.
 
 ### C2 [HIGH] Unverified "latest wins" evicted verified signatures - FIXED
 A later junk signature under a roster name replaced an earlier VERIFIED
@@ -104,6 +108,12 @@ card. Fix: `admits_membership_proposal` (plausible id, pending cap,
 `id_free_for`) runs before `record`; the applier bumps `next_id` only
 inside the wire id window. Test:
 `a_membership_proposal_with_an_implausible_id_is_not_recorded`.
+Residual (LOW, OPEN): a blob-seeded rejoiner that logged a wire
+membership id far above its snapshot's `next_id` and crashed before the
+next snapshot replays the tail with the gate closed, while `adopt_chain`
+raises `next_id` only afterwards - its next local mint can collide. Fix
+direction: adopt the chain (or `bump_next_id_past_chain`) BEFORE the tail
+replay, or widen the replay gate to `max(next_id, chain top) + window`.
 
 ### E2 [HIGH] Wire `Chat.ts` passthrough + `ts + retention` overflow panicked the actor - FIXED
 `uploads_view` added the retention to a peer-chosen stamp; with release
@@ -253,9 +263,12 @@ progress; count lost only in the terminating no-progress pass (the
 counter is the self-heal trigger).
 
 ### M6 [MEDIUM] The held-frame timer retried a PERMANENT refusal forever - FIXED
-Separate `held_permanent` flag (no timer), own `held_backoff_secs`
-(the stall clock keeps its own), no sleep after the last publish
-attempt. Test: `a_permanent_refusal_does_not_arm_the_held_frame_timer`.
+Separate `held_permanent` flag (no timer, and no stall clock either: a
+permanent hold above a proven floor would otherwise be rewound and
+re-failed every budgeted round), own `held_backoff_secs` (the stall clock
+keeps its own), no sleep after the last publish attempt. Test:
+`a_permanent_refusal_does_not_arm_the_held_frame_timer` (the floor-less
+case; the floor case rides the same flag).
 
 ### M7 [MEDIUM] `TransportState` load-modify-save races between the group tasks - OPEN
 Inbox, outbox and file plane each `load → mutate → save(whole)`; a claim
@@ -346,8 +359,14 @@ and a stale doc.
 Fix: `read_manifest` refuses any `key_file` other than
 `molt_core::DEFAULT_KEY_FILE` (an imported blob's cover sheet inherits the
 gate); `secure_remove` removes a symlink AS a link and opens with
-`O_NOFOLLOW`. Tests: `a_manifest_naming_a_foreign_key_file_is_refused_untouched`,
-`sealing_never_follows_a_planted_symlink`.
+`O_NOFOLLOW`; a symlinked `keys` directory refuses the seal outright
+(`O_NOFOLLOW` guards the last component only). Tests:
+`a_manifest_naming_a_foreign_key_file_is_refused_untouched`,
+`sealing_never_follows_a_planted_symlink`,
+`sealing_refuses_a_symlinked_keys_dir`.
+Residual (LOW, OPEN): other ancestors are not checked; the complete
+answer is `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` on a dirfd
+of the workspace (rustix is in the tree).
 
 ### S2 [MEDIUM] `migrate_to_segment_keys` resurrects a key-erased segment - OPEN
 A dropped segment whose file reappears gets a fresh DEK and a bogus
@@ -447,7 +466,8 @@ Only `on_save_settings` issues `SetWakeCommand`. Fix direction: one
 task, used by all three sites.
 
 ### F4 [MEDIUM] CLI-generated `config.toml` was world-readable and the runtime writer preserved it - FIXED
-`--generate-config` / `--repair-config` write 0600 (`write_private`);
+`--generate-config` / `--repair-config` write 0600 (`write_private`,
+the repair's backup copy included - `fs::copy` kept the old mode);
 `configstore::atomic_write` keeps an original's mode only within
 `0o600`. Test: `a_save_narrows_a_world_readable_config_to_owner_only`.
 OPEN: `molt_config::write` has no callers and a stale doc - delete.

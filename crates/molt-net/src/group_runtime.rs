@@ -663,7 +663,10 @@ async fn outbox_loop<L, S, K>(
                 .any(|e| crate::supervisor::own_ackable(&cfg.member, e)),
             _ => false,
         };
-        if !tail {
+        // a PERMANENT hold waits for an append even above a proven floor:
+        // the stall clock would otherwise rewind and re-fail it every round
+        // (a resend round and a ratchet generation per frame, for nothing)
+        if !tail || held_permanent {
             tracing::debug!(
                 me = %cfg.member,
                 ?floor,
