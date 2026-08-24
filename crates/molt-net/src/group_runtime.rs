@@ -470,7 +470,7 @@ async fn publish_with_backoff(
     stop: &mut watch::Receiver<bool>,
 ) -> Result<(), PublishStall> {
     let mut delay = cfg.retry_base;
-    for _ in 0..PUBLISH_ATTEMPTS {
+    for attempt in 1..=PUBLISH_ATTEMPTS {
         // the SAME bytes across relay retries inside one attempt chain: a relay
         // NAK is not a peer rejection, and re-encrypting would burn a ratchet
         // generation for nothing. A REWIND re-frames instead (N5.3).
@@ -487,6 +487,10 @@ async fn publish_with_backoff(
                 }
                 tracing::warn!(error = %e, "publishing a group frame failed");
             }
+        }
+        // the delay separates attempts — none after the last one
+        if attempt == PUBLISH_ATTEMPTS {
+            break;
         }
         tokio::select! {
             () = tokio::time::sleep(delay) => {}
@@ -527,6 +531,15 @@ async fn outbox_loop<L, S, K>(
     // (field 2026-08-24: "Reconnecting… no relay accepted the frame" long
     // after the relays were back)
     let mut publish_failed_reported = false;
+    // a PERMANENT refusal (local, deterministic) is reported like an outage
+    // but never retried on the timer: the answer is the same in an hour,
+    // and every retry would re-frame the envelope (a ratchet generation
+    // per try) and log the error again. It waits for an append.
+    let mut held_permanent = false;
+    // the held-frame retry has its own escalation: sharing the stall
+    // clock's would let an outage inflate the first stall deadline, and a
+    // success reset an escalated stall backoff under a give-up count
+    let mut held_backoff_secs = RESEND_AFTER_SECS;
     loop {
         // NO rewind here. It sat at the loop top through N5.2, where it was
         // inert because nothing ever acked — N5.3's acks made it live, and a
@@ -561,7 +574,8 @@ async fn outbox_loop<L, S, K>(
                     if publish_failed_reported {
                         // the backoff exit — the channel publishes again
                         publish_failed_reported = false;
-                        backoff_secs = RESEND_AFTER_SECS;
+                        held_permanent = false;
+                        held_backoff_secs = RESEND_AFTER_SECS;
                         sink.send_ok(&cfg.member).await;
                     }
                     published_through = env.seq;
@@ -577,6 +591,7 @@ async fn outbox_loop<L, S, K>(
                     if matches!(stall, PublishStall::Stopped) {
                         return;
                     }
+                    held_permanent = matches!(stall, PublishStall::Permanent(_));
                     let reason = match stall {
                         // a wedge, not an outage: the node writes nothing more
                         // until this envelope can go out, across restarts.
@@ -663,7 +678,8 @@ async fn outbox_loop<L, S, K>(
             // so a relay outage is re-tried at least every `retry_cap`; the
             // first success resets it. No rewind, no resend budget: this is
             // the same pass continuing, not a re-offer of proven frames.
-            let retry_in = Duration::from_secs(backoff_secs).min(cfg.retry_cap);
+            let retry_in = Duration::from_secs(held_backoff_secs).min(cfg.retry_cap);
+            let retry_armed = publish_failed_reported && !held_permanent;
             tokio::select! {
                 r = wakeup.changed() => {
                     if r.is_err() {
@@ -674,9 +690,10 @@ async fn outbox_loop<L, S, K>(
                 // re-evaluate (§3.1a: the rejoiner's first sheet at floor 0)
                 () = ack_wake.notified() => {}
                 _ = stop.changed() => return,
-                () = tokio::time::sleep(retry_in), if publish_failed_reported => {
-                    backoff_secs = backoff_secs.saturating_mul(2).min(RESEND_MAX_BACKOFF_SECS);
-                    tracing::info!(me = %cfg.member, backoff_secs, "held frame — retrying the publish");
+                () = tokio::time::sleep(retry_in), if retry_armed => {
+                    held_backoff_secs =
+                        held_backoff_secs.saturating_mul(2).min(RESEND_MAX_BACKOFF_SECS);
+                    tracing::info!(me = %cfg.member, backoff_secs = held_backoff_secs, "held frame - retrying the publish");
                 }
             }
             continue;
@@ -733,6 +750,10 @@ async fn outbox_loop<L, S, K>(
                     "the resend budget for this hour is spent — holding the tail"
                 );
                 backoff_secs = backoff_secs.saturating_mul(2).min(RESEND_MAX_BACKOFF_SECS);
+                // re-anchor, exactly like a granted round: a stale anchor
+                // past its deadline fires on every iteration — a hot loop
+                // of loads, log reads and warnings for the rest of the hour
+                stalled_since = Some(tokio::time::Instant::now());
                 continue;
             }
         }
@@ -2230,6 +2251,45 @@ mod tests {
              the surface stays amber for ever",
         )
         .await;
+        handle.shutdown().await;
+    }
+
+    /// **A PERMANENT refusal does not arm the held-frame timer.**
+    ///
+    /// The timer exists for outages. A frame refused locally (over the
+    /// size budget, unsealable) answers the same in a second and in an
+    /// hour; retrying it re-frames the envelope (one ratchet generation per
+    /// try) and logs an error every round for nothing. It waits for an
+    /// append or the operator — the ERROR line already names it.
+    #[tokio::test]
+    async fn a_permanent_refusal_does_not_arm_the_held_frame_timer() {
+        use std::sync::atomic::Ordering;
+        let (url, up, _relay) = flaky_relay().await;
+        up.store(true, Ordering::SeqCst);
+        let log = crate::MemLog::default();
+        let mut huge = walter_event(1);
+        huge.body = molt_core::WorkspaceEvent::Chat(molt_core::ChatMessage::text(
+            molt_core::MessageId([1u8; 16]),
+            "walter",
+            "x".repeat(256 * 1024),
+            1_751_000_000,
+        ));
+        log.push(huge);
+        let sink = SignalSink::default();
+        let (_wake_tx, wake_rx) = watch::channel(0u64);
+        let handle = spawn_walter(url, log, sink.clone(), wake_rx);
+
+        sink.wait_for(false, "the refusal was never reported").await;
+        // five retry ceilings later the outbox must still have said it ONCE
+        tokio::time::sleep(std::time::Duration::from_millis(1_000)).await;
+        let failures = sink
+            .0
+            .lock()
+            .expect("sink")
+            .iter()
+            .filter(|(_, r)| r.is_some())
+            .count();
+        assert_eq!(failures, 1, "a permanent refusal is retried on a timer");
         handle.shutdown().await;
     }
 
