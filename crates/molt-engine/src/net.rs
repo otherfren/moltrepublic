@@ -2189,6 +2189,17 @@ impl State {
                 tracing::debug!(%member, "unsolicited recovery request for the live anchor — dropped");
                 return Ok(Reply::Ack);
             }
+            // THE CHAIN IS THE REPLAY REGISTER (field storm 2026-08-24):
+            // relays replay every stored request wrap on each resubscribe,
+            // and each once-ACCEPTED old request re-keyed the seat onto a
+            // DEAD incarnation's anchor — kicking the live one out, forever,
+            // in a loop. An anchor that was EVER anchored in this chain
+            // (genesis, any Restored block, the checkpoint's summary) can
+            // only be a replay: a genuine reattach mints a fresh salt.
+            if self.anchor_seen_in_chain(&canonical) {
+                tracing::debug!(%member, "unsolicited recovery request replays a chain-known anchor — dropped");
+                return Ok(Reply::Ack);
+            }
             let now = crate::now_secs();
             let key = (member.to_string(), canonical.clone());
             if self

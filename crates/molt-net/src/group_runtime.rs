@@ -1086,10 +1086,15 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
                             hold.remove(0);
                             state.opaque_frames += 1;
                             let _ = health.send(state.clone());
-                            tracing::warn!(
-                                held = hold.len(),
-                                "epoch hold is full — evicting the oldest unopenable frame"
-                            );
+                            // sampled: a backlog storm otherwise logs per
+                            // frame, several times a second, for minutes
+                            if state.opaque_frames % 256 == 1 {
+                                tracing::warn!(
+                                    held = hold.len(),
+                                    dropped = state.opaque_frames,
+                                    "epoch hold is full — evicting oldest unopenable frames (sampled)"
+                                );
+                            }
                         }
                         hold.push((content, created_at));
                     }

@@ -90,6 +90,21 @@ state. If no survivor answers within the bounded wait the workspace simply
 stays detached (readable), with the honest note — and the ticketed link
 remains the manual path.
 
+### 2.2a The chain is the replay register (field storm 2026-08-24)
+
+The cooldown alone did NOT stop replays: relays replay EVERY stored request
+wrap on each resubscribe, and each once-accepted old request carries a
+DIFFERENT (then-fresh) anchor — so every coordinator restart re-keyed the
+seat onto a dead incarnation's anchor, kicking the live one out, in a loop
+("da geht gar nix mehr"). The register that ends this is the chain itself:
+`anchor_seen_in_chain` (genesis anchors, every `Restored` block's anchor,
+the checkpoint's summarized anchors) refuses any self-service request whose
+"new" anchor was ever anchored — a genuine reattach mints a fresh salt, a
+replay by definition cannot. Verified live on the user's three real nodes:
+the storm died, all three seats converged again. (History pruned below a
+checkpoint forgets pre-cut anchors; the cut plus the cooldown bound that
+window.)
+
 ### 2.3a Sequential coordinator targeting (field fix 2026-08-24)
 
 The first build addressed EVERY survivor at once — two receivers could race

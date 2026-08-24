@@ -2279,6 +2279,40 @@ impl State {
         })
     }
 
+    /// Whether `pk` was EVER a seat's transport anchor in this republic —
+    /// the genesis anchors, every `Restored` block's re-anchor, and (after
+    /// a compaction cut) the checkpoint's summarized working anchors. The
+    /// CHAIN is the replay register (`detached_reattach.md` §2.2a): a relay
+    /// replaying a months-old accepted reattach request presents an anchor
+    /// that is in here, so the request can never re-key the seat onto a
+    /// dead incarnation again. (History pruned below a checkpoint forgets
+    /// pre-cut anchors — bounded by the cut, and the cooldown covers the
+    /// gap for live traffic.)
+    pub(crate) fn anchor_seen_in_chain(&self, pk: &str) -> bool {
+        if pk.is_empty() {
+            return false;
+        }
+        if self
+            .replica
+            .as_ref()
+            .is_some_and(|r| r.identities.iter().any(|i| i.nostr_pk == pk))
+        {
+            return true;
+        }
+        if self.chain.iter().any(|b| {
+            matches!(&b.change, ChainChange::Membership {
+                op: MembershipOp::Restored,
+                nostr_pk: Some(a),
+                ..
+            } if a == pk)
+        }) {
+            return true;
+        }
+        self.checkpoint_blob
+            .as_ref()
+            .is_some_and(|blob| blob.anchors.iter().any(|(_, a)| a == pk))
+    }
+
     /// Distinct collected approvals for a proposal (for the UI progress).
     pub(crate) fn chain_approval_count(&self, id: u64) -> usize {
         // L2: the DISPLAYED count is the verified one — raw collected sigs
@@ -8539,6 +8573,30 @@ mod tests {
             "the commit settles the record without a human approve"
         );
         verify_chain(&walter.chain).expect("the sealed chain verifies from zero");
+    }
+
+    /// The chain IS the replay register (field storm 2026-08-24): every
+    /// anchor that was ever anchored — genesis or a Restored block — refuses
+    /// a replayed self-service request; a fresh salt passes.
+    #[test]
+    fn a_chain_known_anchor_is_a_replay() {
+        let b = Builder::new(&["petra", "walter"], 2);
+        let mut petra = chain_signer("petra", &b, b.blocks.clone());
+        let genesis_anchor = "cc".repeat(32);
+        assert!(petra.anchor_seen_in_chain(&genesis_anchor), "genesis anchors count");
+        let consent = consent_for(&b, "walter", "ab");
+        petra.propose_membership(
+            MembershipOp::Restored,
+            "walter",
+            &b.pk("walter"),
+            Some("ab".to_string()),
+            Vec::new(),
+            Some(consent),
+        );
+        assert_eq!(petra.chain_head.as_ref().expect("head").height, 1, "sealed");
+        assert!(petra.anchor_seen_in_chain("ab"), "a Restored block's anchor counts");
+        assert!(!petra.anchor_seen_in_chain(&"99".repeat(32)), "a fresh salt passes");
+        assert!(!petra.anchor_seen_in_chain(""), "empty is never a hit");
     }
 
     /// The coordinator's vote report toward the waiting rejoiner
