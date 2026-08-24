@@ -29,6 +29,7 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use molt_core::{
@@ -251,12 +252,23 @@ fn remove_tmp_staging(ws_dir: &Path) -> Result<(), StorageError> {
 /// window); a file that cannot be REMOVED is a hard error (key material
 /// would stay behind while the manifest claims sealed).
 fn secure_remove(path: &Path) -> Result<(), StorageError> {
-    match fs::metadata(path) {
+    // NEVER through a symlink: a planted link (`logo.png` → a key elsewhere)
+    // would have the zero-fill land on its target. The link itself is
+    // removed; the open below refuses to follow one that appears in between
+    match fs::symlink_metadata(path) {
         Ok(md) => {
-            if let Ok(mut f) = OpenOptions::new().write(true).open(path) {
-                let len = usize::try_from(md.len()).unwrap_or(0).min(1 << 20);
-                let _ = f.write_all(&vec![0u8; len]);
-                let _ = f.sync_all();
+            if !md.file_type().is_symlink() {
+                let nofollow = i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits())
+                    .expect("O_NOFOLLOW fits an open flag");
+                if let Ok(mut f) = OpenOptions::new()
+                    .write(true)
+                    .custom_flags(nofollow)
+                    .open(path)
+                {
+                    let len = usize::try_from(md.len()).unwrap_or(0).min(1 << 20);
+                    let _ = f.write_all(&vec![0u8; len]);
+                    let _ = f.sync_all();
+                }
             }
             fs::remove_file(path)?;
             // make the unlink itself durable BEFORE the manifest is marked
@@ -343,6 +355,48 @@ mod tests {
             out.push((rel.to_string(), crate::read_capped(&dir.join(rel), crate::READ_CAP_SEGMENT, rel).unwrap_or_default()));
         }
         out
+    }
+
+    /// A manifest is plaintext anyone syncing the dir (or the cover sheet
+    /// of an imported blob) can write; `key_file` is joined and, at a seal,
+    /// zero-filled and unlinked. Only the canonical path is honoured — a
+    /// foreign one is refused before anything is touched (review 2026-08-25).
+    #[test]
+    fn a_manifest_naming_a_foreign_key_file_is_refused_untouched() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let (dir, phrase, _id) = make_ws(&root);
+        let victim = tmp.path().join("id_ed25519");
+        std::fs::write(&victim, b"precious").expect("victim");
+        let manifest_path = dir.join("manifest.toml");
+        let text = std::fs::read_to_string(&manifest_path).expect("manifest");
+        assert!(text.contains("keys/workspace.key"));
+        std::fs::write(
+            &manifest_path,
+            text.replace("keys/workspace.key", victim.to_str().expect("utf8")),
+        )
+        .expect("rewrite");
+        assert!(read_manifest(&dir).is_err(), "a foreign key_file is refused");
+        assert!(seal_at_rest(&dir, &phrase).is_err(), "the seal refuses");
+        assert_eq!(std::fs::read(&victim).expect("victim"), b"precious");
+    }
+
+    /// The seal removes a planted symlink AS A LINK — its target is never
+    /// zero-filled or unlinked.
+    #[test]
+    fn sealing_never_follows_a_planted_symlink() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let (dir, phrase, _id) = make_ws(&root);
+        let victim = tmp.path().join("secret.txt");
+        std::fs::write(&victim, b"keep").expect("victim");
+        std::os::unix::fs::symlink(&victim, dir.join("logo.png")).expect("link");
+        seal_at_rest(&dir, &phrase).expect("seal");
+        assert_eq!(std::fs::read(&victim).expect("victim"), b"keep");
+        assert!(
+            std::fs::symlink_metadata(dir.join("logo.png")).is_err(),
+            "the link itself is gone"
+        );
     }
 
     #[test]

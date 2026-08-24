@@ -1532,8 +1532,14 @@ fn default_kdf() -> String {
 fn default_cipher() -> String {
     "xchacha20poly1305".to_string()
 }
+/// The ONE place a workspace's sealed key may live, relative to its dir.
+/// A manifest naming anything else is refused (`molt_storage::read_manifest`):
+/// the path is joined and later zero-filled + unlinked by the seal, and a
+/// synced or imported manifest is attacker-writable plaintext.
+pub const DEFAULT_KEY_FILE: &str = "keys/workspace.key";
+
 fn default_key_file() -> String {
-    "keys/workspace.key".to_string()
+    DEFAULT_KEY_FILE.to_string()
 }
 fn default_sealed() -> String {
     SEALED_DEVICE.to_string()

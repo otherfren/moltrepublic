@@ -903,6 +903,16 @@ pub fn read_manifest(ws_dir: &Path) -> Result<WorkspaceManifest, StorageError> {
             m.format
         )));
     }
+    // the key path is joined and, at a seal, zero-filled and unlinked — a
+    // manifest is plaintext anyone syncing or importing can write, so only
+    // the one canonical location is ever honoured (review 2026-08-25)
+    if m.crypto.key_file != molt_core::DEFAULT_KEY_FILE {
+        return Err(StorageError::BadFile(format!(
+            "{}: key_file must be {}",
+            path.display(),
+            molt_core::DEFAULT_KEY_FILE
+        )));
+    }
     Ok(m)
 }
 
