@@ -1077,18 +1077,21 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
                     // one retry after the next commit merges, and that retry
                     // is what tells the two apart.
                     Ingest::Opaque | Ingest::FutureEpoch => {
-                        if hold.len() < EPOCH_HOLD_MAX {
-                            hold.push((content, created_at));
-                        } else {
-                            // loud: the guarantee's re-offer is the repair
-                            // path, and silence here would read as delivery
+                        if hold.len() >= EPOCH_HOLD_MAX {
+                            // evict the OLDEST held frame, never the new
+                            // arrival: a hold saturated with a laggard's
+                            // stale frames must not crowd out the one
+                            // commit that would heal this node
+                            // (detached_reattach.md §2.4)
+                            hold.remove(0);
                             state.opaque_frames += 1;
                             let _ = health.send(state.clone());
                             tracing::warn!(
                                 held = hold.len(),
-                                "epoch hold is full — dropping an unopenable frame"
+                                "epoch hold is full — evicting the oldest unopenable frame"
                             );
                         }
+                        hold.push((content, created_at));
                     }
                     Ingest::EpochAdvanced(readmitted) => {
                         // BEFORE the hold retry: the held frames are the new

@@ -2181,6 +2181,14 @@ impl State {
         // accepted (member, anchor) pair is served once per window
         const UNSOLICITED_COOLDOWN_SECS: u64 = 1_800;
         if !ticketed {
+            // a request whose "new" anchor ALREADY is the member's working
+            // anchor is the LIVE incarnation, replayed by a relay after the
+            // cooldown — there is nothing to restore, and re-keying a live
+            // seat is pure epoch churn
+            if !canonical.is_empty() && self.working_nostr_pk(&member) == canonical {
+                tracing::debug!(%member, "unsolicited recovery request for the live anchor — dropped");
+                return Ok(Reply::Ack);
+            }
             let now = crate::now_secs();
             let key = (member.to_string(), canonical.clone());
             if self
@@ -3191,6 +3199,13 @@ impl State {
             // a stuck broadcast outbox names no peer — the channel is the
             // trouble, so its reason joins the channel verdict
             parts.extend(self.net_send_stuck.values().cloned());
+            // SELF-HEAL (detached_reattach.md §2.4): the deaf-node signature
+            // — the OWN outbox stalls (nobody acks) while frames arrive that
+            // no held key opens. A healthy rejoiner counting a laggard's
+            // stale frames never stalls, so it never triggers.
+            if !self.net_send_stuck.is_empty() && h.opaque_frames > 0 {
+                self.maybe_self_heal_reattach();
+            }
             if parts.is_empty() {
                 molt_core::NetHealth::Ok
             } else {

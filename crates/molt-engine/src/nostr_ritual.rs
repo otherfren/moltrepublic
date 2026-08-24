@@ -838,6 +838,12 @@ fn open_group_envelope(
     }
 }
 
+/// How long a rejoin waits on ONE addressed coordinator before it also
+/// addresses the next (`detached_reattach.md` §2.3a). Long enough for a
+/// live coordinator's first progress frame, short enough that a dead or
+/// stale anchor costs seconds, not the run.
+const REATTACH_TARGET_WAIT: Duration = Duration::from_secs(20);
+
 /// Spawn the whole rejoiner task (the production body of
 /// `Command::RecoverStart` on a Nostr republic) — the [`spawn_member_join`]
 /// twin. Every exit reports: success ends in `NetRecoverSealed`, every
@@ -951,14 +957,25 @@ async fn recovery_rejoin(
         // Nostr replies to the gift-wrap anchor, not to a queue
         reply: None,
     });
-    let mut sent = 0usize;
-    for to in &targets {
-        match net.send_ritual(to, &request).await {
-            Ok(_report) => sent += 1,
+    // ONE coordinator at a time (`detached_reattach.md` §2.3a): addressing
+    // every survivor at once made two nodes re-key the same seat in a race,
+    // and the loser's laggards strand (field 2026-08-24). The next target is
+    // addressed only after a silent wait; answers are accepted only from
+    // anchors actually addressed.
+    let mut addressed: Vec<String> = Vec::new();
+    let mut next_target = 0usize;
+    while next_target < targets.len() {
+        let to = targets[next_target].clone();
+        next_target += 1;
+        match net.send_ritual(&to, &request).await {
+            Ok(_report) => {
+                addressed.push(to);
+                break;
+            }
             Err(e) => tracing::warn!(error = %e, "recovery request to one anchor did not publish"),
         }
     }
-    if sent == 0 {
+    if addressed.is_empty() {
         return Err("recovery request: no anchor was reachable".to_string());
     }
 
@@ -973,9 +990,13 @@ async fn recovery_rejoin(
         },
     )
     .await;
-    // the Welcome, from the COORDINATOR's anchor and nobody else's
+    // the Welcome, from an ADDRESSED coordinator's anchor and nobody else's
     let started = tokio::time::Instant::now();
     let mut last_note = started;
+    let mut last_address = started;
+    // a coordinator that ANSWERED (progress/refusal) is live and working —
+    // no further coordinator is addressed past that point
+    let mut answered = false;
     let payload = loop {
         let now = tokio::time::Instant::now();
         if now >= deadline {
@@ -984,6 +1005,22 @@ async fn recovery_rejoin(
                  and approve the return"
                     .to_string(),
             );
+        }
+        // escalation: a silent coordinator (offline, stale anchor) must not
+        // strand the rejoin — address the next one after the quiet window
+        if !answered
+            && next_target < targets.len()
+            && now.duration_since(last_address) >= REATTACH_TARGET_WAIT
+        {
+            let to = targets[next_target].clone();
+            next_target += 1;
+            last_address = now;
+            match net.send_ritual(&to, &request).await {
+                Ok(_report) => addressed.push(to),
+                Err(e) => {
+                    tracing::warn!(error = %e, "recovery request to one anchor did not publish")
+                }
+            }
         }
         // the widening ladder (the join task's cluster-F pattern): a tick a
         // minute, so a long approval wait visibly keeps being a wait
@@ -1000,12 +1037,12 @@ async fn recovery_rejoin(
             .await;
         }
         match inbox.recv((deadline - now).min(RECV_SLICE)).await {
-            Some(RitualDelivery::Welcome(p, sender)) if targets.contains(&sender) => break p,
+            Some(RitualDelivery::Welcome(p, sender)) if addressed.contains(&sender) => break p,
             // the coordinator REFUSED the request (WP6): fail fast with the
             // reason instead of sitting out the 15-minute deadline — the
             // ticket is not spent, so a retry with the right phrase works
             Some(RitualDelivery::Msg(RitualMsg::RecoverRefused { reason, .. }, sender))
-                if targets.contains(&sender) =>
+                if addressed.contains(&sender) =>
             {
                 return Err(format!("the coordinator refused the request: {reason}"));
             }
@@ -1015,7 +1052,8 @@ async fn recovery_rejoin(
             Some(RitualDelivery::Msg(
                 RitualMsg::RecoverProgress { member, need, roster, approved },
                 sender,
-            )) if targets.contains(&sender) => {
+            )) if addressed.contains(&sender) => {
+                answered = true;
                 let _ = send_cmd(
                     tx,
                     Command::NetRecoverProgress { member, need, roster, approved, generation },

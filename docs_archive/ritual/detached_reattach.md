@@ -90,6 +90,32 @@ state. If no survivor answers within the bounded wait the workspace simply
 stays detached (readable), with the honest note — and the ticketed link
 remains the manual path.
 
+### 2.3a Sequential coordinator targeting (field fix 2026-08-24)
+
+The first build addressed EVERY survivor at once — two receivers could race
+the same re-admission, and the losing branch's laggard stranded ≥2 epochs
+behind (deaf both ways; the field's "frames past the key ring"). The
+rejoiner now addresses ONE coordinator at a time and the next only after a
+20 s silent window (`REATTACH_TARGET_WAIT`); a coordinator that answered
+(progress/refusal) stops the escalation. Answers are accepted only from
+anchors actually addressed. Keystone:
+`a_three_member_reattach_leaves_everyone_talking`.
+
+### 2.4 Stuck-epoch self-heal (field fix 2026-08-24)
+
+A member that missed a re-key commit is deaf both ways and does not know
+it. The deaf-node signature is detected in `apply_group_health`: the OWN
+outbox stalls (`net_send_stuck` — nobody acks) while unopenable frames
+arrive (`opaque_frames`); a healthy rejoiner counting a laggard's stale
+frames never stalls, so it never triggers. The heal is the ordinary
+self-service reattach, **capped at 3 per session and spaced 10 min**
+(`maybe_self_heal_reattach`) — two devices restoring the same seat must
+never re-key each other in an endless ping-pong. The epoch hold now evicts
+its OLDEST frame when full (never the new arrival), so a hold saturated
+with stale frames cannot crowd out the one commit that would heal the
+node. Unsolicited requests naming the member's LIVE working anchor are
+dropped (a relay replay after the cooldown re-keys nobody).
+
 ## 3. What is deliberately NOT built
 
 - No new command surface for agents: the reattach is engine-internal
@@ -111,6 +137,48 @@ remains the manual path.
 3. Probe silence: an unsolicited request with a broken consent leaves no
    notice and no refusal frame (the ticket path's WP6 answer stays
    ticket-gated).
+
+## 6. Risk register (2026-08-24, complete)
+
+- **Phrase = seat** (user decision): the phrase alone re-enters; survivors
+  are notified (system line), never asked. The ticketed link is the manual
+  fallback and override.
+- **Automatic S3 backups**: sealed under a phrase-derived key — the blob
+  alone is useless to a thief; no independent risk.
+- **Manual exports**: the blob CARRIES the seed and the export passphrase
+  is the only lock (Argon2id-stretched). Blob + passphrase (or a weak
+  passphrase) = seat, now without any survivor act. The export dialog says
+  so; the passphrase carries the full weight.
+- **Two devices, one seat**: each reattach evicts the other incarnation;
+  automated healing is capped (3/session, 10 min spacing) so the worst
+  case is bounded churn, not an endless ping-pong. One seat = one active
+  device remains the product model.
+- **Relay retention**: a laggard heals by replaying ORIGINAL commit frames
+  (each sealed one epoch back) or via the guarantee's re-offers; relays
+  that expire old events shrink the healing window. Deep-laggard resend
+  sealing is §7 (follow-up analysis).
+- **Replay of accepted requests**: PoP + cooldown + the live-anchor guard;
+  a wrap replayed after the cooldown re-keys nobody (the anchor is the
+  live one by then).
+- **DoS on the standing inbox**: junk wraps cost one failed unwrap;
+  validation is cheap and fail-closed; refusals are never answered on the
+  self-service lane (no probe oracle).
+- **Detached-copy drafts**: the recovery seal retires the local copy to
+  the trash (30 days) — local-only edits made while detached are in the
+  trash, not merged.
+- **Stale target anchors**: the reattach aims at the RESTORED chain's
+  working anchors; if every member re-keyed since the backup, nobody
+  hears — the workspace stays honestly detached (ticketed link works).
+
+## 7. Follow-up: deep-laggard commit resends (open analysis)
+
+`group_frame` reseals a RESENT `MlsCommit` under `exporter_ring().first()`
+— exactly one epoch back. A member ≥2 epochs behind cannot open any resend
+and heals only via relay-stored originals. Direction: reseal a resent
+commit under the exporter of the epoch it was MADE at (the commit's epoch
+is in its MLS bytes; the ring holds K past exporters), and consider a
+deeper `EXPORTER_RING_K`. To be analyzed and built after the self-heal
+round proves out in the field.
 
 ## 5. Landing
 

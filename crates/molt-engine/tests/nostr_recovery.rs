@@ -1438,3 +1438,88 @@ async fn a_restored_workspace_reattaches_without_a_ritual() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
+
+/// **The field case 2026-08-24: a reattach into a THREE-member republic must
+/// leave all three exchanging chat.** The first build addressed every
+/// survivor at once — two coordinators could race the same re-admission and
+/// the losing side's laggard stranded on an old epoch (deaf both ways, the
+/// "frames past the key ring" report). Sequential targeting addresses ONE
+/// coordinator at a time, so exactly one re-key happens on the happy path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_three_member_reattach_leaves_everyone_talking() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .try_init();
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, v, _petra_phrase) = found_three_at(tmp.path(), &url, 2).await;
+
+    let ws_id = read_session(&b).await.workspaces[0].id.clone();
+    let blob = tmp.path().join("petra.molt.enc");
+    b.execute(Command::ExportWorkspace {
+        id: ws_id,
+        dest: blob.display().to_string(),
+        passphrase: "super-secret-pass".to_string(),
+    })
+    .await
+    .expect("export kickoff");
+    wait_for(&b, "the export to finish", |s| {
+        !s.export.running && s.export.result == "ok"
+    })
+    .await;
+    drop(b);
+
+    let c = engine(&tmp.path().join("restored"));
+    adopt_relay(&c, &url).await;
+    c.execute(Command::RestoreStart {
+        way: "file".to_string(),
+        target: blob.display().to_string(),
+        secret: "super-secret-pass".to_string(),
+        replace: false,
+    })
+    .await
+    .expect("restore start");
+    wait_for(&c, "the restore to verify", |s| s.restore.run.outcome == 1).await;
+    c.execute(Command::RestoreFinish).await.expect("restore finish");
+    let s = wait_for(&c, "the reattach to go live", |s| {
+        s.notice.starts_with("recovered:") || s.notice.starts_with("recover-failed:")
+    })
+    .await;
+    assert!(!s.notice.starts_with("recover-failed:"), "reattach: {:?}", s.notice);
+
+    // every ordered pair converges: each node speaks, all three hear all
+    for (i, w) in [&a, &v, &c].into_iter().enumerate() {
+        w.execute(Command::Chat {
+            body: format!("after the comeback {i}"),
+            quote: None,
+            channel: molt_core::ChannelRef::Group,
+        })
+        .await
+        .expect("chat");
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+    loop {
+        let mut missing = Vec::new();
+        for (who, w) in [("walter", &a), ("vera", &v), ("petra", &c)] {
+            let seen = read_chat_bodies(w).await;
+            for i in 0..3 {
+                if !seen.iter().any(|m| m.contains(&format!("after the comeback {i}"))) {
+                    missing.push(format!("{who}:{i}"));
+                }
+            }
+        }
+        if missing.is_empty() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "three-way chat never converged after the reattach — a raced double \
+             re-key strands a laggard: missing {missing:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}

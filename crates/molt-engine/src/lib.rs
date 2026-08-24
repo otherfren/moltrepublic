@@ -565,6 +565,12 @@ pub(crate) struct State {
     /// workspace's own-anchor 1059 subscription, so a restored seat can
     /// announce itself without a minted link. Torn down with the net.
     pub(crate) seat_inbox: Option<tokio::task::JoinHandle<()>>,
+    /// Self-heal bookkeeping (`detached_reattach.md` §2.4): how often this
+    /// session already re-attached itself out of a stuck epoch, and when it
+    /// last tried. Session-lifetime cap — two devices restoring the same
+    /// seat would otherwise re-key each other in an endless ping-pong.
+    pub(crate) reattach_attempts: u32,
+    pub(crate) last_reattach: Option<u64>,
     /// Self-service reattach cooldown (`detached_reattach.md` §2.2): a
     /// `(member, new_anchor) → unix stamp` map that swallows relay replays
     /// of an accepted request (the accept window does not cover 1059 wraps).
@@ -999,6 +1005,8 @@ impl State {
             last_group_ack: None,
             recovery_inboxes: Vec::new(),
             seat_inbox: None,
+            reattach_attempts: 0,
+            last_reattach: None,
             unsolicited_cooldown: std::collections::HashMap::new(),
             chain: Vec::new(),
             chain_head: None,
@@ -5481,6 +5489,27 @@ mod tests {
             st.session.notice,
             "recover-note:waiting for the coordinator's Welcome (2 min)"
         );
+    }
+
+    /// The stuck-epoch self-heal is CAPPED and SPACED (`detached_reattach.md`
+    /// §2.4): a failed spawn still stamps the clock (no per-health-frame
+    /// retry), the session cap survives resets, and a running recovery task
+    /// is never stacked onto.
+    #[test]
+    fn the_self_heal_reattach_is_capped_and_spaced() {
+        let mut st = tests::plain_state();
+        // no chain, no seed — the spawn cannot start, but the clock stamps
+        st.maybe_self_heal_reattach();
+        assert_eq!(st.reattach_attempts, 0, "a spawn that cannot start counts no attempt");
+        let first = st.last_reattach.expect("the try is stamped");
+        // immediately again: inside the spacing window nothing happens
+        st.maybe_self_heal_reattach();
+        assert_eq!(st.last_reattach, Some(first), "spaced — no re-stamp inside the window");
+        // at the session cap nothing ever fires again, even past the window
+        st.reattach_attempts = 3;
+        st.last_reattach = None;
+        st.maybe_self_heal_reattach();
+        assert_eq!(st.last_reattach, None, "the session cap is final (anti ping-pong)");
     }
 
     /// The rejoiner's checklist (`NetRecoverProgress`): a live incarnation's

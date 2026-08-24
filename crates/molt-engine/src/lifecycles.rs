@@ -1744,6 +1744,42 @@ impl State {
         true
     }
 
+    /// Self-heal a STUCK-EPOCH seat (`detached_reattach.md` §2.4): triggered
+    /// by the deaf-node signature (own outbox stalled + unopenable frames).
+    /// Runs the ordinary self-service reattach, capped per SESSION and
+    /// spaced — two devices restoring the same seat must never re-key each
+    /// other in an endless ping-pong, and a misfiring detector must cost
+    /// bounded churn.
+    pub(crate) fn maybe_self_heal_reattach(&mut self) {
+        const SPACING_SECS: u64 = 600;
+        const MAX_ATTEMPTS: u32 = 3;
+        if self.reattach_attempts >= MAX_ATTEMPTS {
+            return;
+        }
+        let now = crate::now_secs();
+        if self
+            .last_reattach
+            .is_some_and(|t| now.saturating_sub(t) < SPACING_SECS)
+        {
+            return;
+        }
+        if self.recover_task.as_ref().is_some_and(|t| !t.is_finished()) {
+            return;
+        }
+        // stamp BEFORE trying: a spawn that cannot start (no seed, no
+        // anchors) must not retry on every health frame either
+        self.last_reattach = Some(now);
+        if self.spawn_reattach() {
+            self.reattach_attempts += 1;
+            tracing::warn!(
+                attempt = self.reattach_attempts,
+                "group key behind and outbox stalled — self-healing via reattach"
+            );
+            self.session.notice = "reattaching".to_string();
+            self.emit_session(SessionScope::Full);
+        }
+    }
+
     pub(crate) fn cmd_recover_start(
         &mut self,
         link: String,
