@@ -474,24 +474,28 @@ fn lock_path_for(path: &Path) -> PathBuf {
 }
 
 /// Standard temp-and-rename in the same directory: a crash leaves either the
-/// old file or the new file, never a torn one. The temp file gets the
-/// original's permissions (the file carries the MCP token — it must not
-/// widen), 0600 when there is no original.
+/// old file or the new file, never a torn one. The file carries the MCP
+/// token, so the written copy is OWNER-ONLY: an original's mode is kept
+/// only within `0o600` (a world-readable file left by an old CLI or a
+/// hand edit narrows on the next save, it never widens).
 fn atomic_write(path: &Path, text: &str) -> std::io::Result<()> {
     let tmp = tmp_path(path);
     {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp)?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::metadata(path)
-                .map(|m| m.permissions())
-                .unwrap_or_else(|_| std::fs::Permissions::from_mode(0o600));
-            f.set_permissions(perms)?;
+            let mode = std::fs::metadata(path)
+                .map(|m| m.permissions().mode() & 0o600)
+                .unwrap_or(0o600);
+            f.set_permissions(std::fs::Permissions::from_mode(mode))?;
         }
         f.write_all(text.as_bytes())?;
         f.sync_all()?;
@@ -638,6 +642,21 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         panic!("notice never became `{want}`");
+    }
+
+    /// A world-readable config (old CLI default, hand edit) narrows to
+    /// owner-only on the next save — the file carries the MCP token.
+    #[cfg(unix)]
+    #[test]
+    fn a_save_narrows_a_world_readable_config_to_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "a = 1\n").expect("seed");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        atomic_write(&path, "a = 2\n").expect("write");
+        let mode = std::fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "never wider than the owner");
     }
 
     #[test]

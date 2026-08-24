@@ -10,6 +10,11 @@
 
 use similar::{ChangeTag, TextDiff};
 
+/// Longest line pair that still gets a char diff; longer pairs render whole.
+const CHAR_DIFF_MAX_LINE: usize = 2048;
+/// Time budget for one line pair's char diff.
+const CHAR_DIFF_DEADLINE_MS: u64 = 50;
+
 // The parser and the file/hunk types moved DOWN to molt-core
 // (shared_memory_real.md WP-A): the strict fold applies exactly what this
 // viewer renders, so both must read one parse. This module keeps the
@@ -111,7 +116,23 @@ fn plain_row(text: &str, tone: SegTone) -> Row {
 /// One merged char-diff row for a changed line pair: equal runs plain,
 /// removed characters red, added characters green — in order.
 fn char_diff_row(old: &str, new: &str) -> Row {
-    let diff = TextDiff::from_chars(old, new);
+    // a pending patch from ANY member reaches every window unasked, and
+    // Myers on two long, different lines is quadratic — bound the work so
+    // one hostile 30 KB line cannot freeze every member's UI thread
+    // (review 2026-08-25): past the length cap the pair renders whole, and
+    // the char diff itself carries a deadline (past it `similar` falls
+    // back to a coarse result)
+    if old.len() > CHAR_DIFF_MAX_LINE || new.len() > CHAR_DIFF_MAX_LINE {
+        return Row {
+            segs: vec![
+                Seg { text: old.to_string(), tone: SegTone::Removed },
+                Seg { text: new.to_string(), tone: SegTone::Added },
+            ],
+        };
+    }
+    let diff = TextDiff::configure()
+        .deadline(std::time::Instant::now() + std::time::Duration::from_millis(CHAR_DIFF_DEADLINE_MS))
+        .diff_chars(old, new);
     let mut segs: Vec<Seg> = Vec::new();
     for change in diff.iter_all_changes() {
         let tone = match change.tag() {
@@ -137,6 +158,20 @@ fn char_diff_row(old: &str, new: &str) -> Row {
 mod tests {
     use super::*;
     use crate::wiki::Wiki;
+
+    /// Past the length cap a changed pair renders whole (one removed, one
+    /// added segment) instead of a quadratic char diff.
+    #[test]
+    fn an_overlong_line_pair_renders_whole_instead_of_char_diffed() {
+        let old = "a".repeat(CHAR_DIFF_MAX_LINE + 1);
+        let new = "b".repeat(CHAR_DIFF_MAX_LINE + 1);
+        let row = char_diff_row(&old, &new);
+        let tones: Vec<SegTone> = row.segs.iter().map(|s| s.tone).collect();
+        assert_eq!(tones, vec![SegTone::Removed, SegTone::Added]);
+        // and a short pair still gets the fine-grained diff
+        let fine = char_diff_row("hello", "hallo");
+        assert!(fine.segs.len() > 2, "a short pair is char-diffed: {fine:?}");
+    }
 
     fn hl(op: char, text: &str) -> HunkLine {
         HunkLine {

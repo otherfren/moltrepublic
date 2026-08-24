@@ -515,10 +515,7 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
             .get("file_cap_bytes")
             .and_then(Value::as_u64)
             .ok_or_else(|| missing("file_cap_bytes"))?,
-        download_dir: args
-            .get("download_dir")
-            .and_then(Value::as_str)
-            .map_or(d.download_dir, str::to_string),
+        download_dir: text("download_dir")?,
         s3_backup: flag("s3_backup")?,
         s3_endpoint: text("s3_endpoint")?,
         s3_access_key: text("s3_access_key")?,
@@ -1041,7 +1038,9 @@ pub fn tools() -> Vec<ToolDef> {
                     "mcp_token": { "type": "string", "description": "rotate the MCP API token (what the GUI's Rotate button does)" },
                     "anonymity": { "type": "string", "enum": ["tor", "none"] },
                     "tor_mode": { "type": "string", "enum": ["local", "embedded", "whonix"] },
-                    "tor_port": { "type": "integer" }
+                    "tor_port": { "type": "integer" },
+                    "file_cap_bytes": { "type": "integer", "description": "byte cap for shared files; 0 = sharing off" },
+                    "download_dir": { "type": "string", "description": "where downloads land" }
                 },
                 "required": [
                     "headless", "workspace_dir", "s3_backup", "s3_endpoint",
@@ -1049,7 +1048,8 @@ pub fn tools() -> Vec<ToolDef> {
                     "s3_interval_min", "s3_keep_copies", "s3_max_bytes",
                     "media_s3_bucket", "media_s3_max_bytes", "sound_message",
                     "sound_vote", "read_receipts", "mcp_port", "mcp_allow",
-                    "mcp_token", "anonymity", "tor_mode", "tor_port"
+                    "mcp_token", "anonymity", "tor_mode", "tor_port",
+                    "file_cap_bytes", "download_dir"
                 ]
             }),
             build: |args| Ok(Command::SaveSettings {
@@ -1455,7 +1455,7 @@ pub fn tools() -> Vec<ToolDef> {
                 "properties": {
                     "name": { "type": "string", "description": "the new republic's name (must be unique locally)" },
                     "member": { "type": "string", "description": "the founder's handle" },
-                    "threshold": { "type": "integer", "description": "approvals required (m), 1..=members" },
+                    "threshold": { "type": "integer", "description": "approvals required (m), 2..=members" },
                     "members": { "type": "integer", "description": "member count (n), 2..=13" }
                 },
                 "required": ["name", "member", "threshold", "members"]
@@ -1842,6 +1842,34 @@ mod tests {
 
     /// A well-formed message id for the argument-mapping tests.
     const HEX_ID: &str = "00112233445566778899aabbccddeeff";
+
+    /// **`save_settings` builds from exactly what its schema requires.**
+    /// The builder demanded `file_cap_bytes` (absent from the schema) and
+    /// silently defaulted `download_dir` — the H5 class the "every field
+    /// required" rule was written against (review 2026-08-25).
+    #[test]
+    fn save_settings_builds_from_exactly_its_schemas_required_list() {
+        let def = tool_named("save_settings");
+        let schema = (def.schema)();
+        let props = schema["properties"].as_object().expect("properties");
+        let required = schema["required"].as_array().expect("required");
+        let mut args = serde_json::Map::new();
+        for key in required {
+            let k = key.as_str().expect("key");
+            let p = props.get(k).unwrap_or_else(|| panic!("required `{k}` is not a property"));
+            let v = match p["type"].as_str() {
+                Some("boolean") => json!(false),
+                Some("integer") => json!(1),
+                _ => json!(p["enum"]
+                    .as_array()
+                    .and_then(|a| a.first())
+                    .and_then(Value::as_str)
+                    .unwrap_or("x")),
+            };
+            args.insert(k.to_string(), v);
+        }
+        build("save_settings", &Value::Object(args)).expect("every required field given builds");
+    }
 
     #[test]
     fn chat_send_accepts_channel_and_quote_id() {

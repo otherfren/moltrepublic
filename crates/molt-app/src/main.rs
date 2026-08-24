@@ -526,6 +526,28 @@ fn default_generate_path() -> anyhow::Result<PathBuf> {
 
 /// Write a fresh default config. Fails if the file exists or the path is not
 /// writable (e.g. an unreachable directory). Creates parent directories.
+/// Write the config owner-only: it carries the MCP token (and, once set,
+/// the S3 secret). The runtime writer keeps whatever mode it finds, so the
+/// FIRST write decides — the umask default would leave it world-readable.
+fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    f.write_all(text.as_bytes())?;
+    f.sync_all()
+}
+
 fn generate_config(path: &Path) -> anyhow::Result<()> {
     if path.exists() {
         anyhow::bail!(
@@ -545,7 +567,7 @@ fn generate_config(path: &Path) -> anyhow::Result<()> {
             .with_context(|| "cannot mint an MCP token, so no config is written")?,
         ..Settings::default()
     };
-    std::fs::write(path, render(&settings))
+    write_private(path, &render(&settings))
         .with_context(|| format!("writing {} (path not reachable?)", path.display()))?;
     let shown = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     println!("Wrote default config to {}", shown.display());
@@ -578,7 +600,7 @@ fn repair_config(path: &Path) -> anyhow::Result<()> {
     let backup = backup_path(path);
     std::fs::copy(path, &backup)
         .with_context(|| format!("writing backup {} (path not reachable?)", backup.display()))?;
-    std::fs::write(path, render(&settings))
+    write_private(path, &render(&settings))
         .with_context(|| format!("writing {}", path.display()))?;
 
     if was_valid {
