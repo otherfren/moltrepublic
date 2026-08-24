@@ -283,7 +283,8 @@ pub struct S3Client {
 impl S3Client {
     /// A client for `config`, dialing through `dialer`.
     pub fn new(config: S3Config, dialer: Dialer) -> S3Client {
-        S3Client { config, dialer }
+        // its own circuits: the bucket must not share one with a relay
+        S3Client { config, dialer: dialer.isolated("s3") }
     }
 
     /// The cheap authenticated probe behind the settings panel's

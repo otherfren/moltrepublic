@@ -70,6 +70,8 @@ pub(crate) fn x25519_provider() -> rustls::crypto::CryptoProvider {
 pub struct ArtiHandle {
     /// The shared, lazily-bootstrapped arti client + isolation map (§4).
     shared: std::sync::Arc<crate::tor_embedded::ArtiShared>,
+    /// The isolation lane (see [`Dialer::isolated`]); empty = the base lane.
+    lane: String,
 }
 
 #[cfg(feature = "embedded-tor")]
@@ -87,6 +89,14 @@ impl ArtiHandle {
     fn new() -> ArtiHandle {
         ArtiHandle {
             shared: crate::tor_embedded::shared(),
+            lane: String::new(),
+        }
+    }
+
+    fn with_lane(&self, tag: &str) -> ArtiHandle {
+        ArtiHandle {
+            shared: self.shared.clone(),
+            lane: format!("{}{tag}/", self.lane),
         }
     }
 }
@@ -183,7 +193,7 @@ pub enum Dialer {
 }
 
 /// Mint a per-session random isolation prefix (8 bytes, hex).
-fn session_token() -> Result<String, NetError> {
+pub(crate) fn session_token() -> Result<String, NetError> {
     let mut b = [0u8; 8];
     getrandom::getrandom(&mut b)
         .map_err(|e| NetError::Crypto(format!("os rng unavailable: {e}")))?;
@@ -254,6 +264,36 @@ impl Dialer {
     /// it, because "cannot connect" means something entirely different
     /// depending on whether a proxy was even involved — and the layer that
     /// reports the failure does not otherwise know which route was taken.
+    /// The same route on its OWN Tor circuits: every `lane` gets a distinct
+    /// SOCKS credential (`IsolateSOCKSAuth`) / arti isolation token, so
+    /// streams from different lanes to one relay never share a circuit.
+    ///
+    /// Isolation used to be per HOST only (review 2026-08-25): the
+    /// anchor-authenticated ritual inbox, the throwaway-key 445
+    /// subscription, the unauthenticated publish channel and every other
+    /// republic on this node rode one circuit per relay — an onion relay
+    /// operator reads the circuit id per connection and links them all, the
+    /// exact links the ephemeral keys and ticket-salted anchors exist to
+    /// prevent. Lanes are stable for equal input (one circuit per lane and
+    /// host, reused) and compose (`isolated` of an isolated dialer nests).
+    #[must_use]
+    pub fn isolated(&self, lane: &str) -> Dialer {
+        let tag = {
+            use sha2::{Digest, Sha256};
+            hex::encode(&Sha256::digest(lane.as_bytes())[..8])
+        };
+        match self {
+            Dialer::Direct => Dialer::Direct,
+            Dialer::Socks5 { proxy, session } => Dialer::Socks5 {
+                proxy: proxy.clone(),
+                session: format!("{session}-{tag}"),
+            },
+            #[cfg(feature = "embedded-tor")]
+            Dialer::Arti(handle) => Dialer::Arti(handle.with_lane(&tag)),
+        }
+    }
+
+    /// The route as a log field (`direct`, `socks5://…`, `arti`).
     pub fn route(&self) -> String {
         match self {
             Dialer::Direct => "direct".to_string(),
@@ -347,7 +387,7 @@ impl Dialer {
                 // and arti applies its own per-circuit/connect timeouts, so a
                 // 30 s cap would abort a legitimate first-run bootstrap. Later
                 // dials reuse the client and are fast. Isolation is per host.
-                let stream = handle.shared.connect(host, port).await?;
+                let stream = handle.shared.connect(&handle.lane, host, port).await?;
                 Ok(DialStream::Arti(Box::new(stream)))
             }
         }
@@ -408,6 +448,28 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Two lanes to one host must never share a circuit: distinct SOCKS
+    /// credentials per lane, stable for equal input, and the base dialer's
+    /// credential is a third one.
+    #[test]
+    fn two_lanes_to_one_host_yield_distinct_socks_credentials() {
+        let base = Dialer::resolve("tor", "local", 9050).expect("tor");
+        let session = |d: &Dialer| match d {
+            Dialer::Socks5 { session, .. } => session.clone(),
+            other => panic!("not a socks dialer: {other:?}"),
+        };
+        let a = session(&base.isolated("anchor:abc"));
+        let b = session(&base.isolated("group:xyz"));
+        assert_ne!(a, b, "different lanes, different credentials");
+        assert_ne!(a, session(&base), "a lane differs from the base");
+        assert_eq!(a, session(&base.isolated("anchor:abc")), "a lane is stable");
+        assert!(a.starts_with(&session(&base)), "the session survives inside the lane");
+        assert!(
+            matches!(Dialer::Direct.isolated("x"), Dialer::Direct),
+            "no circuits, no lanes"
+        );
     }
 
     #[test]

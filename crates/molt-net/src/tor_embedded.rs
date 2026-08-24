@@ -66,12 +66,13 @@ impl ArtiShared {
         }
     }
 
-    /// The isolation token for `host`, minted on first use and stable
-    /// thereafter — so every remote host gets its own Tor circuit and the
-    /// same host reuses one (concept §4/§5).
-    pub fn token_for(&self, host: &str) -> IsolationToken {
+    /// The isolation token for `(lane, host)`, minted on first use and stable
+    /// thereafter — so every remote host gets its own Tor circuit per lane
+    /// and the same pair reuses one (concept §4/§5, [`crate::dial::Dialer::isolated`]).
+    pub fn token_for(&self, lane: &str, host: &str) -> IsolationToken {
         let mut map = self.iso.lock().expect("arti isolation map mutex poisoned");
-        *map.entry(host.to_string()).or_insert_with(IsolationToken::new)
+        *map.entry(format!("{lane}\u{0}{host}"))
+            .or_insert_with(IsolationToken::new)
     }
 
     /// The lazily-bootstrapped shared [`TorClient`]. The first call bootstraps
@@ -85,9 +86,9 @@ impl ArtiShared {
     /// The host is resolved **in-circuit** (no local DNS). The returned
     /// [`DataStream`] is `AsyncRead + AsyncWrite + Unpin + Send`, so a TLS
     /// handshake rides straight over it.
-    pub async fn connect(&self, host: &str, port: u16) -> Result<DataStream, NetError> {
+    pub async fn connect(&self, lane: &str, host: &str, port: u16) -> Result<DataStream, NetError> {
         let client = self.client().await?;
-        let token = self.token_for(host);
+        let token = self.token_for(lane, host);
         let mut prefs = StreamPrefs::new();
         prefs.set_isolation(token);
         client

@@ -155,6 +155,10 @@ impl RitualNet {
                 "transport key disagrees with its anchor derivation".into(),
             ));
         }
+        // the anchor's own circuits: what this endpoint does under its
+        // anchor (the `#p` inbox, its ritual wraps) must not share a
+        // circuit with the group's anonymous traffic or another republic
+        let dialer = dialer.isolated(&format!("anchor:{pk_hex}"));
         Ok(Self { dialer, relays, keys, pk_hex })
     }
 
@@ -398,7 +402,20 @@ impl GroupChannel {
     /// A channel over `relays` for the group whose h tags derive from
     /// `rotation_seed` (minted at founding, learned from the Welcome).
     pub fn new(dialer: Dialer, relays: Vec<String>, rotation_seed: [u8; 32]) -> Self {
-        let pool = crate::relay_runtime::PublishPool::new(dialer.clone(), relays.clone());
+        // two lanes per republic: the h-tag subscriptions (throwaway auth
+        // key) on the group's lane, the ephemeral-key publishes on a lane of
+        // their own per channel instance — a relay must not see the
+        // subscriber and the publisher on one circuit (`Dialer::isolated`)
+        let publish_lane = crate::dial::session_token().unwrap_or_default();
+        let pool = crate::relay_runtime::PublishPool::new(
+            dialer.isolated(&format!("publish:{publish_lane}")),
+            relays.clone(),
+        );
+        let sub_lane = {
+            use sha2::{Digest, Sha256};
+            hex::encode(&Sha256::digest(rotation_seed)[..8])
+        };
+        let dialer = dialer.isolated(&format!("group:{sub_lane}"));
         Self { dialer, relays, rotation_seed, pool }
     }
 

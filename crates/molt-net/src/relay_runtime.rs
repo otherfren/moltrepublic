@@ -41,8 +41,14 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long a session must live for the reconnect backoff to reset.
 const HEALTHY_SESSION: Duration = Duration::from_secs(30);
 
-/// Dedup ring capacity: enough for the WP4a-horizon backlog of a busy
-/// republic, bounded so a hostile relay cannot balloon memory.
+/// Dedup ring FLOOR: enough for the WP4a-horizon backlog of a busy
+/// republic, bounded so a hostile relay cannot balloon memory. The ring is
+/// sized at least to the history bound (+ live headroom): the fan-in
+/// channel is sized on the assumption that relay-count copies of a replay
+/// collapse to one, which only holds while the ring covers the whole
+/// replay — a smaller ring let a second relay's copies pass as fresh and
+/// park its reader on a full channel with its EOSE unread (review
+/// 2026-08-25).
 const DEDUP_CAP: usize = 4096;
 
 /// Clock-skew margin (concept §4.4's ±1h): how far past local now a peer's
@@ -320,11 +326,12 @@ impl RelayRuntime {
 struct DedupRing {
     seen: HashSet<EventId>,
     order: VecDeque<EventId>,
+    cap: usize,
 }
 
 impl DedupRing {
-    fn new() -> Self {
-        Self { seen: HashSet::new(), order: VecDeque::new() }
+    fn with_capacity(cap: usize) -> Self {
+        Self { seen: HashSet::new(), order: VecDeque::new(), cap }
     }
 
     /// `true` iff this id was not seen before (and is now recorded).
@@ -333,7 +340,7 @@ impl DedupRing {
             return false;
         }
         self.order.push_back(id);
-        if self.order.len() > DEDUP_CAP {
+        if self.order.len() > self.cap {
             if let Some(oldest) = self.order.pop_front() {
                 self.seen.remove(&oldest);
             }
@@ -508,7 +515,9 @@ impl RelayRuntime {
             dialer: self.dialer.clone(),
             filter,
             tx,
-            dedup: Arc::new(Mutex::new(DedupRing::new())),
+            dedup: Arc::new(Mutex::new(DedupRing::with_capacity(
+                self.history_bound.saturating_add(64).max(DEDUP_CAP),
+            ))),
             cursors: self.cursors.clone(),
             eose_tx: Arc::new(eose_tx),
             health: self.health.clone(),
@@ -1375,6 +1384,29 @@ async fn publish_one(dialer: &Dialer, url: &str, event: &Event) -> Result<(), Ne
 
 #[cfg(test)]
 mod tests {
+    /// The ring must cover a whole replay of the history bound, or a second
+    /// relay's copies of the earliest events pass as fresh.
+    #[test]
+    fn the_dedup_ring_covers_the_history_bound() {
+        let bound = 10usize;
+        let rt = super::RelayRuntime::new(crate::dial::Dialer::Direct, vec![])
+            .with_history_bound(bound);
+        let cap = rt.history_bound.saturating_add(64).max(super::DEDUP_CAP);
+        let mut ring = super::DedupRing::with_capacity(cap);
+        let ids: Vec<nostr::EventId> = (0..cap)
+            .map(|i| {
+                let mut b = [0u8; 32];
+                b[..8].copy_from_slice(&u64::try_from(i).unwrap_or(0).to_le_bytes());
+                nostr::EventId::from_byte_array(b)
+            })
+            .collect();
+        for id in &ids {
+            assert!(ring.fresh(*id));
+        }
+        assert!(cap >= bound, "ring covers the bound");
+        assert!(!ring.fresh(ids[0]), "the first id of a full replay is still remembered");
+    }
+
     use super::*;
 
     /// The `duplicate:` rule pinned as a pure function, independent of any

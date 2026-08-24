@@ -301,7 +301,11 @@ async fn circuit_rung(dialer: &Dialer, url: &str) -> Result<u32, String> {
     // works" — a fake SOCKS server passes that bar, as this module's own
     // test showed. Completing the WebSocket upgrade proves the RELAY
     // answered, through Tor, on the exact path the transport uses.
-    let dialed = timeout(CIRCUIT_TIMEOUT, crate::relay_ws::RelayWs::connect(dialer, url)).await;
+    let dialed = timeout(
+        CIRCUIT_TIMEOUT,
+        crate::relay_ws::RelayWs::connect(&dialer.isolated("probe"), url),
+    )
+    .await;
     let ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
     match dialed {
         Ok(Ok(ws)) => {
