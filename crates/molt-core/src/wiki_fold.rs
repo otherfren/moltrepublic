@@ -155,11 +155,14 @@ pub fn parse_patch(patch: &str) -> Vec<PatchFile> {
             if let Some(l) = f.hunks.last_mut().and_then(|h| h.lines.last_mut()) {
                 l.newline = false;
             }
-        } else if line.starts_with("similarity index")
-            || line.starts_with("--- ")
-            || line.starts_with("+++ ")
+        } else if f.hunks.is_empty()
+            && (line.starts_with("similarity index")
+                || line.starts_with("--- ")
+                || line.starts_with("+++ "))
         {
-            // header noise — nothing to keep
+            // header noise — nothing to keep. Only BEFORE the first hunk:
+            // inside one, `--- x` is the removal of a line `-- x` and
+            // `+++ x` the addition of `++ x` (review 2026-08-25)
         } else if let Some(h) = f.hunks.last_mut() {
             let mut chars = line.chars();
             if let Some(op @ ('+' | '-' | ' ')) = chars.next() {
@@ -417,6 +420,29 @@ mod tests {
         let mut t2 = tree.clone();
         assert!(apply_patch(&mut t2, &patch_of(rename_then_delete)).is_ok());
         assert!(t2.contains_key("b.md") && !t2.contains_key("a.md"));
+    }
+
+    /// A content line whose text begins with `-- ` (or `++ `) renders as
+    /// `--- …` / `+++ …` inside the hunk. Only a file header looks like
+    /// that BEFORE the first `@@`; inside a hunk it is a line the members
+    /// are shown and must be applied — dropping it silently voids a
+    /// ratified change (the header count no longer agrees) after the
+    /// viewer showed a hunk without it (review 2026-08-25).
+    #[test]
+    fn hunk_lines_that_look_like_file_headers_are_content() {
+        let mut tree = BTreeMap::from([(
+            "a.md".to_string(),
+            "hello\n-- sig\nworld\n".to_string(),
+        )]);
+        let patch = "diff --git a/a.md b/a.md\n--- a/a.md\n+++ b/a.md\n@@ -1,3 +1,3 @@\n hello\n--- sig\n+++ sig\n world\n";
+        let files = patch_of(patch);
+        assert_eq!(files[0].hunks[0].lines.len(), 4, "every hunk line is content");
+        assert_eq!(
+            apply_patch(&mut tree, &files),
+            Ok(()),
+            "a removal of a line starting with `-- ` applies"
+        );
+        assert_eq!(tree.get("a.md").map(String::as_str), Some("hello\n++ sig\nworld\n"));
     }
 
     #[test]
