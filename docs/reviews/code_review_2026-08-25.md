@@ -1,7 +1,10 @@
 # Code review 2026-08-25 (security, correctness, style, refactoring)
 
 Status: **OPEN WORK** for the items marked OPEN below; every item marked
-FIXED landed on master the same night (commits named per section). The
+FIXED landed on master the same night (`2714d814` core patch parser,
+`584125ec` outbox timer, `7ccdbd15` governance + wire ingest + MLS
+authority, `919ad6bc` roster verifiers, `83d72c39` Tor lanes + dedup ring,
+`7e350909` storage seal, `ecf9b640` MCP schema / config mode / diff). The
 review covered every crate: eight independent read-only passes (one per
 area), each finding verified against the code before it was accepted, the
 CRITICAL/HIGH ones reproduced by a red test before the fix. Items already
