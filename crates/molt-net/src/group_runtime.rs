@@ -521,6 +521,12 @@ async fn outbox_loop<L, S, K>(
     let mut rounds_without_progress: u32 = 0;
     let mut stall_reported = false;
     let mut stalled_since: Option<tokio::time::Instant> = None;
+    // whether a failed publish chain was reported (`send_failed`): the
+    // engine lifts that flag on `send_ok` and on nothing else, so the first
+    // success afterwards owes it — or the surface stays amber for ever
+    // (field 2026-08-24: "Reconnecting… no relay accepted the frame" long
+    // after the relays were back)
+    let mut publish_failed_reported = false;
     loop {
         // NO rewind here. It sat at the loop top through N5.2, where it was
         // inert because nothing ever acked — N5.3's acks made it live, and a
@@ -552,6 +558,11 @@ async fn outbox_loop<L, S, K>(
             match publish_with_backoff(&channel, &frame, &cfg, &mut stop).await {
                 Ok(()) => {
                     tracing::debug!(me = %cfg.member, seq = env.seq, "group frame published");
+                    if publish_failed_reported {
+                        // the backoff exit — the channel publishes again
+                        publish_failed_reported = false;
+                        sink.send_ok(&cfg.member).await;
+                    }
                     published_through = env.seq;
                 }
                 // hold the cursor exactly here in EVERY failure case: nothing
@@ -582,6 +593,7 @@ async fn outbox_loop<L, S, K>(
                         _ => "no relay accepted the frame".to_string(),
                     };
                     sink.send_failed(&cfg.member, &reason).await;
+                    publish_failed_reported = true;
                     stalled_since = None;
                     break;
                 }
@@ -2046,5 +2058,149 @@ mod tests {
             3,
             "a rewind is a rewind — it must never advance the send position"
         );
+    }
+
+    /// **A publish that works again lifts the send-failed flag.**
+    ///
+    /// Field 2026-08-24: a restored seat's re-offer hit a relay outage
+    /// (both relays timed out), the outbox raised `send_failed` — and kept
+    /// the surface amber ("Reconnecting… no relay accepted the frame") long
+    /// after the next publish had gone through, because nothing ever sent
+    /// the matching `send_ok`. The engine clears the stuck flag on exactly
+    /// that signal, so the outbox owes it on the first success after a
+    /// reported failure.
+    ///
+    /// The relay sits behind a proxy the test flips: down (every connection
+    /// dropped at once → a transient stall) and then up (bytes piped to a
+    /// MockRelay).
+    #[tokio::test]
+    async fn a_publish_that_works_again_lifts_the_send_failed_flag() {
+        use crate::mls::MlsMember;
+        use ed25519_dalek::SigningKey;
+        use nostr_relay_builder::MockRelay;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        /// `(member, None)` = send_ok, `(member, Some(reason))` = send_failed.
+        type Signals = Vec<(String, Option<String>)>;
+        #[derive(Clone, Default)]
+        struct Sink(Arc<Mutex<Signals>>);
+        impl EngineSink for Sink {
+            async fn deliver(
+                &self,
+                _from: &MemberId,
+                _env: molt_core::EventEnvelope,
+            ) -> Result<(), crate::NetError> {
+                Ok(())
+            }
+            async fn peer_seen(&self, _m: &MemberId) {}
+            async fn send_failed(&self, m: &MemberId, r: &str) {
+                self.0
+                    .lock()
+                    .expect("sink")
+                    .push((m.clone(), Some(r.to_string())));
+            }
+            async fn send_ok(&self, m: &MemberId) {
+                self.0.lock().expect("sink").push((m.clone(), None));
+            }
+        }
+
+        let relay = MockRelay::run().await.expect("relay");
+        let upstream = relay
+            .url()
+            .await
+            .to_string()
+            .trim_start_matches("ws://")
+            .trim_end_matches('/')
+            .to_string();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("proxy");
+        let url = format!("ws://{}", listener.local_addr().expect("proxy addr"));
+        let up = Arc::new(AtomicBool::new(false));
+        let flag = up.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut client, _)) = listener.accept().await else {
+                    return;
+                };
+                if !flag.load(Ordering::SeqCst) {
+                    drop(client);
+                    continue;
+                }
+                let upstream = upstream.clone();
+                tokio::spawn(async move {
+                    if let Ok(mut server) = tokio::net::TcpStream::connect(&upstream).await {
+                        let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+                    }
+                });
+            }
+        });
+
+        let mut walter =
+            MlsMember::new(&SigningKey::from_bytes(&[1u8; 32]), "walter").expect("walter");
+        walter.create_group().expect("group");
+        let own = |seq: u64| molt_core::EventEnvelope {
+            prev_seq: seq.saturating_sub(1),
+            seq,
+            ts: 1_751_000_000 + seq,
+            by: "walter".to_string(),
+            body: molt_core::WorkspaceEvent::Chat(molt_core::ChatMessage::text(
+                molt_core::MessageId([u8::try_from(seq).unwrap_or(0); 16]),
+                "walter",
+                "x",
+                1_751_000_000,
+            )),
+        };
+        let log = crate::MemLog::default();
+        log.push(own(1));
+        let sink = Sink::default();
+        let (wake_tx, wake_rx) = watch::channel(0u64);
+        let (health_tx, _health) = watch::channel(GroupHealth::default());
+        let handle = spawn_group(
+            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![url], [7u8; 32]),
+            MlsChannel::new(walter),
+            GroupNetConfig::fast("walter".into(), vec!["petra".into()]),
+            log.clone(),
+            crate::MemStateStore::default(),
+            sink.clone(),
+            wake_rx,
+            health_tx,
+        );
+
+        // the relay is down: the retry chain runs dry and the outbox says so
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            let seen = sink.0.lock().expect("sink").clone();
+            if seen.iter().any(|(m, r)| m == "walter" && r.is_some()) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the outage was never reported"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        // the relay is back; the next append wakes the outbox, which
+        // republishes the held frame and the new one
+        up.store(true, Ordering::SeqCst);
+        log.push(own(2));
+        wake_tx.send(2).expect("wake");
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            let seen = sink.0.lock().expect("sink").clone();
+            if seen.iter().any(|(m, r)| m == "walter" && r.is_none()) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the publish went through but nothing lifted the send-failed flag — \
+                 the surface stays amber for ever: {seen:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        handle.shutdown().await;
     }
 }

@@ -3081,7 +3081,11 @@ impl State {
         }
         tracing::warn!(%member, %reason, "sends to a member keep failing — outbox is backing off");
         self.net_send_stuck.insert(member.clone(), reason);
-        self.net_unreachable.insert(member);
+        // the group runtime names the OWN seat for its broadcast outbox: a
+        // presence pin on this node could never lift (nothing sights itself)
+        if member != self.member() {
+            self.net_unreachable.insert(member);
+        }
         self.refresh_member_pills();
         self.recompute_net_health();
         Ok(Reply::Ack)
@@ -4226,6 +4230,28 @@ mod tests {
         assert!(
             st.net_unreachable.is_empty(),
             "the close/switch boundary clears the pins"
+        );
+    }
+
+    /// A stuck BROADCAST outbox (the group runtime names the own seat)
+    /// flags the channel, never the operator's own presence: this node is
+    /// running, and no sighting could ever lift a pin on itself.
+    #[test]
+    fn a_stuck_broadcast_outbox_never_pins_the_own_seat_offline() {
+        let mut st = presence_fixture();
+        st.cmd_net_send_failed(
+            "ada".to_string(),
+            "no relay accepted the frame".to_string(),
+            None,
+        )
+        .expect("ack");
+        assert!(
+            st.net_send_stuck.contains_key("ada"),
+            "the channel trouble is recorded"
+        );
+        assert!(
+            !st.net_unreachable.contains("ada"),
+            "the own seat is never pinned unreachable"
         );
     }
 
