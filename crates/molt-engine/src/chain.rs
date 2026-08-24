@@ -82,11 +82,26 @@ pub(crate) struct RecoverProgressReport {
     pub to: Option<String>,
 }
 
+/// The group's rejoin notification — the one thing members see, so it says
+/// WHICH door the seat came back through (`detached_reattach.md` §6): a
+/// survivor-minted link, or the self-service reattach from a restored
+/// backup.
+fn rejoin_note(ticketed: bool, member: &str) -> String {
+    if ticketed {
+        format!("🔑 {member} rejoined the republic after recovery")
+    } else {
+        format!("🔁 {member} reconnected from a restored backup")
+    }
+}
+
 /// until its `Restored` block commits — then the coordinator re-keys the group
 /// (`restore_member`) and sends the Welcome back to `reply`.
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // fields consumed by the MLS re-key increment (restore_member + Welcome)
 pub(crate) struct PendingRecovery {
+    /// Whether the request came over a minted link (`false` = the
+    /// self-service reattach) — chooses the group's notification line.
+    pub ticketed: bool,
     pub member: String,
     pub key_package: String,
     pub reply: String,
@@ -2086,6 +2101,7 @@ impl State {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn verify_and_propose_restore(
         &mut self,
+        ticketed: bool,
         member: &str,
         requested_pk: &str,
         key_package_hex: &str,
@@ -2157,6 +2173,7 @@ impl State {
         self.pending_recovery.insert(
             member.to_string(),
             PendingRecovery {
+                ticketed,
                 member: member.to_string(),
                 key_package: key_package_hex.to_string(),
                 reply: reply.to_string(),
@@ -2862,12 +2879,13 @@ impl State {
         let Some(pending) = self.pending_recovery.remove(member) else {
             return;
         };
+        let ticketed = pending.ticketed;
         let Ok(kp) = hex::decode(&pending.key_package) else {
             tracing::warn!(%member, "recovery KeyPackage is not valid hex");
             return;
         };
         if self.group_net.is_some() {
-            self.coordinator_rekey_nostr(member, &kp);
+            self.coordinator_rekey_nostr(ticketed, member, &kp);
             return;
         }
         match self.net.as_ref().and_then(|n| n.restore_member_on_group(member, &kp)) {
@@ -2908,7 +2926,7 @@ impl State {
                 // system line, not as the coordinator speaking.
                 if let Err(e) = self.post_message_with_kind(
                     me,
-                    format!("🔑 {member} rejoined the republic after recovery"),
+                    rejoin_note(ticketed, member),
                     None,
                     molt_core::ChannelRef::Group,
                     molt_core::ChatKind::System,
@@ -2956,7 +2974,7 @@ impl State {
     /// Steps 2 and 3 are off the actor; 1 and 4 are on it. Every failure is
     /// named — a recovery that quietly does nothing leaves a member locked out
     /// with no way to find out why.
-    fn coordinator_rekey_nostr(&mut self, member: &str, key_package: &[u8]) {
+    fn coordinator_rekey_nostr(&mut self, ticketed: bool, member: &str, key_package: &[u8]) {
         // **Everything that can fail is resolved BEFORE the group is touched.**
         //
         // `nostr_rekey` advances the epoch and evicts the old leaf, and there
@@ -3054,7 +3072,7 @@ impl State {
         let me = self.member();
         if let Err(e) = self.post_message_with_kind(
             me,
-            format!("🔑 {member} rejoined the republic after recovery"),
+            rejoin_note(ticketed, member),
             None,
             molt_core::ChannelRef::Group,
             molt_core::ChatKind::System,
@@ -8169,7 +8187,7 @@ mod tests {
         // the returning member (dora) signs the seat proof with its OWN key
         let good = crate::make_seat_proof(b.key("dora"), ticket, kp_hex, &rid, "", &[]);
         let id = coord
-            .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, ticket, &good, "", &[], "", "")
+            .verify_and_propose_restore(true, "dora", &b.pk("dora"), kp_hex, ticket, &good, "", &[], "", "")
             .expect("a valid seat proof re-admits");
         assert!(matches!(
             coord.proposal_changes.get(&id),
@@ -8185,13 +8203,13 @@ mod tests {
         // a proof signed by the WRONG key (petra forging dora's) is rejected
         let forged = crate::make_seat_proof(b.key("petra"), ticket, kp_hex, &rid, "", &[]);
         assert!(coord
-            .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, ticket, &forged, "", &[], "", "")
+            .verify_and_propose_restore(true, "dora", &b.pk("dora"), kp_hex, ticket, &forged, "", &[], "", "")
             .is_err());
 
         // a request that re-keys the seat to a DIFFERENT identity is rejected —
         // recovery re-derives the SAME key
         assert!(coord
-            .verify_and_propose_restore("dora", &b.pk("walter"), kp_hex, ticket, &good, "", &[], "", "")
+            .verify_and_propose_restore(true, "dora", &b.pk("walter"), kp_hex, ticket, &good, "", &[], "", "")
             .is_err());
     }
 
@@ -8353,6 +8371,7 @@ mod tests {
         let proof = crate::make_seat_proof(b.key("dora"), ticket, kp_hex, &rid, "", &[]);
         let id = coord
             .verify_and_propose_restore(
+                true,
                 "dora",
                 &b.pk("dora"),
                 kp_hex,
@@ -8457,6 +8476,7 @@ mod tests {
         let consent = consent_for(&b, "dora", "");
         let id = coord
             .verify_and_propose_restore(
+                true,
                 "dora",
                 &b.pk("dora"),
                 kp_hex,
@@ -8536,6 +8556,7 @@ mod tests {
         let consent = consent_for(&b, "dora", "");
         let id = coord
             .verify_and_propose_restore(
+                true,
                 "dora",
                 &b.pk("dora"),
                 kp_hex,
@@ -9401,6 +9422,7 @@ mod tests {
         );
         let err = coord
             .verify_and_propose_restore(
+                true,
                 "dora",
                 &b.pk("dora"),
                 kp_hex,
@@ -9434,6 +9456,7 @@ mod tests {
         );
         let id = coord2
             .verify_and_propose_restore(
+                true,
                 "dora",
                 &b2.pk("dora"),
                 kp_hex,
@@ -9465,6 +9488,7 @@ mod tests {
         coord.pending_recovery.insert(
             "walter".to_string(),
             PendingRecovery {
+                ticketed: true,
                 member: "walter".to_string(),
                 key_package: "beef".to_string(),
                 reply: String::new(),
@@ -9689,6 +9713,7 @@ mod tests {
         node.pending_recovery.insert(
             "dora".to_string(),
             PendingRecovery {
+                ticketed: true,
                 member: "dora".to_string(),
                 key_package: "beef".to_string(),
                 reply: String::new(),

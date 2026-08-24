@@ -170,15 +170,23 @@ dropped (a relay replay after the cooldown re-keys nobody).
   working anchors; if every member re-keyed since the backup, nobody
   hears — the workspace stays honestly detached (ticketed link works).
 
-## 7. Follow-up: deep-laggard commit resends (open analysis)
+## 7. Deep-laggard commit resends — BUILT (2026-08-24, same session)
 
-`group_frame` reseals a RESENT `MlsCommit` under `exporter_ring().first()`
-— exactly one epoch back. A member ≥2 epochs behind cannot open any resend
-and heals only via relay-stored originals. Direction: reseal a resent
-commit under the exporter of the epoch it was MADE at (the commit's epoch
-is in its MLS bytes; the ring holds K past exporters), and consider a
-deeper `EXPORTER_RING_K`. To be analyzed and built after the self-heal
-round proves out in the field.
+`group_frame` resealed a RESENT `MlsCommit` under `exporter_ring().first()`
+— exactly one epoch back; a member ≥2 epochs behind could not open any
+resend and healed only via relay-stored originals. Now: the exporter ring
+labels each retained secret with its epoch (MLS snapshot **v3**, additive —
+a v2/v1 blob restores with unlabeled entries and the old one-back
+fallback), a re-framed commit reads its OWN epoch out of its MLS bytes
+(`wire_epoch`) and seals under exactly that epoch's exporter, and
+`EXPORTER_RING_K` grew 3 → 8 (the ring IS the healing window; 32 bytes per
+entry, outer-metadata-layer forward secrecy only). The guarantee's
+re-offers now heal any laggard within 8 epochs regardless of relay
+retention. §6 addendum: the group line distinguishes the door — "🔑 …
+rejoined after recovery" (ticketed) vs "🔁 … reconnected from a restored
+backup" (self-service). Keystone:
+`group_runtime::tests::a_resent_commit_stays_sealed_at_its_own_epoch`
+(red-verified against the one-back behavior).
 
 ## 5. Landing
 

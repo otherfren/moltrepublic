@@ -1428,7 +1428,8 @@ async fn a_restored_workspace_reattaches_without_a_ritual() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let seen = read_chat_bodies(&a).await;
-        if seen.iter().any(|m| m.contains("rejoined the republic after recovery")) {
+        // the SELF-SERVICE door has its own line (detached_reattach.md §6)
+        if seen.iter().any(|m| m.contains("reconnected from a restored backup")) {
             break;
         }
         assert!(

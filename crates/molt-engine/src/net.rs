@@ -2201,6 +2201,7 @@ impl State {
             }
         }
         match self.verify_and_propose_restore(
+            ticketed,
             &member,
             &identity_pk,
             &key_package,

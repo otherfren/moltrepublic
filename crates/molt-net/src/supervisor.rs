@@ -105,14 +105,20 @@ impl MlsChannel {
         // epoch). Same branch `ciphertext_for` keeps for the queue path.
         let (ciphertext, exporter) = if let WorkspaceEvent::MlsCommit { commit } = &env.body {
             // …and on 445 its OUTER layer must be sealed under the epoch its
-            // RECIPIENTS are still at — the one this node just left. A
-            // receiver's `exporter_secrets` is its current epoch plus the ring
-            // of past ones; it reaches BACKWARD only. So a commit sealed at
-            // the new epoch is opaque to exactly the members it exists to move
-            // forward, and the whole re-key is undeliverable. (The queue path
-            // has no outer layer, which is why this only bites here.)
-            let prev = m.exporter_ring().first().copied()?;
-            (hex::decode(commit).ok()?, prev)
+            // RECIPIENTS are still at — the epoch the commit was MADE at
+            // (`detached_reattach.md` §7): a RESEND after further commits
+            // must stay openable to exactly the laggards it exists to move
+            // forward, and "one epoch back" stopped being that the moment a
+            // second commit landed. The commit's own bytes carry its epoch;
+            // the ring maps it to the exporter (head-aligned labels, v3).
+            // Fallback one-back covers legacy rings restored without labels.
+            // (The queue path has no outer layer, which is why this only
+            // bites here.)
+            let bytes = hex::decode(commit).ok()?;
+            let exporter = crate::mls::wire_epoch(&bytes)
+                .and_then(|e| m.exporter_for_epoch(e))
+                .or_else(|| m.exporter_ring().first().copied())?;
+            (bytes, exporter)
         } else {
             let plaintext = serde_json::to_vec(env).ok()?;
             let ct = m.encrypt(&plaintext).ok()?;

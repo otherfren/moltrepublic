@@ -74,7 +74,7 @@ fn ratchet_window() -> SenderRatchetConfiguration {
 }
 
 /// The snapshot schema version (bumped on any incompatible blob layout).
-const SNAPSHOT_VERSION: u8 = 2;
+const SNAPSHOT_VERSION: u8 = 3;
 
 /// Everything that can go wrong inside the MLS layer. All variants are local
 /// bugs or corrupt/hostile wire input — never a transient network condition.
@@ -172,7 +172,25 @@ pub trait ChainOracle: Send + Sync + 'static {
 /// The ring holds OUTER secrets only — the inner MLS layer keeps
 /// `max_past_epochs = 0`, so an evicted leaf's old-epoch message stays
 /// rejected (the asymmetry, concept §6).
-pub const EXPORTER_RING_K: usize = 3;
+// 8 (was 3, 2026-08-24): the ring is the HEALING WINDOW — a laggard is
+// reachable by an epoch-correct commit resend only while the commit's
+// exporter is still in every sender's ring (`detached_reattach.md` §7).
+// Cost: 32 bytes per entry and a bounded forward-secrecy trade on the
+// OUTER metadata layer only (the inner MLS ratchet is untouched).
+pub const EXPORTER_RING_K: usize = 8;
+
+/// The epoch a serialized MLS group message was made AT — for a commit, the
+/// epoch its still-behind recipients sit on. `None` when the bytes do not
+/// parse as a group message (never guess an epoch).
+pub fn wire_epoch(bytes: &[u8]) -> Option<u64> {
+    let msg = MlsMessageIn::tls_deserialize_exact(bytes).ok()?;
+    let protocol: ProtocolMessage = match msg.extract() {
+        MlsMessageBodyIn::PrivateMessage(m) => m.into(),
+        MlsMessageBodyIn::PublicMessage(m) => m.into(),
+        _ => return None,
+    };
+    Some(protocol.epoch().as_u64())
+}
 
 /// The NIP-EE exporter label and length: the outer sealing key of a kind-445
 /// event is `export_secret("nostr", &[], 32)` of the epoch.
@@ -249,6 +267,12 @@ pub struct MlsMember {
     /// The bounded ring of PAST epochs' exporter secrets (newest first), for
     /// the outer envelope layer only — see [`EXPORTER_RING_K`].
     exporter_ring: Vec<[u8; EXPORTER_LEN]>,
+    /// WHICH epoch each ring entry belonged to, head-aligned with
+    /// [`Self::exporter_ring`] (v3; a legacy snapshot restores with this
+    /// empty — its old tail entries stay usable for the opening ladder but
+    /// cannot be addressed by epoch). What lets a commit RESEND be sealed
+    /// under the epoch it was made at (`detached_reattach.md` §7).
+    exporter_ring_epochs: Vec<u64>,
     group: Option<MlsGroup>,
 }
 
@@ -260,6 +284,22 @@ pub struct MlsMember {
 /// never reorder the leading field.
 #[derive(Serialize, Deserialize)]
 struct MlsSnapshot {
+    version: u8,
+    name: String,
+    signer_pub: Vec<u8>,
+    group_id: Vec<u8>,
+    storage: Vec<u8>,
+    exporter_ring: Vec<[u8; EXPORTER_LEN]>,
+    /// v3: the ring entries' epochs, head-aligned (bincode is positional —
+    /// appended field, dispatched by the version byte).
+    exporter_ring_epochs: Vec<u64>,
+}
+
+/// The v2 layout (ring, no epochs) — kept so every blob written before the
+/// v3 bump keeps restoring; its epochs restore empty (the ladder still
+/// works, epoch-addressed resends fall back to one-back).
+#[derive(Serialize, Deserialize)]
+struct MlsSnapshotV2 {
     version: u8,
     name: String,
     signer_pub: Vec<u8>,
@@ -306,6 +346,7 @@ impl MlsMember {
             group: None,
             prior: None,
             exporter_ring: Vec::new(),
+            exporter_ring_epochs: Vec::new(),
         })
     }
 
@@ -605,6 +646,7 @@ impl MlsMember {
                     })
                     .collect();
                 let retiring = self.exporter_secret().ok();
+                let retiring_epoch = self.epoch();
                 // BYSTANDERS CONVERGE TOO (review finding 2026-07-31): a node
                 // that authored no commit still has to survive a race — it
                 // merges whichever of two concurrent commits arrives first,
@@ -620,6 +662,8 @@ impl MlsMember {
                     if self.exporter_ring.first() != Some(&secret) {
                         self.exporter_ring.insert(0, secret);
                         self.exporter_ring.truncate(EXPORTER_RING_K);
+                        self.exporter_ring_epochs.insert(0, retiring_epoch);
+                        self.exporter_ring_epochs.truncate(EXPORTER_RING_K);
                     }
                 }
                 Ok(MlsIncoming::Commit { readmitted })
@@ -672,12 +716,27 @@ impl MlsMember {
     /// before an epoch change, so the secret that just became "past" stays
     /// strippable for the outer layer.
     fn retire_exporter(&mut self) {
+        let epoch = self.epoch();
         if let Ok(secret) = self.exporter_secret() {
             if self.exporter_ring.first() != Some(&secret) {
                 self.exporter_ring.insert(0, secret);
                 self.exporter_ring.truncate(EXPORTER_RING_K);
+                self.exporter_ring_epochs.insert(0, epoch);
+                self.exporter_ring_epochs.truncate(EXPORTER_RING_K);
             }
         }
+    }
+
+    /// The exporter secret of ONE specific epoch — the current one, or a
+    /// ring entry whose epoch label matches (head-aligned; legacy tail
+    /// entries without labels are not addressable). What an epoch-correct
+    /// commit RESEND seals under (`detached_reattach.md` §7).
+    pub fn exporter_for_epoch(&self, epoch: u64) -> Option<[u8; EXPORTER_LEN]> {
+        if self.group.is_some() && self.epoch() == epoch {
+            return self.exporter_secret().ok();
+        }
+        let i = self.exporter_ring_epochs.iter().position(|e| *e == epoch)?;
+        self.exporter_ring.get(i).copied()
     }
 
     /// Snapshot the CURRENT (pre-merge) state into the prior slot, so a
@@ -774,6 +833,7 @@ impl MlsMember {
             group_id: group.group_id().as_slice().to_vec(),
             storage,
             exporter_ring: self.exporter_ring.clone(),
+            exporter_ring_epochs: self.exporter_ring_epochs.clone(),
         };
         bincode::serialize(&snap).map_err(|e| MlsError::Snapshot(format!("encoding snapshot: {e}")))
     }
@@ -788,6 +848,19 @@ impl MlsMember {
         let snap: MlsSnapshot = match blob.first() {
             Some(&SNAPSHOT_VERSION) => bincode::deserialize(blob)
                 .map_err(|e| MlsError::Snapshot(format!("decoding snapshot: {e}")))?,
+            Some(2) => {
+                let v2: MlsSnapshotV2 = bincode::deserialize(blob)
+                    .map_err(|e| MlsError::Snapshot(format!("decoding v2 snapshot: {e}")))?;
+                MlsSnapshot {
+                    version: SNAPSHOT_VERSION,
+                    name: v2.name,
+                    signer_pub: v2.signer_pub,
+                    group_id: v2.group_id,
+                    storage: v2.storage,
+                    exporter_ring: v2.exporter_ring,
+                    exporter_ring_epochs: Vec::new(),
+                }
+            }
             Some(1) => {
                 let v1: MlsSnapshotV1 = bincode::deserialize(blob)
                     .map_err(|e| MlsError::Snapshot(format!("decoding v1 snapshot: {e}")))?;
@@ -798,6 +871,7 @@ impl MlsMember {
                     group_id: v1.group_id,
                     storage: v1.storage,
                     exporter_ring: Vec::new(),
+                    exporter_ring_epochs: Vec::new(),
                 }
             }
             other => {
@@ -832,6 +906,7 @@ impl MlsMember {
             prior: None,
             // v2 blobs carry the ring; a v1 blob restored it empty above
             exporter_ring: snap.exporter_ring,
+            exporter_ring_epochs: snap.exporter_ring_epochs,
         })
     }
 }

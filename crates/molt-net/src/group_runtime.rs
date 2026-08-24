@@ -1225,6 +1225,65 @@ mod tests {
         );
     }
 
+    /// **A commit RESEND stays sealed at its OWN epoch
+    /// (`detached_reattach.md` §7).** Sealing resends "one epoch back"
+    /// stranded every laggard ≥2 epochs behind: after a second commit, the
+    /// first commit's re-offer wore an exporter its laggard never had, and
+    /// the guarantee's repair path could not repair. The ring now labels
+    /// each retained exporter with its epoch and a re-framed commit picks
+    /// the label its own bytes name.
+    #[tokio::test]
+    async fn a_resent_commit_stays_sealed_at_its_own_epoch() {
+        use crate::mls::MlsMember;
+        use ed25519_dalek::SigningKey;
+
+        let key = |s: u8| SigningKey::from_bytes(&[s; 32]);
+        let mut alice = MlsMember::new(&key(11), "alice").expect("alice");
+        let bob = MlsMember::new(&key(12), "bob").expect("bob");
+        let cara = MlsMember::new(&key(13), "cara").expect("cara");
+        alice.create_group().expect("group");
+        let _welcome = alice
+            .add_members(&[
+                bob.key_package().expect("bob kp"),
+                cara.key_package().expect("cara kp"),
+            ])
+            .expect("add")
+            .expect("a welcome");
+        // the exporter of the epoch C1 will be MADE at — every laggard still
+        // on this epoch holds exactly this secret
+        let e_c1 = alice.exporter_secret().expect("pre-C1 exporter");
+        let cara2 = MlsMember::new(&key(14), "cara").expect("cara's 2nd device");
+        let (c1, _w1) = alice
+            .restore_member("cara", &cara2.key_package().expect("kp"), 1_760_000_000)
+            .expect("re-key 1");
+        let e_c2 = alice.exporter_secret().expect("pre-C2 exporter");
+        let cara3 = MlsMember::new(&key(15), "cara").expect("cara's 3rd device");
+        let (c2, _w2) = alice
+            .restore_member("cara", &cara3.key_package().expect("kp"), 1_760_000_100)
+            .expect("re-key 2");
+        assert_ne!(e_c1, e_c2, "two epochs, two exporters");
+
+        let env = |seq: u64, body: molt_core::WorkspaceEvent| molt_core::EventEnvelope {
+            prev_seq: seq - 1,
+            seq,
+            ts: 1_751_000_000,
+            by: "alice".to_string(),
+            body,
+        };
+        let chan = crate::supervisor::MlsChannel::new(alice);
+        let f1 = chan
+            .group_frame(&env(2, molt_core::WorkspaceEvent::MlsCommit { commit: hex::encode(&c1) }))
+            .expect("frame C1");
+        assert_eq!(
+            f1.exporter, e_c1,
+            "a re-framed C1 is sealed under C1's OWN epoch — its laggards can strip it"
+        );
+        let f2 = chan
+            .group_frame(&env(3, molt_core::WorkspaceEvent::MlsCommit { commit: hex::encode(&c2) }))
+            .expect("frame C2");
+        assert_eq!(f2.exporter, e_c2, "…and C2 under C2's");
+    }
+
     /// **A frame that arrives ahead of its commit is held, not dropped.**
     ///
     /// A recovery re-key is the first thing in this product that puts an MLS
