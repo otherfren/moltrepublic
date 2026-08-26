@@ -1098,7 +1098,7 @@ async fn recovery_rejoin(
     // it needs none — a chain that recomputes to this republic's id is this
     // republic's chain, whoever relayed it.
     let mut blob: Option<molt_core::CheckpointState> = None;
-    let mut verified_run_len = 0usize;
+    let mut verified_run: (u64, usize) = (u64::MAX, 0);
     let mut blocks: Vec<molt_core::ChainBlock> = Vec::new();
     let (head, _sealed) = loop {
         let now = tokio::time::Instant::now();
@@ -1120,7 +1120,7 @@ async fn recovery_rejoin(
             molt_core::WorkspaceEvent::CheckpointServed { blob: b } => {
                 blob = Some(b);
                 // new evidence: the same run may verify now (suffix + blob)
-                verified_run_len = 0;
+                verified_run = (u64::MAX, 0);
             }
             molt_core::WorkspaceEvent::Committed(block) => {
                 // bounded (review R7): any group member can flood distinct
@@ -1153,10 +1153,17 @@ async fn recovery_rejoin(
             })
             .map(|(_, b)| b.clone())
             .collect();
-        if run.is_empty() || run.len() == verified_run_len {
-            continue; // nothing new to verify: no re-walk per frame (R7)
+        // no re-walk per frame (R7) — but keyed by (start, length), not
+        // length alone: `[3]` failing and then `[0]` arriving are two
+        // different runs of length one, and the second is the anchor
+        if run.is_empty() {
+            continue;
         }
-        verified_run_len = run.len();
+        let key = (run[0].height, run.len());
+        if key == verified_run {
+            continue;
+        }
+        verified_run = key;
         if let Ok(pair) = crate::chain::verify_served(blob.as_ref(), &run, Some(&h.republic_id)) {
             blocks = run;
             break pair;

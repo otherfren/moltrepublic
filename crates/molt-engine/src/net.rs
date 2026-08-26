@@ -1053,6 +1053,10 @@ impl State {
     /// envelope as a duplicate. Called at the survivor's authenticated
     /// recovery-announce point; the next save persists the reset.
     pub(crate) fn reset_peer_accept_window(&mut self, member: &MemberId) {
+        // a fresh incarnation asks for its catch-up anew: the C3 debounce
+        // keyed by name must not swallow the rejoiner's request because the
+        // lost device asked within the last thirty seconds
+        self.chain_served_at.remove(member);
         if self.accepted.remove(member).is_some() {
             self.accepted_dirty = true;
         }
