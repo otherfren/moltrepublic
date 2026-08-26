@@ -79,17 +79,65 @@ block's anchor, the blob's working anchors).
 Plain `-` and one clause in `backup.rs` / `chain.rs` strings (style sweep
 2026-08-26).
 
-### C10 [REFACTOR] `chain.rs` (10k lines) split + duplicates - OPEN
-Proposed modules: `chain/verify.rs` (pure verification, 1-1238),
-`chain/projection.rs`, `chain/governance.rs`, `chain/membership.rs`,
-`chain/checkpoint.rs`, `chain/sync.rs`, tests per module with a shared
-`test_support`. Duplicates to fold: the replay guard
-(`auto_approve_restore` vs `receive_checkpoint_proposal`), the
-roster-adopt block (`project_one` vs `apply_chain_to_state`), the
-bookkeeping-removal loop, "settle consumed ids", the double
-`id_free_for` check; a checkpoint seal writes the chain three times.
-Stale docs: `working_nostr_pk` / `serve_chain_anchor` "no production
-caller yet" (both called), misplaced doc comments at the top of the file.
+### C10 [REFACTOR] `chain.rs` (10k lines) split + duplicates - FIXED
+Split by responsibility into the module directory `chain/`, one
+mechanical move per commit, every item byte-identical modulo its
+visibility (`pub(super)` where a sibling calls it; a flatten check over
+the original proved no line was lost or invented). `chain/mod.rs` (79)
+holds the shared imports, the `crate::chain::…` re-exports every other
+engine file keeps using unchanged, and the test counters. The map, with
+line counts:
+
+- `verify.rs` (1080) - pure, no `State`: `valid_signers`,
+  `apply_membership`, `verify_genesis`, `block_signers`, `verify_next`,
+  `ChainWalk`, the checkpoint fold (`checkpoint_state` / `genesis_base` /
+  `fold_one` / `fold_state` / `hash_walk_state`), `walk_chain`,
+  `walk_suffix_chain`, `verify_served`, `effective_relays_of_served`,
+  `ServedChainWire`, `working_anchors`, `declared_relays`,
+  `chain_block_view`, `verify_wiki_export`.
+- `projection.rs` (641) - `genesis_chain`, `adopt_chain`,
+  `bump_next_id_past_chain`, `set_checkpoint_blob`, the relay/feature
+  folds, `project_one`, `ensure_applied_record`,
+  `settle_cards_against_chain`, `apply_chain_to_state`, `cmd_read_chain`.
+- `governance.rs` (1022) - `PendingApproval`, `collect_sig` …
+  `append_committed_block`, `after_block_applied`,
+  `settle_membership_records`, `rebase_pending_approvals`,
+  `verify_own` / `walk_own` / `extend_own`, `own_checkpoint_state`,
+  `plausible_wire_id`, `receive_proposed`, `receive_approval`, the
+  open-governance re-serve.
+- `membership.rs` (788) - `RecoverProgressReport`, `PendingRecovery`,
+  `NostrRekey`, `rejoin_note`, `nostr_rekey`, the restore
+  proposal/consent/auto-approve ladder, `coordinator_rekey*`.
+- `checkpoint.rs` (338) - `AUTO_CHECKPOINT_MIN_LEN`, the auto-propose,
+  propose, receive (verify-before-sign) and blob re-anchor code.
+- `sync.rs` (294) - `CATCHUP_BUFFER_WINDOW`, `receive_block` …
+  `serve_chain_anchor`, `tie_break`.
+- tests: one `<module>_tests.rs` each (verify 1126, projection 1185,
+  governance 1833, membership 833, checkpoint 828, sync 476) over
+  `test_support.rs` (241: `Builder`, `chain_peer`, `chain_peer_3`,
+  `chain_signer`, `wire`, `consent_for`, `grown_chain`); bodies unchanged.
+
+Duplicates folded, each pinned by the tests it already had: the replay
+guard is `State::own_signature_stands`; the roster-adopt block is
+`State::adopt_head_roster`; the bookkeeping-removal loop is
+`State::forget_vote` / `forget_votes_for` (by id / by sealed content);
+`try_adopt_from_blob` no longer re-settles what `apply_chain_to_state`
+had just settled (the materialize path of `settle_cards_against_chain`
+forgets the vote bookkeeping too, so a card the holder never had ends
+in the same state); the unreachable second `proposal_changes` match
+after `id_free_for` in `receive_checkpoint_proposal` is gone. A
+checkpoint seal writes the chain ONCE: the Checkpoint arm of
+`after_block_applied` no longer persists, every caller writes once
+after it (the sealer's durable gate now reads the write that includes
+the cut). Test: `a_checkpoint_seal_writes_the_chain_once` (red at 2
+before). Stale docs fixed: the "no production caller YET" notes and
+`dead_code` cfg_attrs on `working_nostr_pk` / `serve_chain_anchor`, the
+six drifted doc comments, the `dead_code` allow on `PendingRecovery`
+(its unread `member` field is gone), the duplicated
+`too_many_arguments`. Observed while landing, NOT introduced here: the
+`nostr_recovery` integration tests race under load (30 s `wait_for`
+deadlines; `a_double_recovery_of_the_same_seat_still_converges_both_ways`
+timed out once in six runs on the pre-split `chain.rs` as well).
 
 ## 2. Engine wire ingest and state (`net.rs`, `events.rs`, `proposals.rs`, `session.rs`, `chat.rs`, `transfer.rs`, `configstore.rs`)
 
