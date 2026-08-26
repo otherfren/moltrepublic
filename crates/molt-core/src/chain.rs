@@ -40,7 +40,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{roster_canonical_bytes, MemberId, MemberIdentity, RosterAttestation, Surface};
+use crate::{put_bytes, roster_canonical_bytes, MemberId, MemberIdentity, RosterAttestation, Surface};
 
 /// The `prev` of the genesis block: 32 zero bytes as lowercase hex. A chain
 /// roots here and nowhere else.
@@ -173,13 +173,6 @@ pub struct ChainBlock {
     /// The member signatures over [`approval_bytes`]: n-of-n at the genesis
     /// (the founding attestations), m-of-n for every later block.
     pub sigs: Vec<RosterAttestation>,
-}
-
-/// Append a `u32`-length-prefixed byte string (same framing as
-/// [`roster_canonical_bytes`], so the layouts stay siblings).
-fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
-    out.extend_from_slice(&u32::try_from(b.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
-    out.extend_from_slice(b);
 }
 
 /// **What the m members sign.** Position-bound: the block's `height` is folded

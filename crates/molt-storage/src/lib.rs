@@ -300,20 +300,18 @@ pub fn republic_id(
         .map(|i| (i.identity_pk.as_str(), i.nostr_pk.as_str()))
         .collect();
     pairs.sort_unstable();
-    let mut h = Sha256::new_with_prefix(b"molt-republic-id-v2\0");
-    let name = name.as_bytes();
-    h.update(u32::try_from(name.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
-    h.update(name);
-    h.update([rule_m, rule_n]);
-    h.update(u32::try_from(pairs.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
+    // the same le32 framing as every other canonical layout (one
+    // definition: `molt_core::put_bytes`), built as a preimage buffer and
+    // hashed whole — byte-identical to the streamed v2 layout
+    let mut pre = Vec::new();
+    molt_core::put_bytes(&mut pre, name.as_bytes());
+    pre.extend_from_slice(&[rule_m, rule_n]);
+    molt_core::put_count(&mut pre, pairs.len());
     for (pk, npk) in pairs {
-        let pk = pk.as_bytes();
-        h.update(u32::try_from(pk.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
-        h.update(pk);
-        let npk = npk.as_bytes();
-        h.update(u32::try_from(npk.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
-        h.update(npk);
+        molt_core::put_bytes(&mut pre, pk.as_bytes());
+        molt_core::put_bytes(&mut pre, npk.as_bytes());
     }
+    let h = Sha256::new_with_prefix(b"molt-republic-id-v2\0").chain_update(&pre);
     hex::encode(h.finalize())
 }
 

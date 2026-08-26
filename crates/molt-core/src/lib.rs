@@ -803,7 +803,11 @@ impl WorkspaceInfo {
         format!("{rule_m}-of-{rule_n}")
     }
 
-    /// The demo set of local republics the scaffold ships with.
+    /// TEST FIXTURE ONLY — the demo republics of the first scaffold, kept
+    /// `pub` because the engine, MCP and GUI test suites address them by
+    /// name. No production constructor lists them (`SessionView::default()`
+    /// is empty since review K6; the Open screen lists what is on disk).
+    #[doc(hidden)]
     pub fn demo_set() -> Vec<WorkspaceInfo> {
         // Demo entries are closed workspaces: no presence knowledge exists
         // for them, so every member is honestly never-seen (the state keeps
@@ -2095,6 +2099,35 @@ impl SealedRoster {
     }
 }
 
+/// Append one `u32`-length-prefixed (little-endian) byte string — THE
+/// framing every canonical byte layout in this workspace uses
+/// ([`roster_canonical_bytes`], the chain's `approval_bytes` /
+/// `block_link_bytes` / `checkpoint_canonical_bytes`, and
+/// `molt_storage::republic_id`), so the layouts stay siblings and a field
+/// can never be extended by a longer neighbour. Length-prefixed rather than
+/// separator-joined for the injectivity reason the storage crate records
+/// on `republic_id`: a member-supplied field may carry any byte.
+pub fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
+    out.extend_from_slice(
+        &u32::try_from(b.len())
+            .expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written")
+            .to_le_bytes(),
+    );
+    out.extend_from_slice(b);
+}
+
+/// Append a `u32` (little-endian) entry COUNT — the run header that keeps
+/// a counted run injective once it is no longer the last field (see the
+/// member-run note in [`roster_canonical_bytes`]). The chain layouts count
+/// with `u64`, deliberately their own width; they do not use this.
+pub fn put_count(out: &mut Vec<u8>, n: usize) {
+    out.extend_from_slice(
+        &u32::try_from(n)
+            .expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written")
+            .to_le_bytes(),
+    );
+}
+
 /// The one canonical serialization of a roster table — what every member
 /// signs during the founding ritual's seal round and what every verifier
 /// reconstructs. Length-prefixed fields, entries in the given order (the
@@ -2144,8 +2177,7 @@ pub fn roster_canonical_bytes(
         b"molt-roster-v4\0".as_slice()
     });
     let id = ws_id.as_bytes();
-    out.extend_from_slice(&u32::try_from(id.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
-    out.extend_from_slice(id);
+    put_bytes(&mut out, id);
     out.push(rule_m);
     out.push(rule_n);
     // COUNT the member run. v3 got away without one because the agenda was
@@ -2154,45 +2186,39 @@ pub fn roster_canonical_bytes(
     // collides — a one-member table byte-matches a zero-member table whose
     // agenda and relay absorb the same bytes. Same class as the separator-only
     // `republic_id` that let a forged larger founding table collide.
-    out.extend_from_slice(&u32::try_from(members.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
+    put_count(&mut out, members.len());
     for m in members {
         let name = m.member.as_bytes();
-        out.extend_from_slice(&u32::try_from(name.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
-        out.extend_from_slice(name);
+        put_bytes(&mut out, name);
         let pk = m.identity_pk.as_bytes();
-        out.extend_from_slice(&u32::try_from(pk.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
-        out.extend_from_slice(pk);
+        put_bytes(&mut out, pk);
         // the third anchor rides inside each member's length-prefixed run;
         // a legacy (empty) value length-prefixes as 0 — no special casing
         // that could collide two different rosters onto one byte form
         let npk = m.nostr_pk.as_bytes();
-        out.extend_from_slice(&u32::try_from(npk.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
-        out.extend_from_slice(npk);
+        put_bytes(&mut out, npk);
     }
     // the deliberated charter (DAO name is already folded into the republic id
     // that salts ws_id; the free-text agenda is bound here) — every member's
     // seal signature is its ratification of exactly these bytes
     let ag = agenda.as_bytes();
-    out.extend_from_slice(&u32::try_from(ag.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
-    out.extend_from_slice(ag);
+    put_bytes(&mut out, ag);
     // the group's relay pool: entry-COUNTED then each entry length-prefixed,
     // so the preimage stays injective for any pool content and the field
     // cannot be extended by a longer neighbour
-    out.extend_from_slice(&u32::try_from(relays.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
+    put_count(&mut out, relays.len());
     for r in relays {
         let b = r.as_bytes();
-        out.extend_from_slice(&u32::try_from(b.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
-        out.extend_from_slice(b);
+        put_bytes(&mut out, b);
     }
     // v5: the ratified feature set — entry-COUNTED then each key
     // length-prefixed, like the relay run. Written only when present, so a
     // legacy (None) table stays byte-identical to v4.
     if let Some(f) = features {
-        out.extend_from_slice(&u32::try_from(f.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
+        put_count(&mut out, f.len());
         for k in f {
             let b = k.as_bytes();
-            out.extend_from_slice(&u32::try_from(b.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
-            out.extend_from_slice(b);
+            put_bytes(&mut out, b);
         }
     }
     out
