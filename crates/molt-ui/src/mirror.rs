@@ -43,7 +43,7 @@ use crate::{
 /// Map a session workspace into the Slint-side row struct. Member chips
 /// render the relative age from the real stamp; a never-seen member (all
 /// of them, on a closed workspace) shows a bare chip.
-pub(crate) fn workspace_item(lang: i32, now: u64, w: &molt_core::WorkspaceInfo) -> WorkspaceItem {
+fn workspace_item(lang: i32, now: u64, w: &molt_core::WorkspaceInfo) -> WorkspaceItem {
     let members: Vec<MemberSync> = w
         .members
         .iter()
@@ -220,7 +220,7 @@ pub(crate) fn parse_recover_notice(notice: &str) -> RecoverNotice {
 /// Copy one run log into its Slint model, localized line-wise (E5). The
 /// TONE model keeps reading the engine lines — the glyph survives
 /// localization (pinned) — so both stay in step.
-pub(crate) fn sync_log_localized(
+fn sync_log_localized(
     lang: i32,
     current: &ModelRc<slint::SharedString>,
     items: &[String],
@@ -238,7 +238,7 @@ pub(crate) fn sync_log_localized(
 /// so the action surface cannot drift from what a person can do. An
 /// unknown verb is a logged no-op — the next snapshot's generation still
 /// answers the caller.
-pub(crate) fn perform_ui_action(ui: &AppWindow, action: &molt_core::UiAction) {
+fn perform_ui_action(ui: &AppWindow, action: &molt_core::UiAction) {
     let s = |k: &str| {
         action
             .args
@@ -319,7 +319,7 @@ pub(crate) fn build_ui_snapshot(ui: &AppWindow) -> molt_core::UiSnapshot {
 /// Build the snapshot on the UI thread and hand it to the engine — the
 /// publish half of `gui_over_mcp.md`, run at the end of every mirror pass
 /// (what it publishes is what it just rendered).
-pub(crate) async fn publish_ui_state(wallet: &WalletHandle, weak: &slint::Weak<AppWindow>) {
+async fn publish_ui_state(wallet: &WalletHandle, weak: &slint::Weak<AppWindow>) {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let weak = weak.clone();
     let _ = slint::invoke_from_event_loop(move || {
@@ -796,7 +796,7 @@ pub(crate) fn relay_rows(relays: &[RelayStatus]) -> Vec<RelayItem> {
 /// are dialable right now (0 = this node is connected to nothing), whether a
 /// confirmed clearnet relay exists at all (only then is there anything for
 /// the session activation to unlock), and the session unlock itself.
-pub(crate) fn apply_relays(ui: &AppWindow, sv: &SessionView) {
+fn apply_relays(ui: &AppWindow, sv: &SessionView) {
     sync_rows(&ui.get_relay_rows(), relay_rows(&sv.relays), |m| {
         ui.set_relay_rows(m);
     });
@@ -819,7 +819,7 @@ pub(crate) fn apply_relays(ui: &AppWindow, sv: &SessionView) {
 /// Mirror the three engine-run lifecycles (the engine ticks them at 90 ms;
 /// a `SessionChanged` with a run scope re-renders ONLY this, so the rest of
 /// the window keeps its focus/scroll state untouched).
-pub(crate) fn apply_runs(ui: &AppWindow, sv: &SessionView) {
+fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     let lang = i32::from(sv.language == "de");
     // restore
     ui.set_rw_step(i32::from(sv.restore.run.step));
@@ -978,7 +978,7 @@ pub(crate) fn apply_runs(ui: &AppWindow, sv: &SessionView) {
 // Mirrored in place via sync_rows: the log modal's per-line colour bindings
 // consume these models, and a fresh ModelRc per engine tick would reset the
 // repeater on every tick while the modal is open.
-pub(crate) fn sync_log_tones(current: &ModelRc<i32>, log: &[String], set: impl FnOnce(ModelRc<i32>)) {
+fn sync_log_tones(current: &ModelRc<i32>, log: &[String], set: impl FnOnce(ModelRc<i32>)) {
     sync_rows(
         current,
         log.iter()

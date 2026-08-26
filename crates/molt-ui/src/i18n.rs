@@ -409,7 +409,7 @@ pub(crate) fn localize_recover_failed(lang: i32, e: &str) -> String {
 /// parts in order, slots between them) against a line; returns the slot
 /// values on a hit. The first part anchors the start, the last the end,
 /// middles bind leftmost-in-order.
-pub(crate) fn match_shape<'a>(parts: &[&str], line: &'a str) -> Option<Vec<&'a str>> {
+fn match_shape<'a>(parts: &[&str], line: &'a str) -> Option<Vec<&'a str>> {
     let rest = line.strip_prefix(parts[0])?;
     if parts.len() == 1 {
         return rest.is_empty().then(Vec::new);

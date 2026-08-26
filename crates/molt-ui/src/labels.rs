@@ -10,7 +10,7 @@ use crate::AppScreen;
 /// A human "x ago" label from minutes (0 = English, 1 = German — these
 /// labels are composed per row in Rust, so like [`seat_state_label`] they
 /// take the language instead of going through the Slint `Strings` global).
-pub(crate) fn ago_label(lang: i32, minutes: u32) -> String {
+fn ago_label(lang: i32, minutes: u32) -> String {
     if lang == 1 {
         match minutes {
             0 => "gerade eben".to_string(),

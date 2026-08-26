@@ -64,7 +64,7 @@ pub(crate) fn stored_settings(last: &Arc<Mutex<Option<SessionSettings>>>) -> Ses
 /// One MiB in bytes — the unit the GUI edits byte quotas in. A realistic
 /// bucket size is far out of reach of a +/- stepper, so the field is typed
 /// text and this is the unit it means.
-pub(crate) const MIB: u64 = 1024 * 1024;
+const MIB: u64 = 1024 * 1024;
 
 /// A byte quota as the whole MiB the field shows. Rounds UP, so the number
 /// displayed is never smaller than the limit actually in force.

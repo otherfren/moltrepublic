@@ -242,7 +242,7 @@ pub(crate) fn annotate_chat_log(log: &mut [LogLineData], quotes: &HashMap<String
 /// (set for both id and legacy quotes whose target is in view — so the two
 /// addressing styles agree on a shared target), then the stable id, then the
 /// teaser text as the last resort for unresolvable cross-channel quotes.
-pub(crate) fn same_quote_target(a: &LogLineData, b: &LogLineData) -> bool {
+fn same_quote_target(a: &LogLineData, b: &LogLineData) -> bool {
     if a.quote_label.is_empty() || b.quote_label.is_empty() {
         return false;
     }
@@ -280,7 +280,7 @@ pub(crate) fn quote_sources(msgs: &[ChatMessage]) -> HashMap<String, QuoteSrc> {
 /// Legacy decision summaries embedded the raw diff (the cap kept 160
 /// chars of "diff --git …"); the chat renders the head only — the card's
 /// raw-patch button is the place for the patch.
-pub(crate) fn strip_diff_body(text: &str) -> String {
+fn strip_diff_body(text: &str) -> String {
     match text.find("diff --git") {
         Some(pos) => text[..pos].trim_end().to_string(),
         None => text.to_string(),

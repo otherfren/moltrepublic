@@ -196,7 +196,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
 /// two can never disagree. The overlap flag mirrors the engine's
 /// make-before-break gate into `confirm-enabled`, so the modal never sends
 /// a draft the engine would refuse after the rows are already gone.
-pub(crate) fn set_relay_draft_rows(ui: &AppWindow, rows: &[String]) {
+fn set_relay_draft_rows(ui: &AppWindow, rows: &[String]) {
     let current: Vec<String> = ui.get_org_relays().iter().map(|s| s.to_string()).collect();
     let overlap = current.is_empty() || rows.iter().any(|r| current.contains(r));
     ui.set_org_relays_draft_overlap(overlap);

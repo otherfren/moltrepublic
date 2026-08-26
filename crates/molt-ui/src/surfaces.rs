@@ -50,7 +50,7 @@ pub(crate) fn page_of(pages: &HashMap<String, usize>, surface: &str, list: &str)
 
 /// Toggle-or-switch a table's sort state: clicking the active column again
 /// flips the direction, a new column starts ascending.
-pub(crate) fn toggle_sort(active: &mut String, ascending: &mut bool, column: &str) {
+fn toggle_sort(active: &mut String, ascending: &mut bool, column: &str) {
     if active == column {
         *ascending = !*ascending;
     } else {
@@ -1260,7 +1260,7 @@ pub(crate) fn to_decided_row(p: &ProposalRowData) -> ProposalRow {
 }
 
 /// Collapse every run of whitespace — newlines included — into one space.
-pub(crate) fn one_line(text: &str) -> String {
+fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -1485,7 +1485,7 @@ pub(crate) fn summarize(v: &serde_json::Value) -> String {
 /// only the machine `op` placeholder, so every UI renders the title in its
 /// own active language (a pre-rendered string would freeze the proposer's
 /// language and mix languages across the group).
-pub(crate) fn org_op_label(lang: i32, op: &str) -> Option<&'static str> {
+fn org_op_label(lang: i32, op: &str) -> Option<&'static str> {
     Some(match (lang, op) {
         (1, "set_name") => "Name ändern",
         (_, "set_name") => "Rename",

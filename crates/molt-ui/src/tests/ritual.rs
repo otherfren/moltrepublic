@@ -3,8 +3,6 @@
 
 use super::*;
 
-// ---- the Restore wizard's one link field (welcome_rework.md) -------
-
 /// The two link shapes are rendered by the ENGINE's own `render()`,
 /// never hand-written here: a hand-built string pins the test's idea of
 /// the format, and the day the real one changes the test keeps passing

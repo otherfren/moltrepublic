@@ -373,7 +373,7 @@ pub fn link_kind(link: &str) -> LinkKind {
 }
 
 /// The invite's relays this node does not hold yet.
-pub(crate) fn invite_relays_missing(ui: &AppWindow, link: &str) -> i32 {
+fn invite_relays_missing(ui: &AppWindow, link: &str) -> i32 {
     let Ok(inv) = molt_engine::FoundingInvite::parse(link) else {
         return 0;
     };
