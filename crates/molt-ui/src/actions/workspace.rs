@@ -11,7 +11,6 @@ use crate::mirror::sort_ws_items;
 use crate::{AppWindow, Ctx, WorkspaceItem};
 
 pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
-    // --- actions: each becomes a Command on the shared engine ---
     {
         let cx = ctx.clone();
         ui.on_navigate(move |screen| {
