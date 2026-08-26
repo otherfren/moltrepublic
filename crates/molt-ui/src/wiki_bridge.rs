@@ -13,8 +13,9 @@ use tokio::runtime::Handle;
 
 use crate::i18n::{error_toast, localize_wiki_err, Lexicon};
 use crate::models::{sync_vec_model, sync_wiki_blocks};
+use crate::settings::browse_start_dir;
 use crate::{
-    browse_start_dir, issue, patchview, wiki, AppWindow, DiffRow, DiffSeg, PatchNavRow, PatchView,
+    issue, patchview, wiki, AppWindow, DiffRow, DiffSeg, PatchNavRow, PatchView,
     Strings, WikiBlock, WikiChangeRow, WikiNavRow, WikiSpan, WikiState, WikiTabRow,
 };
 
