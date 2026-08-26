@@ -66,7 +66,7 @@ fn mockrand_callers_stay_on_the_allowlist() {
         [
             "molt-core/src/lib.rs",
             "molt-core/tests/guards.rs",
-            "molt-engine/src/net.rs",
+            "molt-engine/src/net/demo_mesh.rs",
             "molt-net/src/loopback.rs",
             "molt-net/src/supervisor.rs",
         ],
