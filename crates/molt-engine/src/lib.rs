@@ -677,7 +677,7 @@ pub(crate) struct ChainProjection {
     /// When this node last served a catch-up to each requester: a
     /// `ChainRequest` is an amplifier (the whole chain + blob + open cards
     /// per frame, into the durable log), so one requester is served at
-    /// most once per [`net::CHAIN_SERVE_DEBOUNCE_SECS`] (review C3).
+    /// most once per `CHAIN_SERVE_DEBOUNCE_SECS` (net/ingest.rs) (review C3).
     pub(crate) served_at: HashMap<MemberId, u64>,
     /// Declines waiting for their proposal (keyed by proposal id, one entry
     /// per member with the decline's ts): a decline travels on a different
