@@ -1866,6 +1866,20 @@ fn parse_reply_handover(reply: &str) -> Option<(SndQueueAddr, WrapKey)> {
     ))
 }
 
+/// What the single-use ticket says about an activation of an already
+/// anchored seat (`State::spent_seat`).
+enum SpentSeat {
+    /// The seat is not anchored — run the ladder.
+    Open,
+    /// The anchored member's own request, redelivered — drop it silently.
+    Silent,
+    /// Told and logged — drop it.
+    Refused,
+    /// The same person re-activating before the group is born: run the
+    /// ladder; on success the anchor `displaced` is told it was replaced.
+    ReAnchor { displaced: String },
+}
+
 /// The ritual command handlers (`cmd_net_join_requested`,
 /// `cmd_net_seal_signed`), split out so the transport plumbing above stays
 /// readable. They are inherent `State` methods — no re-export needed.
@@ -2284,6 +2298,161 @@ mod ritual_ops {
                 .push("→ the group is born · welcomes sent to every member".to_string());
         }
 
+        /// Refuse an activation, visibly: one `✗ invite N: …` line in the
+        /// founding log (a silently ignored activation is indistinguishable
+        /// from "the invitee never tried", which an operator cannot debug),
+        /// the session pushed, the frame acked — a refusal is never an
+        /// error on the actor.
+        fn refuse_join(
+            &mut self,
+            idx: usize,
+            why: String,
+        ) -> Result<molt_core::Reply, molt_core::MoltError> {
+            self.session
+                .create
+                .run
+                .log
+                .push(format!("✗ invite {}: {why}", idx + 1));
+            self.emit_session(molt_core::SessionScope::Create);
+            Ok(molt_core::Reply::Ack)
+        }
+
+        /// The single-use ticket, decided BEFORE the ladder: is this seat
+        /// already anchored, and by whom?
+        ///
+        /// The SAME member re-announcing itself is at-least-once delivery (a
+        /// redelivered JoinRequest) — silent, the seat is already theirs. A
+        /// DIFFERENT identity with a valid MAC is either the same person
+        /// re-activating after a transport hiccup (`cmd_join_start` mints a
+        /// FRESH phrase on every start, so a retry always derives a different
+        /// identity_pk — resumable only BEFORE the group is born and BEFORE
+        /// the charter is proposed: the Welcome is bound to the first
+        /// KeyPackage, and the collected signatures cover the identity
+        /// table, review R2) or a second person on one link — that one is
+        /// told on its own claimed address and logged, the anchored seat
+        /// untouched. Nothing is cleared here: the write at the end of the
+        /// ladder overwrites identity, key package and reply handover
+        /// wholesale, so a re-activation that then FAILS a check leaves the
+        /// honest anchor in place (an early clear evicted it).
+        #[allow(clippy::too_many_arguments)] // one wire request's fields, not a bag
+        fn spent_seat(
+            &mut self,
+            idx: usize,
+            seat: u32,
+            member: &str,
+            identity_pk: &str,
+            nostr_pk: &str,
+            proof: &str,
+            reply: &str,
+        ) -> SpentSeat {
+            let Some((anchored_member, anchored_pk, anchored_npk, ticket, seat_sealed)) = self
+                .net_ritual
+                .as_ref()
+                .and_then(|r| r.seats.get(idx))
+                .and_then(|s| {
+                    s.identity.as_ref().map(|a| {
+                        (
+                            a.member.clone(),
+                            a.identity_pk.clone(),
+                            a.nostr_pk.clone(),
+                            s.ticket.clone(),
+                            s.sealed,
+                        )
+                    })
+                })
+            else {
+                return SpentSeat::Open;
+            };
+            let same = anchored_member == member && anchored_pk == identity_pk;
+            if same {
+                return SpentSeat::Silent;
+            }
+            let mac_ok = invite::verify_join_mac(&ticket, member, identity_pk, nostr_pk, proof);
+            if !mac_ok {
+                // previously silent: an unverifiable re-activation looked
+                // exactly like "the invitee never tried"
+                self.session.create.run.log.push(format!(
+                    "✗ invite {}: a second activation by {member} did not verify - ignored",
+                    idx + 1
+                ));
+                return SpentSeat::Refused;
+            }
+            let group_born = self
+                .net_ritual
+                .as_ref()
+                .and_then(|r| r.nostr.as_ref())
+                .is_some_and(|n| n.group.is_some());
+            let charter_proposed = self
+                .net_ritual
+                .as_ref()
+                .is_some_and(|r| r.charter_proposed);
+            let same_person = anchored_member == member;
+            if same_person && !seat_sealed && !group_born && !charter_proposed {
+                // STAGE, do not destroy — the displaced anchor is told only
+                // once the replacement has passed every check
+                return SpentSeat::ReAnchor {
+                    displaced: anchored_npk,
+                };
+            }
+            // WHY it is refused travels with the frame: "ask for your own
+            // link" is right for a second PERSON and wrong for the same
+            // person retrying after the group already formed (a fresh link
+            // cannot help them — the founding must be re-minted)
+            let why = if same_person {
+                "this founding has already formed its group around your first \
+                 attempt - the founder must cancel and re-mint it"
+                    .to_string()
+            } else {
+                "that link was already used by someone else - ask the founder for \
+                 your own, unused link"
+                    .to_string()
+            };
+            // tell the second activator its link is spent — over its OWN
+            // claimed transport address: the gift-wrap anchor on Nostr
+            // (canonicalized; an invalid one gets no reply), the advertised
+            // reply queue on loopback
+            if let Some(nostr) = self.net_ritual.as_ref().and_then(|r| r.nostr.as_ref()) {
+                if let Ok(target) = molt_net::canonical_nostr_pk(nostr_pk) {
+                    let net = nostr.net.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = net
+                            .send_ritual(&target, &invite::RitualMsg::LinkSpent { seat, reason: why })
+                            .await
+                        {
+                            tracing::warn!(error = %e, "link-spent notice did not publish");
+                        }
+                    });
+                }
+            } else if let (Some((snd, wrap)), Some(ritual)) =
+                (parse_reply_handover(reply), &self.net_ritual)
+            {
+                if let Ok(payload) =
+                    serde_json::to_vec(&invite::RitualMsg::LinkSpent { seat, reason: why })
+                {
+                    let transport = ritual.transport.clone();
+                    let id = ritual.next_msg_id(&format!("spent-{idx}-{member}"));
+                    tokio::spawn(async move {
+                        let _ = supervisor::send_framed(&transport, &snd, &wrap, id, &payload).await;
+                    });
+                }
+            }
+            let line = if same_person {
+                format!(
+                    "✗ invite {}: the group already formed around the first activation - \
+                     cancel and re-mint to let {member} back in",
+                    idx + 1
+                )
+            } else {
+                format!(
+                    "✗ invite {} was activated a second time (by {member}) - that \
+                     link is spent, they need an unused one",
+                    idx + 1
+                )
+            };
+            self.session.create.run.log.push(line);
+            SpentSeat::Refused
+        }
+
         /// A member activated their link. Verify the ticket MAC (v2 — it
         /// binds the nostr transport anchor to the ticket holder), anchor
         /// their identity, and — once every seat's key is in — send the
@@ -2331,165 +2500,17 @@ mod ritual_ops {
                 }
             }
             let idx = usize::try_from(seat).unwrap_or(usize::MAX);
-            // the ticket is single-use — handle a spent seat FIRST, on an
-            // immutable borrow (the log/transport access below must not fight
-            // the mutable seat borrow). The SAME member re-announcing itself
-            // is at-least-once delivery (a redelivered JoinRequest) — stay
-            // silent, the seat is already theirs. A DIFFERENT member with a
-            // valid MAC means the founder sent one link to two people: reject
-            // the second activation on its reply queue so it fails fast
-            // instead of waiting forever, and say so in the ritual log — the
-            // anchored seat and the ritual stay untouched.
-            let spent = self
-                .net_ritual
-                .as_ref()
-                .and_then(|r| r.seats.get(idx))
-                .and_then(|s| {
-                    s.identity.as_ref().map(|a| {
-                        (
-                            a.member.clone(),
-                            a.identity_pk.clone(),
-                            a.nostr_pk.clone(),
-                            s.ticket.clone(),
-                            s.sealed,
-                        )
-                    })
-                });
-            let mut re_anchoring = false;
-            // the anchor being replaced — told only once the replacement has
-            // actually passed every check
-            let mut displaced: Option<String> = None;
-            if let Some((anchored_member, anchored_pk, anchored_npk, ticket, seat_sealed)) = spent {
-                let same = anchored_member == member && anchored_pk == identity_pk;
-                let mac_ok =
-                    invite::verify_join_mac(&ticket, &member, &identity_pk, &nostr_pk, &proof);
-                // The group is born the instant every seat has anchored, and
-                // the Welcome is bound to the joiner's FIRST KeyPackage —
-                // whose HPKE private half died with the abandoned task. So a
-                // retry is resumable only BEFORE birth.
-                let group_born = self
-                    .net_ritual
-                    .as_ref()
-                    .and_then(|r| r.nostr.as_ref())
-                    .is_some_and(|n| n.group.is_some());
-                // RE-ACTIVATION, not a second person: `cmd_join_start` mints a
-                // FRESH seed phrase on every start, so a retry after a
-                // transport hiccup always derives a DIFFERENT identity_pk.
-                // (The backlog claimed the retry re-derives the same identity
-                // and that the comparison was the bug — it is not; the bug was
-                // that there was no re-activation path at all, so any hiccup
-                // burned the seat to a dead identity and wedged the founding.)
-                // …and never once the charter is proposed: the collected
-                // signatures cover `full_identities()`, which a re-anchoring
-                // would change under them (review R2)
-                let charter_proposed = self
-                    .net_ritual
-                    .as_ref()
-                    .is_some_and(|r| r.charter_proposed);
-                if !same && mac_ok && anchored_member == member && !seat_sealed && !group_born && !charter_proposed {
-                    // STAGE, do not destroy. The first version cleared the
-                    // seat HERE and only then ran the ladder — so a request
-                    // that failed PoP (any ticket holder can mint a valid MAC
-                    // over a nostr_pk they do not hold) evicted the honest
-                    // member and left the seat empty, after which `all_joined`
-                    // could never become true again.
-                    //
-                    // Nothing needs clearing: the write at the end of the
-                    // ladder overwrites identity, key_package and the reply
-                    // handover wholesale. The early clear's only effect was
-                    // to make FAILURE destructive.
-                    displaced = Some(anchored_npk);
-                    re_anchoring = true;
-                } else if !same && !mac_ok {
-                    // previously silent: an unverifiable re-activation looked
-                    // exactly like "the invitee never tried"
-                    self.session.create.run.log.push(format!(
-                        "✗ invite {}: a second activation by {member} did not verify - ignored",
-                        idx + 1
-                    ));
+            // the ticket is single-use: a spent seat is decided FIRST
+            let displaced = match self.spent_seat(idx, seat, &member, &identity_pk, &nostr_pk, &proof, &reply) {
+                SpentSeat::Open => None,
+                SpentSeat::Silent => return Ok(molt_core::Reply::Ack),
+                SpentSeat::Refused => {
                     self.emit_session(molt_core::SessionScope::Create);
                     return Ok(molt_core::Reply::Ack);
                 }
-                if !re_anchoring && !same && mac_ok {
-                    // WHY it is refused travels with the frame: "ask for your
-                    // own link" is right for a second PERSON and wrong for
-                    // the same person retrying after the group already formed
-                    // (a fresh link cannot help them — the founding must be
-                    // re-minted). The member used to render one text for both.
-                    let why = if anchored_member == member {
-                        "this founding has already formed its group around your first \
-                         attempt - the founder must cancel and re-mint it"
-                            .to_string()
-                    } else {
-                        "that link was already used by someone else - ask the founder for \
-                         your own, unused link"
-                            .to_string()
-                    };
-                    // tell the second activator its link is spent — over its
-                    // OWN claimed transport address: the gift-wrap anchor on
-                    // Nostr (canonicalized; an invalid one gets no reply),
-                    // the advertised reply queue on loopback
-                    if let Some(nostr) = self.net_ritual.as_ref().and_then(|r| r.nostr.as_ref()) {
-                        if let Ok(target) = molt_net::canonical_nostr_pk(&nostr_pk) {
-                            let net = nostr.net.clone();
-                            tokio::spawn(async move {
-                                if let Err(e) = net
-                                    .send_ritual(
-                                        &target,
-                                        &invite::RitualMsg::LinkSpent {
-                                            seat,
-                                            reason: why,
-                                        },
-                                    )
-                                    .await
-                                {
-                                    tracing::warn!(error = %e, "link-spent notice did not publish");
-                                }
-                            });
-                        }
-                    } else if let (Some((snd, wrap)), Some(ritual)) =
-                        (parse_reply_handover(&reply), &self.net_ritual)
-                    {
-                        if let Ok(payload) =
-                            serde_json::to_vec(&invite::RitualMsg::LinkSpent {
-                                seat,
-                                reason: why.clone(),
-                            })
-                        {
-                            let transport = ritual.transport.clone();
-                            let id = ritual.next_msg_id(&format!("spent-{idx}-{member}"));
-                            tokio::spawn(async move {
-                                let _ = supervisor::send_framed(
-                                    &transport, &snd, &wrap, id, &payload,
-                                )
-                                .await;
-                            });
-                        }
-                    }
-                    // split the wording: a DIFFERENT person needs their own
-                    // link; the same person after group birth is a different
-                    // situation entirely and "ask for your own link" would be
-                    // wrong advice
-                    let line = if anchored_member == member {
-                        format!(
-                            "✗ invite {}: the group already formed around the first activation - \
-                             cancel and re-mint to let {member} back in",
-                            idx + 1
-                        )
-                    } else {
-                        format!(
-                            "✗ invite {} was activated a second time (by {member}) - that \
-                             link is spent, they need an unused one",
-                            idx + 1
-                        )
-                    };
-                    self.session.create.run.log.push(line);
-                    self.emit_session(molt_core::SessionScope::Create);
-                }
-                if !re_anchoring {
-                    return Ok(molt_core::Reply::Ack);
-                }
-            }
+                SpentSeat::ReAnchor { displaced } => Some(displaced),
+            };
+            let re_anchoring = displaced.is_some();
             let Some(ritual) = &self.net_ritual else {
                 return Ok(molt_core::Reply::Ack);
             };
@@ -2514,22 +2535,19 @@ mod ritual_ops {
                 let claimed = molt_net::canonical_nostr_pk(&nostr_pk).ok();
                 if claimed.is_none() || claimed.as_deref() != Some(sender_npub.as_str()) {
                     tracing::warn!(seat, %member, "founding join rejected: anchor is not the wrap's proven sealer");
-                    self.session.create.run.log.push(format!(
-                        "✗ invite {}: the request claims a transport key it did not sign with - refused",
-                        idx + 1
-                    ));
-                    self.emit_session(molt_core::SessionScope::Create);
-                    return Ok(molt_core::Reply::Ack);
+                    return self.refuse_join(
+                        idx,
+                        "the request claims a transport key it did not sign with - refused".to_string(),
+                    );
                 }
             }
             if !invite::verify_join_mac(&s.ticket, &member, &identity_pk, &nostr_pk, &proof) {
                 tracing::warn!(seat, %member, "founding join rejected: bad ticket MAC");
-                self.session.create.run.log.push(format!(
-                    "✗ invite {}: the ticket code does not match - refused (wrong, edited or foreign link)",
-                    idx + 1
-                ));
-                self.emit_session(molt_core::SessionScope::Create);
-                return Ok(molt_core::Reply::Ack);
+                return self.refuse_join(
+                    idx,
+                    "the ticket code does not match - refused (wrong, edited or foreign link)"
+                        .to_string(),
+                );
             }
             // normalize-or-reject the wire anchor (concept §3, "normalize at
             // ingest"): the MAC only proves the TICKET HOLDER chose these
@@ -2542,13 +2560,10 @@ mod ritual_ops {
                 Ok(canonical) => canonical,
                 Err(e) => {
                     tracing::warn!(seat, %member, error = %e, "founding join rejected: invalid nostr transport anchor");
-                    self.session.create.run.log.push(format!(
-                        "✗ invite {}: malformed transport key ({e}) - refused, the \
-                         ticket stays usable",
-                        idx + 1
-                    ));
-                    self.emit_session(molt_core::SessionScope::Create);
-                    return Ok(molt_core::Reply::Ack);
+                    return self.refuse_join(
+                        idx,
+                        format!("malformed transport key ({e}) - refused, the ticket stays usable"),
+                    );
                 }
             };
             // cross-seat uniqueness: two seats sharing a transport anchor is
@@ -2575,12 +2590,10 @@ mod ritual_ops {
                     });
             if handle_taken {
                 tracing::warn!(seat, %member, "founding join rejected: handle already taken");
-                self.session.create.run.log.push(format!(
-                    "✗ invite {}: the name {member} is already taken in this founding - refused",
-                    idx + 1
-                ));
-                self.emit_session(molt_core::SessionScope::Create);
-                return Ok(molt_core::Reply::Ack);
+                return self.refuse_join(
+                    idx,
+                    format!("the name {member} is already taken in this founding - refused"),
+                );
             }
             let duplicate = ritual.founder.nostr_pk == nostr_pk
                 || ritual.seats.iter().enumerate().any(|(i, other)| {
@@ -2591,20 +2604,14 @@ mod ritual_ops {
                 });
             if duplicate {
                 tracing::warn!(seat, %member, "founding join rejected: nostr transport anchor already anchored by another seat");
-                self.session.create.run.log.push(format!(
-                    "✗ invite {}: that transport key is already used by another seat - refused",
-                    idx + 1
-                ));
-                self.emit_session(molt_core::SessionScope::Create);
-                return Ok(molt_core::Reply::Ack);
+                return self.refuse_join(
+                    idx,
+                    "that transport key is already used by another seat - refused".to_string(),
+                );
             }
             // the reply address: on Nostr it IS the MAC-bound nostr anchor
             // (no queue handover travels); on loopback the member advertised
             // a reply queue, without which the seat can never be sealed
-            let is_nostr = self
-                .net_ritual
-                .as_ref()
-                .is_some_and(|r| r.nostr.is_some());
             let reply_queue = if is_nostr {
                 None
             } else {
@@ -2612,12 +2619,10 @@ mod ritual_ops {
                     Some(rq) => Some(rq),
                     None => {
                         tracing::warn!(seat, %member, "founding join rejected: missing/invalid reply queue");
-                        self.session.create.run.log.push(format!(
-                            "✗ invite {}: no usable reply address in the request - refused",
-                            idx + 1
-                        ));
-                        self.emit_session(molt_core::SessionScope::Create);
-                        return Ok(molt_core::Reply::Ack);
+                        return self.refuse_join(
+                            idx,
+                            "no usable reply address in the request - refused".to_string(),
+                        );
                     }
                 }
             };
@@ -2635,13 +2640,11 @@ mod ritual_ops {
                 .is_some_and(|(id, sig)| id == member.as_bytes() && hex::encode(sig) == identity_pk);
             if !key_package_binds {
                 tracing::warn!(seat, %member, "founding join rejected: MLS key package does not match the anchored identity");
-                self.session.create.run.log.push(format!(
-                    "✗ invite {}: the key package does not match the identity in the \
-                     request - refused",
-                    idx + 1
-                ));
-                self.emit_session(molt_core::SessionScope::Create);
-                return Ok(molt_core::Reply::Ack);
+                return self.refuse_join(
+                    idx,
+                    "the key package does not match the identity in the request - refused"
+                        .to_string(),
+                );
             }
             // keep a copy of the reply handover to ack the joiner below
             let ack_queue = reply_queue.clone();
