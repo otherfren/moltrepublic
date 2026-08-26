@@ -480,6 +480,10 @@ impl State {
         }
         for (id, surface, payload) in materialize {
             self.ensure_applied_record(id, surface, payload);
+            // signatures that outran the card this holder never had: stash
+            // their voters onto the record it just built, then drop them —
+            // the id is decided
+            self.forget_vote(id);
         }
         for (id, surface) in settle {
             if let Some(p) = self.proposals.get_mut(&id) {

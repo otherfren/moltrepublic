@@ -289,27 +289,15 @@ impl State {
                 self.pending_served_blob = None;
                 self.pending_blocks.retain(|h, _| *h > new_height);
                 self.apply_chain_to_state();
-                // the post-apply bookkeeping the block-by-block path runs in
-                // after_block_applied: sealed proposals get their terminal
-                // state + event, PRE-CUT consumed proposals resolve too
-                // (else they zombie as Proposed and re-base re-signs them
-                // into dead gossip — review finding), org effects refresh,
-                // a Restored seat's stale announce-cooldown clears, and
-                // stale signatures re-base once at the end
-                let consumed: Vec<u64> = self
-                    .checkpoint_blob
-                    .as_ref()
-                    .map(|b| b.consumed_ids.clone())
-                    .unwrap_or_default();
-                for id in consumed {
-                    if let Some(p) = self.proposals.get_mut(&id) {
-                        if p.state == ProposalState::Proposed {
-                            p.state = ProposalState::Applied;
-                        }
-                    }
-                    self.stash_voted(id);
-                    self.pending_sigs.remove(&id);
-                }
+                // The cards are settled: `apply_chain_to_state` folded the
+                // blob's consumed ids (else they zombie as Proposed and the
+                // re-base re-signs them into dead gossip — review finding)
+                // and every suffix block's card through
+                // `settle_cards_against_chain` — terminal state, stashed
+                // voters, dropped signatures. What the block-by-block path
+                // (`after_block_applied`) still owes per block: the Applied
+                // event, the org refresh and a Restored seat's stale
+                // announce-cooldown; stale signatures re-base once at the end.
                 let mut org_touched = false;
                 for block in &candidate {
                     match &block.change {
@@ -318,11 +306,6 @@ impl State {
                             surface,
                             ..
                         } => {
-                            if let Some(p) = self.proposals.get_mut(proposal_id) {
-                                p.state = ProposalState::Applied;
-                            }
-                            self.stash_voted(*proposal_id);
-                            self.pending_sigs.remove(proposal_id);
                             self.emit(Event::Applied {
                                 id: ProposalId(*proposal_id),
                                 surface: *surface,
