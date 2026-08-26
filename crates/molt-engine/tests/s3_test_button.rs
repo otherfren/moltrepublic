@@ -99,6 +99,16 @@ fn cmd_for(endpoint: &str) -> Command {
     }
 }
 
+
+/// Save a test's settings the way the GUI does: the host posture and the
+/// secrets through their own door (`SetNodePosture`), the rest wholesale —
+/// a wholesale save keeps the stored posture (review 2026-08-26).
+async fn save_all(w: &molt_engine::WalletHandle, settings: molt_core::SessionSettings) -> Result<Reply, molt_core::MoltError> {
+    w.execute(Command::SetNodePosture { posture: molt_core::NodePosture::of(&settings) })
+        .await?;
+    w.execute(Command::SaveSettings { settings }).await
+}
+
 #[tokio::test]
 async fn test_button_reports_ok_and_sends_a_signed_probe() {
     let (endpoint, seen) = stub_server(200).await;
@@ -160,7 +170,7 @@ async fn empty_fields_fall_back_to_the_saved_settings() {
     settings.s3_access_key = "AKIAEXAMPLE".to_string();
     settings.s3_secret_key = "secret-example".to_string();
     settings.s3_bucket = "molt-bucket".to_string();
-    w.execute(Command::SaveSettings { settings }).await.expect("settings saved");
+    save_all(&w, settings).await.expect("settings saved");
     w.execute(Command::NetTestS3 {
         target: S3Target::Workspaces,
         endpoint: String::new(),
@@ -199,7 +209,7 @@ async fn a_changed_backup_target_clears_the_stale_probe_verdict() {
     settings.s3_access_key = "AKIAEXAMPLE".to_string();
     settings.s3_secret_key = "secret-example".to_string();
     settings.s3_bucket = "molt-bucket".to_string();
-    w.execute(Command::SaveSettings { settings: settings.clone() })
+    save_all(&w, settings.clone())
         .await
         .expect("settings saved");
     w.execute(Command::NetTestS3 {
@@ -227,7 +237,7 @@ async fn a_changed_backup_target_clears_the_stale_probe_verdict() {
     // change the bucket → the "ok" verdict is now stale and must be cleared
     let mut changed = settings.clone();
     changed.s3_bucket = "other-bucket".to_string();
-    w.execute(Command::SaveSettings { settings: changed })
+    save_all(&w, changed)
         .await
         .expect("second save");
     let Ok(Reply::Session(sv)) = w.execute(Command::ReadSession).await else {
@@ -256,7 +266,7 @@ async fn a_media_probe_addresses_the_media_bucket_and_its_own_slot() {
     settings.s3_secret_key = "secret-example".to_string();
     settings.s3_bucket = "backup-bucket".to_string();
     settings.media_s3_bucket = "media-bucket".to_string();
-    w.execute(Command::SaveSettings { settings }).await.expect("settings saved");
+    save_all(&w, settings).await.expect("settings saved");
     w.execute(Command::NetTestS3 {
         target: S3Target::Media,
         endpoint: String::new(),
@@ -311,7 +321,7 @@ async fn a_bucket_edit_clears_one_verdict_and_an_account_edit_clears_both() {
     let probe_both = |settings: molt_core::SessionSettings| {
         let w = &w;
         async move {
-            w.execute(Command::SaveSettings { settings })
+            save_all(&w, settings)
                 .await
                 .expect("settings saved");
             for target in [S3Target::Workspaces, S3Target::Media] {
@@ -342,7 +352,7 @@ async fn a_bucket_edit_clears_one_verdict_and_an_account_edit_clears_both() {
     // one bucket renamed → only its verdict goes
     let mut changed = settings.clone();
     changed.media_s3_bucket = "other-media".to_string();
-    w.execute(Command::SaveSettings { settings: changed.clone() })
+    save_all(&w, changed.clone())
         .await
         .expect("bucket save");
     let Ok(Reply::Session(sv)) = w.execute(Command::ReadSession).await else {
@@ -355,7 +365,7 @@ async fn a_bucket_edit_clears_one_verdict_and_an_account_edit_clears_both() {
     probe_both(settings.clone()).await;
     let mut rekeyed = settings.clone();
     rekeyed.s3_access_key = "AKIAOTHER".to_string();
-    w.execute(Command::SaveSettings { settings: rekeyed })
+    save_all(&w, rekeyed)
         .await
         .expect("account save");
     let Ok(Reply::Session(sv)) = w.execute(Command::ReadSession).await else {

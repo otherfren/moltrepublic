@@ -134,6 +134,16 @@ fn draft(mode: &str, port: u16) -> Command {
 
 /// KEYSTONE — with Tor off there is nothing to test, and the engine says so
 /// instead of running a probe. `Off` is a refusal, never a verdict about Tor.
+
+/// Save a test's settings the way the GUI does: the host posture and the
+/// secrets through their own door (`SetNodePosture`), the rest wholesale —
+/// a wholesale save keeps the stored posture (review 2026-08-26).
+async fn save_all(w: &molt_engine::WalletHandle, settings: molt_core::SessionSettings) -> Result<Reply, molt_core::MoltError> {
+    w.execute(Command::SetNodePosture { posture: molt_core::NodePosture::of(&settings) })
+        .await?;
+    w.execute(Command::SaveSettings { settings }).await
+}
+
 #[tokio::test]
 async fn tor_off_is_a_refusal_not_a_test() {
     let w = engine();
@@ -322,7 +332,7 @@ async fn changing_the_anonymity_settings_clears_the_stale_verdict() {
     };
     let mut settings = sv.settings.clone();
     settings.tor_port = settings.tor_port.wrapping_add(1);
-    w.execute(Command::SaveSettings { settings })
+    save_all(&w, settings)
         .await
         .expect("settings saved");
     let Ok(Reply::Session(sv)) = w.execute(Command::ReadSession).await else {
@@ -347,7 +357,7 @@ async fn an_empty_request_tests_the_saved_settings() {
     settings.anonymity = "tor".to_string();
     settings.tor_mode = "local".to_string();
     settings.tor_port = dead_port().await;
-    w.execute(Command::SaveSettings { settings })
+    save_all(&w, settings)
         .await
         .expect("settings saved");
     let v = run_test(

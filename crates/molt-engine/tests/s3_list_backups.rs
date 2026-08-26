@@ -57,7 +57,17 @@ async fn save_target(w: &molt_engine::WalletHandle, endpoint: &str, bucket: &str
     settings.s3_access_key = "AKIAEXAMPLE".to_string();
     settings.s3_secret_key = "secret-example".to_string();
     settings.s3_bucket = bucket.to_string();
-    w.execute(Command::SaveSettings { settings }).await.expect("settings saved");
+    save_all(&w, settings).await.expect("settings saved");
+}
+
+/// The demo republics as the session's workspace list — the orphan
+/// arithmetic below addresses them (`SessionView::default()` lists nothing
+/// since review K6).
+fn demo_session() -> SessionView {
+    SessionView {
+        workspaces: molt_core::WorkspaceInfo::demo_set(),
+        ..SessionView::default()
+    }
 }
 
 /// Issue NetListBackups and poll until `session.s3_list` settles.
@@ -76,7 +86,7 @@ async fn listing_settled(w: &molt_engine::WalletHandle) -> SessionView {
 /// Spawn an engine, persist S3 settings pointing at `endpoint`, issue
 /// NetListBackups and poll until `session.s3_list` settles.
 async fn run_listing(endpoint: &str) -> SessionView {
-    let w = molt_engine::spawn(GroupConfig::demo(), SessionView::default());
+    let w = molt_engine::spawn(GroupConfig::demo(), demo_session());
     save_target(&w, endpoint, "molt-bucket").await;
     listing_settled(&w).await
 }
@@ -86,6 +96,16 @@ fn contents(key: &str, size: u64) -> String {
         "<Contents><Key>{key}</Key><LastModified>2013-05-24T00:00:00Z</LastModified>\
          <Size>{size}</Size></Contents>"
     )
+}
+
+
+/// Save a test's settings the way the GUI does: the host posture and the
+/// secrets through their own door (`SetNodePosture`), the rest wholesale —
+/// a wholesale save keeps the stored posture (review 2026-08-26).
+async fn save_all(w: &molt_engine::WalletHandle, settings: molt_core::SessionSettings) -> Result<Reply, molt_core::MoltError> {
+    w.execute(Command::SetNodePosture { posture: molt_core::NodePosture::of(&settings) })
+        .await?;
+    w.execute(Command::SaveSettings { settings }).await
 }
 
 #[tokio::test]
@@ -137,7 +157,7 @@ async fn a_403_reports_the_honest_credentials_class_and_no_orphans() {
 #[tokio::test]
 async fn unconfigured_backup_target_fails_fast_with_an_honest_note() {
     // nothing configured: the validation fails in-actor, no dial happens
-    let w = molt_engine::spawn(GroupConfig::demo(), SessionView::default());
+    let w = molt_engine::spawn(GroupConfig::demo(), demo_session());
     let sv = listing_settled(&w).await;
     assert!(
         sv.s3_list.starts_with("error:") && sv.s3_list.contains("endpoint"),
@@ -158,7 +178,7 @@ async fn a_stale_listing_result_is_dropped() {
         contents(&format!("molt/{orphan}/001700000000.molt.enc"), 1024),
     );
     let endpoint = stub_server(200, body).await;
-    let w = molt_engine::spawn(GroupConfig::demo(), SessionView::default());
+    let w = molt_engine::spawn(GroupConfig::demo(), demo_session());
     save_target(&w, &endpoint, "molt-bucket").await;
     let sv = listing_settled(&w).await;
     assert_eq!(sv.s3_list, "ok");
@@ -195,7 +215,7 @@ async fn changing_the_backup_target_resets_the_stale_table() {
         contents(&format!("molt/{orphan}/001700000000.molt.enc"), 1024),
     );
     let endpoint = stub_server(200, body).await;
-    let w = molt_engine::spawn(GroupConfig::demo(), SessionView::default());
+    let w = molt_engine::spawn(GroupConfig::demo(), demo_session());
     save_target(&w, &endpoint, "molt-bucket").await;
     let sv = listing_settled(&w).await;
     assert_eq!(sv.s3_list, "ok");
@@ -218,7 +238,7 @@ async fn changing_the_backup_target_resets_the_stale_table() {
 /// (no row, no Restore button) until the user found the manual refresh.
 #[tokio::test]
 async fn a_deleted_workspace_becomes_a_restorable_orphan_without_a_new_listing() {
-    let w = molt_engine::spawn(GroupConfig::demo(), SessionView::default());
+    let w = molt_engine::spawn(GroupConfig::demo(), demo_session());
     let sv = session(&w).await;
     let local = sv.workspaces.first().expect("demo workspaces").id.clone();
     let body = format!(
