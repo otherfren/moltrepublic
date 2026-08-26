@@ -25,8 +25,7 @@ still OPEN there, by id (each carries its fix direction in the review):
 - Chain: C3 residual (a non-logged direct serve).
 - Engine: E3 residual (insider system line) · E8 `lib.rs`/`net.rs` split.
 - Ritual/recovery: R4 (design: a survivor capturing a reattaching seat) ·
-  R9 residual (`nostr_sk` in the two `Net*Sealed` commands) · R11
-  duplicated member ladder.
+  R9 residual (`nostr_sk` in the two `Net*Sealed` commands).
 - MLS/delivery: M1 residual (`ChainOracle` allowance design) · M2 open half
   (chain-backed commits outrank at the tiebreak, design).
 - Transport: T10 residual (test-only cursor API).

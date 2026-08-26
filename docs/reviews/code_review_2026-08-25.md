@@ -248,13 +248,23 @@ on `Command`, or a newtype).
 Producers, `known_log_shapes()` and `LOG_SHAPES_DE` moved together; the
 invite refusals lost their parenthetical lectures (style sweep 2026-08-26).
 The stale doc comments (`lifecycles.rs:3-7`, `recovery.rs:11`, the
-`cfg_attr`) stay with R11.
+`cfg_attr`) were corrected with R11.
 
-### R11 [REFACTOR] The member state machine exists twice and has diverged - OPEN
-`run_ritual_member` vs `member_join`; a `RitualLeg` trait with one
-ladder. `cmd_net_join_requested` 450 lines with eight refusal tails
-(`refuse_join`); single-variant `RitualTransport`; loopback-only mesh
-bootstrap; four copies of the framed-message reader.
+### R11 [REFACTOR] The member state machine exists twice and has diverged - FIXED
+`run_ritual_member` and `member_join` both drive ONE ladder
+(`ritual_member::run_member_ladder`) over a `RitualLeg` (loopback / Nostr)
+and a `Ratify` human gate; the ladder has transport-free keystones over a
+scripted leg. The twins' behaviour difference (a Genesis or an abort
+during the ❻½ backup wait) is resolved to the loopback twin's reaction for
+both. `cmd_net_join_requested`: `refuse_join` + the `spent_seat` prelude
+(`SpentSeat`). The single-variant `RitualTransport` is gone
+(`molt_net::LoopbackTransport`); the loopback-only mesh bootstrap lives in
+`loopback_mesh.rs` — NOT feature-gated: the integration tests compile the
+crate without `cfg(test)` and the `NetMesh*` commands sit on the co-equal
+surface (the module doc records it). The four framed-reader loops are
+`next_framed_msg` / `take_delivery`. The stale module docs (`lifecycles.rs`,
+`recovery.rs`, `founding.rs`) and the false `cfg_attr` on `recover_command`
+are corrected.
 
 ## 4. MLS and delivery guarantee (`molt-net/src/mls.rs`, `supervisor.rs`, `group_runtime.rs`, `file_plane.rs`)
 
