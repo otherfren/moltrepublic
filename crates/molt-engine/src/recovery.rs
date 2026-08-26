@@ -10,7 +10,7 @@
 //!
 //! Built stepwise, test-first. Today: the recovery **link** type.
 
-use crate::founding::RitualTransport;
+use molt_net::LoopbackTransport;
 use crate::Envelope;
 use molt_core::Command;
 use molt_net::{invite, msg_id, supervisor, QueueId, SndQueueAddr, Transport, WrapKey};
@@ -284,7 +284,7 @@ pub(crate) fn sealed_roster_from_genesis(
 /// against the coordinator's freshly-minted queue.
 #[doc(hidden)]
 #[derive(Clone)]
-pub struct RecoveryMaterial<T: Transport = RitualTransport> {
+pub struct RecoveryMaterial<T: Transport = LoopbackTransport> {
     /// The returning member the link re-admits.
     pub member: String,
     /// The transport the coordinator minted the recovery queue on (a clone that
@@ -312,7 +312,7 @@ pub struct RecoveryMaterial<T: Transport = RitualTransport> {
 /// handover to the dev-seam sink if one is installed.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_recovery_provisioning(
-    transport: RitualTransport,
+    transport: LoopbackTransport,
     member: String,
     republic: String,
     republic_id: String,
@@ -401,7 +401,7 @@ pub(crate) fn spawn_recovery_provisioning(
 /// this same channel (option A). `reply_json` is the opaque `ReplyHandover` the
 /// rejoiner advertised in its `RecoverRequest`.
 pub(crate) fn spawn_welcome_send(
-    transport: RitualTransport,
+    transport: LoopbackTransport,
     reply_json: String,
     welcome: Vec<u8>,
     chain_json: String,
@@ -495,7 +495,7 @@ pub struct RejoinOutcome {
 ///
 /// The generic core a genuinely separate node runs (N4's Nostr rejoin will
 /// wrap it with the transport parsed from a `molt://recover/…` link). With
-/// `bootstrap` it also re-establishes the runtime mesh ([`rejoin_mesh`],
+/// `bootstrap` it also re-establishes the runtime mesh ([`crate::loopback_mesh::rejoin_mesh`],
 /// best-effort) after the chain verified — the engine's production path;
 /// tests that only exercise the crypto/ritual core pass `false`.
 ///
@@ -654,14 +654,14 @@ pub async fn run_rejoin_with_timeout<T: Transport>(
                         .map(|i| i.member.clone())
                         .filter(|m| m != &inv.member)
                         .collect();
-                    match rejoin_mesh(
+                    match crate::loopback_mesh::rejoin_mesh(
                         &inv.member,
                         &survivors,
                         &transport,
                         &mut mls,
                         &recover_snd,
                         &recover_wrap,
-                        crate::founding::MESH_BOOTSTRAP_TIMEOUT,
+                        crate::loopback_mesh::MESH_BOOTSTRAP_TIMEOUT,
                     )
                     .await
                     {
@@ -786,152 +786,9 @@ pub(crate) fn sealed_roster_from_blob(blob: &molt_core::CheckpointState) -> molt
     }
 }
 
-/// Re-join the **runtime mesh** after recovery — the rejoiner side of dynamic
-/// mesh membership (`docs_archive/transport/dynamic_mesh.md`): open one fresh per-pair
-/// inbound queue per survivor, announce them MLS-encrypted over the recovery
-/// channel (the coordinator authenticates the sender and relays the ciphertext
-/// verbatim over the runtime mesh), then await each survivor's reply announce
-/// as the **first frame on the very queue announced for it** (per-queue FIFO:
-/// the reply precedes any runtime traffic, so it is read here and acked before
-/// the queue is handed to the supervisor), authenticate each reply by MLS
-/// decryption, and assemble the full-mesh links.
-pub(crate) async fn rejoin_mesh<T: Transport>(
-    me: &str,
-    survivors: &[String],
-    transport: &T,
-    mls: &mut molt_net::MlsMember,
-    recover_snd: &SndQueueAddr,
-    recover_wrap: &WrapKey,
-    timeout: std::time::Duration,
-) -> Result<Vec<molt_core::MeshLink>, String> {
-    use molt_net::mesh;
-    use std::collections::BTreeMap;
-
-    // one fresh per-pair inbound queue per survivor (per-pair = unlinkability,
-    // same as the founding bootstrap). The reply arrives on that queue, which
-    // is subscribed BEFORE the announce so a fast reply cannot race the
-    // subscription.
-    let mut my_inbound: BTreeMap<String, (Vec<molt_net::RcvQueue>, WrapKey)> = BTreeMap::new();
-    let mut queues: BTreeMap<String, mesh::QueueHandover> = BTreeMap::new();
-    let (reply_tx, mut reply_rx) = mpsc::channel::<Vec<u8>>(survivors.len().max(1));
-    let mut readers = Vec::with_capacity(survivors.len());
-    for s in survivors {
-        let wrap = WrapKey::fresh().map_err(|e| e.to_string())?;
-        let pair = transport.create_queue().await.map_err(|e| e.to_string())?;
-        let mut rx = transport.subscribe(&pair.rcv).await.map_err(|e| e.to_string())?;
-        queues.insert(s.clone(), mesh::QueueHandover::of(&pair.snd, &wrap));
-        my_inbound.insert(s.clone(), (vec![pair.rcv], wrap.clone()));
-        // the survivor's reply is the FIRST frame on this queue (it sends the
-        // reply before it stands its extended supervisor up, and the queue is
-        // fresh) — read exactly one framed message, ack it, and stop, leaving
-        // every later (runtime) frame for the supervisor's own subscription
-        let tx = reply_tx.clone();
-        readers.push(tokio::spawn(async move {
-            let mut reasm = molt_net::Reassembler::new();
-            while let Some(d) = rx.recv().await {
-                let Ok(plain) = molt_net::wrap::unwrap_block(&wrap, &d.block) else {
-                    d.ack.ack();
-                    continue;
-                };
-                let outcome = reasm.push(&plain);
-                d.ack.ack();
-                if let Ok(molt_net::chunk::PushOutcome::Complete(_, bytes)) = outcome {
-                    if let Ok(invite::RitualMsg::MeshAnnounce { ct }) =
-                        serde_json::from_slice::<invite::RitualMsg>(&bytes)
-                    {
-                        if let Ok(raw) = hex::decode(&ct) {
-                            let _ = tx.send(raw).await;
-                        }
-                    }
-                    return;
-                }
-            }
-        }));
-    }
-    drop(reply_tx);
-
-    // announce the queues — MLS-encrypted, so every survivor authenticates the
-    // sender — over the recovery channel (the coordinator relays to the mesh)
-    let announce = mesh::MeshAnnounce { queues };
-    let bytes = serde_json::to_vec(&announce).map_err(|e| e.to_string())?;
-    let ct = mls.encrypt(&bytes).map_err(|e| e.to_string())?;
-    let msg = invite::RitualMsg::MeshAnnounce { ct: hex::encode(&ct) };
-    let payload = serde_json::to_vec(&msg).map_err(|e| e.to_string())?;
-    supervisor::send_framed(transport, recover_snd, recover_wrap, msg_id(me, "mesh", 2), &payload)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // collect + MLS-authenticate every survivor's reply, bounded by `timeout`
-    // (best-effort like the founding bootstrap)
-    let deadline = tokio::time::Instant::now() + timeout;
-    let mut announces: BTreeMap<String, mesh::MeshAnnounce> = BTreeMap::new();
-    while announces.len() < survivors.len() {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        match tokio::time::timeout(remaining, reply_rx.recv()).await {
-            Ok(Some(raw)) => {
-                // decryption authenticates the replier — an announce from anyone
-                // but an expected survivor is ignored
-                if let Ok(molt_net::MlsIncoming::Application { from, plaintext }) = mls.decrypt(&raw)
-                {
-                    if survivors.contains(&from) {
-                        if let Ok(a) = serde_json::from_slice::<mesh::MeshAnnounce>(&plaintext) {
-                            // validate BEFORE counting it: one malformed reply
-                            // (no queue for us / bad hex) must degrade to "that
-                            // survivor stayed silent", never fail the final
-                            // assembly and nuke the honest survivors' links
-                            let usable = a
-                                .queues
-                                .get(me)
-                                .is_some_and(|h| h.addr().is_some() && h.wrap_key().is_some());
-                            if usable {
-                                announces.insert(from, a);
-                            } else {
-                                tracing::warn!(%from, "mesh reply carries no usable queue for us - ignored");
-                            }
-                        }
-                    }
-                }
-            }
-            Ok(None) => {
-                return Err("mesh re-join reply channel closed".to_string());
-            }
-            Err(_) => {
-                for r in &readers {
-                    r.abort(); // inbound readers only — safe to abort
-                }
-                // NOBODY answered: mesh-less recovery (option A) is honest.
-                if announces.is_empty() {
-                    return Err(format!(
-                        "mesh re-join timed out: 0/{} survivors replied",
-                        survivors.len()
-                    ));
-                }
-                // SOME answered: keep their links. Those survivors have
-                // already re-pointed and persisted their side — discarding
-                // the whole mesh would leave them sending into queues nobody
-                // ever subscribes (a durable blackhole pairing). The silent
-                // rest stays unlinked until a later announce.
-                tracing::warn!(
-                    got = announces.len(),
-                    want = survivors.len(),
-                    "mesh re-join timed out - assembling the partial mesh"
-                );
-                break;
-            }
-        }
-    }
-    // assemble over the survivors that actually replied (all of them on the
-    // happy path; the answering subset after a timeout)
-    let inbound: BTreeMap<String, (Vec<molt_net::RcvQueue>, WrapKey)> = my_inbound
-        .into_iter()
-        .filter(|(m, _)| announces.contains_key(m))
-        .collect();
-    let links = mesh::assemble_mesh(me, &inbound, &announces)?;
-    Ok(links.iter().map(molt_net::PeerLink::to_mesh).collect())
-}
-
 #[cfg(test)]
 mod tests {
+    use crate::loopback_mesh::rejoin_mesh;
 
     /// N4b step 4 — a recovery LINK carries the v2 Nostr handover, and the
     /// legacy queue shape still parses beside it.
@@ -1095,7 +952,7 @@ mod tests {
         use molt_net::LoopbackHub;
 
         let hub = LoopbackHub::calm();
-        let transport = RitualTransport::Loopback(hub.transport());
+        let transport = hub.transport();
         let reply_q = transport.create_queue().await.expect("reply queue");
         let reply_wrap = WrapKey::fresh().expect("wrap");
         let handover = invite::ReplyHandover {

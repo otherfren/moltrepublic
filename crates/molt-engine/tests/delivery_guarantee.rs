@@ -60,7 +60,7 @@ fn has_chat(sink: &CaptureSink, body: &str) -> bool {
 /// the member's supervisor up, prove the baseline chat crosses, ack it as
 /// the member's engine would, then swallow a second chat in a deaf window.
 struct DeafWindow {
-    hub: molt_engine::RitualTransport,
+    hub: molt_net::LoopbackTransport,
     hub_ctl: molt_net::LoopbackHub,
     link: PeerLink,
     member_sink: CaptureSink,
@@ -71,9 +71,7 @@ struct DeafWindow {
 async fn deaf_window(root_a: &std::path::Path) -> (DeafWindow, molt_engine::WalletHandle) {
     let (a, hub, member_mesh, member_mls, id) = found_with_mesh(root_a).await;
     a.execute(Command::CreateFinish).await.expect("enter");
-    // the ritual transport is loopback-only in this build (single-variant enum)
-    let molt_engine::RitualTransport::Loopback(loopback) = &hub;
-    let hub_ctl = loopback.hub();
+    let hub_ctl = hub.hub();
 
     // the member's runtime supervisor; the test doubles as its "engine":
     // it crafts the delivery ACKs a real engine would send (the shared MLS

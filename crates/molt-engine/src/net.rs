@@ -471,7 +471,7 @@ enum NetFeed {
 /// A real mesh's persistable crypto: the runtime transport (whose `Arc` owns the
 /// queue credentials) + the shared MLS group (whose ratchet the supervisor
 /// advances). Snapshotted into `transport.state` on a clean close.
-type RealCrypto = (crate::founding::RitualTransport, Arc<Mutex<molt_net::MlsMember>>);
+type RealCrypto = (molt_net::LoopbackTransport, Arc<Mutex<molt_net::MlsMember>>);
 
 /// The MLS re-key a coordinator produces on recovery: `(commit, welcome)` or a
 /// failure reason (`None` from the caller means there was no runtime group).
@@ -553,7 +553,7 @@ impl NetRuntime {
     /// both create the queue and later subscribe to it (a queue's receive
     /// credential lives in the creating transport's state — a fresh transport
     /// could send but never receive). `None` for the demo mesh (no real transport).
-    pub(crate) fn runtime_transport(&self) -> Option<crate::founding::RitualTransport> {
+    pub(crate) fn runtime_transport(&self) -> Option<molt_net::LoopbackTransport> {
         self.real_crypto.as_ref().map(|(transport, _)| transport.clone())
     }
 
@@ -825,7 +825,7 @@ impl State {
     /// to run (nothing to build) or the group can't be restored.
     pub(crate) fn build_real_net(
         &mut self,
-        transport: crate::founding::RitualTransport,
+        transport: molt_net::LoopbackTransport,
         mesh: &[molt_core::MeshLink],
         mls_blob: &[u8],
     ) -> Option<NetRuntime> {
@@ -951,7 +951,7 @@ impl State {
     /// dedup by msg id at the receiver.
     pub(crate) fn build_real_net_shared(
         &mut self,
-        transport: crate::founding::RitualTransport,
+        transport: molt_net::LoopbackTransport,
         mesh: &[molt_core::MeshLink],
         mls_arc: Arc<Mutex<molt_net::MlsMember>>,
     ) -> Option<NetRuntime> {
@@ -3453,7 +3453,7 @@ impl State {
     /// control frames — today [`molt_net::MESH_ACK_TAG`]`‖window` (the
     /// delivery guarantee's ACK, §4.3).
     pub(crate) async fn send_ping(
-        transport: crate::founding::RitualTransport,
+        transport: molt_net::LoopbackTransport,
         group: Arc<Mutex<molt_net::MlsMember>>,
         peer: PeerLink,
         tag: Vec<u8>,

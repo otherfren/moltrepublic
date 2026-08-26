@@ -69,7 +69,7 @@ async fn found_with_mesh(
     root_a: &Path,
 ) -> (
     WalletHandle,
-    molt_engine::RitualTransport,
+    molt_net::LoopbackTransport,
     Vec<MeshLink>,
     Vec<u8>,
     String,

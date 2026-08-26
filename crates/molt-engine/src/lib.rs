@@ -35,6 +35,7 @@ mod configstore;
 mod events;
 mod founding;
 mod lifecycles;
+mod loopback_mesh;
 mod net;
 mod nostr_ritual;
 mod proposals;
@@ -65,7 +66,7 @@ pub use recovery::{run_rejoin, RejoinOutcome};
 #[doc(hidden)]
 pub use founding::{
     make_seat_proof, member_identity, run_ritual_member, verify_seat_proof, FoundingInvite,
-    InviteMaterial, Ratifier, RitualTransport,
+    InviteMaterial, Ratifier,
 };
 pub use net::{CmdSink, FileStateStore, StorageLog};
 
@@ -235,7 +236,7 @@ pub fn __spawn_demo_mesh(config: GroupConfig, session: SessionView) -> WalletHan
 pub fn __spawn_with_reopen_transport(
     config: GroupConfig,
     session: SessionView,
-    transport: founding::RitualTransport,
+    transport: molt_net::LoopbackTransport,
 ) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
     spawn_actor(
@@ -338,7 +339,7 @@ fn spawn_actor(
     ritual_bootstrap: bool,
     recovery_material_sink: Option<std::sync::mpsc::Sender<recovery::RecoveryMaterial>>,
     demo_mesh: bool,
-    reopen_seam: Option<founding::RitualTransport>,
+    reopen_seam: Option<molt_net::LoopbackTransport>,
 ) -> WalletHandle {
     let (ev_tx, _keep) = broadcast::channel::<Event>(EVENT_QUEUE);
 
@@ -888,7 +889,7 @@ pub(crate) struct State {
     /// test, like a real server would). The product never sets it — and until
     /// N4's Nostr transport lands, a production reopen has no transport to
     /// rebuild, so a mesh-bearing workspace opens honestly detached.
-    pub(crate) reopen_seam: Option<founding::RitualTransport>,
+    pub(crate) reopen_seam: Option<molt_net::LoopbackTransport>,
     /// Opt-in: after sealing, the founder runs the post-founding **mesh
     /// bootstrap** over the star (exchanges [`molt_net::mesh::MeshAnnounce`]s
     /// with the members, assembles the direct mesh, persists it). Off by
@@ -907,13 +908,13 @@ pub(crate) struct State {
     /// assembled (on the loopback hub the queues can't be reconstructed).
     /// Consumed when the real net is built (`NetMeshReady`); cleared on
     /// teardown.
-    pub(crate) runtime_transport: Option<founding::RitualTransport>,
+    pub(crate) runtime_transport: Option<molt_net::LoopbackTransport>,
     /// The **joiner's** equivalent: the off-actor join task hands its ritual
     /// transport (which owns the bootstrap queues' receive credentials) back
     /// through this slot just before it reports `NetJoinSealed`, so the runtime
     /// supervisor reuses the same instance. A fresh per-join `Arc` (replaced in
     /// `cmd_join_start`) isolates a stale task's late fill from a new join.
-    pub(crate) join_transport: std::sync::Arc<std::sync::Mutex<Option<founding::RitualTransport>>>,
+    pub(crate) join_transport: std::sync::Arc<std::sync::Mutex<Option<molt_net::LoopbackTransport>>>,
     /// The running Nostr member-join task (N4a) — aborted on cancel or on a
     /// restarted join (its generation-guarded commands would be dropped
     /// anyway; aborting also releases its relay sockets).
@@ -953,7 +954,7 @@ pub(crate) struct State {
     /// receive credentials), so `cmd_net_recover_sealed` can stand the runtime
     /// supervisor up over the recovered mesh. Replaced per `RecoverStart`.
     pub(crate) recover_transport:
-        std::sync::Arc<std::sync::Mutex<Option<founding::RitualTransport>>>,
+        std::sync::Arc<std::sync::Mutex<Option<molt_net::LoopbackTransport>>>,
     /// The channel the off-actor join task waits on for the joiner's charter
     /// ratification (`JoinConfirmCharter` sends `true`; cancel drops it). Set
     /// while a join is paused at the ratification step, else `None`.

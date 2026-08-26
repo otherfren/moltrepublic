@@ -752,7 +752,7 @@ pub(crate) fn spawn_share_hash(
 /// `NetFile*` commands guarded by `scope`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_file_fetch(
-    transport: crate::founding::RitualTransport,
+    transport: molt_net::LoopbackTransport,
     group: Arc<Mutex<molt_net::MlsMember>>,
     id: MessageId,
     target: FetchTarget,
@@ -828,7 +828,7 @@ pub(crate) fn spawn_file_fetch(
 /// Serve one fetch request off the actor, bounded by the serve semaphore
 /// (a busy node queues further requests instead of saturating its uplink).
 pub(crate) fn spawn_file_serve(
-    transport: crate::founding::RitualTransport,
+    transport: molt_net::LoopbackTransport,
     path: PathBuf,
     expected_size: u64,
     share_id_hex: String,
@@ -850,7 +850,7 @@ pub(crate) fn spawn_file_serve(
 /// Send one honest `Refused` frame to a requester's reply queue (a serve
 /// that cannot start: unknown share, unavailable, path lost).
 pub(crate) fn spawn_send_refusal(
-    transport: crate::founding::RitualTransport,
+    transport: molt_net::LoopbackTransport,
     reply: ReplyHandover,
     frame: TransferFrame,
 ) {
