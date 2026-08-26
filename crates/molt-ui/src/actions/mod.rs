@@ -5,6 +5,7 @@
 //! same command set an MCP agent does, co-equal.
 
 pub(crate) mod chat;
+pub(crate) mod org;
 pub(crate) mod relays;
 pub(crate) mod ritual;
 pub(crate) mod settings;
