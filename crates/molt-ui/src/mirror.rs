@@ -24,7 +24,7 @@ use crate::labels::{
     never_seen_label, orphan_remote_label, seat_state_label, seen_label, short_hex_id, size_label,
     strings_founder, sync_status_label, theme_index, unix_now, view_icon, view_label,
 };
-use crate::models::{sync_rows, sync_strings, sync_vec_model};
+use crate::models::{sync_model, sync_rows, sync_strings};
 use crate::net_tor::{net_health_pill, tor_test_detail, tor_test_tone, tor_verdict_copy_for};
 use crate::settings::{apply_settings_fields, settings_draft_differs};
 use crate::surfaces::{
@@ -1206,9 +1206,7 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                 content: c.as_str().into(),
             })
             .collect();
-        if let Some(fresh) = sync_vec_model(&g.get_base_docs(), docs) {
-            g.set_base_docs(fresh);
-        }
+        sync_model(&g.get_base_docs(), docs, PartialEq::eq, |m| g.set_base_docs(m));
         g.set_base_rev(i32::try_from(mem.wiki_rev).unwrap_or(i32::MAX));
         g.invoke_base_arrived();
     }

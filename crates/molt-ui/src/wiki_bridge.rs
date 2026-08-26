@@ -10,7 +10,7 @@ use molt_core::{Command, Reply, Surface};
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 use crate::i18n::{error_toast, localize_wiki_err, Lexicon};
-use crate::models::{sync_vec_model, sync_wiki_blocks};
+use crate::models::{sync_model, wiki_block_eq};
 use crate::settings::browse_start_dir;
 use crate::app::Ctx;
 use crate::{
@@ -92,9 +92,7 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
             renaming: r.renaming,
         })
         .collect();
-    if let Some(fresh) = sync_vec_model(&s.get_nav_rows(), nav) {
-        s.set_nav_rows(fresh);
-    }
+    sync_model(&s.get_nav_rows(), nav, PartialEq::eq, |m| s.set_nav_rows(m));
     let tabs: Vec<WikiTabRow> = w
         .tab_rows()
         .into_iter()
@@ -105,9 +103,7 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
             status: wiki_status_code(t.status),
         })
         .collect();
-    if let Some(fresh) = sync_vec_model(&s.get_tabs(), tabs) {
-        s.set_tabs(fresh);
-    }
+    sync_model(&s.get_tabs(), tabs, PartialEq::eq, |m| s.set_tabs(m));
     s.set_has_marked(w.has_marked());
     s.set_editing(w.editing);
     s.set_can_reveal(w.active_id().is_some() && w.active_id() != w.marked());
@@ -133,9 +129,7 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
             label: r.label.into(),
         })
         .collect();
-    if let Some(fresh) = sync_vec_model(&s.get_cs_rows(), cs_rows) {
-        s.set_cs_rows(fresh);
-    }
+    sync_model(&s.get_cs_rows(), cs_rows, PartialEq::eq, |m| s.set_cs_rows(m));
     if let Some(doc) = w.active() {
         let id = doc.id;
         s.set_doc_open(true);
@@ -165,13 +159,9 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
                 )),
             })
             .collect();
-        if let Some(fresh) = sync_wiki_blocks(&s.get_blocks(), blocks) {
-            s.set_blocks(fresh);
-        }
+        sync_model(&s.get_blocks(), blocks, wiki_block_eq, |m| s.set_blocks(m));
         let links: Vec<slint::SharedString> = w.links(id).into_iter().map(Into::into).collect();
-        if let Some(fresh) = sync_vec_model(&s.get_links(), links) {
-            s.set_links(fresh);
-        }
+        sync_model(&s.get_links(), links, PartialEq::eq, |m| s.set_links(m));
         if *last != Some((id, w.editing)) {
             s.set_raw(doc.raw.clone().into());
             *last = Some((id, w.editing));
@@ -181,12 +171,8 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
         s.set_doc_path("".into());
         s.set_doc_meta("".into());
         s.set_doc_status(0);
-        if let Some(fresh) = sync_wiki_blocks(&s.get_blocks(), Vec::new()) {
-            s.set_blocks(fresh);
-        }
-        if let Some(fresh) = sync_vec_model(&s.get_links(), Vec::new()) {
-            s.set_links(fresh);
-        }
+        sync_model(&s.get_blocks(), Vec::new(), wiki_block_eq, |m| s.set_blocks(m));
+        sync_model(&s.get_links(), Vec::new(), PartialEq::eq, |m| s.set_links(m));
         *last = None;
     }
 }
