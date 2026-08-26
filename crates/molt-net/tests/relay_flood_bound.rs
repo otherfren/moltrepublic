@@ -57,11 +57,8 @@ async fn a_relay_may_not_replay_more_stored_events_than_the_bound() {
             nostr::SingleLetterTag::lowercase(nostr::Alphabet::H),
             [tag.clone()],
         );
-    let mut sub = RelayRuntime::new(dialer(), vec![url.clone()])
-        .with_history_bound(10)
-        .subscribe(filter)
-        .await
-        .expect("subscribe");
+    let rt = RelayRuntime::new(dialer(), vec![url.clone()]).with_history_bound(10);
+    let mut sub = rt.clone().subscribe(filter).await.expect("subscribe");
 
     // drain what the relay is allowed to give us
     let mut got = 0usize;
@@ -76,5 +73,16 @@ async fn a_relay_may_not_replay_more_stored_events_than_the_bound() {
     assert!(got > 0, "…and the bound must not swallow the whole stream");
 
     // the cut-off is not silent — the relay's own diagnostics carry it
-    // (structured, one line: relay=… bound=… got=…)
+    // (structured, one line: relay=… bound=… got=…) — and the health map
+    // says the relay is DOWN: no supervisor serves it any more, so `deaf()`
+    // must not count it as live (review 2026-08-25 T4)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let health = rt.health().await;
+        if health.get(&url) == Some(&molt_net::relay_runtime::RelayHealth::Down) {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the dropped relay stays Up: {health:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }

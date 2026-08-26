@@ -338,7 +338,7 @@ impl Dialer {
             Dialer::Direct => {
                 // a resolver-less direct dial can never reach an .onion — fail
                 // closed with a clear reason instead of a DNS error / hang.
-                if host.ends_with(".onion") {
+                if host.to_ascii_lowercase().ends_with(".onion") {
                     return Err(NetError::TorMisconfigured(format!(
                         "server {host} is onion-only but Tor is off — enable Tor to reach it"
                     )));
@@ -359,7 +359,14 @@ impl Dialer {
                 // `(host, port)` dials with DOMAINNAME addressing, so the
                 // name resolves PROXY-side (SOCKS5h) — no local DNS.
                 let mut isolation = format!("molt-{session}-{host}");
-                isolation.truncate(255);
+                // on a char boundary: a multibyte host must not panic here
+                if isolation.len() > 255 {
+                    let mut cut = 255;
+                    while !isolation.is_char_boundary(cut) {
+                        cut -= 1;
+                    }
+                    isolation.truncate(cut);
+                }
                 let stream = timeout(
                     CONNECT_TIMEOUT,
                     tokio_socks::tcp::Socks5Stream::connect_with_password(
@@ -470,6 +477,14 @@ mod tests {
             matches!(Dialer::Direct.isolated("x"), Dialer::Direct),
             "no circuits, no lanes"
         );
+    }
+
+    /// The onion refusal is case-insensitive (an S3 endpoint used to reach
+    /// the dialer uppercased).
+    #[tokio::test]
+    async fn direct_refuses_an_uppercase_onion_too() {
+        let err = Dialer::Direct.dial_host("ABC.ONION", 80).await.expect_err("refused");
+        assert!(matches!(err, NetError::TorMisconfigured(_)), "{err:?}");
     }
 
     #[test]

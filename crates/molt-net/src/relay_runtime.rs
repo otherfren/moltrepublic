@@ -821,6 +821,10 @@ async fn read_session(
                             got = stored_seen,
                             "relay replayed more stored events than the bound — dropped"
                         );
+                        // no supervisor serves this relay any more: say so,
+                        // or `deaf()` keeps counting a live relay that is not
+                        // (review 2026-08-25 T4)
+                        shared.health.lock().await.insert(url.to_string(), RelayHealth::Down);
                         return std::ops::ControlFlow::Break(());
                     }
                 }
@@ -888,7 +892,7 @@ async fn read_session(
             {
                 pending_auth = None;
                 if !status {
-                    tracing::warn!(relay = %url, reason = %message, "NIP-42 auth rejected");
+                    tracing::warn!(relay = %url, reason = %relay_reason(&message), "NIP-42 auth rejected");
                     return std::ops::ControlFlow::Continue(());
                 }
             }
@@ -902,7 +906,7 @@ async fn read_session(
             // the idle bound (review finding).
             Ok(RelayMessage::Closed { message, .. }) => {
                 if !message.starts_with("auth-required:") {
-                    tracing::warn!(relay = %url, reason = %message, "relay closed the subscription");
+                    tracing::warn!(relay = %url, reason = %relay_reason(&message), "relay closed the subscription");
                     return std::ops::ControlFlow::Continue(());
                 }
             }
@@ -1184,8 +1188,40 @@ pub struct PublishPool {
     dialer: Dialer,
     /// (url, its connection slot) — urls are fixed at construction; a pool
     /// change builds a new channel and thereby a new pool.
-    conns: Arc<Vec<(String, tokio::sync::Mutex<Option<RelayWs>>)>>,
+    conns: Arc<Vec<(String, tokio::sync::Mutex<PoolSlot>)>>,
     size_budget: Option<u64>,
+    /// Per-attempt bound (kept socket, then fresh dial) — tests shrink it.
+    publish_timeout: Duration,
+}
+
+/// One relay's kept connection plus its BREAKER: a relay that timed out is
+/// not asked again until `down_until` — `publish()` waits for every relay,
+/// so one stalled relay otherwise capped the whole node at one event per
+/// two timeouts, on every publish, with nothing remembering the last one
+/// (review 2026-08-25 T2). A relay VERDICT over a live socket never trips
+/// it; only a broken transport or a missing OK does.
+#[derive(Default)]
+struct PoolSlot {
+    ws: Option<RelayWs>,
+    down_until: Option<tokio::time::Instant>,
+    failures: u32,
+}
+
+impl PoolSlot {
+    /// Record a transport failure: drop the socket, back off exponentially
+    /// (1 s … 60 s).
+    fn tripped(&mut self) {
+        self.ws = None;
+        self.failures = self.failures.saturating_add(1);
+        let secs = 1u64 << self.failures.saturating_sub(1).min(6);
+        self.down_until =
+            Some(tokio::time::Instant::now() + Duration::from_secs(secs.min(60)));
+    }
+
+    fn healthy(&mut self) {
+        self.failures = 0;
+        self.down_until = None;
+    }
 }
 
 // manual: RelayWs holds no secrets, but Debug on a live socket is noise
@@ -1212,11 +1248,19 @@ impl PublishPool {
             dialer,
             conns: Arc::new(
                 urls.into_iter()
-                    .map(|u| (u, tokio::sync::Mutex::new(None)))
+                    .map(|u| (u, tokio::sync::Mutex::new(PoolSlot::default())))
                     .collect(),
             ),
             size_budget: None,
+            publish_timeout: PUBLISH_TIMEOUT,
         }
+    }
+
+    /// Override the per-attempt publish bound (tests use milliseconds).
+    #[must_use]
+    pub fn with_publish_timeout(mut self, timeout: Duration) -> Self {
+        self.publish_timeout = timeout;
+        self
     }
 
     /// Publish one signed event to EVERY relay concurrently over the kept
@@ -1236,11 +1280,12 @@ impl PublishPool {
                 "event of {size} bytes exceeds the smallest relay cap ({budget} bytes) — refused before publish"
             )));
         }
+        let timeout = self.publish_timeout;
         let attempts = self.conns.iter().map(|(url, slot)| {
             let dialer = self.dialer.clone();
             let event = event.clone();
             async move {
-                let outcome = Self::publish_pooled(&dialer, url, slot, &event).await;
+                let outcome = Self::publish_pooled(&dialer, url, slot, &event, timeout).await;
                 (url.clone(), outcome)
             }
         });
@@ -1261,17 +1306,26 @@ impl PublishPool {
     async fn publish_pooled(
         dialer: &Dialer,
         url: &str,
-        slot: &tokio::sync::Mutex<Option<RelayWs>>,
+        slot: &tokio::sync::Mutex<PoolSlot>,
         event: &Event,
+        timeout: Duration,
     ) -> Result<(), NetError> {
         let mut guard = slot.lock().await;
-        if let Some(ws) = guard.as_mut() {
-            match tokio::time::timeout(PUBLISH_TIMEOUT, send_and_await_ok(ws, event)).await {
-                Ok(Ok(verdict)) => return verdict,
+        if let Some(until) = guard.down_until {
+            if tokio::time::Instant::now() < until {
+                return Err(NetError::Unreachable("backing off".into()));
+            }
+        }
+        if let Some(ws) = guard.ws.as_mut() {
+            match tokio::time::timeout(timeout, send_and_await_ok(ws, event)).await {
+                Ok(Ok(verdict)) => {
+                    guard.healthy();
+                    return verdict;
+                }
                 // transport broke or the OK never came — the socket is not
                 // trustworthy any more either way
                 Ok(Err(_)) | Err(_) => {
-                    *guard = None;
+                    guard.ws = None;
                 }
             }
         }
@@ -1282,12 +1336,21 @@ impl PublishPool {
                 .map_err(RecvFail::into_error)?;
             Ok::<(RelayWs, Result<(), NetError>), NetError>((ws, verdict))
         };
-        let (ws, verdict) = tokio::time::timeout(PUBLISH_TIMEOUT, attempt)
+        let outcome = tokio::time::timeout(timeout, attempt)
             .await
-            .unwrap_or_else(|_| Err(NetError::Unreachable("publish timed out".into())))?;
-        // keep the live socket — a refusal verdict still proves it works
-        *guard = Some(ws);
-        verdict
+            .unwrap_or_else(|_| Err(NetError::Unreachable("publish timed out".into())));
+        match outcome {
+            Ok((ws, verdict)) => {
+                // keep the live socket — a refusal verdict still proves it works
+                guard.ws = Some(ws);
+                guard.healthy();
+                verdict
+            }
+            Err(e) => {
+                guard.tripped();
+                Err(e)
+            }
+        }
     }
 }
 
@@ -1311,10 +1374,10 @@ async fn send_and_await_ok(
                     // an authed publish channel would link every
                     // ephemeral-key event to the member (§7.5)
                     Err(NetError::Unreachable(format!(
-                        "relay requires AUTH to publish — refused to link the publish key: {message}"
+                        "relay requires AUTH to publish - refused to link the publish key: {}", relay_reason(&message)
                     )))
                 } else {
-                    Err(NetError::Unreachable(format!("relay refused: {message}")))
+                    Err(NetError::Unreachable(format!("relay refused: {}", relay_reason(&message))))
                 });
             }
             // frames for other events / notices are not our OK
@@ -1322,6 +1385,20 @@ async fn send_and_await_ok(
         }
     }
 }
+
+/// A relay-supplied reason, made safe for a log line or an error shown to
+/// the operator: control characters (a forged log line) replaced, the
+/// length capped (a 900 KiB OK message is not a reason).
+fn relay_reason(message: &str) -> String {
+    message
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(RELAY_REASON_MAX_CHARS)
+        .collect()
+}
+
+/// Longest relay-supplied reason that reaches a log line or an error.
+const RELAY_REASON_MAX_CHARS: usize = 200;
 
 /// The shared ≥1-OK reduction: log per-relay failures, fail typed when
 /// NOTHING accepted, warn on a partial landing.
@@ -1368,10 +1445,10 @@ async fn publish_one(dialer: &Dialer, url: &str, event: &Event) -> Result<(), Ne
                     // ephemeral-key event to the member (§7.5). Loud, so
                     // the operator can pick a different relay.
                     Err(NetError::Unreachable(format!(
-                        "relay requires AUTH to publish — refused to link the publish key: {message}"
+                        "relay requires AUTH to publish - refused to link the publish key: {}", relay_reason(&message)
                     )))
                 } else {
-                    Err(NetError::Unreachable(format!("relay refused: {message}")))
+                    Err(NetError::Unreachable(format!("relay refused: {}", relay_reason(&message))))
                 };
             }
             // frames for other events / notices are not our OK
@@ -1384,6 +1461,66 @@ async fn publish_one(dialer: &Dialer, url: &str, event: &Event) -> Result<(), Ne
 
 #[cfg(test)]
 mod tests {
+    /// A relay's reason never forges a log line or bloats an error.
+    #[test]
+    fn a_relay_reason_is_flat_and_bounded() {
+        let hostile = format!("blocked:\n2026 WARN forged=line{}", "x".repeat(1000));
+        let r = super::relay_reason(&hostile);
+        assert!(!r.contains('\n'));
+        assert_eq!(r.chars().count(), super::RELAY_REASON_MAX_CHARS);
+    }
+
+    /// **One stalled relay does not hold the pool hostage.** A relay that
+    /// accepts the socket and never answers cost every publish two
+    /// timeouts (kept socket, then fresh dial) — the breaker skips it
+    /// until its backoff ends, and the live relay's answer is the
+    /// publish's answer.
+    #[tokio::test]
+    async fn a_stalled_relay_does_not_hold_the_pool_hostage() {
+        let relay = nostr_relay_builder::MockRelay::run().await.expect("relay");
+        let live = relay.url().await.to_string();
+        // a black hole: accepts, reads, never answers
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let hole = format!("ws://{}", listener.local_addr().expect("addr"));
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { return };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    while let Ok(n) = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await {
+                        if n == 0 {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        let pool = super::PublishPool::new(
+            crate::dial::Dialer::Direct,
+            vec![live.clone(), hole.clone()],
+        )
+        .with_publish_timeout(Duration::from_millis(300));
+        let keys = nostr::Keys::generate();
+        let event = |n: &str| {
+            nostr::EventBuilder::new(nostr::Kind::Custom(crate::kinds::KIND_GROUP), n)
+                .sign_with_keys(&keys)
+                .expect("sign")
+        };
+        let first = pool.publish(&event("one")).await.expect("the live relay accepted");
+        assert_eq!(first.accepted, vec![live.clone()]);
+        assert!(first.failed.iter().any(|(u, e)| *u == hole && e.contains("timed out")));
+
+        let started = tokio::time::Instant::now();
+        let second = pool.publish(&event("two")).await.expect("still accepted");
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "the stalled relay is skipped, not waited for: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(second.accepted, vec![live]);
+        assert!(second.failed.iter().any(|(u, e)| *u == hole && e.contains("backing off")));
+    }
+
     /// The ring must cover a whole replay of the history bound, or a second
     /// relay's copies of the earliest events pass as fresh.
     #[test]

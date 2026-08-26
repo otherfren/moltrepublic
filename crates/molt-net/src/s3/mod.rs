@@ -131,6 +131,13 @@ impl S3Endpoint {
         if host.is_empty() {
             return Err(S3Error::Endpoint("no host in endpoint".to_string()));
         }
+        // the dialer's onion check and the SOCKS username assume an ASCII,
+        // lowercase host — the relay policy guarantees that for relays,
+        // nothing did for S3 (review 2026-08-25 T7)
+        if !host.is_ascii() {
+            return Err(S3Error::Endpoint("host must be ASCII".to_string()));
+        }
+        let host = host.to_ascii_lowercase();
         let port = match port_str {
             Some(p) => p
                 .parse::<u16>()
@@ -143,7 +150,7 @@ impl S3Endpoint {
         let base_path = path.trim_end_matches('/').to_string();
         Ok(S3Endpoint {
             scheme,
-            host: host.to_string(),
+            host,
             port,
             base_path,
         })
@@ -226,7 +233,7 @@ fn with_code(base: &str, code: Option<&str>) -> String {
 }
 
 /// The full client configuration for one S3 target.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct S3Config {
     /// Where to connect.
     pub endpoint: S3Endpoint,
@@ -238,6 +245,18 @@ pub struct S3Config {
     pub secret_key: String,
     /// Bucket name (path-style addressed).
     pub bucket: String,
+}
+
+// manual: the secret key is a credential — never in Debug output
+impl std::fmt::Debug for S3Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3Config")
+            .field("endpoint", &self.endpoint)
+            .field("region", &self.region)
+            .field("access_key", &self.access_key)
+            .field("bucket", &self.bucket)
+            .finish_non_exhaustive()
+    }
 }
 
 impl S3Config {
@@ -594,6 +613,25 @@ fn public_tls_config() -> Result<Arc<ClientConfig>, S3Error> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_endpoint_host_is_lowercased_and_ascii_only() {
+        let e = super::S3Endpoint::parse("http://ABC.ONION:8080").expect("parses");
+        assert_eq!(e.host, "abc.onion", "the onion check sees the canonical form");
+        assert!(super::S3Endpoint::parse("https://bücket.example").is_err());
+    }
+
+    #[test]
+    fn the_config_never_debugs_its_secret() {
+        let c = super::S3Config {
+            endpoint: super::S3Endpoint::parse("https://s3.example").expect("parses"),
+            region: "r".into(),
+            access_key: "AK".into(),
+            secret_key: "TOPSECRET".into(),
+            bucket: "b".into(),
+        };
+        assert!(!format!("{c:?}").contains("TOPSECRET"));
+    }
+
     use super::*;
 
     #[test]
