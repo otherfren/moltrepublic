@@ -28,11 +28,10 @@ still OPEN there, by id (each carries its fix direction in the review):
   R9 residual (`nostr_sk` in the two `Net*Sealed` commands) · R11
   duplicated member ladder.
 - MLS/delivery: M1 residual (`ChainOracle` allowance design) · M2 open half
-  (chain-backed commits outrank at the tiebreak, design) · M12 refactor.
+  (chain-backed commits outrank at the tiebreak, design).
 - Transport: T10 residual (test-only cursor API).
-- Storage: S1 residual (`openat2` beneath the workspace) · S11 refactor.
-- Core: K4 residual (a local `--reveal-seed` for headless nodes) · K6
-  residual (`put_bytes` dedupe).
+- Storage: S1 residual (`openat2` beneath the workspace).
+- Core: K4 residual (a local `--reveal-seed` for headless nodes).
 - Frontends: F7 residual (token read per accepted connection) · F11
   `molt-ui` split.
 - MCP privileges (section 9): P8 ritual abandon on context switch

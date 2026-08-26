@@ -248,10 +248,13 @@ persist `(prior_epoch, snapshot, CommitKey, removed)` in the MLS snapshot
 The spent branch never re-anchored `stalled_since`. Fix: re-anchor like a
 granted round.
 
-### M5 [MEDIUM] `retry_epoch_hold` counts frames lost that the same pass would still open - OPEN
-Fix direction: keep `Opaque` frames in `still` while the pass made
-progress; count lost only in the terminating no-progress pass (the
-counter is the self-heal trigger).
+### M5 [MEDIUM] `retry_epoch_hold` counts frames lost that the same pass would still open - FIXED
+`Opaque` frames stay held while the pass made progress; only the
+terminating no-progress pass counts them lost (the counter is the
+self-heal trigger). Landed for the 445 runtime in `29d7b92f`; the M12
+dedupe moved the rule into the shared loop
+(`epoch_hold::drain_until_no_progress`), so the mesh queue path has it
+too. Test: `an_opaque_frame_survives_a_progressing_pass`.
 
 ### M6 [MEDIUM] The held-frame timer retried a PERMANENT refusal forever - FIXED
 Separate `held_permanent` flag (no timer, and no stall clock either: a
@@ -283,12 +286,19 @@ Match `EnvelopeError::Shape` → drop; hold only `EpochOpaque`.
 The three `send_failed` / `link_down` reasons and the GUI arms that match
 them use `-`; the named prose warns carry fields (style sweep 2026-08-26).
 
-### M12 [REFACTOR] - OPEN
-`retry_epoch_hold` vs `drain_epoch_buffer` (one generic
-progress loop); `outbox_loop` (270 lines, four concerns) → publish pass +
-stall decision + a pure `Backoff`; `decode_at` tag table; dead in
-production: `ChainOracle`, `MlsDecode::Ack` on 445, the plaintext
-`WireFrame` path, `MlsChannel.cache` / `evict_*`.
+### M12 [REFACTOR] - FIXED
+One progress loop (`epoch_hold::drain_until_no_progress` +
+`HeldIngest`) behind `retry_epoch_hold` and `drain_epoch_buffer`;
+`outbox_loop` = `publish_pass` → `PassOutcome`, `stall_decision` →
+`Action`, and the pure `Backoff` / `HeldFrame` / `StallClock` (held-frame
+and stall escalations stay separate, M6) with unit tests; `decode_at`
+picks its control-frame parser from the `CONTROL_FRAMES` tag table (the
+unknown-NUL-tag drop stays the one rule below it). `ChainOracle` /
+`GroupDataRefused` / `authorize_group_data` are `cfg(test)` until N6
+wires them. `MlsDecode::Ack` on 445, the plaintext `WireFrame` path and
+`MlsChannel.cache` / `evict_*` are NOT dead: the loopback mesh (the test
+transport, and the engine's demo mesh) runs them - each now says so in
+its doc.
 
 ## 5. Relay transport (`relay_runtime.rs`, `relay_ws.rs`, `dial.rs`, `nostr.rs`, `envelope.rs`, `ritual_net.rs`, `s3/`)
 
@@ -399,10 +409,17 @@ Propagate the dir fsync error in `write_atomic` (at least for
 Error strings use `-`; the transport-loss log is one line with
 `cause=` / `loses=` fields (style sweep 2026-08-26).
 
-### S11 [REFACTOR] - OPEN
-Three copies of "decrypt chain.state" and of "decrypt the genesis frame";
-the seal/unseal quadruplet; transport.state decrypted per cursor save;
-dead `at_rest = "phrase"` import arm; `open_workspace` 250 lines.
+### S11 [REFACTOR] - FIXED
+`decode_chain_state` / `read_chain_at` and `decrypt_genesis_frame` /
+`genesis_frame_at` behind the three copies each (typed faults, each
+caller keeps its wording); `seal_blob` / `unseal_blob` behind the
+quadruplet; `read_transport_state_raw` with the loud-default read and the
+open's newer-version gate as wrappers, the decoded state cached on
+`OpenedWorkspace` (test: `a_cursor_save_reads_the_cached_transport_state`);
+`open_workspace` in four named steps. The `at_rest = "phrase"` import arm
+is NOT dead - `export_archive` produces such blobs since `2cace65b`
+(pinned by `an_archive_export_carries_no_seed_and_imports_sealed`); it
+stays, with a comment naming that test.
 
 ## 7. Core (`molt-core`)
 
@@ -437,12 +454,16 @@ Docs corrected (`clearnet_session`, `RelayClearnetSession.unlock`,
 and `RelayUrlError::TooLong` formats `MAX_URL_LEN` (style sweep
 2026-08-26). `has_archive` stays (a wire field; documented dead).
 
-### K6 [REFACTOR] - PARTLY FIXED
+### K6 [REFACTOR] - FIXED
 `SessionView::default()` lists no workspace (fence test
 `session_default_lists_no_workspaces`); `TorTestState::running` deleted.
 `InviteInfo::render` is NOT dead (the founder's link rendering uses it).
-OPEN: the eight inline length-prefix copies vs one `put_bytes` (with the
-refactor splits).
+One `molt_core::put_bytes` / `put_count` behind the inline length-prefix
+copies in `roster_canonical_bytes`, `chain.rs` and
+`molt_storage::republic_id` - byte-identical (the v4/v5/v6/v7 pins and
+the literal `republic_id` fixture prove it). `WorkspaceInfo::demo_set` is
+`#[doc(hidden)]` and documented as a test fixture (it stays `pub`: the
+engine, MCP and GUI suites use it).
 
 ## 8. Frontends (`molt-mcp`, `molt-app`, `molt-config`, `molt-ui`)
 
