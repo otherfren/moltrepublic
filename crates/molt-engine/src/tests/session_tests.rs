@@ -4,7 +4,8 @@
 //! the GUI's published rendering claim.
 
 use super::support::*;
-use super::*;
+use crate::*;
+use molt_core::{Screen, SessionSettings};
 
 /// `gui_over_mcp.md` steps 1+4, the engine half: the window's publish
 /// is readable back verbatim, an action without a window is REFUSED

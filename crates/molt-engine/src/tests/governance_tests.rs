@@ -4,7 +4,8 @@
 //! withdraw, applied logs, the org tables and the proposal card views).
 
 use super::support::*;
-use super::*;
+use crate::*;
+use serde_json::json;
 
 #[test]
 fn propose_then_threshold_applies() {

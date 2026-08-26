@@ -4,7 +4,8 @@
 //! a valid roster and the persisted transport secret.
 
 use super::support::*;
-use super::*;
+use crate::*;
+use molt_core::Screen;
 
 #[test]
 fn join_requires_a_joinable_link() {

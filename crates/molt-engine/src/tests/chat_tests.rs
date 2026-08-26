@@ -4,7 +4,8 @@
 //! the `WalletHandle` surface.
 
 use super::support::*;
-use super::*;
+use crate::*;
+use serde_json::json;
 
 #[test]
 fn chat_is_ungated_and_propose_rejects_chat() {

@@ -4,7 +4,8 @@
 //! from the served chain, the seat-anchor checks, incarnation scoping.
 
 use super::support::*;
-use super::*;
+use crate::*;
+use molt_core::Screen;
 
 /// An actionable recovery link with a bogus host — parseable, so
 /// `cmd_recover_start` arms the context (generation + link + phrase)

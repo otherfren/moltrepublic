@@ -4,7 +4,8 @@
 //! surface: relay gating, the sim founding, the phrase-backup gate.
 
 use super::support::*;
-use super::*;
+use crate::*;
+use molt_core::{demo_workspace_id, Screen, SessionSettings};
 
 /// seed_backup_confirmation.md keystone (❻½): an all-ratified founding
 /// does NOT finalize — nothing lands on disk — until the founder's own
