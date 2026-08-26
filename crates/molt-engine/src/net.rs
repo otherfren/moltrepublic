@@ -3622,23 +3622,14 @@ fn spawn_demo_peer(
         threshold: usize::from(threshold),
         self_cosign: true,
     };
-    let handle = crate::spawn_actor(
-        config,
-        SessionView::default(),
-        cmd_tx.clone(),
-        cmd_rx,
-        None,
-        false,
-        Some(net),
-        None,
-        false,
-        false,
-        None,
+    let seams = crate::SpawnSeams {
+        net: Some(net),
         // a peer node lives on the demo seam by definition: its own
         // `ensure_demo_net` must keep (not tear down) the injected mesh
-        true,
-        None,
-    );
+        demo_mesh: true,
+        ..crate::SpawnSeams::default()
+    };
+    let handle = crate::spawn_actor(config, SessionView::default(), cmd_tx.clone(), cmd_rx, seams);
     spawn_brain(handle.subscribe(), cmd_tx.downgrade(), owner.clone(), name_seed(name));
     // the returned sender is the peer's sole keepalive: mesh teardown
     // drops it, the actor exits, its State (and with it the supervisor

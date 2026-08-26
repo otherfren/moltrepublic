@@ -169,7 +169,8 @@ pub fn __spawn_manual_founding(
 ) -> (WalletHandle, std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>) {
     let (tx, rx) = std::sync::mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, false, None, false, None);
+    let seams = SpawnSeams { persist: true, ritual_material_sink: Some(tx), ..SpawnSeams::default() };
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, seams);
     (handle, rx)
 }
 
@@ -185,7 +186,13 @@ pub fn __spawn_manual_founding_bootstrap(
 ) -> (WalletHandle, std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>) {
     let (tx, rx) = std::sync::mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, true, None, false, None);
+    let seams = SpawnSeams {
+        persist: true,
+        ritual_material_sink: Some(tx),
+        ritual_bootstrap: true,
+        ..SpawnSeams::default()
+    };
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, seams);
     (handle, rx)
 }
 
@@ -207,9 +214,14 @@ pub fn __spawn_manual_founding_bootstrap_recoverable(
     let (tx, rx) = std::sync::mpsc::channel();
     let (rtx, rrx) = std::sync::mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    let handle = spawn_actor(
-        config, session, cmd_tx, cmd_rx, None, true, None, Some(tx), false, true, Some(rtx), false, None,
-    );
+    let seams = SpawnSeams {
+        persist: true,
+        ritual_material_sink: Some(tx),
+        ritual_bootstrap: true,
+        recovery_material_sink: Some(rtx),
+        ..SpawnSeams::default()
+    };
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, seams);
     (handle, rx, rrx)
 }
 
@@ -222,9 +234,8 @@ pub fn __spawn_manual_founding_bootstrap_recoverable(
 #[doc(hidden)]
 pub fn __spawn_demo_mesh(config: GroupConfig, session: SessionView) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    spawn_actor(
-        config, session, cmd_tx, cmd_rx, None, false, None, None, false, false, None, true, None,
-    )
+    let seams = SpawnSeams { demo_mesh: true, ..SpawnSeams::default() };
+    spawn_actor(config, session, cmd_tx, cmd_rx, seams)
 }
 
 /// Storage-backed engine that resumes a persisted mesh over the GIVEN
@@ -239,21 +250,8 @@ pub fn __spawn_with_reopen_transport(
     transport: molt_net::LoopbackTransport,
 ) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    spawn_actor(
-        config,
-        session,
-        cmd_tx,
-        cmd_rx,
-        None,
-        true,
-        None,
-        None,
-        false,
-        false,
-        None,
-        false,
-        Some(transport),
-    )
+    let seams = SpawnSeams { persist: true, reopen_seam: Some(transport), ..SpawnSeams::default() };
+    spawn_actor(config, session, cmd_tx, cmd_rx, seams)
 }
 
 /// Storage-backed engine whose founding runs in the offline **sim** seam:
@@ -264,7 +262,8 @@ pub fn __spawn_with_reopen_transport(
 #[doc(hidden)]
 pub fn __spawn_sim_founding(config: GroupConfig, session: SessionView, persist: bool) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    spawn_actor(config, session, cmd_tx, cmd_rx, None, persist, None, None, true, false, None, false, None)
+    let seams = SpawnSeams { persist, ritual_sim: true, ..SpawnSeams::default() };
+    spawn_actor(config, session, cmd_tx, cmd_rx, seams)
 }
 
 /// Storage-backed engine with the post-founding **mesh bootstrap** ON — the
@@ -274,7 +273,8 @@ pub fn __spawn_sim_founding(config: GroupConfig, session: SessionView, persist: 
 #[doc(hidden)]
 pub fn __spawn_with_storage_bootstrap(config: GroupConfig, session: SessionView) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    spawn_actor(config, session, cmd_tx, cmd_rx, None, true, None, None, false, true, None, false, None)
+    let seams = SpawnSeams { persist: true, ritual_bootstrap: true, ..SpawnSeams::default() };
+    spawn_actor(config, session, cmd_tx, cmd_rx, seams)
 }
 
 /// Start the engine bound to `config_path`: a [`configstore`] task persists
@@ -291,27 +291,19 @@ pub fn spawn_with_config(
 ) -> std::io::Result<(WalletHandle, ConfigStoreHandle)> {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
     let store = configstore::spawn(config_path, cmd_tx.clone())?;
-    let handle = spawn_actor(
-        config,
-        session,
-        cmd_tx,
-        cmd_rx,
-        Some(store.clone()),
-        true,
-        None,
-        None,
-        false,
+    let seams = SpawnSeams {
+        store: Some(store.clone()),
+        persist: true,
         // the real product runs the post-founding mesh bootstrap: the founder
         // (here) and the joiner (cmd_join_start) exchange announcements, then
         // each stands its runtime supervisor up over the direct mesh — live
         // peer-to-peer MLS chat the moment the republic is founded
-        true,
-        None,
+        ritual_bootstrap: true,
         // the production engine: the demo-mesh test seam stays OFF — no
         // context ever spawns simulated peers here
-        false,
-        None,
-    );
+        ..SpawnSeams::default()
+    };
+    let handle = spawn_actor(config, session, cmd_tx, cmd_rx, seams);
     Ok((handle, store))
 }
 
@@ -322,34 +314,53 @@ fn spawn_inner(
     persist: bool,
 ) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    spawn_actor(config, session, cmd_tx, cmd_rx, store, persist, None, None, false, false, None, false, None)
+    let seams = SpawnSeams { store, persist, ..SpawnSeams::default() };
+    spawn_actor(config, session, cmd_tx, cmd_rx, seams)
 }
 
-#[allow(clippy::too_many_arguments)]
+/// What a spawner wires into the actor beyond its config and session:
+/// persistence and the config store (the production pair), an injected
+/// transport runtime (the demo peers), and the test-only ritual / recovery
+/// / demo-mesh / reopen seams. `Default` is everything off - a session-only
+/// engine with no fake peers; [`spawn_with_config`] is the production
+/// shape (store + persist + bootstrap, nothing else).
+#[derive(Default)]
+pub(crate) struct SpawnSeams {
+    pub(crate) store: Option<ConfigStoreHandle>,
+    pub(crate) persist: bool,
+    pub(crate) net: Option<net::NetRuntime>,
+    pub(crate) ritual_material_sink: Option<std::sync::mpsc::Sender<Vec<founding::InviteMaterial>>>,
+    pub(crate) ritual_sim: bool,
+    pub(crate) ritual_bootstrap: bool,
+    pub(crate) recovery_material_sink: Option<std::sync::mpsc::Sender<recovery::RecoveryMaterial>>,
+    pub(crate) demo_mesh: bool,
+    pub(crate) reopen_seam: Option<molt_net::LoopbackTransport>,
+}
+
 fn spawn_actor(
     config: GroupConfig,
     session: SessionView,
     cmd_tx: mpsc::Sender<Envelope>,
     mut cmd_rx: mpsc::Receiver<Envelope>,
-    store: Option<ConfigStoreHandle>,
-    persist: bool,
-    net: Option<net::NetRuntime>,
-    ritual_material_sink: Option<std::sync::mpsc::Sender<Vec<founding::InviteMaterial>>>,
-    ritual_sim: bool,
-    ritual_bootstrap: bool,
-    recovery_material_sink: Option<std::sync::mpsc::Sender<recovery::RecoveryMaterial>>,
-    demo_mesh: bool,
-    reopen_seam: Option<molt_net::LoopbackTransport>,
+    seams: SpawnSeams,
 ) -> WalletHandle {
     let (ev_tx, _keep) = broadcast::channel::<Event>(EVENT_QUEUE);
 
-    let mut state = State::new(config, session, ev_tx.clone(), cmd_tx.clone(), store, persist, net);
-    state.ritual_material_sink = ritual_material_sink;
-    state.ritual_sim = ritual_sim;
-    state.ritual_bootstrap = ritual_bootstrap;
-    state.recovery.material_sink = recovery_material_sink;
-    state.demo_mesh = demo_mesh;
-    state.reopen_seam = reopen_seam;
+    let mut state = State::new(
+        config,
+        session,
+        ev_tx.clone(),
+        cmd_tx.clone(),
+        seams.store,
+        seams.persist,
+        seams.net,
+    );
+    state.ritual_material_sink = seams.ritual_material_sink;
+    state.ritual_sim = seams.ritual_sim;
+    state.ritual_bootstrap = seams.ritual_bootstrap;
+    state.recovery.material_sink = seams.recovery_material_sink;
+    state.demo_mesh = seams.demo_mesh;
+    state.reopen_seam = seams.reopen_seam;
     // the presence ticker lives as long as the actor: it re-ages the member
     // pills from their real last-seen stamps (net.rs::cmd_net_presence_tick)
     state.spawn_ticker_every(Command::NetPresenceTick, PRESENCE_TICK_MS);
