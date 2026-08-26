@@ -57,7 +57,7 @@ async fn save_target(w: &molt_engine::WalletHandle, endpoint: &str, bucket: &str
     settings.s3_access_key = "AKIAEXAMPLE".to_string();
     settings.s3_secret_key = "secret-example".to_string();
     settings.s3_bucket = bucket.to_string();
-    save_all(&w, settings).await.expect("settings saved");
+    save_all(w, settings).await.expect("settings saved");
 }
 
 /// The demo republics as the session's workspace list — the orphan

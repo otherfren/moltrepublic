@@ -132,9 +132,6 @@ fn draft(mode: &str, port: u16) -> Command {
     }
 }
 
-/// KEYSTONE — with Tor off there is nothing to test, and the engine says so
-/// instead of running a probe. `Off` is a refusal, never a verdict about Tor.
-
 /// Save a test's settings the way the GUI does: the host posture and the
 /// secrets through their own door (`SetNodePosture`), the rest wholesale —
 /// a wholesale save keeps the stored posture (review 2026-08-26).
@@ -143,6 +140,9 @@ async fn save_all(w: &molt_engine::WalletHandle, settings: molt_core::SessionSet
         .await?;
     w.execute(Command::SaveSettings { settings }).await
 }
+
+/// KEYSTONE — with Tor off there is nothing to test, and the engine says so
+/// instead of running a probe. `Off` is a refusal, never a verdict about Tor.
 
 #[tokio::test]
 async fn tor_off_is_a_refusal_not_a_test() {

@@ -321,7 +321,7 @@ async fn a_bucket_edit_clears_one_verdict_and_an_account_edit_clears_both() {
     let probe_both = |settings: molt_core::SessionSettings| {
         let w = &w;
         async move {
-            save_all(&w, settings)
+            save_all(w, settings)
                 .await
                 .expect("settings saved");
             for target in [S3Target::Workspaces, S3Target::Media] {

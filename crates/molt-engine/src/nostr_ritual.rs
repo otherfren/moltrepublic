@@ -1117,7 +1117,11 @@ async fn recovery_rejoin(
             continue;
         };
         match env.body {
-            molt_core::WorkspaceEvent::CheckpointServed { blob: b } => blob = Some(b),
+            molt_core::WorkspaceEvent::CheckpointServed { blob: b } => {
+                blob = Some(b);
+                // new evidence: the same run may verify now (suffix + blob)
+                verified_run_len = 0;
+            }
             molt_core::WorkspaceEvent::Committed(block) => {
                 // bounded (review R7): any group member can flood distinct
                 // heights during the window — keep a window above the lowest

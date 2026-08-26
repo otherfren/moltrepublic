@@ -459,7 +459,7 @@ fn the_verdict_names_the_actual_no_target_cause() {
     assert!(details[2].contains("switched off"), "{}", details[2]);
     let hedged = tor_probe::verdict(&report(None));
     assert!(
-        hedged.detail.contains("relay settings"),
+        hedged.detail.contains("no relay from the pool"),
         "no gap carried keeps the honest hedge: {hedged:?}"
     );
 }

@@ -727,7 +727,7 @@ mod tests {
         let err = import_stage(&dest_root, &blob, "not a phrase")
             .expect_err("garbage secret");
         assert!(
-            err.to_string().contains("RECOVERY PHRASE"),
+            err.to_string().to_lowercase().contains("recovery phrase"),
             "honest secret-kind message: {err}"
         );
         // a WRONG (but valid) phrase fails at the AEAD, indistinguishable
