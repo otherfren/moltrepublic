@@ -309,17 +309,7 @@ pub fn run_app(
     wire_patch_view(&ui);
     wire_wiki_export(&ui, &ctx);
 
-    // --- actions: each becomes a Command on the shared engine ---
-    {
-        let cx = ctx.clone();
-        ui.on_navigate(move |screen| {
-            cx.issue(
-                Command::Navigate {
-                    screen: to_screen(screen),
-                },
-            );
-        });
-    }
+    actions::workspace::wire(&ui, &ctx);
     actions::settings::wire(&ui, &ctx);
     {
         // Add a relay to the pool. The URL is pre-validated with molt-core's
@@ -424,90 +414,6 @@ pub fn run_app(
     ui.on_quit(|| {
         let _ = slint::quit_event_loop();
     });
-    {
-        let cx = ctx.clone();
-        ui.on_open_workspace(move |id| {
-            cx.issue(
-                Command::OpenWorkspace { id: id.to_string() },
-            );
-        });
-    }
-    // real at-rest sealing (S6) — same commands as the MCP
-    // encrypt_/decrypt_workspace tools; the engine verifies the phrase
-    {
-        let cx = ctx.clone();
-        ui.on_encrypt_workspace(move |id, phrase| {
-            cx.issue(
-                Command::EncryptWorkspace {
-                    id: id.to_string(),
-                    phrase: phrase.to_string(),
-                },
-            );
-        });
-    }
-    {
-        let cx = ctx.clone();
-        ui.on_decrypt_workspace(move |id, phrase| {
-            cx.issue(
-                Command::DecryptWorkspace {
-                    id: id.to_string(),
-                    phrase: phrase.to_string(),
-                },
-            );
-        });
-    }
-    {
-        let cx = ctx.clone();
-        ui.on_close_workspace(move || {
-            cx.issue(Command::CloseWorkspace);
-        });
-    }
-    {
-        let cx = ctx.clone();
-        ui.on_delete_workspace(move |id| {
-            cx.issue(
-                Command::DeleteWorkspace { id: id.to_string() },
-            );
-        });
-    }
-    {
-        let cx = ctx.clone();
-        ui.on_set_ws_backup(move |id, enabled| {
-            cx.issue(
-                Command::SetWorkspaceBackup {
-                    id: id.to_string(),
-                    enabled,
-                },
-            );
-        });
-    }
-    // the real manual export — same command as the MCP export_workspace
-    // tool; the honest outcome streams back via the session's export state
-    {
-        let cx = ctx.clone();
-        ui.on_export_workspace(move |id, dest, passphrase| {
-            cx.issue(
-                Command::ExportWorkspace {
-                    id: id.to_string(),
-                    dest: dest.to_string(),
-                    passphrase: passphrase.to_string(),
-                },
-            );
-        });
-    }
-    // Sort the Open list by a header column (view-local: only the mirrored
-    // model is reordered; push_session re-applies the sort on every refresh).
-    {
-        let weak = ui.as_weak();
-        ui.on_sort_workspaces(move |key, desc| {
-            let Some(ui) = weak.upgrade() else {
-                return;
-            };
-            let mut items: Vec<WorkspaceItem> = ui.get_ws_list().iter().collect();
-            sort_ws_items(&mut items, key.as_str(), desc);
-            ui.set_ws_list(ModelRc::new(VecModel::from(items)));
-        });
-    }
     // The Organization tables' sort/filter. View-local presentation like
     // the Open/backup lists — but these mirrored rows are rebuilt from the
     // engine on every push, so the state lives in ChatUiState (toggle in
@@ -570,33 +476,6 @@ pub fn run_app(
                 },
             );
             cx.refresh_surfaces();
-        });
-    }
-    {
-        let cx = ctx.clone();
-        ui.on_restore_start(move |way, target, secret| {
-            cx.issue(
-                Command::RestoreStart {
-                    way: way.to_string(),
-                    target: target.to_string(),
-                    secret: secret.to_string(),
-                    // the GUI's default collision policy is the safe refuse
-                    // (design P2); an explicit replace goes through MCP
-                    replace: false,
-                },
-            );
-        });
-    }
-    {
-        let cx = ctx.clone();
-        ui.on_restore_cancel(move || {
-            cx.issue(Command::RestoreCancel);
-        });
-    }
-    {
-        let cx = ctx.clone();
-        ui.on_restore_finish(move || {
-            cx.issue(Command::RestoreFinish);
         });
     }
     {
@@ -833,29 +712,6 @@ pub fn run_app(
         let cx = ctx.clone();
         ui.on_join_finish(move || {
             cx.issue(Command::JoinFinish);
-        });
-    }
-    {
-        let cx = ctx.clone();
-        ui.on_select_surface(move |key| {
-            let Some(surface) = Surface::parse(&key) else {
-                return;
-            };
-            cx.issue(Command::SelectSurface { surface });
-        });
-    }
-    {
-        let cx = ctx.clone();
-        ui.on_select_view(move |key, view| {
-            let Some(surface) = Surface::parse(&key) else {
-                return;
-            };
-            cx.issue(
-                Command::SelectView {
-                    surface,
-                    view: view.to_string(),
-                },
-            );
         });
     }
     {

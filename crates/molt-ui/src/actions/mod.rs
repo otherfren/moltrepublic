@@ -5,3 +5,4 @@
 //! same command set an MCP agent does, co-equal.
 
 pub(crate) mod settings;
+pub(crate) mod workspace;
