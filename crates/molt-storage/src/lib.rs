@@ -430,30 +430,46 @@ pub fn load_or_create_device_key(path: &Path) -> Result<[u8; 32], StorageError> 
     }
 }
 
-/// Seal the workspace key to the device key (`nonce || ciphertext`; the
-/// workspace id is the AAD, binding the blob to its workspace).
+/// `nonce || ciphertext` under `key`, bound to `aad` — the ONE sealing
+/// shape of every device-sealed key blob (`keys/workspace.key`,
+/// `keys/seed.sealed`). The wrappers below only pick the AAD domain.
+fn seal_blob(key: &[u8; 32], aad: &[u8], msg: &[u8], what: &str) -> Result<Vec<u8>, StorageError> {
+    let mut nonce = [0u8; NONCE_LEN];
+    getrandom::getrandom(&mut nonce)
+        .map_err(|e| StorageError::Crypto(format!("os rng unavailable: {e}")))?;
+    let cipher = XChaCha20Poly1305::new(key.into());
+    let ct = cipher
+        .encrypt(XNonce::from_slice(&nonce), Payload { msg, aad })
+        .map_err(|_| StorageError::Crypto(format!("sealing the {what} failed")))?;
+    let mut out = Vec::with_capacity(NONCE_LEN + ct.len());
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ct);
+    Ok(out)
+}
+
+/// Open a [`seal_blob`] blob: too short → `BadFile`; not authenticating
+/// (foreign device key, tampered, the other AAD domain) → `Crypto`.
+fn unseal_blob(key: &[u8; 32], aad: &[u8], blob: &[u8], what: &str) -> Result<Vec<u8>, StorageError> {
+    if blob.len() <= NONCE_LEN {
+        return Err(StorageError::BadFile(format!("sealed {what} is too short")));
+    }
+    let (nonce, ct) = blob.split_at(NONCE_LEN);
+    let cipher = XChaCha20Poly1305::new(key.into());
+    cipher
+        .decrypt(XNonce::from_slice(nonce), Payload { msg: ct, aad })
+        .map_err(|_| {
+            StorageError::Crypto(format!("unsealing the {what} failed (wrong device key?)"))
+        })
+}
+
+/// Seal the workspace key to the device key (the workspace id is the AAD,
+/// binding the blob to its workspace).
 fn seal_workspace_key(
     device_key: &[u8; 32],
     id: &[u8; 32],
     ws_key: &[u8; 32],
 ) -> Result<Vec<u8>, StorageError> {
-    let mut nonce = [0u8; NONCE_LEN];
-    getrandom::getrandom(&mut nonce)
-        .map_err(|e| StorageError::Crypto(format!("os rng unavailable: {e}")))?;
-    let cipher = XChaCha20Poly1305::new(device_key.into());
-    let ct = cipher
-        .encrypt(
-            XNonce::from_slice(&nonce),
-            Payload {
-                msg: ws_key,
-                aad: id,
-            },
-        )
-        .map_err(|_| StorageError::Crypto("sealing the workspace key failed".to_string()))?;
-    let mut out = Vec::with_capacity(NONCE_LEN + ct.len());
-    out.extend_from_slice(&nonce);
-    out.extend_from_slice(&ct);
-    Ok(out)
+    seal_blob(device_key, id, ws_key, "workspace key")
 }
 
 /// Unseal `keys/workspace.key` with the device key.
@@ -462,20 +478,7 @@ fn unseal_workspace_key(
     id: &[u8; 32],
     blob: &[u8],
 ) -> Result<[u8; 32], StorageError> {
-    if blob.len() <= NONCE_LEN {
-        return Err(StorageError::BadFile(
-            "sealed workspace key is too short".to_string(),
-        ));
-    }
-    let (nonce, ct) = blob.split_at(NONCE_LEN);
-    let cipher = XChaCha20Poly1305::new(device_key.into());
-    let pt = cipher
-        .decrypt(XNonce::from_slice(nonce), Payload { msg: ct, aad: id })
-        .map_err(|_| {
-            StorageError::Crypto(
-                "unsealing the workspace key failed (wrong device key?)".to_string(),
-            )
-        })?;
+    let pt = unseal_blob(device_key, id, blob, "workspace key")?;
     <[u8; 32]>::try_from(pt.as_slice())
         .map_err(|_| StorageError::BadFile("unsealed workspace key is not 32 bytes".to_string()))
 }
@@ -490,8 +493,8 @@ fn seed_seal_aad(id: &[u8; 32]) -> [u8; 44] {
     aad
 }
 
-/// Seal the recovery-seed entropy to the device key (`nonce || ciphertext`,
-/// AAD [`seed_seal_aad`]). Stored so the details panel can show the phrase
+/// Seal the recovery-seed entropy to the device key (AAD
+/// [`seed_seal_aad`]). Stored so the details panel can show the phrase
 /// of an at-rest-unencrypted workspace (decision 2026-07-15); the opt-in
 /// passphrase sealing (S6) removes the file.
 fn seal_seed_entropy(
@@ -499,23 +502,7 @@ fn seal_seed_entropy(
     id: &[u8; 32],
     entropy: &[u8],
 ) -> Result<Vec<u8>, StorageError> {
-    let mut nonce = [0u8; NONCE_LEN];
-    getrandom::getrandom(&mut nonce)
-        .map_err(|e| StorageError::Crypto(format!("os rng unavailable: {e}")))?;
-    let cipher = XChaCha20Poly1305::new(device_key.into());
-    let ct = cipher
-        .encrypt(
-            XNonce::from_slice(&nonce),
-            Payload {
-                msg: entropy,
-                aad: &seed_seal_aad(id),
-            },
-        )
-        .map_err(|_| StorageError::Crypto("sealing the seed failed".to_string()))?;
-    let mut out = Vec::with_capacity(NONCE_LEN + ct.len());
-    out.extend_from_slice(&nonce);
-    out.extend_from_slice(&ct);
-    Ok(out)
+    seal_blob(device_key, &seed_seal_aad(id), entropy, "seed")
 }
 
 /// Unseal a `keys/seed.sealed` blob with the device key (AAD
@@ -527,20 +514,7 @@ fn unseal_seed_entropy(
     id: &[u8; 32],
     blob: &[u8],
 ) -> Result<Vec<u8>, StorageError> {
-    if blob.len() <= NONCE_LEN {
-        return Err(StorageError::BadFile("sealed seed is too short".to_string()));
-    }
-    let (nonce, ct) = blob.split_at(NONCE_LEN);
-    let cipher = XChaCha20Poly1305::new(device_key.into());
-    cipher
-        .decrypt(
-            XNonce::from_slice(nonce),
-            Payload {
-                msg: ct,
-                aad: &seed_seal_aad(id),
-            },
-        )
-        .map_err(|_| StorageError::Crypto("unsealing the stored seed failed".to_string()))
+    unseal_blob(device_key, &seed_seal_aad(id), blob, "seed")
 }
 
 /// Read a workspace's recovery phrase back from `keys/seed.sealed`.
@@ -589,25 +563,68 @@ pub fn peek_genesis(root: &Path, ws_dir: &Path, id_hex: &str) -> Option<EventEnv
     // the earliest segments entirely, so try that first, then fall back to
     // the snapshot, which carries every genesis-derived fact by design (it
     // has to: the genesis is before the snapshot and never replayed).
-    if let Some(env) = genesis_from_log(ws_dir, &key, &id) {
+    if let Ok(env) = genesis_frame_at(ws_dir, &key, &id) {
         return Some(env);
     }
     genesis_from_snapshot(ws_dir, &manifest, &key, &id)
 }
 
-/// The genesis envelope as it lies in the log's first segment, under whatever
-/// key that segment uses (a compacted log gives it its own).
-fn genesis_from_log(ws_dir: &Path, key: &[u8; 32], id: &[u8; 32]) -> Option<EventEnvelope> {
-    let seg_key = segkeys::read_table(ws_dir, key, id)
+/// Why the genesis frame (segment 1, seq 1) did not open. The three
+/// readers (the Open screen's peek, the phrase check of a seal/unseal, the
+/// import's blob check) map it to their own wording.
+pub(crate) enum GenesisFault {
+    /// The first segment holds no structurally valid frame.
+    NoFrame,
+    /// Neither key authenticates the frame.
+    Auth,
+}
+
+/// Decrypt the genesis frame out of a first-segment image (`data` =
+/// `log/000001.mlog`, on disk or inside a blob) under the segment's own
+/// key, falling back to the workspace key for a half-migrated segment 1 —
+/// the same rule `open_workspace`'s replay applies to every segment.
+/// Decrypt only: the caller parses (the phrase check never needs to).
+pub(crate) fn decrypt_genesis_frame(
+    data: &[u8],
+    seg_key: &[u8; 32],
+    ws_key: &[u8; 32],
+    id: &[u8; 32],
+) -> Result<Zeroizing<Vec<u8>>, GenesisFault> {
+    let (frames, _torn) = split_frames(data);
+    let first = frames.first().ok_or(GenesisFault::NoFrame)?;
+    decrypt_frame(seg_key, id, 1, 1, first.nonce, first.ciphertext)
+        .or_else(|e| {
+            if seg_key == ws_key {
+                Err(e)
+            } else {
+                decrypt_frame(ws_key, id, 1, 1, first.nonce, first.ciphertext)
+            }
+        })
+        .map(Zeroizing::new)
+        .map_err(|_| GenesisFault::Auth)
+}
+
+/// The genesis envelope as it lies in a workspace directory's first log
+/// segment, under whatever key that segment uses (a compacted log gives
+/// it its own DEK). The segment unreadable → `Io`; no frame → `Corrupt`;
+/// not authenticating → `Crypto`.
+pub(crate) fn genesis_frame_at(
+    ws_dir: &Path,
+    ws_key: &[u8; 32],
+    id: &[u8; 32],
+) -> Result<EventEnvelope, StorageError> {
+    let seg_key = segkeys::read_table(ws_dir, ws_key, id)
         .ok()
         .flatten()
         .and_then(|t| t.dek(1))
-        .unwrap_or(*key);
-    let data = read_capped(&ws_dir.join("log").join(segment_name(1)), READ_CAP_SEGMENT, "log segment").ok()?;
-    let (frames, _torn) = split_frames(&data);
-    let first = frames.first()?;
-    let plaintext = decrypt_frame(&seg_key, id, 1, 1, first.nonce, first.ciphertext).ok()?;
-    serde_json::from_slice(&plaintext).ok()
+        .unwrap_or(*ws_key);
+    let data = read_capped(&ws_dir.join("log").join(segment_name(1)), READ_CAP_SEGMENT, "log segment")?;
+    let plaintext = decrypt_genesis_frame(&data, &seg_key, ws_key, id).map_err(|f| match f {
+        GenesisFault::NoFrame => StorageError::Corrupt("workspace has no genesis frame".to_string()),
+        GenesisFault::Auth => StorageError::Crypto("the genesis frame does not authenticate".to_string()),
+    })?;
+    serde_json::from_slice(&plaintext)
+        .map_err(|e| StorageError::Corrupt(format!("genesis envelope: {e}")))
 }
 
 /// Rebuild the genesis facts from the newest snapshot — the honest source once
@@ -737,14 +754,19 @@ fn decrypt_state_file(
     segment: u64,
     data: &[u8],
 ) -> Result<Vec<u8>, StorageError> {
-    let (frames, torn) = split_frames(data);
-    let [frame] = frames.as_slice() else {
-        return Err(StorageError::Corrupt("state-file framing".to_string()));
-    };
-    if torn.is_some() {
-        return Err(StorageError::Corrupt("state-file torn tail".to_string()));
-    }
+    let frame = single_frame(data)
+        .ok_or_else(|| StorageError::Corrupt("state-file framing".to_string()))?;
     decrypt_frame(key, id, segment, 0, frame.nonce, frame.ciphertext)
+}
+
+/// The one frame of a single-frame state file — `None` for anything else
+/// (no frame, several, or a torn tail behind the one).
+fn single_frame(data: &[u8]) -> Option<RawFrame<'_>> {
+    let (mut frames, torn) = split_frames(data);
+    if frames.len() != 1 || torn.is_some() {
+        return None;
+    }
+    frames.pop()
 }
 
 /// One structurally valid frame inside a segment buffer.
@@ -1115,6 +1137,13 @@ pub struct OpenedWorkspace {
     pub next_seq: u64,
     /// Unsynced appends are pending.
     dirty: bool,
+    /// `transport.state` as last decoded or written through this handle
+    /// (S11): the file carries the whole MLS ratchet blob, and the
+    /// supervisor's frequent cursor saves each read-modify-write it — one
+    /// decrypt per open, not per save. `None` = not read yet, or the last
+    /// write failed (the file's content is then unknown). Sound because
+    /// the flock makes this handle the only writer of the file.
+    transport: std::sync::Mutex<Option<TransportState>>,
 }
 
 impl OpenedWorkspace {
@@ -1306,7 +1335,8 @@ impl OpenedWorkspace {
             return Ok(0);
         };
         let segments = list_sorted(&self.dir.join("log"), ".mlog");
-        let mut doomed: Vec<(u64, PathBuf)> = Vec::new();
+        // (segment, its file, its last seq)
+        let mut doomed: Vec<(u64, PathBuf, u64)> = Vec::new();
         for (idx, (no, path)) in segments.iter().enumerate() {
             if *no == self.seg_no {
                 continue;
@@ -1321,7 +1351,7 @@ impl OpenedWorkspace {
                 .unwrap_or(self.next_seq);
             let last = next_first.saturating_sub(1);
             if last <= floor && first <= last {
-                doomed.push((*no, path.clone()));
+                doomed.push((*no, path.clone(), last));
             }
         }
         if doomed.is_empty() {
@@ -1329,17 +1359,10 @@ impl OpenedWorkspace {
         }
         let dropped_to = doomed
             .iter()
-            .filter_map(|(no, _)| {
-                let idx = segments.iter().position(|(n, _)| n == no)?;
-                let next_first = segments
-                    .get(idx + 1)
-                    .and_then(|(n, _)| table.first_seq(*n))
-                    .unwrap_or(self.next_seq);
-                Some(next_first.saturating_sub(1))
-            })
+            .map(|(_, _, last)| *last)
             .max()
             .unwrap_or(table.floor);
-        for (no, _) in &doomed {
+        for (no, _, _) in &doomed {
             table.forget(*no);
         }
         table.floor = table.floor.max(dropped_to);
@@ -1348,7 +1371,7 @@ impl OpenedWorkspace {
         self.seg_keys = Some(table);
         // 2) … only then the bytes (a crash in between leaves files nobody
         //    can read, which the next run unlinks)
-        for (_, path) in &doomed {
+        for (_, path, _) in &doomed {
             let _ = fs::remove_file(path);
         }
         Ok(doomed.len())
@@ -1503,11 +1526,6 @@ impl OpenedWorkspace {
         Ok(())
     }
 
-    /// The `chain.state` sub-key (distinct HKDF tag from the transport key).
-    fn chain_key(&self) -> [u8; 32] {
-        hkdf32(&*self.key, "molt-chain-state", &self.id)
-    }
-
     /// Read `transport.state` (transport concept §6): node-local encrypted
     /// transport bookkeeping. Absent, damaged or newer-versioned files fall
     /// back to defaults. For the resendable state (cursors, ratchets, queue
@@ -1515,16 +1533,32 @@ impl OpenedWorkspace {
     /// since N1 (v3) the file may also hold `nostr_sk`, the seat's
     /// NON-re-derivable transport secret (its salting ticket died with the
     /// ritual), so a fallback on an EXISTING file is a loud, named loss,
-    /// not a shrug (see [`read_transport_state_at`]).
+    /// not a shrug (see [`read_transport_state_at`]). Decoded once per
+    /// handle (S11), then served from the cache every write keeps current.
     pub fn read_transport_state(&self) -> TransportState {
-        read_transport_state_at(&self.dir, &self.key, &self.id)
+        let mut cache = self.transport.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        cache
+            .get_or_insert_with(|| read_transport_state_at(&self.dir, &self.key, &self.id))
+            .clone()
     }
 
     /// Rewrite `transport.state` atomically (via `tmp/`, mode 0600), old
     /// content discarded — this file must never accrete history (from T2
     /// it holds ratchet state whose deletion IS forward secrecy).
     pub fn write_transport_state(&self, state: &TransportState) -> Result<(), StorageError> {
-        write_transport_state_at(&self.dir, &self.key, &self.id, state)
+        // the lock spans the write: cache and file move together
+        let mut cache = self.transport.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match write_transport_state_at(&self.dir, &self.key, &self.id, state) {
+            Ok(written) => {
+                *cache = Some(written);
+                Ok(())
+            }
+            Err(e) => {
+                // what the file holds now is unknown — the next read decodes it
+                *cache = None;
+                Err(e)
+            }
+        }
     }
 
     /// Read `chain.state`: the republic's persistent commit-block chain
@@ -1540,43 +1574,7 @@ impl OpenedWorkspace {
         &self,
     ) -> Result<(Option<molt_core::CheckpointState>, Vec<molt_core::ChainBlock>), StorageError>
     {
-        let path = self.dir.join("chain.state");
-        let data = match read_capped(&path, READ_CAP_STATE, "chain.state") {
-            Ok(d) => d,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((None, Vec::new())),
-            Err(e) => {
-                return Err(StorageError::Corrupt(format!("reading chain.state: {e}")));
-            }
-        };
-        let (frames, torn) = split_frames(&data);
-        if frames.len() != 1 || torn.is_some() {
-            return Err(StorageError::Corrupt(
-                "chain.state framing is damaged".to_string(),
-            ));
-        }
-        let plaintext = match decrypt_frame(
-            &self.chain_key(),
-            &self.id,
-            CHAIN_SEGMENT,
-            0,
-            frames[0].nonce,
-            frames[0].ciphertext,
-        ) {
-            Ok(p) => p,
-            Err(e) => {
-                return Err(StorageError::Crypto(format!(
-                    "chain.state does not authenticate: {e}"
-                )));
-            }
-        };
-        match serde_json::from_slice::<ChainStateFile>(&plaintext) {
-            Ok(ChainStateFile::Full(chain)) => Ok((None, chain)),
-            Ok(ChainStateFile::Pruned {
-                checkpoint_blob,
-                blocks,
-            }) => Ok((Some(checkpoint_blob), blocks)),
-            Err(e) => Err(StorageError::Corrupt(format!("chain.state decode: {e}"))),
-        }
+        read_chain_at(&self.dir, &self.key, &self.id)
     }
 
     /// WP4b stage 5: raise the manifest to [`molt_core::STORAGE_VERSION_PRUNED`]
@@ -1611,7 +1609,13 @@ impl OpenedWorkspace {
             None => serde_json::to_vec(chain),
         }
         .map_err(|e| StorageError::Corrupt(format!("encoding chain.state: {e}")))?;
-        let frame = encode_frame(&self.chain_key(), &self.id, CHAIN_SEGMENT, 0, &plaintext)?;
+        let frame = encode_frame(
+            &chain_state_key(&self.key, &self.id),
+            &self.id,
+            CHAIN_SEGMENT,
+            0,
+            &plaintext,
+        )?;
         write_atomic(&self.dir, "chain.state", &frame, true)
     }
 
@@ -1664,6 +1668,128 @@ impl OpenedWorkspace {
     }
 }
 
+/// The `chain.state` sub-key (its own HKDF tag, distinct from the
+/// transport key).
+fn chain_state_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    Zeroizing::new(hkdf32(ws_key, "molt-chain-state", id))
+}
+
+/// The `transport.state` sub-key.
+fn transport_state_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    Zeroizing::new(hkdf32(ws_key, "molt-transport-state", id))
+}
+
+/// Why a `chain.state` image did not yield a chain. The three policies map
+/// it themselves: the open (typed errors, [`read_chain_at`]), the unseal's
+/// version floor (every fault is the conservative PRUNED answer) and the
+/// import (hard errors in the blob's wording).
+pub(crate) enum ChainStateFault {
+    /// Not exactly one well-formed frame.
+    Framing,
+    /// The frame does not authenticate under the chain sub-key.
+    Auth(StorageError),
+    /// The plaintext is no chain-state layout this build knows.
+    Decode(serde_json::Error),
+}
+
+/// Decrypt + parse one `chain.state` image (`data` = the file's bytes, or
+/// a blob entry's) into `(checkpoint, blocks)` — the ONE decoder of the
+/// [`ChainStateFile`] layout.
+pub(crate) fn decode_chain_state(
+    ws_key: &[u8; 32],
+    id: &[u8; 32],
+    data: &[u8],
+) -> Result<(Option<molt_core::CheckpointState>, Vec<molt_core::ChainBlock>), ChainStateFault> {
+    let frame = single_frame(data).ok_or(ChainStateFault::Framing)?;
+    let plaintext = decrypt_frame(
+        &chain_state_key(ws_key, id),
+        id,
+        CHAIN_SEGMENT,
+        0,
+        frame.nonce,
+        frame.ciphertext,
+    )
+    .map(Zeroizing::new)
+    .map_err(ChainStateFault::Auth)?;
+    match serde_json::from_slice::<ChainStateFile>(&plaintext) {
+        Ok(ChainStateFile::Full(chain)) => Ok((None, chain)),
+        Ok(ChainStateFile::Pruned {
+            checkpoint_blob,
+            blocks,
+        }) => Ok((Some(checkpoint_blob), blocks)),
+        Err(e) => Err(ChainStateFault::Decode(e)),
+    }
+}
+
+/// Read the `chain.state` of a workspace directory: absent → `Ok((None,
+/// []))`; present but unreadable → a typed error (the L7 policy, see
+/// [`OpenedWorkspace::read_chain`]).
+pub(crate) fn read_chain_at(
+    dir: &Path,
+    ws_key: &[u8; 32],
+    id: &[u8; 32],
+) -> Result<(Option<molt_core::CheckpointState>, Vec<molt_core::ChainBlock>), StorageError> {
+    let data = match read_capped(&dir.join("chain.state"), READ_CAP_STATE, "chain.state") {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((None, Vec::new())),
+        Err(e) => return Err(StorageError::Corrupt(format!("reading chain.state: {e}"))),
+    };
+    decode_chain_state(ws_key, id, &data).map_err(|f| match f {
+        ChainStateFault::Framing => {
+            StorageError::Corrupt("chain.state framing is damaged".to_string())
+        }
+        ChainStateFault::Auth(e) => {
+            StorageError::Crypto(format!("chain.state does not authenticate: {e}"))
+        }
+        ChainStateFault::Decode(e) => StorageError::Corrupt(format!("chain.state decode: {e}")),
+    })
+}
+
+/// Why a `transport.state` did not yield a state. Two policies read it:
+/// the open gate refuses only `Newer` ([`open_transport_state`]); the read
+/// path starts fresh on everything, loudly on everything but `Absent`
+/// ([`read_transport_state_at`]).
+enum TransportStateFault {
+    /// No file — a fresh workspace.
+    Absent,
+    Read(std::io::Error),
+    /// Not exactly one well-formed frame.
+    Framing,
+    Auth(StorageError),
+    /// Written by a newer build than this one.
+    Newer(u32),
+    Decode(serde_json::Error),
+}
+
+/// Decode a workspace directory's `transport.state`, every fault typed —
+/// the ONE reader behind both policies.
+fn read_transport_state_raw(
+    dir: &Path,
+    ws_key: &[u8; 32],
+    id: &[u8; 32],
+) -> Result<TransportState, TransportStateFault> {
+    let data = match read_capped(&dir.join("transport.state"), READ_CAP_STATE, "transport.state") {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(TransportStateFault::Absent),
+        Err(e) => return Err(TransportStateFault::Read(e)),
+    };
+    let frame = single_frame(&data).ok_or(TransportStateFault::Framing)?;
+    let plaintext = decrypt_frame(
+        &transport_state_key(ws_key, id),
+        id,
+        TRANSPORT_SEGMENT,
+        0,
+        frame.nonce,
+        frame.ciphertext,
+    )
+    .map_err(TransportStateFault::Auth)?;
+    match serde_json::from_slice::<TransportState>(&plaintext) {
+        Ok(st) if st.version <= TRANSPORT_STATE_VERSION => Ok(st),
+        Ok(st) => Err(TransportStateFault::Newer(st.version)),
+        Err(e) => Err(TransportStateFault::Decode(e)),
+    }
+}
+
 /// Read a `transport.state` for a workspace directory — shared by
 /// [`OpenedWorkspace::read_transport_state`] and the import commit (which carries
 /// the replaced dir's non-re-derivable `nostr_sk` over). An ABSENT file is
@@ -1676,107 +1802,57 @@ impl OpenedWorkspace {
 /// only harmless for the resendable state (cursors, ratchets, creds), not
 /// for that identity. Honesty is the whole fix here: the fallback behavior
 /// is unchanged, the silence is not.
-/// Refuse to open a workspace whose `transport.state` this build would
-/// downgrade — the twin of [`openable_gate`]'s manifest check (M5).
-///
-/// Only the NEWER case errors. Missing, unreadable, unauthenticated or
-/// undecodable all stay silent here: the read path treats those as "start
-/// fresh", which is the honest answer for a ratchet, and turning them into
-/// a refusal would make a recoverable workspace unopenable.
-fn ensure_transport_state_not_newer(
-    dir: &Path,
-    ws_key: &[u8; 32],
-    id: &[u8; 32],
-) -> Result<(), StorageError> {
-    let path = dir.join("transport.state");
-    let Ok(data) = read_capped(&path, READ_CAP_STATE, "transport.state") else { return Ok(()) };
-    let (frames, torn) = split_frames(&data);
-    if frames.len() != 1 || torn.is_some() {
-        return Ok(());
-    }
-    let transport_key = hkdf32(ws_key, "molt-transport-state", id);
-    let Ok(plaintext) = decrypt_frame(
-        &transport_key,
-        id,
-        TRANSPORT_SEGMENT,
-        0,
-        frames[0].nonce,
-        frames[0].ciphertext,
-    ) else {
-        return Ok(());
-    };
-    match serde_json::from_slice::<TransportState>(&plaintext) {
-        Ok(st) if st.version > TRANSPORT_STATE_VERSION => {
-            Err(StorageError::NewerVersion(st.version))
-        }
-        _ => Ok(()),
-    }
-}
-
 fn read_transport_state_at(dir: &Path, ws_key: &[u8; 32], id: &[u8; 32]) -> TransportState {
-    let path = dir.join("transport.state");
     // starting fresh loses the non-re-derivable nostr_sk until a recovery
     // ritual re-anchors the seat; the fields keep the log line greppable
     const LOST: &str = "transport.state unreadable, starting fresh";
-    let data = match read_capped(&path, READ_CAP_STATE, "transport.state") {
-        Ok(d) => d,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return TransportState::default(),
-        Err(e) => {
+    match read_transport_state_raw(dir, ws_key, id) {
+        Ok(st) => return st,
+        Err(TransportStateFault::Absent) => {}
+        Err(TransportStateFault::Read(e)) => {
             tracing::error!(error = %e, cause = "read", loses = "nostr_sk", "{LOST}");
-            return TransportState::default();
         }
-    };
-    let (frames, torn) = split_frames(&data);
-    if frames.len() != 1 || torn.is_some() {
-        tracing::error!(cause = "framing", loses = "nostr_sk", "{LOST}");
-        return TransportState::default();
-    }
-    let transport_key = hkdf32(ws_key, "molt-transport-state", id);
-    let plaintext = match decrypt_frame(
-        &transport_key,
-        id,
-        TRANSPORT_SEGMENT,
-        0,
-        frames[0].nonce,
-        frames[0].ciphertext,
-    ) {
-        Ok(p) => p,
-        Err(e) => {
+        Err(TransportStateFault::Framing) => {
+            tracing::error!(cause = "framing", loses = "nostr_sk", "{LOST}");
+        }
+        Err(TransportStateFault::Auth(e)) => {
             tracing::error!(error = %e, cause = "auth", loses = "nostr_sk", "{LOST}");
-            return TransportState::default();
         }
-    };
-    match serde_json::from_slice::<TransportState>(&plaintext) {
-        Ok(st) if st.version <= TRANSPORT_STATE_VERSION => st,
-        Ok(st) => {
-            tracing::error!(version = st.version, cause = "newer", loses = "nostr_sk", "{LOST}");
-            TransportState::default()
+        Err(TransportStateFault::Newer(version)) => {
+            tracing::error!(version, cause = "newer", loses = "nostr_sk", "{LOST}");
         }
-        Err(e) => {
+        Err(TransportStateFault::Decode(e)) => {
             tracing::error!(error = %e, cause = "decode", loses = "nostr_sk", "{LOST}");
-            TransportState::default()
         }
     }
+    TransportState::default()
 }
 
 /// Write a `transport.state` for a workspace directory that is not (yet)
 /// open — shared by [`OpenedWorkspace::write_transport_state`] and the
 /// import commit (which writes the fresh minimal identity-only state into
 /// its staging dir before the rename). Same framing, same sub-key
-/// derivation, atomic via `tmp/`, mode 0600.
+/// derivation, atomic via `tmp/`, mode 0600. Returns the state as written
+/// (this build's version stamped), for the handle's cache.
 fn write_transport_state_at(
     dir: &Path,
     ws_key: &[u8; 32],
     id: &[u8; 32],
     state: &TransportState,
-) -> Result<(), StorageError> {
+) -> Result<TransportState, StorageError> {
     let mut state = state.clone();
     state.version = TRANSPORT_STATE_VERSION;
     let plaintext = serde_json::to_vec(&state)
         .map_err(|e| StorageError::Corrupt(format!("encoding transport.state: {e}")))?;
-    let transport_key = hkdf32(ws_key, "molt-transport-state", id);
-    let frame = encode_frame(&transport_key, id, TRANSPORT_SEGMENT, 0, &plaintext)?;
-    write_atomic(dir, "transport.state", &frame, true)
+    let frame = encode_frame(
+        &transport_state_key(ws_key, id),
+        id,
+        TRANSPORT_SEGMENT,
+        0,
+        &plaintext,
+    )?;
+    write_atomic(dir, "transport.state", &frame, true)?;
+    Ok(state)
 }
 
 /// `000042.mlog`-style segment file name.
@@ -1927,6 +2003,8 @@ pub fn create_workspace(
         seg_len,
         next_seq: 2,
         dirty: false,
+        // a fresh workspace has no transport.state yet
+        transport: std::sync::Mutex::new(Some(TransportState::default())),
     })
 }
 
@@ -1961,6 +2039,61 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
     let manifest = read_manifest(ws_dir)?;
     openable_gate(&manifest)?;
 
+    let (key, id) = open_key_material(ws_dir, &manifest)?;
+    let transport = open_transport_state(ws_dir, &key, &id)?;
+    let prefs = read_prefs(ws_dir);
+
+    // The per-segment key table (WP4a). Absent = never compacted: every
+    // segment is under the workspace key and seq counts from 1, exactly as
+    // before. Present = the log may start above 1 and each segment names both
+    // its first seq and its own key.
+    let seg_keys = segkeys::read_table(ws_dir, &key, &id)?;
+    let compaction_floor = seg_keys.as_ref().map(|t| t.floor).unwrap_or(0);
+    let replay = replay_log(ws_dir, &key, &id, seg_keys.as_ref())?;
+    let snapshot = covering_snapshot(ws_dir, &key, &id, compaction_floor, &replay)?;
+    let floor = snapshot.as_ref().map(|s| s.at_seq).unwrap_or(0);
+    let tail: Vec<EventEnvelope> = replay.history.into_iter().filter(|e| e.seq > floor).collect();
+
+    let (seg_no, seg_len) = replay.last_seg;
+    let seg = OpenOptions::new()
+        .append(true)
+        .open(ws_dir.join("log").join(segment_name(seg_no)))?;
+    let opened = OpenedWorkspace {
+        dir: ws_dir.to_path_buf(),
+        manifest,
+        prefs,
+        key: Zeroizing::new(key),
+        id,
+        _lock: lock,
+        seg_keys,
+        seg_no,
+        seg,
+        seg_len,
+        next_seq: replay.last_seq + 1,
+        dirty: false,
+        transport: std::sync::Mutex::new(transport),
+    };
+    // §A.4 crash recovery: a segment whose key was erased but whose file
+    // survived the crash is already unreadable — unlink it now (the replay
+    // above skipped it, so this only reclaims the bytes)
+    opened.sweep_keyless_segments();
+    Ok((
+        opened,
+        LoadedState {
+            snapshot,
+            tail,
+            unknown_events: replay.unknown_events,
+            compaction_floor,
+        },
+    ))
+}
+
+/// Open step 1: the workspace key (unsealed with the device key) and the
+/// binary workspace id.
+fn open_key_material(
+    ws_dir: &Path,
+    manifest: &WorkspaceManifest,
+) -> Result<([u8; 32], [u8; 32]), StorageError> {
     let root = ws_dir.parent().unwrap_or(ws_dir);
     let device_key = load_or_create_device_key(&device_key_path(root))?;
     let id = id_bytes(&manifest.workspace.id)?;
@@ -1978,27 +2111,61 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
         Err(e) => return Err(e.into()),
     };
     let key = unseal_workspace_key(&device_key, &id, &sealed)?;
-    // …and the same refusal for `transport.state` that the manifest gets.
-    // The read below falls back to a default on damage — right for a
-    // ratchet, which re-establishes — but a file written by a NEWER node is
-    // not damage: the first save would rewrite it under this build's
-    // version, and with it go the MLS ratchet and the transport identity's
-    // non-re-derivable secret. An older reader meeting something unknown
-    // must not WRITE (the additive-only rule), so it does not open at all.
-    ensure_transport_state_not_newer(ws_dir, &key, &id)?;
-    let prefs = read_prefs(ws_dir);
+    Ok((key, id))
+}
 
-    // The per-segment key table (WP4a). Absent = never compacted: every
-    // segment is under the workspace key and seq counts from 1, exactly as
-    // before. Present = the log may start above 1 and each segment names both
-    // its first seq and its own key.
-    let seg_keys = segkeys::read_table(ws_dir, &key, &id)?;
+/// Open step 2: the same refusal for `transport.state` that the manifest
+/// gets (M5). The read path falls back to a default on damage — right for
+/// a ratchet, which re-establishes — but a file written by a NEWER node is
+/// not damage: the first save would rewrite it under this build's version,
+/// and with it go the MLS ratchet and the transport identity's
+/// non-re-derivable secret. An older reader meeting something unknown
+/// must not WRITE (the additive-only rule), so it does not open at all.
+///
+/// Missing, unreadable, unauthenticated or undecodable all stay silent
+/// here: turning them into a refusal would make a recoverable workspace
+/// unopenable. `Some` = the decoded state, seeding the handle's cache so
+/// the open's decrypt is the only one; `None` = damaged, left for the
+/// first read to report as the loud loss it is.
+fn open_transport_state(
+    ws_dir: &Path,
+    key: &[u8; 32],
+    id: &[u8; 32],
+) -> Result<Option<TransportState>, StorageError> {
+    match read_transport_state_raw(ws_dir, key, id) {
+        Ok(st) => Ok(Some(st)),
+        Err(TransportStateFault::Absent) => Ok(Some(TransportState::default())),
+        Err(TransportStateFault::Newer(v)) => Err(StorageError::NewerVersion(v)),
+        Err(_) => Ok(None),
+    }
+}
 
-    // replay the segments; seq is positional and strictly monotonic — from 1
-    // on a complete log, from the surviving segment's own first seq after a
-    // compaction dropped the ones below it
+/// What replaying the surviving log segments produced.
+struct LogReplay {
+    /// Every decodable envelope, in seq order.
+    history: Vec<EventEnvelope>,
+    /// Frames from a newer node: kept on disk, not applied.
+    unknown_events: u64,
+    /// The seq of the first surviving frame — what a usable snapshot must
+    /// reach on a compacted log.
+    log_starts_at: u64,
+    /// The seq of the last frame.
+    last_seq: u64,
+    /// The active segment: (number, byte length after torn-tail recovery).
+    last_seg: (u64, u64),
+}
+
+/// Open step 3: replay the segments. Seq is positional and strictly
+/// monotonic — from 1 on a complete log, from the surviving segment's own
+/// first seq after a compaction dropped the ones below it.
+fn replay_log(
+    ws_dir: &Path,
+    key: &[u8; 32],
+    id: &[u8; 32],
+    seg_keys: Option<&segkeys::SegmentKeyTable>,
+) -> Result<LogReplay, StorageError> {
     let mut segments = list_sorted(&ws_dir.join("log"), ".mlog");
-    if let Some(table) = seg_keys.as_ref() {
+    if let Some(table) = seg_keys {
         // a segment whose key was erased is dropped-but-not-yet-unlinked (a
         // crash between §A.4's key-erase and unlink): its bytes are already
         // worthless, so it is not part of the log
@@ -2011,15 +2178,13 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
     }
     let mut history = Vec::new();
     let mut unknown_events: u64 = 0;
-    let mut expected_seq: u64 = match (seg_keys.as_ref(), segments.first()) {
+    let mut expected_seq: u64 = match (seg_keys, segments.first()) {
         (Some(table), Some((no, _))) => table.first_seq(*no).unwrap_or(1),
         _ => 1,
     };
-    let compaction_floor = seg_keys.as_ref().map(|t| t.floor).unwrap_or(0);
-    // the seq of the first surviving frame — what a usable snapshot must reach
-    let expected_seq_of_first = expected_seq;
+    let log_starts_at = expected_seq;
     let last_idx = segments.len() - 1;
-    let mut last_seg = (1u64, 0u64); // (segment number, byte length after recovery)
+    let mut last_seg = (1u64, 0u64);
     for (idx, (seg_no, path)) in segments.iter().enumerate() {
         let data = read_capped(path, READ_CAP_SEGMENT, "log segment")?;
         let (frames, torn_at) = split_frames(&data);
@@ -2059,7 +2224,7 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
         // the running count means the table and the files no longer describe
         // the same log — refuse rather than replay at a shifted seq (the AAD
         // would fail anyway, but the honest error names the cause)
-        if let Some(stated) = seg_keys.as_ref().and_then(|t| t.first_seq(*seg_no)) {
+        if let Some(stated) = seg_keys.and_then(|t| t.first_seq(*seg_no)) {
             if stated != expected_seq {
                 return Err(StorageError::Corrupt(format!(
                     "log key table says segment {seg_no} starts at seq {stated}, \
@@ -2067,12 +2232,12 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
                 )));
             }
         }
-        let seg_key = seg_keys.as_ref().and_then(|t| t.dek(*seg_no)).unwrap_or(key);
+        let seg_key = seg_keys.and_then(|t| t.dek(*seg_no)).unwrap_or(*key);
         let mut seg_len = 0u64;
         for frame in &frames {
             let plaintext = match decrypt_frame(
                 &seg_key,
-                &id,
+                id,
                 *seg_no,
                 expected_seq,
                 frame.nonce,
@@ -2081,8 +2246,8 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
                 Ok(p) => p,
                 // a half-finished F6 migration: this segment is still under
                 // the workspace key (see `decrypt_log_frame`)
-                Err(e) if seg_key != key => {
-                    decrypt_frame(&key, &id, *seg_no, expected_seq, frame.nonce, frame.ciphertext)
+                Err(e) if seg_key != *key => {
+                    decrypt_frame(key, id, *seg_no, expected_seq, frame.nonce, frame.ciphertext)
                         .map_err(|_| e)?
                 }
                 Err(e) => return Err(e),
@@ -2113,22 +2278,38 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
         }
         last_seg = (*seg_no, seg_len);
     }
-    let last_seq = expected_seq - 1;
+    Ok(LogReplay {
+        history,
+        unknown_events,
+        log_starts_at,
+        last_seq: expected_seq - 1,
+        last_seg,
+    })
+}
 
-    // newest decodable snapshot wins — but only one the surviving log can
-    // continue from. A snapshot ahead of the log (partial dir copy, torn
-    // tail behind an old backup) would make the append position diverge
-    // from the positional seq the AAD binds, bricking every later open;
-    // such a snapshot is skipped and the state rebuilt from the log alone.
+/// Open step 4: the newest decodable snapshot the surviving log can
+/// continue from. A snapshot ahead of the log (partial dir copy, torn
+/// tail behind an old backup) would make the append position diverge
+/// from the positional seq the AAD binds, bricking every later open; such
+/// a snapshot is skipped and the state rebuilt from the log alone.
+///
+/// WP4a: on a COMPACTED log the surviving frames start above 1, so a
+/// snapshot must reach at least to the seq before them or the replay would
+/// have a hole where the dropped segments used to be. An older snapshot
+/// (kept as the spare) is exactly such a hole — skip it, and if none
+/// covers, that is a hard error rather than silently thinner state.
+fn covering_snapshot(
+    ws_dir: &Path,
+    key: &[u8; 32],
+    id: &[u8; 32],
+    compaction_floor: u64,
+    replay: &LogReplay,
+) -> Result<Option<WorkspaceSnapshot>, StorageError> {
+    let log_starts_at = replay.log_starts_at;
+    let last_seq = replay.last_seq;
     let mut snapshot: Option<WorkspaceSnapshot> = None;
     let mut snaps = list_sorted(&ws_dir.join("snapshots"), ".msnap");
     snaps.reverse();
-    // WP4a: on a COMPACTED log the surviving frames start above 1, so a
-    // snapshot must reach at least to the seq before them or the replay would
-    // have a hole where the dropped segments used to be. An older snapshot
-    // (kept as the spare) is exactly such a hole — skip it, and if none
-    // covers, that is a hard error rather than silently thinner state.
-    let log_starts_at = expected_seq_of_first;
     for (at_seq, path) in snaps {
         if compaction_floor > 0 && at_seq.saturating_add(1) < log_starts_at {
             tracing::warn!(
@@ -2147,7 +2328,7 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
             );
             continue;
         }
-        match read_snapshot(&key, &id, at_seq, &path) {
+        match read_snapshot(key, id, at_seq, &path) {
             Ok(s) => {
                 snapshot = Some(s);
                 break;
@@ -2163,40 +2344,7 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
              snapshot covers what came before - refusing to open a partial state"
         )));
     }
-    let floor = snapshot.as_ref().map(|s| s.at_seq).unwrap_or(0);
-    let tail: Vec<EventEnvelope> = history.into_iter().filter(|e| e.seq > floor).collect();
-
-    let (seg_no, seg_len) = last_seg;
-    let seg = OpenOptions::new()
-        .append(true)
-        .open(ws_dir.join("log").join(segment_name(seg_no)))?;
-    let opened = OpenedWorkspace {
-            dir: ws_dir.to_path_buf(),
-            manifest,
-            prefs,
-            key: Zeroizing::new(key),
-            id,
-            _lock: lock,
-            seg_keys,
-            seg_no,
-            seg,
-            seg_len,
-            next_seq: last_seq + 1,
-            dirty: false,
-    };
-    // §A.4 crash recovery: a segment whose key was erased but whose file
-    // survived the crash is already unreadable — unlink it now (the replay
-    // above skipped it, so this only reclaims the bytes)
-    opened.sweep_keyless_segments();
-    Ok((
-        opened,
-        LoadedState {
-            snapshot,
-            tail,
-            unknown_events,
-            compaction_floor,
-        },
-    ))
+    Ok(snapshot)
 }
 
 fn read_snapshot(
@@ -4702,6 +4850,44 @@ mod tests {
             "the cursor save itself lands"
         );
         assert_eq!(ts.inbound.get("bob").copied(), Some(6));
+    }
+
+    /// S11: `transport.state` is decoded ONCE per open handle. Every
+    /// cursor / accept-window save merges into that cached copy — the file
+    /// carries the whole MLS ratchet blob, and re-decrypting it for each
+    /// of the supervisor's frequent saves was the largest read a save did.
+    /// Proven by clobbering the file behind the open handle: a re-decrypt
+    /// would now read garbage (and fall back to the default).
+    #[test]
+    fn a_cursor_save_reads_the_cached_transport_state() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let ws = create_workspace(&root, &seed, &founded(1)).expect("create");
+        ws.write_transport_state(&TransportState {
+            mls: Some(b"ratchet".to_vec()),
+            ..TransportState::default()
+        })
+        .expect("write");
+        fs::write(ws.dir().join("transport.state"), b"clobbered behind the handle")
+            .expect("clobber");
+        assert_eq!(
+            ws.read_transport_state().mls.as_deref(),
+            Some(b"ratchet".as_slice()),
+            "a read after a write is served from the cached state, not a re-decrypt"
+        );
+        drop(ws);
+        // …and a fresh open decodes the file exactly once, at the open
+        let dir = find_workspace_dir(&root, &derive_workspace_id(&seed, "mithra")).expect("dir");
+        let (ws, _loaded) = open_workspace(&dir).expect("open");
+        assert!(ws.read_transport_state().mls.is_none(), "the clobbered file reads as fresh");
+        ws.write_transport_state(&TransportState {
+            mls: Some(b"again".to_vec()),
+            ..TransportState::default()
+        })
+        .expect("write");
+        fs::write(ws.dir().join("transport.state"), b"clobbered again").expect("clobber");
+        assert_eq!(ws.read_transport_state().mls.as_deref(), Some(b"again".as_slice()));
     }
 
     /// A snapshot pointing past the surviving log (partial dir copy, old

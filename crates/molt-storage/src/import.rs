@@ -168,6 +168,9 @@ pub fn import_stage(
                 ));
             }
         }
+        // live, not a leftover: `export_archive` (the S3 media-archive
+        // upload) produces phrase-at-rest blobs — pinned by
+        // `an_archive_export_carries_no_seed_and_imports_sealed`
         molt_core::SEALED_PHRASE => {
             if archive.meta.seed.is_some() {
                 return Err(StorageError::Corrupt(
@@ -234,21 +237,18 @@ pub fn import_stage(
     let genesis: EventEnvelope = if let Some(seg1) =
         archive.entries.iter().find(|e| e.path == "log/000001.mlog")
     {
-        let (frames, _torn) = crate::split_frames(&seg1.data);
-        let first = frames.first().ok_or_else(|| {
-            StorageError::Corrupt("the blob's first log segment holds no valid frame".to_string())
-        })?;
         let seg_key = table.as_ref().and_then(|t| t.dek(1)).unwrap_or(*ws_key);
-        let genesis_plain =
-            crate::decrypt_frame(&seg_key, &id, 1, 1, first.nonce, first.ciphertext)
-                .or_else(|_| crate::decrypt_frame(&ws_key, &id, 1, 1, first.nonce, first.ciphertext))
-                .map_err(|_| {
-                    StorageError::Crypto(
-                        "blob is internally inconsistent (the genesis does not decrypt \
-                         under the blob's workspace key)"
-                            .to_string(),
-                    )
-                })?;
+        let genesis_plain = crate::decrypt_genesis_frame(&seg1.data, &seg_key, &ws_key, &id)
+            .map_err(|f| match f {
+                crate::GenesisFault::NoFrame => StorageError::Corrupt(
+                    "the blob's first log segment holds no valid frame".to_string(),
+                ),
+                crate::GenesisFault::Auth => StorageError::Crypto(
+                    "blob is internally inconsistent (the genesis does not decrypt \
+                     under the blob's workspace key)"
+                        .to_string(),
+                ),
+            })?;
         serde_json::from_slice(&genesis_plain)
             .map_err(|e| StorageError::Corrupt(format!("genesis envelope: {e}")))?
     } else {
@@ -297,42 +297,19 @@ pub fn import_stage(
     // local file may be damaged, an import must never guess)
     let (checkpoint, chain) = match archive.entries.iter().find(|e| e.path == "chain.state") {
         None => (None, Vec::new()),
-        Some(entry) => {
-            let (frames, torn) = crate::split_frames(&entry.data);
-            if frames.len() != 1 || torn.is_some() {
-                return Err(StorageError::Corrupt(
-                    "the blob's chain.state framing is damaged".to_string(),
-                ));
-            }
-            let chain_key = crate::hkdf32(&*ws_key, "molt-chain-state", &id);
-            let plain = crate::decrypt_frame(
-                &chain_key,
-                &id,
-                crate::CHAIN_SEGMENT,
-                0,
-                frames[0].nonce,
-                frames[0].ciphertext,
-            )
-            .map_err(|_| {
-                StorageError::Crypto(
-                    "the blob's chain.state does not authenticate under the \
-                     blob's workspace key"
-                        .to_string(),
-                )
-            })?;
-            match serde_json::from_slice::<crate::ChainStateFile>(&plain) {
-                Ok(crate::ChainStateFile::Full(chain)) => (None, chain),
-                Ok(crate::ChainStateFile::Pruned {
-                    checkpoint_blob,
-                    blocks,
-                }) => (Some(checkpoint_blob), blocks),
-                Err(e) => {
-                    return Err(StorageError::Corrupt(format!(
-                        "the blob's chain.state does not parse: {e}"
-                    )));
-                }
-            }
-        }
+        Some(entry) => crate::decode_chain_state(&ws_key, &id, &entry.data).map_err(|f| match f {
+            crate::ChainStateFault::Framing => StorageError::Corrupt(
+                "the blob's chain.state framing is damaged".to_string(),
+            ),
+            crate::ChainStateFault::Auth(_) => StorageError::Crypto(
+                "the blob's chain.state does not authenticate under the \
+                 blob's workspace key"
+                    .to_string(),
+            ),
+            crate::ChainStateFault::Decode(e) => StorageError::Corrupt(format!(
+                "the blob's chain.state does not parse: {e}"
+            )),
+        })?,
     };
 
     // write the staging dir (dot-invisible to the Open scan); a stale

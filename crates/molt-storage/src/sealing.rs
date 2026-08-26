@@ -175,15 +175,16 @@ fn verify_phrase_key(ws_dir: &Path, id: &[u8; 32], key: &[u8; 32]) -> Result<(),
         }
     }
     let data = crate::read_capped(&ws_dir.join("log").join(crate::segment_name(1)), crate::READ_CAP_SEGMENT, "log segment")?;
-    let (frames, _torn) = crate::split_frames(&data);
-    let first = frames
-        .first()
-        .ok_or_else(|| StorageError::Corrupt("workspace has no genesis frame".to_string()))?;
-    crate::decrypt_frame(key, id, 1, 1, first.nonce, first.ciphertext)
-        .map(Zeroizing::new) // wipe the decrypted genesis on drop
-        .map_err(|_| {
+    // (the decrypted genesis is zeroized on drop; no table = segment 1 is
+    // under the workspace key, so both key slots are the phrase's key)
+    crate::decrypt_genesis_frame(&data, key, key, id).map_err(|f| match f {
+        crate::GenesisFault::NoFrame => {
+            StorageError::Corrupt("workspace has no genesis frame".to_string())
+        }
+        crate::GenesisFault::Auth => {
             StorageError::Crypto("the recovery phrase does not match this workspace".to_string())
-        })?;
+        }
+    })?;
     Ok(())
 }
 
@@ -205,30 +206,11 @@ fn chain_version_floor(ws_dir: &Path, key: &[u8; 32], id: &[u8; 32]) -> u32 {
     if ws_dir.join(crate::segkeys::KEYS_FILE).exists() {
         return STORAGE_VERSION_PRUNED;
     }
-    let data = match crate::read_capped(&ws_dir.join("chain.state"), crate::READ_CAP_STATE, "chain.state") {
-        Ok(d) => d,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return STORAGE_VERSION,
-        Err(_) => return STORAGE_VERSION_PRUNED,
-    };
-    let (frames, torn) = crate::split_frames(&data);
-    if frames.len() != 1 || torn.is_some() {
-        return STORAGE_VERSION_PRUNED;
-    }
-    let chain_key = Zeroizing::new(crate::hkdf32(key, "molt-chain-state", id));
-    let Ok(plaintext) = crate::decrypt_frame(
-        &chain_key,
-        id,
-        crate::CHAIN_SEGMENT,
-        0,
-        frames[0].nonce,
-        frames[0].ciphertext,
-    )
-    .map(Zeroizing::new) else {
-        return STORAGE_VERSION_PRUNED;
-    };
-    match serde_json::from_slice::<crate::ChainStateFile>(&plaintext) {
-        Ok(crate::ChainStateFile::Pruned { .. }) | Err(_) => STORAGE_VERSION_PRUNED,
-        Ok(crate::ChainStateFile::Full(_)) => STORAGE_VERSION,
+    match crate::read_chain_at(ws_dir, key, id) {
+        // absent, or a readable FULL chain
+        Ok((None, _)) => STORAGE_VERSION,
+        // a readable PRUNED chain — or any fault on a present file
+        Ok((Some(_), _)) | Err(_) => STORAGE_VERSION_PRUNED,
     }
 }
 
