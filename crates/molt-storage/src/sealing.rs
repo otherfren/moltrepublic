@@ -185,6 +185,11 @@ fn verify_phrase_key(ws_dir: &Path, id: &[u8; 32], key: &[u8; 32]) -> Result<(),
 ///   exists to hard-stop. Over-describing only costs an old binary a
 ///   polite refusal.
 fn chain_version_floor(ws_dir: &Path, key: &[u8; 32], id: &[u8; 32]) -> u32 {
+    // a log under per-segment keys is PRUNED-class too: a pre-WP4a binary
+    // cannot replay it (it would report corruption instead of "newer")
+    if ws_dir.join(crate::segkeys::KEYS_FILE).exists() {
+        return STORAGE_VERSION_PRUNED;
+    }
     let data = match crate::read_capped(&ws_dir.join("chain.state"), crate::READ_CAP_STATE, "chain.state") {
         Ok(d) => d,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return STORAGE_VERSION,
@@ -417,6 +422,26 @@ mod tests {
         let before = std::fs::read(elsewhere.join("workspace.key")).expect("key");
         assert!(seal_at_rest(&dir, &phrase).is_err(), "refused");
         assert_eq!(std::fs::read(elsewhere.join("workspace.key")).expect("key"), before);
+    }
+
+    /// S4: a log under per-segment keys keeps the PRUNED version gate
+    /// across a seal/unseal round trip — a pre-WP4a binary must be told
+    /// "newer", not "corrupt".
+    #[test]
+    fn unseal_keeps_the_pruned_gate_of_a_migrated_log() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let (dir, phrase, _id) = make_ws(&root);
+        {
+            let (mut ws, _) = open_workspace(&dir).expect("open");
+            ws.migrate_to_segment_keys().expect("migrate");
+        }
+        seal_at_rest(&dir, &phrase).expect("seal");
+        unseal_at_rest(&root, &dir, &phrase).expect("unseal");
+        assert_eq!(
+            read_manifest(&dir).expect("manifest").version,
+            molt_core::STORAGE_VERSION_PRUNED
+        );
     }
 
     #[test]

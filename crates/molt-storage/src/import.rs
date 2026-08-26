@@ -444,7 +444,15 @@ impl ImportStaging {
         // claim an upload it never made, and the ticker would skip the
         // fresh first backup of the imported content.
         let mut prefs = crate::read_prefs(&self.dir);
-        if prefs.last_backup.take().is_some() {
+        let mut changed = prefs.last_backup.take().is_some();
+        // the sharer's ABSOLUTE local paths: meaningless on another device
+        // (a same-named path there may hold something else) and a layout
+        // leak the blob should not carry on (review 2026-08-25 S6)
+        if !prefs.shared_files.is_empty() {
+            prefs.shared_files.clear();
+            changed = true;
+        }
+        if changed {
             crate::write_prefs(&self.dir, &prefs)?;
         }
 
@@ -594,6 +602,26 @@ mod tests {
     /// dir opens, its genesis matches, the key material is re-sealed to the
     /// LOCAL device key, and no transport.state with live state exists —
     /// only the fresh minimal one when an identity is passed.
+    /// S6: the sharer's absolute local share paths do not survive an
+    /// import — they name another device's filesystem.
+    #[test]
+    fn an_import_forgets_the_sources_local_share_paths() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (src_root, src_dir, _seed, id) = make_ws(tmp.path());
+        let mut prefs = crate::read_prefs(&src_dir);
+        prefs
+            .shared_files
+            .insert("share-1".to_string(), "/home/alice/secret-layout/a.bin".to_string());
+        crate::write_prefs(&src_dir, &prefs).expect("prefs");
+        let blob = blob_of(&src_root, &src_dir, &ExportKey::passphrase(PASS));
+        let dest_root = tmp.path().join("dest-root");
+        std::fs::create_dir_all(&dest_root).expect("dest root");
+        let staging = import_stage(&dest_root, &blob, PASS).expect("stage");
+        let dir = staging.commit(&dest_root, false, None).expect("commit");
+        assert_eq!(scan_names(&dest_root), vec![id]);
+        assert!(crate::read_prefs(&dir).shared_files.is_empty(), "paths dropped");
+    }
+
     #[test]
     fn stage_and_commit_round_trip_into_a_fresh_root() {
         let tmp = tempfile::tempdir().expect("tmp");

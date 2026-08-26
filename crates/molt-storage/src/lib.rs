@@ -68,6 +68,7 @@ use molt_core::{
     TRANSPORT_STATE_VERSION,
 };
 use sha2::Sha256;
+use zeroize::Zeroizing;
 
 /// Segment rotation threshold (~8 MiB keeps recovery scans and future
 /// S3 diff-uploads bounded).
@@ -76,6 +77,10 @@ pub const SEGMENT_ROTATE_BYTES: u64 = 8 * 1024 * 1024;
 pub const SNAPSHOTS_KEPT: usize = 2;
 /// Upper bound a frame's `len` field may claim (corruption guard).
 const FRAME_MAX_LEN: u32 = 64 * 1024 * 1024;
+
+/// How many times its own length a damaged segment's tail may be CRC'd
+/// before the torn-tail scan gives up (see `has_valid_frame_after`).
+const TORN_SCAN_BUDGET_FACTOR: usize = 4;
 /// The XChaCha20 nonce size.
 const NONCE_LEN: usize = 24;
 /// Frame header: len(4) + crc(4).
@@ -756,6 +761,12 @@ struct RawFrame<'a> {
 /// random bytes are rejected in a few instructions each; this runs once, on
 /// a segment already known to be damaged.
 fn has_valid_frame_after(data: &[u8], from: usize) -> bool {
+    // BUDGETED (review 2026-08-25 S3): a planted tail whose every offset
+    // reads as a plausible length costs one CRC over that length per
+    // offset — quadratic, hours on a large segment, under the LOCK. Past a
+    // few multiples of the segment the answer is "cannot classify", which
+    // the caller treats as the conservative refusal.
+    let mut budget = data.len().saturating_mul(TORN_SCAN_BUDGET_FACTOR);
     let mut pos = from.saturating_add(1);
     while pos + FRAME_HEADER_LEN + NONCE_LEN <= data.len() {
         let rest = &data[pos..];
@@ -766,6 +777,10 @@ fn has_valid_frame_after(data: &[u8], from: usize) -> bool {
             if let Ok(len_usize) = usize::try_from(len) {
                 let total = FRAME_HEADER_LEN + NONCE_LEN + len_usize;
                 if rest.len() >= total {
+                    if budget < len_usize {
+                        return false;
+                    }
+                    budget -= len_usize;
                     let ciphertext = &rest[FRAME_HEADER_LEN + NONCE_LEN..total];
                     if crc32c::crc32c(ciphertext) == u32::from_le_bytes(crc_bytes) {
                         return true;
@@ -850,8 +865,12 @@ fn write_atomic(ws_dir: &Path, rel: &str, bytes: &[u8], mode_600: bool) -> Resul
     fs::create_dir_all(&tmp_dir)?;
     let tmp = tmp_dir.join(rel.replace('/', "_"));
     {
+        // a FRESH file every time: a leftover (or planted) tmp file would
+        // keep its own mode — `mode` applies at creation only — and a
+        // symlink there would be followed (review 2026-08-25 S8)
+        let _ = fs::remove_file(&tmp);
         let mut opts = OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
+        opts.write(true).create_new(true);
         #[cfg(unix)]
         if mode_600 {
             use std::os::unix::fs::OpenOptionsExt;
@@ -867,11 +886,11 @@ fn write_atomic(ws_dir: &Path, rel: &str, bytes: &[u8], mode_600: bool) -> Resul
     }
     fs::rename(&tmp, &target)?;
     // make the rename itself durable: without the parent-dir fsync a power
-    // loss can undo the rename even though the data blocks were synced
+    // loss can undo the rename even though the data blocks were synced. A
+    // FAILED barrier is an error, not a swallowed success — the chain
+    // commit's durability promise rests on it (review 2026-08-25 S9)
     if let Some(parent) = target.parent() {
-        if let Ok(d) = File::open(parent) {
-            let _ = d.sync_all();
-        }
+        File::open(parent)?.sync_all()?;
     }
     Ok(())
 }
@@ -1073,7 +1092,7 @@ pub struct OpenedWorkspace {
     pub manifest: WorkspaceManifest,
     /// The local node preferences.
     pub prefs: WorkspacePrefs,
-    key: [u8; 32],
+    key: Zeroizing<[u8; 32]>,
     id: [u8; 32],
     _lock: WorkspaceLock,
     /// The per-segment log key table (WP4a §A.3), once this workspace has
@@ -1131,7 +1150,7 @@ impl OpenedWorkspace {
         self.seg_keys
             .as_ref()
             .and_then(|t| t.dek(no))
-            .unwrap_or(self.key)
+            .unwrap_or(*self.key)
     }
 
     /// Decrypt one log frame, tolerating a **half-finished migration**: the
@@ -1179,10 +1198,20 @@ impl OpenedWorkspace {
             Some(t) => t,
             None => segkeys::SegmentKeyTable::new(),
         };
-        // 1) every segment gets an entry (number, first seq, fresh key)
+        // 1) every segment gets an entry (number, first seq, fresh key).
+        // Once the table exists, "no key" below its highest entry means
+        // ERASED by a drop, not unmigrated: a dropped file that reappears
+        // (an unlink error, a sync tool restoring it) must not be minted a
+        // fresh key and a bogus first seq — that poisoned the table and the
+        // next open failed on it (review 2026-08-25 S2)
+        let highest_keyed = table.highest_no();
         let segments = list_sorted(&self.dir.join("log"), ".mlog");
         let mut seq = table.floor;
         for (no, path) in &segments {
+            if table.dek(*no).is_none() && highest_keyed.is_some_and(|h| *no < h) {
+                tracing::warn!(segment = no, "an erased segment's file is back — not resurrecting it");
+                continue;
+            }
             let first_seq = seq + 1;
             if table.dek(*no).is_none() {
                 table.put(segkeys::SegmentKey {
@@ -1200,6 +1229,11 @@ impl OpenedWorkspace {
 
         // 2) rewrite each segment under its key (skipping ones already done)
         for (no, path) in &segments {
+            if highest_keyed.is_some_and(|h| *no < h)
+                && self.seg_keys.as_ref().and_then(|t| t.dek(*no)).is_none()
+            {
+                continue; // erased, see above
+            }
             let data = read_capped(path, READ_CAP_SEGMENT, "log segment")?;
             let (frames, torn) = split_frames(&data);
             if torn.is_some() {
@@ -1242,6 +1276,10 @@ impl OpenedWorkspace {
                 self.seg_len = u64::try_from(out.len()).unwrap_or(self.seg_len);
             }
         }
+        // the log is now under per-segment keys, which a pre-WP4a binary
+        // cannot read: raise the version gate NOW, not only at the first
+        // drop, or such a binary reports "corrupt" instead of "newer"
+        self.bump_pruned_version()?;
         Ok(())
     }
 
@@ -1335,7 +1373,7 @@ impl OpenedWorkspace {
 
     fn rotate(&mut self) -> Result<(), StorageError> {
         self.sync()?;
-        let no = self.seg_no + 1;
+        let no = self.seg_no.saturating_add(1);
         // a compacted log gives every segment its own key — minted and made
         // DURABLE before the first frame lands in it, or a crash would leave
         // frames nobody holds a key for (unrecoverable, unlike the reverse)
@@ -1458,7 +1496,7 @@ impl OpenedWorkspace {
 
     /// The `chain.state` sub-key (distinct HKDF tag from the transport key).
     fn chain_key(&self) -> [u8; 32] {
-        hkdf32(&self.key, "molt-chain-state", &self.id)
+        hkdf32(&*self.key, "molt-chain-state", &self.id)
     }
 
     /// Read `transport.state` (transport concept §6): node-local encrypted
@@ -1754,6 +1792,14 @@ fn list_sorted(dir: &Path, ext: &str) -> Vec<(u64, PathBuf)> {
         };
         if let Some(stem) = name.strip_suffix(ext) {
             if let Ok(no) = stem.parse::<u64>() {
+                // the top numbers are the reserved AAD markers (snapshot,
+                // transport, chain, keys): a planted file up there would
+                // become the active segment under a marker's domain, and
+                // its successor number overflows — ignore it (review S5)
+                if no >= KEYS_SEGMENT {
+                    tracing::warn!(path = %path.display(), "ignoring a file with a reserved number");
+                    continue;
+                }
                 out.push((no, path));
             }
         }
@@ -1865,7 +1911,7 @@ pub fn create_workspace(
         dir: final_dir,
         manifest,
         prefs,
-        key,
+        key: Zeroizing::new(key),
         id,
         _lock: lock,
         // a fresh workspace has never been compacted: its segments live
@@ -2081,7 +2127,7 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
     // covers, that is a hard error rather than silently thinner state.
     let log_starts_at = expected_seq_of_first;
     for (at_seq, path) in snaps {
-        if compaction_floor > 0 && at_seq + 1 < log_starts_at {
+        if compaction_floor > 0 && at_seq.saturating_add(1) < log_starts_at {
             tracing::warn!(
                 path = %path.display(),
                 at_seq,
@@ -2125,7 +2171,7 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
             dir: ws_dir.to_path_buf(),
             manifest,
             prefs,
-            key,
+            key: Zeroizing::new(key),
             id,
             _lock: lock,
             seg_keys,
@@ -2985,8 +3031,9 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                             Err(e) => {
                                 // compaction is hygiene, never correctness: a
                                 // failed round leaves the log exactly as it
-                                // was and the next one retries
-                                fail(&failed_flag, "log compaction", &e);
+                                // was and the next one retries — so it is a
+                                // warning, never the fatal storage flag
+                                tracing::warn!(error = %e, "log compaction failed - next round retries");
                                 CompactionOutcome::default()
                             }
                         };
@@ -3246,6 +3293,111 @@ mod tests {
         }
         ws.sync().expect("sync");
         ws.dir().to_path_buf()
+    }
+
+    /// S3 (review 2026-08-25): a tail whose every offset reads as a
+    /// plausible frame length cost one CRC over that length per offset —
+    /// quadratic, hours under the LOCK. The scan is budgeted and answers
+    /// "cannot classify" instead.
+    #[test]
+    fn a_torn_tail_scan_is_budgeted() {
+        // every 4-byte word says "length 1 MiB"; the next word (the CRC
+        // slot) never matches
+        let word = 0x0010_0000u32.to_le_bytes();
+        let data: Vec<u8> = word.iter().copied().cycle().take(2 * 1024 * 1024).collect();
+        let started = std::time::Instant::now();
+        assert!(!has_valid_frame_after(&data, 0));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the scan must give up within its budget"
+        );
+    }
+
+    /// S5: a planted file with a reserved number (the AAD markers at the
+    /// top of `u64`) is ignored — it must neither become the active
+    /// segment under a marker's domain nor overflow its successor.
+    #[test]
+    fn planted_reserved_numbers_are_ignored() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = make_ws(tmp.path(), 2);
+        std::fs::write(dir.join("log").join(format!("{}.mlog", u64::MAX)), b"").expect("plant");
+        std::fs::write(
+            dir.join("snapshots").join(format!("{}.msnap", u64::MAX)),
+            b"",
+        )
+        .expect("plant");
+        let (ws, loaded) = open_workspace(&dir).expect("opens despite the planted files");
+        assert_eq!(loaded.tail.len(), 3);
+        assert!(ws.seg_no < KEYS_SEGMENT);
+    }
+
+    /// S2: once the key table exists, a keyless segment BELOW its highest
+    /// entry was erased by a drop — a file that reappears must not be
+    /// minted a fresh key (the next open would fail on it).
+    #[test]
+    fn migration_does_not_resurrect_an_erased_segment() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = make_ws(tmp.path(), 0);
+        let (mut ws, _) = open_workspace(&dir).expect("open");
+        rotate_n(&mut ws, 1, 2);
+        ws.migrate_to_segment_keys().expect("migrate");
+        // simulate the drop's key erasure while the file stays behind
+        let mut table = ws.seg_keys.clone().expect("table");
+        assert!(table.dek(1).is_some());
+        table.forget(1);
+        segkeys::write_table(&ws.dir, &ws.key, &ws.id, &table).expect("write");
+        ws.seg_keys = Some(table);
+        ws.migrate_to_segment_keys().expect("migrate again");
+        assert!(
+            ws.seg_keys.as_ref().and_then(|t| t.dek(1)).is_none(),
+            "an erased segment stays erased"
+        );
+        assert!(ws.seg_keys.as_ref().and_then(|t| t.dek(2)).is_some());
+    }
+
+    /// S4: a migrated log is unreadable for a pre-WP4a binary — the
+    /// version gate rises with the migration, not only with the first drop.
+    #[test]
+    fn migration_raises_the_version_gate() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = make_ws(tmp.path(), 1);
+        let (mut ws, _) = open_workspace(&dir).expect("open");
+        ws.migrate_to_segment_keys().expect("migrate");
+        drop(ws);
+        assert_eq!(
+            read_manifest(&dir).expect("manifest").version,
+            molt_core::STORAGE_VERSION_PRUNED
+        );
+    }
+
+    /// S8: a leftover tmp file keeps its own mode (`mode` applies at
+    /// creation only) — the writer starts fresh every time.
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_never_reuses_a_leftover_tmp_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("ws");
+        std::fs::create_dir_all(dir.join("tmp")).expect("tmp dir");
+        let leftover = dir.join("tmp").join("keys_workspace.key");
+        std::fs::write(&leftover, b"old").expect("leftover");
+        std::fs::set_permissions(&leftover, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        write_atomic(&dir, "keys/workspace.key", b"new", true).expect("write");
+        let mode = std::fs::metadata(dir.join("keys/workspace.key"))
+            .expect("meta")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    /// S7: the DEK never reaches Debug output.
+    #[test]
+    fn a_segment_key_debugs_without_its_dek() {
+        let key = segkeys::SegmentKey { no: 7, first_seq: 1, dek: [0xabu8; 32] };
+        let shown = format!("{key:?}");
+        assert!(shown.contains("no: 7"));
+        assert!(!shown.contains("ab, ab") && !shown.contains("171"), "{shown}");
     }
 
     /// Append until the active segment has rotated `n` times — the compactor
@@ -3650,7 +3802,7 @@ mod tests {
         let mut ws = create_workspace(tmp.path(), &seed, &founded(42)).expect("create");
         ws.migrate_to_segment_keys().expect("migrate");
         let dir = ws.dir().to_path_buf();
-        let (key, id) = (ws.key, ws.id);
+        let (key, id) = (*ws.key, ws.id);
         let mut table = segkeys::read_table(&dir, &key, &id)
             .expect("read")
             .expect("a migrated workspace has a table");
@@ -3714,7 +3866,7 @@ mod tests {
         let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
         let ws = create_workspace(tmp.path(), &seed, &founded(42)).expect("create");
         let dir = ws.dir().to_path_buf();
-        let (key, id) = (ws.key, ws.id);
+        let (key, id) = (*ws.key, ws.id);
         // …written the way a future build would write it
         let st = TransportState {
             version: TRANSPORT_STATE_VERSION + 1,

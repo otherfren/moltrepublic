@@ -52,7 +52,7 @@ pub(crate) const KEYS_FILE: &str = "log/keys.state";
 pub(crate) const KEYS_VERSION: u32 = 1;
 
 /// One segment's compaction metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SegmentKey {
     /// Segment number (the `000042.mlog` part).
     pub no: u64,
@@ -61,6 +61,16 @@ pub(crate) struct SegmentKey {
     pub first_seq: u64,
     /// This segment's data key. Erasing it is the deletion.
     pub dek: [u8; 32],
+}
+
+// manual: the DEK is key material — never in Debug output
+impl std::fmt::Debug for SegmentKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SegmentKey")
+            .field("no", &self.no)
+            .field("first_seq", &self.first_seq)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Drop for SegmentKey {
@@ -96,6 +106,12 @@ impl SegmentKeyTable {
             floor: 0,
             segments: Vec::new(),
         }
+    }
+
+    /// The highest segment number with an entry (`None` on an empty table):
+    /// everything below it without a key was ERASED, never unmigrated.
+    pub(crate) fn highest_no(&self) -> Option<u64> {
+        self.segments.iter().map(|s| s.no).max()
     }
 
     /// This segment's data key, if the table knows it.
