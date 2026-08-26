@@ -56,12 +56,27 @@ pub async fn serve_tcp(
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(%addr, allow_all, allowed = allowlist.len(), "MCP server on tcp");
+    // bounded (review F7): every accepted socket holds a buffer and costs
+    // the actor a session read before it authenticates — a flood must not
+    // exhaust either, and one accept error must not end the endpoint
+    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
     loop {
-        let (sock, peer) = listener.accept().await?;
+        let (sock, peer) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(e) => {
+                tracing::warn!(error = %e, "MCP accept failed - retrying");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
+        };
         if !allow_all && !allowlist.contains(&peer.ip()) {
             tracing::warn!(%peer, "MCP connection refused: peer IP not on the allowlist");
             continue; // sock dropped here -> connection closed
         }
+        let Ok(permit) = slots.clone().try_acquire_owned() else {
+            tracing::warn!(%peer, max = MAX_CONNECTIONS, "MCP connection refused: too many open");
+            continue;
+        };
         tracing::info!(%peer, "MCP client connected");
         let h = handle.clone();
         // the LIVE token, per connection. `mcp-security.md` promises a
@@ -72,6 +87,7 @@ pub async fn serve_tcp(
         // falls back to the boot token — never to none.
         let tok = live_token(&handle).await.unwrap_or_else(|| token.clone());
         tokio::spawn(async move {
+            let _permit = permit; // released with the connection
             let (r, w) = sock.into_split();
             if let Err(e) = serve_conn(h, BufReader::new(r), w, Some(tok)).await {
                 tracing::warn!(%peer, error = %e, "MCP connection ended");
@@ -185,7 +201,11 @@ async fn handle_rpc(
     if method == "initialize" {
         if let Some(required) = auth {
             let given = params.get("token").and_then(Value::as_str).unwrap_or("");
-            if given != required {
+            // constant-time (review F6): a byte-by-byte early exit is a
+            // timing oracle on the one credential the endpoint has
+            let matches = given.len() == required.len()
+                && bool::from(subtle::ConstantTimeEq::ct_eq(given.as_bytes(), required.as_bytes()));
+            if !matches {
                 return Some(error_response(
                     id,
                     -32001,
@@ -474,6 +494,9 @@ fn screen_arg(args: &Value) -> Result<Screen, String> {
 /// (a Tor node onto clearnet) and `mcp_token` to empty (authentication off).
 /// A partial update is `patch_settings`, which merges against the running
 /// settings inside the engine, where the current values actually are.
+/// Open TCP connections the endpoint serves at once (review F7).
+const MAX_CONNECTIONS: usize = 64;
+
 /// A bare exchange-folder name: one path component, no separators, no
 /// `..` — the engine re-checks, this refuses early with the tool's words.
 fn bare_name_arg(args: &Value, key: &str) -> Result<String, String> {
@@ -902,7 +925,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "ui_action",
             command: "ui_action",
-            description: "Request ONE GUI interaction, by domain verb (never a widget coordinate): select_channel {channel} · select_view {surface, view} · open_workspace {id} · close_workspace · chat_send {body} · set_draft {field, value} · press {key} · click {target}. The window's live mirror performs it and publishes a fresh snapshot - read the effect back with read_ui_state. Refused while no window is running.",
+            description: "Request ONE GUI interaction, by domain verb (never a widget coordinate): select_channel {channel} · select_view {surface, view} · open_workspace {id} · close_workspace · chat_send {body}. Any other verb is refused. The window's live mirror performs it and publishes a fresh snapshot - read the effect back with read_ui_state. Refused while no window is running.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1832,6 +1855,39 @@ mod tests {
             "reload_settings",
             "config_notice",
         ];
+        // …and a tool BUILDS the command its label names (review F9): a
+        // copy-pasted ToolDef with a stale `command:` would otherwise pass
+        // this audit while executing a different verb. Built from a
+        // schema-derived argument set; tools whose builders validate
+        // formats the generic set cannot satisfy are skipped honestly.
+        let mut checked = 0usize;
+        for t in tools() {
+            let schema = (t.schema)();
+            let props = schema["properties"].as_object().cloned().unwrap_or_default();
+            let required = schema["required"].as_array().cloned().unwrap_or_default();
+            let mut args = serde_json::Map::new();
+            for key in required {
+                let Some(k) = key.as_str() else { continue };
+                let p = props.get(k).cloned().unwrap_or(Value::Null);
+                let v = match p["type"].as_str() {
+                    Some("boolean") => json!(false),
+                    Some("integer") => json!(1),
+                    Some("array") => json!([]),
+                    Some("object") => json!({}),
+                    _ => json!(p["enum"].as_array().and_then(|a| a.first()).and_then(Value::as_str).unwrap_or("x")),
+                };
+                args.insert(k.to_string(), v);
+            }
+            if let Ok(cmd) = (t.build)(&Value::Object(args)) {
+                let tag = serde_json::to_value(&cmd).expect("command serializes")["cmd"]
+                    .as_str()
+                    .expect("tagged")
+                    .to_string();
+                assert_eq!(tag, t.command, "tool `{}` builds `{tag}`, not `{}`", t.name, t.command);
+                checked += 1;
+            }
+        }
+        assert!(checked >= 20, "the generic argument set built {checked} tools — too few to mean anything");
         let mut covered: Vec<&str> = tools().iter().map(|t| t.command).collect();
         covered.extend(INTERNAL);
         covered.sort_unstable();

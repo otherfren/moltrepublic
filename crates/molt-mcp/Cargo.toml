@@ -18,3 +18,5 @@ molt-engine.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+# constant-time token comparison (review F6)
+subtle = "2"

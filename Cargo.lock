@@ -4651,6 +4651,7 @@ dependencies = [
  "molt-net",
  "molt-storage",
  "nostr-relay-builder",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "sha2",
@@ -4668,6 +4669,7 @@ dependencies = [
  "molt-core",
  "molt-engine",
  "serde_json",
+ "subtle",
  "tokio",
  "tracing",
 ]
