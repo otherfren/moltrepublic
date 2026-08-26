@@ -314,8 +314,10 @@ pub struct SessionSettings {
     /// S3 access key id.
     #[serde(default)]
     pub s3_access_key: String,
-    /// S3 secret key.
-    #[serde(default)]
+    /// S3 secret key. NEVER SERIALIZED (2026-08-26): a credential no
+    /// surface needs to read back — set blind through `patch_settings` or
+    /// the GUI (`SetNodePosture`); `read_session` carries "".
+    #[serde(skip_serializing, default)]
     pub s3_secret_key: String,
     /// S3 bucket name. Defaults to something inconspicuous — the bucket
     /// listing should not advertise what it holds.
@@ -350,7 +352,12 @@ pub struct SessionSettings {
     pub mcp_port: u16,
     /// MCP client allowlist (`"127.0.0.1" | "0.0.0.0" | comma-separated`).
     pub mcp_allow: String,
-    /// MCP API token clients must present.
+    /// MCP API token clients must present. NEVER SERIALIZED (2026-08-26):
+    /// the token is the whole TCP credential; a client that holds it needs
+    /// no copy, and one that rotates it must not be the only party that
+    /// learns the new one. The GUI reads it in-process; its one door is
+    /// `SetNodePosture`.
+    #[serde(skip_serializing, default)]
     pub mcp_token: String,
     /// Anonymity network: `"tor" | "none"`. (`"nym"` was retired — the
     /// mixnet was never implemented and the dialer refuses it.)
@@ -3504,6 +3511,18 @@ pub enum Command {
         /// every construction site states its channel.
         channel: ChannelRef,
     },
+    /// [`Command::ShareFile`] for an MCP client: `name` is a bare file
+    /// name inside the node's download directory — the EXCHANGE FOLDER an
+    /// agent may read from and write into. `ShareFile` itself (any path
+    /// the node's user can read) is the GUI's file dialog only: an agent
+    /// that could name any path would publish the operator's private files
+    /// to the whole republic (MCP audit 2026-08-26 H3).
+    ShareFileFromExchange {
+        /// A bare file name (no separators) in the download directory.
+        name: String,
+        /// The channel view the share files under.
+        channel: ChannelRef,
+    },
     /// Download a shared file: fetch the bytes peer-to-peer from the
     /// sharer's device (async kickoff — progress and the result arrive as
     /// `Event::FileTransfer` / `read_uploads`). Fails once the sharer
@@ -3851,6 +3870,21 @@ pub enum Command {
         /// characters, engine-enforced).
         passphrase: String,
     },
+    /// [`Command::ExportWorkspace`] for an MCP client: a KNOWLEDGE ARCHIVE
+    /// — the history, chain and snapshot, but never the recovery seed, and
+    /// marked phrase-sealed so an import needs the phrase to open it —
+    /// written as `name` into the download directory (the exchange
+    /// folder). The seed-carrying export to any path is the GUI's only:
+    /// blob + passphrase would otherwise replace the phrase, which leaves
+    /// the process on no surface (MCP audit 2026-08-26 H1).
+    ExportWorkspaceArchive {
+        /// The workspace id ([`WorkspaceInfo::id`]).
+        id: WorkspaceId,
+        /// A bare file name (no separators) in the download directory.
+        name: String,
+        /// The export passphrase (minimum 10 characters, engine-enforced).
+        passphrase: String,
+    },
     /// The export task confirmed the blob on disk (engine-internal, from
     /// the off-actor export task — an MCP agent must not be able to forge
     /// an export success).
@@ -3888,6 +3922,16 @@ pub enum Command {
         /// Target directory (`~` is expanded; parents are created; existing
         /// files of the same name are overwritten).
         dest: String,
+        /// Include the verification bundle.
+        proof: bool,
+    },
+    /// [`Command::WikiExport`] for an MCP client: into `name`, a bare
+    /// directory name inside the download directory — never an arbitrary
+    /// path, which the tree would be scattered into and same-named files
+    /// overwritten at (MCP audit 2026-08-26 M3).
+    WikiExportArchive {
+        /// A bare directory name (no separators) in the download directory.
+        name: String,
         /// Include the verification bundle.
         proof: bool,
     },
@@ -4885,7 +4929,84 @@ pub enum Command {
         /// The command line, run via `sh -c`. Empty clears it.
         command: String,
     },
+    /// Set the node's HOST POSTURE — the settings that decide who can
+    /// reach this node, whether its traffic is anonymized, where it keeps
+    /// and exchanges files, and the two secrets. Deliberately NOT an MCP
+    /// tool (MCP audit 2026-08-26 M1/H4): an agent operates its human's
+    /// SEAT (the "agents are seats" decision), not the human's machine or
+    /// anonymity — `anonymity = "none"` over MCP would deanonymize the
+    /// operator, `mcp_allow = "0.0.0.0"` or a token rotation would let it
+    /// widen or take over its own access. `SaveSettings` and
+    /// `PatchSettings` keep the stored values for these keys; the GUI and
+    /// `config.toml` are the doors.
+    SetNodePosture {
+        /// The posture to store.
+        posture: NodePosture,
+    },
 }
+
+/// The host-posture settings ([`Command::SetNodePosture`]). `None` for a
+/// secret keeps the stored value.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct NodePosture {
+    /// Run without a window.
+    pub headless: bool,
+    /// Where workspaces live.
+    pub workspace_dir: String,
+    /// The download / exchange directory.
+    pub download_dir: String,
+    /// The MCP TCP port.
+    pub mcp_port: u16,
+    /// The MCP client allowlist.
+    pub mcp_allow: String,
+    /// `"tor" | "none"`.
+    pub anonymity: String,
+    /// `"local" | "embedded" | "whonix"`.
+    pub tor_mode: String,
+    /// The local Tor SOCKS port.
+    pub tor_port: u16,
+    /// The MCP token; `None` keeps the stored one.
+    #[serde(default)]
+    pub mcp_token: Option<String>,
+    /// The S3 secret; `None` keeps the stored one.
+    #[serde(default)]
+    pub s3_secret_key: Option<String>,
+}
+
+impl NodePosture {
+    /// The posture `settings` describe, both secrets included (what the
+    /// GUI's settings draft sends).
+    #[must_use]
+    pub fn of(settings: &SessionSettings) -> NodePosture {
+        NodePosture {
+            headless: settings.headless,
+            workspace_dir: settings.workspace_dir.clone(),
+            download_dir: settings.download_dir.clone(),
+            mcp_port: settings.mcp_port,
+            mcp_allow: settings.mcp_allow.clone(),
+            anonymity: settings.anonymity.clone(),
+            tor_mode: settings.tor_mode.clone(),
+            tor_port: settings.tor_port,
+            mcp_token: Some(settings.mcp_token.clone()),
+            s3_secret_key: Some(settings.s3_secret_key.clone()),
+        }
+    }
+}
+
+/// The settings keys [`Command::SetNodePosture`] owns — refused by
+/// `PatchSettings`, re-merged from the stored values by `SaveSettings`.
+pub const NODE_POSTURE_KEYS: [&str; 10] = [
+    "headless",
+    "workspace_dir",
+    "download_dir",
+    "mcp_port",
+    "mcp_allow",
+    "mcp_token",
+    "anonymity",
+    "tor_mode",
+    "tor_port",
+    "poke_wake_command",
+];
 
 impl Command {
     /// The snake_case names of every command variant — the co-equality

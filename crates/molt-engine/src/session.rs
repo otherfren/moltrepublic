@@ -436,7 +436,18 @@ impl State {
         let serde_json::Value::Object(base_map) = &mut base else {
             return Err(MoltError::Settings("settings are not an object".to_string()));
         };
+        // the S3 secret never serializes, so the base carries "": keep the
+        // stored one unless the patch sets it (write-only)
+        let sets_s3_secret = fields.contains_key("s3_secret_key");
         for (k, v) in fields {
+            // the host posture (who reaches this node, its anonymity, its
+            // directories, the token) is the GUI's / config.toml's: an agent
+            // operates the seat, not the machine (MCP audit 2026-08-26 M1)
+            if molt_core::NODE_POSTURE_KEYS.contains(&k.as_str()) {
+                return Err(MoltError::Settings(format!(
+                    "`{k}` is set in the GUI or config.toml, not here"
+                )));
+            }
             // the relay pool keeps its one door (the Relay* commands), and
             // an unknown key is a typo the caller has to hear about — a
             // silently ignored `anonimity` reads exactly like a setting
@@ -459,15 +470,109 @@ impl State {
             }
             base_map.insert(k, v);
         }
-        let merged: SessionSettings = serde_json::from_value(base)
+        let mut merged: SessionSettings = serde_json::from_value(base)
             .map_err(|e| MoltError::Settings(format!("the patch does not fit the settings: {e}")))?;
-        self.cmd_save_settings(merged)
+        let s3_secret = if sets_s3_secret {
+            Some(std::mem::take(&mut merged.s3_secret_key))
+        } else {
+            None
+        };
+        let reply = self.cmd_save_settings(merged)?;
+        if let Some(secret) = s3_secret {
+            self.cmd_set_node_posture(molt_core::NodePosture {
+                s3_secret_key: Some(secret),
+                ..self.node_posture()
+            })?;
+        }
+        Ok(reply)
+    }
+
+    /// The stored host posture, secrets left as "keep".
+    fn node_posture(&self) -> molt_core::NodePosture {
+        molt_core::NodePosture {
+            mcp_token: None,
+            s3_secret_key: None,
+            ..molt_core::NodePosture::of(&self.session.settings)
+        }
+    }
+
+    /// The GUI's / config's door for the host posture and the two secrets
+    /// (see [`Command::SetNodePosture`]).
+    pub(crate) fn cmd_set_node_posture(
+        &mut self,
+        p: molt_core::NodePosture,
+    ) -> Result<Reply, MoltError> {
+        let mut settings = self.session.settings.clone();
+        settings.headless = p.headless;
+        settings.workspace_dir = p.workspace_dir;
+        settings.download_dir = p.download_dir;
+        settings.mcp_port = p.mcp_port;
+        settings.mcp_allow = p.mcp_allow;
+        settings.anonymity = p.anonymity;
+        settings.tor_mode = p.tor_mode;
+        settings.tor_port = p.tor_port;
+        if let Some(token) = p.mcp_token {
+            settings.mcp_token = token;
+        }
+        if let Some(secret) = p.s3_secret_key {
+            settings.s3_secret_key = secret;
+        }
+        validate_settings(&settings)?;
+        self.invalidate_backup_listing_on_target_change(&settings);
+        self.invalidate_tor_test_on_anonymity_change(&settings);
+        self.session.settings = settings;
+        self.mark_restart_required();
+        if self.store.is_some() {
+            self.session.notice = String::new();
+            self.persist_settings(true);
+        } else {
+            self.session.notice = "saved".to_string();
+        }
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
+    /// `name` as a path inside the download directory — the EXCHANGE
+    /// FOLDER an MCP client may read from and write into. A bare name
+    /// only: no separators, no `..`, nothing that leaves the folder.
+    pub(crate) fn exchange_path(&self, name: &str) -> Result<String, MoltError> {
+        let name = bare_exchange_name(name)?;
+        let dir = molt_storage::expand_tilde(&self.session.settings.download_dir);
+        Ok(dir.join(name).to_string_lossy().into_owned())
+    }
+
+    /// [`Command::ExportWorkspaceArchive`].
+    pub(crate) fn cmd_export_workspace_archive(
+        &mut self,
+        id: WorkspaceId,
+        name: String,
+        passphrase: String,
+    ) -> Result<Reply, MoltError> {
+        let dest = self.exchange_path(&name)?;
+        self.cmd_export_workspace(id, dest, passphrase, true)
+    }
+
+    /// [`Command::WikiExportArchive`].
+    pub(crate) fn cmd_wiki_export_archive(
+        &mut self,
+        name: String,
+        proof: bool,
+    ) -> Result<Reply, MoltError> {
+        let dest = self.exchange_path(&name)?;
+        self.cmd_wiki_export(dest, proof)
     }
 
     pub(crate) fn cmd_save_settings(
         &mut self,
         settings: SessionSettings,
     ) -> Result<Reply, MoltError> {
+        // the HOST POSTURE and the two secrets have their own door
+        // (`SetNodePosture`, GUI/config only — MCP audit 2026-08-26): a
+        // wholesale save keeps the stored values, before anything reads the
+        // incoming ones (a default `anonymity` must not even look like a
+        // change to the Tor-test invalidation)
+        let mut settings = settings;
+        apply_stored_posture(&mut settings, &self.session.settings);
         validate_settings(&settings)?;
         self.invalidate_backup_listing_on_target_change(&settings);
         self.invalidate_tor_test_on_anonymity_change(&settings);
@@ -476,7 +581,6 @@ impl State {
         // replacement must not become a second door — it would let a payload
         // inject a pre-confirmed clearnet relay past the gate, or silently
         // drop the operator's pool while changing an unrelated field.
-        let mut settings = settings;
         settings.relays = std::mem::take(&mut self.session.settings.relays);
         // …and the clearnet decision rides with the pool for the same reason:
         // it is set by the acknowledged confirmation / the explicit switch,
@@ -1886,6 +1990,7 @@ impl State {
         id: WorkspaceId,
         dest: String,
         passphrase: String,
+        archive: bool,
     ) -> Result<Reply, MoltError> {
         let Some(entry) = self.session.workspaces.iter().find(|w| w.id == id) else {
             return Err(MoltError::UnknownWorkspace(id));
@@ -1949,7 +2054,7 @@ impl State {
                         tracing::error!("flush before export failed — the copy may lag the log");
                     }
                 }
-                export_to_file(&root, &dir, &dest_path, zeroize::Zeroizing::new(passphrase))
+                export_to_file(&root, &dir, &dest_path, zeroize::Zeroizing::new(passphrase), archive)
             })
             .await;
             let cmd = match res {
@@ -2247,6 +2352,7 @@ fn export_to_file(
     ws_dir: &std::path::Path,
     dest: &std::path::Path,
     passphrase: zeroize::Zeroizing<String>,
+    archive: bool,
 ) -> Result<molt_storage::export::ExportOutcome, molt_storage::StorageError> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
@@ -2262,7 +2368,11 @@ fn export_to_file(
         let file = std::fs::File::create(&part)?;
         let mut out = std::io::BufWriter::new(file);
         let key = molt_storage::export::ExportKey::Passphrase(passphrase);
-        let outcome = molt_storage::export::export_dir(root, ws_dir, &key, &mut out)?;
+        let outcome = if archive {
+            molt_storage::export::export_archive(root, ws_dir, &key, &mut out)?
+        } else {
+            molt_storage::export::export_dir(root, ws_dir, &key, &mut out)?
+        };
         use std::io::Write as _;
         out.flush()?;
         let file = out
@@ -2325,6 +2435,39 @@ fn validate_fonts(app: u16, nav: u16, editor: u16) -> Result<(), MoltError> {
         }
     }
     Ok(())
+}
+
+/// Keep the stored host posture and secrets in a wholesale settings
+/// replacement (their door is `SetNodePosture`).
+fn apply_stored_posture(target: &mut SessionSettings, stored: &SessionSettings) {
+    target.headless = stored.headless;
+    target.workspace_dir = stored.workspace_dir.clone();
+    target.download_dir = stored.download_dir.clone();
+    target.mcp_port = stored.mcp_port;
+    target.mcp_allow = stored.mcp_allow.clone();
+    target.mcp_token = stored.mcp_token.clone();
+    target.anonymity = stored.anonymity.clone();
+    target.tor_mode = stored.tor_mode.clone();
+    target.tor_port = stored.tor_port;
+    target.s3_secret_key = stored.s3_secret_key.clone();
+}
+
+/// A bare exchange-folder name: one path component, nothing else.
+fn bare_exchange_name(name: &str) -> Result<String, MoltError> {
+    let name = name.trim();
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains('\0')
+        || name.len() > 255
+    {
+        return Err(MoltError::BadPayload(
+            "a bare file name in the download directory is required".to_string(),
+        ));
+    }
+    Ok(name.to_string())
 }
 
 fn validate_settings(s: &SessionSettings) -> Result<(), MoltError> {
@@ -2420,6 +2563,11 @@ mod patch_tests {
             s3_interval_min: 60,
             ..molt_core::SessionSettings::default()
         };
+        // the posture (Tor, the token) enters through its own door; the
+        // wholesale save carries the rest
+        w.execute(Command::SetNodePosture { posture: molt_core::NodePosture::of(&base) })
+            .await
+            .expect("posture");
         w.execute(Command::SaveSettings { settings: base })
             .await
             .expect("save");

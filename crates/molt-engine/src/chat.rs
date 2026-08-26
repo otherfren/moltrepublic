@@ -300,6 +300,16 @@ impl State {
     /// the share message posts (via [`State::cmd_net_file_shared`]) once
     /// the real metadata + sha256 exist. Only metadata enters the chat;
     /// the path stays this node's business (prefs, never wire/log).
+    /// [`Command::ShareFileFromExchange`].
+    pub(crate) fn cmd_share_file_from_exchange(
+        &mut self,
+        name: String,
+        channel: ChannelRef,
+    ) -> Result<Reply, MoltError> {
+        let path = self.exchange_path(&name)?;
+        self.cmd_share_file(path, channel)
+    }
+
     pub(crate) fn cmd_share_file(
         &mut self,
         path: String,

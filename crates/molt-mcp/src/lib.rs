@@ -474,6 +474,25 @@ fn screen_arg(args: &Value) -> Result<Screen, String> {
 /// (a Tor node onto clearnet) and `mcp_token` to empty (authentication off).
 /// A partial update is `patch_settings`, which merges against the running
 /// settings inside the engine, where the current values actually are.
+/// A bare exchange-folder name: one path component, no separators, no
+/// `..` — the engine re-checks, this refuses early with the tool's words.
+fn bare_name_arg(args: &Value, key: &str) -> Result<String, String> {
+    let name = str_arg(args, key)?;
+    let name = name.trim();
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains('\0')
+    {
+        return Err(format!(
+            "`{key}` must be a bare file name inside the download directory (no path separators)"
+        ));
+    }
+    Ok(name.to_string())
+}
+
 fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
     let d = SessionSettings::default();
     let missing = |key: &str| format!("`{key}` is required — to change one setting use patch_settings");
@@ -496,7 +515,10 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
         args.get(key).and_then(Value::as_u64).ok_or_else(|| missing(key))
     };
     Ok(SessionSettings {
-        headless: flag("headless")?,
+        // the HOST POSTURE and the two secrets have exactly one door — the GUI
+        // (`SetNodePosture`) and config.toml: carried through unchanged, the
+        // engine re-merges the stored values (MCP audit 2026-08-26 M1/H4)
+        headless: d.headless,
         // NOT settable through save_settings — the relay pool and the
         // clearnet decision have exactly one door each (the Relay* tools),
         // so an agent cannot grant itself non-onion dialing here. Carried
@@ -507,7 +529,7 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
         font_app: d.font_app,
         font_nav: d.font_nav,
         font_editor: d.font_editor,
-        workspace_dir: text("workspace_dir")?,
+        workspace_dir: d.workspace_dir,
         // required like every other field since 0 became a VALUE (sharing
         // off, FP4 2026-08-16): absent can no longer safely mean "keep" —
         // partial changes go through patch_settings
@@ -515,11 +537,11 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
             .get("file_cap_bytes")
             .and_then(Value::as_u64)
             .ok_or_else(|| missing("file_cap_bytes"))?,
-        download_dir: text("download_dir")?,
+        download_dir: d.download_dir,
         s3_backup: flag("s3_backup")?,
         s3_endpoint: text("s3_endpoint")?,
         s3_access_key: text("s3_access_key")?,
-        s3_secret_key: text("s3_secret_key")?,
+        s3_secret_key: d.s3_secret_key,
         s3_bucket: text("s3_bucket")?,
         s3_interval_min: port("s3_interval_min")?,
         s3_keep_copies: port("s3_keep_copies")?,
@@ -548,12 +570,12 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
         // stored value, exactly like the clearnet decision above.
         poke_wake_command: d.poke_wake_command,
         read_receipts: flag("read_receipts")?,
-        mcp_port: port("mcp_port")?,
-        mcp_allow: text("mcp_allow")?,
-        mcp_token: text("mcp_token")?,
-        anonymity: text("anonymity")?,
-        tor_mode: text("tor_mode")?,
-        tor_port: port("tor_port")?,
+        mcp_port: d.mcp_port,
+        mcp_allow: d.mcp_allow,
+        mcp_token: d.mcp_token,
+        anonymity: d.anonymity,
+        tor_mode: d.tor_mode,
+        tor_port: d.tor_port,
         // never taken from the payload — the engine keeps the live pool
         relays: Vec::new(),
     })
@@ -692,36 +714,39 @@ pub fn tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "share_file",
-            command: "share_file",
-            description: "Share a local file into the ungated chat: the engine derives the metadata and streams the real sha256 off the actor, then posts the share message (async — it appears in read_state once hashing completes). Only metadata enters the chat; the path stays this node's business and the bytes move per-download over a dedicated encrypted queue. A share is a chat message, so `channel` files it under a view of the one stream exactly like chat_send (omit for the all-hands group).",
+            command: "share_file_from_exchange",
+            description: "Share a file from the node's download directory (the EXCHANGE FOLDER - read_session.settings.download_dir) into the ungated chat: the engine derives the metadata and streams the real sha256 off the actor, then posts the share message (async - it appears in read_state once hashing completes). Only metadata enters the chat; the bytes move per-download over a dedicated encrypted queue. `name` is a bare file name inside that folder - an agent shares what was put there for it, never an arbitrary path on the operator's machine (that is the GUI's file dialog). A share is a chat message, so `channel` files it under a view of the one stream exactly like chat_send (omit for the all-hands group).",
             schema: || json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "absolute path of the local file to share" },
+                    "name": { "type": "string", "description": "bare file name inside the download directory (no path separators)" },
                     "channel": channel_schema("optional: the channel view this share files under (omit for the all-hands group)")
                 },
-                "required": ["path"]
+                "required": ["name"]
             }),
-            build: |args| Ok(Command::ShareFile {
-                path: str_arg(args, "path")?,
+            build: |args| Ok(Command::ShareFileFromExchange {
+                name: bare_name_arg(args, "name")?,
                 channel: channel_arg(args)?.unwrap_or_default(),
             }),
         },
         ToolDef {
             name: "download_file",
             command: "download_file",
-            description: "Download a shared file: fetches the BYTES peer-to-peer from the sharer's device over a dedicated encrypted queue (the sharer must be online), verifies size + sha256 against the share, and writes the file to `dest` (an existing directory, or a full target path; omitted = the configured download directory). Async kickoff — poll read_uploads for the download's phase/percent/path/error. Addressed by the share message's stable id (32-char lowercase hex, from read_state). Fails honestly once the sharer deleted the file or stays offline.",
+            description: "Download a shared file: fetches the BYTES peer-to-peer from the sharer's device over a dedicated encrypted queue (the sharer must be online), verifies size + sha256 against the share, and writes the file into the node's download directory (the EXCHANGE FOLDER) - as `dest`, a bare file name, or under the share's own name when omitted. Never an arbitrary path: peer-chosen bytes landing anywhere on the operator's machine would be a persistence primitive. Async kickoff - poll read_uploads for the download's phase/percent/path/error. Addressed by the share message's stable id (32-char lowercase hex, from read_state). Fails honestly once the sharer deleted the file or stays offline.",
             schema: || json!({
                 "type": "object",
                 "properties": {
                     "id": { "type": "string", "description": "share message id (32-char lowercase hex, from read_state)" },
-                    "dest": { "type": "string", "description": "optional destination: an existing directory or a full target path (omit = the configured download directory)" }
+                    "dest": { "type": "string", "description": "optional: a bare file name inside the download directory (no path separators; omit = the share's own name)" }
                 },
                 "required": ["id"]
             }),
             build: |args| Ok(Command::DownloadFile {
                 id: id_arg(args, "id")?,
-                dest: args.get("dest").and_then(Value::as_str).map(str::to_string),
+                dest: match args.get("dest").and_then(Value::as_str) {
+                    Some(_) => Some(bare_name_arg(args, "dest")?),
+                    None => None,
+                },
             }),
         },
         ToolDef {
@@ -1012,16 +1037,13 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "save_settings",
             command: "save_settings",
-            description: "Store the node settings and persist them to the node's config.toml (format-preserving, atomic; the write outcome lands in the session notice, restart-required keys in session.restart_required). Replaces the settings wholesale; read_session first, then pass back the changed fields.",
+            description: "Store the node settings and persist them to the node's config.toml (format-preserving, atomic; the write outcome lands in the session notice, restart-required keys in session.restart_required). Replaces the settings wholesale; read_session first, then pass back the changed fields. The host posture (headless, directories, MCP port/allowlist/token, anonymity, Tor) and the S3 secret are NOT part of it - they are set in the GUI or config.toml (the S3 secret also via patch_settings, write-only).",
             schema: || json!({
                 "type": "object",
                 "properties": {
-                    "headless": { "type": "boolean" },
-                    "workspace_dir": { "type": "string" },
                     "s3_backup": { "type": "boolean" },
                     "s3_endpoint": { "type": "string" },
                     "s3_access_key": { "type": "string" },
-                    "s3_secret_key": { "type": "string" },
                     "s3_bucket": { "type": "string" },
                     "s3_interval_min": { "type": "integer" },
                     "s3_keep_copies": { "type": "integer" },
@@ -1033,23 +1055,13 @@ pub fn tools() -> Vec<ToolDef> {
                     "sound_poke": { "type": "string", "enum": ["none", "bell", "chime", "pop"], "description": "optional; absent = \"none\"" },
                     "poke_enabled": { "type": "boolean", "description": "optional; absent = false (react to pokes and offer poking)" },
                     "read_receipts": { "type": "boolean", "description": "send/show per-message chat read receipts (local privacy switch)" },
-                    "mcp_port": { "type": "integer" },
-                    "mcp_allow": { "type": "string", "description": "client IP allowlist: \"127.0.0.1\" | \"0.0.0.0\" | comma-separated" },
-                    "mcp_token": { "type": "string", "description": "rotate the MCP API token (what the GUI's Rotate button does)" },
-                    "anonymity": { "type": "string", "enum": ["tor", "none"] },
-                    "tor_mode": { "type": "string", "enum": ["local", "embedded", "whonix"] },
-                    "tor_port": { "type": "integer" },
-                    "file_cap_bytes": { "type": "integer", "description": "byte cap for shared files; 0 = sharing off" },
-                    "download_dir": { "type": "string", "description": "where downloads land" }
+                    "file_cap_bytes": { "type": "integer", "description": "byte cap for shared files; 0 = sharing off" }
                 },
                 "required": [
-                    "headless", "workspace_dir", "s3_backup", "s3_endpoint",
-                    "s3_access_key", "s3_secret_key", "s3_bucket",
+                    "s3_backup", "s3_endpoint", "s3_access_key", "s3_bucket",
                     "s3_interval_min", "s3_keep_copies", "s3_max_bytes",
                     "media_s3_bucket", "media_s3_max_bytes", "sound_message",
-                    "sound_vote", "read_receipts", "mcp_port", "mcp_allow",
-                    "mcp_token", "anonymity", "tor_mode", "tor_port",
-                    "file_cap_bytes", "download_dir"
+                    "sound_vote", "read_receipts", "file_cap_bytes"
                 ]
             }),
             build: |args| Ok(Command::SaveSettings {
@@ -1059,36 +1071,26 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "patch_settings",
             command: "patch_settings",
-            description: "Change SOME settings, keeping every field you do not mention. This is the tool for adjusting one thing: save_settings REPLACES everything, and its defaults are not neutral - anonymity defaults to \"none\" (a Tor node onto clearnet) and mcp_token to empty (authentication off), so a partial save_settings would silently reset them. Unknown keys are refused rather than ignored, and the relay pool keeps its own door (the relay_* tools).",
+            description: "Change SOME settings, keeping every field you do not mention. This is the tool for adjusting one thing: save_settings REPLACES everything, and its defaults are not neutral - its defaults are not neutral, so a partial save_settings would silently reset them. Unknown keys are refused rather than ignored; the relay pool keeps its own door (the relay_* tools), and the host posture (headless, workspace_dir, download_dir, mcp_port, mcp_allow, mcp_token, anonymity, tor_mode, tor_port, poke_wake_command) is the GUI's / config.toml's - refused here. s3_secret_key is accepted write-only (it never reads back).",
             schema: || json!({
                 "type": "object",
                 "description": "the settings to change, keyed as in read_session.settings",
                 "properties": {
-                    "headless": { "type": "boolean" },
-                    "workspace_dir": { "type": "string" },
                     "s3_backup": { "type": "boolean" },
                     "s3_endpoint": { "type": "string" },
                     "s3_access_key": { "type": "string" },
-                    "s3_secret_key": { "type": "string" },
                     "s3_bucket": { "type": "string" },
                     "s3_interval_min": { "type": "integer" },
                     "s3_keep_copies": { "type": "integer" },
                     "s3_max_bytes": { "type": "integer", "description": "byte quota for the backup bucket; 0 = no limit. Over it the oldest copies go first, never a workspace's newest" },
                     "media_s3_bucket": { "type": "string", "description": "a second bucket at the same endpoint/credentials, for media; configured only, nothing writes media to S3 yet" },
                     "media_s3_max_bytes": { "type": "integer", "description": "byte quota for the media bucket; 0 = no limit" },
-                    "download_dir": { "type": "string" },
                     "file_cap_bytes": { "type": "integer", "description": "per-file byte cap for sharing over relays; 0 = sharing off" },
                     "sound_message": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
                     "sound_vote": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
                     "sound_poke": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
                     "poke_enabled": { "type": "boolean" },
                     "read_receipts": { "type": "boolean" },
-                    "mcp_port": { "type": "integer" },
-                    "mcp_allow": { "type": "string" },
-                    "mcp_token": { "type": "string" },
-                    "anonymity": { "type": "string", "enum": ["tor", "none"] },
-                    "tor_mode": { "type": "string", "enum": ["local", "embedded", "whonix"] },
-                    "tor_port": { "type": "integer" }
                 }
             }),
             build: |args| Ok(Command::PatchSettings { patch: args.clone() }),
@@ -1159,13 +1161,21 @@ pub fn tools() -> Vec<ToolDef> {
                 },
                 "required": ["url"]
             }),
-            build: |args| Ok(Command::RelayConfirm {
-                url: str_arg(args, "url")?,
-                accept_clearnet: args
-                    .get("accept_clearnet")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-            }),
+            build: |args| {
+                // the clearnet acknowledgement exposes the OPERATOR's IP and
+                // subscriptions: a human decision in the GUI, never an
+                // agent's (MCP audit 2026-08-26 M2)
+                if args.get("accept_clearnet").and_then(Value::as_bool) == Some(true) {
+                    return Err(
+                        "clearnet consent is given in the GUI, not over MCP - confirm onion relays here"
+                            .to_string(),
+                    );
+                }
+                Ok(Command::RelayConfirm {
+                    url: str_arg(args, "url")?,
+                    accept_clearnet: false,
+                })
+            },
         },
         ToolDef {
             name: "relay_revoke",
@@ -1189,7 +1199,16 @@ pub fn tools() -> Vec<ToolDef> {
                 },
                 "required": ["unlock"]
             }),
-            build: |args| Ok(Command::RelayClearnetSession { unlock: bool_arg(args, "unlock")? }),
+            build: |args| {
+                let unlock = bool_arg(args, "unlock")?;
+                if unlock {
+                    return Err(
+                        "non-onion dialing is switched on in the GUI, not over MCP - switching it off is fine here"
+                            .to_string(),
+                    );
+                }
+                Ok(Command::RelayClearnetSession { unlock })
+            },
         },
         ToolDef {
             name: "net_test_s3",
@@ -1377,37 +1396,37 @@ pub fn tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "export_workspace",
-            command: "export_workspace",
-            description: "Export a workspace as ONE encrypted blob file (*.molt.enc, format molt-export-v1): manifest, the encrypted history, the threshold-signed chain, the newest snapshot, the logo — and, when stored on this device, the recovery seed. CAUTION: with the seed inside, blob + passphrase replaces the recovery phrase (full seat capability) — guard both like the phrase. Live MLS/transport state is NEVER exported: the blob restores knowledge; rejoining the live republic goes through the recovery ritual. Protection: Argon2id-stretched passphrase (minimum 10 characters) + XChaCha20-Poly1305. Async kickoff — the honest outcome (ok with byte count and skipped files, or the real error) lands in read_session's `export` state; there is no fake success.",
+            command: "export_workspace_archive",
+            description: "Export a workspace as ONE encrypted KNOWLEDGE ARCHIVE (*.molt.enc, format molt-export-v1) into the node's download directory (the EXCHANGE FOLDER): manifest, the encrypted history, the threshold-signed chain, the newest snapshot, the logo. NEVER the recovery seed: the blob is marked phrase-sealed, so an import needs the recovery phrase to open it - blob + passphrase reads the knowledge and nothing more (the seed-carrying export to any path is the GUI's). Live MLS/transport state is NEVER exported: the blob restores knowledge; rejoining the live republic goes through the recovery ritual. Protection: Argon2id-stretched passphrase (minimum 10 characters) + XChaCha20-Poly1305. Async kickoff - the honest outcome (ok with byte count and skipped files, or the real error) lands in read_session's `export` state; there is no fake success.",
             schema: || json!({
                 "type": "object",
                 "properties": {
                     "id": { "type": "string", "description": "the workspace id from read_session" },
-                    "dest": { "type": "string", "description": "target file path (~ is expanded, parents are created, an existing file is atomically replaced)" },
+                    "name": { "type": "string", "description": "bare file name inside the download directory (no path separators; an existing file is replaced)" },
                     "passphrase": { "type": "string", "description": "export passphrase, minimum 10 characters" }
                 },
-                "required": ["id", "dest", "passphrase"]
+                "required": ["id", "name", "passphrase"]
             }),
-            build: |args| Ok(Command::ExportWorkspace {
+            build: |args| Ok(Command::ExportWorkspaceArchive {
                 id: str_arg(args, "id")?,
-                dest: str_arg(args, "dest")?,
+                name: bare_name_arg(args, "name")?,
                 passphrase: str_arg(args, "passphrase")?,
             }),
         },
         ToolDef {
             name: "wiki_export",
-            command: "wiki_export",
-            description: "Write the Shared-Memory wiki to a directory on disk as plain files: <dest>/wiki/<path> per document, the deterministic fold of the applied wiki patches (local unapplied drafts are NEVER exported). With proof=true (the default) it also writes <dest>/proof/bundle.json + README.md - the genesis, every membership block and every applied wiki patch, so an OUTSIDER can verify the tree is exactly what a real m-of-n of the sealed roster approved, without moltd and without any key (cargo run -p molt-engine --example verify_wiki_export -- <dest>). CAUTION: the bundle necessarily reveals member names, identity keys, transport anchors, the relay pool, the charter and each patch's signer set; proof=false writes only wiki/. It proves authenticity and threshold provenance, NOT completeness (an export can omit the newest patches). Refused when the wiki is empty, and proof is refused on a workspace without chain governance (no signatures to prove anything with). Async kickoff - the honest outcome (ok with the file count, or the real error) lands in read_session's `wiki_export` state.",
+            command: "wiki_export_archive",
+            description: "Export the wiki (every applied page) as files into `name`, a directory inside the node's download directory (the EXCHANGE FOLDER), optionally with the verification bundle (the threshold-signed patches that prove every page). Never an arbitrary path: an agent-chosen destination would scatter the tree into the operator's directories and overwrite same-named files. Async kickoff - the outcome lands in read_session's `wiki_export` state.",
             schema: || json!({
                 "type": "object",
                 "properties": {
-                    "dest": { "type": "string", "description": "target directory (~ is expanded, parents are created, files of the same name are overwritten)" },
+                    "name": { "type": "string", "description": "bare directory name inside the download directory (no path separators)" },
                     "proof": { "type": "boolean", "description": "include the verification bundle (default true)" }
                 },
-                "required": ["dest"]
+                "required": ["name"]
             }),
-            build: |args| Ok(Command::WikiExport {
-                dest: str_arg(args, "dest")?,
+            build: |args| Ok(Command::WikiExportArchive {
+                name: bare_name_arg(args, "name")?,
                 proof: args.get("proof").and_then(Value::as_bool).unwrap_or(true),
             }),
         },
@@ -1449,7 +1468,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "create_start",
             command: "create_start",
-            description: "Begin founding a new republic: the engine derives the founder's identity, mints one-time invite links per member, and runs the real founding ritual with a live log; read_session shows the seed, the joinable links, and each seat filling in. Once every member has joined, propose the charter with create_propose. Needs a CONFIRMED relay first (relay_add, then confirm) - without one it refuses with \"cannot found: no relay configured\". The threshold must be at least 2.",
+            description: "Begin founding a new republic: the engine derives the founder's identity, mints one-time invite links per member, and runs the real founding ritual with a live log; read_session shows the joinable links and each seat filling in (the recovery phrase is shown in the GUI wizard only - it leaves the process on no surface, so the backup confirmation and thereby a founding complete on a GUI node). Once every member has joined, propose the charter with create_propose. Needs a CONFIRMED relay first (relay_add, then confirm) - without one it refuses with \"cannot found: no relay configured\". The threshold must be at least 2.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1546,7 +1565,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "create_finish",
             command: "create_finish",
-            description: "Enter the republic a successful founding sealed (read_session shows create.run.outcome == 1). The phrase backup was already confirmed DURING the ritual (confirm_seed_backup) - this just enters, the founder twin of join_finish.",
+            description: "Enter the republic a successful founding sealed (read_session shows create.run.outcome == 1). The phrase backup was already confirmed DURING the ritual (confirm_seed_backup, which needs the phrase the GUI wizard shows) - this just enters, the founder twin of join_finish.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::CreateFinish),
         },
@@ -1621,7 +1640,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "join_finish",
             command: "join_finish",
-            description: "Enter the republic a completed join sealed (read_session shows join.run.outcome == 1 with join.sealed_id). The phrase backup was already confirmed DURING the ritual (confirm_seed_backup) - this just enters, the joiner twin of create_finish.",
+            description: "Enter the republic a completed join sealed (read_session shows join.run.outcome == 1 with join.sealed_id). The phrase backup was already confirmed DURING the ritual (confirm_seed_backup, which needs the phrase the GUI wizard shows) - this just enters, the joiner twin of create_finish.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::JoinFinish),
         },
@@ -1714,7 +1733,16 @@ mod tests {
         // would let any MCP client execute code as the node's user, which is
         // a different thing entirely from acting inside the republic. The
         // wholesale settings paths refuse the key for the same reason.
-        const INTERNAL: [&str; 61] = [
+        const INTERNAL: [&str; 65] = [
+            // the HOST POSTURE and the two secrets (MCP audit 2026-08-26 M1/H4):
+            // an agent operates the seat, not the machine — GUI / config only
+            "set_node_posture",
+            // any-path file access is the GUI's file dialog; an agent gets the
+            // exchange folder (share_file_from_exchange, export_workspace_archive,
+            // wiki_export_archive) — H1/H3/M3 of the same audit
+            "share_file",
+            "export_workspace",
+            "wiki_export",
             // ui_publish is the WINDOW reporting what it renders — an
             // agent must not be able to forge what the GUI claims to show
             // (gui_over_mcp.md); reads go through read_ui_state.
@@ -1862,12 +1890,80 @@ mod tests {
             join: molt_core::JoinState { seed: phrase.to_string(), ..Default::default() },
             ..Default::default()
         };
+        let mut sv = sv;
+        sv.settings.mcp_token = "TOKEN-SECRET".to_string();
+        sv.settings.s3_secret_key = "S3-SECRET".to_string();
         let json = serde_json::to_string(&sv).expect("serializes");
         assert!(!json.contains(phrase), "a phrase is in the wire form: {json}");
         assert!(!json.contains("\"seed\""), "a seed key is in the wire form");
+        assert!(!json.contains("TOKEN-SECRET") && !json.contains("S3-SECRET"), "a secret is in the wire form");
         // …and a view read back without them is the same view
         let back: molt_core::SessionView = serde_json::from_str(&json).expect("reads back");
         assert_eq!(back.workspaces[0].seed, "", "the phrase stays in-process");
+    }
+
+    /// **No host-posture key and no secret is on the settings surface.**
+    /// `save_settings` never carries them (the engine re-merges the stored
+    /// values), `patch_settings` refuses them — an agent operates the seat,
+    /// not the machine (MCP audit 2026-08-26 M1/H4).
+    #[test]
+    fn the_settings_tools_carry_no_host_posture_or_secret() {
+        for tool in ["save_settings", "patch_settings"] {
+            let schema = (tool_named(tool).schema)();
+            let props = schema["properties"].as_object().expect("properties");
+            for key in molt_core::NODE_POSTURE_KEYS {
+                assert!(!props.contains_key(key), "{tool} exposes `{key}`");
+            }
+            if tool == "save_settings" {
+                assert!(!props.contains_key("s3_secret_key"), "the secret is write-only via patch");
+            }
+        }
+    }
+
+    /// **The exchange folder is the only place an agent reads from or
+    /// writes into.** Download, share and both exports take a bare name;
+    /// a path is refused before it reaches the engine (H2/H3/M3).
+    #[test]
+    fn file_tools_take_bare_exchange_names_only() {
+        let refused = ["../x", "/etc/passwd", "a/b", "..", ""];
+        for bad in refused {
+            assert!(build("download_file", &json!({ "id": HEX_ID, "dest": bad })).is_err(), "{bad:?}");
+            assert!(build("share_file", &json!({ "name": bad })).is_err(), "{bad:?}");
+            assert!(
+                build("export_workspace", &json!({ "id": "w", "name": bad, "passphrase": "long enough passphrase" })).is_err(),
+                "{bad:?}"
+            );
+            assert!(build("wiki_export", &json!({ "name": bad })).is_err(), "{bad:?}");
+        }
+        assert!(matches!(
+            build("download_file", &json!({ "id": HEX_ID, "dest": "report.pdf" })),
+            Ok(Command::DownloadFile { dest: Some(d), .. }) if d == "report.pdf"
+        ));
+        assert!(matches!(
+            build("share_file", &json!({ "name": "report.pdf" })),
+            Ok(Command::ShareFileFromExchange { name, .. }) if name == "report.pdf"
+        ));
+        assert!(matches!(
+            build("export_workspace", &json!({ "id": "w", "name": "w.molt.enc", "passphrase": "long enough passphrase" })),
+            Ok(Command::ExportWorkspaceArchive { .. })
+        ));
+    }
+
+    /// **Clearnet consent is a human decision.** Over MCP a relay can be
+    /// confirmed only without the acknowledgement, and non-onion dialing
+    /// can only be switched OFF (M2).
+    #[test]
+    fn clearnet_consent_is_not_given_over_mcp() {
+        assert!(build("relay_confirm", &json!({ "url": "wss://r.example", "accept_clearnet": true })).is_err());
+        assert!(matches!(
+            build("relay_confirm", &json!({ "url": "wss://r.example" })),
+            Ok(Command::RelayConfirm { accept_clearnet: false, .. })
+        ));
+        assert!(build("relay_clearnet_session", &json!({ "unlock": true })).is_err());
+        assert!(matches!(
+            build("relay_clearnet_session", &json!({ "unlock": false })),
+            Ok(Command::RelayClearnetSession { unlock: false })
+        ));
     }
 
     /// **`save_settings` builds from exactly what its schema requires.**
@@ -1986,21 +2082,21 @@ mod tests {
             schema["properties"]["channel"]["properties"]["kind"]["enum"],
             json!(["group", "patch", "topic"])
         );
-        assert_eq!(schema["required"], json!(["path"]));
+        assert_eq!(schema["required"], json!(["name"]));
 
         // Omitted channel → the all-hands group (the default view).
-        match build("share_file", &json!({ "path": "/tmp/a.pdf" })).expect("plain share builds") {
-            Command::ShareFile { channel, .. } => assert_eq!(channel, ChannelRef::Group),
+        match build("share_file", &json!({ "name": "a.pdf" })).expect("plain share builds") {
+            Command::ShareFileFromExchange { channel, .. } => assert_eq!(channel, ChannelRef::Group),
             other => panic!("wrong command: {other:?}"),
         }
         // Patch channel by proposal id.
         match build(
             "share_file",
-            &json!({ "path": "/tmp/a.pdf", "channel": { "kind": "patch", "id": 7 } }),
+            &json!({ "name": "a.pdf", "channel": { "kind": "patch", "id": 7 } }),
         )
         .expect("patch share builds")
         {
-            Command::ShareFile { channel, .. } => {
+            Command::ShareFileFromExchange { channel, .. } => {
                 assert_eq!(channel, ChannelRef::Patch { id: ProposalId(7) });
             }
             other => panic!("wrong command: {other:?}"),
@@ -2008,11 +2104,11 @@ mod tests {
         // Topic channel — normalized exactly like chat_send.
         match build(
             "share_file",
-            &json!({ "path": "/tmp/a.pdf", "channel": { "kind": "topic", "name": "  Budget " } }),
+            &json!({ "name": "a.pdf", "channel": { "kind": "topic", "name": "  Budget " } }),
         )
         .expect("topic share builds")
         {
-            Command::ShareFile { channel, .. } => {
+            Command::ShareFileFromExchange { channel, .. } => {
                 assert_eq!(
                     channel,
                     ChannelRef::Topic {
@@ -2381,21 +2477,38 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_accept_loop_reads_the_token_that_is_current_now() {
         let h = wallet();
-        let with_token = |t: &str| molt_core::SessionSettings {
-            mcp_token: t.to_string(),
-            ..molt_core::SessionSettings::default()
+        // the token's one door is the host posture (GUI / config.toml —
+        // MCP audit 2026-08-26): save_settings and patch_settings keep the
+        // stored one, so a rotation over MCP is refused
+        let d = molt_core::SessionSettings::default();
+        let posture = |t: &str| molt_core::NodePosture {
+            headless: d.headless,
+            workspace_dir: d.workspace_dir.clone(),
+            download_dir: d.download_dir.clone(),
+            mcp_port: d.mcp_port,
+            mcp_allow: d.mcp_allow.clone(),
+            anonymity: d.anonymity.clone(),
+            tor_mode: d.tor_mode.clone(),
+            tor_port: d.tor_port,
+            mcp_token: Some(t.to_string()),
+            s3_secret_key: None,
         };
-        h.execute(Command::SaveSettings { settings: with_token("first") })
+        h.execute(Command::SetNodePosture { posture: posture("first") })
             .await
-            .expect("save");
+            .expect("posture");
+        assert_eq!(live_token(&h).await.as_deref(), Some("first"));
+        assert!(
+            h.execute(Command::PatchSettings { patch: json!({ "mcp_token": "hijack" }) })
+                .await
+                .is_err(),
+            "a rotation over MCP is refused"
+        );
         assert_eq!(live_token(&h).await.as_deref(), Some("first"));
 
-        // …rotate, exactly as the GUI button and save_settings.mcp_token do
-        h.execute(Command::PatchSettings {
-            patch: json!({ "mcp_token": "second" }),
-        })
-        .await
-        .expect("rotate");
+        // …rotate, exactly as the GUI button does
+        h.execute(Command::SetNodePosture { posture: posture("second") })
+            .await
+            .expect("rotate");
         assert_eq!(
             live_token(&h).await.as_deref(),
             Some("second"),

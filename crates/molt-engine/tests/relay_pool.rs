@@ -309,8 +309,10 @@ fn save_settings_can_neither_inject_nor_wipe_relays() {
 
         // a settings payload that tries to smuggle in a confirmed clearnet
         // relay AND drop the real one, while changing something innocuous
+        // (mcp_port is host posture since 2026-08-26 — kept by a wholesale
+        // save — so the innocuous field is the backup interval)
         let mut settings = session(&w).await.settings;
-        settings.mcp_port = 4141;
+        settings.s3_interval_min = 41;
         settings.relays = vec![molt_core::relay::RelayEntry {
             url: "wss://attacker.example.org".to_string(),
             confirmed: true,
@@ -318,7 +320,7 @@ fn save_settings_can_neither_inject_nor_wipe_relays() {
         w.execute(Command::SaveSettings { settings }).await.expect("save");
 
         let s = session(&w).await;
-        assert_eq!(s.settings.mcp_port, 4141, "the honest field was saved");
+        assert_eq!(s.settings.s3_interval_min, 41, "the honest field was saved");
         assert_eq!(s.relays.len(), 1, "no relay was injected");
         assert_eq!(s.relays[0].url, ONION, "and the real pool survived");
         assert!(s.relays[0].confirmed);

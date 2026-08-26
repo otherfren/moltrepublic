@@ -316,6 +316,32 @@ pub(crate) fn export_dir_chunked(
     chunk_bytes: u32,
     out: &mut dyn Write,
 ) -> Result<ExportOutcome, StorageError> {
+    export_dir_impl(root, ws_dir, key, chunk_bytes, false, out)
+}
+
+/// [`export_dir`] as a KNOWLEDGE ARCHIVE: the same history, chain and
+/// snapshot, but no recovery seed, and the blob marked phrase-sealed — an
+/// import commits it sealed, so opening it needs the phrase (which lives
+/// with the human, never in the blob). What an MCP client gets
+/// (`Command::ExportWorkspaceArchive`): blob + passphrase reads the
+/// knowledge and nothing more.
+pub fn export_archive(
+    root: &Path,
+    ws_dir: &Path,
+    key: &ExportKey,
+    out: &mut dyn Write,
+) -> Result<ExportOutcome, StorageError> {
+    export_dir_impl(root, ws_dir, key, EXPORT_CHUNK_BYTES, true, out)
+}
+
+fn export_dir_impl(
+    root: &Path,
+    ws_dir: &Path,
+    key: &ExportKey,
+    chunk_bytes: u32,
+    archive: bool,
+    out: &mut dyn Write,
+) -> Result<ExportOutcome, StorageError> {
     if chunk_bytes == 0 {
         return Err(StorageError::BadFile("export chunk size must be > 0".to_string()));
     }
@@ -355,7 +381,7 @@ pub(crate) fn export_dir_chunked(
         }
     }
 
-    let (files, skipped) = collect_entries(ws_dir)?;
+    let (mut files, skipped) = collect_entries(ws_dir)?;
 
     let kdf = match key {
         ExportKey::Passphrase(_) => {
@@ -413,16 +439,31 @@ pub(crate) fn export_dir_chunked(
     written += 15 + 4 + u64::from(header_len);
 
     // encrypted payload stream
+    // an ARCHIVE carries no seed and presents itself phrase-sealed: the
+    // blob's manifest says so, so the import commits it without keys
+    if archive {
+        let mut sealed_manifest = manifest.clone();
+        sealed_manifest.crypto.sealed = molt_core::SEALED_PHRASE.to_string();
+        let text = toml::to_string_pretty(&sealed_manifest)
+            .map_err(|e| StorageError::BadFile(format!("rendering manifest: {e}")))?;
+        if let Some(entry) = files.iter_mut().find(|(n, _)| n == "manifest.toml") {
+            entry.1 = ExportSource::Bytes(text.into_bytes());
+        }
+    }
     let created = crate::now_secs();
     let meta = ExportMeta {
         created,
         exporter: env!("CARGO_PKG_VERSION").to_string(),
         // every exportable dir is device-sealed (a phrase-sealed dir was
         // refused on its marker above); shared vocabulary with the S6
-        // manifest marker
-        at_rest: molt_core::SEALED_DEVICE.to_string(),
+        // manifest marker — an archive claims the phrase-sealed state
+        at_rest: if archive {
+            molt_core::SEALED_PHRASE.to_string()
+        } else {
+            molt_core::SEALED_DEVICE.to_string()
+        },
         workspace_key: hex::encode(*ws_key),
-        seed: seed.as_ref().map(|s| hex::encode(s.as_slice())),
+        seed: if archive { None } else { seed.as_ref().map(|s| hex::encode(s.as_slice())) },
         files: u64::try_from(files.len()).unwrap_or(0),
     };
     // the serialized meta carries the raw key + seed hex — wipe it on drop

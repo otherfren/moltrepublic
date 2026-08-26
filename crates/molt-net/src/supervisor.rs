@@ -1839,7 +1839,7 @@ mod tests {
             tasks.push(tokio::spawn(async move {
                 store
                     .update(|st| {
-                        let mut g = st.group.clone().unwrap_or_default();
+                        let mut g = st.group.unwrap_or_default();
                         g.resend_rounds += 1;
                         st.group = Some(g);
                         true

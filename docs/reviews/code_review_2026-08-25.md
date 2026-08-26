@@ -515,6 +515,70 @@ file; five copies of the in-place `VecModel` diff; six copies of the
 `wiki_bridge.rs`, `src/tests/*`. Mechanical moves first, then the
 `Ctx` / `sync_model` collapses.
 
+## 9. MCP tool privileges (audit 2026-08-26)
+
+A dedicated pass over every MCP tool (70) against the lenses secret
+disclosure, self-escalation / lockout, destructive actions, third-party
+impact and the INTERNAL boundary. The rule applied: "agents are seats"
+licenses republic actions, not the operator's machine, identity or
+secrets — the same line `SetWakeCommand` already drew. The doc is
+`docs_archive/security/mcp-security.md` ("The host boundary").
+
+### P1 [HIGH] `export_workspace` exfiltrated the recovery seed - FIXED
+Blob + passphrase to an agent-chosen path carried the seed ("full seat
+capability"). Fix: the MCP tool is `export_workspace_archive` — no seed,
+marked phrase-sealed (an import commits it sealed; the phrase opens it),
+written into the exchange folder. `ExportWorkspace` is INTERNAL (GUI).
+Test: `an_archive_export_carries_no_seed_and_imports_sealed`.
+
+### P2 [HIGH] `download_file dest` was an arbitrary-file-write primitive - FIXED
+Peer-chosen bytes to any writable path (a dotfile = persistence). Fix:
+`dest` is a bare name inside `download_dir`, refused at the builder.
+Test: `file_tools_take_bare_exchange_names_only`.
+
+### P3 [HIGH] `share_file` read and served any file on the host - FIXED
+Fix: the MCP tool is `share_file_from_exchange` (a bare name in
+`download_dir`); `ShareFile` (any path) is the GUI's file dialog, INTERNAL.
+
+### P4 [HIGH] `read_session` handed every client the S3 secret and the MCP token - FIXED
+Fix: both fields never serialize (`#[serde(skip_serializing)]`); the S3
+secret is settable write-only through `patch_settings`; the token's door
+is `SetNodePosture`. Test: `no_recovery_phrase_ever_serializes` (extended).
+
+### P5 [MEDIUM] `patch_settings` / `save_settings` could deanonymize the human and widen exposure - FIXED
+`anonymity`, `tor_mode`, `tor_port`, `mcp_allow`, `mcp_port`,
+`mcp_token`, `headless`, `workspace_dir`, `download_dir` (+ the wake
+command) are the HOST POSTURE: `Command::SetNodePosture` (INTERNAL, GUI /
+config) is their one door; `patch_settings` refuses them, `save_settings`
+re-merges the stored values. The GUI's three save paths go through one
+`save_draft` (wake → posture → wholesale, one task — closes F3). Tests:
+`the_settings_tools_carry_no_host_posture_or_secret`,
+`the_accept_loop_reads_the_token_that_is_current_now`.
+
+### P6 [MEDIUM] Clearnet consent had an MCP door - FIXED
+`relay_confirm` refuses `accept_clearnet: true`, `relay_clearnet_session`
+refuses `unlock: true` over MCP (switching off stays). `relay_probe`
+dials through the live dialer (Tor when on) — kept. Test:
+`clearnet_consent_is_not_given_over_mcp`.
+
+### P7 [MEDIUM] Export / wiki export wrote to agent-chosen paths - FIXED
+Both write into the exchange folder over MCP (`wiki_export_archive`);
+`WikiExport` is INTERNAL.
+
+### P8 [MEDIUM] Ritual-abandon side effects of `create_start` / `join_start` / `recover_start` / `open_workspace` - OPEN (product)
+A single call while the human is mid-founding tears the ritual down for
+everyone. Fix direction: refuse the context switch while a ritual is in
+flight unless an explicit `force` argument is set (both surfaces).
+
+### P9 [LOW] Tool descriptions claimed `read_session` shows the seed - FIXED
+`create_start` / `create_finish` / `join_finish` say where the phrase is
+shown and that a founding/join completes on a GUI node. OPEN: a local
+`--reveal-seed` for headless nodes (K4).
+
+### P10 [LOW] No send-side rate limits on chat / poke / propose / share - OPEN
+Bounded only by the hourly relay budget and the receive-side poke
+cooldown. Fix direction: per-tool send caps.
+
 ---
 
 ## Checked and in order (no finding)

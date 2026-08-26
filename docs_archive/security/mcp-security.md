@@ -148,6 +148,46 @@ If a client hangs or gets a connection reset with no JSON reply, check that
 `WARN ... peer IP not on the allowlist` line first — the allowlist drops the socket
 before the protocol ever starts.
 
+## The host boundary: what an agent may NOT do (audit 2026-08-26)
+
+"Agents are seats" licenses REPUBLIC actions — propose, approve, chat,
+share, restore — not the operator's MACHINE, identity or secrets. The
+tool catalogue enforces that line at the builder and the engine keeps the
+stored values behind it:
+
+* **Host posture is the GUI's / `config.toml`'s door** (`SetNodePosture`,
+  INTERNAL): `headless`, `workspace_dir`, `download_dir`, `mcp_port`,
+  `mcp_allow`, `mcp_token`, `anonymity`, `tor_mode`, `tor_port` and
+  `poke_wake_command`. `patch_settings` refuses them, `save_settings`
+  never carries them (the engine re-merges the stored values). An agent
+  therefore cannot switch the operator's Tor off, bind the endpoint to
+  `0.0.0.0`, rotate itself a token the human never learns, or repoint the
+  workspace root.
+* **Secrets never read back.** `settings.s3_secret_key` and
+  `settings.mcp_token` are not serialized (like the recovery phrase); the
+  S3 secret is settable write-only through `patch_settings`.
+* **The exchange folder is the agent's whole filesystem.** `download_file`
+  writes into `download_dir` only (a bare name), `share_file` shares a
+  bare name FROM it (`share_file_from_exchange`), `export_workspace` and
+  `wiki_export` write INTO it (`export_workspace_archive`,
+  `wiki_export_archive`). Any-path access — the file dialog — is the GUI's
+  (`ShareFile`, `ExportWorkspace`, `WikiExport` are INTERNAL).
+* **The MCP export is a knowledge archive.** It carries no recovery seed and
+  is marked phrase-sealed: an import commits it sealed, so reading it needs
+  the phrase the human holds. Blob + passphrase never becomes a seat.
+* **Clearnet consent is a human decision.** `relay_confirm` refuses
+  `accept_clearnet: true` and `relay_clearnet_session` refuses
+  `unlock: true` over MCP; switching non-onion dialing OFF and confirming
+  onion relays stay available.
+* **Founding and joining complete on a GUI node.** The recovery phrase is
+  shown in the wizard only and `confirm_seed_backup` needs it re-typed, so
+  a headless MCP client cannot attest the backup on the human's behalf.
+
+Still open (product): a ritual in flight is abandoned as a side effect of
+`create_start` / `join_start` / `recover_start` / `open_workspace` from
+any surface — a griefing primitive against the human's own in-flight
+work; a `force` argument or an "in flight" refusal is the fix direction.
+
 ## Co-equality audit: what the GUI can do vs. what a bot can do
 
 The rule is: **every state-changing action the GUI offers maps to one MCP

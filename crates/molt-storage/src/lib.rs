@@ -3486,6 +3486,42 @@ mod tests {
         assert_eq!(loaded.tail.len(), 3);
     }
 
+    /// A KNOWLEDGE ARCHIVE (what an MCP client may export) carries no
+    /// recovery seed and imports SEALED: reading it needs the phrase the
+    /// human holds, and blob + passphrase never becomes a seat (MCP audit
+    /// 2026-08-26 H1).
+    #[test]
+    fn an_archive_export_carries_no_seed_and_imports_sealed() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().to_path_buf();
+        let phrase = generate_seed_phrase().expect("gen");
+        let seed = seed_entropy(&phrase).expect("entropy");
+        let dir = {
+            let mut ws = create_workspace(&root, &seed, &founded(42)).expect("create");
+            ws.append(&chat(2, "knowledge")).expect("append");
+            ws.sync().expect("sync");
+            ws.dir().to_path_buf()
+        };
+        let pass = "a passphrase long enough for the export";
+        let mut blob = Vec::new();
+        crate::export::export_archive(&root, &dir, &crate::export::ExportKey::passphrase(pass), &mut blob)
+            .expect("export");
+        let dest_root = tmp.path().join("dest-root");
+        std::fs::create_dir_all(&dest_root).expect("dest root");
+        let staging = crate::import::import_stage(&dest_root, &blob, pass).expect("stage");
+        assert!(staging.seed_entropy().is_none(), "no seed in an archive");
+        assert_eq!(staging.at_rest, molt_core::SEALED_PHRASE);
+        let imported = staging.commit(&dest_root, false, None).expect("commit");
+        assert!(
+            is_sealed(&read_manifest(&imported).expect("manifest")),
+            "the import is sealed - the phrase opens it"
+        );
+        assert!(open_workspace(&imported).is_err(), "no keys on disk");
+        crate::sealing::unseal_at_rest(&dest_root, &imported, &phrase).expect("the phrase opens it");
+        let (_ws, loaded) = open_workspace(&imported).expect("open after unseal");
+        assert_eq!(loaded.tail.len(), 2, "the knowledge is all there");
+    }
+
     /// Append until the active segment has rotated `n` times — the compactor
     /// can only drop WHOLE segments, so every drop test needs a multi-segment
     /// log. Rotation is size-driven in production (8 MiB); driving it

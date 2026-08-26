@@ -671,9 +671,11 @@ mod tests {
                 ..SessionSettings::default()
             };
             wallet
-                .execute(Command::SaveSettings { settings })
+                .execute(Command::SetNodePosture {
+                    posture: molt_core::NodePosture::of(&settings),
+                })
                 .await
-                .expect("save");
+                .expect("posture");
 
             let text = wait_for_file(&path, |t| t.contains("port = 5555")).await;
             // the user's comment and the strict schema both survive
@@ -708,9 +710,11 @@ mod tests {
                 ..SessionSettings::default()
             };
             wallet
-                .execute(Command::SaveSettings { settings })
+                .execute(Command::SetNodePosture {
+                    posture: molt_core::NodePosture::of(&settings),
+                })
                 .await
-                .expect("save");
+                .expect("posture");
             wait_for_file(&path, |t| t.contains("port = 9150")).await;
             wait_for_notice(&wallet, "saved").await;
 

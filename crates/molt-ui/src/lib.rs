@@ -344,18 +344,8 @@ pub fn run_app(
                 return;
             };
             let settings = read_settings_draft(&ui, &stored_settings(&last));
-            // the wake command has its own door — the settings paths refuse
-            // it, so that no surface but this one (and config.toml) can plant
-            // a shell command. One click, two commands.
-            issue(
-                &rt,
-                &w,
-                &ui.as_weak(),
-                Command::SetWakeCommand {
-                    command: ui.get_cfg_poke_wake().to_string(),
-                },
-            );
-            issue(&rt, &w, &ui.as_weak(), Command::SaveSettings { settings });
+            let wake = ui.get_cfg_poke_wake().to_string();
+            issue_draft(&rt, &w, &ui.as_weak(), wake, settings);
         });
     }
     {
@@ -377,7 +367,8 @@ pub fn run_app(
             };
             ui.set_cfg_mcp_token(token.into());
             let settings = read_settings_draft(&ui, &stored_settings(&last));
-            issue(&rt, &w, &ui.as_weak(), Command::SaveSettings { settings });
+            let wake = ui.get_cfg_poke_wake().to_string();
+            issue_draft(&rt, &w, &ui.as_weak(), wake, settings);
         });
     }
     {
@@ -635,12 +626,13 @@ pub fn run_app(
                 return;
             };
             let settings = read_settings_draft(&ui, &stored_settings(&last));
+            let wake = ui.get_cfg_poke_wake().to_string();
             let screen = to_screen(ui.get_settings_return());
             let w = w.clone();
             let weak = ui.as_weak();
             rt.spawn(async move {
-                match w.execute(Command::SaveSettings { settings }).await {
-                    Ok(_) => {
+                match save_draft(&w, wake, settings).await {
+                    Ok(()) => {
                         let _ = w.execute(Command::Navigate { screen }).await;
                     }
                     Err(e) => {
@@ -3723,6 +3715,48 @@ fn issue_then_toast(
 /// Fire a command on the shared handle; the resulting event drives the
 /// live-mirror, so callers do not await a reply — but an engine error is
 /// surfaced as a toast instead of vanishing silently.
+/// The settings draft's three doors, in ORDER and in ONE task: the wake
+/// command (a local shell hook — its own door, so no other surface can
+/// plant one), the host posture with both secrets (`SetNodePosture` —
+/// the GUI's door; MCP operates the seat, not the machine), then the
+/// wholesale save, which re-merges the stored posture and so must land
+/// LAST. "Save & continue" and "Rotate token" used to skip the wake door
+/// and lose an edited command (review 2026-08-25 F3).
+async fn save_draft(
+    w: &WalletHandle,
+    wake: String,
+    settings: SessionSettings,
+) -> Result<(), molt_core::MoltError> {
+    w.execute(Command::SetWakeCommand { command: wake }).await?;
+    w.execute(Command::SetNodePosture {
+        posture: molt_core::NodePosture::of(&settings),
+    })
+    .await?;
+    w.execute(Command::SaveSettings { settings }).await?;
+    Ok(())
+}
+
+/// [`save_draft`] fire-and-forget, an error as a toast.
+fn issue_draft(
+    rt: &Handle,
+    wallet: &WalletHandle,
+    weak: &slint::Weak<AppWindow>,
+    wake: String,
+    settings: SessionSettings,
+) {
+    let w = wallet.clone();
+    let weak = weak.clone();
+    rt.spawn(async move {
+        if let Err(e) = save_draft(&w, wake, settings).await {
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.invoke_show_toast_error(error_toast(&ui, &e));
+                }
+            });
+        }
+    });
+}
+
 fn issue(rt: &Handle, wallet: &WalletHandle, weak: &slint::Weak<AppWindow>, cmd: Command) {
     let w = wallet.clone();
     let weak = weak.clone();

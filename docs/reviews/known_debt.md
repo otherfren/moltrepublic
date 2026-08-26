@@ -41,6 +41,7 @@ still OPEN there, by id (each carries its fix direction in the review):
 - Core: K2-K3 LOW · K4 residuals (S3 secret / token in `read_session`,
   product call; a local `--reveal-seed` for headless nodes) · K5 style and
   stale contract docs · K6 refactor.
-- Frontends: F2 `ui_action` verbs · F3 wake-command save paths · F4 open
-  half (`molt_config::write` dead) · F6-F9 LOW · F10 style · F11 `molt-ui`
-  split.
+- Frontends: F2 `ui_action` verbs · F4 open half (`molt_config::write`
+  dead) · F6-F9 LOW · F10 style · F11 `molt-ui` split.
+- MCP privileges (section 9): P8 ritual abandon on context switch
+  (product) · P10 send-side rate limits.
