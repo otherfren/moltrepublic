@@ -4047,7 +4047,7 @@ mod tests {
     /// ada is the local member; nobody has been seen yet.
     fn presence_fixture() -> crate::State {
         let mut st = crate::tests::plain_state();
-        st.clock_override = Some(T);
+        st.presence.clock_override = Some(T);
         let roster: Vec<String> =
             vec!["ada".to_string(), "bob".to_string(), "cid".to_string()];
         st.replica = Some(crate::ReplicaState {
@@ -4108,11 +4108,11 @@ mod tests {
         assert_eq!((s.active_1h, s.active_24h, s.active_7d), (2, 2, 2));
         // two hours of silence: bob leaves the 1h window by pure clock
         // advance — no event needed, the trio reads the stamps
-        st.clock_override = Some(T + 7_200);
+        st.presence.clock_override = Some(T + 7_200);
         let s = st.status();
         assert_eq!((s.active_1h, s.active_24h, s.active_7d), (1, 2, 2));
         // eight days of silence: bob leaves every window
-        st.clock_override = Some(T + 8 * 86_400);
+        st.presence.clock_override = Some(T + 8 * 86_400);
         let s = st.status();
         assert_eq!((s.active_1h, s.active_24h, s.active_7d), (1, 1, 1));
     }
@@ -4124,7 +4124,7 @@ mod tests {
     fn the_local_member_stays_online_through_aging() {
         let mut st = presence_fixture(); // ada is the local member
         // long after every threshold, with no traffic at all
-        st.clock_override = Some(T + 30 * 86_400);
+        st.presence.clock_override = Some(T + 30 * 86_400);
         st.cmd_net_presence_tick().expect("tick");
         assert_eq!(pill(&st, "ada").state, 0, "self never ages offline");
         let ada = st
@@ -4186,7 +4186,7 @@ mod tests {
         let mut st = presence_fixture();
         st.cmd_net_peer_seen("bob".to_string(), None).expect("stamp bob");
         // a quiet weekend later, on a MESH workspace: bob is honestly offline
-        st.clock_override = Some(T + 3 * 86_400);
+        st.presence.clock_override = Some(T + 3 * 86_400);
         st.cmd_net_presence_tick().expect("tick");
         assert_eq!(pill(&st, "bob").state, 2, "mesh aging is unchanged");
         // the same silence on a NOSTR workspace: coarse, not dark
@@ -4221,11 +4221,11 @@ mod tests {
             rotation_seed: [0u8; 32],
         });
         // inside the window: coarse, not dark (the quiet-republic case)
-        st.clock_override = Some(T + MemberInfo::COARSE_SECS - 60);
+        st.presence.clock_override = Some(T + MemberInfo::COARSE_SECS - 60);
         st.cmd_net_presence_tick().expect("tick");
         assert_eq!(pill(&st, "bob").state, 1, "a quiet week is still stale");
         // past it: this is not silence any more, it is absence
-        st.clock_override = Some(T + MemberInfo::COARSE_SECS + 60);
+        st.presence.clock_override = Some(T + MemberInfo::COARSE_SECS + 60);
         st.cmd_net_presence_tick().expect("tick");
         assert_eq!(pill(&st, "bob").state, 2, "months of silence must read dark");
         assert_eq!(
@@ -4396,7 +4396,7 @@ mod tests {
     #[test]
     fn an_announce_without_our_queue_does_not_burn_the_cooldown() {
         let mut st = presence_fixture();
-        st.clock_override = Some(T);
+        st.presence.clock_override = Some(T);
         let handover = |queue: &str| molt_net::mesh::QueueHandover {
             server: String::new(),
             queue: queue.to_string(),
@@ -4412,7 +4412,7 @@ mod tests {
             "an announce carrying nothing for us must not stamp the cooldown"
         );
         // moments later bob's announce FOR ada arrives — it must pass the gate
-        st.clock_override = Some(T + 5);
+        st.presence.clock_override = Some(T + 5);
         let mut queues = std::collections::BTreeMap::new();
         queues.insert("ada".to_string(), handover("bb"));
         let for_ada = molt_net::mesh::MeshAnnounce { queues };
@@ -4423,7 +4423,7 @@ mod tests {
             "the announce for us passes the cooldown gate and stamps it"
         );
         // a REPEATED valid announce inside the window is still ignored (churn cap)
-        st.clock_override = Some(T + 10);
+        st.presence.clock_override = Some(T + 10);
         st.spawn_mesh_extension("bob".to_string(), &for_ada);
         assert_eq!(
             st.mesh_extension_at.get("bob"),
@@ -4477,10 +4477,10 @@ mod tests {
     fn the_ticker_ages_a_silent_pill_stale_then_offline() {
         let mut st = presence_fixture();
         st.cmd_net_peer_seen("bob".to_string(), None).expect("ack");
-        st.clock_override = Some(T + MemberInfo::ONLINE_SECS + 1);
+        st.presence.clock_override = Some(T + MemberInfo::ONLINE_SECS + 1);
         st.cmd_net_presence_tick().expect("tick");
         assert_eq!(pill(&st, "bob").state, 1, "silence past ONLINE_SECS is stale");
-        st.clock_override = Some(T + MemberInfo::STALE_SECS + 1);
+        st.presence.clock_override = Some(T + MemberInfo::STALE_SECS + 1);
         st.cmd_net_presence_tick().expect("tick");
         let bob = pill(&st, "bob");
         assert_eq!(bob.state, 2, "silence past STALE_SECS is offline");
@@ -4542,7 +4542,7 @@ mod tests {
             restored: false,
         });
         // 31 minutes of total silence pass everywhere
-        st.clock_override = Some(T + MemberInfo::STALE_SECS + 1);
+        st.presence.clock_override = Some(T + MemberInfo::STALE_SECS + 1);
         st.cmd_net_presence_tick().expect("tick");
         // the ACTIVE entry ages honestly (bob offline, ada self-online)
         assert_eq!(pill(&st, "bob").state, 2, "the active workspace's silent peer ages offline");
@@ -4575,20 +4575,20 @@ mod tests {
         let mut st = presence_fixture();
         // align to a label-minute boundary so the buckets are obvious
         let base = (T / 60) * 60;
-        st.clock_override = Some(base);
+        st.presence.clock_override = Some(base);
         // first sighting flips NEVER -> online: a state change, so it pushes
         st.cmd_net_peer_seen("bob".to_string(), None).expect("first sighting");
         // observe only pushes from here on
         let mut ev = st.subscribe_events();
         // a re-stamp still inside the same displayed minute renders identically
-        st.clock_override = Some(base + 59);
+        st.presence.clock_override = Some(base + 59);
         st.cmd_net_peer_seen("bob".to_string(), None).expect("re-stamp, same minute");
         assert!(
             ev.try_recv().is_err(),
             "a re-stamp inside the same label-minute must not re-broadcast the session"
         );
         // a re-stamp crossing into the next displayed minute changes the label
-        st.clock_override = Some(base + 60);
+        st.presence.clock_override = Some(base + 60);
         st.cmd_net_peer_seen("bob".to_string(), None).expect("re-stamp, next minute");
         assert!(
             matches!(ev.try_recv(), Ok(crate::Event::SessionChanged { .. })),
@@ -4609,7 +4609,7 @@ mod tests {
         assert_eq!(bob.state, 2, "failing sends mark the member unreachable");
         assert_eq!(bob.last_seen, T, "a failure is not a sighting");
         // the ticker must not lift the pin while the stamp is still fresh
-        st.clock_override = Some(T + 10);
+        st.presence.clock_override = Some(T + 10);
         st.cmd_net_presence_tick().expect("tick");
         assert_eq!(pill(&st, "bob").state, 2, "unreachable is sticky");
         assert_eq!(

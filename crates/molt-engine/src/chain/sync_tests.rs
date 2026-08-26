@@ -20,7 +20,7 @@ fn a_catch_up_request_is_served_once_per_debounce() {
     let mut b = Builder::new(&["petra", "walter", "dora"], 2);
     b.commit_applied(1, &["petra", "dora"]);
     let mut walter = chain_peer("walter", &b, b.blocks.clone());
-    walter.clock_override = Some(1_000);
+    walter.presence.clock_override = Some(1_000);
     let before = walter.next_seq;
     wire(&mut walter, "petra", 1, WorkspaceEvent::ChainRequest { from_height: 0 });
     let served = walter.next_seq;
@@ -29,7 +29,7 @@ fn a_catch_up_request_is_served_once_per_debounce() {
     assert_eq!(walter.next_seq, served, "a repeat inside the debounce serves nothing");
     wire(&mut walter, "petra", 3, WorkspaceEvent::ChainRequest { from_height: 99 });
     assert_eq!(walter.next_seq, served, "nothing above the head is served");
-    walter.clock_override = Some(1_000 + crate::net::CHAIN_SERVE_DEBOUNCE_SECS);
+    walter.presence.clock_override = Some(1_000 + crate::net::CHAIN_SERVE_DEBOUNCE_SECS);
     wire(&mut walter, "petra", 4, WorkspaceEvent::ChainRequest { from_height: 0 });
     assert!(walter.next_seq > served, "after the debounce it is served again");
 }

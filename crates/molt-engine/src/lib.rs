@@ -527,6 +527,27 @@ pub(crate) struct DeliveryState {
     pub(crate) last_mesh_out: u64,
 }
 
+/// Presence bookkeeping of the open workspace: the test-only clock seam every
+/// presence stamp and aging pass reads through (`State::presence_now`), and
+/// the poke / auto-wake cooldowns. Active-workspace scope for the cooldowns;
+/// the clock seam outlives a workspace switch.
+pub(crate) struct PresenceState {
+    /// Per-sender cooldown for accepted pokes (`member → presence_now of the
+    /// last reacted poke`): a poke inside the window is dropped quietly, so
+    /// a flooding member cannot ring this node's sound or spawn its wake
+    /// command in a loop. Active-workspace scope.
+    pub(crate) poke_at: std::collections::HashMap<MemberId, u64>,
+    /// Global holdoff stamp for the pending-vote auto-wake (`presence_now`
+    /// of the last fired wake): new proposals inside the window do not
+    /// re-spawn the wake command — one nudge, then the agent reads state.
+    pub(crate) wake_at: Option<u64>,
+    /// Presence clock **test seam** (same posture as [`State::demo_mesh`]):
+    /// `None` in every production context — presence stamping/aging then
+    /// runs on the shared [`now_secs`] clock; tests pin it to age pills
+    /// deterministically.
+    pub(crate) clock_override: Option<u64>,
+}
+
 pub(crate) struct State {
     pub(crate) config: GroupConfig,
     ev_tx: broadcast::Sender<Event>,
@@ -777,15 +798,7 @@ pub(crate) struct State {
     /// the window is ignored — one rotation per member per minute is ample,
     /// and it caps the churn a misbehaving member can inflict.
     pub(crate) mesh_extension_at: std::collections::HashMap<MemberId, u64>,
-    /// Per-sender cooldown for accepted pokes (`member → presence_now of the
-    /// last reacted poke`): a poke inside the window is dropped quietly, so
-    /// a flooding member cannot ring this node's sound or spawn its wake
-    /// command in a loop. Active-workspace scope.
-    pub(crate) poke_at: std::collections::HashMap<MemberId, u64>,
-    /// Global holdoff stamp for the pending-vote auto-wake (`presence_now`
-    /// of the last fired wake): new proposals inside the window do not
-    /// re-spawn the wake command — one nudge, then the agent reads state.
-    pub(crate) wake_at: Option<u64>,
+    pub(crate) presence: PresenceState,
     /// Are clearnet relays activated for THIS session? Runtime-only **on
     /// purpose** — it is never persisted, so every start re-arms the gate and
     /// no clearnet packet leaves before the user acts again
@@ -800,11 +813,6 @@ pub(crate) struct State {
     /// ritual opened). Every probe path is timeout-bounded, so an entry
     /// always clears.
     pub(crate) pending_relay_confirms: std::collections::HashSet<String>,
-    /// Presence clock **test seam** (same posture as [`State::demo_mesh`]):
-    /// `None` in every production context — presence stamping/aging then
-    /// runs on the shared [`now_secs`] clock; tests pin it to age pills
-    /// deterministically.
-    pub(crate) clock_override: Option<u64>,
     /// Generation of the newest backup-bucket listing request
     /// ([`molt_core::Command::NetListBackups`]): bumped per request and on a
     /// backup-target settings change, so a stale off-actor result can never
@@ -1071,14 +1079,16 @@ impl State {
             recovery_tickets: HashMap::new(),
             recovery_mesh_window: std::collections::HashSet::new(),
             mesh_extension_at: std::collections::HashMap::new(),
-            poke_at: std::collections::HashMap::new(),
-            wake_at: None,
+            presence: PresenceState {
+                poke_at: std::collections::HashMap::new(),
+                wake_at: None,
+                clock_override: None,
+            },
             // the STORED decision is what a fresh process starts from
             // (ADR-0004 amendment): an operator who acknowledged clearnet
             // exposure is not asked again on every restart
             clearnet_session: session.settings.clearnet_relays_enabled,
             pending_relay_confirms: std::collections::HashSet::new(),
-            clock_override: None,
             s3_list_gen: 0,
             tor_test_gen: 0,
             backup_inflight: std::collections::HashSet::new(),
@@ -1133,7 +1143,7 @@ impl State {
     /// Every presence stamp, aging pass and activity-trio read runs on
     /// THIS accessor so tests can age pills deterministically.
     pub(crate) fn presence_now(&self) -> u64 {
-        self.clock_override.unwrap_or_else(now_secs)
+        self.presence.clock_override.unwrap_or_else(now_secs)
     }
 
     /// The 0/1/2 presence pill for one member, the single derivation every

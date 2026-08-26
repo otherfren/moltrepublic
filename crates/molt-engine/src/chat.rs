@@ -864,13 +864,13 @@ impl State {
             return;
         }
         let now = self.presence_now();
-        if let Some(last) = self.poke_at.get(from) {
+        if let Some(last) = self.presence.poke_at.get(from) {
             if now.saturating_sub(*last) < POKE_COOLDOWN_SECS {
                 tracing::debug!(%from, "poke inside the cooldown - dropped");
                 return;
             }
         }
-        self.poke_at.insert(from.to_string(), now);
+        self.presence.poke_at.insert(from.to_string(), now);
         tracing::info!(%from, "poked");
         self.emit(Event::Poked {
             by: from.to_string(),
@@ -894,12 +894,12 @@ impl State {
             return;
         }
         let now = self.presence_now();
-        if let Some(last) = self.wake_at {
+        if let Some(last) = self.presence.wake_at {
             if now.saturating_sub(last) < WAKE_HOLDOFF_SECS {
                 return;
             }
         }
-        self.wake_at = Some(now);
+        self.presence.wake_at = Some(now);
         self.spawn_wake("vote_pending", by);
     }
 
@@ -1366,7 +1366,7 @@ mod tests {
     #[test]
     fn the_park_clears_on_reset_and_releases_stale_entries() {
         let mut st = plain_state();
-        st.clock_override = Some(1_750_000_000);
+        st.presence.clock_override = Some(1_750_000_000);
         // seed the window: with a history to order against, G7 parks (the
         // fresh-incarnation rule would otherwise deliver the orphan as a
         // first-contact baseline)
@@ -1685,7 +1685,7 @@ mod tests {
     fn a_received_poke_reacts_once_per_sender_inside_the_cooldown() {
         let mut st = plain_state();
         st.session.settings.poke_enabled = true;
-        st.clock_override = Some(1_000);
+        st.presence.clock_override = Some(1_000);
         let mut ev = st.subscribe_events();
         let me = st.member();
 
@@ -1694,7 +1694,7 @@ mod tests {
             matches!(ev.try_recv(), Ok(crate::Event::Poked { by, .. }) if by == "peer-1"),
             "the first poke reacts"
         );
-        st.clock_override = Some(1_010);
+        st.presence.clock_override = Some(1_010);
         st.receive_poke("peer-1", &me);
         assert!(
             ev.try_recv().is_err(),
@@ -1705,7 +1705,7 @@ mod tests {
             matches!(ev.try_recv(), Ok(crate::Event::Poked { by, .. }) if by == "peer-2"),
             "the cooldown is per sender"
         );
-        st.clock_override = Some(1_000 + super::POKE_COOLDOWN_SECS);
+        st.presence.clock_override = Some(1_000 + super::POKE_COOLDOWN_SECS);
         st.receive_poke("peer-1", &me);
         assert!(
             matches!(ev.try_recv(), Ok(crate::Event::Poked { by, .. }) if by == "peer-1"),
@@ -1765,7 +1765,7 @@ mod tests {
     #[test]
     fn pending_work_wakes_once_inside_the_holdoff() {
         let mut st = plain_state();
-        st.clock_override = Some(5_000);
+        st.presence.clock_override = Some(5_000);
         let marker = std::env::temp_dir().join(format!("molt-vote-wake-{}", std::process::id()));
         let _ = std::fs::remove_file(&marker);
         st.session.settings.poke_wake_command = format!("echo woke >> '{}'", marker.display());
@@ -1805,12 +1805,12 @@ mod tests {
         st.maybe_wake_pending("peer-1");
         await_lines(&marker, 1);
 
-        st.clock_override = Some(5_010);
+        st.presence.clock_override = Some(5_010);
         st.maybe_wake_pending("peer-1");
         std::thread::sleep(std::time::Duration::from_millis(150));
         assert_eq!(lines(&marker), 1, "inside the holdoff: one nudge only");
 
-        st.clock_override = Some(5_000 + super::WAKE_HOLDOFF_SECS);
+        st.presence.clock_override = Some(5_000 + super::WAKE_HOLDOFF_SECS);
         st.maybe_wake_pending("peer-1");
         await_lines(&marker, 2);
         let _ = std::fs::remove_file(&marker);

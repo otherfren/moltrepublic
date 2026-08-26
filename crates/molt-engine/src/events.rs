@@ -660,8 +660,8 @@ impl State {
         self.recovery_tickets.clear();
         self.recovery_mesh_window.clear();
         self.mesh_extension_at.clear();
-        self.poke_at.clear();
-        self.wake_at = None;
+        self.presence.poke_at.clear();
+        self.presence.wake_at = None;
         // the accept windows belong to the OLD workspace's senders — leaking
         // them would dedup-drop the NEXT workspace's fresh envelopes
         self.delivery.accepted.clear();
