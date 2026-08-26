@@ -75,11 +75,9 @@ the variant stays reserved. Tests: `a_joined_block_is_refused_whole`,
 Both gates use `anchor_seen_in_chain` (founding anchors, every Restored
 block's anchor, the blob's working anchors).
 
-### C9 [STYLE] Em dashes / prose in strings reaching the UI - OPEN
-`backup.rs:30` (`SEALED_SKIP`), `backup.rs` export-cap and chainless
-messages, `chain.rs` consent-twice and no-previous-exporter errors; prose
-log lines `chain.rs` (seal held back, tie-break, checkpoint arms). Plain
-`-`, one clause, structured fields.
+### C9 [STYLE] Em dashes / prose in strings reaching the UI - FIXED
+Plain `-` and one clause in `backup.rs` / `chain.rs` strings (style sweep
+2026-08-26).
 
 ### C10 [REFACTOR] `chain.rs` (10k lines) split + duplicates - OPEN
 Proposed modules: `chain/verify.rs` (pure verification, 1-1238),
@@ -135,10 +133,10 @@ E8).
 At most `PARKED_READS_PER_FRAME` (16) targets per frame. Test:
 `a_read_receipt_frame_parks_a_bounded_number_of_targets`.
 
-### E7 [STYLE] Prose / em dashes in engine strings the GUI renders - OPEN
-`session.rs` (`NOSTR_RUNTIME_PENDING`, relay-confirm refusals, offline
-health reasons), `lib.rs` (`LEGACY_RECOVERY_LINK`), `proposals.rs`,
-`chat.rs`, `transfer.rs`, `net.rs:2027`.
+### E7 [STYLE] Prose / em dashes in engine strings the GUI renders - FIXED
+`NOSTR_RUNTIME_PENDING`, the offline health reasons and the
+encrypt/decrypt refusals cut to one clause; the GUI's German arms follow
+(style sweep 2026-08-26).
 
 ### E8 [REFACTOR] `lib.rs` / `net.rs` structure - OPEN
 `lib.rs`: 4,150 of 5,835 lines are tests → `src/tests/*`; `State` (90
@@ -198,10 +196,11 @@ The phrases in `JoinCtx` / `RecoverCtx` / `recover_ctx` are `Zeroizing`.
 OPEN: `nostr_sk` in the two `Net*Sealed` commands (a redacting `Debug`
 on `Command`, or a newtype).
 
-### R10 [STYLE] ~100 em dashes in run-log producers and the E5 shape list - OPEN
-Must change together with `known_log_shapes()` (the GUI localizes by
-shape). Stale docs: `lifecycles.rs:3-7`, `recovery.rs:11`, the misplaced
-`cfg_attr` on `recover_command`.
+### R10 [STYLE] ~100 em dashes in run-log producers and the E5 shape list - FIXED
+Producers, `known_log_shapes()` and `LOG_SHAPES_DE` moved together; the
+invite refusals lost their parenthetical lectures (style sweep 2026-08-26).
+The stale doc comments (`lifecycles.rs:3-7`, `recovery.rs:11`, the
+`cfg_attr`) stay with R11.
 
 ### R11 [REFACTOR] The member state machine exists twice and has diverged - OPEN
 `run_ritual_member` vs `member_join`; a `RitualLeg` trait with one
@@ -280,10 +279,9 @@ Persist `published_through` before returning on `Stopped`.
 ### M10 [LOW] Shape-malformed 445s are held as if they might open later - OPEN
 Match `EnvelopeError::Shape` → drop; hold only `EpochOpaque`.
 
-### M11 [STYLE] Em dashes reaching the health surface; prose logs - OPEN
-`group_runtime.rs` "not acknowledging deliveries — still resending",
-`supervisor.rs:966, 1374`, `file_plane.rs:286`; prose warns
-`supervisor.rs:1286, 1632, 300-303`.
+### M11 [STYLE] Em dashes reaching the health surface; prose logs - FIXED
+The three `send_failed` / `link_down` reasons and the GUI arms that match
+them use `-`; the named prose warns carry fields (style sweep 2026-08-26).
 
 ### M12 [REFACTOR] - OPEN
 `retry_epoch_hold` vs `drain_epoch_buffer` (one generic
@@ -335,9 +333,9 @@ plaintext `http://` to clearnet like the relay policy.
 ### T8 [LOW] `S3Config` derives `Debug` with the secret - OPEN
 Manual `Debug` eliding `secret_key`.
 
-### T9 [STYLE] Em dashes in `TorTest.detail`, `S3Error` hints, `NetError::Framing` - OPEN
-`tor_probe.rs`, `s3/mod.rs`, `s3/http.rs`, `dial.rs:303`,
-`relay_runtime.rs` publish gate; `molt-ui` rewrites them per string.
+### T9 [STYLE] Em dashes in `TorTest.detail`, `S3Error` hints, `NetError::Framing` - FIXED
+Sources and the GUI's prefix arms use `-`; the two long Tor hedges are one
+clause each (style sweep 2026-08-26).
 
 ### T10 [REFACTOR] - PARTLY FIXED
 `publish_one` = connect → `send_and_await_ok` → close; one
@@ -397,8 +395,9 @@ the staging loop.
 Propagate the dir fsync error in `write_atomic` (at least for
 `mode_600`).
 
-### S10 [STYLE] Em dashes in `MoltError::Storage` strings; the transport-loss log - OPEN
-`lib.rs`, `import.rs`, `export.rs` sites; the four-line `lost` sentence.
+### S10 [STYLE] Em dashes in `MoltError::Storage` strings; the transport-loss log - FIXED
+Error strings use `-`; the transport-loss log is one line with
+`cause=` / `loses=` fields (style sweep 2026-08-26).
 
 ### S11 [REFACTOR] - OPEN
 Three copies of "decrypt chain.state" and of "decrypt the genesis frame";
@@ -432,12 +431,11 @@ OPEN: a headless node has no way to show its phrase to the operator except
 the device files - a local CLI (`moltd --reveal-seed <id>`) would close
 that without touching the network surface.
 
-### K5 [STYLE] Em dashes / prose in `Display` strings; stale contract docs - PARTLY FIXED
+### K5 [STYLE] Em dashes / prose in `Display` strings; stale contract docs - FIXED
 Docs corrected (`clearnet_session`, `RelayClearnetSession.unlock`,
-`ReadState.view`, `CreateStart.threshold`). OPEN: the em-dash `Display`
-strings (`ChatNotGated`, `AlreadyApproved`, `DiscussionClosed`,
-`WorkspaceEncrypted`, `RelayUrlError`) go with the style sweep;
-`has_archive` stays (a wire field; documented dead).
+`ReadState.view`, `CreateStart.threshold`); the `Display` strings use `-`
+and `RelayUrlError::TooLong` formats `MAX_URL_LEN` (style sweep
+2026-08-26). `has_archive` stays (a wire field; documented dead).
 
 ### K6 [REFACTOR] - PARTLY FIXED
 `SessionView::default()` lists no workspace (fence test
@@ -489,13 +487,11 @@ created exclusively (never through an existing file).
 Every tool that builds from a schema-derived argument set is compared
 against its label's serde tag.
 
-### F10 [STYLE] Stale operator text; em dashes - PARTLY FIXED
-Fixed: the `threshold` schema text (`2..=members`). OPEN: `main.rs:159`
-"the Nostr transport lands with N4" at every boot; the `SIMULATION`
-shape; em dashes in `LOG_SHAPES_DE` (change with the engine shapes), the
-net-health / S3 / Tor detail strings, `main.rs` clap text and stdout,
-`molt-config` rendered template comments. Slint files and the landing
-page are clean.
+### F10 [STYLE] Stale operator text; em dashes - FIXED
+The `threshold` schema text (`2..=members`), the boot line and the
+`SIMULATION` shape no longer mention N4; `LOG_SHAPES_DE`, the net-health /
+S3 / Tor arms, the MCP tool descriptions, `main.rs` and the rendered
+`config.toml` comments use `-` (style sweep 2026-08-26).
 
 ### F11 [REFACTOR] `molt-ui/src/lib.rs` (14.4k lines) - OPEN
 `run_app` is one 2,150-line function; tests are 4,950 lines in the same
