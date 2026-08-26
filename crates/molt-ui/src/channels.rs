@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use molt_core::{ChannelInfo, ChannelRef, Command, ProposalId, ProposalView, Surface};
 
-use crate::{display_title, ChannelRowData};
+use crate::surfaces::{display_title, ChannelRowData};
 
 /// The stable string form of a channel across the Rust↔Slint boundary:
 /// `"group"`, `"patch:<id>"`, `"topic:<name>"`. Sidebar rows carry it; the

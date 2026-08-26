@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use molt_core::{ChannelRef, ChatMessage, ProposalView, SurfaceSnapshot};
 
 use crate::labels::{file_date_label, file_size_label, when_label};
-use crate::{display_title, KnownFate, KnownProposal, LogLineData, ReactionData, ReceiptData};
+use crate::channels::{KnownFate, KnownProposal};
+use crate::surfaces::{display_title, LogLineData, ReactionData, ReceiptData};
 
 /// One quotable message, as the teaser renderer needs it — built over the
 /// FULL chat log, because a quote may point across channels (the sanctioned
