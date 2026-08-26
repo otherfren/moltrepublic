@@ -58,7 +58,9 @@ NO_BARE_SCAN_FILES = {
     # folder/file.md), never repo docs — same class as the sample tree
     "crates/molt-core/src/wiki_fold.rs": "fold keystone fixtures",
     "crates/molt-core/src/lib.rs": "WikiDoc doc-comment path examples",
-    "crates/molt-engine/src/chain.rs": "supersede-walk keystone fixtures",
+    "crates/molt-engine/src/chain/projection_tests.rs": "supersede-walk keystone fixtures",
+    "crates/molt-engine/src/chain/checkpoint_tests.rs": "wiki-fold-across-a-cut fixtures",
+    "crates/molt-engine/src/chain/verify_tests.rs": "wiki export bundle fixtures",
     "crates/molt-engine/tests/wiki_export.rs": "wiki export keystone fixtures",
 }
 
