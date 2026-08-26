@@ -6,7 +6,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use molt_core::{Command, Surface};
+use molt_core::{Command, Reply, Surface};
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 use crate::i18n::{error_toast, localize_wiki_err, Lexicon};
@@ -897,4 +897,41 @@ pub(crate) fn wire_wiki_vote(
             });
         });
     });
+}
+
+/// The debounced wiki-draft persist (WP-D) and its load on workspace
+/// entry: the two draft doors the wiki model reaches the engine through.
+pub(crate) fn wire_wiki_draft(ui: &AppWindow, ctx: &Ctx) {
+    {
+        let cx = ctx.clone();
+        // the debounced wiki-draft persist (WP-D) — an opaque blob hop
+        ui.on_wiki_draft_save(move |draft| {
+            cx.issue(
+                Command::WikiDraftSave {
+                    draft: draft.to_string(),
+                },
+            );
+        });
+    }
+
+    {
+        let cx = ctx.clone();
+        // workspace entry: fetch the stored draft, hand it to the wiki
+        // model over the WikiState bridge (the completion is Send-bound)
+        ui.on_wiki_draft_load(move || {
+            let w = cx.wallet.clone();
+            let weak2 = cx.weak.clone();
+            cx.rt.spawn(async move {
+                let draft = match w.execute(Command::WikiDraftLoad).await {
+                    Ok(Reply::WikiDraft { draft }) => draft,
+                    _ => String::new(),
+                };
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak2.upgrade() {
+                        ui.global::<WikiState>().invoke_draft_loaded(draft.into());
+                    }
+                });
+            });
+        });
+    }
 }

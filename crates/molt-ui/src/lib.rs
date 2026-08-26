@@ -34,7 +34,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 
-use molt_core::{Command, Event, Reply, SessionScope, SessionSettings};
+use molt_core::{Command, Event, SessionScope, SessionSettings};
 use molt_engine::WalletHandle;
 use slint::{Model, ModelRc, VecModel};
 use tokio::runtime::Handle;
@@ -220,6 +220,7 @@ pub fn run_app(
     wire_wiki_vote(&ui, &ctx, &wiki_model, &wiki_last);
     wire_patch_view(&ui);
     wire_wiki_export(&ui, &ctx);
+    wire_wiki_draft(&ui, &ctx);
 
     // --- actions: each becomes a Command on the shared engine ---
     actions::workspace::wire(&ui, &ctx);
@@ -233,37 +234,6 @@ pub fn run_app(
     ui.on_quit(|| {
         let _ = slint::quit_event_loop();
     });
-    {
-        let cx = ctx.clone();
-        // the debounced wiki-draft persist (WP-D) — an opaque blob hop
-        ui.on_wiki_draft_save(move |draft| {
-            cx.issue(
-                Command::WikiDraftSave {
-                    draft: draft.to_string(),
-                },
-            );
-        });
-    }
-    {
-        let cx = ctx.clone();
-        // workspace entry: fetch the stored draft, hand it to the wiki
-        // model over the WikiState bridge (the completion is Send-bound)
-        ui.on_wiki_draft_load(move || {
-            let w = cx.wallet.clone();
-            let weak2 = cx.weak.clone();
-            cx.rt.spawn(async move {
-                let draft = match w.execute(Command::WikiDraftLoad).await {
-                    Ok(Reply::WikiDraft { draft }) => draft,
-                    _ => String::new(),
-                };
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = weak2.upgrade() {
-                        ui.global::<WikiState>().invoke_draft_loaded(draft.into());
-                    }
-                });
-            });
-        });
-    }
 
     // --- live-mirror: re-read and re-render on every engine change ---
     {
@@ -3089,7 +3059,7 @@ mod gui_tests {
     //! layer, where nothing could observe it.
 
     use super::*;
-    use molt_core::{ChannelRef, GroupConfig, SessionView, Surface};
+    use molt_core::{ChannelRef, GroupConfig, Reply, SessionView, Surface};
 
     /// `gui_over_mcp.md` step 1's pin: the published snapshot claims what
     /// the WINDOW's models hold — screen, selection, the chat surface's
