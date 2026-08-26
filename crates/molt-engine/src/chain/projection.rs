@@ -374,7 +374,14 @@ impl State {
             }
             _ => {}
         }
-        // the verified head carries the roster after every membership block
+        self.adopt_head_roster();
+    }
+
+    /// The verified head carries the roster after every membership block —
+    /// adopt it so the newcomers/rekeys show up in the roster + approvals.
+    /// The one fold both the per-block append and the whole-chain rebuild
+    /// end on.
+    fn adopt_head_roster(&mut self) {
         if let Some(head) = &self.chain_head {
             if let Some(r) = &mut self.replica {
                 r.identities = head.identities.clone();
@@ -565,14 +572,7 @@ impl State {
         // R6: an adopted chain may carry pool edits this node has not lived
         // through (catch-up, restore) — adopt the governed pool it lands on
         self.adopt_pool_change();
-        // the verified head carries the roster after every membership block —
-        // adopt it so the newcomers/rekeys show up in the roster + approvals
-        if let Some(head) = &self.chain_head {
-            if let Some(r) = &mut self.replica {
-                r.identities = head.identities.clone();
-                r.roster = head.identities.iter().map(|i| i.member.clone()).collect();
-            }
-        }
+        self.adopt_head_roster();
     }
 
     /// Surface a chain workspace that opened without its local signing key: it
