@@ -75,6 +75,13 @@ pub(crate) const ORDERED_PARK_GIVEUP_SECS: u64 = 900;
 /// message into a retention-proof future.
 pub(crate) const WIRE_STAMP_SKEW_SECS: u64 = 900;
 
+/// One requester is served a chain catch-up at most this often (review C3).
+pub(crate) const CHAIN_SERVE_DEBOUNCE_SECS: u64 = 30;
+
+/// Unknown read-receipt targets one `ChatRead` frame may park: a frame of
+/// random ids would otherwise sweep the whole P6 parking buffer (review E6).
+pub(crate) const PARKED_READS_PER_FRAME: usize = 16;
+
 /// Demo fan-out jitter (ms): enough to be honest about asynchrony, small
 /// enough to feel live. Real deployments keep the concept's 2 s default.
 const DEMO_JITTER_MS: u64 = 300;
@@ -1435,6 +1442,7 @@ impl State {
             // re-applies when its message lands — see the Chat arm's drain.
             WorkspaceEvent::ChatRead { ids, .. } => {
                 let mut known: Vec<MessageId> = Vec::new();
+                let mut parked = 0usize;
                 for id in ids {
                     match self.chat_by_id(&id) {
                         Ok((_, msg)) => {
@@ -1444,7 +1452,13 @@ impl State {
                                 known.push(id);
                             }
                         }
-                        Err(_) => self.parked.park(id, PendingRef::Read { by: from.clone() }),
+                        Err(_) if parked < PARKED_READS_PER_FRAME => {
+                            parked += 1;
+                            self.parked.park(id, PendingRef::Read { by: from.clone() });
+                        }
+                        // past the per-frame cap: a receipt is ephemeral and
+                        // its target may never arrive — dropped, not parked
+                        Err(_) => {}
                     }
                 }
                 if !known.is_empty() {
@@ -1656,11 +1670,28 @@ impl State {
             }
             WorkspaceEvent::ChainRequest { from_height } if self.is_chain_governed() => {
                 tracing::debug!(me = %self.member(), %from, from_height, "chain catch-up request arrived");
-                self.serve_chain_from(from_height);
-                // WP2: the requester is (re)joining the conversation — beyond
-                // the committed suffix it also lost the ephemeral open
-                // governance state with its RAM, so re-serve that too
-                self.serve_open_governance();
+                // an AMPLIFIER (review C3): one frame makes every member record
+                // the whole chain + blob + open cards. Nothing above the head
+                // to serve, and one requester at most once per debounce
+                let now = self.presence_now();
+                let beyond_head = self
+                    .chain_head
+                    .as_ref()
+                    .is_some_and(|h| from_height > h.height);
+                let recently = self
+                    .chain_served_at
+                    .get(&from)
+                    .is_some_and(|t| now.saturating_sub(*t) < CHAIN_SERVE_DEBOUNCE_SECS);
+                if beyond_head || recently {
+                    tracing::debug!(%from, from_height, beyond_head, recently, "chain catch-up request not served");
+                } else {
+                    self.chain_served_at.insert(from.clone(), now);
+                    self.serve_chain_from(from_height);
+                    // WP2: the requester is (re)joining the conversation — beyond
+                    // the committed suffix it also lost the ephemeral open
+                    // governance state with its RAM, so re-serve that too
+                    self.serve_open_governance();
+                }
             }
             WorkspaceEvent::MembershipProposed {
                 id,
@@ -2174,7 +2205,12 @@ impl State {
         // only on an open chain-governed group, only WITH a consent (it is
         // the authorization), and every failure past here stays a SILENT
         // drop (no refusal frame — an unauthenticated prober gets no oracle).
-        let ticketed = self.recovery_tickets.contains(&ticket);
+        // a ticket is bound to the seat it was minted for (review R8): a
+        // member holding its own phrase must not spend ANOTHER seat's link
+        let ticketed = self
+            .recovery_tickets
+            .get(&ticket)
+            .is_some_and(|minted_for| *minted_for == member);
         if !ticketed {
             if !self.is_chain_governed() || self.group_net.is_none() {
                 tracing::debug!(%member, "unsolicited recovery request without an open group — dropped");
@@ -2184,19 +2220,21 @@ impl State {
                 tracing::warn!(%member, "unsolicited recovery request without a consent — dropped");
                 return Ok(Reply::Ack);
             }
-            // one re-admission at a time: a pending Restored proposal for
-            // this member means another receiver (or an earlier frame of
-            // this broadcast) already coordinates
-            if self.proposal_changes.values().any(|c| {
-                matches!(c, molt_core::ChainChange::Membership {
-                    op: molt_core::MembershipOp::Restored,
-                    member: m,
-                    ..
-                } if m == &member)
-            }) {
-                tracing::debug!(%member, "unsolicited recovery request while one is pending — dropped");
-                return Ok(Reply::Ack);
-            }
+        }
+        // one re-admission at a time, on BOTH lanes (review R3): a pending
+        // Restored proposal for this member means another receiver (or an
+        // earlier frame of this broadcast) already coordinates — a second,
+        // ticketed request would re-key with its KeyPackage while the first
+        // block's Welcome goes to a dead anchor, stranding the seat
+        if self.proposal_changes.values().any(|c| {
+            matches!(c, molt_core::ChainChange::Membership {
+                op: molt_core::MembershipOp::Restored,
+                member: m,
+                ..
+            } if m == &member)
+        }) {
+            tracing::warn!(%member, ticketed, "recovery request while a re-admission is pending — dropped");
+            return Ok(Reply::Ack);
         }
         // NB: on a verified request, verify_and_propose_restore registers the
         // pending recovery BEFORE proposing (a lone coordinator commits the
@@ -2218,10 +2256,9 @@ impl State {
         };
         // …and it must not collide with a seat that already holds it
         if !canonical.is_empty() {
-            let taken = self
-                .replica
-                .as_ref()
-                .is_some_and(|r| r.identities.iter().any(|i| i.nostr_pk == canonical));
+            // the complete register (review C8): founding anchors, every
+            // Restored block's anchor and the blob's working anchors
+            let taken = self.anchor_seen_in_chain(&canonical);
             if taken {
                 tracing::warn!(%member, "recovery request reuses an anchored transport key — dropped");
                 return Ok(Reply::Ack);
@@ -2510,7 +2547,7 @@ impl State {
         let wrap = molt_net::wrap::WrapKey::fresh().map_err(|e| MoltError::Recover(e.to_string()))?;
         // register the ticket BEFORE the queue can carry a request, so the
         // spend-once guard is armed the moment the returning member answers
-        self.recovery_tickets.insert(ticket.clone());
+        self.recovery_tickets.insert(ticket.clone(), member.clone());
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return Err(MoltError::Recover("engine stopped".to_string()));
         };
@@ -2616,7 +2653,7 @@ impl State {
             molt_net::invite::mint_ticket().map_err(|e| MoltError::Recover(e.to_string()))?;
         // register BEFORE the inbox can carry a request, so the spend-once
         // guard is armed the moment the returning member answers
-        self.recovery_tickets.insert(ticket.clone());
+        self.recovery_tickets.insert(ticket.clone(), member.clone());
         // ONE inbox per open workspace. Every mint subscribes the same filter
         // on the same anchor (kind 1059, #p = this seat), so a second
         // subscription would duplicate every delivery and add another set of
@@ -3693,7 +3730,7 @@ mod tests {
     #[test]
     fn a_recover_link_failure_report_sets_the_notice_and_kills_the_ticket() {
         let mut st = crate::tests::plain_state();
-        st.recovery_tickets.insert("t-1".to_string());
+        st.recovery_tickets.insert("t-1".to_string(), "bob".to_string());
         st.cmd_net_recover_link_failed(
             "bob".to_string(),
             "boom".to_string(),
@@ -3893,6 +3930,32 @@ mod tests {
         assert!(m.read_by.is_empty(), "no forged receipts");
         assert_eq!(m.deleted_by, None, "no forged tombstone");
         assert_ne!(m.ts, 0, "an unknown age is the arrival time, not 'forever'");
+    }
+
+    /// E6: one `ChatRead` of random ids parks a bounded number of
+    /// targets — never the whole P6 buffer.
+    #[test]
+    fn a_read_receipt_frame_parks_a_bounded_number_of_targets() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let mut st = crate::tests::plain_state();
+        let ids: Vec<MessageId> = (100..160).map(id).collect();
+        st.cmd_net_delivered(
+            "peer-1".to_string(),
+            EventEnvelope { prev_seq: 0,
+                seq: 1,
+                ts: 100,
+                by: "peer-1".to_string(),
+                body: WorkspaceEvent::ChatRead { ids: ids.clone(), by: "peer-1".to_string() },
+            },
+            None,
+        )
+        .expect("a wire delivery never errors");
+        let parked = ids.iter().filter(|i| st.parked.holds(i)).count();
+        assert_eq!(parked, super::PARKED_READS_PER_FRAME, "the per-frame cap holds");
     }
 
     fn id(n: usize) -> MessageId {

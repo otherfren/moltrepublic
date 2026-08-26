@@ -379,6 +379,16 @@ impl State {
         let root = self.workspace_root();
         let keep = usize::from(self.session.settings.s3_keep_copies.max(1));
         let max_bytes = self.session.settings.s3_max_bytes;
+        // the byte quota is THIS node's (review C4): a bucket shared with
+        // another node must not have that node's copies pruned by ours
+        let own_ids: std::collections::HashSet<WorkspaceId> = self
+            .session
+            .workspaces
+            .iter()
+            .filter(|w| w.s3)
+            .map(|w| w.id.clone())
+            .chain(std::iter::once(id.clone()))
+            .collect();
         tokio::spawn(async move {
             let ts = now_secs();
             let build_dir = dir.clone();
@@ -429,7 +439,7 @@ impl State {
                                 let prune_error =
                                     prune_old_copies(&client, &id, keep, &object).await;
                                 let quota_error =
-                                    enforce_quota(&client, max_bytes, &object).await;
+                                    enforce_quota(&client, max_bytes, &object, &own_ids).await;
                                 Command::NetBackupDone {
                                     id,
                                     ts,
@@ -646,6 +656,7 @@ async fn enforce_quota(
     client: &molt_net::s3::S3Client,
     max_bytes: u64,
     just_uploaded: &str,
+    own: &std::collections::HashSet<WorkspaceId>,
 ) -> String {
     if max_bytes == 0 {
         return String::new();
@@ -665,6 +676,7 @@ async fn enforce_quota(
             })
         })
         .collect();
+    let objects = own_backups(objects, own);
     let (delete, remaining) = quota_candidates(objects, max_bytes, just_uploaded);
     let mut first_error = String::new();
     for key in delete {
@@ -681,6 +693,16 @@ async fn enforce_quota(
         return format!("{remaining} B of {max_bytes} B, nothing left to prune");
     }
     String::new()
+}
+
+/// Only the workspaces THIS node backs up count toward its quota — a second
+/// node writing perfectly parseable keys into the same bucket is not ours
+/// to prune (review C4; the doc and the GUI hint say "this node's").
+fn own_backups(
+    objects: Vec<QuotaObject>,
+    own: &std::collections::HashSet<WorkspaceId>,
+) -> Vec<QuotaObject> {
+    objects.into_iter().filter(|o| own.contains(&o.id)).collect()
 }
 
 /// Pure byte-quota decision (`docs/storage/s3_buckets.md` §4): from every
@@ -755,6 +777,20 @@ fn backup_refusal_reason(dir: &std::path::Path) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    /// C4: the quota never counts or prunes another node's backups.
+    #[test]
+    fn the_quota_sees_only_this_nodes_workspaces() {
+        let obj = |id: &str, ts: u64| super::QuotaObject {
+            key: format!("k-{id}-{ts}"),
+            id: id.to_string(),
+            ts,
+            size: 100,
+        };
+        let own: std::collections::HashSet<String> = ["mine".to_string()].into_iter().collect();
+        let kept = super::own_backups(vec![obj("mine", 1), obj("theirs", 2), obj("mine", 3)], &own);
+        assert_eq!(kept.len(), 2);
+        assert!(kept.iter().all(|o| o.id == "mine"));
+    }
     use super::{prune_candidates, quota_candidates, QuotaObject};
 
     fn key(ts: u64) -> String {

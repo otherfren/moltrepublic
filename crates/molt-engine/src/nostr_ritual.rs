@@ -53,9 +53,16 @@ pub(crate) struct JoinCtx {
     /// the Welcome is checked against).
     pub dial_relays: Vec<String>,
     pub member: String,
-    pub phrase: String,
+    /// The recovery phrase — wiped on drop (review R9).
+    pub phrase: zeroize::Zeroizing<String>,
     pub generation: u64,
 }
+
+/// How many `Committed` frames the rejoiner buffers while it waits for a
+/// verifiable run, and how far above the lowest seen height a frame may
+/// sit (review R7: a flood of distinct heights is bounded, not buffered).
+const RECOVER_BLOCK_BUFFER: usize = 256;
+const RECOVER_BLOCK_WINDOW: u64 = 256;
 
 /// Send one engine-internal command through the weak handle. `false` = the
 /// engine is gone — the caller returns (its work is moot).
@@ -810,7 +817,8 @@ pub(crate) struct RecoverCtx {
     /// Empty on the ticketed single-coordinator path.
     pub extra_targets: Vec<String>,
     pub member: String,
-    pub phrase: String,
+    /// The recovery phrase — wiped on drop (review R9).
+    pub phrase: zeroize::Zeroizing<String>,
     pub generation: u64,
 }
 
@@ -1096,6 +1104,7 @@ async fn recovery_rejoin(
     // it needs none — a chain that recomputes to this republic's id is this
     // republic's chain, whoever relayed it.
     let mut blob: Option<molt_core::CheckpointState> = None;
+    let mut verified_run_len = 0usize;
     let mut blocks: Vec<molt_core::ChainBlock> = Vec::new();
     let (head, _sealed) = loop {
         let now = tokio::time::Instant::now();
@@ -1116,9 +1125,17 @@ async fn recovery_rejoin(
         match env.body {
             molt_core::WorkspaceEvent::CheckpointServed { blob: b } => blob = Some(b),
             molt_core::WorkspaceEvent::Committed(block) => {
+                // bounded (review R7): any group member can flood distinct
+                // heights during the window — keep a window above the lowest
+                // seen and at most RECOVER_BLOCK_BUFFER of them
+                let lowest = blocks.first().map_or(block.height, |b| b.height.min(block.height));
+                if block.height > lowest.saturating_add(RECOVER_BLOCK_WINDOW) {
+                    continue;
+                }
                 if !blocks.iter().any(|b| b.height == block.height) {
                     blocks.push(block);
                     blocks.sort_by_key(|b| b.height);
+                    blocks.truncate(RECOVER_BLOCK_BUFFER);
                 }
             }
             _ => continue,
@@ -1138,9 +1155,10 @@ async fn recovery_rejoin(
             })
             .map(|(_, b)| b.clone())
             .collect();
-        if run.is_empty() {
-            continue;
+        if run.is_empty() || run.len() == verified_run_len {
+            continue; // nothing new to verify: no re-walk per frame (R7)
         }
+        verified_run_len = run.len();
         if let Ok(pair) = crate::chain::verify_served(blob.as_ref(), &run, Some(&h.republic_id)) {
             blocks = run;
             break pair;

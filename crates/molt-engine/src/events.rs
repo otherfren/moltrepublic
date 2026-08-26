@@ -720,6 +720,14 @@ impl State {
         self.chain_applied.clear();
         self.pending_sigs.clear();
         self.own_approvals.clear();
+        self.chain_served_at.clear();
+        // the chain PROJECTIONS too (review E5): a chainless workspace opened
+        // next has nothing to refold them from, so they bled across
+        self.chain_applied_sigs.clear();
+        self.chain_anchors.clear();
+        self.chain_member_relays.clear();
+        self.split_noted.clear();
+        self.last_group_ack = None;
         self.pending_declines.clear();
         self.pending_withdrawals.clear();
         self.file_series.clear();

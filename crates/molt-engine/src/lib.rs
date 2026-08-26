@@ -641,6 +641,11 @@ pub(crate) struct State {
     /// under any roster name (review 2026-08-25: a forged own entry made
     /// the node sign for real).
     pub(crate) own_approvals: std::collections::BTreeSet<u64>,
+    /// When this node last served a catch-up to each requester: a
+    /// `ChainRequest` is an amplifier (the whole chain + blob + open cards
+    /// per frame, into the durable log), so one requester is served at
+    /// most once per [`net::CHAIN_SERVE_DEBOUNCE_SECS`] (review C3).
+    pub(crate) chain_served_at: HashMap<MemberId, u64>,
     /// Declines waiting for their proposal (keyed by proposal id, one entry
     /// per member with the decline's ts): a decline travels on a different
     /// sender's G7 chain than its proposal, and an own-log decline replays
@@ -694,7 +699,7 @@ pub(crate) struct State {
     /// spend-once guard. A ticket is inserted when a recovery link is minted and
     /// removed the moment a valid request spends it, so a replayed request on a
     /// live recovery queue finds a dead ticket and is dropped.
-    pub(crate) recovery_tickets: std::collections::HashSet<String>,
+    pub(crate) recovery_tickets: HashMap<String, MemberId>,
     /// Members whose recovery re-key just completed and whose **mesh announce**
     /// the coordinator therefore expects on the recovery queue (dynamic mesh
     /// membership) — armed in `coordinator_rekey`, disarmed when the announce
@@ -940,7 +945,7 @@ pub(crate) struct State {
     /// identity from the phrase (the ritual salts it with a workspace-id
     /// string, so it must NOT be re-derived from the member handle) and checks
     /// the served chain against the link. `None` outside a recovery.
-    pub(crate) recover_ctx: Option<(recovery::RecoveryInvite, String)>,
+    pub(crate) recover_ctx: Option<(recovery::RecoveryInvite, zeroize::Zeroizing<String>)>,
     /// The **rejoiner's** transport slot — the twin of
     /// [`State::join_transport`]: the off-actor rejoin task parks a clone of
     /// its transport here (its `Arc` owns the re-established mesh queues'
@@ -1026,6 +1031,7 @@ impl State {
             split_noted: std::collections::HashSet::new(),
             pending_sigs: HashMap::new(),
             own_approvals: std::collections::BTreeSet::new(),
+            chain_served_at: HashMap::new(),
             pending_declines: HashMap::new(),
             pending_withdrawals: HashMap::new(),
             file_series: HashMap::new(),
@@ -1037,7 +1043,7 @@ impl State {
             pending_blocks: std::collections::BTreeMap::new(),
             catchup_from: None,
             pending_recovery: HashMap::new(),
-            recovery_tickets: std::collections::HashSet::new(),
+            recovery_tickets: HashMap::new(),
             recovery_mesh_window: std::collections::HashSet::new(),
             mesh_extension_at: std::collections::HashMap::new(),
             poke_at: std::collections::HashMap::new(),

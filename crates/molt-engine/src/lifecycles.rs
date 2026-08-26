@@ -144,6 +144,14 @@ impl State {
         };
         let sk_bytes = signing_key.as_ref().map(|sk| sk.to_bytes().to_vec());
         let root = self.workspace_root();
+        // VERIFY BEFORE THE FIRST DISK WRITE (review R1): a founding/join
+        // genesis that does not verify must never become a persisted,
+        // chainless workspace reported as sealed. A served (pruned) chain
+        // was hard-verified by the recovery path already.
+        if checkpoint_blob.is_none() && !chain.is_empty() {
+            crate::chain::verify_chain(&chain)
+                .map_err(|e| err(format!("the genesis does not verify - {e}")))?;
+        }
         let mut opened = molt_storage::create_workspace(&root, &entropy, &genesis)
             .map_err(|e| err(e.to_string()))?;
         // seal the node's own MLS group state + assembled mesh into
@@ -759,11 +767,7 @@ impl State {
         if name.is_empty() {
             return Err(MoltError::Create("the name must not be empty".to_string()));
         }
-        if member.is_empty() {
-            return Err(MoltError::Create(
-                "the handle must not be empty".to_string(),
-            ));
-        }
+        crate::founding::check_handle(&member).map_err(MoltError::Create)?;
         // threshold 1 is refused since 2026-08-08 (product decision): a lone
         // voice is no threshold. The gate sits HERE, not in the verifier —
         // the genesis is immutable, and rejecting existing m=1 chains at
@@ -980,6 +984,12 @@ impl State {
             agenda: c.agenda.clone(),
             features: features.clone(),
         };
+        // what every member writes must verify HERE too (review R2): an
+        // attestation collected over a pre-charter table would otherwise be
+        // persisted, `adopt_chain` would reject the genesis, and the wizard
+        // would still report "sealed by everyone"
+        crate::founding::verify_sealed_roster(&sealed)
+            .map_err(|e| MoltError::Create(format!("the sealed roster does not verify - {e}")))?;
 
         // the founder's MLS group. On the Nostr path it was BORN at
         // all-joined (the Welcomes are already gift-wrapped out — concept
@@ -1255,9 +1265,7 @@ impl State {
     ) -> Result<Reply, MoltError> {
         guard_idle(&self.session.join.run, MoltError::Join)?;
         let member = member.trim().to_string();
-        if member.is_empty() {
-            return Err(MoltError::Join("the handle must not be empty".to_string()));
-        }
+        crate::founding::check_handle(&member).map_err(MoltError::Join)?;
         // the founding's twin gate: "adopt relays" confirms async, and a
         // join in the same breath would race the verdict — the link-carried
         // relays would be judged against a pool about to change
@@ -1378,7 +1386,7 @@ impl State {
                 invite: inv,
                 dial_relays,
                 member: self.session.join.member.clone(),
-                phrase: self.session.join.seed.clone(),
+                phrase: self.session.join.seed.clone().into(),
                 generation,
             },
             confirm_rx,
@@ -1724,7 +1732,7 @@ impl State {
                 republic_id,
                 handover: Some(handover.clone()),
             },
-            phrase.clone(),
+            phrase.clone().into(),
         ));
         self.session.recover = molt_core::RecoverState::default();
         let extra_targets = targets.get(1..).map(<[String]>::to_vec).unwrap_or_default();
@@ -1735,7 +1743,7 @@ impl State {
                 dial_relays,
                 extra_targets,
                 member,
-                phrase,
+                phrase: phrase.into(),
                 generation,
             },
             cmd_tx.downgrade(),
@@ -1827,7 +1835,7 @@ impl State {
         self.recover_generation += 1;
         let generation = self.recover_generation;
         let task_phrase = phrase.clone();
-        self.recover_ctx = Some((inv.clone(), phrase));
+        self.recover_ctx = Some((inv.clone(), phrase.into()));
         // a fresh run starts with a fresh checklist (the old republic's
         // finished list must not front-run the new coordinator's report)
         self.session.recover = molt_core::RecoverState::default();
@@ -1900,7 +1908,7 @@ impl State {
                 dial_relays,
                 extra_targets: Vec::new(),
                 member: inv.member.clone(),
-                phrase: task_phrase,
+                phrase: task_phrase.into(),
                 generation,
             },
             cmd_tx.downgrade(),
@@ -2166,7 +2174,7 @@ impl State {
             sealed.rule_m,
             sealed.roster.len(),
             members,
-            phrase.clone(),
+            (*phrase).clone(),
             self.effective_net_label(),
             self.session.settings.s3_backup,
             sealed.agenda.clone(),

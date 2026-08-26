@@ -108,13 +108,14 @@ pub(crate) fn spawn(
     engine_tx: mpsc::Sender<Envelope>,
 ) -> std::io::Result<ConfigStoreHandle> {
     sweep_stale_tmp(&path);
-    let lock_path = acquire_lock(&path)?;
+    let (lock_path, lock_file) = acquire_lock(&path)?;
     // The node just strictly parsed this file to boot; it is the known-good base.
     let last_good = std::fs::read_to_string(&path)?;
     let (tx, rx) = mpsc::channel(STORE_QUEUE);
     tokio::spawn(store_task(Store {
         path,
         lock_path,
+        _lock_file: lock_file,
         last_good,
         conflict: None,
         engine_tx,
@@ -127,6 +128,9 @@ pub(crate) fn spawn(
 struct Store {
     path: PathBuf,
     lock_path: PathBuf,
+    /// The flock holder: the kernel releases it with the process, so a
+    /// crash never leaves a lock behind (review E4).
+    _lock_file: std::fs::File,
     /// Content of the file as last written by us or last successfully
     /// reloaded — the echo-suppression reference and the fallback write base.
     last_good: String,
@@ -541,41 +545,35 @@ fn sweep_stale_tmp(path: &Path) {
 /// read-write (naming the PID); a stale lock (holder no longer running) is
 /// swept and retried. This also protects the echo-suppression assumption:
 /// only *we* and humans write this file.
-fn acquire_lock(path: &Path) -> std::io::Result<PathBuf> {
+fn acquire_lock(path: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
     let lock = lock_path_for(path);
-    loop {
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock)
-        {
-            Ok(mut f) => {
-                let _ = f.write_all(std::process::id().to_string().as_bytes());
-                return Ok(lock);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let holder = std::fs::read_to_string(&lock).unwrap_or_default();
-                let holder_pid: Option<u32> = holder.trim().parse().ok();
-                let alive = holder_pid
-                    .map(|pid| Path::new(&format!("/proc/{pid}")).exists())
-                    .unwrap_or(false);
-                if alive {
-                    return Err(std::io::Error::other(format!(
-                        "another moltd (pid {}) already runs on {} — \
-                         two nodes must not share one config ({})",
-                        holder.trim(),
-                        path.display(),
-                        lock.display(),
-                    )));
-                }
-                // Stale lock from a crashed run: sweep and retry (the
-                // create_new above arbitrates if two nodes race here).
-                tracing::warn!(lock = %lock.display(), "removing stale config lock");
-                let _ = std::fs::remove_file(&lock);
-            }
-            Err(e) => return Err(e),
+    // an flock, not a PID heuristic (review E4): the kernel releases it
+    // with the holder, so a crash or a reboot never leaves a lock that a
+    // reused PID then "proves" alive — the PID inside is a diagnostic
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock)?;
+    match rustix::fs::flock(&f, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => {}
+        Err(rustix::io::Errno::WOULDBLOCK) => {
+            let holder = std::fs::read_to_string(&lock).unwrap_or_default();
+            return Err(std::io::Error::other(format!(
+                "another moltd (pid {}) already runs on {} - two nodes must not share one config ({})",
+                holder.trim(),
+                path.display(),
+                lock.display(),
+            )));
         }
+        Err(e) => return Err(std::io::Error::from(e)),
     }
+    use std::io::Seek;
+    f.set_len(0)?;
+    f.seek(std::io::SeekFrom::Start(0))?;
+    let _ = f.write_all(std::process::id().to_string().as_bytes());
+    Ok((lock, f))
 }
 
 // ---------------------------------------------------------------------------
@@ -780,6 +778,22 @@ mod tests {
             assert_eq!(sv.notice, "config-conflict");
             assert_eq!(sv.settings.anonymity, "none", "session must keep last good");
         });
+    }
+
+    /// E4: a lock file left by a crashed run — even one naming a PID that
+    /// exists again after a reboot (here: our own) — is not a holder; only
+    /// a live flock is.
+    #[test]
+    fn a_stale_lock_naming_a_live_pid_is_not_a_holder() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "a = 1\n").expect("config");
+        std::fs::write(lock_path_for(&path), std::process::id().to_string()).expect("stale lock");
+        let (_lock, held) = acquire_lock(&path).expect("a stale lock is swept, not honoured");
+        // …and while we hold it, a second acquire fails fast
+        let err = acquire_lock(&path).expect_err("the flock is exclusive");
+        assert!(err.to_string().contains("already runs"), "{err}");
+        drop(held);
     }
 
     #[test]

@@ -46,41 +46,34 @@ genuine signature on its own node). Fix: verify-before-replace in
 `collect_sig` (a held verified signature is only replaced by one that
 verifies). Test: `junk_does_not_evict_a_verified_signature`.
 
-### C3 [MEDIUM] `ChainRequest` is an unbounded amplifier - OPEN
-`chain.rs` `serve_chain_from` / `serve_open_governance`, `net.rs` arm:
-every roster member makes every other member record the whole chain + blob
-+ open cards per frame, into the durable log. Fix direction: per-requester
-debounce keyed `(from, from_height)`, cap `from_height` to the anchor
-unless the blob path applies, skip when `from_height > head`; consider a
-non-logged direct serve.
+### C3 [MEDIUM] `ChainRequest` is an unbounded amplifier - FIXED
+One requester is served at most once per `CHAIN_SERVE_DEBOUNCE_SECS`
+(30 s) and never for a height above the head. Test:
+`a_catch_up_request_is_served_once_per_debounce`. OPEN: a non-logged
+direct serve would spare every member's log the re-broadcast.
 
-### C4 [MEDIUM] Byte quota prunes OTHER nodes' backups in a shared bucket - OPEN
-`backup.rs` `enforce_quota` / `quota_candidates` count every parseable key
-bucket-wide; the doc and GUI say "this node's backups". Fix direction:
-restrict candidates to this node's workspace ids (pass the set into the
-task) or namespace keys per node; or correct the doc/GUI text if
-bucket-wide is intended (product call).
+### C4 [MEDIUM] Byte quota prunes OTHER nodes' backups in a shared bucket - FIXED
+The quota counts and prunes this node's workspaces only (the set rides
+into the backup task), as the doc and the GUI hint say. Test:
+`the_quota_sees_only_this_nodes_workspaces`.
 
-### C5 [LOW] `tie_break` re-walks the chain before verifying the incoming block - OPEN
-`chain.rs` `tie_break`: a ground low-hash block at tip height costs a full
-walk per frame. Fix direction: `verify_next` the incoming block alone
-first.
+### C5 [LOW] `tie_break` re-walks the chain before verifying the incoming block - FIXED
+The contender's signatures are checked against the roster (threshold
+included) before anything moves; only a contender that carries a valid
+threshold triggers the walk.
 
-### C6 [LOW] Dead headless-genesis adoption adopts ANY valid genesis - OPEN
-`receive_block` with `chain_head == None` → `adopt_chain` without a
-republic-id pin; unreachable from the wire today. Fix direction: delete
-the branch + its test, or pin `adopt_chain` to `self.republic_id()`.
+### C6 [LOW] Dead headless-genesis adoption adopts ANY valid genesis - FIXED
+A headless node adopts only a genesis carrying its replica's republic id.
+Test: `a_headless_node_refuses_another_republics_genesis`.
 
-### C7 [LOW] `MembershipOp::Joined` + a checkpoint bricks pruned holders - OPEN
-`walk_suffix_chain` requires every roster entry in the founding table; a
-`Joined` seat is not. No production producer (product decision: no seat
-adding). Fix direction: `verify_next` hard-rejects `Joined`, or the
-variant is documented reserved and its producers deleted.
+### C7 [LOW] `MembershipOp::Joined` + a checkpoint bricks pruned holders - FIXED
+`Joined` is hard-rejected by the verifier (seats are fixed at founding);
+the variant stays reserved. Tests: `a_joined_block_is_refused_whole`,
+`a_bundle_with_a_joined_block_is_refused`.
 
-### C8 [LOW] Restore anchor-uniqueness gates check founding anchors only - OPEN
-`auto_approve_restore` and the coordinator ingest compare against
-`identities` only; `anchor_seen_in_chain` already exists. Fix direction:
-use it in both gates.
+### C8 [LOW] Restore anchor-uniqueness gates check founding anchors only - FIXED
+Both gates use `anchor_seen_in_chain` (founding anchors, every Restored
+block's anchor, the blob's working anchors).
 
 ### C9 [STYLE] Em dashes / prose in strings reaching the UI - OPEN
 `backup.rs:30` (`SEALED_SKIP`), `backup.rs` export-cap and chainless
@@ -109,12 +102,9 @@ card. Fix: `admits_membership_proposal` (plausible id, pending cap,
 `id_free_for`) runs before `record`; the applier bumps `next_id` only
 inside the wire id window. Test:
 `a_membership_proposal_with_an_implausible_id_is_not_recorded`.
-Residual (LOW, OPEN): a blob-seeded rejoiner that logged a wire
-membership id far above its snapshot's `next_id` and crashed before the
-next snapshot replays the tail with the gate closed, while `adopt_chain`
-raises `next_id` only afterwards - its next local mint can collide. Fix
-direction: adopt the chain (or `bump_next_id_past_chain`) BEFORE the tail
-replay, or widen the replay gate to `max(next_id, chain top) + window`.
+Residual - FIXED: the chain is read before the point of no return and
+its consumed ids clear the mint counter BEFORE the tail replays
+(`max_applied_proposal_id`).
 
 ### E2 [HIGH] Wire `Chat.ts` passthrough + `ts + retention` overflow panicked the actor - FIXED
 `uploads_view` added the retention to a peer-chosen stamp; with release
@@ -133,20 +123,17 @@ recovery rejoin notice), so an insider can still dress a message as a
 system line - cosmetic. Fix direction: a wire system line must carry the
 deterministic id its content derives, verifiable at ingest.
 
-### E4 [MEDIUM] `configstore::acquire_lock` decides liveness by `/proc/<pid>` - OPEN
-PID reuse after a reboot refuses startup with a false "another moltd
-runs". Fix direction: `rustix::fs::flock` (already used for the workspace
-LOCK), PID as diagnostic only.
+### E4 [MEDIUM] `configstore::acquire_lock` decides liveness by `/proc/<pid>` - FIXED
+An flock held for the store's lifetime; the PID inside is a diagnostic.
+Test: `a_stale_lock_naming_a_live_pid_is_not_a_holder`.
 
-### E5 [LOW] `reset_workspace_state` misses five chain projections - OPEN
-`chain_applied_sigs`, `chain_anchors`, `chain_member_relays`,
-`split_noted`, `last_group_ack` bleed into a chainless workspace opened
-next. Fix direction: clear them, or (R2) move the chain projection into
-one struct reset with `Default`.
+### E5 [LOW] `reset_workspace_state` misses five chain projections - FIXED
+All five are cleared (the structural `ChainProjection` fold stays with
+E8).
 
-### E6 [LOW] `ChatRead` parks every unknown id unbounded per frame - OPEN
-One frame with 300 random ids sweeps the whole P6 parking buffer. Fix
-direction: per-frame cap, or a separate small ring for read refs.
+### E6 [LOW] `ChatRead` parks every unknown id unbounded per frame - FIXED
+At most `PARKED_READS_PER_FRAME` (16) targets per frame. Test:
+`a_read_receipt_frame_parks_a_bounded_number_of_targets`.
 
 ### E7 [STYLE] Prose / em dashes in engine strings the GUI renders - OPEN
 `session.rs` (`NOSTR_RUNTIME_PENDING`, relay-confirm refusals, offline
@@ -170,23 +157,18 @@ code behind a feature/module. `transfer.rs` landing sequence three times.
 attestation signers, `identities.len() == rule_n` and `1 <= m <= n`
 (`check_rule_shape`). Test:
 `verify_sealed_roster_refuses_duplicate_signers_and_a_lying_n`.
-OPEN half: `materialize_workspace` still rewrites `rule_n` from
-`roster.len()` and writes the workspace before `adopt_chain` verifies the
-genesis. Fix direction: use `sealed.rule_n`, run `verify_own` on the built
-genesis chain BEFORE `create_workspace`, fail the run on error.
+Open half - FIXED: the genesis chain is verified BEFORE the first disk
+write (`verify_chain` in `materialize_workspace`); `rule_n` equals the
+ratified value by the verifiers' `n == seats` rule.
 
-### R2 [MEDIUM] Founder accepts `Signed` / `BackupConfirmed` before the table is frozen - OPEN
-`cmd_net_seal_signed` / `apply_backup_attestation` have no
-`charter_proposed` gate; `finalize_founding` never runs
-`verify_sealed_roster`. Fix direction: gate both on `charter_proposed`
-(+ `seal_published` on Nostr), re-anchoring gate `!charter_proposed`,
-`verify_sealed_roster` in `finalize_founding` with outcome 2 on error.
+### R2 [MEDIUM] Founder accepts `Signed` / `BackupConfirmed` before the table is frozen - FIXED
+Both are ignored before the charter proposal, a re-anchoring is refused
+after it, and `finalize_founding` verifies the sealed roster before
+anything is written (a failure ends the run with outcome 2).
 
-### R3 [MEDIUM] Ticketed recovery lane has no one-re-admission-at-a-time gate - OPEN
-A same-coordinator re-mint while the first `Restored` is pending strands
-the seat (re-key with KP #2, Welcome to anchor #1). Fix direction: apply
-the pending-`Restored` gate to the ticketed lane (`RecoverRefused`), or
-supersede deterministically.
+### R3 [MEDIUM] Ticketed recovery lane has no one-re-admission-at-a-time gate - FIXED
+The pending-`Restored` gate applies to both lanes (a second request is
+dropped, loudly, while the first re-admission is pending).
 
 ### R4 [LOW] A single survivor can capture a reattaching seat into a private group - OPEN (design)
 The Welcome's group and rotation seed are not bound to the chain. Fix
@@ -194,25 +176,27 @@ direction: require a threshold-sealed `Restored` block naming our new
 anchor before flipping to `recovered:`; document the threat model in
 `detached_reattach.md`.
 
-### R5 [LOW] Far-end text chooses the joiner's headline - OPEN
-`relay_msg.rs` `ritual_headline` matches "did not publish" before the
-own-phrase arms. Fix direction: `starts_with` on the anchored own phrases.
+### R5 [LOW] Far-end text chooses the joiner's headline - FIXED
+The arms that embed far-end text come first; the hostile-reason test
+covers "did not publish".
 
-### R6 [LOW] Unauthenticated `JoinRequest`s write attacker text into the founder's run log; the handle is never validated - OPEN
-Fix direction: log after `verify_join_mac`; validate the handle
-(non-empty, <= 64 chars, no control chars) at ingest and in
-`cmd_join_start` / `cmd_create_start`.
+### R6 [LOW] Unauthenticated `JoinRequest`s write attacker text into the founder's run log; the handle is never validated - FIXED
+`check_handle` (non-empty, <= 64 chars, one line) at the founder ingest
+(silent drop) and in `cmd_join_start` / `cmd_create_start`; a logged
+handle is thereby bounded to one line.
 
-### R7 [LOW] Rejoiner buffers `Committed` blocks unbounded, re-verifies per frame - OPEN
-Fix direction: cap 256, height window from the first served frame,
-verify once per new consecutive run.
+### R7 [LOW] Rejoiner buffers `Committed` blocks unbounded, re-verifies per frame - FIXED
+Buffer capped at 256 within a 256-height window above the lowest seen;
+the run is verified only when it grew.
 
-### R8 [LOW] A recovery ticket is not bound to the member it was minted for - OPEN
-Fix direction: register `(ticket, member)`, refuse a mismatch.
+### R8 [LOW] A recovery ticket is not bound to the member it was minted for - FIXED
+`recovery_tickets` maps ticket → member; another seat's ticket takes the
+self-service lane.
 
-### R9 [LOW] Phrase / `nostr_sk` transit as plain `String` / `Vec` - OPEN
-Fix direction: `Zeroizing` in `JoinCtx` / `RecoverCtx` and the two
-commands, a redacting `Debug` on `Command`.
+### R9 [LOW] Phrase / `nostr_sk` transit as plain `String` / `Vec` - PARTLY FIXED
+The phrases in `JoinCtx` / `RecoverCtx` / `recover_ctx` are `Zeroizing`.
+OPEN: `nostr_sk` in the two `Net*Sealed` commands (a redacting `Debug`
+on `Command`, or a newtype).
 
 ### R10 [STYLE] ~100 em dashes in run-log producers and the E5 shape list - OPEN
 Must change together with `known_log_shapes()` (the GUI localizes by

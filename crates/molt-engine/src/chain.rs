@@ -313,17 +313,14 @@ fn apply_membership(
 ) -> Result<(), String> {
     match op {
         MembershipOp::Joined => {
-            if identities.iter().any(|i| i.member == member) {
-                return Err(format!("member {member} is already in the roster"));
-            }
-            identities.push(MemberIdentity {
-                member: member.to_string(),
-                identity_pk: identity_pk.to_string(),
-                // the Membership change carries no nostr anchor yet (the
-                // ChainChange layout is additive-only); a joined-later seat
-                // reads as legacy until a versioned Membership binds it
-                nostr_pk: String::new(),
-            });
+            // HARD-REJECTED (review C7): seats are fixed at founding (product
+            // decision 2026-07-11) and a joined-later seat is not in the
+            // founding table, so the first checkpoint after such a block
+            // stranded every pruned holder (`walk_suffix_chain` requires
+            // every roster entry there). The variant stays reserved; a
+            // chain carrying it is refused whole, like any unknown change.
+            let _ = (identities, member, identity_pk);
+            return Err("membership op `joined` is not supported: seats are fixed at founding".to_string());
         }
         MembershipOp::Restored => {
             let Some(id) = identities.iter_mut().find(|i| i.member == member) else {
@@ -1305,6 +1302,20 @@ impl State {
     /// that adopted its chain without the ephemeral event log to bump
     /// `next_id` for it (a blob-seeded rejoiner after total loss). Called
     /// wherever the walk adopts or extends; `max` keeps it monotone.
+    /// The highest proposal id a chain has consumed (`Applied` blocks) —
+    /// what the mint counter must clear BEFORE the ephemeral tail replays
+    /// (review E1 residual: a blob-seeded rejoiner's tail replayed with the
+    /// gate closed while the counter was still at its snapshot value).
+    pub(crate) fn max_applied_proposal_id(blocks: &[ChainBlock]) -> Option<u64> {
+        blocks
+            .iter()
+            .filter_map(|b| match &b.change {
+                ChainChange::Applied { proposal_id, .. } => Some(*proposal_id),
+                _ => None,
+            })
+            .max()
+    }
+
     fn bump_next_id_past_chain(&mut self) {
         if let Some(top) = self
             .chain_walk
@@ -2024,12 +2035,11 @@ impl State {
                 tracing::warn!(%id, %member, "restore proposal carries a non-canonical anchor — not auto-signing");
                 return;
             }
-            if head
-                .identities
-                .iter()
-                .any(|i| i.member != member && i.nostr_pk == *npk)
-            {
-                tracing::warn!(%id, %member, "restore proposal reuses a living seat's anchor — not auto-signing");
+            // the complete register (review C8): founding anchors, every
+            // Restored block's anchor and the blob's working anchors — a
+            // restore mints a FRESH anchor, any reuse is a forgery
+            if self.anchor_seen_in_chain(npk) {
+                tracing::warn!(%id, %member, "restore proposal reuses an anchor the chain knows — not auto-signing");
                 return;
             }
         }
@@ -3567,6 +3577,16 @@ impl State {
             // the genesis a survivor serves, then drains whatever else arrived
             // first; a non-genesis block is buffered until the genesis lands
             if block.height == 0 {
+                // a valid genesis is trivially forgeable (n-of-n over
+                // attacker keys): only THIS republic's, when the replica
+                // knows which one that is (review C6)
+                let expected = self.republic_id();
+                if let ChainChange::Genesis { republic_id, .. } = &block.change {
+                    if !expected.is_empty() && *republic_id != expected {
+                        tracing::warn!(%republic_id, "refusing a genesis for another republic");
+                        return;
+                    }
+                }
                 self.adopt_chain(vec![block]);
                 if self.chain_head.is_some() {
                     self.drain_buffered_blocks();
@@ -4059,6 +4079,18 @@ impl State {
         let incoming = molt_storage::content_hash(&block_link_bytes(&rid, &block));
         let current = molt_storage::content_hash(&block_link_bytes(&rid, existing));
         let is_tip = self.chain.last().is_some_and(|b| b.height == block.height);
+        // CHEAP FIRST (review C5): a ground low-hash block costs a full
+        // re-walk per frame; the signatures are what any contender must
+        // carry, so they are checked against the roster before anything
+        // moves (the roster is stable across blocks — `Joined` is refused)
+        let signed = self.chain_head.as_ref().is_some_and(|h| {
+            block_signers(&rid, &h.identities, &block)
+                .is_ok_and(|signers| signers.len() >= usize::from(h.rule_m))
+        });
+        if is_tip && incoming < current && !signed {
+            tracing::warn!(height = block.height, "tie-break contender without a valid threshold — dropped");
+            return;
+        }
         if is_tip && incoming < current {
             // the incoming block wins the tip; swap it in and re-verify
             let displaced = self.chain.pop();
@@ -4337,10 +4369,13 @@ mod tests {
     }
 
     #[test]
-    fn a_membership_block_grows_the_roster_and_lets_the_newcomer_approve() {
+    /// Seats are fixed at founding (product decision 2026-07-11): a
+    /// `Joined` block is refused WHOLE, like any unknown change — a joined
+    /// seat is not in the founding table and the first checkpoint after it
+    /// stranded every pruned holder (review C7).
+    fn a_joined_block_is_refused_whole() {
         let mut b = Builder::new(&["petra", "walter"], 2);
-        // add dora with her own derived identity key
-        let (dora_sk, dora_pk) = derive_identity_key(&[9u8; 32], "dora");
+        let (_dora_sk, dora_pk) = derive_identity_key(&[9u8; 32], "dora");
         let height = u64::try_from(b.blocks.len()).expect("small chain");
         let join = ChainChange::Membership {
             op: MembershipOp::Joined,
@@ -4352,12 +4387,60 @@ mod tests {
         };
         let block = b.seal(height, join, &["petra", "walter"]);
         b.push(block);
-        b.keys.push(("dora".to_string(), dora_sk));
-        // now an Applied block signed by dora + walter must count dora
-        b.commit_applied(1, &["dora", "walter"]);
-        let head = verify_chain(&b.blocks).expect("newcomer approval counts");
-        assert_eq!(head.identities.len(), 3);
-        assert_eq!(head.height, 2);
+        let err = verify_chain(&b.blocks).expect_err("a joined block does not verify");
+        assert!(err.contains("not supported"), "{err}");
+    }
+
+    /// C3: one requester is served a catch-up at most once per debounce,
+    /// and never for a height above the head.
+    #[test]
+    fn a_catch_up_request_is_served_once_per_debounce() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+        b.commit_applied(1, &["petra", "dora"]);
+        let mut walter = chain_peer("walter", &b, b.blocks.clone());
+        walter.clock_override = Some(1_000);
+        let before = walter.next_seq;
+        wire(&mut walter, "petra", 1, WorkspaceEvent::ChainRequest { from_height: 0 });
+        let served = walter.next_seq;
+        assert!(served > before, "the first request is served");
+        wire(&mut walter, "petra", 2, WorkspaceEvent::ChainRequest { from_height: 0 });
+        assert_eq!(walter.next_seq, served, "a repeat inside the debounce serves nothing");
+        wire(&mut walter, "petra", 3, WorkspaceEvent::ChainRequest { from_height: 99 });
+        assert_eq!(walter.next_seq, served, "nothing above the head is served");
+        walter.clock_override = Some(1_000 + crate::net::CHAIN_SERVE_DEBOUNCE_SECS);
+        wire(&mut walter, "petra", 4, WorkspaceEvent::ChainRequest { from_height: 0 });
+        assert!(walter.next_seq > served, "after the debounce it is served again");
+    }
+
+    /// C6: a headless node adopts only ITS republic's genesis — a valid
+    /// genesis is trivially forgeable.
+    #[test]
+    fn a_headless_node_refuses_another_republics_genesis() {
+        let b = Builder::new(&["petra", "walter"], 2);
+        let other = Builder::new(&["mallory", "walter"], 2);
+        let mut walter = chain_peer("walter", &b, b.blocks.clone());
+        walter.chain.clear();
+        walter.chain_head = None;
+        walter.chain_walk = None;
+        walter.receive_block(other.blocks[0].clone());
+        assert!(walter.chain_head.is_none(), "a foreign genesis is not adopted");
+        walter.receive_block(b.blocks[0].clone());
+        assert!(walter.chain_head.is_some(), "the own genesis is");
+    }
+
+    /// E1 residual: the mint counter clears every id the chain consumed.
+    #[test]
+    fn the_max_applied_proposal_id_reads_the_chain() {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        assert_eq!(crate::State::max_applied_proposal_id(&b.blocks), None);
+        b.commit_applied(7, &["petra", "walter"]);
+        b.commit_applied(3, &["petra", "walter"]);
+        assert_eq!(crate::State::max_applied_proposal_id(&b.blocks), Some(7));
     }
 
     /// A member that only holds the genesis receives a peer's broadcast commit
@@ -10227,24 +10310,9 @@ mod tests {
             &["petra"],
         );
         b.push(restored);
-        // dora joins with her own key and co-signs the second patch
-        let (dora_sk, dora_pk) = derive_identity_key(&[9u8; 32], "dora");
-        let height = u64::try_from(b.blocks.len()).expect("small chain");
-        let joined = b.seal(
-            height,
-            ChainChange::Membership {
-                op: MembershipOp::Joined,
-                member: "dora".to_string(),
-                identity_pk: dora_pk,
-                nostr_pk: None,
-                relays: Vec::new(),
-                consent: None,
-            },
-            &["petra", "walter"],
-        );
-        b.push(joined);
-        b.keys.push(("dora".to_string(), dora_sk));
-        commit_wiki(&mut b, 3, WIKI_ADD_B, &["walter", "dora"]);
+        // (a `Joined` block used to sit here — seats are fixed at founding
+        // and the variant is refused since review C7)
+        commit_wiki(&mut b, 3, WIKI_ADD_B, &["walter", "petra"]);
         b
     }
 
@@ -10272,12 +10340,12 @@ mod tests {
         assert_eq!(report.name, "Chess Club");
         assert_eq!((report.rule_m, report.rule_n), (2, 2));
         assert_eq!(report.patches, 2, "both wiki patches ride along");
-        assert_eq!(report.membership_blocks, 2, "restored + joined ride along");
+        assert_eq!(report.membership_blocks, 1, "the restored block rides along");
         assert_eq!(report.files, 2);
         assert_eq!(
             report.members,
-            vec!["petra".to_string(), "walter".to_string(), "dora".to_string()],
-            "the roster walk ends at the post-join roster"
+            vec!["petra".to_string(), "walter".to_string()],
+            "the roster walk ends at the founding roster (seats are fixed)"
         );
         // the org edit is NOT in the bundle: its content never leaves
         assert!(
@@ -10318,14 +10386,14 @@ mod tests {
     fn a_forged_or_removed_signature_fails_verification() {
         // removed: the patch drops below the threshold
         let mut b = wiki_fixture();
-        b.blocks[5].sigs.truncate(1);
+        b.blocks[4].sigs.truncate(1);
         assert!(
             verify_wiki_export(&bundle_json(&b.blocks), &wiki_fixture_tree()).is_err(),
             "one signature is below m = 2"
         );
         // forged: a signature that does not verify counts for nobody
         let mut b = wiki_fixture();
-        b.blocks[5].sigs[0].sig = "00".repeat(64);
+        b.blocks[4].sigs[0].sig = "00".repeat(64);
         assert!(
             verify_wiki_export(&bundle_json(&b.blocks), &wiki_fixture_tree()).is_err(),
             "a forged signature must not count"
@@ -10333,8 +10401,8 @@ mod tests {
         // a signer outside the roster cannot lift a block to threshold
         let mut b = wiki_fixture();
         let (mallory_sk, _) = derive_identity_key(&[42u8; 32], "mallory");
-        let bytes = approval_bytes(&b.republic_id, 5, &b.blocks[5].change);
-        b.blocks[5].sigs[0] = RosterAttestation {
+        let bytes = approval_bytes(&b.republic_id, 5, &b.blocks[4].change);
+        b.blocks[4].sigs[0] = RosterAttestation {
             member: "mallory".to_string(),
             sig: identity_sign(&mallory_sk, &bytes),
         };
@@ -10356,23 +10424,32 @@ mod tests {
         );
     }
 
+    /// Seats are fixed at founding: a bundle carrying a `Joined` block is
+    /// refused whole, exactly like the chain it came from (review C7) —
+    /// there is no identity history beyond the founding table to verify
+    /// a later patch against.
     #[test]
-    fn an_omitted_membership_block_fails_the_later_patch() {
+    fn a_bundle_with_a_joined_block_is_refused() {
         let b = wiki_fixture();
         let mut bundle =
             crate::wiki_export::bundle_from_chain(&b.blocks).expect("the chain has a genesis");
-        // drop the Joined block — dora's signature on the last patch then
-        // belongs to nobody in the roster
-        bundle.blocks.retain(|block| {
-            !matches!(
-                &block.change,
-                ChainChange::Membership { op: MembershipOp::Joined, .. }
-            )
-        });
+        let (_dora_sk, dora_pk) = derive_identity_key(&[9u8; 32], "dora");
+        let height = bundle.blocks.last().map_or(0, |bl| bl.height) + 1;
+        let mut joined = b.blocks[0].clone();
+        joined.height = height;
+        joined.change = ChainChange::Membership {
+            op: MembershipOp::Joined,
+            member: "dora".to_string(),
+            identity_pk: dora_pk,
+            nostr_pk: None,
+            relays: Vec::new(),
+            consent: None,
+        };
+        bundle.blocks.push(joined);
         let json = serde_json::to_string(&bundle).expect("bundle serializes");
         assert!(
             verify_wiki_export(&json, &wiki_fixture_tree()).is_err(),
-            "without the identity history the later patch cannot verify"
+            "a joined seat is not a thing the verifier accepts"
         );
     }
 

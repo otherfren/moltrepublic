@@ -1139,6 +1139,26 @@ fn check_roster_anchors(identities: &[molt_core::MemberIdentity]) -> Result<(), 
 /// `n` seats in the identity table and a threshold inside `1..=n` — the
 /// same shape `verify_genesis` enforces, checked here before a member
 /// ratifies and before a joiner writes anything (review 2026-08-25).
+/// A member handle as it may be anchored: non-empty, at most
+/// [`MAX_HANDLE_CHARS`] characters, one line, no control characters — it
+/// becomes forever-bytes in the roster and one line of every run log.
+pub(crate) fn check_handle(handle: &str) -> Result<(), String> {
+    let handle = handle.trim();
+    if handle.is_empty() {
+        return Err("the handle must not be empty".to_string());
+    }
+    if handle.chars().count() > MAX_HANDLE_CHARS {
+        return Err(format!("the handle is too long (max {MAX_HANDLE_CHARS} characters)"));
+    }
+    if handle.chars().any(char::is_control) {
+        return Err("the handle must be one line without control characters".to_string());
+    }
+    Ok(())
+}
+
+/// The longest handle a seat may carry.
+pub(crate) const MAX_HANDLE_CHARS: usize = 64;
+
 fn check_rule_shape(rule_m: u8, rule_n: u8, seats: usize) -> Result<(), String> {
     if usize::from(rule_n) != seats {
         return Err(format!("rule n={rule_n} does not match {seats} seats"));
@@ -2538,6 +2558,13 @@ mod ritual_ops {
             if !self.ritual_generation_current(generation) {
                 return Ok(molt_core::Reply::Ack);
             }
+            // a handle is forever-bytes and one line of the run log: bound it
+            // BEFORE it is logged or anchored (review R6) — the request is
+            // unauthenticated at this point, so the drop is silent
+            if let Err(e) = check_handle(&member) {
+                tracing::warn!(seat, error = %e, "join request with an invalid handle — dropped");
+                return Ok(molt_core::Reply::Ack);
+            }
             // R4's founding twin (2026-08-08): a joiner that declares its
             // dialable relays lets the founder SEE a pool deviation while
             // everyone is still in the ritual — one log line naming the
@@ -2603,7 +2630,14 @@ mod ritual_ops {
                 // and that the comparison was the bug — it is not; the bug was
                 // that there was no re-activation path at all, so any hiccup
                 // burned the seat to a dead identity and wedged the founding.)
-                if !same && mac_ok && anchored_member == member && !seat_sealed && !group_born {
+                // …and never once the charter is proposed: the collected
+                // signatures cover `full_identities()`, which a re-anchoring
+                // would change under them (review R2)
+                let charter_proposed = self
+                    .net_ritual
+                    .as_ref()
+                    .is_some_and(|r| r.charter_proposed);
+                if !same && mac_ok && anchored_member == member && !seat_sealed && !group_born && !charter_proposed {
                     // STAGE, do not destroy. The first version cleared the
                     // seat HERE and only then ran the ladder — so a request
                     // that failed PoP (any ticket holder can mint a valid MAC
@@ -3273,6 +3307,14 @@ mod ritual_ops {
                 if s.sealed {
                     return Ok(molt_core::Reply::Ack); // this seat already sealed
                 }
+                // the TABLE must be frozen (review R2): before the charter is
+                // proposed `canonical()` is the provisional one, and a
+                // signature over it would mark the seat sealed — its real
+                // signature over the proposed table then drops as a duplicate
+                if !ritual.charter_proposed {
+                    tracing::warn!(seat, "seal signature before the charter proposal — ignored");
+                    return Ok(molt_core::Reply::Ack);
+                }
                 let Some(who) = &s.identity else {
                     return Ok(molt_core::Reply::Ack);
                 };
@@ -3396,7 +3438,7 @@ mod ritual_ops {
                 let Some(s) = ritual.seats.get(idx) else {
                     return;
                 };
-                if !s.sealed || s.backup_confirmed {
+                if !ritual.charter_proposed || !s.sealed || s.backup_confirmed {
                     return;
                 }
                 let Some(who) = &s.identity else {

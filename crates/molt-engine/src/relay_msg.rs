@@ -369,14 +369,16 @@ fn network_headline(e: &str) -> Option<&'static str> {
 
 /// The founding/join leg: the ritual's own faults.
 fn ritual_headline(e: &str) -> Option<&'static str> {
-    Some(if e.contains("did not publish") || e.contains("relay refused") {
-        "No relay took it"
-    } else if e.contains("already used") {
-        "Invite already used"
-    } else if e.contains("ended this founding") {
+    // the two arms that EMBED far-end text come first (review R5): a
+    // founder's reason "did not publish" must not read as a relay fault
+    Some(if e.contains("ended this founding") {
         "The founder ended it"
     } else if e.contains("the founder refused this activation") {
         "The founder refused it"
+    } else if e.contains("did not publish") || e.contains("relay refused") {
+        "No relay took it"
+    } else if e.contains("already used") {
+        "Invite already used"
     } else if e.contains("already exists") {
         // the founding's own materialization step, not a backup
         "Workspace already exists"
@@ -694,6 +696,11 @@ mod tests {
         assert_eq!(
             headline_for(&format!("the founder refused this activation: {hostile}")),
             "The founder refused it"
+        );
+        // …nor with a reason that names a ritual arm itself (review R5)
+        assert_eq!(
+            headline_for("the founder ended this founding: did not publish"),
+            "The founder ended it"
         );
         // and the operator's own file path cannot do it either
         assert_eq!(

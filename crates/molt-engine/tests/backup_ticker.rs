@@ -701,8 +701,9 @@ async fn a_full_bucket_prunes_oldest_first_and_never_a_last_copy() {
     let (w, id, _root) = founded_engine(tmp.path(), &endpoint, 99).await;
     let other = "cd".repeat(32);
     let mine: Vec<String> = (1..=4u64).map(|ts| molt_core::backup_key(&id, ts)).collect();
-    // 5 objects x 1000 B = 5000 B. The other republic's SINGLE copy is the
-    // oldest thing in the bucket - and must survive anyway.
+    // 4 own objects x 1000 B = 4000 B, plus another node's SINGLE copy —
+    // the oldest thing in the bucket, and not ours to touch at all (the
+    // quota is THIS node's, review C4): 4000 B down to 2000 B
     let mut objects: Vec<(String, u64)> = mine.iter().map(|k| (k.clone(), 1000)).collect();
     objects.push((molt_core::backup_key(&other, 0), 1000));
     *listing.lock().expect("listing") = listing_of_sized(&objects);
@@ -716,7 +717,7 @@ async fn a_full_bucket_prunes_oldest_first_and_never_a_last_copy() {
     })
     .await;
     for _ in 0..100 {
-        if log.lock().expect("log").iter().filter(|r| r.method == "DELETE").count() >= 3 {
+        if log.lock().expect("log").iter().filter(|r| r.method == "DELETE").count() >= 2 {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -729,9 +730,9 @@ async fn a_full_bucket_prunes_oldest_first_and_never_a_last_copy() {
         .collect();
     assert_eq!(
         deleted,
-        vec![mine[0].clone(), mine[1].clone(), mine[2].clone()],
-        "5000 B down to 2000 B: the three oldest deletable objects go, and \
-         neither newest copy is touched: {reqs:?}"
+        vec![mine[0].clone(), mine[1].clone()],
+        "4000 B down to 2000 B: the two oldest own copies go; the newest own \
+         copy and the other node's copy are not touched: {reqs:?}"
     );
 }
 
@@ -754,7 +755,8 @@ async fn an_unreachable_quota_is_reported_instead_of_deleting_the_last_copies() 
     let mut objects: Vec<(String, u64)> = mine.iter().map(|k| (k.clone(), 1000)).collect();
     objects.push((molt_core::backup_key(&other, 7), 1000));
     *listing.lock().expect("listing") = listing_of_sized(&objects);
-    // 500 B limit against 2000 B of untouchable newest copies
+    // 500 B limit against 1000 B of untouchable newest own copy (the other
+    // node's 1000 B are not counted at all)
     set_quota(&w, 500).await;
     w.execute(Command::SetWorkspaceBackup { id: id.clone(), enabled: true })
         .await
@@ -767,7 +769,7 @@ async fn an_unreachable_quota_is_reported_instead_of_deleting_the_last_copies() 
     w.execute(Command::BackupTick).await.expect("tick");
     let sv = poll_session(&w, "quota notice", |sv| sv.notice.starts_with("backup-quota:")).await;
     assert!(
-        sv.notice.contains("2000 B of 500 B") && sv.notice.contains("nothing left to prune"),
+        sv.notice.contains("1000 B of 500 B") && sv.notice.contains("nothing left to prune"),
         "the notice names the fault once: {:?}",
         sv.notice
     );

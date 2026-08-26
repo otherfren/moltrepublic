@@ -1436,11 +1436,22 @@ impl State {
             ));
         }
 
+        // the chain is read BEFORE the point of no return (an unreadable one
+        // refuses the open with the old workspace intact) and its consumed
+        // ids clear the mint counter BEFORE the tail replays — the replay's
+        // id gate would otherwise refuse a chain-consumed id the snapshot
+        // never saw (review E1 residual)
+        let (checkpoint_blob, chain) = opened.read_chain().map_err(|e| {
+            MoltError::Engine(format!("this workspace's chain is unreadable — {e}"))
+        })?;
         // point of no return: swap the actor state to the new workspace
         self.close_active_storage();
         self.reset_workspace_state();
         if let Some(snap) = loaded.snapshot {
             self.restore_dump(snap.state);
+        }
+        if let Some(top) = Self::max_applied_proposal_id(&chain) {
+            self.next_id = self.next_id.max(top.saturating_add(1));
         }
         for env in &loaded.tail {
             self.apply(env);
@@ -1456,9 +1467,6 @@ impl State {
         // "no chain" it ran a chain republic chainless on the legacy
         // counted path, and the next governance write overwrote the
         // damaged file (destroying the evidence). Absent stays quiet.
-        let (checkpoint_blob, chain) = opened.read_chain().map_err(|e| {
-            MoltError::Engine(format!("this workspace's chain is unreadable — {e}"))
-        })?;
         // heal the crash window between a pruned chain write and its
         // manifest bump: a pruned workspace must never sit at v1
         if checkpoint_blob.is_some() {

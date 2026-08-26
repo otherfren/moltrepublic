@@ -1658,23 +1658,26 @@ mod tests {
     /// member's recovery outright and mesh-announce to a stale roster.
     #[test]
     fn a_post_genesis_member_recovers_against_the_verified_head() {
-        use molt_core::{approval_bytes, block_link_bytes, ChainBlock, ChainChange, MembershipOp, RosterAttestation};
+        use molt_core::{approval_bytes, block_link_bytes, ChainBlock, ChainChange, RosterAttestation};
 
         let (coord_sk, coord_pk) = molt_storage::derive_identity_key(&[1u8; 32], "coordinator");
         let (bob_sk, bob_pk) = molt_storage::derive_identity_key(&[2u8; 32], "bob");
         let (_dave_sk, dave_pk) = molt_storage::derive_identity_key(&[4u8; 32], "dave");
         let (mut chain, republic_id) = signed_genesis(
-            &[("coordinator", &coord_sk, &coord_pk), ("bob", &bob_sk, &bob_pk)],
+            &[
+                ("coordinator", &coord_sk, &coord_pk),
+                ("bob", &bob_sk, &bob_pk),
+                ("dave", &_dave_sk, &dave_pk),
+            ],
             1,
         );
-        // dave joins later: a threshold-committed Membership{Joined} block
-        let change = ChainChange::Membership {
-            op: MembershipOp::Joined,
-            member: "dave".to_string(),
-            identity_pk: dave_pk.clone(),
-            nostr_pk: None,
-            relays: Vec::new(),
-            consent: None,
+        // the republic moved on after the genesis: a threshold-committed
+        // Applied block (seats are fixed at founding — review C7 — so dave is
+        // a founding seat whose recovery must still verify against the HEAD)
+        let change = ChainChange::Applied {
+            proposal_id: 1,
+            surface: molt_core::Surface::Memory,
+            payload: serde_json::json!({ "op": "add_note", "id": 1 }),
         };
         let bytes = approval_bytes(&republic_id, 1, &change);
         let block1 = ChainBlock {
@@ -1697,8 +1700,8 @@ mod tests {
         // the genesis constitution stays what the workspace materializes from …
         assert_eq!(
             sealed.expect("genesis roster").identities.len(),
-            2,
-            "the genesis constitution is untouched by later membership"
+            3,
+            "the genesis constitution is what the workspace materializes from"
         );
         // … while the LIVE roster (survivor set, anchor base) is the head's
         let names: Vec<&str> = roster.iter().map(|i| i.member.as_str()).collect();
