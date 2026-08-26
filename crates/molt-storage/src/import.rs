@@ -89,8 +89,8 @@ pub fn import_stage(
         "workspace" => {
             let entropy = crate::seed_entropy(secret).map_err(|_| {
                 StorageError::BadSeed(
-                    "this backup unlocks with the RECOVERY PHRASE (24 words) — \
-                     the typed secret does not parse as one"
+                    "this backup unlocks with the recovery phrase (24 words) - \
+                     the typed secret is not one"
                         .to_string(),
                 )
             })?;

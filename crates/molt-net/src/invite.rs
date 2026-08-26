@@ -212,8 +212,7 @@ impl RecoveryHandoverV2 {
         let parsed: RecoveryWire = serde_json::from_str(&wire).map_err(|_| {
             if wire.contains('\n') {
                 NetError::Framing(
-                    "this is a queue-shaped recovery link from an older build — \
-                     ask for a fresh recovery link on this build"
+                    "this is a recovery link from an older build - ask for a fresh one"
                         .into(),
                 )
             } else {
@@ -222,7 +221,7 @@ impl RecoveryHandoverV2 {
         })?;
         if parsed.v != RECOVERY_HANDOVER_VERSION {
             return Err(NetError::Framing(format!(
-                "unsupported recovery handover version {} — this build reads \
+                "unsupported recovery handover version {} - this build reads \
                  v{RECOVERY_HANDOVER_VERSION}",
                 parsed.v
             )));
@@ -307,8 +306,7 @@ impl InviteHandoverV2 {
         let parsed: HandoverWire = serde_json::from_str(&wire).map_err(|_| {
             if wire.contains('\n') {
                 NetError::Framing(
-                    "this is a queue-shaped invite from an older build — \
-                     mint a fresh invite on this build"
+                    "this is an invite from an older build - mint a fresh one"
                         .into(),
                 )
             } else {
@@ -317,7 +315,7 @@ impl InviteHandoverV2 {
         })?;
         if parsed.v != INVITE_HANDOVER_VERSION {
             return Err(NetError::Framing(format!(
-                "unsupported invite handover version {} — this build reads v{INVITE_HANDOVER_VERSION}",
+                "unsupported invite handover version {} - this build reads v{INVITE_HANDOVER_VERSION}",
                 parsed.v
             )));
         }
@@ -346,7 +344,7 @@ impl InviteHandoverV2 {
         }
         if relays.len() > crate::welcome::MAX_PAYLOAD_RELAYS {
             return Err(NetError::Framing(format!(
-                "{} relays — more than the {} an invite may carry",
+                "{} relays - more than the {} an invite may carry",
                 relays.len(),
                 crate::welcome::MAX_PAYLOAD_RELAYS
             )));

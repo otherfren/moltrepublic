@@ -148,7 +148,7 @@ pub async fn fetch_series(
     loop {
         if tokio::time::Instant::now() >= deadline {
             return Err(NetError::Framing(
-                "the fetch budget is spent — the series did not complete".to_string(),
+                "the fetch budget is spent - the series did not complete".to_string(),
             ));
         }
         match sub.recv(quiet).await {
@@ -171,7 +171,7 @@ pub async fn fetch_series(
                         > cap_usize.saturating_add(chunk_budget)
                     {
                         return Err(NetError::Framing(format!(
-                            "series claims {count} chunks — beyond the {cap}-byte cap"
+                            "series claims {count} chunks - beyond the {cap}-byte cap"
                         )));
                     }
                 }
@@ -204,7 +204,7 @@ pub async fn fetch_series(
                 // whole quiet window (a dead pool is Deaf, below) — this is
                 // the honest MISS: retention pruned it, or never published
                 return Err(NetError::Framing(
-                    "no chunk of this series arrived — the relays do not hold it".to_string(),
+                    "no chunk of this series arrived - the relays do not hold it".to_string(),
                 ));
             }
             GroupRecv::Deaf(why) => {

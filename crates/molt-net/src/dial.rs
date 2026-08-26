@@ -255,7 +255,7 @@ impl Dialer {
     #[cfg(not(feature = "embedded-tor"))]
     fn resolve_embedded(_port: u16) -> Result<Dialer, NetError> {
         Err(NetError::TorMisconfigured(
-            "embedded Tor not built — rebuild with --features embedded-tor".into(),
+            "embedded Tor not built - rebuild with --features embedded-tor".into(),
         ))
     }
 
@@ -340,7 +340,7 @@ impl Dialer {
                 // closed with a clear reason instead of a DNS error / hang.
                 if host.to_ascii_lowercase().ends_with(".onion") {
                     return Err(NetError::TorMisconfigured(format!(
-                        "server {host} is onion-only but Tor is off — enable Tor to reach it"
+                        "server {host} is onion-only but Tor is off - enable Tor to reach it"
                     )));
                 }
                 let addr = format!("{host}:{port}");

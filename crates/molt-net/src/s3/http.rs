@@ -312,7 +312,7 @@ where
         }
         if started.elapsed() > overall {
             return Err(S3Error::Protocol(format!(
-                "http response head too slow — below the {} B/s floor",
+                "http response head too slow - below the {} B/s floor",
                 bounds.min_throughput_bps
             )));
         }
@@ -341,13 +341,13 @@ where
     }
     let Some(total) = content_length(&resp_headers) else {
         return Err(S3Error::Protocol(
-            "download without a Content-Length — truncation would be undetectable".to_string(),
+            "download without a Content-Length".to_string(),
         ));
     };
     let total = u64::try_from(total).unwrap_or(u64::MAX);
     if total > max_bytes {
         return Err(S3Error::Protocol(format!(
-            "object is {total} bytes — beyond the {max_bytes}-byte cap"
+            "object is {total} bytes - beyond the {max_bytes}-byte cap"
         )));
     }
     let mut written: u64 = 0;
@@ -365,7 +365,7 @@ where
     while written < total {
         if started.elapsed() > overall {
             return Err(S3Error::Protocol(format!(
-                "download too slow — below the {} B/s floor ({written} of {total} bytes)",
+                "download too slow - below the {} B/s floor ({written} of {total} bytes)",
                 bounds.min_throughput_bps
             )));
         }

@@ -409,7 +409,7 @@ impl S3Client {
         if code.as_deref() == Some("RequestTimeTooSkewed") {
             return S3Error::Http {
                 status,
-                hint: "the local clock is too far from the server's — fix the system time"
+                hint: "the local clock is too far from the server's - fix the system time"
                     .to_string(),
             };
         }
@@ -421,13 +421,13 @@ impl S3Client {
             400 => S3Error::Http {
                 status: 400,
                 hint: with_code(
-                    "bad request — often a region mismatch for this endpoint",
+                    "bad request - often a region mismatch for this endpoint",
                     code.as_deref(),
                 ),
             },
             401 | 403 => S3Error::Http {
                 status,
-                hint: with_code("access denied — check access key and secret", code.as_deref()),
+                hint: with_code("access denied - check access key and secret", code.as_deref()),
             },
             404 => S3Error::Http {
                 status: 404,

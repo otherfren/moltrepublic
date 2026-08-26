@@ -30,7 +30,7 @@ pub enum RitualWrapError {
     #[error("wrapping the ritual message: {0}")]
     Wrap(String),
     /// The message does not fit the NIP-44 plaintext cap.
-    #[error("ritual message is {bytes} bytes — over the {cap}-byte gift-wrap cap")]
+    #[error("ritual message is {bytes} bytes - over the {cap}-byte gift-wrap cap")]
     TooLarge {
         /// Measured encoded size.
         bytes: usize,

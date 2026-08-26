@@ -302,8 +302,9 @@ impl MlsChannel {
             // branch nobody is on — N4 re-issues it against the new epoch.
             Ok(MlsIncoming::CommitRewound { readmitted }) => {
                 tracing::warn!(
-                    "a concurrent commit won the tiebreak — our own commit was rolled back; \
-                     any re-key it carried must be re-issued at the new epoch"
+                    own_commit = "rolled back",
+                    rekey = "re-issue at the new epoch",
+                    "a concurrent commit won the tiebreak"
                 );
                 self.epoch_bump.send_modify(|n| *n = n.wrapping_add(1));
                 MlsDecode::EpochAdvanced(readmitted)
@@ -989,7 +990,7 @@ async fn outbox_task<T, L, S, K>(
                     stall_reported = true;
                     sink.send_failed(
                         &peer.member,
-                        "deliveries keep going unacknowledged — still resending",
+                        "deliveries keep going unacknowledged - still resending",
                     )
                     .await;
                 }
@@ -1309,7 +1310,7 @@ async fn drain_epoch_buffer<K: EngineSink>(
                     epoch_buffer.push((id, bytes, held)); // still ahead
                 }
                 MlsDecode::Discard => {
-                    tracing::warn!(peer = %peer.member, total = count_discarded(), "held MLS message did not decode after the epoch advance — dropped");
+                    tracing::warn!(peer = %peer.member, total = count_discarded(), action = "dropped", "held MLS message did not decode after the epoch advance");
                     ack_all(held);
                 }
             }
@@ -1396,8 +1397,8 @@ async fn recv_watchdog_task<T, L, S, K>(
         {
             RecvEnd::EngineGone => return,
             RecvEnd::StreamEnded => {
-                tracing::warn!(member = %peer.member, queue = %queue_tag(&peer.rcv0().id.0), "inbound subscription ended — resubscribing");
-                sink.link_down(&peer.member, "inbound subscription ended — resubscribing")
+                tracing::warn!(member = %peer.member, queue = %queue_tag(&peer.rcv0().id.0), "inbound subscription ended - resubscribing");
+                sink.link_down(&peer.member, "inbound subscription ended - resubscribing")
                     .await;
             }
         }
@@ -1655,7 +1656,7 @@ where
                     // of redelivered blocks land here too — routine weather,
                     // but a STREAM of these on a quiet mesh is the signature
                     // of a desynced ratchet.
-                    tracing::warn!(peer = %peer.member, total = count_discarded(), "inbound MLS message did not decode (replay/proposal/garbage) — dropped");
+                    tracing::warn!(peer = %peer.member, total = count_discarded(), action = "dropped", "inbound MLS message did not decode (replay/proposal/garbage)");
                     ack_all(acks);
                 }
             }

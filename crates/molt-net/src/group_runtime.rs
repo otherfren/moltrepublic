@@ -837,7 +837,7 @@ async fn outbox_loop<L, S, K>(
             // resends keep trying at the cap
             stall_reported = true;
             for m in &cfg.members {
-                sink.send_failed(m, "not acknowledging deliveries — still resending")
+                sink.send_failed(m, "not acknowledging deliveries - still resending")
                     .await;
             }
         }

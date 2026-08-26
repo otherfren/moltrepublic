@@ -110,20 +110,20 @@ impl core::fmt::Display for RelayUrlError {
                 "a relay URL must start with wss:// (or ws:// for .onion and local addresses)",
             ),
             Self::Host => f.write_str("the relay URL has no usable host"),
-            Self::PlaintextClearnet => f.write_str(
-                "ws:// is plaintext and only allowed for .onion or local relays — use wss:// here",
-            ),
+            Self::PlaintextClearnet => {
+                f.write_str("ws:// is only allowed for .onion or local relays - use wss://")
+            }
             Self::Junk => {
                 f.write_str("the relay URL contains whitespace or control characters")
             }
-            Self::OnionAddress => f.write_str(
-                "not a valid onion address — a v3 onion is 56 characters (a-z, 2-7) before .onion",
-            ),
+            Self::OnionAddress => {
+                f.write_str("not a v3 onion address (56 characters a-z, 2-7 before .onion)")
+            }
             Self::Userinfo => f.write_str("credentials do not belong in a relay URL"),
             Self::Fragment => f.write_str("a relay URL cannot carry a #fragment"),
-            Self::TooLong => f.write_str("the relay URL is longer than 512 bytes"),
+            Self::TooLong => write!(f, "the relay URL is longer than {MAX_URL_LEN} bytes"),
             Self::NonCanonical => f.write_str(
-                "not the canonical spelling of this address — write host, IP and port plainly \
+                "not the canonical spelling - write host, IP and port plainly \
                  (e.g. wss://relay.example.org or ws://192.168.1.5:7777)",
             ),
         }

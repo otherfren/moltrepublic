@@ -127,10 +127,9 @@ pub fn verdict(r: &RungReport) -> TorTest {
         (Some(Ok(())), None) => TorTest {
             state: TorTestState::ProxyOnly,
             detail: match r.gap {
-                Some(g) => format!("no circuit was proven — {}", gap_detail(g)),
-                None => "nothing was routed through the proxy, so no circuit was proven — \
-                         no relay from the pool was reachable through Tor (see the relay \
-                         settings for which of them this node may dial)"
+                Some(g) => format!("no circuit was proven - {}", gap_detail(g)),
+                None => "nothing was routed through the proxy - no relay from the pool \
+                         was reachable through Tor"
                     .to_string(),
             },
             proxy: r.proxy.clone(),
@@ -141,9 +140,8 @@ pub fn verdict(r: &RungReport) -> TorTest {
         (None, None) => TorTest {
             state: TorTestState::NoTarget,
             detail: match r.gap {
-                Some(g) => format!("nothing about Tor could be established — {}", gap_detail(g)),
-                None => "no SOCKS proxy to probe and no relay this node may dial through Tor \
-                         — nothing about Tor could be established"
+                Some(g) => format!("nothing about Tor could be established - {}", gap_detail(g)),
+                None => "no SOCKS proxy to probe and no relay this node may dial through Tor"
                     .to_string(),
             },
             proxy: r.proxy.clone(),
@@ -237,7 +235,7 @@ pub async fn probe(dialer: &Dialer, target: Option<&str>, gap: Option<TargetGap>
     if !dialer.tor_on() {
         return TorTest {
             state: TorTestState::Off,
-            detail: "Tor is not enabled — nothing was sent".to_string(),
+            detail: "Tor is not enabled - nothing was sent".to_string(),
             ..TorTest::default()
         };
     }

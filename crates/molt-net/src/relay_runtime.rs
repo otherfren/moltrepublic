@@ -278,7 +278,7 @@ impl RelayRuntime {
     pub async fn publish(&self, event: &Event) -> Result<PublishReport, NetError> {
         if self.urls.is_empty() {
             return Err(NetError::Unreachable(
-                "no dialable relay — the pool is empty or gated".into(),
+                "no dialable relay - the pool is empty or gated".into(),
             ));
         }
         // the size budget gates BEFORE any relay sees the event: one relay
@@ -293,7 +293,7 @@ impl RelayRuntime {
             .unwrap_or(u64::MAX);
         if size > budget {
             return Err(NetError::Framing(format!(
-                "event of {size} bytes exceeds the smallest relay cap ({budget} bytes) — refused before publish"
+                "event of {size} bytes exceeds the smallest relay cap ({budget} bytes)"
             )));
         }
         let attempts = self.urls.iter().map(|url| {
@@ -497,7 +497,7 @@ impl RelayRuntime {
     pub async fn subscribe(&self, filter: Filter) -> Result<Subscription, NetError> {
         if self.urls.is_empty() {
             return Err(NetError::Unreachable(
-                "no dialable relay — the pool is empty or gated".into(),
+                "no dialable relay - the pool is empty or gated".into(),
             ));
         }
         // The channel must hold the WHOLE bounded stored replay without a
@@ -1266,7 +1266,7 @@ impl PublishPool {
     pub async fn publish(&self, event: &Event) -> Result<PublishReport, NetError> {
         if self.conns.is_empty() {
             return Err(NetError::Unreachable(
-                "no dialable relay — the pool is empty or gated".into(),
+                "no dialable relay - the pool is empty or gated".into(),
             ));
         }
         let budget = self.size_budget.unwrap_or(DEFAULT_SIZE_BUDGET);
@@ -1274,7 +1274,7 @@ impl PublishPool {
             .unwrap_or(u64::MAX);
         if size > budget {
             return Err(NetError::Framing(format!(
-                "event of {size} bytes exceeds the smallest relay cap ({budget} bytes) — refused before publish"
+                "event of {size} bytes exceeds the smallest relay cap ({budget} bytes)"
             )));
         }
         let timeout = self.publish_timeout;

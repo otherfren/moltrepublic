@@ -53,7 +53,7 @@ pub enum WelcomeError {
     Wrap(String),
     /// The payload does not fit the NIP-44 plaintext cap — a founding this
     /// size cannot ride a gift wrap, and the caller must surface that.
-    #[error("welcome payload is {bytes} bytes — over the {cap}-byte gift-wrap cap")]
+    #[error("welcome payload is {bytes} bytes - over the {cap}-byte gift-wrap cap")]
     TooLarge {
         /// Measured encoded payload size.
         bytes: usize,
@@ -108,7 +108,7 @@ impl WelcomePayload {
         }
         if self.relays.len() > MAX_PAYLOAD_RELAYS {
             return Err(WelcomeError::Payload(format!(
-                "{} relays — more than the {MAX_PAYLOAD_RELAYS} the payload may carry",
+                "{} relays - more than the {MAX_PAYLOAD_RELAYS} the payload may carry",
                 self.relays.len()
             )));
         }
@@ -142,7 +142,7 @@ impl WelcomePayload {
             .map_err(|_| WelcomeError::Payload("rotation_seed is not 32 bytes".into()))?;
         if wire.relays.len() > MAX_PAYLOAD_RELAYS {
             return Err(WelcomeError::Payload(format!(
-                "{} relays — more than the {MAX_PAYLOAD_RELAYS} the payload may carry",
+                "{} relays - more than the {MAX_PAYLOAD_RELAYS} the payload may carry",
                 wire.relays.len()
             )));
         }

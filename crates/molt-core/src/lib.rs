@@ -5902,7 +5902,7 @@ pub enum MoltError {
     #[error("unknown proposal {0:?}")]
     UnknownProposal(ProposalId),
     /// A proposal was attempted on the ungated chat surface.
-    #[error("chat is ungated — use the chat command, not propose")]
+    #[error("chat is ungated - use chat, not propose")]
     ChatNotGated,
     /// The proposal payload was malformed.
     #[error("bad payload: {0}")]
@@ -5923,11 +5923,7 @@ pub enum MoltError {
     /// counts invented approvals on behalf of other members. The missing
     /// approvals must come from the members themselves, which takes a
     /// chain-governed republic (real signed m-of-n over the mesh).
-    #[error(
-        "proposal {0:?} already carries this node's approval — the remaining \
-         approvals must come from the other members themselves, which needs \
-         a chain-governed republic"
-    )]
+    #[error("proposal {0:?} already carries this node's approval - the others must approve themselves")]
     AlreadyApproved(ProposalId),
     /// A repeated `Decline` by the same member — one voice per member; the
     /// proposal rejects only when enough DISTINCT members decline.
@@ -5936,7 +5932,7 @@ pub enum MoltError {
     /// A write into the discussion channel of a decided vote (the
     /// discussion stays readable, linked from the vote's card — but the
     /// deliberation ended with the vote).
-    #[error("discussion of proposal {0:?} is read-only — the vote is {1:?}")]
+    #[error("discussion of proposal {0:?} is read-only - the vote is {1:?}")]
     DiscussionClosed(ProposalId, ProposalState),
     /// A settings value failed validation (nothing was stored or written).
     #[error("settings: {0}")]
@@ -5948,7 +5944,7 @@ pub enum MoltError {
     #[error("workspace is busy: {0}")]
     WorkspaceBusy(String),
     /// The workspace is encrypted at rest — decrypt it first.
-    #[error("workspace `{0}` is encrypted — decrypt it first")]
+    #[error("workspace `{0}` is encrypted - decrypt it first")]
     WorkspaceEncrypted(String),
     /// A storage operation failed (I/O, corruption, wrong key, …).
     #[error("storage: {0}")]

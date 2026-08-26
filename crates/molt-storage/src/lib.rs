@@ -192,7 +192,7 @@ pub enum StorageError {
     /// material on disk — opening is impossible by design, not an I/O
     /// accident. Mapped to [`molt_core::MoltError::WorkspaceEncrypted`] so
     /// every frontend routes it to the decrypt flow.
-    #[error("workspace is sealed at rest — decrypt it with its recovery phrase first")]
+    #[error("workspace is sealed at rest - decrypt it with its recovery phrase first")]
     Sealed(String),
     /// The recovery phrase did not parse / carry valid entropy.
     #[error("seed: {0}")]
@@ -1220,7 +1220,7 @@ impl OpenedWorkspace {
         let mut seq = table.floor;
         for (no, path) in &segments {
             if table.dek(*no).is_none() && highest_keyed.is_some_and(|h| *no < h) {
-                tracing::warn!(segment = no, "an erased segment's file is back — not resurrecting it");
+                tracing::warn!(segment = no, "an erased segment's file is back, not resurrecting it");
                 continue;
             }
             let first_seq = seq + 1;
@@ -1249,7 +1249,7 @@ impl OpenedWorkspace {
             let (frames, torn) = split_frames(&data);
             if torn.is_some() {
                 return Err(StorageError::Corrupt(format!(
-                    "segment {} has a torn tail — not migrating a damaged log",
+                    "segment {} has a torn tail - not migrating a damaged log",
                     path.display()
                 )));
             }
@@ -1717,21 +1717,20 @@ fn ensure_transport_state_not_newer(
 
 fn read_transport_state_at(dir: &Path, ws_key: &[u8; 32], id: &[u8; 32]) -> TransportState {
     let path = dir.join("transport.state");
-    let lost = "an existing transport.state is unreadable — starting fresh; if this \
-                workspace anchored a nostr transport identity, its non-re-derivable \
-                secret (nostr_sk) was in this file and is now lost until a recovery \
-                ritual re-anchors the seat";
+    // starting fresh loses the non-re-derivable nostr_sk until a recovery
+    // ritual re-anchors the seat; the fields keep the log line greppable
+    const LOST: &str = "transport.state unreadable, starting fresh";
     let data = match read_capped(&path, READ_CAP_STATE, "transport.state") {
         Ok(d) => d,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return TransportState::default(),
         Err(e) => {
-            tracing::error!(error = %e, "{lost}");
+            tracing::error!(error = %e, cause = "read", loses = "nostr_sk", "{LOST}");
             return TransportState::default();
         }
     };
     let (frames, torn) = split_frames(&data);
     if frames.len() != 1 || torn.is_some() {
-        tracing::error!("transport.state framing is damaged — {lost}");
+        tracing::error!(cause = "framing", loses = "nostr_sk", "{LOST}");
         return TransportState::default();
     }
     let transport_key = hkdf32(ws_key, "molt-transport-state", id);
@@ -1745,21 +1744,18 @@ fn read_transport_state_at(dir: &Path, ws_key: &[u8; 32], id: &[u8; 32]) -> Tran
     ) {
         Ok(p) => p,
         Err(e) => {
-            tracing::error!(error = %e, "transport.state does not authenticate — {lost}");
+            tracing::error!(error = %e, cause = "auth", loses = "nostr_sk", "{LOST}");
             return TransportState::default();
         }
     };
     match serde_json::from_slice::<TransportState>(&plaintext) {
         Ok(st) if st.version <= TRANSPORT_STATE_VERSION => st,
         Ok(st) => {
-            tracing::error!(
-                version = st.version,
-                "transport.state was written by a newer node — {lost}"
-            );
+            tracing::error!(version = st.version, cause = "newer", loses = "nostr_sk", "{LOST}");
             TransportState::default()
         }
         Err(e) => {
-            tracing::error!(error = %e, "transport.state decode failed — {lost}");
+            tracing::error!(error = %e, cause = "decode", loses = "nostr_sk", "{LOST}");
             TransportState::default()
         }
     }
@@ -1976,9 +1972,8 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
         // never a guess — decrypting with the recovery phrase repairs it
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(StorageError::BadFile(format!(
-                "{} says device-sealed but the key material is missing \
-                 (interrupted encrypt?) — decrypt with the recovery phrase \
-                 to repair",
+                "{} says device-sealed but the key material is missing - \
+                 decrypt with the recovery phrase to repair",
                 ws_dir.display()
             )));
         }
@@ -2041,8 +2036,7 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
             if idx == last_idx && has_valid_frame_after(&data, pos) {
                 return Err(StorageError::Corrupt(format!(
                     "segment {seg_no} is damaged at byte {pos} but valid frames \
-                     follow it (bitrot, not a torn write) — refusing to truncate \
-                     history away"
+                     follow it - refusing to truncate history away"
                 )));
             }
             if idx == last_idx {
@@ -2056,8 +2050,8 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
                 f.sync_all()?;
             } else {
                 return Err(StorageError::Corrupt(format!(
-                    "segment {} is damaged at byte {} but is not the last segment \
-                     (bitrot?) — refusing to guess",
+                    "segment {} is damaged at byte {} but is not the last segment - \
+                     refusing to guess",
                     path.display(),
                     pos
                 )));
@@ -2143,7 +2137,7 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
                 path = %path.display(),
                 at_seq,
                 log_starts_at,
-                "snapshot predates the compacted log — skipping it"
+                "snapshot predates the compacted log, skipping it"
             );
             continue;
         }
@@ -2151,7 +2145,7 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
             tracing::warn!(
                 path = %path.display(),
                 last_seq,
-                "snapshot is ahead of the log (partial restore?) — skipping it"
+                "snapshot is ahead of the log, skipping it"
             );
             continue;
         }
@@ -2168,7 +2162,7 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
         // surviving tail alone would present a partial state as complete
         return Err(StorageError::Corrupt(format!(
             "the log starts at seq {log_starts_at} (compacted) but no usable \
-             snapshot covers what came before — refusing to open a partial state"
+             snapshot covers what came before - refusing to open a partial state"
         )));
     }
     let floor = snapshot.as_ref().map(|s| s.at_seq).unwrap_or(0);
@@ -2394,7 +2388,7 @@ const DIR_SIZE_MAX_DEPTH: u32 = 16;
 fn dir_size_to(dir: &Path, depth: u32) -> u64 {
     let mut total = 0u64;
     if depth > DIR_SIZE_MAX_DEPTH {
-        tracing::warn!(dir = %dir.display(), "directory nesting past the scan depth — size not counted below");
+        tracing::warn!(dir = %dir.display(), "directory nesting past the scan depth, size not counted below");
         return total;
     }
     let Ok(rd) = fs::read_dir(dir) else {
@@ -2671,7 +2665,7 @@ impl StorageHandle {
         match self.tx.try_send(WriterMsg::SaveAccepted(accepted)) {
             Ok(()) => {}
             Err(mpsc::TrySendError::Full(_)) => {
-                tracing::warn!("writer queue full — dropping an accept-window save");
+                tracing::warn!(dropped = "accept-window save", "writer queue full");
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {}
         }
@@ -2684,7 +2678,7 @@ impl StorageHandle {
         match self.tx.try_send(WriterMsg::SaveTransport(state)) {
             Ok(()) => {}
             Err(mpsc::TrySendError::Full(_)) => {
-                tracing::warn!("writer queue full — dropping a transport.state save");
+                tracing::warn!(dropped = "transport.state save", "writer queue full");
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {}
         }
@@ -2739,7 +2733,7 @@ impl StorageHandle {
         }) {
             Ok(()) => true,
             Err(mpsc::TrySendError::Full(_)) => {
-                tracing::warn!("writer queue full — dropping a live MLS merge");
+                tracing::warn!(dropped = "live MLS merge", "writer queue full");
                 false
             }
             Err(mpsc::TrySendError::Disconnected(_)) => false,

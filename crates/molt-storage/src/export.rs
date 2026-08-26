@@ -363,7 +363,7 @@ fn export_dir_impl(
     let device_key = crate::load_or_create_device_key(&crate::device_key_path(root))?;
     let sealed = crate::read_capped(&ws_dir.join(&manifest.crypto.key_file), crate::READ_CAP_KEY, "workspace key").map_err(|e| {
         StorageError::BadFile(format!(
-            "no device-sealed workspace key ({e}) — cannot export"
+            "no device-sealed workspace key ({e}) - cannot export"
         ))
     })?;
     let ws_key = Zeroizing::new(crate::unseal_workspace_key(&device_key, &id, &sealed)?);
@@ -374,8 +374,8 @@ fn export_dir_impl(
     if let Some(s) = &seed {
         if crate::derive_workspace_key(s, &id_hex) != *ws_key {
             return Err(StorageError::Crypto(
-                "the stored seed does not derive this workspace's key — \
-                 refusing to export an inconsistent workspace"
+                "the stored seed does not derive this workspace's key - \
+                 refusing to export"
                     .to_string(),
             ));
         }
@@ -835,7 +835,7 @@ pub fn read_export(
         }
         (mode @ ("passphrase" | "workspace"), _) => {
             return Err(StorageError::BadFile(format!(
-                "this export uses key mode `{mode}` — a different secret kind was supplied"
+                "this export uses key mode `{mode}` - a different secret kind was supplied"
             )));
         }
         (other, _) => {
