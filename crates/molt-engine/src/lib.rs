@@ -509,7 +509,7 @@ pub(crate) struct DeliveryState {
     /// crash simply re-earns them via the resend machinery. Drained in seq
     /// order as predecessors land; a stale entry (pathological chain) is
     /// released loudly by the delivery tick after
-    /// [`crate::net::ORDERED_PARK_GIVEUP_SECS`]. Runtime-only, workspace
+    /// `ORDERED_PARK_GIVEUP_SECS` (net/delivery.rs). Runtime-only, workspace
     /// scope.
     #[allow(clippy::type_complexity)]
     pub(crate) ordered_park:
