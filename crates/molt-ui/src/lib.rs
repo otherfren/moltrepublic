@@ -27,6 +27,25 @@
 //! [`molt_core::Event::SessionChanged`] and pushes it back into the Slint
 //! properties. An MCP agent issuing the *same* commands drives this *same* state,
 //! so the GUI and the MCP operator are co-equal — exactly as for the surfaces.
+//!
+//! Module map (review 2026-08-25 F11):
+//! - `app` — [`run_app`]: build the window, wire, mirror, run; `Ctx` is what
+//!   every callback captures.
+//! - `actions/{settings,workspace,relays,ritual,chat,org}` — the callback
+//!   wiring, one `wire(ui, ctx)` per screen/surface.
+//! - `mirror` — the live mirror: session/runs/relays/surfaces pushed into the
+//!   window, the UI snapshot publish, the mirror task.
+//! - `surfaces` — the `Send` bundle a mirror pass gathers, the UI-local
+//!   chat-bus state, the proposal/chain/table row projections.
+//! - `chat_log`, `channels` — the chat pane's rows and the chat bus's
+//!   channels + proposal cache.
+//! - `settings` — the settings draft (read/apply/dirty/save).
+//! - `models` — the one in-place `VecModel` patch (`sync_model`).
+//! - `images`, `labels`, `i18n`, `alerts`, `net_tor` — pictures, rendered
+//!   prose, localization, alert sounds, the anonymity panel.
+//! - `wiki`, `patchview`, `wiki_bridge` — the Shared-Memory wiki's state
+//!   machine, its diff viewer, and their Slint bridge.
+//! - `tests/` — the unit tests per module and the headless GUI tests.
 
 // The Slint-generated window (AppWindow, the Strings/Theme globals, every
 // row struct) lives in its own crate as a compile-time firewall — see
