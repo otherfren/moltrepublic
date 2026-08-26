@@ -109,9 +109,8 @@ pub(crate) fn spawn_founder_inbox(
             let _ = send_cmd(
                 &tx,
                 Command::NetRitualFailed {
-                    error: "the founding inbox is not readable on any relay — no relay \
-                            replayed the subscription (auth required, rate limited, or \
-                            refused). No invite was published."
+                    error: "the founding inbox is not readable on any relay - no invite \
+                            was published"
                         .to_string(),
                     generation: Some(generation),
                 },
@@ -266,11 +265,11 @@ pub(crate) fn spawn_rekey_delivery(
         }
         if !published {
             // the ONE thing that matters, and the action that follows from it
-            tracing::error!(%member, "the re-key commit reached no relay — re-mint the recovery link");
+            tracing::error!(%member, "the re-key commit reached no relay - re-mint the recovery link");
             return;
         }
         if let Err(e) = net.send_welcome(&to_npub, &payload).await {
-            tracing::error!(%member, error = %e, "the recovery welcome did not publish — re-mint the recovery link");
+            tracing::error!(%member, error = %e, "the recovery welcome did not publish - re-mint the recovery link");
         }
     })
 }
@@ -290,7 +289,7 @@ pub(crate) fn spawn_seat_inbox(
         let mut inbox = match net.inbox().await {
             Ok(i) => i,
             Err(e) => {
-                tracing::warn!(error = %e, "seat inbox subscribe failed — self-service reattach unavailable this session");
+                tracing::warn!(error = %e, "seat inbox subscribe failed - self-service reattach unavailable this session");
                 return;
             }
         };
@@ -604,7 +603,7 @@ fn open_group_frame(
         Ok(other) => {
             // no commit flies during ritual deliberation — anything else is
             // stream noise for this loop
-            tracing::debug!(?other, "non-application 445 during the ritual — skipped");
+            tracing::debug!(?other, "non-application 445 during the ritual - skipped");
             None
         }
         Err(e) => {
@@ -718,10 +717,7 @@ pub(crate) fn spawn_founder_group_recv(
             let _ = send_cmd(
                 &tx,
                 Command::NetRitualFailed {
-                    error: "the group channel is not readable on any relay — no relay \
-                            replayed the subscription (auth required, rate limited, or \
-                            refused)"
-                        .to_string(),
+                    error: "the group channel is not readable on any relay".to_string(),
                     generation: Some(generation),
                 },
             )
@@ -753,7 +749,7 @@ pub(crate) fn spawn_founder_group_recv(
                         &tx,
                         Command::NetRitualNote {
                             note: format!(
-                                "⚠ cannot hear the group channel — {why} · still retrying"
+                                "⚠ cannot hear the group channel - {why} · still retrying"
                             ),
                             generation: Some(generation),
                         },
@@ -912,9 +908,7 @@ async fn recovery_rejoin(
         .map_err(|e| format!("recovery inbox subscribe: {e}"))?;
     if !inbox.live_state(LIVE_WAIT).await.any() {
         return Err(
-            "the recovery inbox is not readable on any relay — no relay replayed the \
-             subscription (auth required, rate limited, or refused)"
-                .to_string(),
+            "the recovery inbox is not readable on any relay".to_string(),
         );
     }
 
@@ -1009,7 +1003,7 @@ async fn recovery_rejoin(
         let now = tokio::time::Instant::now();
         if now >= deadline {
             return Err(
-                "no Welcome arrived within 15 minutes — the coordinator must be running \
+                "no Welcome arrived within 15 minutes - the coordinator must be running \
                  and approve the return"
                     .to_string(),
             );
@@ -1092,8 +1086,8 @@ async fn recovery_rejoin(
         .map_err(|e| format!("group subscribe: {e}"))?;
     if !sub.live_state(LIVE_WAIT).await.any() {
         return Err(
-            "the group channel is not readable on any relay — the Welcome arrived but \
-             the chain cannot be fetched"
+            "the group channel is not readable on any relay - the chain cannot be \
+             fetched"
                 .to_string(),
         );
     }
@@ -1110,7 +1104,7 @@ async fn recovery_rejoin(
         let now = tokio::time::Instant::now();
         if now >= deadline {
             return Err(
-                "the republic's chain anchor never arrived — the coordinator re-keyed \
+                "the republic's chain anchor never arrived - the coordinator re-keyed \
                  but served no chain"
                     .to_string(),
             );
@@ -1183,7 +1177,7 @@ async fn recovery_rejoin(
         tracing::warn!(
             welcome = payload.relays.join(" "),
             served = served_fold.join(" "),
-            "the Welcome's relay set differs from the served anchor's fold — \
+            "the Welcome's relay set differs from the served anchor's fold - \
              a later pool vote or a lie; the chain decides on catch-up"
         );
     }
@@ -1274,9 +1268,7 @@ async fn member_join(
     let st = inbox.live_state(LIVE_WAIT).await;
     if !st.any() {
         return Err(
-            "the join inbox is not readable on any relay — no relay replayed the \
-             subscription (auth required, rate limited, or refused)"
-                .to_string(),
+            "the join inbox is not readable on any relay".to_string(),
         );
     }
 
@@ -1312,8 +1304,7 @@ async fn member_join(
         let now = tokio::time::Instant::now();
         if now >= deadline {
             return Err(
-                "the founder did not accept within 90 s — check the link, the relays, \
-                 and that the founding is still open"
+                "the founder did not accept within 90 s - check the link and the relays"
                     .to_string(),
             );
         }
@@ -1330,8 +1321,8 @@ async fn member_join(
                 // the founder's OWN words: "ask for your own link" is wrong
                 // advice when the group already formed around a first attempt
                 return Err(if reason.is_empty() {
-                    "this invite link was already used by someone else — ask the founder \
-                     for a fresh, unused link"
+                    "this invite link was already used by someone else - ask the founder \
+                     for a fresh one"
                         .to_string()
                 } else {
                     format!("the founder refused this activation: {reason}")
@@ -1363,7 +1354,7 @@ async fn member_join(
                     if sender == h.npub =>
                 {
                     return Err(if reason.is_empty() {
-                        "the founder voided this seat — the link was re-used".to_string()
+                        "the founder voided this seat - the link was re-used".to_string()
                     } else {
                         format!("the founder voided this seat: {reason}")
                     });
@@ -1384,9 +1375,7 @@ async fn member_join(
     // a mismatch is a broken or malicious founder.
     if payload.relays != h.relays {
         return Err(
-            "the Welcome names a different relay set than the invite — refusing \
-             (relay changes are governed by the chain, not by the ritual)"
-                .to_string(),
+            "the Welcome names a different relay set than the invite - refused".to_string(),
         );
     }
     mls.join_from_welcome(&payload.welcome)
@@ -1402,9 +1391,7 @@ async fn member_join(
     let st = sub.live_state(LIVE_WAIT).await;
     if !st.any() {
         return Err(
-            "the group channel is not readable on any relay — no relay replayed the \
-             subscription (auth required, rate limited, or refused)"
-                .to_string(),
+            "the group channel is not readable on any relay".to_string(),
         );
     }
 
@@ -1435,7 +1422,7 @@ async fn member_join(
                 let _ = send_cmd(
                     tx,
                     Command::NetJoinNote {
-                        note: format!("⚠ cannot hear the group channel — {why} · still retrying"),
+                        note: format!("⚠ cannot hear the group channel - {why} · still retrying"),
                         generation,
                     },
                 )
@@ -1454,7 +1441,7 @@ async fn member_join(
             if frame_is_from_founder(&from, &ctx.invite.info) {
                 return Err(format!("the founder ended this founding: {reason}"));
             }
-            tracing::warn!(%from, "abort frame from a co-member — ignored");
+            tracing::warn!(%from, "abort frame from a co-member - ignored");
             continue;
         }
         if let RitualMsg::Seal { proposal } = msg {
@@ -1462,14 +1449,14 @@ async fn member_join(
             // verifying it before the author check would let any invitee
             // abort every other invitee's join with one garbage frame
             let Ok(sealed) = serde_json::from_str::<molt_core::SealedRoster>(&proposal) else {
-                tracing::debug!(%from, "unparseable seal on the group channel — ignored");
+                tracing::debug!(%from, "unparseable seal on the group channel - ignored");
                 continue;
             };
             match check_proposal_provenance(&from, &sealed, &h.npub, &ctx.invite.info) {
                 Provenance::NotTheFounder => {
                     tracing::warn!(
                         %from,
-                        "a group member other than the founder proposed a charter — ignored"
+                        "a group member other than the founder proposed a charter - ignored"
                     );
                     continue;
                 }
@@ -1568,7 +1555,7 @@ async fn member_join(
                 let _ = send_cmd(
                     tx,
                     Command::NetJoinNote {
-                        note: format!("⚠ cannot hear the group channel — {why} · still retrying"),
+                        note: format!("⚠ cannot hear the group channel - {why} · still retrying"),
                         generation,
                     },
                 )
@@ -1584,7 +1571,7 @@ async fn member_join(
             if frame_is_from_founder(&from, &ctx.invite.info) {
                 return Err(format!("the founder ended this founding: {reason}"));
             }
-            tracing::warn!(%from, "abort frame from a co-member — ignored");
+            tracing::warn!(%from, "abort frame from a co-member - ignored");
             continue;
         }
         if let RitualMsg::Genesis { sealed, .. } = msg {
@@ -1592,12 +1579,12 @@ async fn member_join(
             // fatal — otherwise one forged Genesis published first kills
             // every honest joiner while blaming the founder
             let Ok(sealed) = serde_json::from_str::<molt_core::SealedRoster>(&sealed) else {
-                tracing::debug!(%from, "unparseable genesis on the group channel — ignored");
+                tracing::debug!(%from, "unparseable genesis on the group channel - ignored");
                 continue;
             };
             match check_proposal_provenance(&from, &sealed, &h.npub, &ctx.invite.info) {
                 Provenance::NotTheFounder => {
-                    tracing::warn!(%from, "a non-founder published a genesis — ignored");
+                    tracing::warn!(%from, "a non-founder published a genesis - ignored");
                     continue;
                 }
                 Provenance::Refused(why) => {
@@ -1610,7 +1597,7 @@ async fn member_join(
                     .map_err(|e| format!("distributed sealed roster rejected: {e}"))?;
             if sealed_table != table {
                 return Err(
-                    "the sealed roster is not the table we ratified — the founder \
+                    "the sealed roster is not the table we ratified - the founder \
                      distributed a different constitution"
                         .to_string(),
                 );

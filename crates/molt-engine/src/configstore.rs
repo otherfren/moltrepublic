@@ -442,9 +442,8 @@ fn session_settings(s: &Settings) -> SessionSettings {
                 == Some(molt_core::relay::PoolGap::NonOnionOff)
             {
                 tracing::warn!(
-                    "every confirmed relay is clearnet or local and \
-                     [transport.nostr] clearnet_enabled is false — this node \
-                     will dial NO relay; founding and joining will be refused"
+                    key = "[transport.nostr] clearnet_enabled",
+                    "every confirmed relay is clearnet or local and the switch is off - founding and joining will be refused"
                 );
             }
             kept

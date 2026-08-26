@@ -540,7 +540,7 @@ impl State {
                 // never truncate silently: the operator must be able to tell
                 // "using my whole pool" from "using the first eight of it"
                 notes.push(format!(
-                    "→ this node has {} dialable relays; the invite and the Welcome carry the first {} (the pool order is the priority — reorder in Settings to change which)",
+                    "→ this node has {} dialable relays; the invite and the Welcome carry the first {} (pool order = priority - reorder in Settings)",
                     relays.len() + over,
                     molt_net::welcome::MAX_PAYLOAD_RELAYS
                 ));
@@ -1019,7 +1019,7 @@ impl FoundingInvite {
             serde_json::from_str(&text).map_err(|_| "not an invite link".to_string())?;
         if wire.v != INVITE_LINK_VERSION {
             return Err(format!(
-                "unsupported invite link version {} — this build reads v{INVITE_LINK_VERSION}",
+                "unsupported invite link version {} - this build reads v{INVITE_LINK_VERSION}",
                 wire.v
             ));
         }
@@ -1065,7 +1065,7 @@ impl FoundingInvite {
         // the preview parse of `head` then fails, which tells them apart
         // without guessing on the blob's shape
         if molt_core::InviteInfo::parse(head).is_none() {
-            return Err("not a joinable invite link — it carries no transport details".into());
+            return Err("not a joinable invite link - it carries no transport details".into());
         }
         let handover =
             molt_net::invite::InviteHandoverV2::decode(blob).map_err(|e| e.to_string())?;
@@ -1098,7 +1098,7 @@ fn check_roster_anchors(identities: &[molt_core::MemberIdentity]) -> Result<(), 
     for id in identities {
         if !names.insert(id.member.as_str()) {
             return Err(format!(
-                "two seats share the handle {} — every seat must be distinguishable",
+                "two seats share the handle {} - every seat must be distinguishable",
                 id.member
             ));
         }
@@ -1820,9 +1820,7 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
                 Ok(msg) => msg?,
                 Err(_) => {
                     return Err(
-                        "the inviter did not answer — the link may already be used \
-                         up, the founding may be over, or the founder is offline; \
-                         ask the founder for a fresh link and try again"
+                        "the inviter did not answer - ask the founder for a fresh link"
                             .to_string(),
                     );
                 }
@@ -1841,8 +1839,8 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
             // own, unused link.
             invite::RitualMsg::LinkSpent { .. } => {
                 return Err(
-                    "this invite link was already used by another member — every \
-                     member needs their own link; ask the founder for a fresh one"
+                    "this invite link was already used by another member - ask the \
+                     founder for a fresh one"
                         .to_string(),
                 );
             }
@@ -1922,7 +1920,7 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
                 msg = next_ritual_msg(&mut rx, &mut cancel, &reply_wrap, &mut reasm) => match msg? {
                     invite::RitualMsg::Genesis { .. } => {
                         return Err(
-                            "the founder sealed before our backup confirmation — protocol violation"
+                            "the founder sealed before our backup confirmation - protocol violation"
                                 .to_string(),
                         );
                     }
@@ -1995,7 +1993,7 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
                     .map_err(|e| format!("distributed sealed roster rejected: {e}"))?;
                 if sealed_table != table {
                     return Err(
-                        "the sealed roster is not the table we ratified — the founder \
+                        "the sealed roster is not the table we ratified - the founder \
                          distributed a different constitution"
                             .to_string(),
                     );
@@ -2210,7 +2208,7 @@ mod ritual_ops {
                     if !ours {
                         tracing::error!(
                             %workspace,
-                            "…and its workspace is no longer open — reopen it to see the notice"
+                            "…and its workspace is no longer open - reopen it to see the notice"
                         );
                         return Ok(molt_core::Reply::Ack);
                     }
@@ -2222,7 +2220,7 @@ mod ritual_ops {
                     if let Err(e) = self.post_message_with_kind(
                         String::new(),
                         format!(
-                            "⚠ genesis reached no relay ({detail}) — nobody can join until it is published"
+                            "⚠ genesis reached no relay ({detail}) - nobody can join until it is published"
                         ),
                         None,
                         molt_core::ChannelRef::Group,
@@ -2253,7 +2251,7 @@ mod ritual_ops {
                     return Ok(molt_core::Reply::Ack);
                 }
                 self.session.create.run.log.push(format!(
-                    "⚠ {what} landed on {} of {} relays — {detail}",
+                    "⚠ {what} landed on {} of {} relays - {detail}",
                     accepted.len(),
                     accepted.len() + failed.len()
                 ));
@@ -2562,7 +2560,7 @@ mod ritual_ops {
             // BEFORE it is logged or anchored (review R6) — the request is
             // unauthenticated at this point, so the drop is silent
             if let Err(e) = check_handle(&member) {
-                tracing::warn!(seat, error = %e, "join request with an invalid handle — dropped");
+                tracing::warn!(seat, error = %e, "join request with an invalid handle - dropped");
                 return Ok(molt_core::Reply::Ack);
             }
             // R4's founding twin (2026-08-08): a joiner that declares its
@@ -2655,7 +2653,7 @@ mod ritual_ops {
                     // previously silent: an unverifiable re-activation looked
                     // exactly like "the invitee never tried"
                     self.session.create.run.log.push(format!(
-                        "✗ invite {}: a second activation by {member} did not verify — ignored",
+                        "✗ invite {}: a second activation by {member} did not verify - ignored",
                         idx + 1
                     ));
                     self.emit_session(molt_core::SessionScope::Create);
@@ -2669,10 +2667,10 @@ mod ritual_ops {
                     // re-minted). The member used to render one text for both.
                     let why = if anchored_member == member {
                         "this founding has already formed its group around your first \
-                         attempt — the founder must cancel and re-mint it"
+                         attempt - the founder must cancel and re-mint it"
                             .to_string()
                     } else {
-                        "that link was already used by someone else — ask the founder for \
+                        "that link was already used by someone else - ask the founder for \
                          your own, unused link"
                             .to_string()
                     };
@@ -2723,14 +2721,14 @@ mod ritual_ops {
                     // wrong advice
                     let line = if anchored_member == member {
                         format!(
-                            "✗ invite {}: this founding has already formed its group around the \
-                             first activation — cancel and re-mint to let {member} back in",
+                            "✗ invite {}: the group already formed around the first activation - \
+                             cancel and re-mint to let {member} back in",
                             idx + 1
                         )
                     } else {
                         format!(
-                            "✗ invite {} was activated a second time (by {member}) — that \
-                             link is spent; they need their own, unused link",
+                            "✗ invite {} was activated a second time (by {member}) - that \
+                             link is spent, they need an unused one",
                             idx + 1
                         )
                     };
@@ -2753,7 +2751,7 @@ mod ritual_ops {
             // which is exactly the state an operator cannot debug.
             let is_nostr = ritual.nostr.is_some();
             self.session.create.run.log.push(format!(
-                "· invite {} activated by {member} — checking",
+                "· invite {} activated by {member} - checking",
                 idx + 1
             ));
             // PROOF OF POSSESSION (Nostr only): the request arrived inside a
@@ -2766,7 +2764,7 @@ mod ritual_ops {
                 if claimed.is_none() || claimed.as_deref() != Some(sender_npub.as_str()) {
                     tracing::warn!(seat, %member, "founding join rejected: anchor is not the wrap's proven sealer");
                     self.session.create.run.log.push(format!(
-                        "✗ invite {}: the request claims a transport key it did not sign with — refused (possible impersonation)",
+                        "✗ invite {}: the request claims a transport key it did not sign with - refused",
                         idx + 1
                     ));
                     self.emit_session(molt_core::SessionScope::Create);
@@ -2776,7 +2774,7 @@ mod ritual_ops {
             if !invite::verify_join_mac(&s.ticket, &member, &identity_pk, &nostr_pk, &proof) {
                 tracing::warn!(seat, %member, "founding join rejected: bad ticket MAC");
                 self.session.create.run.log.push(format!(
-                    "✗ invite {}: the ticket code does not match — refused (wrong or edited link, or a link from a different founding)",
+                    "✗ invite {}: the ticket code does not match - refused (wrong, edited or foreign link)",
                     idx + 1
                 ));
                 self.emit_session(molt_core::SessionScope::Create);
@@ -2794,8 +2792,8 @@ mod ritual_ops {
                 Err(e) => {
                     tracing::warn!(seat, %member, error = %e, "founding join rejected: invalid nostr transport anchor");
                     self.session.create.run.log.push(format!(
-                        "✗ invite {}: malformed transport key ({e}) — refused; the \
-                         ticket stays usable for a correct retry",
+                        "✗ invite {}: malformed transport key ({e}) - refused, the \
+                         ticket stays usable",
                         idx + 1
                     ));
                     self.emit_session(molt_core::SessionScope::Create);
@@ -2827,7 +2825,7 @@ mod ritual_ops {
             if handle_taken {
                 tracing::warn!(seat, %member, "founding join rejected: handle already taken");
                 self.session.create.run.log.push(format!(
-                    "✗ invite {}: the name {member} is already taken in this founding — refused (every seat must be distinguishable, and the founder's own name is reserved)",
+                    "✗ invite {}: the name {member} is already taken in this founding - refused",
                     idx + 1
                 ));
                 self.emit_session(molt_core::SessionScope::Create);
@@ -2843,8 +2841,7 @@ mod ritual_ops {
             if duplicate {
                 tracing::warn!(seat, %member, "founding join rejected: nostr transport anchor already anchored by another seat");
                 self.session.create.run.log.push(format!(
-                    "✗ invite {}: that transport key is already used by another seat — \
-                     refused (two seats may never share one)",
+                    "✗ invite {}: that transport key is already used by another seat - refused",
                     idx + 1
                 ));
                 self.emit_session(molt_core::SessionScope::Create);
@@ -2865,7 +2862,7 @@ mod ritual_ops {
                     None => {
                         tracing::warn!(seat, %member, "founding join rejected: missing/invalid reply queue");
                         self.session.create.run.log.push(format!(
-                            "✗ invite {}: no usable reply address in the request — refused",
+                            "✗ invite {}: no usable reply address in the request - refused",
                             idx + 1
                         ));
                         self.emit_session(molt_core::SessionScope::Create);
@@ -2888,8 +2885,8 @@ mod ritual_ops {
             if !key_package_binds {
                 tracing::warn!(seat, %member, "founding join rejected: MLS key package does not match the anchored identity");
                 self.session.create.run.log.push(format!(
-                    "✗ invite {}: the encryption key package does not match the \
-                     identity in the request — refused",
+                    "✗ invite {}: the key package does not match the identity in the \
+                     request - refused",
                     idx + 1
                 ));
                 self.emit_session(molt_core::SessionScope::Create);
@@ -2945,7 +2942,7 @@ mod ritual_ops {
                     }
                 }
                 self.session.create.run.log.push(format!(
-                    "· invite {} re-activated by {member} — the earlier attempt is replaced",
+                    "· invite {} re-activated by {member} - the earlier attempt is replaced",
                     idx + 1
                 ));
             }
@@ -3060,7 +3057,7 @@ mod ritual_ops {
             // charter, cancel and re-mint the founding.
             if ritual.charter_proposed {
                 return Err(molt_core::MoltError::Create(
-                    "the charter was already proposed — cancel the founding to change it".to_string(),
+                    "the charter was already proposed - cancel the founding to change it".to_string(),
                 ));
             }
             if ritual.seats.iter().any(|s| s.identity.is_none()) {
@@ -3118,7 +3115,7 @@ mod ritual_ops {
                     tracing::warn!(seat, %from, "decline refused: not that seat's member");
                     self.session.create.run.log.push(format!(
                         "✗ a decline for invite {} came from {from}, who does not hold \
-                         that seat — ignored",
+                         that seat - ignored",
                         idx + 1
                     ));
                     self.emit_session(molt_core::SessionScope::Create);
@@ -3151,7 +3148,7 @@ mod ritual_ops {
             if self.session.create.run.outcome == 0 {
                 self.session.create.run.outcome = 2;
                 self.session.create.run.log.push(
-                    "✗ the ritual is over — this republic must be founded anew (close and re-mint)"
+                    "✗ the ritual is over - this republic must be founded anew (close and re-mint)"
                         .to_string(),
                 );
                 self.abandon_ritual(&format!("{who} declined the charter - the founding is over"));
@@ -3312,7 +3309,7 @@ mod ritual_ops {
                 // signature over it would mark the seat sealed — its real
                 // signature over the proposed table then drops as a duplicate
                 if !ritual.charter_proposed {
-                    tracing::warn!(seat, "seal signature before the charter proposal — ignored");
+                    tracing::warn!(seat, "seal signature before the charter proposal - ignored");
                     return Ok(molt_core::Reply::Ack);
                 }
                 let Some(who) = &s.identity else {

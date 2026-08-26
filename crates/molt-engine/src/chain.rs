@@ -204,7 +204,7 @@ pub(crate) fn nostr_rekey(
     // read AFTER the commit: the ring's newest entry is now the epoch the
     // commit was made from, which is where its recipients still are
     let prev_exporter = group.exporter_ring().first().copied().ok_or_else(|| {
-        "the re-key left no previous exporter — the commit would seal opaque".to_string()
+        "the re-key left no previous exporter - the commit would seal opaque".to_string()
     })?;
     Ok(NostrRekey { commit, welcome, prev_exporter, stamp })
 }
@@ -440,7 +440,7 @@ fn block_signers(
         }
         if signers.contains(member) {
             return Err(format!(
-                "block {} counts {member} twice — consent plus a roster signature",
+                "block {} counts {member} twice - consent plus a roster signature",
                 block.height
             ));
         }
@@ -1806,7 +1806,7 @@ impl State {
         if self.chain_head.is_some() && self.identity_sk.is_none() {
             tracing::warn!(
                 republic = %self.republic_id(),
-                "chain workspace has no local signing key — it can follow governance but not co-sign it"
+                "chain workspace has no local signing key - it can follow governance but not co-sign it"
             );
         }
     }
@@ -2027,19 +2027,19 @@ impl State {
             return;
         };
         if identity_pk != anchored {
-            tracing::warn!(%id, %member, "restore proposal swaps the anchored identity — not auto-signing");
+            tracing::warn!(%id, %member, "restore proposal swaps the anchored identity - not auto-signing");
             return;
         }
         if let Some(npk) = &nostr_pk {
             if molt_net::canonical_nostr_pk(npk).ok().as_deref() != Some(npk.as_str()) {
-                tracing::warn!(%id, %member, "restore proposal carries a non-canonical anchor — not auto-signing");
+                tracing::warn!(%id, %member, "restore proposal carries a non-canonical anchor - not auto-signing");
                 return;
             }
             // the complete register (review C8): founding anchors, every
             // Restored block's anchor and the blob's working anchors — a
             // restore mints a FRESH anchor, any reuse is a forgery
             if self.anchor_seen_in_chain(npk) {
-                tracing::warn!(%id, %member, "restore proposal reuses an anchor the chain knows — not auto-signing");
+                tracing::warn!(%id, %member, "restore proposal reuses an anchor the chain knows - not auto-signing");
                 return;
             }
         }
@@ -2050,7 +2050,7 @@ impl State {
             nostr_pk.as_deref().unwrap_or(""),
         );
         if !molt_storage::identity_verify(&anchored, &bytes, &consent) {
-            tracing::warn!(%id, %member, "restore consent does not verify — not auto-signing");
+            tracing::warn!(%id, %member, "restore consent does not verify - not auto-signing");
             return;
         }
         // replay guard: one signature per member per height
@@ -2062,7 +2062,7 @@ impl State {
         {
             return;
         }
-        tracing::info!(%id, %member, "consented re-admission verified — auto-approving");
+        tracing::info!(%id, %member, "consented re-admission verified - auto-approving");
         self.chain_sign_and_gossip_approval(id);
     }
 
@@ -2616,7 +2616,7 @@ impl State {
             tracing::error!(
                 height = block.height,
                 proposal = proposal_id,
-                "sealed block held back from broadcast — not durable; \
+                "sealed block held back from broadcast - not durable; \
                  peers seal it from the gossip themselves"
             );
             return;
@@ -2673,7 +2673,7 @@ impl State {
             // matters most: the chain is the republic's agreed history, and
             // a block that never reached the disk is one this node will ask
             // for again after a crash.
-            tracing::error!("the chain did not reach the disk — it is only in memory");
+            tracing::error!("the chain did not reach the disk - it is only in memory");
         }
         durable
     }
@@ -2797,13 +2797,13 @@ impl State {
                             height: anchor_height,
                             upto,
                         });
-                        tracing::info!(height = anchor_height, upto, "checkpoint sealed — history below the cut dropped");
+                        tracing::info!(height = anchor_height, upto, "checkpoint sealed - history below the cut dropped");
                     }
                     Err(e) => {
                         // keep full history rather than drop on a state we
                         // could not recompute (should be impossible: the
                         // verifier just matched this very state)
-                        tracing::warn!(error = %e, "checkpoint sealed but the blob could not be built — keeping full history");
+                        tracing::warn!(error = %e, "checkpoint sealed but the blob could not be built - keeping full history");
                     }
                 }
             }
@@ -3019,7 +3019,7 @@ impl State {
             None => tracing::warn!(
                 %member,
                 group = "none",
-                "no re-key path for this workspace — the returning seat gets no welcome"
+                "no re-key path for this workspace - the returning seat gets no welcome"
             ),
         }
     }
@@ -3054,11 +3054,11 @@ impl State {
         // through an earlier door.
         let relays = self.dialable_group_relays();
         if relays.is_empty() {
-            tracing::error!(%member, "no dialable relay for this republic — the re-key cannot be delivered");
+            tracing::error!(%member, "no dialable relay for this republic - the re-key cannot be delivered");
             return;
         }
         let Ok(dialer) = self.dialer_for() else {
-            tracing::error!(%member, "no usable dial route — the re-key cannot be delivered");
+            tracing::error!(%member, "no usable dial route - the re-key cannot be delivered");
             return;
         };
         // the transport material, copied out so the group borrow below is free
@@ -3082,7 +3082,7 @@ impl State {
         ) {
             Ok(n) => n,
             Err(e) => {
-                tracing::error!(%member, error = %e, "recovery transport keys — the re-key cannot be delivered");
+                tracing::error!(%member, error = %e, "recovery transport keys - the re-key cannot be delivered");
                 return;
             }
         };
@@ -3091,7 +3091,7 @@ impl State {
         // already been folded, so this is the key the seat just proved it holds
         let to = self.working_nostr_pk(member);
         if to.is_empty() {
-            tracing::error!(%member, "the restored seat carries no transport anchor — nothing to address the welcome to");
+            tracing::error!(%member, "the restored seat carries no transport anchor - nothing to address the welcome to");
             return;
         }
 
@@ -3105,7 +3105,7 @@ impl State {
         let rekey = match nostr_rekey(&group.mls, member, key_package, stamp) {
             Ok(r) => r,
             Err(e) => {
-                tracing::error!(%member, error = %e, "the Nostr re-key failed — the returning seat gets no welcome");
+                tracing::error!(%member, error = %e, "the Nostr re-key failed - the returning seat gets no welcome");
                 return;
             }
         };
@@ -3941,7 +3941,7 @@ impl State {
                 // drop THIS stash so a later honest re-serve can land — a
                 // failed pairing must not wedge the slot forever
                 self.pending_served_blob = None;
-                tracing::warn!(error = %e, "served checkpoint blob + suffix do not verify — stash cleared");
+                tracing::warn!(error = %e, "served checkpoint blob + suffix do not verify - stash cleared");
             }
         }
     }
@@ -4100,7 +4100,7 @@ impl State {
                 .is_ok_and(|signers| signers.len() >= usize::from(h.rule_m))
         });
         if is_tip && incoming < current && !signed {
-            tracing::warn!(height = block.height, "tie-break contender without a valid threshold — dropped");
+            tracing::warn!(height = block.height, "tie-break contender without a valid threshold - dropped");
             return;
         }
         if is_tip && incoming < current {
@@ -4921,7 +4921,7 @@ mod tests {
         );
         assert!(
             !peer.proposals.contains_key(&loser_id),
-            "the materialized card vanished with its displaced block — no phantom open card"
+            "the materialized card vanished with its displaced block - no phantom open card"
         );
         assert_eq!(
             peer.proposals.get(&winner_id).map(|p| p.state),
@@ -5053,7 +5053,7 @@ mod tests {
             peer.proposal_changes
                 .values()
                 .any(|c| matches!(c, ChainChange::Checkpoint { .. })),
-            "a gap block cannot apply next — the cut must still be proposed"
+            "a gap block cannot apply next - the cut must still be proposed"
         );
 
         // …but a block adjacent to head still pins it: the head is about
@@ -5223,7 +5223,7 @@ mod tests {
         let offer = full.anchor_bootstrap();
         let (blob, blocks) = split_bootstrap(&offer);
         assert!(blob.is_none(), "a full holder has no blob to offer");
-        assert_eq!(blocks.len(), 1, "the genesis and nothing else — not the chain");
+        assert_eq!(blocks.len(), 1, "the genesis and nothing else - not the chain");
         assert_eq!(blocks[0].height, 0);
         let (head, sealed) = verify_served(blob.as_ref(), &blocks, Some(&b.republic_id))
             .expect("the genesis verifies standalone");
@@ -5940,7 +5940,7 @@ mod tests {
             1,
             WorkspaceEvent::Declined { id: ProposalId(4), by: "petra".to_string(), hash: String::new() },
         );
-        assert!(peer.proposals.is_empty(), "no card yet — the declines wait");
+        assert!(peer.proposals.is_empty(), "no card yet - the declines wait");
         wire(
             &mut peer,
             "petra",
@@ -6338,7 +6338,7 @@ mod tests {
         assert_eq!(
             walter.chain_head.as_ref().expect("head").height,
             1,
-            "verification costs no liveness — the block seals"
+            "verification costs no liveness - the block seals"
         );
     }
 
@@ -6426,7 +6426,7 @@ mod tests {
             .pending_sigs
             .get(&1)
             .is_some_and(|p| p.sigs.iter().any(|a| a.member == "walter"));
-        assert!(!mine, "walter never decided on #1 — the re-base must not sign it");
+        assert!(!mine, "walter never decided on #1 - the re-base must not sign it");
         assert_eq!(walter.chain_approval_count(1), 0, "no forged progress");
     }
 
@@ -6583,7 +6583,7 @@ mod tests {
         assert_eq!(
             walter.chain_approval_count(1),
             0,
-            "not verifiable yet — the card has not landed"
+            "not verifiable yet - the card has not landed"
         );
         wire(
             &mut walter,
@@ -6598,7 +6598,7 @@ mod tests {
         assert_eq!(
             walter.chain_approval_count(1),
             1,
-            "the card landed — the collected signature displays"
+            "the card landed - the collected signature displays"
         );
     }
 
@@ -6774,7 +6774,7 @@ mod tests {
                 payload: json!({ "op": "add_note", "id": 1 }),
             },
         );
-        peer.cmd_approve(ProposalId(1)).expect("walter signs — 1 of 2 locally");
+        peer.cmd_approve(ProposalId(1)).expect("walter signs - 1 of 2 locally");
         // the block seals from the other side, signed by petra and dora
         b.commit_applied(1, &["petra", "dora"]);
         peer.receive_block(b.blocks[1].clone());
@@ -7288,13 +7288,13 @@ mod tests {
         );
         assert_eq!(
             steps, N,
-            "each block is verified exactly once — a re-walk per block would \
+            "each block is verified exactly once - a re-walk per block would \
              cost {} here, and 7M at N=1000",
             N * (N + 1)
         );
         assert_eq!(
             writes, 1,
-            "the drained batch is written ONCE — the write blocks on the \
+            "the drained batch is written ONCE - the write blocks on the \
              storage writer's ack, so {N} of them would sit inside one turn"
         );
     }
@@ -8108,7 +8108,7 @@ mod tests {
         assert_eq!(
             org[0].1.get("value").and_then(serde_json::Value::as_str),
             Some("third.png"),
-            "the summary kept the wrong logo — a republic would show a superseded image forever"
+            "the summary kept the wrong logo - a republic would show a superseded image forever"
         );
         // …and every consumed id survives, including the two whose payload
         // was dropped. This is the guard most likely to be lost by accident.
@@ -8166,7 +8166,7 @@ mod tests {
         assert_eq!(
             notes.len(),
             3,
-            "notes are distinct objects — summarizing them away deletes the shared brain: {notes:?}"
+            "notes are distinct objects - summarizing them away deletes the shared brain: {notes:?}"
         );
     }
 
@@ -8219,7 +8219,7 @@ mod tests {
         let mut chain = b.blocks.clone();
         chain.push(cut);
         let head = verify_chain(&chain).expect(
-            "the walk must reach the same summary the fold did — otherwise no cut is signable",
+            "the walk must reach the same summary the fold did - otherwise no cut is signable",
         );
         assert_eq!(head.height, 5);
     }
@@ -8262,7 +8262,7 @@ mod tests {
         let suffix: Vec<ChainBlock> = b.blocks[3..].to_vec();
         assert!(
             verify_suffix_chain(&blob, &suffix, &b.republic_id).is_err(),
-            "a summarized-away proposal id re-applied in the suffix — the double-apply \
+            "a summarized-away proposal id re-applied in the suffix - the double-apply \
              guard was repealed for exactly the entries the cut dropped"
         );
     }
@@ -8489,7 +8489,7 @@ mod tests {
         assert_eq!(
             walter.chain_head.as_ref().expect("head").height,
             1,
-            "the recovered proposal is fully approvable — the block seals"
+            "the recovered proposal is fully approvable - the block seals"
         );
     }
 
@@ -8765,7 +8765,7 @@ mod tests {
         let rec = coord.proposals.get(&id).expect("the proposer holds a record");
         assert_eq!(rec.payload["op"], "restore_member");
         assert_eq!(rec.payload["member"], "dora");
-        assert_eq!(rec.state, ProposalState::Proposed, "1 of 2 voices — still open");
+        assert_eq!(rec.state, ProposalState::Proposed, "1 of 2 voices - still open");
 
         // …and on a receiver: the gossip's log event creates the SAME record
         let env = walter.make_env(
@@ -8800,7 +8800,7 @@ mod tests {
                 .pending_sigs
                 .get(&id)
                 .is_some_and(|p| p.sigs.iter().any(|a| a.member == "walter")),
-            "a consent-less restore never auto-signs — the human vote is the content"
+            "a consent-less restore never auto-signs - the human vote is the content"
         );
         let petra_sig = coord
             .pending_sigs
@@ -10029,7 +10029,7 @@ mod tests {
             .expect("seal the commit");
         assert!(
             molt_net::envelope::open_outer(&survivor_secrets, &sealed).is_ok(),
-            "a survivor that has NOT yet merged the commit cannot open it — the whole \
+            "a survivor that has NOT yet merged the commit cannot open it - the whole \
              re-key is undeliverable to exactly the members it is for"
         );
         // …and the counter-case: the epoch the coordinator moved TO must not
@@ -10037,7 +10037,7 @@ mod tests {
         let new_epoch = mls.lock().expect("lock").exporter_secret().expect("new exporter");
         assert_ne!(
             new_epoch, rekey.prev_exporter,
-            "the commit was sealed at the coordinator's NEW epoch — backward-only \
+            "the commit was sealed at the coordinator's NEW epoch - backward-only \
              exporter rings make that opaque to every survivor"
         );
     }
@@ -10062,7 +10062,7 @@ mod tests {
         let rekey = nostr_rekey(&mls, "walter", &kp, pinned).expect("the re-key runs");
         assert_eq!(
             rekey.stamp, pinned,
-            "the re-key must carry its own pinned stamp — the delivery has no other \
+            "the re-key must carry its own pinned stamp - the delivery has no other \
              source for it, and re-reading a clock is exactly the divergence"
         );
     }

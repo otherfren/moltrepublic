@@ -408,13 +408,13 @@ pub(crate) fn spawn_welcome_send(
 ) {
     tokio::spawn(async move {
         let Ok(handover) = serde_json::from_str::<invite::ReplyHandover>(&reply_json) else {
-            tracing::warn!("recovery reply handover is not valid JSON — cannot send the welcome");
+            tracing::warn!("recovery reply handover is not valid JSON - cannot send the welcome");
             return;
         };
         let (Ok(qid), Ok(wrap_bytes)) =
             (hex::decode(&handover.queue_id), hex::decode(&handover.wrap))
         else {
-            tracing::warn!("recovery reply handover has malformed hex — cannot send the welcome");
+            tracing::warn!("recovery reply handover has malformed hex - cannot send the welcome");
             return;
         };
         let Ok(wrap_arr): Result<[u8; 32], _> = wrap_bytes.try_into() else {
@@ -613,8 +613,8 @@ pub async fn run_rejoin_with_timeout<T: Transport>(
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let Ok(received) = tokio::time::timeout(remaining, rx.recv()).await else {
             return Err(format!(
-                "timed out waiting for the coordinator's welcome after {}s — the coordinator \
-                 may be gone; mint a fresh recovery link on any survivor and retry",
+                "timed out waiting for the coordinator's welcome after {}s - mint a fresh \
+                 recovery link on any survivor and retry",
                 welcome_timeout.as_secs()
             ));
         };
@@ -667,7 +667,7 @@ pub async fn run_rejoin_with_timeout<T: Transport>(
                     {
                         Ok(m) => m,
                         Err(e) => {
-                            tracing::warn!(error = %e, "mesh re-join failed — recovered without live links");
+                            tracing::warn!(error = %e, "mesh re-join failed - recovered without live links");
                             Vec::new()
                         }
                     }
@@ -886,7 +886,7 @@ pub(crate) async fn rejoin_mesh<T: Transport>(
                             if usable {
                                 announces.insert(from, a);
                             } else {
-                                tracing::warn!(%from, "mesh reply carries no usable queue for us — ignored");
+                                tracing::warn!(%from, "mesh reply carries no usable queue for us - ignored");
                             }
                         }
                     }
@@ -914,7 +914,7 @@ pub(crate) async fn rejoin_mesh<T: Transport>(
                 tracing::warn!(
                     got = announces.len(),
                     want = survivors.len(),
-                    "mesh re-join timed out — assembling the partial mesh"
+                    "mesh re-join timed out - assembling the partial mesh"
                 );
                 break;
             }
@@ -1294,7 +1294,7 @@ mod tests {
         assert!(
             sealed.attestations.is_empty(),
             "a pruned holder has no founding block, so no founding attestations \
-             — the blob's own m-of-n anchor is what a suffix verifier trusts"
+             - the blob's own m-of-n anchor is what a suffix verifier trusts"
         );
     }
 

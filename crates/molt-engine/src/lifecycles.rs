@@ -474,9 +474,7 @@ impl State {
         if staging.chain.is_empty() {
             staging.abort();
             return self.fail_restore(
-                "the backup carries no verifiable chain — refusing to \
-                 materialize unverified history"
-                    .to_string(),
+                "the backup carries no verifiable chain - refused".to_string(),
             );
         }
         // no external anchor exists for an import — the content-derived
@@ -556,15 +554,13 @@ impl State {
         if self.session.active_workspace == ws_id {
             staging.abort();
             return self.fail_restore(format!(
-                "workspace {ws_id} is currently open — close it before restoring \
-                 over it (a replace cannot move a live directory)"
+                "workspace {ws_id} is currently open - close it before restoring over it"
             ));
         }
         if self.backup_inflight.contains(&ws_id) {
             staging.abort();
             return self.fail_restore(format!(
-                "a backup of workspace {ws_id} is in flight — retry the restore \
-                 once it completes"
+                "a backup of workspace {ws_id} is in flight - retry once it completes"
             ));
         }
 
@@ -577,9 +573,8 @@ impl State {
             Ok(dir) => dir,
             Err(molt_storage::StorageError::Exists(_)) => {
                 return self.fail_restore(
-                    "a workspace with this id already exists — it may be AHEAD \
-                     of the backup. Delete it first, or re-run the restore with \
-                     replace enabled to move it to the recoverable trash"
+                    "a workspace with this id already exists - delete it, or restore \
+                     with replace enabled"
                         .to_string(),
                 );
             }
@@ -646,15 +641,14 @@ impl State {
         ));
         if seed_present && identity_sk.is_none() {
             r.log.push(
-                "→ the blob's seed does not anchor this seat's identity in the \
-                 verified roster — knowledge-only restore"
+                "→ the seed does not anchor this seat in the verified roster - \
+                 knowledge-only restore"
                     .to_string(),
             );
         }
         r.log.push(
-            "→ knowledge is restored — the workspace opens detached and \
-             reattaches to the live republic automatically (fallback: a \
-             recovery link)"
+            "→ knowledge restored - the workspace opens detached and reattaches \
+             automatically"
                 .to_string(),
         );
         self.emit_session(SessionScope::Full);
@@ -845,15 +839,14 @@ impl State {
         self.session.create.run.log.extend(notes);
         if simulated {
             self.session.create.run.log.push(
-                "→ SIMULATION — no real network in this build (the Nostr transport \
-                 lands with N4): this node auto-activates and signs for every \
-                 member. Nothing was shared off-band."
+                "→ SIMULATION - no real network in this build: this node signs for \
+                 every member"
                     .to_string(),
             );
         } else {
             self.session.create.run.log.push(
-                "→ share each link off-band, over a private channel — the ritual waits \
-                 for members to activate"
+                "→ share each link off-band over a private channel - the ritual waits \
+                 for the activations"
                     .to_string(),
             );
         }
@@ -1244,7 +1237,7 @@ impl State {
         // — the engine enforces it for every operator, not just the GUI
         if self.session.create.run.outcome != 1 {
             return Err(MoltError::Create(
-                "the founding ritual is not complete — every member must sign first".to_string(),
+                "the founding ritual is not complete - every member must sign first".to_string(),
             ));
         }
         let id = self.session.active_workspace.clone();
@@ -1663,7 +1656,7 @@ impl State {
             .map(|w| w.seed.clone())
             .filter(|s| !s.is_empty())
         else {
-            tracing::info!("detached workspace carries no seed — reattach needs the recovery link");
+            tracing::info!("detached workspace carries no seed - reattach needs the recovery link");
             return false;
         };
         // every OTHER seat's WORKING anchor from the restored chain —
@@ -1690,7 +1683,7 @@ impl State {
             .map(|v| v.url.clone())
             .collect();
         if dial_relays.is_empty() {
-            tracing::info!("detached workspace: no ratified relay is locally confirmed — staying detached");
+            tracing::info!("detached workspace: no ratified relay is locally confirmed - staying detached");
             return false;
         }
         let Ok(dialer) = self.dialer_for() else {
@@ -1748,7 +1741,7 @@ impl State {
             },
             cmd_tx.downgrade(),
         ));
-        tracing::info!("detached workspace — reattaching to the republic");
+        tracing::info!("detached workspace - reattaching to the republic");
         true
     }
 
@@ -1781,7 +1774,7 @@ impl State {
             self.reattach_attempts += 1;
             tracing::warn!(
                 attempt = self.reattach_attempts,
-                "group key behind and outbox stalled — self-healing via reattach"
+                "group key behind and outbox stalled - self-healing via reattach"
             );
             self.session.notice = "reattaching".to_string();
             self.emit_session(SessionScope::Full);
@@ -1798,7 +1791,7 @@ impl State {
         // handover — a bare preview link cannot reach anyone
         let Some(inv) = crate::recovery::RecoveryInvite::parse(&link) else {
             return Err(MoltError::Recover(
-                "not an actionable recovery link — it carries no transport details".to_string(),
+                "not an actionable recovery link - it carries no transport details".to_string(),
             ));
         };
         // a recovered republic only exists as a materialized workspace — a
@@ -2108,7 +2101,7 @@ impl State {
                         Ok(_trashed) => {
                             self.session.workspaces.retain(|w| w.id != ws_id);
                             self.reclassify_backups();
-                            tracing::info!(%ws_id, "recovery replaces the local copy — retired to the trash");
+                            tracing::info!(%ws_id, "recovery replaces the local copy - retired to the trash");
                         }
                         Err(e) => {
                             return self.cmd_net_recover_failed(
@@ -2525,7 +2518,7 @@ impl State {
         // terminal for the whole ritual, not just this join: a declined seat
         // can never seal, so the founder must re-mint — say so here too
         self.session.join.run.log.push(
-            "✗ the ritual is over — this republic must be founded anew".to_string(),
+            "✗ the ritual is over - this republic must be founded anew".to_string(),
         );
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
@@ -2645,7 +2638,7 @@ async fn restore_task(
                         .len();
                     if len > RESTORE_MAX_BYTES {
                         return Err(format!(
-                            "file is {len} bytes — beyond the {RESTORE_MAX_BYTES}-byte cap"
+                            "file is {len} bytes - beyond the {RESTORE_MAX_BYTES}-byte cap"
                         ));
                     }
                     std::fs::read(&read_path)

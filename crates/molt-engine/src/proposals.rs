@@ -213,7 +213,7 @@ fn validate_payload_fits(
         );
     if let Some(bytes) = image_bytes(payload).filter(|_| is_set_image) {
         return Err(MoltError::BadPayload(format!(
-            "the image is {} KiB — this republic's relays carry {} KiB",
+            "the image is {} KiB - this republic's relays carry {} KiB",
             bytes.len() / 1024,
             image_headroom(surface, payload, roster) / 1024
         )));
@@ -303,7 +303,7 @@ pub(crate) fn image_dimensions(bytes: &[u8]) -> Result<(u32, u32), MoltError> {
     let trimmed = head.trim_start();
     if trimmed.starts_with("<svg") || trimmed.starts_with("<?xml") {
         return Err(MoltError::BadPayload(
-            "svg is not accepted — use a raster image (png/jpeg/webp/gif/bmp)".into(),
+            "svg is not accepted - use a raster image (png/jpeg/webp/gif/bmp)".into(),
         ));
     }
     image::guess_format(bytes).map_err(|_| refuse())?;
@@ -314,7 +314,7 @@ pub(crate) fn image_dimensions(bytes: &[u8]) -> Result<(u32, u32), MoltError> {
         .map_err(|_| refuse())?;
     if w == 0 || h == 0 || w > IMAGE_MAX_DIM || h > IMAGE_MAX_DIM {
         return Err(MoltError::BadPayload(format!(
-            "the image is {w}x{h} — the limit is {IMAGE_MAX_DIM}x{IMAGE_MAX_DIM}"
+            "the image is {w}x{h} - the limit is {IMAGE_MAX_DIM}x{IMAGE_MAX_DIM}"
         )));
     }
     Ok((w, h))
@@ -880,7 +880,7 @@ impl State {
             if !self.pending_withdrawals.contains_key(&id)
                 && self.pending_withdrawals.len() >= PARKED_DECLINE_IDS_MAX
             {
-                tracing::warn!(%id, %by, "withdraw park full — dropping");
+                tracing::warn!(%id, %by, "withdraw park full - dropping");
                 return WithdrawOutcome::Ignored;
             }
             self.pending_withdrawals
@@ -1056,7 +1056,7 @@ impl State {
                 && (self.pending_declines.len() >= PARKED_DECLINE_IDS_MAX
                     || member_parked >= PARKED_DECLINES_PER_MEMBER_MAX)
             {
-                tracing::warn!(%id, %by, "decline park full — dropping");
+                tracing::warn!(%id, %by, "decline park full - dropping");
                 return DeclineOutcome::Known;
             }
             let parked = self.pending_declines.entry(id).or_default();
@@ -2220,7 +2220,7 @@ mod size_gate_tests {
         assert!(
             cost <= molt_net::relay_runtime::DEFAULT_SIZE_BUDGET,
             "a payload at the accepted ceiling frames to {cost} B, over the \
-             {} B publish budget — every proposal at the cap would wedge the outbox",
+             {} B publish budget - every proposal at the cap would wedge the outbox",
             molt_net::relay_runtime::DEFAULT_SIZE_BUDGET
         );
     }
@@ -2289,11 +2289,11 @@ mod size_gate_tests {
         assert!(
             headroom < 256 * 1024 / 2,
             "the derived headroom {headroom} B is not meaningfully below the 256 KiB \
-             that was there before — nothing was reconciled"
+             that was there before - nothing was reconciled"
         );
         assert!(
             headroom >= 32 * 1024,
-            "only {headroom} B fits — too small for a logo; the answer would have to \
+            "only {headroom} B fits - too small for a logo; the answer would have to \
              be structural (a hash in the block, bytes elsewhere)"
         );
     }
@@ -2309,7 +2309,7 @@ mod size_gate_tests {
         let large = image_headroom(Surface::Organization, &image_payload(&[]), &big);
         assert!(
             large < small,
-            "50 seats ({large} B) left as much room as 3 ({small} B) — the block's \
+            "50 seats ({large} B) left as much room as 3 ({small} B) - the block's \
              own signatures are not being counted"
         );
     }

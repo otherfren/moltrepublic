@@ -96,7 +96,7 @@ const DELIVERY_TICK_MS: u64 = 1_000;
 /// Surfaced through recovery's EXISTING failure path (the recovery notice) —
 /// never a fake success.
 pub(crate) const LEGACY_RECOVERY_LINK: &str =
-    "this recovery link is the old queue shape — ask the coordinator for a new one";
+    "this recovery link is the old queue shape - ask the coordinator for a new one";
 
 /// A command paired with the channel its reply must go back on.
 pub(crate) struct Envelope {
@@ -3289,7 +3289,7 @@ mod tests {
                     );
                     assert!(
                         rows[0].online,
-                        "the sharer is this node itself — always online"
+                        "the sharer is this node itself - always online"
                     );
                     assert!(
                         rows[0].download.is_none(),
@@ -3376,7 +3376,7 @@ mod tests {
                     assert_eq!(st.founded_ts, 0, "the demo group has no genesis event");
                     assert_eq!(
                         st.active_7d, 1,
-                        "honest presence: never-seen peers count nowhere — only the local member"
+                        "honest presence: never-seen peers count nowhere - only the local member"
                     );
                     assert!(st.active_1h <= st.active_24h && st.active_24h <= st.active_7d);
                 }
@@ -3708,11 +3708,11 @@ mod tests {
         assert_eq!(
             rows[0].expires_ts,
             fresh_ts + 7 * 86_400,
-            "the share expires on the retention deadline — the org window, not a mock TTL"
+            "the share expires on the retention deadline - the org window, not a mock TTL"
         );
         assert_eq!(
             rows[1].expires_ts, 0,
-            "unknown age (ts 0) never ages out — 0 = no deadline"
+            "unknown age (ts 0) never ages out - 0 = no deadline"
         );
 
         // downloading the expired share fails cleanly, the others pass the gate
@@ -5535,7 +5535,7 @@ mod tests {
         let first = st.last_reattach.expect("the try is stamped");
         // immediately again: inside the spacing window nothing happens
         st.maybe_self_heal_reattach();
-        assert_eq!(st.last_reattach, Some(first), "spaced — no re-stamp inside the window");
+        assert_eq!(st.last_reattach, Some(first), "spaced - no re-stamp inside the window");
         // at the session cap nothing ever fires again, even past the window
         st.reattach_attempts = 3;
         st.last_reattach = None;

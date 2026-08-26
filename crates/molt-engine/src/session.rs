@@ -39,8 +39,7 @@ pub(crate) fn entry_size_kib(dir: &std::path::Path) -> u32 {
 /// bring it up" — a missing MLS group, or no relay of the republic's that
 /// this node may dial.
 pub(crate) const NOSTR_RUNTIME_PENDING: &str =
-    "no relay channel — check this republic's relays in Settings; local reads/writes \
-     work and queued traffic delivers once one is reachable";
+    "no relay channel - check this republic's relays in Settings";
 
 impl State {
     pub(crate) fn cmd_navigate(&mut self, screen: Screen) -> Result<Reply, MoltError> {
@@ -167,8 +166,8 @@ impl State {
         if self.net_ritual.is_none() || self.session.create.run.outcome != 0 {
             return;
         }
-        let line = "⚠ the relay pool changed — the invites already minted still name the \
-                    OLD relays. Cancel and re-mint to hand out links that carry this pool."
+        let line = "⚠ the relay pool changed - minted invites still name the old relays; \
+                    cancel and re-mint"
             .to_string();
         if self.session.create.run.log.last() == Some(&line) {
             return;
@@ -854,7 +853,7 @@ impl State {
             return self.settle_tor_test(molt_core::TorTest {
                 state: molt_core::TorTestState::Off,
                 detail: format!(
-                    "the configured anonymity network is `{}`, not tor — nothing was sent",
+                    "the configured anonymity network is `{}`, not tor - nothing was sent",
                     quote_for_display(&network)
                 ),
                 ..molt_core::TorTest::default()
@@ -1341,19 +1340,13 @@ impl State {
             || !transport_state.mesh.is_empty()
         {
             Some(if transport_state.smp_queues.is_none() {
-                "offline: no queue credentials on disk — the mesh cannot resume on \
-                 this seat (hard shutdown before the mesh came up, or a pre-fix \
-                 build); local reads/writes work, nothing reaches the peers; rejoin \
-                 via a recovery link"
+                "offline: no queue credentials on disk - rejoin via a recovery link"
             } else if transport_state.mls.is_none() {
-                "offline: no MLS group snapshot on disk — the mesh cannot resume; \
-                 rejoin via a recovery link"
+                "offline: no MLS group snapshot on disk - rejoin via a recovery link"
             } else if transport_state.mesh.is_empty() {
-                "offline: no mesh links on disk — the mesh cannot resume; rejoin \
-                 via a recovery link"
+                "offline: no mesh links on disk - rejoin via a recovery link"
             } else {
-                "offline: resuming the persisted mesh failed — local reads/writes \
-                 work, nothing reaches the peers"
+                "offline: resuming the persisted mesh failed - nothing reaches the peers"
             })
         } else {
             None
@@ -1414,9 +1407,8 @@ impl State {
             molt_storage::open_workspace(&dir).map_err(molt_storage::StorageError::into_molt)?;
         if loaded.unknown_events > 0 {
             return Err(MoltError::Storage(format!(
-                "{} event(s) were written by a newer version — update this \
-                 node to open the workspace (writing with a partial history \
-                 would fork it)",
+                "{} event(s) were written by a newer version - update this node to \
+                 open the workspace",
                 loaded.unknown_events
             )));
         }
@@ -1442,7 +1434,7 @@ impl State {
         // id gate would otherwise refuse a chain-consumed id the snapshot
         // never saw (review E1 residual)
         let (checkpoint_blob, chain) = opened.read_chain().map_err(|e| {
-            MoltError::Engine(format!("this workspace's chain is unreadable — {e}"))
+            MoltError::Engine(format!("this workspace's chain is unreadable - {e}"))
         })?;
         // point of no return: swap the actor state to the new workspace
         self.close_active_storage();
@@ -1798,7 +1790,7 @@ impl State {
         }
         if self.ui_state.is_none() {
             return Err(MoltError::Engine(
-                "no window is running — nothing can perform the action".to_string(),
+                "no window is running - nothing can perform the action".to_string(),
             ));
         }
         self.emit(molt_core::Event::UiActionRequested { action });
@@ -1847,16 +1839,14 @@ impl State {
         // Refuse until the upload settles — mirrors `cmd_backup_now`.
         if self.backup_inflight.contains(&id) {
             return Err(MoltError::WorkspaceBusy(
-                "a backup of this workspace is in flight — encrypt once it \
+                "a backup of this workspace is in flight - encrypt once it \
                  completes"
                     .to_string(),
             ));
         }
         if phrase.trim().is_empty() {
             return Err(MoltError::BadPayload(
-                "the recovery phrase is required to encrypt — it is verified \
-                 before the device-sealed keys are removed"
-                    .to_string(),
+                "the recovery phrase is required to encrypt".to_string(),
             ));
         }
         // a storage-less node has no at-rest bytes and nothing to verify a
@@ -1864,8 +1854,7 @@ impl State {
         // behavior this command used to be; refuse honestly instead
         if !self.persist {
             return Err(MoltError::Storage(
-                "this node runs without workspace storage — there is nothing \
-                 on disk to encrypt"
+                "this node runs without workspace storage - nothing on disk to encrypt"
                     .to_string(),
             ));
         }
@@ -1908,7 +1897,7 @@ impl State {
         // dir's key material — decrypting under it would race the re-seal.
         if self.backup_inflight.contains(&id) {
             return Err(MoltError::WorkspaceBusy(
-                "a backup of this workspace is in flight — decrypt once it \
+                "a backup of this workspace is in flight - decrypt once it \
                  completes"
                     .to_string(),
             ));
@@ -1922,8 +1911,7 @@ impl State {
         // verify the phrase against — refuse instead of pretending
         if !self.persist {
             return Err(MoltError::Storage(
-                "this node runs without workspace storage — there is nothing \
-                 on disk to decrypt"
+                "this node runs without workspace storage - nothing on disk to decrypt"
                     .to_string(),
             ));
         }
@@ -2062,7 +2050,7 @@ impl State {
                         // the export would capture a log the disk does not
                         // hold yet; the copy is still made (it is better
                         // than none) but the miss is not swallowed
-                        tracing::error!("flush before export failed — the copy may lag the log");
+                        tracing::error!("flush before export failed - the copy may lag the log");
                     }
                 }
                 export_to_file(&root, &dir, &dest_path, zeroize::Zeroizing::new(passphrase), archive)

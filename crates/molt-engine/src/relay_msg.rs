@@ -107,14 +107,14 @@ pub(crate) fn join_relay_refusal(
         // remedy is "one of them" — stated ONCE, here, not per relay. Relays
         // do not federate: joining means dialing a relay the others dial,
         // and nothing else will do (§10.15).
-        "no relay in common with this invite — add one of them".to_string()
+        "no relay in common with this invite - add one of them".to_string()
     } else if switch_blocks {
         // the one case the operator cannot deduce from their own config
-        format!("no dialable relay — clearnet/local dialing off ({CLEARNET_KEY})")
+        format!("no dialable relay - clearnet/local dialing off ({CLEARNET_KEY})")
     } else {
         // the residual mix (unconfirmed and/or unknown): both fixes are
         // acts on this node's pool — name them once, like the siblings
-        "no dialable relay for this invite — add or confirm one of them".to_string()
+        "no dialable relay for this invite - add or confirm one of them".to_string()
     };
     JoinRelayRefusal { detail, headline }
 }
@@ -235,8 +235,8 @@ pub fn known_log_shapes() -> &'static [LogShape] {
         &["→ restore started · way ", " · ", ""],
         &["✓ chain verified · height ", " · ", "-of-", ""],
         &["✓ backup from unix ", " (", " day(s) old) · workspace “", "” materialized"],
-        &["→ the blob's seed does not anchor this seat's identity in the verified roster — knowledge-only restore"],
-        &["→ knowledge is restored — the workspace opens detached and reattaches to the live republic automatically (fallback: a recovery link)"],
+        &["→ the seed does not anchor this seat in the verified roster - knowledge-only restore"],
+        &["→ knowledge restored - the workspace opens detached and reattaches automatically"],
         &["✗ restore failed: ", ""],
         &["→ fs: read ", ""],
         &["→ s3: list ", ""],
@@ -246,41 +246,41 @@ pub fn known_log_shapes() -> &'static [LogShape] {
         &["→ staged · ", " chain block(s) await verification"],
         // the create leg (lifecycles.rs, session.rs, founding.rs)
         &["→ ritual opened · ", " (founder) · ", "-of-", " · ", " invite(s) minted"],
-        &["→ SIMULATION — no real network in this build (the Nostr transport lands with N4): this node auto-activates and signs for every member. Nothing was shared off-band."],
-        &["→ share each link off-band, over a private channel — the ritual waits for members to activate"],
+        &["→ SIMULATION - no real network in this build: this node signs for every member"],
+        &["→ share each link off-band over a private channel - the ritual waits for the activations"],
         &["✓ roster sealed by everyone · workspace created"],
         &["✗ founding failed: ", ""],
         &["✓ recovery phrase backed up"],
-        &["⚠ the relay pool changed — the invites already minted still name the OLD relays. Cancel and re-mint to hand out links that carry this pool."],
-        &["→ this node has ", " dialable relays; the invite and the Welcome carry the first ", " (the pool order is the priority — reorder in Settings to change which)"],
+        &["⚠ the relay pool changed - minted invites still name the old relays; cancel and re-mint"],
+        &["→ this node has ", " dialable relays; the invite and the Welcome carry the first ", " (pool order = priority - reorder in Settings)"],
         &["✗ ", " does not reach ", " of ", " pool relays - ", ""],
-        &["⚠ ", " landed on ", " of ", " relays — ", ""],
+        &["⚠ ", " landed on ", " of ", " relays - ", ""],
         &["✓ direct mesh established · ", " peer(s)"],
         &["→ the group is born · welcomes sent to every member"],
-        &["✗ invite ", ": a second activation by ", " did not verify — ignored"],
-        &["✗ invite ", ": this founding has already formed its group around the first activation — cancel and re-mint to let ", " back in"],
-        &["✗ invite ", " was activated a second time (by ", ") — that link is spent; they need their own, unused link"],
-        &["· invite ", " activated by ", " — checking"],
-        &["✗ invite ", ": the request claims a transport key it did not sign with — refused (possible impersonation)"],
-        &["✗ invite ", ": the ticket code does not match — refused (wrong or edited link, or a link from a different founding)"],
-        &["✗ invite ", ": malformed transport key (", ") — refused; the ticket stays usable for a correct retry"],
-        &["✗ invite ", ": the name ", " is already taken in this founding — refused (every seat must be distinguishable, and the founder's own name is reserved)"],
-        &["✗ invite ", ": that transport key is already used by another seat — refused (two seats may never share one)"],
-        &["✗ invite ", ": no usable reply address in the request — refused"],
-        &["✗ invite ", ": the encryption key package does not match the identity in the request — refused"],
-        &["· invite ", " re-activated by ", " — the earlier attempt is replaced"],
+        &["✗ invite ", ": a second activation by ", " did not verify - ignored"],
+        &["✗ invite ", ": the group already formed around the first activation - cancel and re-mint to let ", " back in"],
+        &["✗ invite ", " was activated a second time (by ", ") - that link is spent, they need an unused one"],
+        &["· invite ", " activated by ", " - checking"],
+        &["✗ invite ", ": the request claims a transport key it did not sign with - refused"],
+        &["✗ invite ", ": the ticket code does not match - refused (wrong, edited or foreign link)"],
+        &["✗ invite ", ": malformed transport key (", ") - refused, the ticket stays usable"],
+        &["✗ invite ", ": the name ", " is already taken in this founding - refused"],
+        &["✗ invite ", ": that transport key is already used by another seat - refused"],
+        &["✗ invite ", ": no usable reply address in the request - refused"],
+        &["✗ invite ", ": the key package does not match the identity in the request - refused"],
+        &["· invite ", " re-activated by ", " - the earlier attempt is replaced"],
         &["→ ", " activated invite ", " · key received"],
         &["→ every member has joined · propose the charter to seal"],
         &["→ charter proposed · awaiting every member's ratification"],
-        &["✗ a decline for invite ", " came from ", ", who does not hold that seat — ignored"],
+        &["✗ a decline for invite ", " came from ", ", who does not hold that seat - ignored"],
         &["✗ ", " declined the charter · cancel and re-mint to change it"],
-        &["✗ the ritual is over — this republic must be founded anew (close and re-mint)"],
+        &["✗ the ritual is over - this republic must be founded anew (close and re-mint)"],
         &["→ charter proposed · sealing the roster for ratification"],
         &["✓ ", " signed the roster · seat sealed"],
         &["✓ ", " secured their key"],
         // the group-channel notes both legs share (nostr_ritual.rs)
         &["✓ the group channel is back"],
-        &["⚠ cannot hear the group channel — ", " · still retrying"],
+        &["⚠ cannot hear the group channel - ", " · still retrying"],
         &["⧗ waiting for the genesis · ", ""],
         // the join leg (lifecycles.rs + relay_msg.rs refusal detail)
         &["✓ recovery phrase backed up · waiting for the others"],
@@ -291,7 +291,7 @@ pub fn known_log_shapes() -> &'static [LogShape] {
         &["✓ you ratified the charter · sealing your signature"],
         &["→ save your recovery phrase - re-type it to confirm"],
         &["✗ you declined the charter"],
-        &["✗ the ritual is over — this republic must be founded anew"],
+        &["✗ the ritual is over - this republic must be founded anew"],
         &["→ dialable here: ", ""],
         &["→ ", "  dialable"],
         &["→ ", "  not in relay pool"],
@@ -476,7 +476,7 @@ mod tests {
             "this seed holds no seat in the roster",
             "the workspace is currently open",
             "reading /tmp/x: permission denied",
-            "file is 9 bytes — beyond the 5-byte cap",
+            "file is 9 bytes - beyond the 5-byte cap",
             "no backup for workspace x",
             "download failed: 404",
         ];
@@ -553,7 +553,7 @@ mod tests {
         // name every relay the republic uses, so "one of them" is actionable
         assert_eq!(
             r.headline,
-            "no relay in common with this invite — add one of them"
+            "no relay in common with this invite - add one of them"
         );
         assert!(r.detail.iter().any(|l| l.contains("dialable here: wss://mine.example")), "{:?}", r.detail);
     }
@@ -583,7 +583,7 @@ mod tests {
             format!("cannot found: {}", pool_gap_reason(PoolGap::NonOnionOff)),
             format!("cannot found: {}", pool_verifying_reason()),
             // …emitted verbatim by nostr_ritual.rs / dial.rs / lifecycles.rs
-            "the founding inbox is not readable on any relay — no relay replayed \
+            "the founding inbox is not readable on any relay - no relay replayed \
              the subscription (auth required, rate limited, or refused). No invite \
              was published."
                 .to_string(),
@@ -649,9 +649,9 @@ mod tests {
     fn a_restore_failure_is_never_reported_as_a_tor_problem() {
         let restore_failures = [
             "the restore task lost its staged blob",
-            "the backup carries no verifiable chain — refusing to materialize \
+            "the backup carries no verifiable chain - refusing to materialize \
              unverified history",
-            "workspace ws-1 is currently open — close it before restoring over it \
+            "workspace ws-1 is currently open - close it before restoring over it \
              (a replace cannot move a live directory)",
             "this node has no workspace storage to restore into",
             "crypto: aead open failed",
@@ -671,7 +671,7 @@ mod tests {
             "Cannot decrypt the backup"
         );
         assert_eq!(
-            restore_headline_for("workspace ws-1 is currently open — close it first"),
+            restore_headline_for("workspace ws-1 is currently open - close it first"),
             "Workspace is open"
         );
     }

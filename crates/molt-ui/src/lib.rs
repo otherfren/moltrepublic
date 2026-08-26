@@ -3180,41 +3180,36 @@ fn net_phrase_de(p: &str) -> String {
         return format!("keine lebende Relay-Verbindung (0 von {n} erreichbar, verbinde neu)");
     }
     if p.starts_with("no relay channel") {
-        return "kein Relay-Kanal - Relays dieser Republik unter Einstellungen prüfen; \
-                lokal geht alles, Gepuffertes liefert, sobald eines erreichbar ist"
-            .into();
+        return "kein Relay-Kanal - Relays dieser Republik unter Einstellungen prüfen".into();
     }
     if p.starts_with("offline: no queue credentials") {
-        return "offline: keine Queue-Credentials auf der Platte - das Mesh kann auf \
-                diesem Sitz nicht weiterlaufen (harter Stopp vor dem Mesh-Start oder \
-                ein Vor-Fix-Build); lokal geht alles, nichts erreicht die Peers; per \
-                Recovery-Link neu beitreten"
+        return "offline: keine Queue-Credentials auf der Platte - per Recovery-Link neu \
+                beitreten"
             .into();
     }
     if p.starts_with("offline: no MLS group snapshot") {
-        return "offline: kein MLS-Gruppen-Snapshot auf der Platte - das Mesh kann \
-                nicht weiterlaufen; per Recovery-Link neu beitreten"
+        return "offline: kein MLS-Gruppen-Snapshot auf der Platte - per Recovery-Link neu \
+                beitreten"
             .into();
     }
     if p.starts_with("offline: no mesh links") {
-        return "offline: keine Mesh-Links auf der Platte - das Mesh kann nicht \
-                weiterlaufen; per Recovery-Link neu beitreten"
+        return "offline: keine Mesh-Links auf der Platte - per Recovery-Link neu beitreten"
             .into();
     }
     if p.starts_with("offline: resuming the persisted mesh") {
-        return "offline: das persistierte Mesh ließ sich nicht fortsetzen - lokal \
-                geht alles, nichts erreicht die Peers"
+        return "offline: das persistierte Mesh ließ sich nicht fortsetzen - nichts \
+                erreicht die Peers"
             .into();
     }
     match p {
         "connecting" => "verbinde".into(),
-        "inbound subscription ended — resubscribing" => {
+        "inbound subscription ended - resubscribing" => {
             "Eingangs-Subscription endete - erneuere".into()
         }
-        "deliveries keep going unacknowledged — still resending" => {
+        "deliveries keep going unacknowledged - still resending" => {
             "Zustellungen bleiben unbestätigt - sende weiter".into()
         }
-        "not acknowledging deliveries — still resending" => {
+        "not acknowledging deliveries - still resending" => {
             "bestätigt keine Zustellungen - sende weiter".into()
         }
         "no relay accepted the frame" => "kein Relay nahm den Frame an".into(),
@@ -3281,7 +3276,7 @@ fn s3_endpoint_de(t: &str) -> String {
 fn s3_hint_de(hint: &str) -> String {
     let map: [(&str, &str); 6] = [
         (
-            "the local clock is too far from the server's — fix the system time",
+            "the local clock is too far from the server's - fix the system time",
             "die lokale Uhr weicht zu weit von der des Servers ab - Systemzeit korrigieren",
         ),
         (
@@ -3289,11 +3284,11 @@ fn s3_hint_de(hint: &str) -> String {
             "der Bucket liegt an einem anderen Endpunkt/einer anderen Region (Redirect)",
         ),
         (
-            "bad request — often a region mismatch for this endpoint",
+            "bad request - often a region mismatch for this endpoint",
             "Bad Request - oft ein Region-Mismatch für diesen Endpunkt",
         ),
         (
-            "access denied — check access key and secret",
+            "access denied - check access key and secret",
             "Zugriff verweigert - Access-Key und Secret prüfen",
         ),
         ("unexpected status", "unerwarteter Status"),
@@ -3322,33 +3317,32 @@ fn localize_tor_detail(lang: i32, d: &str) -> String {
     if lang != 1 || d.is_empty() {
         return d.to_string();
     }
-    if let Some(g) = d.strip_prefix("no circuit was proven — ") {
+    if let Some(g) = d.strip_prefix("no circuit was proven - ") {
         return format!("kein Circuit bewiesen - {}", tor_gap_de(g));
     }
-    if let Some(g) = d.strip_prefix("nothing about Tor could be established — ") {
+    if let Some(g) = d.strip_prefix("nothing about Tor could be established - ") {
         return format!("nichts über Tor feststellbar - {}", tor_gap_de(g));
     }
     if let Some(net) = d
         .strip_prefix("the configured anonymity network is ")
-        .and_then(|r| r.strip_suffix(", not tor — nothing was sent"))
+        .and_then(|r| r.strip_suffix(", not tor - nothing was sent"))
     {
         return format!("das konfigurierte Anonymitätsnetz ist {net}, nicht tor - nichts wurde gesendet");
     }
     if d == "the resolved transport does not route over Tor" {
         return "der aufgelöste Transport routet nicht über Tor".into();
     }
-    if d == "Tor is not enabled — nothing was sent" {
+    if d == "Tor is not enabled - nothing was sent" {
         return "Tor ist nicht aktiv - nichts wurde gesendet".into();
     }
     if d.starts_with("nothing was routed through the proxy") {
-        return "nichts lief durch den Proxy, also ist kein Circuit bewiesen - kein \
-                Relay aus dem Pool war über Tor erreichbar (die Relay-Einstellungen \
-                zeigen, welche dieser Knoten wählen darf)"
+        return "nichts lief durch den Proxy - kein Relay aus dem Pool war über Tor \
+                erreichbar"
             .into();
     }
     if d.starts_with("no SOCKS proxy to probe") {
         return "kein SOCKS-Proxy zu prüfen und kein Relay, das dieser Knoten über \
-                Tor wählen darf - nichts über Tor feststellbar"
+                Tor wählen darf"
             .into();
     }
     d.to_string()
@@ -3477,12 +3471,12 @@ static LOG_SHAPES_DE: &[(&[&str], &[&str])] = &[
         &["✓ Backup von Unix ", " (", " Tag(e) alt) · Workspace “", "” materialisiert"],
     ),
     (
-        &["→ the blob's seed does not anchor this seat's identity in the verified roster — knowledge-only restore"],
-        &["→ der Seed des Blobs verankert die Identität dieses Sitzes nicht im verifizierten Roster - nur Wissen wird wiederhergestellt"],
+        &["→ the seed does not anchor this seat in the verified roster - knowledge-only restore"],
+        &["→ der Seed verankert diesen Sitz nicht im verifizierten Roster - nur Wissen wird wiederhergestellt"],
     ),
     (
-        &["→ knowledge is restored — the workspace opens detached and reattaches to the live republic automatically (fallback: a recovery link)"],
-        &["→ Wissen ist wiederhergestellt - der Workspace öffnet abgekoppelt und verbindet sich automatisch wieder mit der lebenden Republik (Fallback: Recovery-Link)"],
+        &["→ knowledge restored - the workspace opens detached and reattaches automatically"],
+        &["→ Wissen wiederhergestellt - der Workspace öffnet abgekoppelt und verbindet sich automatisch wieder"],
     ),
     (&["✗ restore failed: ", ""], &["✗ Restore fehlgeschlagen: ", ""]),
     (&["→ fs: read ", ""], &["→ fs: lese ", ""]),
@@ -3502,11 +3496,11 @@ static LOG_SHAPES_DE: &[(&[&str], &[&str])] = &[
         &["→ Ritual eröffnet · ", " (Gründer) · ", "-von-", " · ", " Einladung(en) erzeugt"],
     ),
     (
-        &["→ SIMULATION — no real network in this build (the Nostr transport lands with N4): this node auto-activates and signs for every member. Nothing was shared off-band."],
-        &["→ SIMULATION - kein echtes Netz in diesem Build (der Nostr-Transport kommt mit N4): dieser Knoten aktiviert und signiert für jedes Mitglied automatisch. Nichts wurde off-band geteilt."],
+        &["→ SIMULATION - no real network in this build: this node signs for every member"],
+        &["→ SIMULATION - kein echtes Netz in diesem Build: dieser Knoten signiert für jedes Mitglied"],
     ),
     (
-        &["→ share each link off-band, over a private channel — the ritual waits for members to activate"],
+        &["→ share each link off-band over a private channel - the ritual waits for the activations"],
         &["→ jeden Link off-band über einen privaten Kanal teilen - das Ritual wartet auf die Aktivierungen"],
     ),
     (
@@ -3516,19 +3510,19 @@ static LOG_SHAPES_DE: &[(&[&str], &[&str])] = &[
     (&["✗ founding failed: ", ""], &["✗ Gründung fehlgeschlagen: ", ""]),
     (&["✓ recovery phrase backed up"], &["✓ Recovery-Phrase gesichert"]),
     (
-        &["⚠ the relay pool changed — the invites already minted still name the OLD relays. Cancel and re-mint to hand out links that carry this pool."],
-        &["⚠ der Relay-Pool hat sich geändert - bereits erzeugte Einladungen nennen noch die ALTEN Relays. Abbrechen und neu erzeugen, damit die Links diesen Pool tragen."],
+        &["⚠ the relay pool changed - minted invites still name the old relays; cancel and re-mint"],
+        &["⚠ der Relay-Pool hat sich geändert - erzeugte Einladungen nennen noch die alten Relays; abbrechen und neu erzeugen"],
     ),
     (
-        &["→ this node has ", " dialable relays; the invite and the Welcome carry the first ", " (the pool order is the priority — reorder in Settings to change which)"],
-        &["→ dieser Knoten hat ", " wählbare Relays; Einladung und Welcome tragen die ersten ", " (die Pool-Reihenfolge ist die Priorität - unter Einstellungen umsortieren)"],
+        &["→ this node has ", " dialable relays; the invite and the Welcome carry the first ", " (pool order = priority - reorder in Settings)"],
+        &["→ dieser Knoten hat ", " wählbare Relays; Einladung und Welcome tragen die ersten ", " (Pool-Reihenfolge = Priorität - unter Einstellungen umsortieren)"],
     ),
     (
         &["✗ ", " does not reach ", " of ", " pool relays - ", ""],
         &["✗ ", " erreicht ", " von ", " Pool-Relays nicht - ", ""],
     ),
     (
-        &["⚠ ", " landed on ", " of ", " relays — ", ""],
+        &["⚠ ", " landed on ", " of ", " relays - ", ""],
         &["⚠ ", " landete auf ", " von ", " Relays - ", ""],
     ),
     (
@@ -3540,51 +3534,51 @@ static LOG_SHAPES_DE: &[(&[&str], &[&str])] = &[
         &["→ die Gruppe ist geboren · Welcomes an alle Mitglieder gesendet"],
     ),
     (
-        &["✗ invite ", ": a second activation by ", " did not verify — ignored"],
+        &["✗ invite ", ": a second activation by ", " did not verify - ignored"],
         &["✗ Einladung ", ": eine zweite Aktivierung durch ", " verifizierte nicht - ignoriert"],
     ),
     (
-        &["✗ invite ", ": this founding has already formed its group around the first activation — cancel and re-mint to let ", " back in"],
-        &["✗ Einladung ", ": diese Gründung hat ihre Gruppe um die erste Aktivierung gebildet - abbrechen und neu erzeugen, um ", " wieder hereinzulassen"],
+        &["✗ invite ", ": the group already formed around the first activation - cancel and re-mint to let ", " back in"],
+        &["✗ Einladung ", ": die Gruppe hat sich um die erste Aktivierung gebildet - abbrechen und neu erzeugen, um ", " wieder hereinzulassen"],
     ),
     (
-        &["✗ invite ", " was activated a second time (by ", ") — that link is spent; they need their own, unused link"],
-        &["✗ Einladung ", " wurde ein zweites Mal aktiviert (durch ", ") - dieser Link ist verbraucht; ein eigener, unbenutzter Link ist nötig"],
+        &["✗ invite ", " was activated a second time (by ", ") - that link is spent, they need an unused one"],
+        &["✗ Einladung ", " wurde ein zweites Mal aktiviert (durch ", ") - dieser Link ist verbraucht, ein unbenutzter ist nötig"],
     ),
     (
-        &["· invite ", " activated by ", " — checking"],
+        &["· invite ", " activated by ", " - checking"],
         &["· Einladung ", " aktiviert durch ", " - prüfe"],
     ),
     (
-        &["✗ invite ", ": the request claims a transport key it did not sign with — refused (possible impersonation)"],
-        &["✗ Einladung ", ": die Anfrage nennt einen Transport-Schlüssel, mit dem sie nicht signiert hat - abgelehnt (mögliche Impersonation)"],
+        &["✗ invite ", ": the request claims a transport key it did not sign with - refused"],
+        &["✗ Einladung ", ": die Anfrage nennt einen Transport-Schlüssel, mit dem sie nicht signiert hat - abgelehnt"],
     ),
     (
-        &["✗ invite ", ": the ticket code does not match — refused (wrong or edited link, or a link from a different founding)"],
-        &["✗ Einladung ", ": der Ticket-Code passt nicht - abgelehnt (falscher oder veränderter Link, oder ein Link aus einer anderen Gründung)"],
+        &["✗ invite ", ": the ticket code does not match - refused (wrong, edited or foreign link)"],
+        &["✗ Einladung ", ": der Ticket-Code passt nicht - abgelehnt (falscher, veränderter oder fremder Link)"],
     ),
     (
-        &["✗ invite ", ": malformed transport key (", ") — refused; the ticket stays usable for a correct retry"],
-        &["✗ Einladung ", ": fehlgeformter Transport-Schlüssel (", ") - abgelehnt; das Ticket bleibt für einen korrekten Versuch nutzbar"],
+        &["✗ invite ", ": malformed transport key (", ") - refused, the ticket stays usable"],
+        &["✗ Einladung ", ": fehlgeformter Transport-Schlüssel (", ") - abgelehnt, das Ticket bleibt nutzbar"],
     ),
     (
-        &["✗ invite ", ": the name ", " is already taken in this founding — refused (every seat must be distinguishable, and the founder's own name is reserved)"],
-        &["✗ Einladung ", ": der Name ", " ist in dieser Gründung schon vergeben - abgelehnt (jeder Sitz muss unterscheidbar sein, und der Name des Gründers ist reserviert)"],
+        &["✗ invite ", ": the name ", " is already taken in this founding - refused"],
+        &["✗ Einladung ", ": der Name ", " ist in dieser Gründung schon vergeben - abgelehnt"],
     ),
     (
-        &["✗ invite ", ": that transport key is already used by another seat — refused (two seats may never share one)"],
-        &["✗ Einladung ", ": dieser Transport-Schlüssel wird schon von einem anderen Sitz benutzt - abgelehnt (zwei Sitze teilen nie einen)"],
+        &["✗ invite ", ": that transport key is already used by another seat - refused"],
+        &["✗ Einladung ", ": dieser Transport-Schlüssel wird schon von einem anderen Sitz benutzt - abgelehnt"],
     ),
     (
-        &["✗ invite ", ": no usable reply address in the request — refused"],
+        &["✗ invite ", ": no usable reply address in the request - refused"],
         &["✗ Einladung ", ": keine nutzbare Antwort-Adresse in der Anfrage - abgelehnt"],
     ),
     (
-        &["✗ invite ", ": the encryption key package does not match the identity in the request — refused"],
-        &["✗ Einladung ", ": das Verschlüsselungs-Key-Package passt nicht zur Identität in der Anfrage - abgelehnt"],
+        &["✗ invite ", ": the key package does not match the identity in the request - refused"],
+        &["✗ Einladung ", ": das Key-Package passt nicht zur Identität in der Anfrage - abgelehnt"],
     ),
     (
-        &["· invite ", " re-activated by ", " — the earlier attempt is replaced"],
+        &["· invite ", " re-activated by ", " - the earlier attempt is replaced"],
         &["· Einladung ", " erneut aktiviert durch ", " - der frühere Versuch ist ersetzt"],
     ),
     (
@@ -3600,7 +3594,7 @@ static LOG_SHAPES_DE: &[(&[&str], &[&str])] = &[
         &["→ Charter vorgeschlagen · warte auf die Ratifikation aller Mitglieder"],
     ),
     (
-        &["✗ a decline for invite ", " came from ", ", who does not hold that seat — ignored"],
+        &["✗ a decline for invite ", " came from ", ", who does not hold that seat - ignored"],
         &["✗ eine Ablehnung für Einladung ", " kam von ", ", das diesen Sitz nicht hält - ignoriert"],
     ),
     (
@@ -3608,7 +3602,7 @@ static LOG_SHAPES_DE: &[(&[&str], &[&str])] = &[
         &["✗ ", " hat die Charter abgelehnt · zum Ändern abbrechen und neu erzeugen"],
     ),
     (
-        &["✗ the ritual is over — this republic must be founded anew (close and re-mint)"],
+        &["✗ the ritual is over - this republic must be founded anew (close and re-mint)"],
         &["✗ das Ritual ist vorbei - diese Republik muss neu gegründet werden (schließen und neu erzeugen)"],
     ),
     (
@@ -3628,7 +3622,7 @@ static LOG_SHAPES_DE: &[(&[&str], &[&str])] = &[
         &["✓ der Gruppenkanal ist zurück"],
     ),
     (
-        &["⚠ cannot hear the group channel — ", " · still retrying"],
+        &["⚠ cannot hear the group channel - ", " · still retrying"],
         &["⚠ der Gruppenkanal ist nicht hörbar - ", " · versuche weiter"],
     ),
     (
@@ -3662,7 +3656,7 @@ static LOG_SHAPES_DE: &[(&[&str], &[&str])] = &[
     ),
     (&["✗ you declined the charter"], &["✗ Charter abgelehnt"]),
     (
-        &["✗ the ritual is over — this republic must be founded anew"],
+        &["✗ the ritual is over - this republic must be founded anew"],
         &["✗ das Ritual ist vorbei - diese Republik muss neu gegründet werden"],
     ),
     (&["→ dialable here: ", ""], &["→ hier wählbar: ", ""]),
@@ -9611,7 +9605,7 @@ mod tests {
         // the offline statics match by prefix (the engine wraps their tails)
         assert!(localize_net_reason(
             1,
-            "offline: no mesh links on disk — the mesh cannot resume; rejoin via a recovery link"
+            "offline: no mesh links on disk - rejoin via a recovery link"
         )
         .starts_with("offline: keine Mesh-Links"));
         // s3: machine states untouched; shells + hints localized, code rides
@@ -9624,7 +9618,7 @@ mod tests {
         assert_eq!(
             localize_s3_verdict(
                 1,
-                "error: http 403: access denied — check access key and secret (AccessDenied)"
+                "error: http 403: access denied - check access key and secret (AccessDenied)"
             ),
             "Fehler: HTTP 403: Zugriff verweigert - Access-Key und Secret prüfen (AccessDenied)"
         );
@@ -9647,7 +9641,7 @@ mod tests {
         des.dedup();
         assert_eq!(des.len(), 4, "gap renderings collide");
         assert_eq!(
-            localize_tor_detail(1, "no circuit was proven — no relay is confirmed yet"),
+            localize_tor_detail(1, "no circuit was proven - no relay is confirmed yet"),
             "kein Circuit bewiesen - noch kein Relay bestätigt"
         );
         assert_eq!(
@@ -12867,7 +12861,6 @@ mod gui_tests {
         ui.set_cw_relay_picks(ModelRc::new(VecModel::from(vec![RelayPick {
             url: "wss://relay.example".into(),
             picked: true,
-            ..RelayPick::default()
         }])));
         ui.set_screen(AppScreen::Main);
         for s in &surfaces {

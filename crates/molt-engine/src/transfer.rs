@@ -512,10 +512,10 @@ where
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             let Ok(received) = tokio::time::timeout(remaining, rx.recv()).await else {
                 return Err(if manifest.is_none() {
-                    "the sharer did not answer — it may be offline; retry when it is back"
+                    "the sharer did not answer - retry when it is back online"
                         .to_string()
                 } else {
-                    "the transfer stalled — the sharer may have gone offline".to_string()
+                    "the transfer stalled - the sharer may have gone offline".to_string()
                 });
             };
             let Some(delivery) = received else {
@@ -643,7 +643,7 @@ where
         };
         if &got != want {
             return Err(
-                "checksum mismatch — the bytes served are not the file that was shared"
+                "checksum mismatch - the served bytes are not the shared file"
                     .to_string(),
             );
         }

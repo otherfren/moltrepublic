@@ -348,7 +348,7 @@ impl State {
             if let Ok(meta) = std::fs::metadata(&p) {
                 if meta.len() > cap {
                     return Err(MoltError::BadPayload(format!(
-                        "file is {} bytes — the share cap is {cap}",
+                        "file is {} bytes - the share cap is {cap}",
                         meta.len()
                     )));
                 }
@@ -491,7 +491,7 @@ impl State {
                 self.net.as_ref().and_then(|n| n.group_arc()),
             ) else {
                 return Err(MoltError::Engine(
-                    "this workspace's members are simulated — no real node holds this file"
+                    "this workspace's members are simulated - no real node holds this file"
                         .into(),
                 ));
             };
@@ -605,7 +605,7 @@ impl State {
         // refuse here instead of recording a dead event for every peer)
         if msg.deleted_by.is_some() {
             return Err(MoltError::BadPayload(
-                "the message was deleted — a tombstone takes no reactions".into(),
+                "the message was deleted - a tombstone takes no reactions".into(),
             ));
         }
         // resolve the toggle against local state: same emoji un-reacts,
@@ -1153,7 +1153,7 @@ mod tests {
         assert_eq!(st.chat.len(), 1, "B must not become visible before A");
         assert!(
             !st.accepted["peer-2"].is_accepted(12),
-            "a parked envelope is NOT accept-marked — the sender keeps resending it"
+            "a parked envelope is NOT accept-marked - the sender keeps resending it"
         );
         // a resent copy of B while parked is absorbed
         deliver_env(&mut st, chat(12, 10, 3, "B"));
@@ -1283,7 +1283,7 @@ mod tests {
             rotation_seed: [0u8; 32],
         });
         st.cmd_share_file("/tmp/x.pdf".to_string(), molt_core::ChannelRef::Group)
-            .expect("the share is admitted — the hash task reports any IO truth");
+            .expect("the share is admitted - the hash task reports any IO truth");
     }
 
     /// G7's fresh-incarnation rule (N4b §3.1a): an envelope from a sender we
@@ -1314,7 +1314,7 @@ mod tests {
         };
         // first contact: seq 12 chained onto a history this node never saw
         deliver_env(&mut st, chat(12, 11, 1, "first contact"));
-        assert_eq!(st.chat.len(), 1, "nothing to order against — it must deliver");
+        assert_eq!(st.chat.len(), 1, "nothing to order against - it must deliver");
         assert!(
             st.accepted["peer-2"].is_accepted(12),
             "…and it seeds the window as the ordering baseline"
@@ -1354,7 +1354,7 @@ mod tests {
         let e2 = st.make_env("me".to_string(), body(2));
         assert_eq!(
             e2.prev_seq, e1.seq,
-            "the chain skips the commit — a receiver can never accept one"
+            "the chain skips the commit - a receiver can never accept one"
         );
         let foreign = st.make_env("peer-1".to_string(), body(3));
         assert_eq!(foreign.prev_seq, 0, "re-recorded peer events carry no chain");

@@ -101,7 +101,7 @@ const LINES: [&str; 16] = [
     "did anyone hear back from the notary?",
     "lol",
     "agreed, let's move on",
-    "wait — which invite was that?",
+    "wait - which invite was that?",
     "backing this",
     "brb, checking the vault",
     "nice, ship it",
@@ -196,7 +196,7 @@ impl ParkedRefs {
         if self.order.len() >= PARKED_TARGET_CAP {
             if let Some(oldest) = self.order.pop_front() {
                 self.refs.remove(&oldest);
-                tracing::warn!(target = %oldest, "parking buffer full — evicting the oldest parked target");
+                tracing::warn!(target = %oldest, "parking buffer full - evicting the oldest parked target");
             }
         }
         self.refs.insert(target, vec![r]);
@@ -713,7 +713,7 @@ impl State {
         }
         match self.build_demo_net(owner, context, peers) {
             Ok(net) => self.net = Some(net),
-            Err(e) => tracing::warn!(error = %e, "building the demo mesh failed — chat stays local"),
+            Err(e) => tracing::warn!(error = %e, "building the demo mesh failed - chat stays local"),
         }
     }
 
@@ -909,7 +909,7 @@ impl State {
         let nostr = self.nostr.as_ref()?;
         let dialer = self.dialer_for().ok()?;
         if relays.is_empty() {
-            tracing::warn!("no dialable relay for this republic — the group runtime stays down");
+            tracing::warn!("no dialable relay for this republic - the group runtime stays down");
             return None;
         }
         let channel = molt_net::ritual_net::GroupChannel::new(
@@ -1211,7 +1211,7 @@ impl State {
             // machinery re-offers it once the chain caught up
             if let Some((&last, _)) = park.iter().next_back() {
                 if envelope.seq > last {
-                    tracing::debug!(%from, seq = envelope.seq, "ordered park full — shedding onto the resend");
+                    tracing::debug!(%from, seq = envelope.seq, "ordered park full - shedding onto the resend");
                     return;
                 }
                 park.remove(&last);
@@ -1273,7 +1273,7 @@ impl State {
             if park.is_empty() {
                 self.ordered_park.remove(&member);
             }
-            tracing::warn!(%member, seq, prev = env.prev_seq, "a parked envelope's predecessor never arrived — releasing it unordered");
+            tracing::warn!(%member, seq, prev = env.prev_seq, "a parked envelope's predecessor never arrived - releasing it unordered");
             let _ = self.deliver_gated(member.clone(), env);
         }
     }
@@ -1292,7 +1292,7 @@ impl State {
         // ordered park, bounded by its give-up valve).
         if let WorkspaceEvent::Declined { id, by, .. } = &envelope.body {
             if by == &from && self.decline_would_shed(id.0, by) {
-                tracing::warn!(%from, id = id.0, "decline park full — leaving the frame unacked for the resend");
+                tracing::warn!(%from, id = id.0, "decline park full - leaving the frame unacked for the resend");
                 return Ok(Reply::Ack);
             }
         }
@@ -2033,7 +2033,7 @@ impl State {
         // under a stale ring secret would hand out a series fresh seats
         // and post-re-key members can never open
         let Some(exporter) = current else {
-            tracing::warn!(%id, "no current exporter secret — not publishing the series");
+            tracing::warn!(%id, "no current exporter secret - not publishing the series");
             return;
         };
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
@@ -2125,7 +2125,7 @@ impl State {
             return;
         };
         if !file.available {
-            refuse("the sharer removed the file — no longer available");
+            refuse("the sharer removed the file - no longer available");
             return;
         }
         // uploads are ephemeral like chat: once the share aged out of the
@@ -2213,11 +2213,11 @@ impl State {
             .is_some_and(|minted_for| *minted_for == member);
         if !ticketed {
             if !self.is_chain_governed() || self.group_net.is_none() {
-                tracing::debug!(%member, "unsolicited recovery request without an open group — dropped");
+                tracing::debug!(%member, "unsolicited recovery request without an open group - dropped");
                 return Ok(Reply::Ack);
             }
             if consent.is_empty() {
-                tracing::warn!(%member, "unsolicited recovery request without a consent — dropped");
+                tracing::warn!(%member, "unsolicited recovery request without a consent - dropped");
                 return Ok(Reply::Ack);
             }
         }
@@ -2233,7 +2233,7 @@ impl State {
                 ..
             } if m == &member)
         }) {
-            tracing::warn!(%member, ticketed, "recovery request while a re-admission is pending — dropped");
+            tracing::warn!(%member, ticketed, "recovery request while a re-admission is pending - dropped");
             return Ok(Reply::Ack);
         }
         // NB: on a verified request, verify_and_propose_restore registers the
@@ -2249,7 +2249,7 @@ impl State {
             match molt_net::canonical_nostr_pk(&new_nostr_pk) {
                 Ok(c) => c,
                 Err(e) => {
-                    tracing::warn!(%member, error = %e, "recovery request with a malformed transport anchor — dropped");
+                    tracing::warn!(%member, error = %e, "recovery request with a malformed transport anchor - dropped");
                     return Ok(Reply::Ack);
                 }
             }
@@ -2260,7 +2260,7 @@ impl State {
             // Restored block's anchor and the blob's working anchors
             let taken = self.anchor_seen_in_chain(&canonical);
             if taken {
-                tracing::warn!(%member, "recovery request reuses an anchored transport key — dropped");
+                tracing::warn!(%member, "recovery request reuses an anchored transport key - dropped");
                 return Ok(Reply::Ack);
             }
         }
@@ -2279,7 +2279,7 @@ impl State {
         {
             tracing::warn!(
                 %member,
-                "recovery request claims a transport key it did not sign with — refused (possible impersonation)"
+                "recovery request claims a transport key it did not sign with - refused (possible impersonation)"
             );
             return Ok(Reply::Ack);
         }
@@ -2293,7 +2293,7 @@ impl State {
             // cooldown — there is nothing to restore, and re-keying a live
             // seat is pure epoch churn
             if !canonical.is_empty() && self.working_nostr_pk(&member) == canonical {
-                tracing::debug!(%member, "unsolicited recovery request for the live anchor — dropped");
+                tracing::debug!(%member, "unsolicited recovery request for the live anchor - dropped");
                 return Ok(Reply::Ack);
             }
             // THE CHAIN IS THE REPLAY REGISTER (field storm 2026-08-24):
@@ -2304,7 +2304,7 @@ impl State {
             // (genesis, any Restored block, the checkpoint's summary) can
             // only be a replay: a genuine reattach mints a fresh salt.
             if self.anchor_seen_in_chain(&canonical) {
-                tracing::debug!(%member, "unsolicited recovery request replays a chain-known anchor — dropped");
+                tracing::debug!(%member, "unsolicited recovery request replays a chain-known anchor - dropped");
                 return Ok(Reply::Ack);
             }
             let now = crate::now_secs();
@@ -2314,7 +2314,7 @@ impl State {
                 .get(&key)
                 .is_some_and(|t| now.saturating_sub(*t) < UNSOLICITED_COOLDOWN_SECS)
             {
-                tracing::debug!(%member, "unsolicited recovery request within the cooldown — dropped");
+                tracing::debug!(%member, "unsolicited recovery request within the cooldown - dropped");
                 return Ok(Reply::Ack);
             }
         }
@@ -2342,7 +2342,7 @@ impl State {
                     .retain(|_, t| now.saturating_sub(*t) < UNSOLICITED_COOLDOWN_SECS);
                 self.unsolicited_cooldown
                     .insert((member.to_string(), canonical.clone()), now);
-                tracing::info!(%member, ticketed, "recovery seat proof verified — proposing re-admission");
+                tracing::info!(%member, ticketed, "recovery seat proof verified - proposing re-admission");
                 // the first checklist frame: the rejoiner learns the roster,
                 // the threshold and the voices already counted
                 self.push_recover_progress(id);
@@ -2799,20 +2799,20 @@ impl State {
         let Some((announcer, plain)) =
             self.net.as_ref().and_then(|n| n.decrypt_group_message(&raw))
         else {
-            tracing::warn!("a recovery-queue mesh announce did not decrypt — dropped");
+            tracing::warn!("a recovery-queue mesh announce did not decrypt - dropped");
             return Ok(Reply::Ack);
         };
         // parse BEFORE spending the one-shot window: a malformed (but
         // authentic) announce must degrade to a dropped frame, not burn the
         // rejoiner's only chance to re-mesh (version skew / client bug)
         let Ok(announce) = serde_json::from_slice::<molt_net::mesh::MeshAnnounce>(&plain) else {
-            tracing::warn!(%announcer, "mesh announce is malformed — dropped (window kept)");
+            tracing::warn!(%announcer, "mesh announce is malformed - dropped (window kept)");
             return Ok(Reply::Ack);
         };
         // only the member whose re-key JUST completed may (re)announce here —
         // the recovery queue can never re-point another member's links
         if !self.recovery_mesh_window.remove(&announcer) {
-            tracing::warn!(%announcer, "mesh announce outside a recovery window — dropped");
+            tracing::warn!(%announcer, "mesh announce outside a recovery window - dropped");
             return Ok(Reply::Ack);
         }
         // E7 review finding 1: the rejoiner's NEW incarnation restarts its
@@ -2869,7 +2869,7 @@ impl State {
         let now = self.presence_now();
         if let Some(last) = self.mesh_extension_at.get(&member) {
             if now.saturating_sub(*last) < MESH_EXTENSION_COOLDOWN_SECS {
-                tracing::warn!(%member, "mesh announce inside the cooldown — ignored");
+                tracing::warn!(%member, "mesh announce inside the cooldown - ignored");
                 return;
             }
         }
@@ -2980,7 +2980,7 @@ impl State {
         // subscriber on the same queues would supersede the first)
         let member = link.member.clone();
         if PeerLink::from_mesh(&link).is_none() {
-            tracing::warn!(%member, "mesh extension link is malformed — keeping the old mesh");
+            tracing::warn!(%member, "mesh extension link is malformed - keeping the old mesh");
             return Ok(Reply::Ack);
         }
         let mut mesh = net.mesh().to_vec();
@@ -3068,7 +3068,7 @@ impl State {
         op: Option<molt_core::ReactOp>,
     ) {
         let Ok((index, msg)) = self.chat_by_id(&id) else {
-            tracing::debug!(%from, %id, "a wire reaction arrived before its message — parked (P6)");
+            tracing::debug!(%from, %id, "a wire reaction arrived before its message - parked (P6)");
             self.parked.park(id, PendingRef::React { by: from, emoji, op });
             return;
         };
@@ -3086,7 +3086,7 @@ impl State {
     /// `from` is the target's author in OUR log (no moderation concept).
     fn wire_delete(&mut self, id: MessageId, from: MemberId) {
         let Ok((index, msg)) = self.chat_by_id(&id) else {
-            tracing::debug!(%from, %id, "a wire delete arrived before its message — parked (P6)");
+            tracing::debug!(%from, %id, "a wire delete arrived before its message - parked (P6)");
             self.parked.park(id, PendingRef::Delete { by: from });
             return;
         };
@@ -3103,7 +3103,7 @@ impl State {
     /// if `from` is the sharer (the share message's author in OUR log).
     fn wire_file_remove(&mut self, id: MessageId, from: MemberId) {
         let Ok((index, msg)) = self.chat_by_id(&id) else {
-            tracing::debug!(%from, %id, "a wire file-removal arrived before its message — parked (P6)");
+            tracing::debug!(%from, %id, "a wire file-removal arrived before its message - parked (P6)");
             self.parked.park(id, PendingRef::FileRemove { by: from });
             return;
         };
@@ -3122,7 +3122,7 @@ impl State {
     /// pair commutes — the same guard as the apply arm.
     fn wire_read(&mut self, id: MessageId, from: MemberId) {
         let Ok((_, msg)) = self.chat_by_id(&id) else {
-            tracing::debug!(%from, %id, "a wire read receipt arrived before its message — parked (P6)");
+            tracing::debug!(%from, %id, "a wire read receipt arrived before its message - parked (P6)");
             self.parked.park(id, PendingRef::Read { by: from });
             return;
         };
@@ -3165,7 +3165,7 @@ impl State {
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
         if self.net_generation_current(generation) {
-            tracing::info!(%member, "re-key commit merged — forgetting the seat's old accept window");
+            tracing::info!(%member, "re-key commit merged - forgetting the seat's old accept window");
             self.reset_peer_accept_window(&member);
         }
         Ok(Reply::Ack)
@@ -3186,7 +3186,7 @@ impl State {
         if !self.net_generation_current(generation) {
             return Ok(Reply::Ack);
         }
-        tracing::warn!(%member, %reason, "sends to a member keep failing — outbox is backing off");
+        tracing::warn!(%member, %reason, "sends to a member keep failing - outbox is backing off");
         self.net_send_stuck.insert(member.clone(), reason);
         // the group runtime names the OWN seat for its broadcast outbox: a
         // presence pin on this node could never lift (nothing sights itself)
@@ -4162,7 +4162,7 @@ mod tests {
         // the leg is verified, not merely live-but-unverified) — still degraded
         // because the OTHER peer's outbox is stuck
         st.cmd_net_link_up("bob".to_string(), None).expect("ack");
-        st.cmd_net_peer_seen("bob".to_string(), None).expect("bob delivers — leg verified");
+        st.cmd_net_peer_seen("bob".to_string(), None).expect("bob delivers - leg verified");
         assert!(
             matches!(st.session.net_health, molt_core::NetHealth::Degraded { .. }),
             "cid's outbox is still stuck"
@@ -4300,7 +4300,7 @@ mod tests {
     fn a_down_verdict_is_never_lifted_by_link_signals() {
         let mut st = presence_fixture();
         st.session.net_health = molt_core::NetHealth::Down {
-            reason: "resume failed — workspace opened detached".to_string(),
+            reason: "resume failed - workspace opened detached".to_string(),
         };
         st.cmd_net_link_down("bob".to_string(), "x".to_string(), None).expect("ack");
         assert!(matches!(st.session.net_health, molt_core::NetHealth::Down { .. }));
@@ -4373,14 +4373,14 @@ mod tests {
         st.flush_due_acks(T + 1);
         assert!(
             !st.ack_due.contains_key("bob"),
-            "the due deadline is consumed (no mesh here: dropped — resends re-arm)"
+            "the due deadline is consumed (no mesh here: dropped - resends re-arm)"
         );
         assert!(st.ack_due.contains_key("cid"), "a future deadline stays armed");
 
         // link-up arms an immediate ack — but only with a window to report
         st.ack_due.clear();
         st.cmd_net_link_up("cid".to_string(), None).expect("ack");
-        assert!(st.ack_due.is_empty(), "no window for cid — nothing to report");
+        assert!(st.ack_due.is_empty(), "no window for cid - nothing to report");
         st.cmd_net_link_up("bob".to_string(), None).expect("ack");
         assert_eq!(st.ack_due.get("bob"), Some(&T), "bob's window arms a due-now ack");
     }
@@ -4424,7 +4424,7 @@ mod tests {
         assert_eq!(
             st.mesh_extension_at.get("bob"),
             Some(&(T + 5)),
-            "a rapid repeat stays capped — the stamp is not refreshed"
+            "a rapid repeat stays capped - the stamp is not refreshed"
         );
     }
 

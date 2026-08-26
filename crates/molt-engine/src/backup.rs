@@ -26,7 +26,7 @@ use crate::{now_secs, Envelope, State};
 pub(crate) const BACKUP_TICK_MS: u64 = 60_000;
 
 /// The honest per-workspace status of a sealed-at-rest skip (design P6).
-const SEALED_SKIP: &str = "sealed at rest — backup skipped until decrypted";
+const SEALED_SKIP: &str = "sealed at rest - backup skipped until decrypted";
 
 impl State {
     /// One decide pass of the backup ticker (engine-internal). Synchronous:
@@ -397,7 +397,7 @@ impl State {
                     if !handle.flush_blocking() {
                         // the backup would capture a log the disk does not
                         // hold yet — say so rather than shipping it quietly
-                        tracing::error!("flush before backup failed — the copy may lag the log");
+                        tracing::error!("flush before backup failed - the copy may lag the log");
                     }
                 }
                 let mut blob = Vec::new();
@@ -420,8 +420,8 @@ impl State {
                         Command::NetBackupFailed {
                             id,
                             error: format!(
-                                "workspace export is {bytes} bytes — beyond the \
-                                 {}-byte cap the restore path enforces; not uploaded",
+                                "workspace export is {bytes} bytes - beyond the \
+                                 {}-byte restore cap, not uploaded",
                                 crate::lifecycles::RESTORE_MAX_BYTES
                             ),
                         }
@@ -768,8 +768,7 @@ fn quota_candidates(
 fn backup_refusal_reason(dir: &std::path::Path) -> Option<&'static str> {
     if !dir.join("chain.state").exists() {
         return Some(
-            "no persistent chain — a backup of this workspace could not be \
-             restored (chainless legacy directory)",
+            "no persistent chain - a backup could not be restored",
         );
     }
     None
@@ -910,6 +909,6 @@ mod tests {
         let objects = vec![obj(1, 1, 100), obj(1, 2, 100), obj(2, 1, 100)];
         let (del, used) = quota_candidates(objects, 50, "");
         assert_eq!(del, vec![molt_core::backup_key(&"01".repeat(32), 1)]);
-        assert_eq!(used, 200, "still over 50 — only the newest copies remain");
+        assert_eq!(used, 200, "still over 50 - only the newest copies remain");
     }
 }

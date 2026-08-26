@@ -1726,7 +1726,7 @@ async fn changing_the_pool_during_a_founding_says_the_invites_are_stale() {
         .expect("add");
     let s = read_session(&a).await;
     assert!(
-        s.create.run.log.iter().any(|l| l.contains("already minted still name")),
+        s.create.run.log.iter().any(|l| l.contains("minted invites still name")),
         "the founding log must say the outstanding links are stale: {:?}",
         s.create.run.log
     );
@@ -1739,7 +1739,7 @@ async fn changing_the_pool_during_a_founding_says_the_invites_are_stale() {
     .expect("confirm");
     let s = read_session(&a).await;
     assert_eq!(
-        s.create.run.log.iter().filter(|l| l.contains("already minted still name")).count(),
+        s.create.run.log.iter().filter(|l| l.contains("minted invites still name")).count(),
         1,
         "the warning must not stack per pool edit: {:?}",
         s.create.run.log
