@@ -114,6 +114,22 @@ impl State {
         self.pending_sigs.get(&id).map(|p| p.verified.len()).unwrap_or(0)
     }
 
+    /// The replay guard every AUTOMATIC co-sign runs (a consented restore,
+    /// a matching checkpoint cut): does this node already hold its OWN
+    /// signature for `id` at the current target height? A re-received frame
+    /// must not amplify into fresh `Approved` gossip. Headless (no chain
+    /// head) there is no target, hence nothing standing.
+    pub(super) fn own_signature_stands(&self, id: u64) -> bool {
+        let Some(head) = self.chain_head.as_ref() else {
+            return false;
+        };
+        let me = self.member();
+        let target = head.height + 1;
+        self.pending_sigs
+            .get(&id)
+            .is_some_and(|p| p.height == target && p.sigs.iter().any(|a| a.member == me))
+    }
+
     /// Sign this node's approval of a proposal at the current head+1 and
     /// record + gossip it (the outbox fans the self-authored `Approved`
     /// envelope out over the mesh). Then try to seal. The proposer's own

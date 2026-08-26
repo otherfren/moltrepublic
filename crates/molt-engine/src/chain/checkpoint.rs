@@ -203,15 +203,8 @@ impl State {
             return;
         }
         self.proposal_changes.insert(id, this);
-        // replay guard: one signature per member per cut — a re-received
-        // frame must not amplify into fresh Approved gossip
-        let me = self.member();
-        let target = head.height + 1;
-        if self
-            .pending_sigs
-            .get(&id)
-            .is_some_and(|p| p.height == target && p.sigs.iter().any(|a| a.member == me))
-        {
+        // replay guard: one signature per member per cut
+        if self.own_signature_stands(id) {
             return;
         }
         // correctness attestation, not a product decision: co-sign directly

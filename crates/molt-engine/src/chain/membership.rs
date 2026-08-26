@@ -320,12 +320,7 @@ impl State {
             return;
         }
         // replay guard: one signature per member per height
-        let target = self.chain_head.as_ref().map(|h| h.height + 1).unwrap_or(1);
-        if self
-            .pending_sigs
-            .get(&id)
-            .is_some_and(|p| p.height == target && p.sigs.iter().any(|a| a.member == me))
-        {
+        if self.own_signature_stands(id) {
             return;
         }
         tracing::info!(%id, %member, "consented re-admission verified - auto-approving");
