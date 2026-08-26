@@ -8,7 +8,8 @@
 //! `RitualMsg::Recover` wire request, the coordinator recv loop, and the
 //! rejoiner activation — mirroring `founding.rs`.
 //!
-//! Built stepwise, test-first. Today: the recovery **link** type.
+//! All of it is built; over Nostr the production twin of [`run_rejoin`] is
+//! `nostr_ritual::spawn_recovery_rejoiner`.
 
 use molt_net::LoopbackTransport;
 use crate::Envelope;

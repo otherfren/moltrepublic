@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The engine-run lifecycles: **founding** (create) and **join** keep their
-//! command surface and wizard state, but the network legs are in the
-//! N-demo→N4 gap — there is no transport in this build, so the production
-//! paths fail honestly (the loopback seams still drive the full rituals in
-//! tests; N4's Nostr transport re-wires the off-actor tasks). **restore** is real
+//! The engine-run lifecycles: **founding** (create) and **join** own the
+//! command surface and wizard state; their network legs run off-actor over
+//! Nostr since N4/N5 (`nostr_ritual.rs`: the founder's inbox + group tasks,
+//! the member ladder's Nostr leg), and the loopback seams drive the same
+//! rituals in tests. **restore** is real
 //! (`backup_restore_design.md` §4/§6.6): an off-actor task fetches (file or
 //! S3) and stages the encrypted blob, the ACTOR hard-verifies the
 //! threshold-signed chain before anything materializes, and the restored

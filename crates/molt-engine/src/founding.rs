@@ -4,8 +4,8 @@
 //! constituted *before* any workspace touches the disk.
 //!
 //! The founder mints one single-use invite per future member and provisions a
-//! transport queue per seat. Each member — a loopback node in the dev seams
-//! today, a real remote node once the Nostr transport (N4) lands — derives its
+//! transport queue per seat. Each member — a remote node over Nostr in
+//! production, a loopback node in the test seams — derives its
 //! own identity key from its own recovery phrase, activates the link
 //! (`JoinRequest`, MAC-bound to the ticket), and later signs the final
 //! canonical roster table (`SealSigned`). Only when every seat is sealed does
@@ -821,7 +821,6 @@ fn join_relay_deviation(member: &str, pool: &[String], declared: &[String]) -> O
 /// Map a returning member's [`invite::RecoverRequest`] to the internal
 /// [`Command::NetRecoverRequested`] — the coordinator recv loop's one decode.
 /// The reply-queue handover is re-serialized to the opaque string core carries.
-#[cfg_attr(not(test), allow(dead_code))] // wired by the recovery link-mint increment
 /// `sender_npub` is the wrap's PROVEN author on the Nostr path, and empty on
 /// the loopback one (a queue delivery has no wrap author to prove).
 pub(crate) fn recover_command(
@@ -2107,7 +2106,6 @@ mod ritual_ops {
         /// their identity, and — once every seat's key is in — send the
         /// canonical table to all members to sign. Verification failures
         /// are logged and dropped (a bad request must not wedge anything).
-        #[allow(clippy::too_many_arguments)]
         #[allow(clippy::too_many_arguments)] // one wire request's fields, not a bag
         pub(crate) fn cmd_net_join_requested(
             &mut self,
