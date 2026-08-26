@@ -4,5 +4,6 @@
 //! UI-local change followed by a surfaces re-read) - the GUI drives the
 //! same command set an MCP agent does, co-equal.
 
+pub(crate) mod relays;
 pub(crate) mod settings;
 pub(crate) mod workspace;
