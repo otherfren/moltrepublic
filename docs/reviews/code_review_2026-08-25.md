@@ -198,7 +198,7 @@ code behind a feature/module. `transfer.rs` landing sequence three times.
 
 ## 3. Founding ritual and recovery (`founding.rs`, `nostr_ritual.rs`, `recovery.rs`, `lifecycles.rs`, `relay_msg.rs`)
 
-### R1 [MEDIUM] Member-side roster verifiers weaker than `verify_genesis` - PARTLY FIXED
+### R1 [MEDIUM] Member-side roster verifiers weaker than `verify_genesis` - FIXED
 `verify_sealed_roster` / `verify_seal_proposal` now enforce distinct
 attestation signers, `identities.len() == rule_n` and `1 <= m <= n`
 (`check_rule_shape`). Test:
@@ -296,11 +296,11 @@ not, before comparing `CommitKey`s — a survivor that merged the evicted
 device's commit first then REWINDS onto the chain-backed re-key, and
 the device's commit can never win a slot the chain decided.
 
-### M3 [MEDIUM] The prior slot is not persisted - OPEN
-Two nodes decide a late same-epoch commit differently depending on a
-restart in between - a silent fork among survivors. Fix direction:
-persist `(prior_epoch, snapshot, CommitKey, removed)` in the MLS snapshot
-(v4, additive).
+### M3 [MEDIUM] The prior slot is not persisted - FIXED
+The MLS snapshot (v4, additive) carries `(prior_epoch, snapshot,
+CommitKey, removed)`; a restarted node decides a late same-epoch commit
+like an uninterrupted one. Test:
+`the_prior_slot_survives_snapshot_and_restore`.
 
 ### M4 [MEDIUM] Stall clock spun once the hourly budget was spent - FIXED
 The spent branch never re-anchored `stalled_since`. Fix: re-anchor like a
@@ -322,11 +322,11 @@ keeps its own), no sleep after the last publish attempt. Test:
 `a_permanent_refusal_does_not_arm_the_held_frame_timer` (the floor-less
 case; the floor case rides the same flag).
 
-### M7 [MEDIUM] `TransportState` load-modify-save races between the group tasks - OPEN
-Inbox, outbox and file plane each `load → mutate → save(whole)`; a claim
-sheet or a consumed budget round can be lost. Fix direction: one shared
-`Arc<Mutex<TransportState>>` as the mesh supervisor has, store as
-write-behind.
+### M7 [MEDIUM] `TransportState` load-modify-save races between the group tasks - FIXED
+Inbox, outbox and file plane share one `Arc<Mutex<TransportState>>` (the
+mesh supervisor's shape); `StateStore::update` mutates under the lock, so
+a claim sheet or a consumed budget round is never overwritten by a stale
+whole-state save. Test: `state_updates_never_lose_each_other`.
 
 ### M8 [MEDIUM] §7 deep-laggard commit resends are not wired on Nostr - FIXED
 The Nostr re-key arm records the commit in the log with its carrier
@@ -334,11 +334,13 @@ stamp (`MlsCommit.stamp`, additive); the outbox publishes a stamped commit
 at exactly that stamp, so a resend keys like the original. Test:
 `a_commits_frame_carries_its_recorded_stamp`.
 
-### M9 [LOW] `Stopped` mid-batch discards cursor progress - OPEN
-Persist `published_through` before returning on `Stopped`.
+### M9 [LOW] `Stopped` mid-batch discards cursor progress - FIXED
+`persist_cursor` runs before `PassOutcome::Stopped` returns: the frames
+that went out before the stop stay published.
 
-### M10 [LOW] Shape-malformed 445s are held as if they might open later - OPEN
-Match `EnvelopeError::Shape` → drop; hold only `EpochOpaque`.
+### M10 [LOW] Shape-malformed 445s are held as if they might open later - FIXED
+`EnvelopeError::Shape` → `Ingest::Nothing` (dropped at debug level); only
+an epoch-opaque frame takes a hold slot.
 
 ### M11 [STYLE] Em dashes reaching the health surface; prose logs - FIXED
 The three `send_failed` / `link_down` reasons and the GUI arms that match
@@ -369,37 +371,39 @@ host); lanes: `anchor:<pk>` (RitualNet), `group:<seed>` (subscriptions),
 `publish:<random>` per `GroupChannel`, `s3`, `probe`. Test:
 `two_lanes_to_one_host_yield_distinct_socks_credentials`.
 
-### T2 [MEDIUM] `PublishPool`: one stalled relay caps the node at ~1 event / 20 s - OPEN
-`publish()` waits for the slowest relay; nothing remembers a timeout. Fix
-direction: per-relay `Down{until}` backoff in the pool, report
-`failed("backing off")` immediately, resolve when the live relays
-answered.
+### T2 [MEDIUM] `PublishPool`: one stalled relay caps the node at ~1 event / 20 s - FIXED
+Each `PoolSlot` carries a breaker (`tripped()` / `healthy()`,
+`down_until`): a relay that timed out answers `Unreachable("backing
+off")` at once until its backoff lapses, so `publish()` resolves on the
+live relays. `with_publish_timeout` makes the window testable. Test:
+`a_stalled_relay_does_not_hold_the_pool_hostage`.
 
 ### T3 [MEDIUM] `DEDUP_CAP` (4096) < history bound (5000) - FIXED
 The fan-in channel's size argument assumed the ring covers a whole
 replay. Fix: the ring is sized `max(history_bound + 64, DEDUP_CAP)`.
 Test: `the_dedup_ring_covers_the_history_bound`.
 
-### T4 [LOW] A relay dropped for over-replaying stays `Up` in `health()` - OPEN
-`deaf()` then reports a live relay with no supervisor. Fix direction: set
-`Down` before the bound `Break`, distinct log.
+### T4 [LOW] A relay dropped for over-replaying stays `Up` in `health()` - FIXED
+The health entry is set to `Down` before the bound `Break`, with its own
+log line.
 
 ### T5 [LOW] `place_req` narrows a multi-window catch-up on reconnect - FIXED
 The resume cursor applies to open-ended subscriptions only (a filter that
 carries its own `since` keeps it).
 
-### T6 [LOW] Relay-supplied strings unbounded into `NetError` / WARN - OPEN
-Fix direction: one `relay_reason()` helper (cap ~200 chars, strip
-control chars) at the four sites.
+### T6 [LOW] Relay-supplied strings unbounded into `NetError` / WARN - FIXED
+One `relay_reason()` (200 chars, control characters stripped, one line)
+at every site that embeds relay text. Test:
+`a_relay_reason_is_flat_and_bounded`.
 
-### T7 [LOW] S3 endpoint host not lowercased / ASCII-checked - OPEN
-`.ONION` bypasses the Direct-dial onion refusal; a long non-ASCII host
-can panic `truncate(255)`. Fix direction: parse with `url::Url` (or
-lowercase + ASCII refusal); `eq_ignore_ascii_case` in the dialer; refuse
-plaintext `http://` to clearnet like the relay policy.
+### T7 [LOW] S3 endpoint host not lowercased / ASCII-checked - FIXED
+`S3Config` refuses a non-ASCII host and lowercases it; the dialer's onion
+check is case-insensitive; the truncation is char-safe. Tests:
+`an_endpoint_host_is_lowercased_and_ascii_only`,
+`direct_refuses_an_uppercase_onion_too`.
 
-### T8 [LOW] `S3Config` derives `Debug` with the secret - OPEN
-Manual `Debug` eliding `secret_key`.
+### T8 [LOW] `S3Config` derives `Debug` with the secret - FIXED
+Manual `Debug` elides `secret_key`. Test: `the_config_never_debugs_its_secret`.
 
 ### T9 [STYLE] Em dashes in `TorTest.detail`, `S3Error` hints, `NetError::Framing` - FIXED
 Sources and the GUI's prefix arms use `-`; the two long Tor hedges are one
@@ -426,42 +430,39 @@ Residual (LOW, OPEN): other ancestors are not checked; the complete
 answer is `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` on a dirfd
 of the workspace (rustix is in the tree).
 
-### S2 [MEDIUM] `migrate_to_segment_keys` resurrects a key-erased segment - OPEN
-A dropped segment whose file reappears gets a fresh DEK and a bogus
-`first_seq`; the next open fails AEAD. Fix direction: skip (and unlink)
-keyless segments below the lowest keyed one / with last seq <= floor; a
-compaction error is not the fatal flag.
+### S2 [MEDIUM] `migrate_to_segment_keys` resurrects a key-erased segment - FIXED
+A keyless segment below the lowest keyed one stays dropped (no fresh DEK,
+no bogus `first_seq`). Test: `migration_does_not_resurrect_an_erased_segment`.
 
-### S3 [MEDIUM] `has_valid_frame_after` is quadratic in CRC work - OPEN
-A planted tail of `0x02` turns open into hours under the LOCK. Fix
-direction: budget the scan (e.g. 4x `data.len()`), classify as `Corrupt`
-past it.
+### S3 [MEDIUM] `has_valid_frame_after` is quadratic in CRC work - FIXED
+The torn-tail scan is budgeted; past the budget the tail classifies as
+`Corrupt` instead of being rescanned. Test: `a_torn_tail_scan_is_budgeted`.
 
-### S4 [MEDIUM] The PRUNED version gate is lowered by `unseal_at_rest` and never raised by the F6 migration - OPEN
-Fix direction: `version_floor` returns PRUNED when `log/keys.state`
-exists; bump right after `migrate_to_segment_keys`.
+### S4 [MEDIUM] The PRUNED version gate is lowered by `unseal_at_rest` and never raised by the F6 migration - FIXED
+`version_floor` reads PRUNED off `log/keys.state`; the migration bumps
+the manifest right after it. Tests: `migration_raises_the_version_gate`,
+`unseal_keeps_the_pruned_gate_of_a_migrated_log`; the compacted-workspace
+seal/export/import gap the test uncovered is fixed in `e9bc711a`.
 
-### S5 [MEDIUM] Segment / snapshot numbers from file names are unbounded - OPEN
-`18446744073709551615.msnap` panics `open_workspace` (`at_seq + 1`); a
-`u64::MAX` `.mlog` becomes the active segment under the snapshot AAD
-marker. Fix direction: reject numbers >= `KEYS_SEGMENT` in the callers
-of `list_sorted`, `saturating_add`, refuse an empty last segment that is
-not the only one.
+### S5 [MEDIUM] Segment / snapshot numbers from file names are unbounded - FIXED
+Numbers at or above the reserved range are ignored by the listing; the
+seq arithmetic saturates. Test: `planted_reserved_numbers_are_ignored`.
 
-### S6 [LOW] The export carries `prefs.toml` `shared_files` absolute paths - OPEN
-Strip in `commit_inner` next to `last_backup`.
+### S6 [LOW] The export carries `prefs.toml` `shared_files` absolute paths - FIXED
+Stripped on import next to `last_backup`. Test:
+`an_import_forgets_the_sources_local_share_paths`.
 
-### S7 [LOW] Key hygiene inconsistent with `segkeys.rs`'s promise - OPEN
-`SegmentKey` derives `Debug`; `dek()` hands out unzeroized copies;
-`OpenedWorkspace.key` plain. `Zeroizing` + manual `Debug`.
+### S7 [LOW] Key hygiene inconsistent with `segkeys.rs`'s promise - FIXED
+`SegmentKey` has a manual `Debug`; the DEK copies and `OpenedWorkspace.key`
+are `Zeroizing`. Test: `a_segment_key_debugs_without_its_dek`.
 
-### S8 [LOW] `write_atomic` reuses a pre-existing tmp file; import stages state files at 0644 - OPEN
-`create_new` after unlinking the tmp path; `write_atomic(.., true)` in
-the staging loop.
+### S8 [LOW] `write_atomic` reuses a pre-existing tmp file; import stages state files at 0644 - FIXED
+`create_new` after unlinking the tmp path; the import staging loop writes
+0600. Test: `write_atomic_never_reuses_a_leftover_tmp_file`.
 
-### S9 [LOW] `PersistChain` acks durable on a swallowed dir fsync - OPEN
-Propagate the dir fsync error in `write_atomic` (at least for
-`mode_600`).
+### S9 [LOW] `PersistChain` acks durable on a swallowed dir fsync - FIXED
+`write_atomic` propagates the directory fsync error. Test:
+`fsync_dir_propagates_a_failed_barrier`.
 
 ### S10 [STYLE] Em dashes in `MoltError::Storage` strings; the transport-loss log - FIXED
 Error strings use `-`; the transport-loss log is one line with
