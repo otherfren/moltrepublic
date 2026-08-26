@@ -821,7 +821,7 @@ pub(crate) struct State {
     /// target message has not arrived yet (cross-sender ordering is not
     /// guaranteed), drained when the `Chat` lands. Bounded; runtime-only —
     /// never persisted, a restart loses parked refs (ephemerality is fine).
-    pub(crate) parked: net::ParkedRefs,
+    pub(crate) parked: chat::ParkedRefs,
     pub(crate) files: FilePlane,
     /// The GUI's last published rendering claim (`gui_over_mcp.md`):
     /// written only by `Command::UiPublish` (the window's live mirror),
@@ -1062,7 +1062,7 @@ impl State {
             chat_pruned: false,
             chat_pruned_counts: std::collections::BTreeMap::new(),
             compacted_at: 0,
-            parked: net::ParkedRefs::new(),
+            parked: chat::ParkedRefs::new(),
             files: FilePlane {
                 share_paths: HashMap::new(),
                 downloads: HashMap::new(),

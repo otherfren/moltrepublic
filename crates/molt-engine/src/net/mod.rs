@@ -22,13 +22,13 @@ use molt_core::{
     Command, EventEnvelope, GroupConfig, MemberId, MessageId, MoltError,
     Reply, SessionScope, SessionView, WorkspaceEvent, WorkspaceId,
 };
-use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use molt_net::supervisor::{self, EngineSink, MemLog, MemStateStore, MlsChannel, NetConfig, PeerLink};
 use molt_net::{LoopbackHub, NetError, SupervisorHandle, Transport};
 use tokio::sync::{mpsc, oneshot, watch};
 
+use crate::chat::PendingRef;
 use crate::{Envelope, State};
 
 mod demo_mesh;
@@ -76,127 +76,6 @@ pub(crate) const CHAIN_SERVE_DEBOUNCE_SECS: u64 = 30;
 /// Unknown read-receipt targets one `ChatRead` frame may park: a frame of
 /// random ids would otherwise sweep the whole P6 parking buffer (review E6).
 pub(crate) const PARKED_READS_PER_FRAME: usize = 16;
-
-// ---------------------------------------------------------------------------
-// P6: the parking buffer for out-of-order wire references
-// ---------------------------------------------------------------------------
-
-/// Cap on distinct target message ids the parking buffer holds at once;
-/// when full, the OLDEST parked target (insertion order) is evicted whole.
-const PARKED_TARGET_CAP: usize = 256;
-/// Cap on refs parked under ONE target id (a flood of reactions to a single
-/// unknown id must not grow without bound); the oldest ref is shed first.
-const PARKED_REFS_PER_TARGET: usize = 64;
-
-/// One wire reference (reaction / delete / file-removal) whose target
-/// message has not arrived yet. `by` is ALWAYS the authenticated link
-/// identity it arrived on (forced at park time, exactly like a live wire
-/// event), so the P5 enforcement matrix re-evaluates at drain time against
-/// trusted data only — never against a claim inside the parked event.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PendingRef {
-    /// A reaction; the emoji passed the wire sanity check at park time.
-    React {
-        /// The reacting member (the link identity).
-        by: MemberId,
-        /// The sanitized emoji.
-        emoji: String,
-        /// The sender's explicit direction (`None` = legacy toggle).
-        op: Option<molt_core::ReactOp>,
-    },
-    /// A message deletion — honored at drain only if `by` turns out to be
-    /// the target's author (no moderation concept).
-    Delete {
-        /// The deleting member (the link identity).
-        by: MemberId,
-    },
-    /// A file-share removal — honored at drain only if `by` turns out to be
-    /// the sharer.
-    FileRemove {
-        /// The removing member (the link identity).
-        by: MemberId,
-    },
-    /// A read receipt — honored at drain unless the target turns out to be a
-    /// tombstone or `by`'s own message (the ChatRead commute rules).
-    Read {
-        /// The reading member (the link identity).
-        by: MemberId,
-    },
-}
-
-/// The P6 parking buffer: cross-sender ordering is not guaranteed (per-sender
-/// in-order only, and the MLS path bypasses the wire reorder buffer), so a
-/// reaction/delete/file-removal can arrive BEFORE the message it targets.
-/// Such refs are parked here, keyed by the unknown target id, and drained
-/// when the `Chat` lands. Bounded (FIFO eviction of the oldest target) and
-/// strictly runtime-only: never persisted — a restart loses parked refs,
-/// which is fine, the chat bus is ephemeral by design.
-pub(crate) struct ParkedRefs {
-    /// Parked refs per unknown target id, in arrival order.
-    refs: BTreeMap<MessageId, Vec<PendingRef>>,
-    /// Target ids in insertion order — the FIFO eviction ledger.
-    order: VecDeque<MessageId>,
-}
-
-impl ParkedRefs {
-    /// An empty buffer.
-    pub(crate) fn new() -> Self {
-        ParkedRefs {
-            refs: BTreeMap::new(),
-            order: VecDeque::new(),
-        }
-    }
-
-    /// Park one ref under its (unknown) target id. A new target beyond the
-    /// cap evicts the OLDEST parked target wholesale; within one target the
-    /// oldest ref is shed once the per-target cap is hit.
-    pub(crate) fn park(&mut self, target: MessageId, r: PendingRef) {
-        if let Some(list) = self.refs.get_mut(&target) {
-            if list.len() >= PARKED_REFS_PER_TARGET {
-                list.remove(0);
-            }
-            list.push(r);
-            return;
-        }
-        if self.order.len() >= PARKED_TARGET_CAP {
-            if let Some(oldest) = self.order.pop_front() {
-                self.refs.remove(&oldest);
-                tracing::warn!(target = %oldest, "parking buffer full - evicting the oldest parked target");
-            }
-        }
-        self.refs.insert(target, vec![r]);
-        self.order.push_back(target);
-    }
-
-    /// Remove and return everything parked for `target` (its message just
-    /// arrived), freeing the target's slot in the eviction ledger.
-    pub(crate) fn drain(&mut self, target: &MessageId) -> Vec<PendingRef> {
-        let parked = self.refs.remove(target).unwrap_or_default();
-        if !parked.is_empty() {
-            self.order.retain(|t| t != target);
-        }
-        parked
-    }
-
-    /// Drop everything (workspace close/switch).
-    pub(crate) fn clear(&mut self) {
-        self.refs.clear();
-        self.order.clear();
-    }
-
-    /// Number of distinct parked targets (tests).
-    #[cfg(test)]
-    fn targets(&self) -> usize {
-        debug_assert_eq!(self.refs.len(), self.order.len());
-        self.refs.len()
-    }
-
-    /// Whether a target has parked refs (tests).
-    #[cfg(test)]
-    fn holds(&self, target: &MessageId) -> bool {
-        self.refs.contains_key(target)
-    }
-}
 
 // ---------------------------------------------------------------------------
 // EngineSink / OutboxLog / StateStore implementations
@@ -2886,92 +2765,6 @@ impl State {
         Ok(Reply::Ack)
     }
 
-    // ---- the P5 appliers (live wire arrivals AND P6 drains) --------------
-    //
-    // Each resolves the target by stable id; an unknown target parks the
-    // ref (P6) instead of dropping it. `from` is ALWAYS the authenticated
-    // link identity (a live arm passes the link; a drain passes the `by`
-    // that was forced to the link at park time), so the authorization
-    // checks below never trust event-claimed data. A drain runs right
-    // after the target's `Chat` was inserted, so it cannot re-park.
-
-    /// Apply (or park) a link-authenticated wire reaction. The sender's
-    /// explicit `op` passes through unchanged (`None` only from a legacy
-    /// peer — that records the old toggle semantics, accepted Q3-style
-    /// degradation while versions are mixed).
-    fn wire_react(
-        &mut self,
-        id: MessageId,
-        from: MemberId,
-        emoji: String,
-        op: Option<molt_core::ReactOp>,
-    ) {
-        let Ok((index, msg)) = self.chat_by_id(&id) else {
-            tracing::debug!(%from, %id, "a wire reaction arrived before its message - parked (P6)");
-            self.parked.park(id, PendingRef::React { by: from, emoji, op });
-            return;
-        };
-        // a KNOWN but tombstoned target: skip entirely — recording would
-        // put a dead event in the log (the applier ignores reactions on
-        // tombstones so that react/delete commute)
-        if msg.deleted_by.is_some() {
-            tracing::debug!(%from, %id, "skipping a wire reaction on a tombstoned message");
-            return;
-        }
-        self.record_react(index, id, from, emoji, op);
-    }
-
-    /// Apply (or park) a link-authenticated wire delete. Honored only if
-    /// `from` is the target's author in OUR log (no moderation concept).
-    fn wire_delete(&mut self, id: MessageId, from: MemberId) {
-        let Ok((index, msg)) = self.chat_by_id(&id) else {
-            tracing::debug!(%from, %id, "a wire delete arrived before its message - parked (P6)");
-            self.parked.park(id, PendingRef::Delete { by: from });
-            return;
-        };
-        // no moderation concept: only the author wipes its own message —
-        // and the author is what OUR log says, never a claim in the event
-        if msg.from != from {
-            tracing::warn!(%from, %id, "dropping a wire delete from a non-author");
-            return;
-        }
-        self.record_delete(index, id, from);
-    }
-
-    /// Apply (or park) a link-authenticated wire file-removal. Honored only
-    /// if `from` is the sharer (the share message's author in OUR log).
-    fn wire_file_remove(&mut self, id: MessageId, from: MemberId) {
-        let Ok((index, msg)) = self.chat_by_id(&id) else {
-            tracing::debug!(%from, %id, "a wire file-removal arrived before its message - parked (P6)");
-            self.parked.park(id, PendingRef::FileRemove { by: from });
-            return;
-        };
-        // only the sharer (the share message's author in OUR log) may flip
-        // its own share to unavailable
-        if msg.from != from || msg.file.is_none() {
-            tracing::warn!(%from, %id, "dropping a wire file-removal from a non-sharer");
-            return;
-        }
-        self.record_file_remove(index, id, from);
-    }
-
-    /// Apply (or park) a link-authenticated wire read receipt for a single
-    /// message (the P6 drain path; the live arm batches and parks inline).
-    /// Skips a tombstoned target or `from`'s own message so the read/delete
-    /// pair commutes — the same guard as the apply arm.
-    fn wire_read(&mut self, id: MessageId, from: MemberId) {
-        let Ok((_, msg)) = self.chat_by_id(&id) else {
-            tracing::debug!(%from, %id, "a wire read receipt arrived before its message - parked (P6)");
-            self.parked.park(id, PendingRef::Read { by: from });
-            return;
-        };
-        if msg.deleted_by.is_some() || msg.from == from {
-            tracing::debug!(%from, %id, "skipping a wire read receipt on a tombstone or own message");
-            return;
-        }
-        self.record_read(vec![id], from);
-    }
-
     /// Passive presence: stamp the member with the engine clock's real
     /// unix time (authenticated inbound traffic is the ONLY thing that
     /// moves a stamp) and lift a send-failure pin.
@@ -3399,7 +3192,7 @@ impl State {
 
 #[cfg(test)]
 mod tests {
-    use super::{ParkedRefs, PendingRef, PARKED_TARGET_CAP};
+    use crate::chat::{ParkedRefs, PendingRef, PARKED_TARGET_CAP};
     use molt_core::{ChatMessage, EventEnvelope, MessageId, WorkspaceEvent};
 
     /// The provisioning task's failure report lands as the calm
