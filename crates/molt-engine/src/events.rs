@@ -657,9 +657,9 @@ impl State {
         // (their commands carry the old scope) — a mere mesh rebuild within
         // one workspace deliberately does not pass through here
         self.net_scope += 1;
-        self.recovery_tickets.clear();
-        self.recovery_mesh_window.clear();
-        self.mesh_extension_at.clear();
+        self.recovery.tickets.clear();
+        self.recovery.mesh_window.clear();
+        self.recovery.mesh_extension_at.clear();
         self.presence.poke_at.clear();
         self.presence.wake_at = None;
         // the accept windows belong to the OLD workspace's senders — leaking
@@ -694,10 +694,10 @@ impl State {
         // the recovery inboxes are INBOUND-only (they subscribe and read), so
         // aborting is safe — there is no outbound frame in flight to drop,
         // which is the one case the delivery guarantee forbids aborting
-        for task in self.recovery_inboxes.drain(..) {
+        for task in self.recovery.inboxes.drain(..) {
             task.abort();
         }
-        if let Some(task) = self.seat_inbox.take() {
+        if let Some(task) = self.recovery.seat_inbox.take() {
             task.abort();
         }
         // …and so are the relay-plane file fetches (FP3): private inbound
@@ -737,7 +737,7 @@ impl State {
         self.chain.proposal_changes.clear();
         self.chain.pending_blocks.clear();
         self.chain.catchup_from = None;
-        self.pending_recovery.clear();
+        self.recovery.pending.clear();
         self.chat.clear();
         self.chat_pos.clear();
         // the compaction state belongs to the workspace we are leaving:

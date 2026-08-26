@@ -633,7 +633,7 @@ impl State {
     /// next session-only chat lazily rebuilds it for the current roster.
     pub(crate) fn teardown_net(&mut self) {
         self.net = None;
-        if let Some(task) = self.seat_inbox.take() {
+        if let Some(task) = self.recovery.seat_inbox.take() {
             task.abort();
         }
     }
@@ -2212,7 +2212,7 @@ impl State {
         // a ticket is bound to the seat it was minted for (review R8): a
         // member holding its own phrase must not spend ANOTHER seat's link
         let ticketed = self
-            .recovery_tickets
+            .recovery.tickets
             .get(&ticket)
             .is_some_and(|minted_for| *minted_for == member);
         if !ticketed {
@@ -2314,7 +2314,7 @@ impl State {
             let now = crate::now_secs();
             let key = (member.to_string(), canonical.clone());
             if self
-                .unsolicited_cooldown
+                .recovery.unsolicited_cooldown
                 .get(&key)
                 .is_some_and(|t| now.saturating_sub(*t) < UNSOLICITED_COOLDOWN_SECS)
             {
@@ -2339,12 +2339,12 @@ impl State {
                 // member whose first attempt failed (e.g. a truncated proof) can
                 // retry on the still-live queue
                 if ticketed {
-                    self.recovery_tickets.remove(&ticket);
+                    self.recovery.tickets.remove(&ticket);
                 }
                 let now = crate::now_secs();
-                self.unsolicited_cooldown
+                self.recovery.unsolicited_cooldown
                     .retain(|_, t| now.saturating_sub(*t) < UNSOLICITED_COOLDOWN_SECS);
-                self.unsolicited_cooldown
+                self.recovery.unsolicited_cooldown
                     .insert((member.to_string(), canonical.clone()), now);
                 tracing::info!(%member, ticketed, "recovery seat proof verified - proposing re-admission");
                 // the first checklist frame: the rejoiner learns the roster,
@@ -2447,7 +2447,7 @@ impl State {
     /// previous incarnation. A refusal to spawn (no relays, no key) is
     /// quiet — the ticketed link path is unaffected.
     pub(crate) fn spawn_seat_inbox_if_nostr(&mut self) {
-        if let Some(task) = self.seat_inbox.take() {
+        if let Some(task) = self.recovery.seat_inbox.take() {
             task.abort();
         }
         if self.transport_kind != Some(molt_core::TransportKind::Nostr)
@@ -2471,7 +2471,7 @@ impl State {
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return;
         };
-        self.seat_inbox = Some(crate::nostr_ritual::spawn_seat_inbox(
+        self.recovery.seat_inbox = Some(crate::nostr_ritual::spawn_seat_inbox(
             net,
             self.net_scope,
             cmd_tx.downgrade(),
@@ -2551,7 +2551,7 @@ impl State {
         let wrap = molt_net::wrap::WrapKey::fresh().map_err(|e| MoltError::Recover(e.to_string()))?;
         // register the ticket BEFORE the queue can carry a request, so the
         // spend-once guard is armed the moment the returning member answers
-        self.recovery_tickets.insert(ticket.clone(), member.clone());
+        self.recovery.tickets.insert(ticket.clone(), member.clone());
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return Err(MoltError::Recover("engine stopped".to_string()));
         };
@@ -2566,7 +2566,7 @@ impl State {
             // mid-recovery must not orphan the minted link)
             self.net_scope,
             cmd_tx,
-            self.recovery_material_sink.clone(),
+            self.recovery.material_sink.clone(),
         );
         Ok(Reply::Ack)
     }
@@ -2657,14 +2657,14 @@ impl State {
             molt_net::invite::mint_ticket().map_err(|e| MoltError::Recover(e.to_string()))?;
         // register BEFORE the inbox can carry a request, so the spend-once
         // guard is armed the moment the returning member answers
-        self.recovery_tickets.insert(ticket.clone(), member.clone());
+        self.recovery.tickets.insert(ticket.clone(), member.clone());
         // ONE inbox per open workspace. Every mint subscribes the same filter
         // on the same anchor (kind 1059, #p = this seat), so a second
         // subscription would duplicate every delivery and add another set of
         // forever-redialing relay supervisors. The actor validates by TICKET,
         // not by which task delivered the request, so one inbox serves every
         // outstanding link.
-        for old in self.recovery_inboxes.drain(..) {
+        for old in self.recovery.inboxes.drain(..) {
             old.abort();
         }
         // the seat's anchored identity pk rides the link (WP7): the rejoiner
@@ -2688,7 +2688,7 @@ impl State {
         );
         // parked so the close path can abort it — a relay subscription does
         // not end on its own the way a dead queue does
-        self.recovery_inboxes.push(task);
+        self.recovery.inboxes.push(task);
         Ok(Reply::Ack)
     }
 
@@ -2730,7 +2730,7 @@ impl State {
             return Ok(Reply::Ack);
         }
         if !ticket.is_empty() {
-            self.recovery_tickets.remove(&ticket);
+            self.recovery.tickets.remove(&ticket);
         }
         tracing::warn!(%member, %reason, "recovery link mint failed");
         self.session.notice = format!("recovery-link-failed:{reason}");
@@ -2815,7 +2815,7 @@ impl State {
         };
         // only the member whose re-key JUST completed may (re)announce here —
         // the recovery queue can never re-point another member's links
-        if !self.recovery_mesh_window.remove(&announcer) {
+        if !self.recovery.mesh_window.remove(&announcer) {
             tracing::warn!(%announcer, "mesh announce outside a recovery window - dropped");
             return Ok(Reply::Ack);
         }
@@ -2871,13 +2871,13 @@ impl State {
         // recovery and honest rotation are one-shot; only rapid repeats are
         // capped, bounding the churn a misbehaving member can inflict)
         let now = self.presence_now();
-        if let Some(last) = self.mesh_extension_at.get(&member) {
+        if let Some(last) = self.recovery.mesh_extension_at.get(&member) {
             if now.saturating_sub(*last) < MESH_EXTENSION_COOLDOWN_SECS {
                 tracing::warn!(%member, "mesh announce inside the cooldown - ignored");
                 return;
             }
         }
-        self.mesh_extension_at.insert(member.clone(), now);
+        self.recovery.mesh_extension_at.insert(member.clone(), now);
         let Some(net) = self.net.as_ref() else {
             return;
         };
@@ -3734,7 +3734,7 @@ mod tests {
     #[test]
     fn a_recover_link_failure_report_sets_the_notice_and_kills_the_ticket() {
         let mut st = crate::tests::plain_state();
-        st.recovery_tickets.insert("t-1".to_string(), "bob".to_string());
+        st.recovery.tickets.insert("t-1".to_string(), "bob".to_string());
         st.cmd_net_recover_link_failed(
             "bob".to_string(),
             "boom".to_string(),
@@ -3744,7 +3744,7 @@ mod tests {
         .expect("the report acks");
         assert_eq!(st.session.notice, "recovery-link-failed:boom");
         assert!(
-            st.recovery_tickets.is_empty(),
+            st.recovery.tickets.is_empty(),
             "the failed mint's ticket must not stay armed"
         );
     }
@@ -4408,7 +4408,7 @@ mod tests {
         let for_cid = molt_net::mesh::MeshAnnounce { queues };
         st.spawn_mesh_extension("bob".to_string(), &for_cid);
         assert!(
-            !st.mesh_extension_at.contains_key("bob"),
+            !st.recovery.mesh_extension_at.contains_key("bob"),
             "an announce carrying nothing for us must not stamp the cooldown"
         );
         // moments later bob's announce FOR ada arrives — it must pass the gate
@@ -4418,7 +4418,7 @@ mod tests {
         let for_ada = molt_net::mesh::MeshAnnounce { queues };
         st.spawn_mesh_extension("bob".to_string(), &for_ada);
         assert_eq!(
-            st.mesh_extension_at.get("bob"),
+            st.recovery.mesh_extension_at.get("bob"),
             Some(&(T + 5)),
             "the announce for us passes the cooldown gate and stamps it"
         );
@@ -4426,7 +4426,7 @@ mod tests {
         st.presence.clock_override = Some(T + 10);
         st.spawn_mesh_extension("bob".to_string(), &for_ada);
         assert_eq!(
-            st.mesh_extension_at.get("bob"),
+            st.recovery.mesh_extension_at.get("bob"),
             Some(&(T + 5)),
             "a rapid repeat stays capped - the stamp is not refreshed"
         );

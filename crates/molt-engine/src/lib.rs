@@ -347,7 +347,7 @@ fn spawn_actor(
     state.ritual_material_sink = ritual_material_sink;
     state.ritual_sim = ritual_sim;
     state.ritual_bootstrap = ritual_bootstrap;
-    state.recovery_material_sink = recovery_material_sink;
+    state.recovery.material_sink = recovery_material_sink;
     state.demo_mesh = demo_mesh;
     state.reopen_seam = reopen_seam;
     // the presence ticker lives as long as the actor: it re-ages the member
@@ -692,6 +692,86 @@ pub(crate) struct ChainProjection {
     pub(crate) catchup_from: Option<u64>,
 }
 
+/// Recovery on both sides of the open workspace: what this seat coordinates
+/// (pending re-admissions, the spend-once tickets, the announce window and
+/// extension cooldown, the standing seat inbox and the per-link inboxes, the
+/// self-heal reattach cap) and what it runs as the rejoiner (the task, its
+/// generation, the parsed link + phrase, the transport slot, the test-only
+/// material sink). The phrase in `ctx` is `Zeroizing`; this struct
+/// deliberately derives nothing, so it can never be printed.
+pub(crate) struct RecoveryState {
+    /// Live recovery-inbox tasks (N4b step 5), one per minted link.
+    ///
+    /// They MUST be aborted when the workspace closes. The loopback twin gets
+    /// away with forgetting its handle because that task dies with the ritual
+    /// transport; a relay subscription does not — the pool outlives the
+    /// workspace, so a forgotten task would sit on a relay socket forever and
+    /// every mint would add another.
+    pub(crate) inboxes: Vec<tokio::task::JoinHandle<()>>,
+    /// The STANDING seat inbox (`detached_reattach.md` §2.1): an open Nostr
+    /// workspace's own-anchor 1059 subscription, so a restored seat can
+    /// announce itself without a minted link. Torn down with the net.
+    pub(crate) seat_inbox: Option<tokio::task::JoinHandle<()>>,
+    /// Self-heal bookkeeping (`detached_reattach.md` §2.4): how often this
+    /// session already re-attached itself out of a stuck epoch, and when it
+    /// last tried. Session-lifetime cap — two devices restoring the same
+    /// seat would otherwise re-key each other in an endless ping-pong.
+    pub(crate) reattach_attempts: u32,
+    pub(crate) last_reattach: Option<u64>,
+    /// Self-service reattach cooldown (`detached_reattach.md` §2.2): a
+    /// `(member, new_anchor) → unix stamp` map that swallows relay replays
+    /// of an accepted request (the accept window does not cover 1059 wraps).
+    pub(crate) unsolicited_cooldown: std::collections::HashMap<(String, String), u64>,
+    /// Recoveries this node is coordinating, keyed by the returning **member**
+    /// (so the trigger fires whether this node commits the Restored block or
+    /// receives it): the fresh KeyPackage + reply queue, kept until the Restored
+    /// block commits and the coordinator re-keys the group + sends the Welcome.
+    pub(crate) pending: HashMap<String, chain::PendingRecovery>,
+    /// Recovery tickets this node has minted and is still listening for — the
+    /// spend-once guard. A ticket is inserted when a recovery link is minted and
+    /// removed the moment a valid request spends it, so a replayed request on a
+    /// live recovery queue finds a dead ticket and is dropped.
+    pub(crate) tickets: HashMap<String, MemberId>,
+    /// Members whose recovery re-key just completed and whose **mesh announce**
+    /// the coordinator therefore expects on the recovery queue (dynamic mesh
+    /// membership) — armed in `coordinator_rekey`, disarmed when the announce
+    /// is handled. The recovery queue can never re-point any OTHER member's
+    /// links.
+    pub(crate) mesh_window: std::collections::HashSet<MemberId>,
+    /// Per-member cooldown for mesh extensions (`member → now_secs of the
+    /// last accepted announce`): folding a link in costs every peer a full
+    /// supervisor teardown+rebuild+fsync, so a member re-announcing inside
+    /// the window is ignored — one rotation per member per minute is ample,
+    /// and it caps the churn a misbehaving member can inflict.
+    pub(crate) mesh_extension_at: std::collections::HashMap<MemberId, u64>,
+    /// The recovery twin of [`Self::ritual_material_sink`]: when set, the
+    /// recovery link-mint hands the minted queue's transport handover out on
+    /// this channel so a *second* engine can run the returning-member side.
+    /// Only the two-instance recovery dev test installs it; a real mint reports
+    /// the link to the operator instead.
+    pub(crate) material_sink:
+        Option<std::sync::mpsc::Sender<recovery::RecoveryMaterial>>,
+    /// The running Nostr rejoiner task (N4b step 6e), the [`State::join_task`]
+    /// twin — aborted on a restarted recovery, for the same two reasons.
+    pub(crate) task: Option<tokio::task::JoinHandle<()>>,
+    /// A separate incarnation counter for the **recovery** flow (an off-actor
+    /// rejoin) — the twin of [`State::join_generation`].
+    pub(crate) generation: u64,
+    /// While a recovery is in flight: the parsed recovery link + the phrase
+    /// the rejoin task runs with. `cmd_net_recover_sealed` re-derives the seat
+    /// identity from the phrase (the ritual salts it with a workspace-id
+    /// string, so it must NOT be re-derived from the member handle) and checks
+    /// the served chain against the link. `None` outside a recovery.
+    pub(crate) ctx: Option<(recovery::RecoveryInvite, zeroize::Zeroizing<String>)>,
+    /// The **rejoiner's** transport slot — the twin of
+    /// [`State::join_transport`]: the off-actor rejoin task parks a clone of
+    /// its transport here (its `Arc` owns the re-established mesh queues'
+    /// receive credentials), so `cmd_net_recover_sealed` can stand the runtime
+    /// supervisor up over the recovered mesh. Replaced per `RecoverStart`.
+    pub(crate) transport:
+        std::sync::Arc<std::sync::Mutex<Option<molt_net::LoopbackTransport>>>,
+}
+
 pub(crate) struct State {
     pub(crate) config: GroupConfig,
     ev_tx: broadcast::Sender<Event>,
@@ -774,51 +854,8 @@ pub(crate) struct State {
     /// Nostr one whose MLS group or relay set did not come up.
     pub(crate) group_net: Option<GroupNet>,
     pub(crate) delivery: DeliveryState,
-    /// Live recovery-inbox tasks (N4b step 5), one per minted link.
-    ///
-    /// They MUST be aborted when the workspace closes. The loopback twin gets
-    /// away with forgetting its handle because that task dies with the ritual
-    /// transport; a relay subscription does not — the pool outlives the
-    /// workspace, so a forgotten task would sit on a relay socket forever and
-    /// every mint would add another.
-    pub(crate) recovery_inboxes: Vec<tokio::task::JoinHandle<()>>,
-    /// The STANDING seat inbox (`detached_reattach.md` §2.1): an open Nostr
-    /// workspace's own-anchor 1059 subscription, so a restored seat can
-    /// announce itself without a minted link. Torn down with the net.
-    pub(crate) seat_inbox: Option<tokio::task::JoinHandle<()>>,
-    /// Self-heal bookkeeping (`detached_reattach.md` §2.4): how often this
-    /// session already re-attached itself out of a stuck epoch, and when it
-    /// last tried. Session-lifetime cap — two devices restoring the same
-    /// seat would otherwise re-key each other in an endless ping-pong.
-    pub(crate) reattach_attempts: u32,
-    pub(crate) last_reattach: Option<u64>,
-    /// Self-service reattach cooldown (`detached_reattach.md` §2.2): a
-    /// `(member, new_anchor) → unix stamp` map that swallows relay replays
-    /// of an accepted request (the accept window does not cover 1059 wraps).
-    pub(crate) unsolicited_cooldown: std::collections::HashMap<(String, String), u64>,
+    pub(crate) recovery: RecoveryState,
     pub(crate) chain: ChainProjection,
-    /// Recoveries this node is coordinating, keyed by the returning **member**
-    /// (so the trigger fires whether this node commits the Restored block or
-    /// receives it): the fresh KeyPackage + reply queue, kept until the Restored
-    /// block commits and the coordinator re-keys the group + sends the Welcome.
-    pub(crate) pending_recovery: HashMap<String, chain::PendingRecovery>,
-    /// Recovery tickets this node has minted and is still listening for — the
-    /// spend-once guard. A ticket is inserted when a recovery link is minted and
-    /// removed the moment a valid request spends it, so a replayed request on a
-    /// live recovery queue finds a dead ticket and is dropped.
-    pub(crate) recovery_tickets: HashMap<String, MemberId>,
-    /// Members whose recovery re-key just completed and whose **mesh announce**
-    /// the coordinator therefore expects on the recovery queue (dynamic mesh
-    /// membership) — armed in `coordinator_rekey`, disarmed when the announce
-    /// is handled. The recovery queue can never re-point any OTHER member's
-    /// links.
-    pub(crate) recovery_mesh_window: std::collections::HashSet<MemberId>,
-    /// Per-member cooldown for mesh extensions (`member → now_secs of the
-    /// last accepted announce`): folding a link in costs every peer a full
-    /// supervisor teardown+rebuild+fsync, so a member re-announcing inside
-    /// the window is ignored — one rotation per member per minute is ample,
-    /// and it caps the churn a misbehaving member can inflict.
-    pub(crate) mesh_extension_at: std::collections::HashMap<MemberId, u64>,
     pub(crate) presence: PresenceState,
     /// Are clearnet relays activated for THIS session? Runtime-only **on
     /// purpose** — it is never persisted, so every start re-arms the gate and
@@ -903,13 +940,6 @@ pub(crate) struct State {
     /// Only the two-instance dev test installs this.
     pub(crate) ritual_material_sink:
         Option<std::sync::mpsc::Sender<Vec<founding::InviteMaterial>>>,
-    /// The recovery twin of [`Self::ritual_material_sink`]: when set, the
-    /// recovery link-mint hands the minted queue's transport handover out on
-    /// this channel so a *second* engine can run the returning-member side.
-    /// Only the two-instance recovery dev test installs it; a real mint reports
-    /// the link to the operator instead.
-    pub(crate) recovery_material_sink:
-        Option<std::sync::mpsc::Sender<recovery::RecoveryMaterial>>,
     /// Offline **test seam only** ([`__spawn_sim_founding`]): found over the
     /// loopback hub with simulated members. The product never sets it — a
     /// production founding fails honestly until N4's Nostr transport lands;
@@ -958,9 +988,6 @@ pub(crate) struct State {
     /// restarted join (its generation-guarded commands would be dropped
     /// anyway; aborting also releases its relay sockets).
     pub(crate) join_task: Option<tokio::task::JoinHandle<()>>,
-    /// The running Nostr rejoiner task (N4b step 6e), the [`State::join_task`]
-    /// twin — aborted on a restarted recovery, for the same two reasons.
-    pub(crate) recover_task: Option<tokio::task::JoinHandle<()>>,
     /// Monotonic mesh/ritual-incarnation counter: `Net*` commands carry
     /// the generation of the runtime that sent them, and commands from a
     /// torn-down runtime are dropped (a delivery queued behind a workspace
@@ -978,22 +1005,6 @@ pub(crate) struct State {
     /// concurrent founding/mesh change can neither be mistaken for a stale
     /// join nor silently drop a live one.
     pub(crate) join_generation: u64,
-    /// A separate incarnation counter for the **recovery** flow (an off-actor
-    /// rejoin) — the twin of [`State::join_generation`].
-    pub(crate) recover_generation: u64,
-    /// While a recovery is in flight: the parsed recovery link + the phrase
-    /// the rejoin task runs with. `cmd_net_recover_sealed` re-derives the seat
-    /// identity from the phrase (the ritual salts it with a workspace-id
-    /// string, so it must NOT be re-derived from the member handle) and checks
-    /// the served chain against the link. `None` outside a recovery.
-    pub(crate) recover_ctx: Option<(recovery::RecoveryInvite, zeroize::Zeroizing<String>)>,
-    /// The **rejoiner's** transport slot — the twin of
-    /// [`State::join_transport`]: the off-actor rejoin task parks a clone of
-    /// its transport here (its `Arc` owns the re-established mesh queues'
-    /// receive credentials), so `cmd_net_recover_sealed` can stand the runtime
-    /// supervisor up over the recovered mesh. Replaced per `RecoverStart`.
-    pub(crate) recover_transport:
-        std::sync::Arc<std::sync::Mutex<Option<molt_net::LoopbackTransport>>>,
     /// The channel the off-actor join task waits on for the joiner's charter
     /// ratification (`JoinConfirmCharter` sends `true`; cancel drops it). Set
     /// while a join is paused at the ratification step, else `None`.
@@ -1075,11 +1086,22 @@ impl State {
                 send_stuck: std::collections::BTreeMap::new(),
                 last_mesh_out: 0,
             },
-            recovery_inboxes: Vec::new(),
-            seat_inbox: None,
-            reattach_attempts: 0,
-            last_reattach: None,
-            unsolicited_cooldown: std::collections::HashMap::new(),
+            recovery: RecoveryState {
+                inboxes: Vec::new(),
+                seat_inbox: None,
+                reattach_attempts: 0,
+                last_reattach: None,
+                unsolicited_cooldown: std::collections::HashMap::new(),
+                pending: HashMap::new(),
+                tickets: HashMap::new(),
+                mesh_window: std::collections::HashSet::new(),
+                mesh_extension_at: std::collections::HashMap::new(),
+                material_sink: None,
+                task: None,
+                generation: 0,
+                ctx: None,
+                transport: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            },
             chain: ChainProjection {
                 blocks: Vec::new(),
                 head: None,
@@ -1100,10 +1122,6 @@ impl State {
                 pending_blocks: std::collections::BTreeMap::new(),
                 catchup_from: None,
             },
-            pending_recovery: HashMap::new(),
-            recovery_tickets: HashMap::new(),
-            recovery_mesh_window: std::collections::HashSet::new(),
-            mesh_extension_at: std::collections::HashMap::new(),
             presence: PresenceState {
                 poke_at: std::collections::HashMap::new(),
                 wake_at: None,
@@ -1130,7 +1148,6 @@ impl State {
             seal_published: false,
             ritual_attestations: Vec::new(),
             ritual_material_sink: None,
-            recovery_material_sink: None,
             ritual_sim: false,
             demo_mesh: false,
             reopen_seam: None,
@@ -1139,13 +1156,9 @@ impl State {
             runtime_transport: None,
             join_transport: std::sync::Arc::new(std::sync::Mutex::new(None)),
             join_task: None,
-            recover_task: None,
             net_generation: 0,
             net_scope: 0,
             join_generation: 0,
-            recover_generation: 0,
-            recover_ctx: None,
-            recover_transport: std::sync::Arc::new(std::sync::Mutex::new(None)),
             join_confirm: None,
             join_backup: None,
             persist,

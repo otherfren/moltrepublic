@@ -412,7 +412,7 @@ impl State {
                 return Err(format!("{named} is in nobody else's pool - add it first"));
             }
         }
-        self.pending_recovery.insert(
+        self.recovery.pending.insert(
             member.to_string(),
             PendingRecovery {
                 ticketed,
@@ -464,7 +464,7 @@ impl State {
         else {
             return None;
         };
-        if !self.pending_recovery.contains_key(member) {
+        if !self.recovery.pending.contains_key(member) {
             return None;
         }
         let head = self.chain.head.as_ref()?;
@@ -501,7 +501,7 @@ impl State {
         else {
             return None;
         };
-        if !self.pending_recovery.contains_key(member) {
+        if !self.recovery.pending.contains_key(member) {
             return None;
         }
         let head = self.chain.head.as_ref()?;
@@ -568,7 +568,7 @@ impl State {
     /// MLS lives on `GroupNet`, its commit rides a 445 at a pinned stamp and
     /// its Welcome is a gift wrap rather than a reply queue.
     pub(super) fn coordinator_rekey(&mut self, member: &str) {
-        let Some(pending) = self.pending_recovery.remove(member) else {
+        let Some(pending) = self.recovery.pending.remove(member) else {
             return;
         };
         let ticketed = pending.ticketed;
@@ -629,7 +629,7 @@ impl State {
                 // 4) dynamic mesh membership: the rejoiner's mesh announce
                 // follows on this same recovery queue — accept it for exactly
                 // this member (docs_archive/transport/dynamic_mesh.md §3)
-                self.recovery_mesh_window.insert(member.to_string());
+                self.recovery.mesh_window.insert(member.to_string());
                 tracing::info!(%member, "re-keyed the group, broadcast the commit, sent the welcome");
             }
             Some(Err(e)) => tracing::warn!(%member, error = %e, "MLS re-key failed"),

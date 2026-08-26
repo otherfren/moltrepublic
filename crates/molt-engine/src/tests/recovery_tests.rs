@@ -242,7 +242,7 @@ fn recovery_materializes_the_nostr_shape_and_the_new_anchor() {
 #[test]
 fn a_recover_note_speaks_only_for_the_live_incarnation() {
     let mut st = tests::plain_state();
-    st.recover_generation = 3;
+    st.recovery.generation = 3;
     st.cmd_net_recover_note("waiting".to_string(), Some(2)).expect("ack");
     assert!(
         !st.session.notice.starts_with("recover-note:"),
@@ -269,16 +269,16 @@ fn the_self_heal_reattach_is_capped_and_spaced() {
     let mut st = tests::plain_state();
     // no chain, no seed — the spawn cannot start, but the clock stamps
     st.maybe_self_heal_reattach();
-    assert_eq!(st.reattach_attempts, 0, "a spawn that cannot start counts no attempt");
-    let first = st.last_reattach.expect("the try is stamped");
+    assert_eq!(st.recovery.reattach_attempts, 0, "a spawn that cannot start counts no attempt");
+    let first = st.recovery.last_reattach.expect("the try is stamped");
     // immediately again: inside the spacing window nothing happens
     st.maybe_self_heal_reattach();
-    assert_eq!(st.last_reattach, Some(first), "spaced - no re-stamp inside the window");
+    assert_eq!(st.recovery.last_reattach, Some(first), "spaced - no re-stamp inside the window");
     // at the session cap nothing ever fires again, even past the window
-    st.reattach_attempts = 3;
-    st.last_reattach = None;
+    st.recovery.reattach_attempts = 3;
+    st.recovery.last_reattach = None;
     st.maybe_self_heal_reattach();
-    assert_eq!(st.last_reattach, None, "the session cap is final (anti ping-pong)");
+    assert_eq!(st.recovery.last_reattach, None, "the session cap is final (anti ping-pong)");
 }
 
 /// The rejoiner's checklist (`NetRecoverProgress`): a live incarnation's
@@ -287,7 +287,7 @@ fn the_self_heal_reattach_is_capped_and_spaced() {
 #[test]
 fn a_recover_progress_builds_the_checklist_for_the_live_incarnation() {
     let mut st = tests::plain_state();
-    st.recover_generation = 3;
+    st.recovery.generation = 3;
     let roster = vec!["petra".to_string(), "vera".to_string(), "walter".to_string()];
     let approved = vec!["petra".to_string(), "walter".to_string()];
     st.cmd_net_recover_progress("petra".to_string(), 3, roster.clone(), approved.clone(), Some(2))
@@ -363,7 +363,7 @@ fn a_context_switch_abandons_an_in_flight_recovery() {
     let phrase = molt_storage::generate_seed_phrase().expect("phrase");
     let (chain, republic_id) = recovered_chain(&phrase);
     let mut st = recovering_state(&tmp, "bob", &republic_id, &phrase);
-    assert!(st.recover_ctx.is_some(), "precondition: the context is armed");
+    assert!(st.recovery.ctx.is_some(), "precondition: the context is armed");
 
     // starting a founding is a context switch like any other. (A join
     // start that is REFUSED — an unparseable link — deliberately is not
@@ -375,7 +375,7 @@ fn a_context_switch_abandons_an_in_flight_recovery() {
         2,
         Vec::new(),
     );
-    assert!(st.recover_ctx.is_none(), "the abandoned recovery kept its context");
+    assert!(st.recovery.ctx.is_none(), "the abandoned recovery kept its context");
 
     // …and the abandoned incarnation's result lands nowhere
     st.cmd_net_recover_sealed(

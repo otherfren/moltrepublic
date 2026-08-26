@@ -560,8 +560,8 @@ impl State {
                 // proposal id, so match by content — the Checkpoint arm's
                 // pattern (the committer also cleans by id upstream).
                 self.settle_membership_records(&block.change);
-                self.mesh_extension_at.remove(member);
-                if self.pending_recovery.contains_key(member) {
+                self.recovery.mesh_extension_at.remove(member);
+                if self.recovery.pending.contains_key(member) {
                     // the completed checklist, BEFORE the re-key consumes the
                     // pending entry: the live per-approval frames stop at the
                     // seal (`push_recover_progress` reports only while the

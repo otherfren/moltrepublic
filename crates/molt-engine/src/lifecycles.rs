@@ -1695,9 +1695,9 @@ impl State {
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return false;
         };
-        self.recover_generation += 1;
-        let generation = self.recover_generation;
-        if let Some(task) = self.recover_task.take() {
+        self.recovery.generation += 1;
+        let generation = self.recovery.generation;
+        if let Some(task) = self.recovery.task.take() {
             task.abort();
         }
         let handover = molt_net::invite::RecoveryHandoverV2 {
@@ -1714,7 +1714,7 @@ impl State {
             .as_ref()
             .map(|r| r.name.clone())
             .unwrap_or_default();
-        self.recover_ctx = Some((
+        self.recovery.ctx = Some((
             crate::recovery::RecoveryInvite {
                 republic,
                 member: member.clone(),
@@ -1729,7 +1729,7 @@ impl State {
         ));
         self.session.recover = molt_core::RecoverState::default();
         let extra_targets = targets.get(1..).map(<[String]>::to_vec).unwrap_or_default();
-        self.recover_task = Some(crate::nostr_ritual::spawn_recovery_rejoiner(
+        self.recovery.task = Some(crate::nostr_ritual::spawn_recovery_rejoiner(
             dialer,
             crate::nostr_ritual::RecoverCtx {
                 handover,
@@ -1754,26 +1754,26 @@ impl State {
     pub(crate) fn maybe_self_heal_reattach(&mut self) {
         const SPACING_SECS: u64 = 600;
         const MAX_ATTEMPTS: u32 = 3;
-        if self.reattach_attempts >= MAX_ATTEMPTS {
+        if self.recovery.reattach_attempts >= MAX_ATTEMPTS {
             return;
         }
         let now = crate::now_secs();
         if self
-            .last_reattach
+            .recovery.last_reattach
             .is_some_and(|t| now.saturating_sub(t) < SPACING_SECS)
         {
             return;
         }
-        if self.recover_task.as_ref().is_some_and(|t| !t.is_finished()) {
+        if self.recovery.task.as_ref().is_some_and(|t| !t.is_finished()) {
             return;
         }
         // stamp BEFORE trying: a spawn that cannot start (no seed, no
         // anchors) must not retry on every health frame either
-        self.last_reattach = Some(now);
+        self.recovery.last_reattach = Some(now);
         if self.spawn_reattach() {
-            self.reattach_attempts += 1;
+            self.recovery.reattach_attempts += 1;
             tracing::warn!(
-                attempt = self.reattach_attempts,
+                attempt = self.recovery.reattach_attempts,
                 "group key behind and outbox stalled - self-healing via reattach"
             );
             self.session.notice = "reattaching".to_string();
@@ -1825,10 +1825,10 @@ impl State {
         self.ritual_attestations.clear();
         // a restarted recovery supersedes the one in flight — bump the
         // incarnation so the stale task's late result is dropped
-        self.recover_generation += 1;
-        let generation = self.recover_generation;
+        self.recovery.generation += 1;
+        let generation = self.recovery.generation;
         let task_phrase = phrase.clone();
-        self.recover_ctx = Some((inv.clone(), phrase.into()));
+        self.recovery.ctx = Some((inv.clone(), phrase.into()));
         // a fresh run starts with a fresh checklist (the old republic's
         // finished list must not front-run the new coordinator's report)
         self.session.recover = molt_core::RecoverState::default();
@@ -1836,7 +1836,7 @@ impl State {
         // join_transport twin: cmd_net_recover_sealed stands the runtime
         // supervisor up from it when a rejoin task filled it (the two-instance
         // tests inject NetRecoverSealed against exactly this armed context)
-        self.recover_transport = std::sync::Arc::new(std::sync::Mutex::new(None));
+        self.recovery.transport = std::sync::Arc::new(std::sync::Mutex::new(None));
         self.session.notice = format!("recover-started:{}", inv.member);
         self.emit_session(SessionScope::Full);
         // A v2 handover is what makes a link runnable over Nostr (N4b step
@@ -1891,10 +1891,10 @@ impl State {
         // a restarted recovery aborts the previous incarnation's task: its
         // generation-guarded results would be dropped anyway, and aborting
         // also releases its relay sockets
-        if let Some(task) = self.recover_task.take() {
+        if let Some(task) = self.recovery.task.take() {
             task.abort();
         }
-        self.recover_task = Some(crate::nostr_ritual::spawn_recovery_rejoiner(
+        self.recovery.task = Some(crate::nostr_ritual::spawn_recovery_rejoiner(
             dialer,
             crate::nostr_ritual::RecoverCtx {
                 handover,
@@ -1928,10 +1928,10 @@ impl State {
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
         // a cancelled/restarted recovery bumped the generation — drop stale results
-        if generation != Some(self.recover_generation) {
+        if generation != Some(self.recovery.generation) {
             return Ok(Reply::Ack);
         }
-        let Some((inv, phrase)) = self.recover_ctx.clone() else {
+        let Some((inv, phrase)) = self.recovery.ctx.clone() else {
             return Ok(Reply::Ack);
         };
         let wire: crate::chain::ServedChainWire = match serde_json::from_str(&chain) {
@@ -2141,8 +2141,8 @@ impl State {
         };
         // the recovery is done — advance the incarnation so a late result from
         // the (finished) rejoin task can't touch the recovered state
-        self.recover_generation += 1;
-        self.recover_ctx = None;
+        self.recovery.generation += 1;
+        self.recovery.ctx = None;
         // recovery is NOT a full-roster live seal (unlike founding/join): only
         // the returning seat itself and the peers the re-established mesh
         // actually reached (`net_seed.1`, each an MLS-authenticated announce —
@@ -2178,7 +2178,7 @@ impl State {
         // credentials — the join-tail twin). Best-effort: no mesh or no
         // transport just means no live links yet (option A still holds).
         let (mls_blob, mesh) = net_seed;
-        let reused = self.recover_transport.lock().ok().and_then(|mut s| s.take());
+        let reused = self.recovery.transport.lock().ok().and_then(|mut s| s.take());
         if self.persist && !mesh.is_empty() {
             if let (Some(blob), Some(transport)) = (mls_blob, reused) {
                 // hard-kill safety (2026-07-19): the fresh mesh queues'
@@ -2244,7 +2244,7 @@ impl State {
         error: String,
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
-        if generation != Some(self.recover_generation) {
+        if generation != Some(self.recovery.generation) {
             return Ok(Reply::Ack);
         }
         tracing::warn!(error = %error, "recovery failed");
@@ -2299,9 +2299,9 @@ impl State {
     /// join must abandon this too — a forgotten task sits on relay sockets
     /// long after the human moved on.
     pub(crate) fn invalidate_recovery(&mut self) {
-        self.recover_generation += 1;
-        self.recover_ctx = None;
-        if let Some(task) = self.recover_task.take() {
+        self.recovery.generation += 1;
+        self.recovery.ctx = None;
+        if let Some(task) = self.recovery.task.take() {
             task.abort();
         }
     }
@@ -2346,7 +2346,7 @@ impl State {
         note: String,
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
-        if generation != Some(self.recover_generation) {
+        if generation != Some(self.recovery.generation) {
             return Ok(Reply::Ack);
         }
         let notice = format!("recover-note:{note}");
@@ -2369,7 +2369,7 @@ impl State {
         approved: Vec<String>,
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
-        if generation != Some(self.recover_generation) {
+        if generation != Some(self.recovery.generation) {
             return Ok(Reply::Ack);
         }
         let state = molt_core::RecoverState {

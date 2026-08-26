@@ -312,7 +312,7 @@ impl State {
                             member,
                             ..
                         } => {
-                            self.mesh_extension_at.remove(member);
+                            self.recovery.mesh_extension_at.remove(member);
                         }
                         _ => {}
                     }

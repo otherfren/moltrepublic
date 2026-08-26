@@ -152,7 +152,7 @@ fn a_coordinator_re_admits_only_a_valid_seat_proof() {
     ));
     // a verified request registers the pending recovery (the MLS re-key
     // consumes it the moment the block commits — even synchronously)
-    assert!(coord.pending_recovery.contains_key("dora"));
+    assert!(coord.recovery.pending.contains_key("dora"));
 
     // a proof signed by the WRONG key (petra forging dora's) is rejected
     let forged = crate::make_seat_proof(b.key("petra"), ticket, kp_hex, &rid, "", &[]);
@@ -632,7 +632,7 @@ fn a_restored_commit_triggers_the_coordinators_rekey() {
     let b = Builder::new(&["petra", "walter", "dora"], 2);
     let walter_pk = b.pk("walter");
     let mut coord = chain_signer("petra", &b, b.blocks.clone());
-    coord.pending_recovery.insert(
+    coord.recovery.pending.insert(
         "walter".to_string(),
         PendingRecovery {
             ticketed: true,
@@ -655,7 +655,7 @@ fn a_restored_commit_triggers_the_coordinators_rekey() {
 
     assert_eq!(coord.chain.head.as_ref().expect("head").height, 1);
     assert!(
-        !coord.pending_recovery.contains_key("walter"),
+        !coord.recovery.pending.contains_key("walter"),
         "the coordinator consumed the pending recovery on the Restored commit"
     );
 }
@@ -796,7 +796,7 @@ fn a_restored_commit_without_a_pending_recovery_is_inert() {
     let walter_pk = b.pk("walter");
     let mut node = chain_signer("petra", &b, b.blocks.clone());
     // a pending recovery for ANOTHER member must survive walter's commit
-    node.pending_recovery.insert(
+    node.recovery.pending.insert(
         "dora".to_string(),
         PendingRecovery {
             ticketed: true,
@@ -826,8 +826,8 @@ fn a_restored_commit_without_a_pending_recovery_is_inert() {
     // or a chat notice would have advanced next_seq) …
     assert_eq!(node.next_seq, seq_before, "no MlsCommit/notice was recorded");
     // … the recovery mesh window was never armed …
-    assert!(node.recovery_mesh_window.is_empty());
+    assert!(node.recovery.mesh_window.is_empty());
     // … and only walter's (absent) entry was consulted — dora's pending
     // recovery is untouched
-    assert!(node.pending_recovery.contains_key("dora"));
+    assert!(node.recovery.pending.contains_key("dora"));
 }
