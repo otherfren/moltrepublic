@@ -184,13 +184,6 @@ impl State {
             tracing::warn!(%id, "refusing a checkpoint proposal whose id names a different change");
             return;
         }
-        match self.proposal_changes.get(&id) {
-            Some(existing) if *existing != this => {
-                tracing::warn!(%id, "refusing a checkpoint proposal whose id names a different change");
-                return;
-            }
-            _ => {}
-        }
         // L3: ONE cut per head — the identical (upto, state_hash) under a
         // second id would mint one registry entry + one signed Approved
         // per frame (1:1 outbound amplification); the first id IS the cut
