@@ -640,10 +640,15 @@ async fn place_req(
     sub_id: &SubscriptionId,
 ) -> Result<(), NetError> {
     let mut relay_filter = shared.filter.clone();
-    if let Some(cursor) = shared.cursors.lock().await.get(url) {
-        relay_filter = relay_filter.since(nostr::Timestamp::from_secs(
-            cursor.saturating_sub(CURSOR_OVERLAP),
-        ));
+    // the resume cursor applies to an OPEN-ENDED subscription only: a
+    // caller that fixed its own time window (a multi-window catch-up) must
+    // not have it narrowed to "cursor - overlap" on a reconnect (review T5)
+    if relay_filter.since.is_none() {
+        if let Some(cursor) = shared.cursors.lock().await.get(url) {
+            relay_filter = relay_filter.since(nostr::Timestamp::from_secs(
+                cursor.saturating_sub(CURSOR_OVERLAP),
+            ));
+        }
     }
     tracing::debug!(relay = %url, filter = %nostr::JsonUtil::as_json(&relay_filter), "placing REQ");
     ws.send(ClientMessage::req(sub_id.clone(), vec![relay_filter]))
@@ -1106,20 +1111,12 @@ pub async fn probe_nip11_max_message(
     dialer: &Dialer,
     ws_url: &str,
 ) -> Result<Option<u64>, NetError> {
-    let parsed = url::Url::parse(ws_url)
-        .map_err(|e| NetError::Framing(format!("relay url {ws_url}: {e}")))?;
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| NetError::Framing(format!("relay url {ws_url}: no host")))?
-        .to_string();
-    let port = parsed
-        .port_or_known_default()
-        .ok_or_else(|| NetError::Framing(format!("relay url {ws_url}: no port")))?;
+    let (host, port, tls) = crate::relay_ws::relay_dial_coords(ws_url)?;
     let mut stream = dial_maybe_tls(
         &crate::relay_ws::dialer_for(dialer, ws_url),
         &host,
         port,
-        parsed.scheme() == "wss",
+        tls,
     )
     .await?;
     let request = format!(
@@ -1433,28 +1430,9 @@ fn finish_publish_report(report: PublishReport) -> Result<PublishReport, NetErro
 /// One relay, one publish: connect, EVENT, await the OK for THIS event id.
 async fn publish_one(dialer: &Dialer, url: &str, event: &Event) -> Result<(), NetError> {
     let mut ws = RelayWs::connect(dialer, url).await?;
-    ws.send(ClientMessage::event(event.clone())).await?;
-    let verdict = loop {
-        match ws.recv(PUBLISH_TIMEOUT).await.map_err(RecvFail::into_error)? {
-            RelayMessage::Ok { event_id, status, message } if event_id == event.id => {
-                break if counts_as_published(status, &message) {
-                    Ok(())
-                } else if message.starts_with("auth-required:") {
-                    // deliberate: the publish path NEVER authenticates —
-                    // an authed publish channel would link every
-                    // ephemeral-key event to the member (§7.5). Loud, so
-                    // the operator can pick a different relay.
-                    Err(NetError::Unreachable(format!(
-                        "relay requires AUTH to publish - refused to link the publish key: {}", relay_reason(&message)
-                    )))
-                } else {
-                    Err(NetError::Unreachable(format!("relay refused: {}", relay_reason(&message))))
-                };
-            }
-            // frames for other events / notices are not our OK
-            _ => {}
-        }
-    };
+    let verdict = send_and_await_ok(&mut ws, event)
+        .await
+        .map_err(RecvFail::into_error)?;
     ws.close().await;
     verdict
 }

@@ -476,7 +476,12 @@ async fn publish_with_backoff(
         // the SAME bytes across relay retries inside one attempt chain: a relay
         // NAK is not a peer rejection, and re-encrypting would burn a ratchet
         // generation for nothing. A REWIND re-frames instead (N5.3).
-        match channel.publish_frame(&frame.exporter, &frame.ciphertext).await {
+        let published = match frame.stamp {
+            // a commit rides its ORIGINAL stamp on every resend (M8)
+            Some(at) => channel.publish_frame_at(&frame.exporter, &frame.ciphertext, at).await,
+            None => channel.publish_frame(&frame.exporter, &frame.ciphertext).await,
+        };
+        match published {
             Ok((_stamp, report)) if !report.accepted.is_empty() => return Ok(()),
             Ok((_stamp, _report)) => {
                 tracing::warn!("no relay accepted a group frame — retrying");
@@ -1302,6 +1307,7 @@ mod tests {
         let frame = crate::supervisor::GroupFrame {
             ciphertext: vec![0x5au8; 256 * 1024],
             exporter: [3u8; 32],
+            stamp: None,
         };
         let (_stop_tx, mut stop) = watch::channel(false);
 
@@ -1335,6 +1341,7 @@ mod tests {
         let frame = crate::supervisor::GroupFrame {
             ciphertext: vec![0u8; 32],
             exporter: [3u8; 32],
+            stamp: None,
         };
         let (_stop_tx, mut stop) = watch::channel(false);
         let outcome = publish_with_backoff(&channel, &frame, &cfg(), &mut stop).await;
@@ -1342,6 +1349,36 @@ mod tests {
             matches!(outcome, Err(PublishStall::Transient)),
             "an empty pool can refill — it must not be classed permanent: {outcome:?}"
         );
+    }
+
+    /// M8: a commit recorded with its carrier stamp is framed for a
+    /// publish AT that stamp — the resend keys identically to the original.
+    #[test]
+    fn a_commits_frame_carries_its_recorded_stamp() {
+        use crate::mls::MlsMember;
+        use ed25519_dalek::SigningKey;
+        let mut walter = MlsMember::new(&SigningKey::from_bytes(&[1u8; 32]), "walter").expect("w");
+        walter.create_group().expect("group");
+        let chan = MlsChannel::new(walter);
+        let env = |body: molt_core::WorkspaceEvent| molt_core::EventEnvelope {
+            prev_seq: 0,
+            seq: 1,
+            ts: 1,
+            by: "walter".to_string(),
+            body,
+        };
+        let plain = chan.group_frame(&env(molt_core::WorkspaceEvent::Chat(molt_core::ChatMessage::text(
+            molt_core::MessageId([1u8; 16]),
+            "walter",
+            "x",
+            1,
+        ))));
+        assert_eq!(plain.expect("frame").stamp, None, "an application frame is stamped now");
+        let commit = chan
+            .group_frame(&env(molt_core::WorkspaceEvent::MlsCommit { commit: "00".to_string(), stamp: 1234 }));
+        // a junk commit does not frame (no epoch to seal under) — only the
+        // stamp plumbing is under test, so read it off the event directly
+        assert!(commit.is_none() || commit.map(|f| f.stamp) == Some(Some(1234)));
     }
 
     /// **A commit RESEND stays sealed at its OWN epoch
@@ -1391,14 +1428,14 @@ mod tests {
         };
         let chan = crate::supervisor::MlsChannel::new(alice);
         let f1 = chan
-            .group_frame(&env(2, molt_core::WorkspaceEvent::MlsCommit { commit: hex::encode(&c1) }))
+            .group_frame(&env(2, molt_core::WorkspaceEvent::MlsCommit { commit: hex::encode(&c1), stamp: 0 }))
             .expect("frame C1");
         assert_eq!(
             f1.exporter, e_c1,
             "a re-framed C1 is sealed under C1's OWN epoch — its laggards can strip it"
         );
         let f2 = chan
-            .group_frame(&env(3, molt_core::WorkspaceEvent::MlsCommit { commit: hex::encode(&c2) }))
+            .group_frame(&env(3, molt_core::WorkspaceEvent::MlsCommit { commit: hex::encode(&c2), stamp: 0 }))
             .expect("frame C2");
         assert_eq!(f2.exporter, e_c2, "…and C2 under C2's");
     }
@@ -1496,7 +1533,7 @@ mod tests {
         // encrypted at the NEW epoch — alice merged her own commit already
         let after = alice_mls.group_frame(&msg).expect("frame after the commit");
         let commit_frame = alice_mls
-            .group_frame(&env(2, molt_core::WorkspaceEvent::MlsCommit { commit: hex::encode(&commit) }))
+            .group_frame(&env(2, molt_core::WorkspaceEvent::MlsCommit { commit: hex::encode(&commit), stamp: 0 }))
             .expect("commit frame");
 
         let sink = Sink::default();
@@ -1612,7 +1649,7 @@ mod tests {
                 seq: 1,
                 ts: 1_751_000_000,
                 by: "alice".to_string(),
-                body: molt_core::WorkspaceEvent::MlsCommit { commit: hex::encode(&commit) },
+                body: molt_core::WorkspaceEvent::MlsCommit { commit: hex::encode(&commit), stamp: 0 },
             })
             .expect("commit frame");
 

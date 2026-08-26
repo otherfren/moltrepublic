@@ -1725,6 +1725,16 @@ mod tests {
         assert_eq!(err.to_string(), "wiki export: an export is already running");
     }
 
+    /// The demo republics as the session's workspace list — what the
+    /// fixture-driven tests below address by name (`SessionView::default()`
+    /// lists nothing since review K6).
+    fn demo_session() -> SessionView {
+        SessionView {
+            workspaces: molt_core::WorkspaceInfo::demo_set(),
+            ..SessionView::default()
+        }
+    }
+
     pub(crate) fn plain_state() -> State {
         let (ev_tx, _keep) = broadcast::channel::<Event>(8);
         let (cmd_tx, _cmd_rx) = mpsc::channel::<Envelope>(8);
@@ -2528,7 +2538,7 @@ mod tests {
     #[test]
     fn workspace_backup_toggles_and_stamps() {
         rt().block_on(async {
-            let w = spawn(GroupConfig::demo(), SessionView::default());
+            let w = spawn(GroupConfig::demo(), demo_session());
             // "Savings-DAO" ships without auto-backup
             let before = match w.execute(Command::ReadSession).await.expect("read0") {
                 Reply::Session(s) => s
@@ -3303,7 +3313,7 @@ mod tests {
     #[test]
     fn a_storageless_node_refuses_to_fake_at_rest_sealing() {
         rt().block_on(async {
-            let w = spawn(GroupConfig::demo(), SessionView::default());
+            let w = spawn(GroupConfig::demo(), demo_session());
             let id = demo_workspace_id("Family Office");
             // an empty phrase is rejected before anything else
             assert!(
@@ -4295,7 +4305,7 @@ mod tests {
     #[test]
     fn workspaces_and_restore_lifecycle_are_shared() {
         rt().block_on(async {
-            let w = spawn(GroupConfig::demo(), SessionView::default());
+            let w = spawn(GroupConfig::demo(), demo_session());
 
             // open by id moves to main and records the active workspace
             w.execute(Command::OpenWorkspace {

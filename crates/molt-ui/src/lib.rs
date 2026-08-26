@@ -7563,11 +7563,15 @@ fn play_alert(kind: &str) {
     }
     let kind = kind.to_string();
     std::thread::spawn(move || {
-        // a per-process, per-kind path (the pid keeps two instances from
-        // racing the same file, and avoids trusting a world-writable name
-        // another local user could pre-plant)
-        let path = std::env::temp_dir()
-            .join(format!("molt-alert-{}-{kind}.wav", std::process::id()));
+        // under the per-user runtime dir (0700) when there is one, else the
+        // shared temp dir — and never a file this process did not write:
+        // a pre-planted file (pids are enumerable) would feed the player
+        // attacker bytes (review F8). One random tag per process start.
+        let dir = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(std::path::PathBuf::from)
+            .filter(|d| d.is_dir())
+            .unwrap_or_else(std::env::temp_dir);
+        let path = dir.join(format!("molt-alert-{}-{kind}.wav", alert_nonce()));
         if !path.exists() && write_alert_wav(&path, &kind).is_err() {
             return;
         }
@@ -7591,6 +7595,23 @@ fn play_alert(kind: &str) {
 /// Synthesize one alert as a 44.1 kHz mono 16-bit WAV: a few decaying
 /// sine partials per kind — bell (bright fifth), chime (rising triad),
 /// pop (short thump).
+/// A per-process-start random tag for the alert files: unguessable, unlike
+/// the pid.
+fn alert_nonce() -> &'static str {
+    static NONCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NONCE.get_or_init(|| molt_config::random_token().unwrap_or_else(|_| "0".to_string()))
+}
+
+/// Create `path` as a NEW file — never through one that already exists
+/// (a planted file or symlink there is not ours to write).
+fn write_new_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    std::io::Write::write_all(&mut f, bytes)
+}
+
 fn write_alert_wav(path: &std::path::Path, kind: &str) -> std::io::Result<()> {
     let (freqs, dur): (&[f32], f32) = match kind {
         "bell" => (&[880.0, 1318.5], 0.35),
@@ -7631,7 +7652,7 @@ fn write_alert_wav(path: &std::path::Path, kind: &str) -> std::io::Result<()> {
     for s in samples {
         wav.extend_from_slice(&s.to_le_bytes());
     }
-    std::fs::write(path, wav)
+    write_new_file(path, &wav)
 }
 
 /// Map an anonymity-network name to its ComboBox index. The dropdown
@@ -11378,6 +11399,8 @@ mod tests {
                     last_backup_min: 43_200,
                 },
             ],
+            // the demo republics are a fixture, not the default (review K6)
+            workspaces: molt_core::WorkspaceInfo::demo_set(),
             ..SessionView::default()
         }
     }

@@ -218,19 +218,26 @@ checked the new KeyPackage against the roster. Fix: `MlsMember::set_roster_keys`
 - a leaf added for a member under any other signature key is refused
 before the merge, epoch untouched. Test:
 `an_added_leaf_must_carry_the_anchored_identity_key`.
-Residual (OPEN): a legacy workspace without a chain arms no authority
-(unchecked, as before). The `ChainOracle` seam (remove+add backed by a
-threshold `Restored` block) is still unwired.
+Residual (OPEN, design): a legacy workspace without a chain arms no
+authority (unchecked, as before). The `ChainOracle` seam (remove+add
+backed by a threshold `Restored` block) is still unwired. Design: the
+engine arms a one-shot ALLOWANCE on the MLS member when a `Restored`
+block for seat X seals (`allow_rekey_of(X)`); a commit removing+adding X
+consumes it, one without it is HELD like a future-epoch frame and retried
+when the allowance arrives (the block precedes the commit on the
+coordinator, but relays reorder); the hold's eviction rules apply.
 
 ### M2 [HIGH] An evicted device undid its eviction with a back-dated same-epoch commit - PARTLY FIXED
 The prior slot now records which leaves the merged commit removed; a
 rewind onto a commit from one of them is refused (`rewind_forbidden`).
 Test: `an_evicted_leaf_cannot_undo_its_eviction_with_a_back_dated_commit`.
-OPEN half: the REVERSE order - the evicted device's low-key commit
-arriving before the re-key makes the re-key `CommitSuperseded`; the
-recovery has to retry and the device can repeat. Fix direction: the
-tiebreak ranks a chain-backed commit (one an armed oracle authorizes)
-above an unbacked one before comparing `CommitKey`s.
+OPEN half (design): the REVERSE order - the evicted device's low-key
+commit arriving before the re-key makes the re-key `CommitSuperseded`;
+the recovery has to retry and the device can repeat. Design: the tiebreak
+ranks a commit that consumed an allowance (M1 design) above one that did
+not, before comparing `CommitKey`s — a survivor that merged the evicted
+device's commit first then REWINDS onto the chain-backed re-key, and
+the device's commit can never win a slot the chain decided.
 
 ### M3 [MEDIUM] The prior slot is not persisted - OPEN
 Two nodes decide a late same-epoch commit differently depending on a
@@ -261,11 +268,11 @@ sheet or a consumed budget round can be lost. Fix direction: one shared
 `Arc<Mutex<TransportState>>` as the mesh supervisor has, store as
 write-behind.
 
-### M8 [MEDIUM] §7 deep-laggard commit resends are not wired on Nostr - OPEN
-The Nostr re-key arm publishes once and records nothing, so the outbox
-never re-offers a commit; `detached_reattach.md` §7 overclaims. Fix
-direction: record the commit with its pinned stamp and publish
-`MlsCommit`s via `publish_frame_at(stamp)`; or downgrade the doc.
+### M8 [MEDIUM] §7 deep-laggard commit resends are not wired on Nostr - FIXED
+The Nostr re-key arm records the commit in the log with its carrier
+stamp (`MlsCommit.stamp`, additive); the outbox publishes a stamped commit
+at exactly that stamp, so a resend keys like the original. Test:
+`a_commits_frame_carries_its_recorded_stamp`.
 
 ### M9 [LOW] `Stopped` mid-batch discards cursor progress - OPEN
 Persist `published_through` before returning on `Stopped`.
@@ -311,9 +318,9 @@ Test: `the_dedup_ring_covers_the_history_bound`.
 `deaf()` then reports a live relay with no supervisor. Fix direction: set
 `Down` before the bound `Break`, distinct log.
 
-### T5 [LOW] `place_req` narrows a multi-window catch-up on reconnect - OPEN (latent)
-`since = cursor - 48 h` overrides the caller's window; `subscribe_since`
-has no production caller. Fix direction: a `resume` flag on `subscribe`.
+### T5 [LOW] `place_req` narrows a multi-window catch-up on reconnect - FIXED
+The resume cursor applies to open-ended subscriptions only (a filter that
+carries its own `since` keeps it).
 
 ### T6 [LOW] Relay-supplied strings unbounded into `NetError` / WARN - OPEN
 Fix direction: one `relay_reason()` helper (cap ~200 chars, strip
@@ -332,11 +339,11 @@ Manual `Debug` eliding `secret_key`.
 `tor_probe.rs`, `s3/mod.rs`, `s3/http.rs`, `dial.rs:303`,
 `relay_runtime.rs` publish gate; `molt-ui` rewrites them per string.
 
-### T10 [REFACTOR] - OPEN
-`publish_one` duplicates `send_and_await_ok`'s verdict; URL→(host, port)
-three times (the NIP-11 copy lacks the IPv6 bracket trim);
-`with_cursors` / `cursors()` / `subscribe_since` have only test callers
-and a stale doc.
+### T10 [REFACTOR] - PARTLY FIXED
+`publish_one` = connect → `send_and_await_ok` → close; one
+`relay_dial_coords` for the WS connection, the NIP-11 probe and the Tor
+probe. OPEN: `with_cursors` / `cursors()` / `subscribe_since` still have
+only test callers (their doc claims a reopen reseeds them).
 
 ## 6. Storage (`molt-storage`)
 
@@ -405,12 +412,11 @@ A removed line starting with `-- ` vanished from the viewer AND voided
 the ratified change at apply. Fix: header noise only before the first
 hunk. Test: `hunk_lines_that_look_like_file_headers_are_content`.
 
-### K2 [LOW] `apply_patch`'s "one voice per path" fires for renames only - OPEN
-Dedupe `{old_path, new_path}` per file, then void unconditionally.
+### K2 [LOW] `apply_patch`'s "one voice per path" fires for renames only - FIXED
+Test: `two_sections_on_one_path_are_void`.
 
-### K3 [LOW] `*.localhost` classified `Local` (direct, never Tor) - OPEN
-Resolver-dependent. Grant `Local` to bare `localhost` and IP literals
-only.
+### K3 [LOW] `*.localhost` classified `Local` (direct, never Tor) - FIXED
+Only the bare `localhost` (and IP literals) are `Local`.
 
 ### K4 [HIGH] `ReadSession` carried every unsealed workspace's recovery phrase - FIXED (2026-08-26)
 `WorkspaceInfo.seed` (a demo-era display field of the first scaffold,
@@ -426,18 +432,19 @@ OPEN: a headless node has no way to show its phrase to the operator except
 the device files - a local CLI (`moltd --reveal-seed <id>`) would close
 that without touching the network surface.
 
-### K5 [STYLE] Em dashes / prose in `Display` strings; stale contract docs - OPEN
-`ChatNotGated`, `AlreadyApproved`, `DiscussionClosed`,
-`WorkspaceEncrypted`, `RelayUrlError` (`TooLong` hardcodes 512).
-Docs: `clearnet_session` "does not survive a restart" (it does),
-`ReadState.view` archive half (refused), `has_archive` hard-false,
-`CreateStart.threshold` "1..=members" (m >= 2).
+### K5 [STYLE] Em dashes / prose in `Display` strings; stale contract docs - PARTLY FIXED
+Docs corrected (`clearnet_session`, `RelayClearnetSession.unlock`,
+`ReadState.view`, `CreateStart.threshold`). OPEN: the em-dash `Display`
+strings (`ChatNotGated`, `AlreadyApproved`, `DiscussionClosed`,
+`WorkspaceEncrypted`, `RelayUrlError`) go with the style sweep;
+`has_archive` stays (a wire field; documented dead).
 
-### K6 [REFACTOR] - OPEN
-`SessionView::default()` ships six demo republics (fence test
-`session_default_lists_no_workspaces`, `demo_set` behind test support);
-eight inline length-prefix copies vs one `put_bytes`; dead
-`InviteInfo::render`, `TorTestState::running`, `has_archive`.
+### K6 [REFACTOR] - PARTLY FIXED
+`SessionView::default()` lists no workspace (fence test
+`session_default_lists_no_workspaces`); `TorTestState::running` deleted.
+`InviteInfo::render` is NOT dead (the founder's link rendering uses it).
+OPEN: the eight inline length-prefix copies vs one `put_bytes` (with the
+refactor splits).
 
 ## 8. Frontends (`molt-mcp`, `molt-app`, `molt-config`, `molt-ui`)
 
@@ -447,39 +454,40 @@ defaulted `download_dir` (the H5 class). Fix: both in `properties` +
 `required`, `download_dir` required. Test:
 `save_settings_builds_from_exactly_its_schemas_required_list`.
 
-### F2 [MEDIUM] `ui_action` advertises verbs the GUI does not implement - OPEN
-`set_draft` / `press` / `click` are warn no-ops that still bump the
-snapshot generation. Fix direction: trim the description, refuse unknown
-verbs, verb inventory in `molt_core` next to `UiAction`.
+### F2 [MEDIUM] `ui_action` advertises verbs the GUI does not implement - FIXED
+The inventory is `molt_core::UI_ACTION_VERBS`; the engine refuses any
+other verb; the tool description lists the five.
 
-### F3 [MEDIUM] "Save & continue" and "Rotate token" drop an edited wake command - OPEN
-Only `on_save_settings` issues `SetWakeCommand`. Fix direction: one
-`save_draft` helper issuing `SetWakeCommand` then `SaveSettings` in ONE
-task, used by all three sites.
+### F3 [MEDIUM] "Save & continue" and "Rotate token" drop an edited wake command - FIXED
+One `save_draft` (wake → posture → wholesale, one task) behind all three
+paths (landed with the MCP privilege batch, `2cace65b`).
 
 ### F4 [MEDIUM] CLI-generated `config.toml` was world-readable and the runtime writer preserved it - FIXED
 `--generate-config` / `--repair-config` write 0600 (`write_private`,
 the repair's backup copy included - `fs::copy` kept the old mode);
 `configstore::atomic_write` keeps an original's mode only within
 `0o600`. Test: `a_save_narrows_a_world_readable_config_to_owner_only`.
-OPEN: `molt_config::write` has no callers and a stale doc - delete.
+`molt_config::write` (no callers) is deleted.
 
 ### F5 [MEDIUM] Wiki-patch diff viewer ran an unbounded char diff on the UI thread - FIXED
 Pairs over 2 KiB render whole; the char diff carries a 50 ms deadline.
 Test: `an_overlong_line_pair_renders_whole_instead_of_char_diffed`.
 
-### F6 [LOW] MCP token comparison is not constant-time - OPEN
-`subtle::ConstantTimeEq` is already in the lock.
+### F6 [LOW] MCP token comparison is not constant-time - FIXED
+`subtle::ConstantTimeEq`.
 
-### F7 [LOW] Accept loop dies on any accept error; unauthenticated connects cost an engine round-trip, uncapped - OPEN
-Log-and-continue (sleep on `EMFILE`), token fetched on `initialize`,
-semaphore on pre-auth connections.
+### F7 [LOW] Accept loop dies on any accept error; unauthenticated connects cost an engine round-trip, uncapped - FIXED
+Accept errors are logged and retried; open connections are capped at 64.
+OPEN: the token is still read per accepted connection (one session read
+before auth).
 
-### F8 [LOW] Alert WAV in a world-writable temp dir is trusted if it exists - OPEN
-`$XDG_RUNTIME_DIR` or `O_EXCL` + random suffix, or pipe the bytes.
+### F8 [LOW] Alert WAV in a world-writable temp dir is trusted if it exists - FIXED
+Under `$XDG_RUNTIME_DIR` when present, a random per-process-start tag,
+created exclusively (never through an existing file).
 
-### F9 [LOW] The co-equality test never checks that a tool builds the command its label names - OPEN
-Build every tool from minimal args, compare the serde `cmd` tag.
+### F9 [LOW] The co-equality test never checks that a tool builds the command its label names - FIXED
+Every tool that builds from a schema-derived argument set is compared
+against its label's serde tag.
 
 ### F10 [STYLE] Stale operator text; em dashes - PARTLY FIXED
 Fixed: the `threshold` schema text (`2..=members`). OPEN: `main.rs:159`

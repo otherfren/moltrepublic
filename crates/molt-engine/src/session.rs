@@ -1790,8 +1790,11 @@ impl State {
         &mut self,
         action: molt_core::UiAction,
     ) -> Result<Reply, MoltError> {
-        if action.verb.is_empty() {
-            return Err(MoltError::BadPayload("the action names no verb".to_string()));
+        if !molt_core::UI_ACTION_VERBS.contains(&action.verb.as_str()) {
+            return Err(MoltError::BadPayload(format!(
+                "unknown ui_action verb `{}`",
+                action.verb
+            )));
         }
         if self.ui_state.is_none() {
             return Err(MoltError::Engine(

@@ -126,7 +126,12 @@ async fn engine_and_mesh_shut_down_when_the_last_handle_drops() {
 /// roster, and a peer's reply flips its presence pill to live.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn demo_workspace_mesh_updates_presence_on_reply() {
-    let w = molt_engine::__spawn_demo_mesh(GroupConfig::demo(), SessionView::default());
+    // the demo republics are a fixture, not the default (review K6)
+    let session = SessionView {
+        workspaces: molt_core::WorkspaceInfo::demo_set(),
+        ..SessionView::default()
+    };
+    let w = molt_engine::__spawn_demo_mesh(GroupConfig::demo(), session);
     w.execute(Command::OpenWorkspace {
         id: molt_core::demo_workspace_id("Family Office"),
     })

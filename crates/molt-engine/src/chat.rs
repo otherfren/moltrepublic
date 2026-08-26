@@ -1348,7 +1348,7 @@ mod tests {
         st.apply(&e1);
         let commit = st.make_env(
             "me".to_string(),
-            WorkspaceEvent::MlsCommit { commit: "aa".to_string() },
+            WorkspaceEvent::MlsCommit { commit: "aa".to_string(), stamp: 0 },
         );
         st.apply(&commit);
         let e2 = st.make_env("me".to_string(), body(2));

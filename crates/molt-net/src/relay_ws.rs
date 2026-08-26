@@ -118,6 +118,31 @@ impl AsyncWrite for MaybeTls {
 /// dialed DIRECTLY — which is exactly why it sits behind the same explicit
 /// gate as clearnet. Everything else keeps the configured
 /// fail-closed dialer unchanged.
+/// The ONE URL → `(host, port, tls)` reading every dial shares (the WS
+/// connection, the NIP-11 probe, the Tor probe — review T10: the third copy
+/// lacked the IPv6 bracket trim). `host_str()` brackets an IPv6 literal;
+/// the dialer and the TLS SNI both want the bare address.
+pub(crate) fn relay_dial_coords(url: &str) -> Result<(String, u16, bool), NetError> {
+    let parsed = url::Url::parse(url)
+        .map_err(|e| NetError::Framing(format!("relay url {url}: {e}")))?;
+    let scheme = parsed.scheme();
+    if scheme != "ws" && scheme != "wss" {
+        return Err(NetError::Framing(format!(
+            "relay url {url}: scheme must be ws or wss"
+        )));
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| NetError::Framing(format!("relay url {url}: no host")))?
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| NetError::Framing(format!("relay url {url}: no port")))?;
+    Ok((host, port, scheme == "wss"))
+}
+
 pub(crate) fn dialer_for(dialer: &Dialer, url: &str) -> Dialer {
     if molt_core::relay::relay_kind(url) == molt_core::relay::RelayKind::Local {
         return Dialer::Direct;
@@ -185,28 +210,10 @@ impl RelayWs {
     /// SAME WHATWG parser the pool policy validated it with, so the dialed
     /// host can never differ from the classified one.
     pub async fn connect(dialer: &Dialer, url: &str) -> Result<Self, NetError> {
-        let parsed = url::Url::parse(url)
-            .map_err(|e| NetError::Framing(format!("relay url {url}: {e}")))?;
-        let scheme = parsed.scheme().to_string();
-        if scheme != "ws" && scheme != "wss" {
-            return Err(NetError::Framing(format!(
-                "relay url {url}: scheme must be ws or wss"
-            )));
-        }
-        // `host_str()` brackets an IPv6 literal; the dialer and the TLS SNI
-        // both want the bare address (review finding)
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| NetError::Framing(format!("relay url {url}: no host")))?
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .to_string();
-        let port = parsed
-            .port_or_known_default()
-            .ok_or_else(|| NetError::Framing(format!("relay url {url}: no port")))?;
+        let (host, port, tls) = relay_dial_coords(url)?;
         let route = dialer_for(dialer, url);
-        tracing::debug!(relay = %url, host = %host, port, tls = scheme == "wss", via = %route.route(), "relay dial");
-        let stream = dial_maybe_tls(&route, &host, port, scheme == "wss").await?;
+        tracing::debug!(relay = %url, host = %host, port, tls, via = %route.route(), "relay dial");
+        let stream = dial_maybe_tls(&route, &host, port, tls).await?;
         // Bound what a hostile relay may make us allocate: tungstenite's
         // defaults are 64 MiB per message / 16 MiB per frame, ~500× beyond
         // anything this client exchanges (the publish budget is ≤128 KiB).

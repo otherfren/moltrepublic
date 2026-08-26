@@ -2965,7 +2965,7 @@ impl State {
                 // and advances to the new epoch (it MUST precede any new-epoch
                 // traffic — hence recorded before the announcement below).
                 let env =
-                    self.make_env(me.clone(), WorkspaceEvent::MlsCommit { commit: hex::encode(&commit) });
+                    self.make_env(me.clone(), WorkspaceEvent::MlsCommit { commit: hex::encode(&commit), stamp: 0 });
                 self.record(env);
                 // 2) deliver the welcome + the whole chain to the returning
                 // member's reply queue so it rejoins the group AND catches its
@@ -3114,6 +3114,17 @@ impl State {
             rotation_seed,
             relays: ratified,
         };
+        // the commit goes into the LOG too (review M8): the delivery task
+        // publishes it a few times now, the outbox re-offers it from here
+        // for every laggard the guarantee later finds — at the same stamp,
+        // so the resend keys like the original (`detached_reattach.md` §7)
+        let commit_env = self.make_env(
+            self.member(),
+            WorkspaceEvent::MlsCommit {
+                commit: hex::encode(&rekey.commit),
+                stamp: rekey.stamp,
+            },
+        );
         crate::nostr_ritual::spawn_rekey_delivery(
             channel,
             net,
@@ -3122,6 +3133,7 @@ impl State {
             payload,
             member.to_string(),
         );
+        self.record(commit_env);
         // **Forget the seat's OLD accept window.** The returning member is a
         // new incarnation whose log seq space restarts at 1, so the marks from
         // the lost device swallow every fresh envelope as a duplicate — its

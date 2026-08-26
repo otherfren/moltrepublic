@@ -317,8 +317,11 @@ pub fn apply_patch(
     // one patch, one voice per path (the plan's collision rule)
     let mut touched: BTreeSet<&str> = BTreeSet::new();
     for f in files {
+        // the plan's collision rule, for EVERY file (review K2): two edit
+        // sections on one path were let through as long as neither renamed
+        let mut own: BTreeSet<&str> = BTreeSet::new();
         for p in [f.old_path.as_str(), f.new_path.as_str()] {
-            if !p.is_empty() && !touched.insert(p) && f.old_path != f.new_path {
+            if !p.is_empty() && own.insert(p) && !touched.insert(p) {
                 return Err(void(format!("path touched twice: {p}")));
             }
         }
@@ -443,6 +446,17 @@ mod tests {
             "a removal of a line starting with `-- ` applies"
         );
         assert_eq!(tree.get("a.md").map(String::as_str), Some("hello\n++ sig\nworld\n"));
+    }
+
+    /// K2: one patch, one voice per path — two edit sections on one file
+    /// are a collision like a rename onto a touched path.
+    #[test]
+    fn two_sections_on_one_path_are_void() {
+        let mut tree = BTreeMap::from([("a.md".to_string(), "hello\nworld\n".to_string())]);
+        let twice = format!("{EDIT_A}{EDIT_A}");
+        let before = tree.clone();
+        assert!(apply_patch(&mut tree, &patch_of(&twice)).is_err());
+        assert_eq!(tree, before);
     }
 
     #[test]

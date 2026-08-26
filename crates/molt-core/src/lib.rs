@@ -2505,6 +2505,12 @@ pub enum WorkspaceEvent {
     MlsCommit {
         /// Hex of the MLS commit's wire bytes.
         commit: String,
+        /// The carrier stamp the commit was keyed at on Nostr (`0` = none:
+        /// the loopback/mesh path carries no stamp). A RESEND must ride the
+        /// same stamp, or the receivers' `CommitKey` differs from the
+        /// original's and a tiebreak splits (review M8). Additive.
+        #[serde(default)]
+        stamp: u64,
     },
     /// A member **(re)announced its per-pair mesh queues** — the relay leg of
     /// dynamic mesh membership (`docs_archive/transport/dynamic_mesh.md`): the coordinator
@@ -3164,10 +3170,6 @@ impl TorTestState {
         }
     }
 
-    /// Whether a probe is in flight (the surfaces' "testing…" affordance).
-    pub fn running(self) -> bool {
-        self == TorTestState::Testing
-    }
 }
 
 /// The outcome of a Tor connectivity probe — the rung that was reached plus
@@ -3259,9 +3261,10 @@ pub struct SessionView {
     /// to no relay until its operator adds and confirms one.
     #[serde(default)]
     pub relays: Vec<crate::relay::RelayStatus>,
-    /// Whether clearnet relays are activated for THIS session. Always starts
-    /// `false` — a confirmed clearnet relay still needs an explicit, in-session
-    /// act before any packet leaves, and that act does not survive a restart.
+    /// Whether dialing confirmed clearnet/local relays is switched on. A
+    /// persisted decision since the ADR-0004 amendment: confirming such a
+    /// relay with the acknowledgement switches it on, `RelayClearnetSession`
+    /// switches it off, and both survive a restart.
     #[serde(default)]
     pub clearnet_session: bool,
     /// The locally known workspaces, from the real on-disk directory scan.
@@ -3316,7 +3319,10 @@ impl Default for SessionView {
             settings: SessionSettings::default(),
             relays: Vec::new(),
             clearnet_session: false,
-            workspaces: WorkspaceInfo::demo_set(),
+            // EMPTY: every production constructor lists what is on disk;
+            // the demo republics are a test fixture (`demo_set`), and a
+            // default that shipped them hid the one real workspace (K6)
+            workspaces: Vec::new(),
             backup_orphans: Vec::new(),
             active_workspace: String::new(),
             restore: RestoreState::default(),
@@ -3565,13 +3571,11 @@ pub enum Command {
         /// every channel, filtered or not.
         #[serde(default)]
         channel: Option<ChannelRef>,
-        /// Chat only: the time axis of the retention window, keyed by
-        /// [`Surface::views`] ("today"/"archive"). `"today"` keeps the
-        /// messages younger than half the effective retention window (the
-        /// General view), `"archive"` the older half still inside the
-        /// window; `None` is the whole window (the additive default —
-        /// older readers keep today's behavior). An unknown key is an
-        /// error; other surfaces validate but ignore it. Orthogonal to
+        /// Chat only: a [`Surface::views`] key (`"today"` = the General
+        /// view; `"archive"` was a design mock and is refused until a real
+        /// archive exists); `None` is the whole window (the additive
+        /// default — older readers keep today's behavior). An unknown key
+        /// is an error; other surfaces validate but ignore it. Orthogonal to
         /// `channel` — the two filters compose.
         #[serde(default)]
         view: Option<String>,
@@ -3740,7 +3744,8 @@ pub enum Command {
     /// acknowledgement already turns it on; this is the explicit switch (and
     /// the way to go dark again). Onion relays are unaffected.
     RelayClearnetSession {
-        /// `true` = allow dialing confirmed clearnet relays until shutdown.
+        /// `true` = allow dialing confirmed clearnet/local relays, `false` =
+        /// go dark; persisted across restarts (ADR-0004 amendment).
         unlock: bool,
     },
     /// Change SOME settings, keeping every field the payload does not
@@ -4035,7 +4040,7 @@ pub enum Command {
         name: String,
         /// The founder's handle.
         member: String,
-        /// The approval threshold (m), `1..=members`.
+        /// The approval threshold (m), `2..=members` (the engine refuses 1).
         threshold: u8,
         /// The member count (n), `2..=13`.
         members: u8,
@@ -4993,6 +4998,17 @@ impl NodePosture {
     }
 }
 
+/// The verbs the window performs for [`Command::UiAction`]; anything else
+/// is refused by the engine instead of landing as a silent no-op that
+/// still bumps the snapshot generation (review F2).
+pub const UI_ACTION_VERBS: [&str; 5] = [
+    "select_view",
+    "select_channel",
+    "open_workspace",
+    "close_workspace",
+    "chat_send",
+];
+
 /// The settings keys [`Command::SetNodePosture`] owns — refused by
 /// `PatchSettings`, re-merged from the stored values by `SaveSettings`.
 pub const NODE_POSTURE_KEYS: [&str; 10] = [
@@ -5078,8 +5094,7 @@ pub struct UiSnapshot {
 /// performs it, MCP never writes into another surface's state).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct UiAction {
-    /// The verb: `select_channel` · `select_view` · `open_workspace` ·
-    /// `close_workspace` · `chat_send` · `set_draft` · `press` · `click`.
+    /// The verb, one of [`UI_ACTION_VERBS`].
     #[serde(default)]
     pub verb: String,
     /// Per-verb parameters (JSON object).
@@ -6077,8 +6092,6 @@ mod tests {
         // exactly ONE state means "Tor works" — the whole point of the ladder
         assert!(TorTestState::ProxyOnly != TorTestState::Circuit);
         assert!(TorTestState::CircuitFailed != TorTestState::Circuit);
-        assert!(TorTestState::Testing.running());
-        assert!(!TorTestState::Circuit.running());
     }
 
     /// A fresh session has never probed Tor — and an older reader meeting a
@@ -6614,6 +6627,13 @@ mod tests {
     /// The production session must never invent bucket contents: orphans
     /// appear only from a real listing (`NetListBackups`), so the default is
     /// EMPTY. This is the regression fence for the removed demo fixture.
+    /// K6: the default view lists NO republic — the demo set is a fixture,
+    /// and a default that carried it hid the one real workspace on disk.
+    #[test]
+    fn session_default_lists_no_workspaces() {
+        assert!(SessionView::default().workspaces.is_empty());
+    }
+
     #[test]
     fn session_default_has_no_backup_orphans() {
         assert!(

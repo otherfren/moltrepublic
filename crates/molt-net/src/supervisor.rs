@@ -103,7 +103,11 @@ impl MlsChannel {
         // wrapped in an application ciphertext (one encrypted at the old epoch
         // could never be processed — the recipient needs it to REACH the new
         // epoch). Same branch `ciphertext_for` keeps for the queue path.
-        let (ciphertext, exporter) = if let WorkspaceEvent::MlsCommit { commit } = &env.body {
+        let stamp = match &env.body {
+            WorkspaceEvent::MlsCommit { stamp, .. } if *stamp > 0 => Some(*stamp),
+            _ => None,
+        };
+        let (ciphertext, exporter) = if let WorkspaceEvent::MlsCommit { commit, .. } = &env.body {
             // …and on 445 its OUTER layer must be sealed under the epoch its
             // RECIPIENTS are still at — the epoch the commit was MADE at
             // (`detached_reattach.md` §7): a RESEND after further commits
@@ -125,7 +129,7 @@ impl MlsChannel {
             let exporter = m.exporter_secret().ok()?;
             (ct, exporter)
         };
-        Some(GroupFrame { ciphertext, exporter })
+        Some(GroupFrame { ciphertext, exporter, stamp })
     }
 
     /// Ciphertext + the exporter secret of the epoch it was made at, under ONE
@@ -138,7 +142,7 @@ impl MlsChannel {
         let mut m = self.member.lock().ok()?;
         let ciphertext = m.encrypt(plaintext).ok()?;
         let exporter = m.exporter_secret().ok()?;
-        Some(GroupFrame { ciphertext, exporter })
+        Some(GroupFrame { ciphertext, exporter, stamp: None })
     }
 
     /// The outer-opening ladder: the CURRENT epoch's exporter secret first,
@@ -178,7 +182,7 @@ impl MlsChannel {
         // epoch could never be processed — the recipient needs it to REACH the
         // new epoch). The receiver's `decrypt` recognises it as a commit and
         // merges it. It still rides this per-link stream in order with chat.
-        if let WorkspaceEvent::MlsCommit { commit } = &env.body {
+        if let WorkspaceEvent::MlsCommit { commit, .. } = &env.body {
             let raw = hex::decode(commit).ok()?;
             self.cache.lock().ok()?.insert(seq, raw.clone());
             return Some(raw);
@@ -316,6 +320,9 @@ impl MlsChannel {
 pub(crate) struct GroupFrame {
     pub(crate) ciphertext: Vec<u8>,
     pub(crate) exporter: [u8; 32],
+    /// A commit's carrier stamp (review M8): the outbox publishes it AT this
+    /// stamp so a resend keys identically to the original; `None` = now.
+    pub(crate) stamp: Option<u64>,
 }
 
 /// What the recv loop should do with one inbound MLS message.
@@ -2022,7 +2029,7 @@ mod tests {
             chat(2, "me"),
             chat(3, "me"),
             chat(4, "peer"),
-            env(5, "me", WorkspaceEvent::MlsCommit { commit: "aa".to_string() }),
+            env(5, "me", WorkspaceEvent::MlsCommit { commit: "aa".to_string(), stamp: 0 }),
             chat(8, "me"),
         ];
         assert_eq!(advance_acked_floor(&"me".to_string(), &envs, &win, 0), 8);
@@ -2047,7 +2054,7 @@ mod tests {
             chat(2, "me"),
             chat(4, "peer"),
             chat(9, "peer"),
-            env(11, "me", WorkspaceEvent::MlsCommit { commit: "bb".to_string() }),
+            env(11, "me", WorkspaceEvent::MlsCommit { commit: "bb".to_string(), stamp: 0 }),
         ];
         assert_eq!(
             advance_acked_floor(&"me".to_string(), &envs, &win, 0),

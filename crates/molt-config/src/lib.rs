@@ -1021,22 +1021,6 @@ pub fn backup_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
-/// Render `settings` and write them to `path`, creating parent directories.
-///
-/// When `make_backup` is true and `path` already exists, the current file is
-/// first copied to `<path>.bak`. This is the call the GUI settings panel uses to
-/// persist a runtime change without losing the previous on-disk version.
-pub fn write(path: &Path, settings: &Settings, make_backup: bool) -> std::io::Result<()> {
-    if make_backup && path.exists() {
-        std::fs::copy(path, backup_path(path))?;
-    }
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-    std::fs::write(path, render(settings))
-}
 
 // ---------------------------------------------------------------------------
 // Format-preserving runtime rewrite (toml_edit).

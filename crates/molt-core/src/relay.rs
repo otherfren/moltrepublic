@@ -276,8 +276,10 @@ fn domain_kind(host: &str) -> Result<RelayKind, RelayUrlError> {
             return Err(RelayUrlError::Host);
         }
     }
-    // RFC 6761: localhost names resolve to loopback
-    if host == "localhost" || host.ends_with(".localhost") {
+    // the bare name only (review K3): `*.localhost` resolves to loopback
+    // where the stub resolver implements RFC 6761 — not everywhere — and
+    // `Local` means "dialed directly, never over Tor"
+    if host == "localhost" {
         return Ok(RelayKind::Local);
     }
     // `Onion` — and with it the right to be dialed with no user interaction
@@ -803,7 +805,6 @@ mod tests {
             "ws://[::1]:8080",
             "ws://[fd00::1]",
             "ws://localhost:7777",
-            "ws://relay.localhost",
         ] {
             let n = normalize_relay_url(local)
                 .unwrap_or_else(|e| panic!("{local:?} must be a valid local relay: {e}"));
@@ -834,6 +835,17 @@ mod tests {
         for dead in ["wss://0.0.0.0", "wss://255.255.255.255", "wss://224.0.0.1", "wss://[ff02::1]"] {
             assert!(normalize_relay_url(dead).is_err(), "must refuse {dead:?}");
         }
+    }
+
+    /// K3: `*.localhost` is NOT `Local` — only a resolver implementing
+    /// RFC 6761 keeps it on loopback, and `Local` means "dialed directly,
+    /// never over Tor". It asks first, like any clearnet name (ws:// to a
+    /// non-local host is refused, wss:// is clearnet).
+    #[test]
+    fn a_localhost_subdomain_is_not_local() {
+        assert!(normalize_relay_url("ws://relay.localhost").is_err(), "plaintext to a non-local host");
+        let n = normalize_relay_url("wss://relay.localhost").expect("valid clearnet relay");
+        assert_eq!(relay_kind(&n), RelayKind::Clearnet);
     }
 
     /// The WHATWG parser resolves alternate IPv4 spellings (hex, octal, plain

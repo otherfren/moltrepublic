@@ -330,17 +330,9 @@ pub const TIMEOUT_MARK: &str = "timed out reaching";
 /// pool policy classified it with (`relay_ws::connect` does the identical
 /// read) — the host dialed can never differ from the host classified.
 fn relay_host_port(url: &str) -> Result<(String, u16), String> {
-    let parsed = url::Url::parse(url).map_err(|e| format!("relay url {url}: {e}"))?;
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| format!("relay url {url}: no host"))?
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .to_string();
-    let port = parsed
-        .port_or_known_default()
-        .ok_or_else(|| format!("relay url {url}: no port"))?;
-    Ok((host, port))
+    crate::relay_ws::relay_dial_coords(url)
+        .map(|(host, port, _tls)| (host, port))
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

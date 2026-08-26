@@ -3831,6 +3831,7 @@ fn ev_mls_commit(by: &str, seq: u64, commit_hex: &str) -> EventEnvelope {
         by: by.to_string(),
         body: WorkspaceEvent::MlsCommit {
             commit: commit_hex.to_string(),
+            stamp: 0,
         },
     }
 }
