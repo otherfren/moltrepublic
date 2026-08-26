@@ -12,14 +12,14 @@
 
 use super::*;
 
-/// The **ephemeral** signature collection for one pending proposal on a
-/// chain-governed republic (never persisted; rebuilt from gossip). The
-/// committer bundles these into a block once `sigs` reaches the threshold. A
-/// re-base (the head advanced past `height`) clears it and re-signs.
 /// L3: open cards one proposer may hold at once — a flooding member can
 /// only crowd itself (the shed card is re-earned by the WP2 re-serve).
 pub(super) const OPEN_CARDS_PER_PROPOSER_MAX: usize = 64;
 
+/// The **ephemeral** signature collection for one pending proposal on a
+/// chain-governed republic (never persisted; rebuilt from gossip). The
+/// committer bundles these into a block once `sigs` reaches the threshold. A
+/// re-base (the head advanced past `height`) clears it and re-signs.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PendingApproval {
     /// The chain height every signature here is bound to.
@@ -766,14 +766,6 @@ impl State {
         }
     }
 
-    /// Inbound: a peer proposed something (gossip). Record it as pending so it
-    /// shows up and can be approved here. `by` is the authenticated wire
-    /// sender — the proposer on a direct delivery, the serving peer on a
-    /// WP2 re-serve (a display hint, never an authorization input).
-    /// Returns `true` only when the proposal was genuinely NEW here — a
-    /// refused id collision or a deduplicated re-serve (WP2 catch-up
-    /// re-wraps open proposals under the serving peer's name) returns
-    /// `false`, and the caller must not announce it on the event stream.
     /// L3: a peer-chosen proposal id far past the mint counter is garbage —
     /// registering it (or even bumping `next_id` for it) would poison every
     /// later local mint (a u64::MAX id would freeze proposing for good).
@@ -784,6 +776,14 @@ impl State {
             .saturating_add(crate::proposals::PARKED_DECLINE_ID_WINDOW)
     }
 
+    /// Inbound: a peer proposed something (gossip). Record it as pending so it
+    /// shows up and can be approved here. `by` is the authenticated wire
+    /// sender — the proposer on a direct delivery, the serving peer on a
+    /// WP2 re-serve (a display hint, never an authorization input).
+    /// Returns `true` only when the proposal was genuinely NEW here — a
+    /// refused id collision or a deduplicated re-serve (WP2 catch-up
+    /// re-wraps open proposals under the serving peer's name) returns
+    /// `false`, and the caller must not announce it on the event stream.
     pub(crate) fn receive_proposed(
         &mut self,
         id: u64,

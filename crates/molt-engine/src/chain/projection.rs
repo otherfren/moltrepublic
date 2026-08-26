@@ -72,13 +72,6 @@ impl State {
         }
     }
 
-    /// The mint counter must stay AHEAD of every proposal id the verified
-    /// chain has consumed: `receive_proposed` (and its membership twin)
-    /// refuses an already-consumed id on every peer, so a locally minted
-    /// collision could never seal — a silent liveness hole for any holder
-    /// that adopted its chain without the ephemeral event log to bump
-    /// `next_id` for it (a blob-seeded rejoiner after total loss). Called
-    /// wherever the walk adopts or extends; `max` keeps it monotone.
     /// The highest proposal id a chain has consumed (`Applied` blocks) —
     /// what the mint counter must clear BEFORE the ephemeral tail replays
     /// (review E1 residual: a blob-seeded rejoiner's tail replayed with the
@@ -93,6 +86,13 @@ impl State {
             .max()
     }
 
+    /// The mint counter must stay AHEAD of every proposal id the verified
+    /// chain has consumed: `receive_proposed` (and its membership twin)
+    /// refuses an already-consumed id on every peer, so a locally minted
+    /// collision could never seal — a silent liveness hole for any holder
+    /// that adopted its chain without the ephemeral event log to bump
+    /// `next_id` for it (a blob-seeded rejoiner after total loss). Called
+    /// wherever the walk adopts or extends; `max` keeps it monotone.
     pub(super) fn bump_next_id_past_chain(&mut self) {
         if let Some(top) = self
             .chain_walk
@@ -114,27 +114,16 @@ impl State {
         self.chain_walk = None;
     }
 
-    /// Re-project the persistent state from the whole chain: the gated
-    /// surfaces' applied logs (into the chain-owned [`State::chain_applied`], a
-    /// full clear-and-refold so a re-base is free) and the roster/identities
-    /// (taken from the already-verified head, which evolved them across the
-    /// membership blocks). Chat, [`State::applied`] and pending proposals are
-    /// left untouched — they are ephemeral or legacy-owned.
     /// The transport anchor to ADDRESS this member at right now: the seat's
     /// re-anchored key if a `Restored` block gave it one, else the immutable
     /// founding anchor from the roster. Empty for an unknown member — never
     /// somebody else's key.
     ///
-    /// Every gift-wrap send resolves through this. Reaching for
-    /// `identities[i].nostr_pk` directly addresses a key a recovered member
-    /// no longer holds, and the send simply vanishes.
-    // No production caller YET: every gift-wrap send today addresses a RITUAL
-    // SEAT during a founding, where no recovered seat can exist. The consumers
-    // arrive with N4b step 6 (the rejoiner/coordinator legs) and N5 (the
-    // runtime), and each MUST resolve through here. Pinned by
-    // `the_working_anchor_follows_a_restored_block_while_the_roster_does_not`
-    // so the projection cannot rot before its callers land.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Every gift-wrap send resolves through this (the Nostr re-key's
+    /// Welcome, the reattach request's targets, the live-anchor replay
+    /// check at ingest). Reaching for `identities[i].nostr_pk` directly
+    /// addresses a key a recovered member no longer holds, and the send
+    /// simply vanishes.
     pub(crate) fn working_nostr_pk(&self, member: &str) -> String {
         if let Some(pk) = self.chain_anchors.get(member) {
             return pk.clone();
@@ -390,13 +379,6 @@ impl State {
         }
     }
 
-    /// Settle the gossip-built proposal cards against the verified chain:
-    /// every proposal a block (or the checkpoint blob below a cut) consumed
-    /// shows Applied, every sealed membership change settles its
-    /// content-matched cards. Idempotent — the re-base/prune rebuilds run it
-    /// harmlessly; the reopen order makes it load-bearing. Deliberation is
-    /// ephemeral: after a replay only chain truth remains, so a card the
-    /// chain consumed can only honestly read Applied.
     /// The chain is the durable record; the `Proposed` gossip is ephemeral
     /// RAM on every RECEIVER (only the proposer's own log carries it). A
     /// holder that adopts an Applied block without the card — a reopen, a
@@ -428,6 +410,13 @@ impl State {
             });
     }
 
+    /// Settle the gossip-built proposal cards against the verified chain:
+    /// every proposal a block (or the checkpoint blob below a cut) consumed
+    /// shows Applied, every sealed membership change settles its
+    /// content-matched cards. Idempotent — the re-base/prune rebuilds run it
+    /// harmlessly; the reopen order makes it load-bearing. Deliberation is
+    /// ephemeral: after a replay only chain truth remains, so a card the
+    /// chain consumed can only honestly read Applied.
     fn settle_cards_against_chain(&mut self) {
         // ONE pass over blob + chain: records missing entirely (this holder
         // never was the proposer and its ephemeral gossip is gone) come
@@ -508,6 +497,12 @@ impl State {
         }
     }
 
+    /// Re-project the persistent state from the whole chain: the gated
+    /// surfaces' applied logs (into the chain-owned [`State::chain_applied`], a
+    /// full clear-and-refold so a re-base is free) and the roster/identities
+    /// (taken from the already-verified head, which evolved them across the
+    /// membership blocks). Chat, [`State::applied`] and pending proposals are
+    /// left untouched — they are ephemeral or legacy-owned.
     pub(crate) fn apply_chain_to_state(&mut self) {
         let mut projected: std::collections::HashMap<
             Surface,

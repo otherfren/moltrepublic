@@ -213,18 +213,9 @@ impl State {
 
     /// Broadcast [`State::anchor_bootstrap`]. The coordinator pushes this
     /// right after a recovery Welcome, because a rejoiner cannot ASK: it has
-    /// no workspace to record a `ChainRequest` from yet.
-    ///
-    /// **No production caller YET, deliberately.** Its one call site is the
-    /// Nostr arm of [`State::coordinator_rekey`], which does not exist:
-    /// `restore_member_on_group` reads `NetRuntime::real_crypto`, and a Nostr
-    /// workspace has no `NetRuntime` at all — its group MLS lives on
-    /// `GroupNet`. So today that path logs "no runtime MLS group to re-key"
-    /// and sends nothing. Wiring this into the `else` of the QUEUE branch
-    /// would have been an unreachable branch dressed as a feature; the caller
-    /// lands with the Nostr re-key, and the offer is pinned meanwhile by
-    /// `the_served_anchor_is_the_smallest_prefix_that_verifies`.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// no workspace to record a `ChainRequest` from yet. Called from the
+    /// Nostr re-key ([`State::coordinator_rekey_nostr`]); the offer's shape
+    /// is pinned by `the_served_anchor_is_the_smallest_prefix_that_verifies`.
     pub(crate) fn serve_chain_anchor(&mut self) {
         let me = self.member();
         for ev in self.anchor_bootstrap() {

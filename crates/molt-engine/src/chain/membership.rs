@@ -12,8 +12,6 @@
 
 use super::*;
 
-/// A recovery in flight on the coordinator: the returning member's fresh MLS
-/// KeyPackage + reply-queue handover, kept keyed by the re-admission proposal id
 /// The coordinator's snapshot of a pending re-admission vote
 /// (`recovery_auto_approval.md` §4) — what [`State::recover_progress_for`]
 /// reports toward the waiting rejoiner's checklist.
@@ -44,16 +42,19 @@ fn rejoin_note(ticketed: bool, member: &str) -> String {
     }
 }
 
-/// until its `Restored` block commits — then the coordinator re-keys the group
-/// (`restore_member`) and sends the Welcome back to `reply`.
+/// A recovery in flight on the coordinator: the returning member's fresh MLS
+/// KeyPackage + reply-queue handover, kept (in `State::pending_recovery`,
+/// keyed by the returning seat) until its `Restored` block commits — then
+/// the coordinator re-keys the group (`restore_member`) and sends the
+/// Welcome back to `reply`.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // fields consumed by the MLS re-key increment (restore_member + Welcome)
 pub(crate) struct PendingRecovery {
     /// Whether the request came over a minted link (`false` = the
     /// self-service reattach) — chooses the group's notification line.
     pub ticketed: bool,
-    pub member: String,
+    /// The returning member's fresh MLS KeyPackage, hex.
     pub key_package: String,
+    /// The reply queue the Welcome goes back to (mesh arm).
     pub reply: String,
 }
 
@@ -340,7 +341,6 @@ impl State {
     /// and `after_block_applied` keys the re-key on this entry. Registering it
     /// afterwards would silently skip the re-key (the recovery E2E pins this).
     #[allow(clippy::too_many_arguments)] // one verified request's fields, not a bag
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn verify_and_propose_restore(
         &mut self,
         ticketed: bool,
@@ -416,7 +416,6 @@ impl State {
             member.to_string(),
             PendingRecovery {
                 ticketed,
-                member: member.to_string(),
                 key_package: key_package_hex.to_string(),
                 reply: reply.to_string(),
             },

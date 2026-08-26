@@ -636,7 +636,6 @@ fn a_restored_commit_triggers_the_coordinators_rekey() {
         "walter".to_string(),
         PendingRecovery {
             ticketed: true,
-            member: "walter".to_string(),
             key_package: "beef".to_string(),
             reply: String::new(),
         },
@@ -801,7 +800,6 @@ fn a_restored_commit_without_a_pending_recovery_is_inert() {
         "dora".to_string(),
         PendingRecovery {
             ticketed: true,
-            member: "dora".to_string(),
             key_package: "beef".to_string(),
             reply: String::new(),
         },

@@ -873,16 +873,6 @@ pub(crate) fn walk_chain(blocks: &[ChainBlock]) -> Result<ChainWalk, String> {
     Ok(walk)
 }
 
-/// Verify a SERVED chain — the shared front door of the recovery adoption
-/// (`cmd_net_recover_sealed`) and the restore import
-/// (`cmd_net_restore_staged`): full chains from block 0 via
-/// [`verify_chain`], pruned ones against their checkpoint blob via
-/// [`verify_suffix_chain`]. `expected_rid` is the caller's EXTERNAL anchor
-/// when it has one (the recovery link); `None` anchors on the
-/// content-derived id the genesis/blob founding table itself recomputes —
-/// the same trust model a full-chain import has. Hard-reject,
-/// all-or-nothing; returns the verified head plus the founding
-/// constitution the workspace materializes from.
 /// The chain-ratified relay pool as SERVED MATERIAL folds it: the blob's
 /// (else the genesis') pool plus every applied `set_relays` edit in the
 /// verified run — the recovery gate's authority. A Welcome minted after a
@@ -917,6 +907,16 @@ pub(crate) fn effective_relays_of_served(
     pool
 }
 
+/// Verify a SERVED chain — the shared front door of the recovery adoption
+/// (`cmd_net_recover_sealed`) and the restore import
+/// (`cmd_net_restore_staged`): full chains from block 0 via
+/// [`verify_chain`], pruned ones against their checkpoint blob via
+/// [`verify_suffix_chain`]. `expected_rid` is the caller's EXTERNAL anchor
+/// when it has one (the recovery link); `None` anchors on the
+/// content-derived id the genesis/blob founding table itself recomputes —
+/// the same trust model a full-chain import has. Hard-reject,
+/// all-or-nothing; returns the verified head plus the founding
+/// constitution the workspace materializes from.
 pub(crate) fn verify_served(
     checkpoint: Option<&molt_core::CheckpointState>,
     blocks: &[ChainBlock],
