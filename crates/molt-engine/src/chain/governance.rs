@@ -187,6 +187,31 @@ impl State {
         }
     }
 
+    /// Drop the ephemeral vote bookkeeping of a DECIDED proposal id: its
+    /// collected signatures (the voter set is stashed for the display
+    /// first) and its registered chain change. Idempotent.
+    pub(super) fn forget_vote(&mut self, id: u64) {
+        self.stash_voted(id);
+        self.pending_sigs.remove(&id);
+        self.proposal_changes.remove(&id);
+    }
+
+    /// [`State::forget_vote`] for a sealed change that carries no proposal
+    /// id (a Membership or Checkpoint block): every registered entry with
+    /// exactly this content is decided — the sealer (which also cleans by
+    /// id), every passive applier and a catch-up all settle identically.
+    pub(super) fn forget_votes_for(&mut self, sealed: &ChainChange) {
+        let ids: Vec<u64> = self
+            .proposal_changes
+            .iter()
+            .filter(|(_, c)| *c == sealed)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            self.forget_vote(id);
+        }
+    }
+
     /// Collect one signature into a proposal's pending set: dedup by member,
     /// and rebase the set to a newer `height` (dropping stale signatures) —
     /// a signature for an already-superseded height is ignored. A TERMINAL
@@ -390,9 +415,7 @@ impl State {
         self.after_block_applied(&block);
         // clean up the proposal we just committed — a Membership block carries
         // no proposal id for after_block_applied to key on, so drop it here
-        self.stash_voted(proposal_id);
-        self.pending_sigs.remove(&proposal_id);
-        self.proposal_changes.remove(&proposal_id);
+        self.forget_vote(proposal_id);
         // **H3 second half (total_review.md): broadcast only what is
         // durable.** The block stays appended and projected — the m
         // signatures are real, and the peers seal the byte-identical block
@@ -558,18 +581,7 @@ impl State {
             // adopt_committed_block; receivers find it by content). Local
             // block-dropping below `upto` is stage 4.
             ChainChange::Checkpoint { upto, .. } => {
-                let sealed = &block.change;
-                let ids: Vec<u64> = self
-                    .proposal_changes
-                    .iter()
-                    .filter(|(_, c)| *c == sealed)
-                    .map(|(id, _)| *id)
-                    .collect();
-                for id in ids {
-                    self.proposal_changes.remove(&id);
-                    self.stash_voted(id);
-                    self.pending_sigs.remove(&id);
-                }
+                self.forget_votes_for(&block.change);
                 // B-F2: drop the summarized history locally, automatically —
                 // the vote just confirmed this summary is correct. The blob
                 // becomes the holder's trust anchor; the chain keeps the
@@ -636,17 +648,7 @@ impl State {
                 surface: Surface::Organization,
             });
         }
-        let stale: Vec<u64> = self
-            .proposal_changes
-            .iter()
-            .filter(|(_, c)| *c == sealed)
-            .map(|(id, _)| *id)
-            .collect();
-        for id in stale {
-            self.proposal_changes.remove(&id);
-            self.stash_voted(id);
-            self.pending_sigs.remove(&id);
-        }
+        self.forget_votes_for(sealed);
     }
 
     /// Re-sign this node's standing approvals at the new head+1: an approval

@@ -485,9 +485,7 @@ impl State {
             if let Some(p) = self.proposals.get_mut(&id) {
                 p.state = ProposalState::Applied;
             }
-            self.stash_voted(id);
-            self.pending_sigs.remove(&id);
-            self.proposal_changes.remove(&id);
+            self.forget_vote(id);
             self.emit(Event::Applied {
                 id: ProposalId(id),
                 surface,
