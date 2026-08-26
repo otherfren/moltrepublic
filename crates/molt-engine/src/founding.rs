@@ -27,6 +27,7 @@ use molt_storage::SigningKey;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
+use crate::ritual_member::{run_member_ladder, MemberSeat, Phase, RitualLeg};
 use crate::{Envelope, State};
 
 /// How long a node waits for its peers' mesh announcements before giving up and
@@ -1400,33 +1401,7 @@ pub(crate) fn verify_seal_proposal(
     ))
 }
 
-/// What the member side produced: its anchored identity pk, and — when it
-/// waited for it (`collect_genesis`) — the sealed roster the founder
-/// distributed at the end, from which the member writes its **own** workspace.
-#[doc(hidden)]
-pub struct JoinOutcome {
-    /// The member's identity public key (what the founder anchored).
-    pub pk: String,
-    /// The member's derived Nostr transport secret (32-byte secp256k1
-    /// scalar — `molt_net::nostr_identity`, salted with this seat's ticket).
-    /// The ticket dies with the ritual, so this is NOT re-derivable later:
-    /// the caller must seal it into the member's `transport.state.nostr_sk`
-    /// beside `identity_sk`. `Zeroizing` — a caller that drops the outcome
-    /// (a failed join tail) wipes the scalar with it.
-    pub nostr_sk: zeroize::Zeroizing<Vec<u8>>,
-    /// The complete sealed roster, present only when `collect_genesis` was
-    /// set and the founder finished distributing it.
-    pub sealed: Option<molt_core::SealedRoster>,
-    /// The member's own MLS group snapshot after processing the Welcome (and,
-    /// if `bootstrap` ran, advancing the ratchet through its announcements) —
-    /// present only when `collect_genesis` was set and a Welcome arrived. The
-    /// caller seals it into the member's `transport.state`.
-    pub mls_snapshot: Option<Vec<u8>>,
-    /// The member's assembled runtime full-mesh handovers — present only when
-    /// `bootstrap` ran to completion. The caller seals them into
-    /// `transport.state.mesh` and builds the runtime supervisor.
-    pub mesh: Option<Vec<molt_core::MeshLink>>,
-}
+pub use crate::ritual_member::{JoinOutcome, Ratifier};
 
 /// Receive the next complete [`invite::RitualMsg`] on the member's reply
 /// queue (unwrap, reassemble); `cancel` ends the wait early.
@@ -1460,40 +1435,6 @@ async fn next_ritual_msg(
             return Ok(msg);
         }
     }
-}
-
-/// The member side of the founding ritual, as a standalone unit both the
-/// founder's simulated members and a real second instance run: derive the
-/// identity from `phrase`, activate the invite (`JoinRequest`, MAC-bound to
-/// the ticket), await the canonical table, sign it, and — when
-/// `collect_genesis` — wait for the founder to distribute the complete sealed
-/// roster (so the caller can write the member's own workspace). Simulated
-/// members pass `false`; a real joining node passes `true`.
-///
-/// `cancel` (if any) ends the wait early (ritual teardown). This is the exact
-/// code path a remote member's node will run once a real transport is back.
-/// The joiner's human **ratification gate**: `run_ritual_member` surfaces the
-/// founder's proposed charter (final name, agenda) on `proposal` and blocks on
-/// `confirm` before signing — signing *is* the ratification (concept §3.3).
-/// `None` on the non-interactive paths (the founder's sim members, the
-/// standalone CLI join), which sign as soon as the table verifies.
-#[doc(hidden)]
-pub struct Ratifier {
-    /// Fires once when the founder acknowledges the join (`JoinAccepted`) — the
-    /// joiner's wizard shows "you're in, waiting for the deliberation" instead of
-    /// a silent wait. Best-effort (capacity 1; a resend is dropped).
-    pub accepted: mpsc::Sender<()>,
-    /// The proposed `(final name, agenda, feature selection)` surfaced for
-    /// the human to review (`None` features = a pre-v5 founder).
-    pub proposal: mpsc::Sender<(String, String, Option<Vec<String>>)>,
-    /// The human's decision: `true` ratifies (sign); `false` or a closed
-    /// channel declines and aborts the join.
-    pub confirm: mpsc::Receiver<bool>,
-    /// The human's phrase-backup proof (`seed_backup_confirmation.md` ❻½),
-    /// AFTER ratifying: `true` releases the signed attestation; a closed
-    /// channel cancels the join. Sim/CLI paths (a `None` ratifier) attest
-    /// automatically.
-    pub backup: mpsc::Receiver<bool>,
 }
 
 /// Run the member side of the post-founding **mesh bootstrap** over the star:
@@ -1713,12 +1654,133 @@ pub(crate) fn member_identity_from_entropy(
     molt_storage::derive_identity_key(entropy, &member_id)
 }
 
-/// Run the **member side** of the founding ritual against the founder's
-/// transport: derive the member's own identity, build its MLS `KeyPackage`,
-/// activate the seat (ticket MAC), ratify the charter, and — when
+/// The loopback leg of the member ladder ([`crate::ritual_member`]): the
+/// member's reply queue on the founder's hub (subscribed BEFORE it is
+/// advertised, so the founder's table can never race ahead of the
+/// subscription — each party owns the queue it receives on) and the
+/// founder's invite queue for everything outbound. The private reply queue
+/// is the authenticator: only the founder holds its address and wrap key.
+struct LoopbackLeg<T: molt_net::Transport> {
+    transport: T,
+    invite_snd: SndQueueAddr,
+    invite_wrap: WrapKey,
+    reply_snd: SndQueueAddr,
+    reply_wrap: WrapKey,
+    /// The reply-queue reader; taken by the mesh bootstrap at the end.
+    rx: Option<mpsc::Receiver<Delivery>>,
+    reasm: molt_net::Reassembler,
+    cancel: Option<mpsc::Receiver<()>>,
+    name: String,
+    /// Outbound frame counter (the msg ids only need to be distinct).
+    seq: u64,
+    /// Run the post-founding mesh bootstrap after the genesis.
+    bootstrap: bool,
+}
+
+impl<T: molt_net::Transport> RitualLeg for LoopbackLeg<T> {
+    async fn next_msg(
+        &mut self,
+        _phase: Phase,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<invite::RitualMsg, String> {
+        let Some(rx) = self.rx.as_mut() else {
+            return Err("queue closed".to_string());
+        };
+        match deadline {
+            None => next_ritual_msg(rx, &mut self.cancel, &self.reply_wrap, &mut self.reasm).await,
+            Some(d) => match tokio::time::timeout_at(
+                d,
+                next_ritual_msg(rx, &mut self.cancel, &self.reply_wrap, &mut self.reasm),
+            )
+            .await
+            {
+                Ok(msg) => msg,
+                Err(_) => Err("the inviter did not answer - ask the founder for a fresh link".to_string()),
+            },
+        }
+    }
+
+    async fn send(&mut self, msg: &invite::RitualMsg) -> Result<(), String> {
+        let payload = serde_json::to_vec(msg).map_err(|e| e.to_string())?;
+        self.seq += 1;
+        supervisor::send_framed(
+            &self.transport,
+            &self.invite_snd,
+            &self.invite_wrap,
+            msg_id(&self.name, "founder", self.seq),
+            &payload,
+        )
+        .await
+        .map_err(|e| e.to_string())
+    }
+
+    fn reply_handover(&self) -> Option<invite::ReplyHandover> {
+        Some(invite::ReplyHandover {
+            server: self.reply_snd.server.clone(),
+            queue_id: hex::encode(&self.reply_snd.id.0),
+            wrap: hex::encode(self.reply_wrap.to_bytes()),
+        })
+    }
+
+    fn declared_relays(&self) -> Vec<String> {
+        // the loopback path has no relays to declare
+        Vec::new()
+    }
+
+    fn in_group(&self) -> bool {
+        // the Welcome rides the genesis; the ladder joins from it
+        false
+    }
+
+    async fn finish(
+        &mut self,
+        name: &str,
+        sealed: &molt_core::SealedRoster,
+        group: &Arc<Mutex<molt_net::MlsMember>>,
+        early: Vec<Vec<u8>>,
+    ) -> Option<Vec<molt_core::MeshLink>> {
+        if !self.bootstrap {
+            return None;
+        }
+        let rx = self.rx.take()?;
+        let reasm = std::mem::replace(&mut self.reasm, molt_net::Reassembler::new());
+        let peers: Vec<MemberId> = sealed.roster.iter().filter(|r| *r != name).cloned().collect();
+        // best-effort: a bootstrap that times out or errors still lets us
+        // enter, just without a direct mesh (the group is already in hand;
+        // the mesh can be re-established later)
+        match member_bootstrap(
+            name,
+            peers,
+            &self.transport,
+            self.invite_snd.clone(),
+            self.invite_wrap.clone(),
+            self.reply_wrap.clone(),
+            rx,
+            reasm,
+            early,
+            group.clone(),
+        )
+        .await
+        {
+            Ok(mesh) => Some(mesh),
+            Err(e) => {
+                tracing::warn!(error = %e, "mesh bootstrap did not complete; entering without a direct mesh");
+                None
+            }
+        }
+    }
+}
+
+/// Run the **member side** of the founding ritual over the loopback
+/// transport — the ONE ladder ([`crate::ritual_member::run_member_ladder`])
+/// on a [`LoopbackLeg`]: derive the member's own identity, build its MLS
+/// `KeyPackage`, activate the seat (ticket MAC), ratify the charter behind
+/// `ratify` (`None` = sign as soon as the table verifies), and — when
 /// `collect_genesis` is set — receive and verify the sealed roster + Welcome
-/// (optionally bootstrapping the post-founding mesh). Returns the member's
-/// [`JoinOutcome`]. The code path a genuinely separate node runs.
+/// (`bootstrap` = then assemble the post-founding mesh over the star).
+/// `cancel` (if any) ends any wait early (ritual teardown). Returns the
+/// member's [`JoinOutcome`]. The founder's simulated members and a genuinely
+/// separate test instance both run exactly this.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub async fn run_ritual_member<T: molt_net::Transport>(
@@ -1727,343 +1789,32 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
     phrase: String,
     collect_genesis: bool,
     bootstrap: bool,
-    mut ratify: Option<Ratifier>,
-    mut cancel: Option<mpsc::Receiver<()>>,
+    ratify: Option<Ratifier>,
+    cancel: Option<mpsc::Receiver<()>>,
 ) -> Result<JoinOutcome, String> {
-    // per-workspace identity, deterministic from the member's own phrase —
-    // a real, verifiable key the founder anchors on activation. The SAME
-    // derivation must be reproducible when the join finish materializes the
-    // workspace (so the chain signing key matches the anchored roster key) —
-    // hence the shared [`member_identity`] helper.
-    let entropy = molt_storage::seed_entropy(&phrase).map_err(|e| e.to_string())?;
-    let (sk, pk) = member_identity_from_entropy(&entropy);
-    // the third anchor: the Nostr transport key, salted with THIS seat's
-    // ticket (one key per republic — no cross-republic correlation handle).
-    // Derived once here; the pk is MAC-bound to the ticket, anchored by the
-    // founder, and re-checked at ratification (sign-what-you-see); the sk
-    // must survive the ritual via the JoinOutcome (the ticket dies with it).
-    // ONE wiped-on-drop carrier — the stack copy is zeroized immediately.
-    let (mut nostr_raw, nostr_pk) = molt_net::nostr_identity(&entropy, &m.ticket);
-    let nostr_sk = zeroize::Zeroizing::new(nostr_raw.to_vec());
-    zeroize::Zeroize::zeroize(&mut nostr_raw);
-
-    // the MLS member, built from the *same* identity key (concept §3.3: one
-    // identity anchors both the genesis table and the MLS credential). Its
-    // KeyPackage rides the JoinRequest; its provider must live until the
-    // Welcome is processed, then is snapshotted into transport.state.
-    let mut mls = molt_net::MlsMember::new(&sk, &name).map_err(|e| e.to_string())?;
-    let key_package = mls.key_package().map_err(|e| e.to_string())?;
-
-    // create the reply queue we (the member) receive the canonical table
-    // on, and subscribe *before* announcing it — so the founder's table can
-    // never race ahead of our subscription. Each party owns the queue it
-    // receives on; this is exactly that queue.
+    let seat = MemberSeat::derive(m.seat, &m.ticket, &phrase)?;
+    // subscribe BEFORE the JoinRequest advertises the queue
     let reply_q = m.transport.create_queue().await.map_err(|e| e.to_string())?;
     let reply_wrap = WrapKey::fresh().map_err(|e| e.to_string())?;
-    let mut rx = m
+    let rx = m
         .transport
         .subscribe(&reply_q.rcv)
         .await
         .map_err(|e| e.to_string())?;
-
-    // activate: JoinRequest, MAC-bound to the ticket, advertising our reply
-    // queue so the founder knows where to send the table
-    let join = invite::RitualMsg::Join(invite::JoinRequest {
-        seat: m.seat,
+    let mut leg = LoopbackLeg {
+        transport: m.transport,
+        invite_snd: m.invite_snd,
+        invite_wrap: m.invite_wrap,
+        reply_snd: reply_q.snd,
+        reply_wrap,
+        rx: Some(rx),
+        reasm: molt_net::Reassembler::new(),
+        cancel,
         name: name.clone(),
-        identity_pk: pk.clone(),
-        nostr_pk: nostr_pk.clone(),
-        mac: invite::join_mac(&m.ticket, &name, &pk, &nostr_pk),
-        reply: Some(invite::ReplyHandover {
-            server: reply_q.snd.server.clone(),
-            queue_id: hex::encode(&reply_q.snd.id.0),
-            wrap: hex::encode(reply_wrap.to_bytes()),
-        }),
-        key_package: hex::encode(&key_package),
-        // the loopback path has no relays to declare
-        relays: Vec::new(),
-    });
-    let payload = serde_json::to_vec(&join).map_err(|e| e.to_string())?;
-    supervisor::send_framed(
-        &m.transport,
-        &m.invite_snd,
-        &m.invite_wrap,
-        msg_id(&name, "founder", 1),
-        &payload,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-
-    // await the proposed constitution on our reply queue; the founder's
-    // JoinAccepted ack arrives first and gives the wizard early feedback.
-    // UNTIL that ack arrives, the wait has a hard deadline: a spent link
-    // used against a FINISHED/cancelled ritual is dropped silently on the
-    // founder side (stale generation), and an offline founder answers
-    // nothing — without the deadline the joiner hangs in "Contacting the
-    // inviter…" forever. AFTER the ack the wait is unbounded again: the
-    // charter deliberation is a human step and may take as long as it
-    // takes (and the wizard's × can cancel any time).
-    const ACCEPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
-    let accept_deadline = tokio::time::Instant::now() + ACCEPT_TIMEOUT;
-    let mut accepted = false;
-    let mut reasm = molt_net::Reassembler::new();
-    let proposal_json = loop {
-        let msg = if accepted {
-            next_ritual_msg(&mut rx, &mut cancel, &reply_wrap, &mut reasm).await?
-        } else {
-            match tokio::time::timeout_at(
-                accept_deadline,
-                next_ritual_msg(&mut rx, &mut cancel, &reply_wrap, &mut reasm),
-            )
-            .await
-            {
-                Ok(msg) => msg?,
-                Err(_) => {
-                    return Err(
-                        "the inviter did not answer - ask the founder for a fresh link"
-                            .to_string(),
-                    );
-                }
-            }
-        };
-        match msg {
-            invite::RitualMsg::JoinAccepted { .. } => {
-                accepted = true;
-                if let Some(r) = ratify.as_ref() {
-                    let _ = r.accepted.try_send(());
-                }
-            }
-            // the founder rejected this activation: the single-use ticket was
-            // already spent by another member (the same link went to two
-            // people). Fail fast with the reason — the joiner needs their
-            // own, unused link.
-            invite::RitualMsg::LinkSpent { .. } => {
-                return Err(
-                    "this invite link was already used by another member - ask the \
-                     founder for a fresh one"
-                        .to_string(),
-                );
-            }
-            invite::RitualMsg::Seal { proposal } => break proposal,
-            _ => {}
-        }
+        seq: 0,
+        bootstrap,
     };
-    let proposal: molt_core::SealedRoster =
-        serde_json::from_str(&proposal_json).map_err(|e| e.to_string())?;
-    // verify what we are about to ratify BEFORE we sign, and recompute the exact
-    // bytes to sign from the shown proposal — so what we sign provably equals
-    // the name + agenda + roster we ratify (including OUR derived nostr
-    // anchor: a split third anchor is rejected before we sign)
-    let table = verify_seal_proposal(&proposal, &name, &pk, &nostr_pk)?;
-    // human ratification gate: surface the charter and wait for the confirm
-    // before signing. The non-interactive paths (sim members, CLI) pass None
-    // and ratify once the proposal verified.
-    if let Some(r) = ratify.as_mut() {
-        let _ = r
-            .proposal
-            .send((
-                proposal.name.clone(),
-                proposal.agenda.clone(),
-                proposal.features.clone(),
-            ))
-            .await;
-        match r.confirm.recv().await {
-            Some(true) => {}
-            Some(false) => {
-                // explicit decline: tell the founder so its seat shows declined
-                // (a silent abandon — None below — the founder just sees stale)
-                let declined = invite::RitualMsg::Declined { seat: m.seat };
-                if let Ok(payload) = serde_json::to_vec(&declined) {
-                    let _ = supervisor::send_framed(
-                        &m.transport,
-                        &m.invite_snd,
-                        &m.invite_wrap,
-                        msg_id(&name, "founder", 3),
-                        &payload,
-                    )
-                    .await;
-                }
-                return Err("the charter was declined".to_string());
-            }
-            None => return Err("the ritual was cancelled".to_string()),
-        }
-    }
-    let sig = molt_storage::identity_sign(&sk, &table);
-    let signed = invite::RitualMsg::Signed(invite::SealSigned { seat: m.seat, sig });
-    let out = serde_json::to_vec(&signed).map_err(|e| e.to_string())?;
-    supervisor::send_framed(
-        &m.transport,
-        &m.invite_snd,
-        &m.invite_wrap,
-        msg_id(&name, "founder", 2),
-        &out,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-
-    // ❻½ (seed_backup_confirmation.md): the phrase-backup round. The
-    // interactive path waits for the HUMAN's re-typed proof before the
-    // attestation goes out — and, defensively, a Genesis arriving DURING
-    // that wait is a founder that sealed without us (protocol violation:
-    // an honest founder cannot reach ❼ before our confirmation). The
-    // non-interactive paths (sim members, CLI) attest right away, exactly
-    // as they auto-ratify. A `MeshAnnounce` racing in here is buffered
-    // like in the genesis wait below.
-    let mut early_mesh: Vec<Vec<u8>> = Vec::new();
-    if let Some(r) = ratify.as_mut() {
-        loop {
-            tokio::select! {
-                confirmed = r.backup.recv() => match confirmed {
-                    Some(true) => break,
-                    _ => return Err("the ritual was cancelled before the backup confirmation".to_string()),
-                },
-                msg = next_ritual_msg(&mut rx, &mut cancel, &reply_wrap, &mut reasm) => match msg? {
-                    invite::RitualMsg::Genesis { .. } => {
-                        return Err(
-                            "the founder sealed before our backup confirmation - protocol violation"
-                                .to_string(),
-                        );
-                    }
-                    invite::RitualMsg::Aborted { reason } => {
-                        return Err(format!("the founding was aborted: {reason}"));
-                    }
-                    invite::RitualMsg::MeshAnnounce { ct } => {
-                        if let Ok(b) = hex::decode(&ct) {
-                            early_mesh.push(b);
-                        }
-                    }
-                    _ => {}
-                },
-            }
-        }
-    }
-    let att = molt_storage::backup_confirm_bytes(&table);
-    let att_sig = molt_storage::identity_sign(&sk, &att);
-    let confirmed = invite::RitualMsg::BackupConfirmed { seat: m.seat, sig: att_sig };
-    let out = serde_json::to_vec(&confirmed).map_err(|e| e.to_string())?;
-    supervisor::send_framed(
-        &m.transport,
-        &m.invite_snd,
-        &m.invite_wrap,
-        msg_id(&name, "founder", 4),
-        &out,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-
-    if !collect_genesis {
-        // sim members stop at their attestation; their KeyPackage still
-        // joined the founder's group, they just never process the Welcome
-        return Ok(JoinOutcome {
-            pk,
-            nostr_sk,
-            sealed: None,
-            mls_snapshot: None,
-            mesh: None,
-        });
-    }
-
-    // wait for the founder to distribute the complete sealed roster + the MLS
-    // Welcome once every seat has signed — this is what lets us write our own
-    // workspace and enter the group. A `MeshAnnounce` that races ahead of the
-    // genesis (the founder starts its bootstrap right after distributing) is
-    // *buffered* here, not dropped, so the member's own bootstrap still sees it.
-    loop {
-        match next_ritual_msg(&mut rx, &mut cancel, &reply_wrap, &mut reasm).await? {
-            invite::RitualMsg::MeshAnnounce { ct } => {
-                if let Ok(b) = hex::decode(&ct) {
-                    early_mesh.push(b);
-                }
-            }
-            invite::RitualMsg::Genesis { sealed, welcome } => {
-                let sealed: molt_core::SealedRoster =
-                    serde_json::from_str(&sealed).map_err(|e| e.to_string())?;
-                // sign-what-you-see closes at the GENESIS: the roster we
-                // MATERIALIZE must be byte-identically the table we RATIFIED.
-                // verify_seal_proposal re-runs the full checks over the
-                // DISTRIBUTED roster (content-derived id, our 3-anchor seat,
-                // every seat's anchor format) and returns its canonical
-                // bytes, which must equal the exact bytes we signed. Without
-                // this, a founder could run the ritual honestly through
-                // ratification and then seal a DIFFERENT, fully
-                // self-consistent table (e.g. our seat swapped to attacker
-                // keys, all n attestations self-signed) — verify_sealed_roster
-                // alone cannot catch that, it has no memory of the proposal.
-                let sealed_table = verify_seal_proposal(&sealed, &name, &pk, &nostr_pk)
-                    .map_err(|e| format!("distributed sealed roster rejected: {e}"))?;
-                if sealed_table != table {
-                    return Err(
-                        "the sealed roster is not the table we ratified - the founder \
-                         distributed a different constitution"
-                            .to_string(),
-                    );
-                }
-                // a founding without a Welcome (pre-MLS peer) leaves us groupless
-                if welcome.is_empty() {
-                    return Ok(JoinOutcome {
-                        pk,
-                        nostr_sk,
-                        sealed: Some(sealed),
-                        mls_snapshot: None,
-                        mesh: None,
-                    });
-                }
-                let bytes = hex::decode(&welcome).map_err(|e| e.to_string())?;
-                mls.join_from_welcome(&bytes).map_err(|e| e.to_string())?;
-                // opt-in: bootstrap the runtime mesh over the star, then snapshot
-                // the group AFTER (its ratchet advanced through the announcements)
-                if bootstrap {
-                    let peers: Vec<MemberId> =
-                        sealed.roster.iter().filter(|r| **r != name).cloned().collect();
-                    let mls_arc = Arc::new(Mutex::new(mls));
-                    // best-effort: a bootstrap that times out or errors still lets
-                    // us enter, just without a direct mesh (the group is already
-                    // in hand; the mesh can be re-established later)
-                    let mesh = match member_bootstrap(
-                        &name,
-                        peers,
-                        &m.transport,
-                        m.invite_snd.clone(),
-                        m.invite_wrap.clone(),
-                        reply_wrap.clone(),
-                        rx,
-                        reasm,
-                        early_mesh,
-                        mls_arc.clone(),
-                    )
-                    .await
-                    {
-                        Ok(mesh) => Some(mesh),
-                        Err(e) => {
-                            tracing::warn!(error = %e, "mesh bootstrap did not complete; entering without a direct mesh");
-                            None
-                        }
-                    };
-                    let snap = mls_arc
-                        .lock()
-                        .map_err(|_| "mls lock poisoned".to_string())?
-                        .snapshot()
-                        .map_err(|e| e.to_string())?;
-                    return Ok(JoinOutcome {
-                        pk,
-                        nostr_sk,
-                        sealed: Some(sealed),
-                        mls_snapshot: Some(snap),
-                        mesh,
-                    });
-                }
-                let snap = mls.snapshot().map_err(|e| e.to_string())?;
-                return Ok(JoinOutcome {
-                    pk,
-                    nostr_sk,
-                    sealed: Some(sealed),
-                    mls_snapshot: Some(snap),
-                    mesh: None,
-                });
-            }
-            _ => {}
-        }
-    }
+    run_member_ladder(&mut leg, &name, seat, ratify, collect_genesis).await
 }
 
 /// A simulated member (offline **test seam** only): a real

@@ -23,12 +23,9 @@ use molt_net::invite::{self, RitualMsg};
 use molt_net::ritual_net::{GroupChannel, RitualDelivery, RitualNet};
 use tokio::sync::mpsc;
 
+use crate::ritual_member::{run_member_ladder, MemberSeat, Phase, Ratify, RitualLeg};
 use crate::Envelope;
 
-/// How long the joiner waits for the founder's `JoinAccepted` (mirrors the
-/// loopback ritual's 90 s accept deadline; after the ack the waits are
-/// unbounded — human deliberation upstream).
-const ACCEPT_TIMEOUT: Duration = Duration::from_secs(90);
 /// Long-poll slice for the unbounded waits — short enough that an aborted
 /// task dies promptly, long enough to stay quiet.
 const RECV_SLICE: Duration = Duration::from_secs(30);
@@ -613,35 +610,6 @@ fn open_group_frame(
     }
 }
 
-/// What an inbound 445 ritual frame is, relative to the founder named in
-/// the invite link. Three-valued on purpose: "someone else published this"
-/// and "the founder published something wrong" must NOT be handled the
-/// same way — see [`check_proposal_provenance`].
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Provenance {
-    /// The founder's frame, describing the republic the link promised.
-    FromFounder,
-    /// Published by another member of the group. IGNORE it — never fail the
-    /// join, or any invitee could abort every other invitee's join at will.
-    NotTheFounder,
-    /// The FOUNDER sent something inconsistent with the invite. A real
-    /// failure the joiner must surface rather than sign.
-    Refused(String),
-}
-
-/// **The 445 proposer binding** (review 2026-08-01, CRITICAL).
-///
-/// On the loopback path `Seal`/`Genesis` arrived on the member's OWN reply
-/// queue, wrapped under a key it minted and handed only to the founder in
-/// its MAC-bound JoinRequest — the CHANNEL was the proposer authentication,
-/// so no code ever had to check it. The kind-445 group channel is shared by
-/// every welcomed seat, so that binding vanished in the fork and has to be
-/// re-established explicitly here.
-///
-/// `from` is the MLS-authenticated leaf credential — the handle the sender
-/// passed to `MlsMember::new`, which the founder set to its own member name.
-/// Everything else is cross-checked against what the LINK promised, because
-/// the link is the joiner's root of trust for "whose founding is this".
 /// Is this 445 frame from the FOUNDER?
 ///
 /// `from` is the MLS-authenticated credential of the frame's author, so this
@@ -653,17 +621,27 @@ pub(crate) fn frame_is_from_founder(from: &str, info: &molt_core::InviteInfo) ->
     from == info.inviter
 }
 
-pub(crate) fn check_proposal_provenance(
-    from: &str,
+/// **The 445 proposer binding** (review 2026-08-01, CRITICAL), second half.
+///
+/// On the loopback path `Seal`/`Genesis` arrive on the member's OWN reply
+/// queue, wrapped under a key it minted and handed only to the founder in
+/// its MAC-bound JoinRequest — the CHANNEL is the proposer authentication,
+/// so no code ever has to check it. The kind-445 group channel is shared by
+/// every welcomed seat, so that binding has to be re-established explicitly:
+/// [`frame_is_from_founder`] gates the AUTHOR (a co-member's frame is
+/// ignored, never fatal — or any invitee could abort every other invitee's
+/// join at will), and this check pins a founder-authored proposal to what
+/// the invite LINK promised — the rule, and the founder's own seat under the
+/// anchor the link named — because the link is the joiner's root of trust
+/// for "whose founding is this". An `Err` is a real failure the joiner must
+/// surface rather than sign.
+pub(crate) fn check_proposal_against_link(
     proposal: &molt_core::SealedRoster,
     founder_npub: &str,
     info: &molt_core::InviteInfo,
-) -> Provenance {
-    if !frame_is_from_founder(from, info) {
-        return Provenance::NotTheFounder;
-    }
+) -> Result<(), String> {
     if proposal.rule_m != info.threshold || proposal.rule_n != info.members {
-        return Provenance::Refused(format!(
+        return Err(format!(
             "the proposed republic is {}-of-{}, but the invite promised {}-of-{}",
             proposal.rule_m, proposal.rule_n, info.threshold, info.members
         ));
@@ -673,18 +651,16 @@ pub(crate) fn check_proposal_provenance(
         .iter()
         .find(|i| i.member == info.inviter)
     else {
-        return Provenance::Refused(
-            "the proposed roster does not seat the founder who invited us".to_string(),
-        );
+        return Err("the proposed roster does not seat the founder who invited us".to_string());
     };
     if founder_seat.nostr_pk != founder_npub {
-        return Provenance::Refused(
+        return Err(
             "the founder's seat carries a transport key other than the one the \
              invite link named"
                 .to_string(),
         );
     }
-    Provenance::FromFounder
+    Ok(())
 }
 
 /// The founder's 445 recv: `Signed`/`Declined` come back over the freshly
@@ -1232,43 +1208,309 @@ pub(crate) fn spawn_member_join(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let generation = Some(ctx.generation);
-        let mut confirm = confirm;
-        let mut backup = backup;
-        if let Err(error) = member_join(dialer, ctx, &mut confirm, &mut backup, &tx).await {
+        if let Err(error) = member_join(dialer, ctx, confirm, backup, &tx).await {
             let _ = send_cmd(&tx, Command::NetJoinFailed { error, generation }).await;
         }
     })
 }
 
-/// The member state machine over Nostr — the §4.2 restructured order:
-/// JoinRequest (gift-wrap) → JoinAccepted → **Welcome before deliberation**
-/// (payload v2: MLS Welcome + rotation seed + relays) → group 445s for
-/// Seal → ratify → Signed → Genesis, with the SAME verification ladder as
-/// the loopback ritual: `verify_seal_proposal` before signing, and the
-/// genesis-time byte comparison against the exact ratified table.
+/// The Nostr leg of the member ladder ([`crate::ritual_member`]) — the §4.2
+/// restructured order: JoinRequest (gift-wrap) → JoinAccepted →
+/// **Welcome before deliberation** (payload v2: MLS Welcome, rotation seed,
+/// relays) → the group 445s carry Seal → Signed → BackupConfirmed → Genesis.
+///
+/// The leg authenticates every message before the ladder sees it: the
+/// NIP-59 wrap sealer on the 1059 inbox, the MLS leaf credential on the 445
+/// channel (`frame_is_from_founder`) — a co-member's frame is dropped, never
+/// fatal (one garbage frame must not abort every other seat's join).
+struct NostrLeg {
+    net: RitualNet,
+    inbox: molt_net::ritual_net::RitualInbox,
+    dialer: molt_net::dial::Dialer,
+    /// What we DIAL (our confirmed subset) — deliberately different from
+    /// the invite's full list, which the GROUP uses.
+    dial_relays: Vec<String>,
+    founder_npub: String,
+    invite_relays: Vec<String>,
+    info: molt_core::InviteInfo,
+    seat: u32,
+    tx: mpsc::WeakSender<Envelope>,
+    generation: Option<u64>,
+    /// The ladder's MLS member, attached before the JoinRequest.
+    group: Option<Arc<Mutex<molt_net::MlsMember>>>,
+    /// The 445 channel + subscription, from the Welcome on.
+    chan: Option<(GroupChannel, molt_net::ritual_net::GroupSub)>,
+    rotation_seed: Option<[u8; 32]>,
+    was_deaf: bool,
+    /// A note that must not be awaited while a frame is in hand (the
+    /// ladder selects on `next_msg`): flushed at the next call.
+    pending_note: Option<String>,
+    /// The genesis wait's clock: `(since, last noted rung)`.
+    genesis_wait: Option<(tokio::time::Instant, u64)>,
+}
+
+impl NostrLeg {
+    async fn note(&self, note: String) {
+        let _ = send_cmd(
+            &self.tx,
+            Command::NetJoinNote {
+                note,
+                generation: self.generation,
+            },
+        )
+        .await;
+    }
+
+    /// The Welcome: relay honesty, join the group, stand the 445
+    /// subscription up (readable-gated — a never-readable subscription would
+    /// hang the Seal wait forever in silence).
+    async fn join_group(&mut self, payload: molt_net::welcome::WelcomePayload) -> Result<(), String> {
+        // the joiner gated the INVITE relays through its own pool
+        // (ADR-0004); a Welcome silently pointing elsewhere would bypass
+        // that consent. At founding the two sets are the same by
+        // construction; a mismatch is a broken or malicious founder.
+        if payload.relays != self.invite_relays {
+            return Err(
+                "the Welcome names a different relay set than the invite - refused".to_string(),
+            );
+        }
+        let group = self
+            .group
+            .as_ref()
+            .ok_or_else(|| "no group attached".to_string())?;
+        group
+            .lock()
+            .map_err(|_| "mls lock poisoned".to_string())?
+            .join_from_welcome(&payload.welcome)
+            .map_err(|e| format!("mls welcome: {e}"))?;
+        let chan = GroupChannel::new(
+            self.dialer.clone(),
+            self.dial_relays.clone(),
+            payload.rotation_seed,
+        );
+        let mut sub = chan
+            .subscribe()
+            .await
+            .map_err(|e| format!("group subscribe: {e}"))?;
+        let st = sub.live_state(LIVE_WAIT).await;
+        if !st.any() {
+            return Err("the group channel is not readable on any relay".to_string());
+        }
+        self.rotation_seed = Some(payload.rotation_seed);
+        self.chan = Some((chan, sub));
+        Ok(())
+    }
+}
+
+impl RitualLeg for NostrLeg {
+    async fn next_msg(
+        &mut self,
+        phase: Phase,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<RitualMsg, String> {
+        if let Some(note) = self.pending_note.take() {
+            self.note(note).await;
+        }
+        loop {
+            if self.chan.is_none() {
+                // the 1059 inbox: the founder's ack, refusal, abort — or the
+                // Welcome, which moves us onto the group channel
+                let budget = match deadline {
+                    Some(d) => {
+                        let now = tokio::time::Instant::now();
+                        if now >= d {
+                            return Err(
+                                "the founder did not accept within 90 s - check the link and the relays"
+                                    .to_string(),
+                            );
+                        }
+                        d - now
+                    }
+                    None => RECV_SLICE,
+                };
+                match self.inbox.recv(budget).await {
+                    Some(RitualDelivery::Msg(msg, sender)) if sender == self.founder_npub => {
+                        return Ok(msg);
+                    }
+                    // a fast founder's Welcome may overtake the advisory
+                    // ack; it counts as acceptance
+                    Some(RitualDelivery::Welcome(p, sender)) if sender == self.founder_npub => {
+                        self.join_group(p).await?;
+                        return Ok(RitualMsg::JoinAccepted { seat: self.seat });
+                    }
+                    _ => continue,
+                }
+            }
+            let Some((_, sub)) = self.chan.as_mut() else {
+                continue;
+            };
+            let (content, created_at) = match sub.recv(RECV_SLICE).await {
+                molt_net::ritual_net::GroupRecv::Frame { content, created_at } => {
+                    if self.was_deaf {
+                        self.was_deaf = false;
+                        self.pending_note = Some("✓ the group channel is back".to_string());
+                    }
+                    (content, created_at)
+                }
+                molt_net::ritual_net::GroupRecv::Idle => {
+                    // the genesis wait is deliberately UNBOUNDED (every seat
+                    // must ratify, and a founder finishing a human
+                    // deliberation is not a failure) — but silence and
+                    // progress must not look identical, so the wait says how
+                    // long it has been waiting
+                    if phase == Phase::Genesis {
+                        let (since, noted) = self
+                            .genesis_wait
+                            .get_or_insert_with(|| (tokio::time::Instant::now(), 0));
+                        if let Some(next) = genesis_wait_note(since.elapsed().as_secs(), *noted) {
+                            *noted = next;
+                            self.note(format!(
+                                "⧗ waiting for the genesis · {}",
+                                elapsed_label(next)
+                            ))
+                            .await;
+                        }
+                    }
+                    continue;
+                }
+                // loud, never fatal — the join keeps waiting, visibly
+                molt_net::ritual_net::GroupRecv::Deaf(why) => {
+                    self.was_deaf = true;
+                    self.note(format!(
+                        "⚠ cannot hear the group channel - {why} · still retrying"
+                    ))
+                    .await;
+                    continue;
+                }
+            };
+            let Some(group) = self.group.as_ref() else {
+                continue;
+            };
+            let Some((msg, from)) = open_group_frame(group, &content, created_at) else {
+                continue;
+            };
+            // the MLS-authenticated author is the whole gate: an ungated
+            // arm would let any welcomed seat abort every other seat's join
+            // (or propose a charter) with one frame
+            if !frame_is_from_founder(&from, &self.info) {
+                tracing::warn!(%from, "group frame from a co-member on the ritual path - ignored");
+                continue;
+            }
+            return Ok(msg);
+        }
+    }
+
+    async fn send(&mut self, msg: &RitualMsg) -> Result<(), String> {
+        match (&self.chan, &self.group) {
+            // inside the group: a 445 frame
+            (Some((chan, _)), Some(group)) => publish_frame_now(chan, group, msg).await.map(|_| ()),
+            // before the Welcome: a gift wrap to the founder's anchor
+            _ => self
+                .net
+                .send_ritual(&self.founder_npub, msg)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+        }
+    }
+
+    fn reply_handover(&self) -> Option<invite::ReplyHandover> {
+        // the reply address IS the MAC-bound nostr anchor
+        None
+    }
+
+    fn declared_relays(&self) -> Vec<String> {
+        // what this joiner actually dials — the founder's log names any
+        // pool relay missing from it
+        self.dial_relays.clone()
+    }
+
+    fn attach_group(&mut self, group: Arc<Mutex<molt_net::MlsMember>>) {
+        self.group = Some(group);
+    }
+
+    fn in_group(&self) -> bool {
+        self.chan.is_some()
+    }
+
+    fn vet_proposal(&self, proposal: &molt_core::SealedRoster) -> Result<(), String> {
+        check_proposal_against_link(proposal, &self.founder_npub, &self.info)
+    }
+
+    async fn finish(
+        &mut self,
+        _name: &str,
+        _sealed: &molt_core::SealedRoster,
+        _group: &Arc<Mutex<molt_net::MlsMember>>,
+        _early: Vec<Vec<u8>>,
+    ) -> Option<Vec<molt_core::MeshLink>> {
+        // no mesh over relays — the 445 runtime is the group's transport
+        None
+    }
+}
+
+/// The production human gate: the ladder's steps surface as engine
+/// commands (the wizard renders them), the answers arrive on the channels
+/// `cmd_join_confirm_charter` / `cmd_confirm_seed_backup` release.
+struct CommandGate {
+    tx: mpsc::WeakSender<Envelope>,
+    generation: Option<u64>,
+    confirm: mpsc::Receiver<bool>,
+    backup: mpsc::Receiver<bool>,
+}
+
+impl Ratify for CommandGate {
+    async fn accepted(&mut self) {
+        let _ = send_cmd(
+            &self.tx,
+            Command::NetJoinAccepted {
+                generation: self.generation,
+            },
+        )
+        .await;
+    }
+
+    async fn propose(&mut self, name: &str, agenda: &str, features: Option<&[String]>) {
+        let _ = send_cmd(
+            &self.tx,
+            Command::NetJoinCharterProposed {
+                name: name.to_string(),
+                agenda: agenda.to_string(),
+                features: features.map(<[String]>::to_vec),
+                generation: self.generation,
+            },
+        )
+        .await;
+    }
+
+    async fn confirm(&mut self) -> Option<bool> {
+        self.confirm.recv().await
+    }
+
+    async fn backup(&mut self) -> Option<bool> {
+        self.backup.recv().await
+    }
+}
+
+/// The member join over Nostr: derive the seat, stand the endpoint + inbox
+/// up (readable-gated, subscribe-before-advertise), then run the ONE member
+/// ladder on the [`NostrLeg`] and report the sealed result.
 async fn member_join(
     dialer: molt_net::dial::Dialer,
     ctx: JoinCtx,
-    confirm: &mut mpsc::Receiver<bool>,
-    backup: &mut mpsc::Receiver<bool>,
+    confirm: mpsc::Receiver<bool>,
+    backup: mpsc::Receiver<bool>,
     tx: &mpsc::WeakSender<Envelope>,
 ) -> Result<(), String> {
     let h = ctx.invite.handover;
-    let seat = h.seat;
     let generation = Some(ctx.generation);
-    // what we DIAL (our confirmed subset) vs what the GROUP uses (the
-    // invite's full list) — the two are deliberately different
     let dial_relays = ctx.dial_relays;
 
     // the joiner's identity — derived exactly as the ritual anchors it
-    let (sk, pk) = crate::founding::member_identity(&ctx.phrase)?;
-    let entropy = molt_storage::seed_entropy(&ctx.phrase).map_err(|e| e.to_string())?;
-    let (mut nostr_raw, nostr_pk) = molt_net::nostr_identity(&entropy, &h.ticket);
-    let nostr_sk = zeroize::Zeroizing::new(nostr_raw.to_vec());
-    zeroize::Zeroize::zeroize(&mut nostr_raw);
+    let seat = MemberSeat::derive(h.seat, &h.ticket, &ctx.phrase)?;
 
     // endpoint + inbox BEFORE announcing (subscribe-before-advertise)
-    let net = RitualNet::new(dialer.clone(), dial_relays.clone(), &nostr_sk)
+    let net = RitualNet::new(dialer.clone(), dial_relays.clone(), &seat.nostr_sk)
         .map_err(|e| format!("transport keys: {e}"))?;
     let mut inbox = net
         .inbox()
@@ -1278,359 +1520,52 @@ async fn member_join(
     // reply lands nowhere and the join hangs with no reason
     let st = inbox.live_state(LIVE_WAIT).await;
     if !st.any() {
-        return Err(
-            "the join inbox is not readable on any relay".to_string(),
-        );
+        return Err("the join inbox is not readable on any relay".to_string());
     }
 
-    // MLS identity + KeyPackage, then the MAC-bound JoinRequest to the
-    // founder's anchor
-    let mut mls =
-        molt_net::MlsMember::new(&sk, &ctx.member).map_err(|e| format!("mls identity: {e}"))?;
-    let kp = mls.key_package().map_err(|e| format!("key package: {e}"))?;
-    let mac = invite::join_mac(&h.ticket, &ctx.member, &pk, &nostr_pk);
-    net.send_ritual(
-        &h.npub,
-        &RitualMsg::Join(invite::JoinRequest {
-            seat,
-            name: ctx.member.clone(),
-            identity_pk: pk.clone(),
-            nostr_pk: nostr_pk.clone(),
-            mac,
-            reply: None,
-            key_package: hex::encode(&kp),
-            // what this joiner actually dials — the founder's log names any
-            // pool relay missing from it
-            relays: dial_relays.clone(),
-        }),
-    )
-    .await
-    .map_err(|e| format!("join request: {e}"))?;
-
-    // accept wait (90 s) — a fast founder's Welcome may overtake the
-    // advisory ack; both count as acceptance
-    let deadline = tokio::time::Instant::now() + ACCEPT_TIMEOUT;
-    let mut welcome: Option<molt_net::welcome::WelcomePayload> = None;
-    loop {
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            return Err(
-                "the founder did not accept within 90 s - check the link and the relays"
-                    .to_string(),
-            );
-        }
-        match inbox.recv(deadline - now).await {
-            Some(RitualDelivery::Msg(RitualMsg::JoinAccepted { .. }, sender))
-                if sender == h.npub =>
-            {
-                let _ = send_cmd(tx, Command::NetJoinAccepted { generation }).await;
-                break;
-            }
-            Some(RitualDelivery::Msg(RitualMsg::LinkSpent { reason, .. }, sender))
-                if sender == h.npub =>
-            {
-                // the founder's OWN words: "ask for your own link" is wrong
-                // advice when the group already formed around a first attempt
-                return Err(if reason.is_empty() {
-                    "this invite link was already used by someone else - ask the founder \
-                     for a fresh one"
-                        .to_string()
-                } else {
-                    format!("the founder refused this activation: {reason}")
-                });
-            }
-            // the founder gave up: stop waiting instead of sitting here until
-            // the accept deadline with no idea why
-            Some(RitualDelivery::Msg(RitualMsg::Aborted { reason }, sender))
-                if sender == h.npub =>
-            {
-                return Err(format!("the founder ended this founding: {reason}"));
-            }
-            Some(RitualDelivery::Welcome(p, sender)) if sender == h.npub => {
-                let _ = send_cmd(tx, Command::NetJoinAccepted { generation }).await;
-                welcome = Some(p);
-                break;
-            }
-            _ => continue,
-        }
-    }
-
-    // Welcome wait (unbounded — the founder waits for every seat)
-    let payload = match welcome {
-        Some(p) => p,
-        None => loop {
-            match inbox.recv(RECV_SLICE).await {
-                Some(RitualDelivery::Welcome(p, sender)) if sender == h.npub => break p,
-                Some(RitualDelivery::Msg(RitualMsg::LinkSpent { reason, .. }, sender))
-                    if sender == h.npub =>
-                {
-                    return Err(if reason.is_empty() {
-                        "the founder voided this seat - the link was re-used".to_string()
-                    } else {
-                        format!("the founder voided this seat: {reason}")
-                    });
-                }
-                // …the same, in the wait that really is unbounded
-                Some(RitualDelivery::Msg(RitualMsg::Aborted { reason }, sender))
-                    if sender == h.npub =>
-                {
-                    return Err(format!("the founder ended this founding: {reason}"));
-                }
-                _ => continue,
-            }
-        },
+    let mut leg = NostrLeg {
+        net,
+        inbox,
+        dialer,
+        dial_relays,
+        founder_npub: h.npub,
+        invite_relays: h.relays,
+        info: ctx.invite.info,
+        seat: h.seat,
+        tx: tx.clone(),
+        generation,
+        group: None,
+        chan: None,
+        rotation_seed: None,
+        was_deaf: false,
+        pending_note: None,
+        genesis_wait: None,
     };
-    // relay honesty: the joiner gated the INVITE relays through its own
-    // pool (ADR-0004); a Welcome silently pointing elsewhere would bypass
-    // that consent. At founding the two sets are the same by construction;
-    // a mismatch is a broken or malicious founder.
-    if payload.relays != h.relays {
-        return Err(
-            "the Welcome names a different relay set than the invite - refused".to_string(),
-        );
-    }
-    mls.join_from_welcome(&payload.welcome)
-        .map_err(|e| format!("mls welcome: {e}"))?;
-    let group = Arc::new(Mutex::new(mls));
-    let chan = GroupChannel::new(dialer, dial_relays.clone(), payload.rotation_seed);
-    let mut sub = chan
-        .subscribe()
-        .await
-        .map_err(|e| format!("group subscribe: {e}"))?;
-    // …and the same before the Seal wait, which is unbounded: a
-    // never-readable 445 subscription would hang the join forever in silence
-    let st = sub.live_state(LIVE_WAIT).await;
-    if !st.any() {
-        return Err(
-            "the group channel is not readable on any relay".to_string(),
-        );
-    }
-
-    let mut was_deaf = false;
-    // Seal wait: the founder's charter proposal as a 445 in the born group.
-    // verify_seal_proposal is THE ladder (content-derived id, our 3-anchor
-    // seat, every seat's anchor) — sign-what-you-see, unchanged.
-    let (proposal, table) = loop {
-        let (content, created_at) = match sub.recv(RECV_SLICE).await {
-            molt_net::ritual_net::GroupRecv::Frame { content, created_at } => {
-                if was_deaf {
-                    was_deaf = false;
-                    let _ = send_cmd(
-                        tx,
-                        Command::NetJoinNote {
-                            note: "✓ the group channel is back".to_string(),
-                            generation,
-                        },
-                    )
-                    .await;
-                }
-                (content, created_at)
-            }
-            molt_net::ritual_net::GroupRecv::Idle => continue,
-            // loud, never fatal — the join keeps waiting, visibly
-            molt_net::ritual_net::GroupRecv::Deaf(why) => {
-                was_deaf = true;
-                let _ = send_cmd(
-                    tx,
-                    Command::NetJoinNote {
-                        note: format!("⚠ cannot hear the group channel - {why} · still retrying"),
-                        generation,
-                    },
-                )
-                .await;
-                continue;
-            }
-        };
-        let Some((msg, from)) = open_group_frame(&group, &content, created_at) else {
-            continue;
-        };
-        // the founder gave up after the group was born: end the wait rather
-        // than loop forever. Gated on the authenticated author for the same
-        // reason the Seal is — an ungated abort is a one-frame kill switch
-        // any welcomed seat could pull on every other seat.
-        if let RitualMsg::Aborted { reason } = &msg {
-            if frame_is_from_founder(&from, &ctx.invite.info) {
-                return Err(format!("the founder ended this founding: {reason}"));
-            }
-            tracing::warn!(%from, "abort frame from a co-member - ignored");
-            continue;
-        }
-        if let RitualMsg::Seal { proposal } = msg {
-            // a frame from a co-member is IGNORED, never fatal: parsing or
-            // verifying it before the author check would let any invitee
-            // abort every other invitee's join with one garbage frame
-            let Ok(sealed) = serde_json::from_str::<molt_core::SealedRoster>(&proposal) else {
-                tracing::debug!(%from, "unparseable seal on the group channel - ignored");
-                continue;
-            };
-            match check_proposal_provenance(&from, &sealed, &h.npub, &ctx.invite.info) {
-                Provenance::NotTheFounder => {
-                    tracing::warn!(
-                        %from,
-                        "a group member other than the founder proposed a charter - ignored"
-                    );
-                    continue;
-                }
-                Provenance::Refused(why) => return Err(format!("seal proposal rejected: {why}")),
-                Provenance::FromFounder => {}
-            }
-            let table =
-                crate::founding::verify_seal_proposal(&sealed, &ctx.member, &pk, &nostr_pk)
-                    .map_err(|e| format!("seal proposal rejected: {e}"))?;
-            break (sealed, table);
-        }
+    let gate = CommandGate {
+        tx: tx.clone(),
+        generation,
+        confirm,
+        backup,
     };
+    let out = run_member_ladder(&mut leg, &ctx.member, seat, Some(gate), true).await?;
 
-    // the human gate: surface the charter, block on the wizard's answer
-    let _ = send_cmd(
-        tx,
-        Command::NetJoinCharterProposed {
-            name: proposal.name.clone(),
-            agenda: proposal.agenda.clone(),
-            features: proposal.features.clone(),
-            generation,
-        },
-    )
-    .await;
-    let confirmed = confirm.recv().await.unwrap_or(false);
-    if !confirmed {
-        // tell the group before failing — the founder's recv maps it to the
-        // declined seat state
-        let _ = publish_frame_now(&chan, &group, &RitualMsg::Declined { seat }).await;
-        return Err("charter declined".to_string());
-    }
-    let sig = molt_storage::identity_sign(&sk, &table);
-    publish_frame_now(&chan, &group, &RitualMsg::Signed(invite::SealSigned { seat, sig }))
-        .await
-        .map_err(|e| format!("seal signature did not publish: {e}"))?;
-
-    // ❻½ (seed_backup_confirmation.md): wait for the HUMAN's phrase-backup
-    // proof, then publish the signed attestation. Sequential on this path
-    // (no early-Genesis peek — the loopback twin carries that defensive
-    // check; an honest founder cannot reach ❼ before this attestation).
-    match backup.recv().await {
-        Some(true) => {}
-        _ => return Err("the ritual was cancelled before the backup confirmation".to_string()),
-    }
-    let att = molt_storage::backup_confirm_bytes(&table);
-    let att_sig = molt_storage::identity_sign(&sk, &att);
-    publish_frame_now(&chan, &group, &RitualMsg::BackupConfirmed { seat, sig: att_sig })
-        .await
-        .map_err(|e| format!("backup attestation did not publish: {e}"))?;
-
-    let mut was_deaf = false;
-    // The wait below is deliberately UNBOUNDED: the genesis lands only after
-    // every seat ratified, and a founder finishing a human deliberation is not
-    // a failure. But silence and progress looked identical here — a member
-    // whose founder died sat on this loop forever with nothing on screen. So
-    // the wait says how long it has been waiting (cluster F's deferred
-    // elapsed line).
-    let waiting_since = tokio::time::Instant::now();
-    let mut noted_secs: u64 = 0;
-    // Genesis wait: the sealed roster as a 445. Sign-what-you-see closes
-    // HERE — the distributed table must byte-equal the ratified one.
-    let sealed_final = loop {
-        let (content, created_at) = match sub.recv(RECV_SLICE).await {
-            molt_net::ritual_net::GroupRecv::Frame { content, created_at } => {
-                if was_deaf {
-                    was_deaf = false;
-                    let _ = send_cmd(
-                        tx,
-                        Command::NetJoinNote {
-                            note: "✓ the group channel is back".to_string(),
-                            generation,
-                        },
-                    )
-                    .await;
-                }
-                (content, created_at)
-            }
-            molt_net::ritual_net::GroupRecv::Idle => {
-                let waited = waiting_since.elapsed().as_secs();
-                if let Some(next) = genesis_wait_note(waited, noted_secs) {
-                    noted_secs = next;
-                    let _ = send_cmd(
-                        tx,
-                        Command::NetJoinNote {
-                            note: format!("⧗ waiting for the genesis · {}", elapsed_label(next)),
-                            generation,
-                        },
-                    )
-                    .await;
-                }
-                continue;
-            }
-            // loud, never fatal — the join keeps waiting, visibly
-            molt_net::ritual_net::GroupRecv::Deaf(why) => {
-                was_deaf = true;
-                let _ = send_cmd(
-                    tx,
-                    Command::NetJoinNote {
-                        note: format!("⚠ cannot hear the group channel - {why} · still retrying"),
-                        generation,
-                    },
-                )
-                .await;
-                continue;
-            }
-        };
-        let Some((msg, from)) = open_group_frame(&group, &content, created_at) else {
-            continue;
-        };
-        // …and in the genesis wait too, on the same gate
-        if let RitualMsg::Aborted { reason } = &msg {
-            if frame_is_from_founder(&from, &ctx.invite.info) {
-                return Err(format!("the founder ended this founding: {reason}"));
-            }
-            tracing::warn!(%from, "abort frame from a co-member - ignored");
-            continue;
-        }
-        if let RitualMsg::Genesis { sealed, .. } = msg {
-            // same rule as the Seal: a co-member's frame is ignored, not
-            // fatal — otherwise one forged Genesis published first kills
-            // every honest joiner while blaming the founder
-            let Ok(sealed) = serde_json::from_str::<molt_core::SealedRoster>(&sealed) else {
-                tracing::debug!(%from, "unparseable genesis on the group channel - ignored");
-                continue;
-            };
-            match check_proposal_provenance(&from, &sealed, &h.npub, &ctx.invite.info) {
-                Provenance::NotTheFounder => {
-                    tracing::warn!(%from, "a non-founder published a genesis - ignored");
-                    continue;
-                }
-                Provenance::Refused(why) => {
-                    return Err(format!("distributed sealed roster rejected: {why}"))
-                }
-                Provenance::FromFounder => {}
-            }
-            let sealed_table =
-                crate::founding::verify_seal_proposal(&sealed, &ctx.member, &pk, &nostr_pk)
-                    .map_err(|e| format!("distributed sealed roster rejected: {e}"))?;
-            if sealed_table != table {
-                return Err(
-                    "the sealed roster is not the table we ratified - the founder \
-                     distributed a different constitution"
-                        .to_string(),
-                );
-            }
-            break sealed;
-        }
-    };
-
-    let snap = {
-        let g = group.lock().map_err(|_| "mls lock poisoned".to_string())?;
-        g.snapshot().map_err(|e| format!("mls snapshot: {e}"))?
-    };
-    let sealed_json = serde_json::to_string(&sealed_final).map_err(|e| e.to_string())?;
+    let sealed = out.sealed.ok_or_else(|| "no sealed roster".to_string())?;
+    let snap = out
+        .mls_snapshot
+        .ok_or_else(|| "the join ended outside the group".to_string())?;
+    let rotation_seed = leg
+        .rotation_seed
+        .ok_or_else(|| "the join ended without a Welcome".to_string())?;
+    let sealed_json = serde_json::to_string(&sealed).map_err(|e| e.to_string())?;
     let _ = send_cmd(
         tx,
         Command::NetJoinSealed {
             sealed: sealed_json,
             mls: hex::encode(snap),
             mesh: Vec::new(),
-            nostr_sk: hex::encode(nostr_sk.as_slice()),
-            relays: h.relays,
-            rotation_seed: hex::encode(payload.rotation_seed),
+            nostr_sk: hex::encode(out.nostr_sk.as_slice()),
+            relays: leg.invite_relays,
+            rotation_seed: hex::encode(rotation_seed),
             generation,
         },
     )
@@ -1640,6 +1575,31 @@ async fn member_join(
 
 #[cfg(test)]
 mod tests {
+    /// The two production gates composed the way the leg applies them:
+    /// "someone else published this" (ignored) and "the founder published
+    /// something wrong" (refused) must NOT be handled the same way.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Provenance {
+        FromFounder,
+        NotTheFounder,
+        Refused(String),
+    }
+
+    fn check_proposal_provenance(
+        from: &str,
+        proposal: &molt_core::SealedRoster,
+        founder_npub: &str,
+        info: &molt_core::InviteInfo,
+    ) -> Provenance {
+        if !frame_is_from_founder(from, info) {
+            return Provenance::NotTheFounder;
+        }
+        match check_proposal_against_link(proposal, founder_npub, info) {
+            Ok(()) => Provenance::FromFounder,
+            Err(why) => Provenance::Refused(why),
+        }
+    }
+
     use super::*;
 
     fn info(inviter: &str, m: u8, n: u8) -> molt_core::InviteInfo {

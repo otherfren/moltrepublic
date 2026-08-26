@@ -39,6 +39,7 @@ mod net;
 mod nostr_ritual;
 mod proposals;
 mod recovery;
+mod ritual_member;
 mod relay_msg;
 pub use relay_msg::known_headlines;
 pub use relay_msg::{known_log_shapes, LogShape};
