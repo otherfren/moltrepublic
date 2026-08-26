@@ -43,7 +43,7 @@ fn rejoin_note(ticketed: bool, member: &str) -> String {
 }
 
 /// A recovery in flight on the coordinator: the returning member's fresh MLS
-/// KeyPackage + reply-queue handover, kept (in `State::pending_recovery`,
+/// KeyPackage + reply-queue handover, kept (in `RecoveryState::pending`,
 /// keyed by the returning seat) until its `Restored` block commits — then
 /// the coordinator re-keys the group (`restore_member`) and sends the
 /// Welcome back to `reply`.

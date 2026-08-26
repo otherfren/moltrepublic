@@ -478,7 +478,7 @@ pub(crate) struct DeliveryState {
     /// authenticated wire delivery, persisted debounced + at close. Active-
     /// workspace scope — [`State::reset_workspace_state`] clears it.
     pub(crate) accepted: std::collections::BTreeMap<MemberId, molt_core::AcceptedWindow>,
-    /// Whether [`Self::accepted`] changed since it was last persisted (the
+    /// Whether [`DeliveryState::accepted`] changed since it was last persisted (the
     /// debounced save on the presence tick checks this).
     pub(crate) accepted_dirty: bool,
     /// Per SENDER: when a delivery ACK to them is due (`member →
@@ -601,9 +601,9 @@ pub(crate) struct ChainProjection {
     /// governance record (`docs_archive/chain/persistent_chain.md`). Block 0 is the
     /// founding; empty when no chain-aware workspace is open.
     pub(crate) blocks: Vec<molt_core::ChainBlock>,
-    /// The verified head of [`State::chain`] (`None` = empty chain).
+    /// The verified head of [`ChainProjection::blocks`] (`None` = empty chain).
     pub(crate) head: Option<chain::ChainHead>,
-    /// The verification walk over [`State::chain`], kept so appending a block
+    /// The verification walk over [`ChainProjection::blocks`], kept so appending a block
     /// costs that block's signatures instead of a re-walk from the anchor.
     /// Runtime-only and always re-derivable; `None` simply means the next
     /// append pays one full verification and re-fills it. Never trusted
@@ -614,7 +614,7 @@ pub(crate) struct ChainProjection {
     /// persisted — re-served on the next catch-up if lost).
     pub(crate) pending_served_blob: Option<molt_core::CheckpointState>,
     /// WP4b: the checkpoint blob a PRUNED holder anchors on — `Some` once
-    /// history below a sealed checkpoint was dropped locally; [`State::chain`]
+    /// history below a sealed checkpoint was dropped locally; [`ChainProjection::blocks`]
     /// then starts with the checkpoint block instead of the genesis.
     pub(crate) checkpoint_blob: Option<molt_core::CheckpointState>,
     /// The gated surfaces' applied logs **derived from the chain** — a separate
@@ -627,7 +627,7 @@ pub(crate) struct ChainProjection {
     /// present here (every `Applied` block names its proposal).
     pub(crate) applied: HashMap<Surface, Vec<(Option<u64>, Value)>>,
     /// The sealing signatures per Applied proposal id — a chain PROJECTION
-    /// like [`State::chain_applied`], maintained by the same two writers
+    /// like [`ChainProjection::applied`], maintained by the same two writers
     /// (full re-fold + append). `ProposalView` building reads voters from
     /// here in O(1); the per-card reverse chain scan it replaces made every
     /// snapshot O(cards × chain) once ALL applied history materializes
@@ -635,7 +635,7 @@ pub(crate) struct ChainProjection {
     pub(crate) applied_sigs: HashMap<u64, Vec<molt_core::RosterAttestation>>,
     /// WORKING transport anchors — `member -> nostr_pk` for every seat a
     /// `Restored` block re-anchored. A chain PROJECTION like
-    /// [`State::chain_applied`]: rebuilt from the chain, never persisted
+    /// [`ChainProjection::applied`]: rebuilt from the chain, never persisted
     /// separately, so it cannot drift from what the blocks say.
     ///
     /// The roster's anchor is the immutable FOUNDING record and stays that
@@ -645,7 +645,7 @@ pub(crate) struct ChainProjection {
     /// and does so silently.
     pub(crate) anchors: HashMap<MemberId, String>,
     /// The relay LEDGER (R3b): each seat's DECLARED reachable pool, folded
-    /// from `Membership` blocks exactly like [`State::chain_anchors`] (and
+    /// from `Membership` blocks exactly like [`ChainProjection::anchors`] (and
     /// seeded from the checkpoint summary after a cut). Read through
     /// [`State::member_relays`], which falls back to the ratified group pool
     /// for seats that never declared. The split-detection input (R4).
@@ -1177,7 +1177,7 @@ impl State {
     }
 
     /// The presence clock: seconds since the unix epoch — the shared
-    /// [`now_secs`] clock, unless a test pinned [`State::clock_override`].
+    /// [`now_secs`] clock, unless a test pinned [`PresenceState::clock_override`].
     /// Every presence stamp, aging pass and activity-trio read runs on
     /// THIS accessor so tests can age pills deterministically.
     pub(crate) fn presence_now(&self) -> u64 {

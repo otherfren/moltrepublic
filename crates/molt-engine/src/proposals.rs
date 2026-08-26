@@ -1363,7 +1363,7 @@ impl State {
             let op = p.payload.get("op").and_then(Value::as_str).unwrap_or("");
             let seat = p.payload.get("member").and_then(Value::as_str);
             // O(1) for Applied cards: the sealing sigs ride the chain
-            // projection (`chain_applied_sigs`) — the per-card reverse
+            // projection (`chain.applied_sigs`) — the per-card reverse
             // chain scan made every snapshot O(cards × chain) once ALL
             // applied history materializes cards. Only a Membership card
             // (its block carries no proposal id) still matches by content.

@@ -498,7 +498,7 @@ impl State {
     }
 
     /// Re-project the persistent state from the whole chain: the gated
-    /// surfaces' applied logs (into the chain-owned [`State::chain_applied`], a
+    /// surfaces' applied logs (into the chain-owned [`ChainProjection::applied`], a
     /// full clear-and-refold so a re-base is free) and the roster/identities
     /// (taken from the already-verified head, which evolved them across the
     /// membership blocks). Chat, [`State::applied`] and pending proposals are

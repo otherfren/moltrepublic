@@ -263,7 +263,7 @@ It is the state-model twin of the founding ritual — load-bearing invariants:
   signatures and seals a block at *m*, deterministically — the m lowest-named
   signers — then broadcasts it; `crosses_wire` carries `Proposed`/`Approved`/
   `Committed`). The legacy counted simulation is OFF for chain workspaces (guard
-  on `is_chain_governed`), and `self.chain_applied` is a *separate* projection
+  on `is_chain_governed`), and `self.chain.applied` is a *separate* projection
   from the legacy `self.applied` so the two never collide (reads concat them).
   The identity signing key must reach `materialize_workspace` from the ritual
   (`ritual.founder_sk()` / `founding::member_identity`) — re-deriving it from the

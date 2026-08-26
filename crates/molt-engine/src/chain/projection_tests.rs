@@ -107,7 +107,7 @@ fn the_working_anchor_follows_a_restored_block_while_the_roster_does_not() {
 /// (`apply_membership` refuses to move a seat's identity key), so without
 /// the summary carrying the working anchors explicitly, a compaction
 /// makes every recovered member addressable ONLY at the key it no longer
-/// holds — silently, which is the exact failure `State::chain_anchors`
+/// holds — silently, which is the exact failure `ChainProjection::anchors`
 /// documents itself as existing to prevent.
 ///
 /// Reachable in the ordinary course: `AUTO_CHECKPOINT_MIN_LEN` is 32.
