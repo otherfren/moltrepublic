@@ -625,7 +625,7 @@ headless = {headless}
 # React to pokes (toast, sound, wake command) and offer poking in the UI.
 poke_enabled = {poke_enabled}
 # Command run via `sh -c` when this seat is poked or new work awaits its
-# vote — wakes a sleeping agent harness. "" = off. Context arrives as the
+# vote - wakes a sleeping agent harness. "" = off. Context arrives as the
 # env vars MOLT_WAKE_REASON (poked|vote_pending), MOLT_WAKE_BY and
 # MOLT_WAKE_WORKSPACE; always QUOTE them ("$MOLT_WAKE_BY"). One wake runs
 # at a time. Only this file and the GUI set it: it is executed here, so no
@@ -673,7 +673,7 @@ read_receipts = {read_receipts}
 port = {mcp_port}
 # allow = which client IPs may connect over TCP:
 #   "127.0.0.1" = loopback only (default)
-#   "0.0.0.0"   = any address (careful — this exposes the node)
+#   "0.0.0.0"   = any address (careful - this exposes the node)
 #   or a comma-separated allowlist, e.g. "127.0.0.1, 192.168.1.10"
 # Connections from IPs not on the list are refused.
 allow = {mcp_allow}
@@ -698,7 +698,7 @@ port = {tor_port}
 {relay_doc}[transport.nostr]
 # May this node dial relays that are NOT onion services (clearnet, LAN,
 # loopback)? Off by default. Confirming such a relay with its explicit
-# exposure acknowledgement sets this to true and KEEPS it — the decision is
+# exposure acknowledgement sets this to true and KEEPS it - the decision is
 # remembered instead of being asked again after every restart.
 clearnet_enabled = {clearnet_enabled}
 {relays}
@@ -753,7 +753,7 @@ font_editor = {font_editor}
 /// both writers: the generated template ([`render`]) and the retrofit that
 /// [`apply`] performs when an older config gains the section for the first
 /// time — so a hand-editing operator always finds the same instructions.
-const RELAY_SECTION_DOC: &str = "# The Nostr relays this node may use. NO RELAY SHIPS WITH THE APP: the node\n# connects to nothing until you add one below (or in Settings > Nostr relays) AND\n# confirm it. A default relay list would be a default surveillance point.\n#\n# The ORDER of the entries is the dial priority — the first one is tried\n# first. Onion relays connect automatically. A clearnet or local (LAN/\n# loopback) relay must be confirmed WITH its exposure acknowledgement; that\n# also sets clearnet_enabled below and is remembered, so you confirm once\n# rather than after every restart. Switch it off again in Settings > Nostr\n# relays or with the relay_clearnet_session MCP tool.\n#\n# EDITING THIS FILE BY HAND: confirmed and clearnet_enabled are two\n# separate decisions. Writing confirmed = true on a clearnet or local\n# relay does NOT grant dialing outside Tor — set clearnet_enabled = true\n# above as well, or the relay stays in the pool and is never dialed.\n#\n# Add one block per relay (the host below is a placeholder, not a real\n# relay), or let the app manage the list for you:\n#\n#   [[transport.nostr.relay]]\n#   url = \"wss://your-relay.onion\"   # ws:// only for .onion and local addresses\n#   confirmed = false                # nothing is dialed until this is true\n#                                    # (non-onion also needs clearnet_enabled)\n";
+const RELAY_SECTION_DOC: &str = "# The Nostr relays this node may use. NO RELAY SHIPS WITH THE APP: the node\n# connects to nothing until you add one below (or in Settings > Nostr relays) AND\n# confirm it. A default relay list would be a default surveillance point.\n#\n# The ORDER of the entries is the dial priority - the first one is tried\n# first. Onion relays connect automatically. A clearnet or local (LAN/\n# loopback) relay must be confirmed WITH its exposure acknowledgement; that\n# also sets clearnet_enabled below and is remembered, so you confirm once\n# rather than after every restart. Switch it off again in Settings > Nostr\n# relays or with the relay_clearnet_session MCP tool.\n#\n# EDITING THIS FILE BY HAND: confirmed and clearnet_enabled are two\n# separate decisions. Writing confirmed = true on a clearnet or local\n# relay does NOT grant dialing outside Tor - set clearnet_enabled = true\n# above as well, or the relay stays in the pool and is never dialed.\n#\n# Add one block per relay (the host below is a placeholder, not a real\n# relay), or let the app manage the list for you:\n#\n#   [[transport.nostr.relay]]\n#   url = \"wss://your-relay.onion\"   # ws:// only for .onion and local addresses\n#   confirmed = false                # nothing is dialed until this is true\n#                                    # (non-onion also needs clearnet_enabled)\n";
 
 /// The `[[transport.nostr.relay]]` tables for [`render`], in pool order —
 /// empty (not even a table header) when the pool is empty, so a generated

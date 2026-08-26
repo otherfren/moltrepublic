@@ -51,7 +51,7 @@ use tracing_subscriber::EnvFilter;
 #[command(
     name = "moltd",
     version,
-    about = "MoltRepublic node — one command set, two co-equal operators (GUI + MCP)."
+    about = "MoltRepublic node - one command set, two co-equal operators (GUI + MCP)."
 )]
 struct Cli {
     /// Use exactly this config.toml (skips auto-discovery; aborts if missing).
@@ -122,8 +122,7 @@ fn main() -> anyhow::Result<()> {
                     tracing::warn!(
                         id = %w.id,
                         dir = %e.dir.display(),
-                        "workspace marked sealed-at-rest but its device-sealed key \
-                         material is still present — half-unsealed; decrypt to repair"
+                        "workspace marked sealed-at-rest but its device-sealed key is still present - decrypt to repair"
                     );
                 }
             } else {
@@ -156,7 +155,7 @@ fn main() -> anyhow::Result<()> {
         network = ?anonymity.network,
         tor_mode = ?anonymity.tor.mode,
         tor_port = anonymity.tor.port,
-        "transport anonymity configured (loopback transport active; the Nostr transport lands with N4)"
+        "transport anonymity configured"
     );
 
     // a hand-written pool may contain entries ingest would refuse; they are
@@ -190,9 +189,8 @@ fn main() -> anyhow::Result<()> {
             == Some(molt_core::relay::PoolGap::NonOnionOff)
         {
             tracing::warn!(
-                "every confirmed relay is clearnet or local and [transport.nostr] \
-                 clearnet_enabled is false — this node will dial NO relay; founding \
-                 and joining will be refused"
+                key = "[transport.nostr] clearnet_enabled",
+                "every confirmed relay is clearnet or local and the switch is off - founding and joining will be refused"
             );
         }
         // The transport POSTURE, once, at startup: the route this config
@@ -220,7 +218,7 @@ fn main() -> anyhow::Result<()> {
                 network = anonymity.network.as_str(),
                 tor_mode = mode,
                 error = %e,
-                "the anonymity settings do not resolve to a usable dialer — NOTHING will connect"
+                "the anonymity settings do not resolve to a usable dialer - NOTHING will connect"
             ),
         }
         for e in &kept {
@@ -331,10 +329,7 @@ fn main() -> anyhow::Result<()> {
     let (bind_ip, allow_all, allowlist) = parse_mcp_allow(&config.mcp.allow);
     let mcp_addr = format!("{bind_ip}:{}", config.mcp.port);
     if config.mcp.token.is_empty() {
-        tracing::warn!(
-            "MCP token is empty — the TCP endpoint is unauthenticated; \
-             run `moltd --generate-config` or set [mcp].token"
-        );
+        tracing::warn!(key = "[mcp].token", "MCP token is empty - the TCP endpoint is unauthenticated");
     }
     let mcp_token = config.mcp.token.clone();
     {
@@ -572,7 +567,7 @@ fn generate_config(path: &Path) -> anyhow::Result<()> {
     let shown = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     println!("Wrote default config to {}", shown.display());
     println!();
-    println!("MCP API token (shown once — clients send it as `initialize` params.token):");
+    println!("MCP API token (shown once - clients send it as `initialize` params.token):");
     println!("    {}", settings.mcp_token);
     println!("It is stored in the config; rotate it anytime from the GUI settings (MCP tab).");
     println!();
@@ -585,7 +580,7 @@ fn generate_config(path: &Path) -> anyhow::Result<()> {
 fn repair_config(path: &Path) -> anyhow::Result<()> {
     if !path.is_file() {
         anyhow::bail!(
-            "nothing to repair — no file at {}\n\
+            "nothing to repair - no file at {}\n\
              Create one with:  moltd --generate-config {}",
             path.display(),
             path.display()
@@ -612,7 +607,7 @@ fn repair_config(path: &Path) -> anyhow::Result<()> {
         );
     } else if parseable {
         println!(
-            "Repaired {} — salvaged the valid fields, filled the rest with defaults.",
+            "Repaired {} - salvaged the valid fields, filled the rest with defaults.",
             path.display()
         );
     } else {
@@ -661,7 +656,7 @@ fn parse_mcp_allow(allow: &str) -> (String, bool, Vec<IpAddr>) {
     if !understood && !entries.is_empty() {
         eprintln!(
             "config: [mcp].allow = {allow:?} names no usable address \
-             (an entry must be an IP literal, or 0.0.0.0 for any) — \
+             (an entry must be an IP literal, or 0.0.0.0 for any) - \
              binding loopback only"
         );
     }
