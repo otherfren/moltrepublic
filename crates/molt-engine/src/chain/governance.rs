@@ -411,8 +411,11 @@ impl State {
         if !self.append_committed_block(block.clone()) {
             return;
         }
-        let durable = self.persist_chain_now();
+        // the ONE write of this seal — behind the bookkeeping, because a
+        // Checkpoint block's cut (blob set, history below it dropped) is
+        // part of what must reach the disk before the block is announced
         self.after_block_applied(&block);
+        let durable = self.persist_chain_now();
         // clean up the proposal we just committed — a Membership block carries
         // no proposal id for after_block_applied to key on, so drop it here
         self.forget_vote(proposal_id);
@@ -588,12 +591,14 @@ impl State {
                 // checkpoint block and everything after it.
                 let upto = *upto;
                 let anchor_height = block.height;
+                // NOT persisted here: every caller of `after_block_applied`
+                // writes the chain once after it (the seal, the tie-break,
+                // the catch-up batch), and the cut is part of that write
                 match self.own_checkpoint_state(upto) {
                     Ok(blob) => {
                         self.set_checkpoint_blob(Some(blob));
                         self.chain.retain(|b| b.height >= anchor_height);
                         self.apply_chain_to_state();
-                        self.persist_chain_now();
                         self.emit(Event::CheckpointSealed {
                             height: anchor_height,
                             upto,

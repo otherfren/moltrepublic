@@ -783,3 +783,46 @@ fn a_checkpoint_cut_keeps_only_the_latest_avatar_per_member() {
         ]
     );
 }
+
+/// A checkpoint seal writes the chain ONCE — on the sealer (the block
+/// plus the cut it triggers reach the disk in one write, and the
+/// broadcast gate reads that write) and on a passive receiver (one write
+/// per accepted batch, the cut included). Review C10: the Checkpoint arm
+/// of `after_block_applied` used to add a write of its own on top of the
+/// caller's.
+#[test]
+fn a_checkpoint_seal_writes_the_chain_once() {
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    b.commit_applied(1, &["petra", "walter"]);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    let hash = checkpoint_state_hash(&checkpoint_state(&b.blocks, 1).expect("state"));
+    walter.receive_checkpoint_proposal(40, 1, &hash);
+    let change = ChainChange::Checkpoint {
+        upto: 1,
+        state_hash: hash,
+    };
+    let bytes = approval_bytes(&b.republic_id, 2, &change);
+    let petra_sig = identity_sign(b.key("petra"), &bytes);
+    CHAIN_PERSISTS.with(|c| c.set(0));
+    walter.receive_approval(40, "petra", 2, &petra_sig);
+    assert_eq!(walter.chain_head.as_ref().expect("head").height, 2, "sealed");
+    assert_eq!(walter.chain.len(), 1, "and cut");
+    assert_eq!(
+        CHAIN_PERSISTS.with(std::cell::Cell::get),
+        1,
+        "the sealer writes the cut chain once"
+    );
+
+    // a passive holder applies the broadcast block: one write for the batch
+    let sealed = walter.chain.first().expect("anchor").clone();
+    let mut petra = chain_peer("petra", &b, b.blocks.clone());
+    CHAIN_PERSISTS.with(|c| c.set(0));
+    petra.receive_block(sealed);
+    assert_eq!(petra.chain_head.as_ref().expect("head").height, 2, "applied");
+    assert_eq!(petra.chain.len(), 1, "and cut");
+    assert_eq!(
+        CHAIN_PERSISTS.with(std::cell::Cell::get),
+        1,
+        "a passive receiver writes the cut chain once"
+    );
+}

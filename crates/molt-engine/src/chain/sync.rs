@@ -267,7 +267,6 @@ impl State {
             if let Ok(head) = self.verify_own(&self.chain) {
                 self.chain_head = Some(head);
                 self.apply_chain_to_state();
-                self.persist_chain_now();
                 // the displaced proposal returns to pending and re-bases —
                 // but ONLY a card with a deliberation behind it (a proposer
                 // this holder learned via gossip). A record MATERIALIZED
@@ -291,6 +290,7 @@ impl State {
                     }
                 }
                 self.after_block_applied(&block);
+                self.persist_chain_now();
             } else {
                 // revert — should not happen for a verified block
                 self.chain.pop();
