@@ -630,27 +630,38 @@ fn genesis_from_snapshot(
         let Ok(snap) = read_snapshot(key, id, at_seq, &path) else {
             continue;
         };
-        let st = snap.state;
-        return Some(EventEnvelope { prev_seq: 0,
-            seq: 1,
-            ts: st.founded_ts,
-            by: st.member.clone(),
-            body: WorkspaceEvent::Founded {
-                name: st.name,
-                rule_m: st.rule_m,
-                rule_n: manifest.workspace.rule_n,
-                member: st.member,
-                roster: st.roster,
-                identities: st.identities,
-                attestations: Vec::new(),
-                republic_id: st.republic_id,
-                agenda: st.agenda,
-                relays: Vec::new(),
-                features: st.features,
-            },
-        });
+        return Some(genesis_envelope_of(snap, manifest));
     }
     None
+}
+
+/// The genesis envelope a snapshot implies (every genesis-derived fact is
+/// carried by design — the genesis itself is before the snapshot and never
+/// replayed). Attestations and relays are not in the snapshot: empty.
+pub(crate) fn genesis_envelope_of(
+    snap: WorkspaceSnapshot,
+    manifest: &WorkspaceManifest,
+) -> EventEnvelope {
+    let st = snap.state;
+    EventEnvelope {
+        prev_seq: 0,
+        seq: 1,
+        ts: st.founded_ts,
+        by: st.member.clone(),
+        body: WorkspaceEvent::Founded {
+            name: st.name,
+            rule_m: st.rule_m,
+            rule_n: manifest.workspace.rule_n,
+            member: st.member,
+            roster: st.roster,
+            identities: st.identities,
+            attestations: Vec::new(),
+            republic_id: st.republic_id,
+            agenda: st.agenda,
+            relays: Vec::new(),
+            features: st.features,
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2203,7 +2214,18 @@ fn read_snapshot(
     path: &Path,
 ) -> Result<WorkspaceSnapshot, StorageError> {
     let data = read_capped(path, READ_CAP_STATE, "snapshot")?;
-    let (frames, torn) = split_frames(&data);
+    decode_snapshot(key, id, at_seq, &data)
+}
+
+/// [`read_snapshot`] on bytes already in memory (the import reads them out
+/// of a blob before anything is on disk).
+pub(crate) fn decode_snapshot(
+    key: &[u8; 32],
+    id: &[u8; 32],
+    at_seq: u64,
+    data: &[u8],
+) -> Result<WorkspaceSnapshot, StorageError> {
+    let (frames, torn) = split_frames(data);
     if frames.len() != 1 || torn.is_some() {
         return Err(StorageError::Corrupt("snapshot framing".to_string()));
     }
@@ -3398,6 +3420,60 @@ mod tests {
         let shown = format!("{key:?}");
         assert!(shown.contains("no: 7"));
         assert!(!shown.contains("ab, ab") && !shown.contains("171"), "{shown}");
+    }
+
+    /// A compacted workspace — segments under their own keys, segment 1
+    /// DROPPED, the genesis living only in the snapshot — exports and
+    /// imports (review 2026-08-26: the import decrypted frame 1 under the
+    /// workspace key and required the segment, so every backup of a
+    /// compacted republic was unrestorable).
+    #[test]
+    fn a_compacted_workspace_exports_and_imports() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().to_path_buf();
+        let dir = make_ws(&root, 0);
+        {
+            let (mut ws, _) = open_workspace(&dir).expect("open");
+            rotate_n(&mut ws, 2, 2);
+            ws.migrate_to_segment_keys().expect("migrate");
+            cover_with_snapshot(&mut ws);
+            assert!(ws.drop_segments_below(u64::MAX).expect("drop") >= 1);
+            assert!(!dir.join("log").join(segment_name(1)).exists(), "segment 1 is gone");
+        }
+        let pass = "a passphrase long enough for the export";
+        let mut blob = Vec::new();
+        crate::export::export_dir(&root, &dir, &crate::export::ExportKey::passphrase(pass), &mut blob)
+            .expect("export");
+        let dest_root = tmp.path().join("dest-root");
+        std::fs::create_dir_all(&dest_root).expect("dest root");
+        let staging = crate::import::import_stage(&dest_root, &blob, pass).expect("stage");
+        assert_eq!(staging.genesis.seq, 1, "the genesis comes from the snapshot");
+        let imported = staging.commit(&dest_root, false, None).expect("commit");
+        let (_ws, loaded) = open_workspace(&imported).expect("the import opens");
+        assert!(loaded.snapshot.is_some(), "restored from the snapshot");
+    }
+
+    /// The lighter twin: migrated (frame 1 under the segment's DEK) but not
+    /// dropped — the import must read the table, not assume the workspace key.
+    #[test]
+    fn a_migrated_workspace_exports_and_imports() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().to_path_buf();
+        let dir = make_ws(&root, 2);
+        {
+            let (mut ws, _) = open_workspace(&dir).expect("open");
+            ws.migrate_to_segment_keys().expect("migrate");
+        }
+        let pass = "a passphrase long enough for the export";
+        let mut blob = Vec::new();
+        crate::export::export_dir(&root, &dir, &crate::export::ExportKey::passphrase(pass), &mut blob)
+            .expect("export");
+        let dest_root = tmp.path().join("dest-root");
+        std::fs::create_dir_all(&dest_root).expect("dest root");
+        let staging = crate::import::import_stage(&dest_root, &blob, pass).expect("stage");
+        let imported = staging.commit(&dest_root, false, None).expect("commit");
+        let (_ws, loaded) = open_workspace(&imported).expect("the import opens");
+        assert_eq!(loaded.tail.len(), 3);
     }
 
     /// Append until the active segment has rotated `n` times — the compactor

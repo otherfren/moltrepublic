@@ -212,28 +212,69 @@ pub fn import_stage(
     // below names the member)
     // (checked after the genesis decrypt, which yields the member)
 
-    // decrypt the genesis frame — the proof that key and content match
-    let seg1 = archive
+    // decrypt the genesis — the proof that key and content match. A
+    // compacted log keeps segment 1 under its own DEK (the table travels in
+    // the blob, sealed under the workspace key) or has dropped it, in which
+    // case the newest snapshot carries every genesis fact (review
+    // 2026-08-26: assuming the workspace key and the segment made every
+    // compacted republic's backup unrestorable)
+    let table = archive
         .entries
         .iter()
-        .find(|e| e.path == "log/000001.mlog")
-        .ok_or_else(|| {
-            StorageError::Corrupt("blob carries no log/000001.mlog (no genesis)".to_string())
-        })?;
-    let (frames, _torn) = crate::split_frames(&seg1.data);
-    let first = frames.first().ok_or_else(|| {
-        StorageError::Corrupt("the blob's first log segment holds no valid frame".to_string())
-    })?;
-    let genesis_plain = crate::decrypt_frame(&ws_key, &id, 1, 1, first.nonce, first.ciphertext)
+        .find(|e| e.path == "log/keys.state")
+        .map(|e| crate::segkeys::decode_table(&e.data, &ws_key, &id))
+        .transpose()
         .map_err(|_| {
             StorageError::Crypto(
-                "blob is internally inconsistent (the genesis does not decrypt \
+                "blob is internally inconsistent (the log key table does not decrypt \
                  under the blob's workspace key)"
                     .to_string(),
             )
         })?;
-    let genesis: EventEnvelope = serde_json::from_slice(&genesis_plain)
-        .map_err(|e| StorageError::Corrupt(format!("genesis envelope: {e}")))?;
+    let genesis: EventEnvelope = if let Some(seg1) =
+        archive.entries.iter().find(|e| e.path == "log/000001.mlog")
+    {
+        let (frames, _torn) = crate::split_frames(&seg1.data);
+        let first = frames.first().ok_or_else(|| {
+            StorageError::Corrupt("the blob's first log segment holds no valid frame".to_string())
+        })?;
+        let seg_key = table.as_ref().and_then(|t| t.dek(1)).unwrap_or(*ws_key);
+        let genesis_plain =
+            crate::decrypt_frame(&seg_key, &id, 1, 1, first.nonce, first.ciphertext)
+                .or_else(|_| crate::decrypt_frame(&ws_key, &id, 1, 1, first.nonce, first.ciphertext))
+                .map_err(|_| {
+                    StorageError::Crypto(
+                        "blob is internally inconsistent (the genesis does not decrypt \
+                         under the blob's workspace key)"
+                            .to_string(),
+                    )
+                })?;
+        serde_json::from_slice(&genesis_plain)
+            .map_err(|e| StorageError::Corrupt(format!("genesis envelope: {e}")))?
+    } else {
+        let mut snaps: Vec<(u64, &Vec<u8>)> = archive
+            .entries
+            .iter()
+            .filter_map(|e| {
+                let stem = e.path.strip_prefix("snapshots/")?.strip_suffix(".msnap")?;
+                stem.parse::<u64>().ok().map(|at| (at, &e.data))
+            })
+            .collect();
+        snaps.sort_by(|a, b| b.0.cmp(&a.0));
+        let (at_seq, data) = snaps.first().ok_or_else(|| {
+            StorageError::Corrupt(
+                "blob carries neither log/000001.mlog nor a snapshot (no genesis)".to_string(),
+            )
+        })?;
+        let snap = crate::decode_snapshot(&ws_key, &id, *at_seq, data).map_err(|_| {
+            StorageError::Crypto(
+                "blob is internally inconsistent (the snapshot does not decrypt \
+                 under the blob's workspace key)"
+                    .to_string(),
+            )
+        })?;
+        crate::genesis_envelope_of(snap, &manifest)
+    };
     let WorkspaceEvent::Founded { member, .. } = &genesis.body else {
         return Err(StorageError::Corrupt(
             "the blob's first event is not a Founded genesis".to_string(),

@@ -159,6 +159,21 @@ pub fn unseal_at_rest(root: &Path, ws_dir: &Path, phrase: &str) -> Result<(), St
 /// Authenticated decrypt of the genesis frame (segment 1, seq 1) with the
 /// phrase-derived key — succeeds iff the phrase is THIS workspace's.
 fn verify_phrase_key(ws_dir: &Path, id: &[u8; 32], key: &[u8; 32]) -> Result<(), StorageError> {
+    // a compacted log keeps its genesis under segment 1's DEK (or in the
+    // snapshot only) — the key TABLE, sealed under the workspace key with
+    // the id as AAD, is then the proof the phrase is this workspace's
+    // (review 2026-08-26: the frame-1 check refused every compacted
+    // republic's seal as "phrase does not match")
+    match crate::segkeys::read_table(ws_dir, key, id) {
+        Ok(Some(_)) => return Ok(()),
+        Ok(None) => {}
+        Err(StorageError::NewerVersion(v)) => return Err(StorageError::NewerVersion(v)),
+        Err(_) => {
+            return Err(StorageError::Crypto(
+                "the recovery phrase does not match this workspace".to_string(),
+            ))
+        }
+    }
     let data = crate::read_capped(&ws_dir.join("log").join(crate::segment_name(1)), crate::READ_CAP_SEGMENT, "log segment")?;
     let (frames, _torn) = crate::split_frames(&data);
     let first = frames
@@ -424,11 +439,12 @@ mod tests {
         assert_eq!(std::fs::read(elsewhere.join("workspace.key")).expect("key"), before);
     }
 
-    /// S4: a log under per-segment keys keeps the PRUNED version gate
-    /// across a seal/unseal round trip — a pre-WP4a binary must be told
-    /// "newer", not "corrupt".
+    /// A migrated log SEALS at all (the phrase check read frame 1 under
+    /// the workspace key, which a compacted log no longer uses — review
+    /// 2026-08-26) and keeps the PRUNED version gate across the round
+    /// trip (S4): a pre-WP4a binary must be told "newer", not "corrupt".
     #[test]
-    fn unseal_keeps_the_pruned_gate_of_a_migrated_log() {
+    fn a_migrated_log_seals_unseals_and_keeps_the_pruned_gate() {
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("workspaces");
         let (dir, phrase, _id) = make_ws(&root);

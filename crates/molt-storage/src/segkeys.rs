@@ -165,8 +165,18 @@ pub(crate) fn read_table(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.into()),
     };
+    decode_table(&data, ws_key, id).map(Some)
+}
+
+/// Decode a table from its file bytes (the import reads it out of a blob
+/// before anything is on disk).
+pub(crate) fn decode_table(
+    data: &[u8],
+    ws_key: &[u8; 32],
+    id: &[u8; 32],
+) -> Result<SegmentKeyTable, StorageError> {
     let plaintext = Zeroizing::new(
-        crate::decrypt_state_file(&keys_key(ws_key, id), id, crate::KEYS_SEGMENT, &data)
+        crate::decrypt_state_file(&keys_key(ws_key, id), id, crate::KEYS_SEGMENT, data)
             .map_err(|e| StorageError::Corrupt(format!("log key table: {e}")))?,
     );
     let table: SegmentKeyTable = serde_json::from_slice(&plaintext)
@@ -174,7 +184,7 @@ pub(crate) fn read_table(
     if table.version > KEYS_VERSION {
         return Err(StorageError::NewerVersion(table.version));
     }
-    Ok(Some(table))
+    Ok(table)
 }
 
 /// Rewrite the table atomically (tmp + fsync + rename, mode 0600) — the same
