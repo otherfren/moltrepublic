@@ -393,6 +393,21 @@ impl supervisor::StateStore for FileStateStore {
     async fn save(&self, state: molt_core::TransportState) {
         self.handle.save_transport_state(state);
     }
+
+    // load → apply → save under the handle's gate: the three stores a
+    // workspace's runtime builds (outbox, inbox, file plane) all clone one
+    // handle, so they serialize against each other
+    async fn update<F>(&self, f: F)
+    where
+        F: FnOnce(&mut molt_core::TransportState) -> bool + Send,
+    {
+        let gate = self.handle.transport_gate();
+        let _held = gate.lock().await;
+        let mut state = self.handle.load_transport_state().await;
+        if f(&mut state) {
+            self.handle.save_transport_state(state);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

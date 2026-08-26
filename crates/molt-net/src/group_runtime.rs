@@ -351,8 +351,9 @@ async fn apply_group_ack<L: OutboxLog, S: StateStore>(
     let Some(window) = ack.window_for(me) else {
         return; // silence, not a claim of zero
     };
-    let mut state = store.load().await;
-    let old = state
+    let old = store
+        .load()
+        .await
         .outbound
         .get(from)
         .map_or(0, |c| c.acked_floor);
@@ -373,31 +374,32 @@ async fn apply_group_ack<L: OutboxLog, S: StateStore>(
     // refill: live incident 2026-08-09 §2). A caught-up peer's sheet
     // proves nothing to heal, and saving is conditional — most sheets in
     // steady state change nothing worth a state write.
-    let mut changed = false;
-    let mut group = state.group.unwrap_or_default();
-    if floor < group.log_seq && !group.heal_evidence {
-        group.heal_evidence = true;
-        changed = true;
-    }
-    state.group = Some(group);
-    if floor > old {
-        let cursor = state.outbound.entry(from.clone()).or_default();
-        cursor.acked_floor = floor;
-        cursor.ack_seen = true;
-        changed = true;
-    } else {
-        // no progress — but the peer is listening. Latch without moving the
-        // floor; the floor stays honest (0 = nothing proven) and the rewind
-        // can now reach back to what this peer is actually missing.
-        let cursor = state.outbound.entry(from.clone()).or_default();
-        if !cursor.ack_seen {
-            cursor.ack_seen = true;
-            changed = true;
-        }
-    }
-    if changed {
-        store.save(state).await;
-    }
+    store
+        .update(|state| {
+            let mut changed = false;
+            let mut group = state.group.unwrap_or_default();
+            if floor < group.log_seq && !group.heal_evidence {
+                group.heal_evidence = true;
+                changed = true;
+            }
+            state.group = Some(group);
+            let cursor = state.outbound.entry(from.clone()).or_default();
+            // only ever forward: another sheet may have moved it meanwhile
+            if floor > cursor.acked_floor {
+                cursor.acked_floor = floor;
+                cursor.ack_seen = true;
+                changed = true;
+            } else if !cursor.ack_seen {
+                // no progress — but the peer is listening. Latch without
+                // moving the floor; the floor stays honest (0 = nothing
+                // proven) and the rewind can now reach back to what this
+                // peer is actually missing.
+                cursor.ack_seen = true;
+                changed = true;
+            }
+            changed
+        })
+        .await;
 }
 
 /// Publish claim sheets as they are handed over.
@@ -501,6 +503,37 @@ async fn publish_with_backoff(
     Err(PublishStall::Transient)
 }
 
+/// Advance the persisted broadcast cursor to `published_through` (never
+/// backwards, never when nothing went out).
+async fn persist_cursor<S: StateStore>(store: &S, start: u64, published_through: u64) {
+    if published_through <= start {
+        return;
+    }
+    store
+        .update(|state| {
+            let mut cur = state.group.unwrap_or_default();
+            if published_through > cur.log_seq {
+                cur.log_seq = published_through;
+                state.group = Some(cur);
+                true
+            } else {
+                false
+            }
+        })
+        .await;
+}
+
+/// The stall clock's verdict on one fired round.
+enum StallRound {
+    /// No floor is proven any more — nothing to re-offer.
+    NoFloor,
+    /// The hourly budget is spent and no heal evidence buys a round.
+    Spent(u64),
+    /// A round was granted (`heal` = the evidence-driven one) and the
+    /// cursor rewound to the floor.
+    Granted { floor: u64, heal: bool },
+}
+
 /// Read the log from the broadcast cursor and publish this node's own events.
 #[allow(clippy::too_many_arguments)]
 async fn outbox_loop<L, S, K>(
@@ -589,6 +622,9 @@ async fn outbox_loop<L, S, K>(
                     // here painted a red pill onto every clean close that
                     // happened to catch a publish mid-backoff
                     if matches!(stall, PublishStall::Stopped) {
+                        // drain, don't discard: the frames that went out
+                        // before the stop stay published (review M9)
+                        persist_cursor(&store, start, published_through).await;
                         return;
                     }
                     held_permanent = matches!(stall, PublishStall::Permanent(_));
@@ -615,15 +651,7 @@ async fn outbox_loop<L, S, K>(
                 }
             }
         }
-        if published_through > start {
-            let mut state = store.load().await;
-            let mut cur = state.group.unwrap_or_default();
-            if published_through > cur.log_seq {
-                cur.log_seq = published_through;
-                state.group = Some(cur);
-                store.save(state).await;
-            }
-        }
+        persist_cursor(&store, start, published_through).await;
         // --- the stall clock -------------------------------------------------
         let state = store.load().await;
         let floor = group_floor(&state, &cfg);
@@ -730,24 +758,47 @@ async fn outbox_loop<L, S, K>(
         if !fired {
             continue;
         }
-        let mut state = store.load().await;
-        // the floor may have moved during a sleep of up to ten minutes;
-        // rewinding to a stale snapshot would re-offer what has since been
-        // confirmed
-        let Some(f) = group_floor(&state, &cfg) else {
-            stalled_since = None;
-            continue;
-        };
-        let mut cur = state.group.unwrap_or_default();
-        if !consume_resend_round(&mut cur, wall_secs()) {
-            // spent — but fresh evidence of a lagging listener (a claim
-            // sheet since the last round) buys the one heal round
-            if consume_heal_round(&mut cur, wall_secs()) {
-                tracing::info!(
-                    floor = f,
-                    "budget spent, but a listener proved itself lagging — heal round"
-                );
-            } else {
+        // decide and rewind as ONE state step (M7): the floor may have moved
+        // during a sleep of up to ten minutes — rewinding to a stale
+        // snapshot would re-offer what has since been confirmed — and a
+        // claim sheet landing between a load and a save was lost before.
+        // Every group frame is a FRESH encryption (`group_frame` bypasses
+        // the fan-out cache), so there is no stale-ciphertext eviction to do
+        // and no resend epoch to bump — a relay-level duplicate dedups at
+        // each receiver's AcceptedWindow. Through `rewind_group`, not by
+        // assignment: one definition of "pull the broadcast cursor back to
+        // what is proven", and it is the one the unit tests pin.
+        let mut round = StallRound::NoFloor;
+        let now_wall = wall_secs();
+        store
+            .update(|state| {
+                let Some(f) = group_floor(state, &cfg) else {
+                    round = StallRound::NoFloor;
+                    return false;
+                };
+                let mut cur = state.group.unwrap_or_default();
+                let heal = if consume_resend_round(&mut cur, now_wall) {
+                    false
+                } else if consume_heal_round(&mut cur, now_wall) {
+                    // spent — but fresh evidence of a lagging listener (a
+                    // claim sheet since the last round) buys the one heal round
+                    true
+                } else {
+                    round = StallRound::Spent(f);
+                    return false;
+                };
+                state.group = Some(cur); // the consumed budget
+                rewind_group(state, &cfg);
+                round = StallRound::Granted { floor: f, heal };
+                true
+            })
+            .await;
+        let f = match round {
+            StallRound::NoFloor => {
+                stalled_since = None;
+                continue;
+            }
+            StallRound::Spent(f) => {
                 tracing::warn!(
                     floor = f,
                     "the resend budget for this hour is spent — holding the tail"
@@ -759,19 +810,16 @@ async fn outbox_loop<L, S, K>(
                 stalled_since = Some(tokio::time::Instant::now());
                 continue;
             }
-        }
-        // rewind to the proven floor and re-offer the tail. Every group frame
-        // is a FRESH encryption (`group_frame` bypasses the fan-out cache), so
-        // there is no stale-ciphertext eviction to do and no resend epoch to
-        // bump — a relay-level duplicate dedups at each receiver's
-        // AcceptedWindow.
-        //
-        // Through `rewind_group`, not by assignment: one definition of "pull
-        // the broadcast cursor back to what is proven", and it is the one the
-        // unit tests pin.
-        state.group = Some(cur); // the consumed budget
-        rewind_group(&mut state, &cfg);
-        store.save(state).await;
+            StallRound::Granted { floor, heal } => {
+                if heal {
+                    tracing::info!(
+                        floor,
+                        "budget spent, but a listener proved itself lagging — heal round"
+                    );
+                }
+                floor
+            }
+        };
         rounds_without_progress = rounds_without_progress.saturating_add(1);
         tracing::warn!(
             floor = f,
@@ -945,8 +993,15 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
         return Ingest::Nothing;
     }
     let secrets = mls.exporter_secrets();
-    let Ok(wire) = crate::envelope::open_outer(&secrets, content) else {
-        return Ingest::Opaque;
+    let wire = match crate::envelope::open_outer(&secrets, content) {
+        Ok(w) => w,
+        // not even the shape of a frame: nothing a later key could open,
+        // so it must not take a hold slot from an honest frame (review M10)
+        Err(crate::envelope::EnvelopeError::Shape(_)) => {
+            tracing::debug!(me = %me, "dropping a malformed 445 frame");
+            return Ingest::Nothing;
+        }
+        Err(_) => return Ingest::Opaque,
     };
     // the CARRIER stamp, never NO_CARRIER_STAMP: 445 is the first transport
     // that carries one, and it is half of the CommitKey that breaks a
@@ -1045,11 +1100,16 @@ async fn retry_epoch_hold<L: OutboxLog, S: StateStore, K: EngineSink>(
     loop {
         let mut progress = false;
         let mut still = Vec::new();
+        // opaque THIS pass is not opaque for good while the pass is still
+        // merging commits: a laggard two epochs behind holds frames sealed
+        // under the epoch the NEXT held commit opens (review M5). They are
+        // counted lost only by the terminating no-progress pass.
+        let mut opaque = Vec::new();
         for (content, at) in std::mem::take(hold) {
             match ingest_one(mls, log, store, sink, me, seen, (&content, at)).await {
                 Ingest::EngineGone => return Err(()),
                 Ingest::FutureEpoch => still.push((content, at)),
-                Ingest::Opaque => lost += 1,
+                Ingest::Opaque => opaque.push((content, at)),
                 // a held COMMIT merged during the retry: forget the
                 // re-admitted members' windows before their held frames
                 // (later in this very pass) are delivered
@@ -1061,6 +1121,11 @@ async fn retry_epoch_hold<L: OutboxLog, S: StateStore, K: EngineSink>(
                 }
                 _ => progress = true,
             }
+        }
+        if progress {
+            still.extend(opaque);
+        } else {
+            lost += u64::try_from(opaque.len()).unwrap_or(u64::MAX);
         }
         *hold = still;
         if !progress || hold.is_empty() {

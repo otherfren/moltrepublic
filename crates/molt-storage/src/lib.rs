@@ -2543,9 +2543,19 @@ enum WriterMsg {
 pub struct StorageHandle {
     tx: mpsc::SyncSender<WriterMsg>,
     failed: Arc<AtomicBool>,
+    /// Serializes every read-modify-write of `transport.state` across the
+    /// handle's clones (the group runtime's tasks each hold one): the state
+    /// file is rewritten whole, so two interleaved updaters lost each
+    /// other's writes (review 2026-08-25 M7).
+    transport_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl StorageHandle {
+    /// The gate every `transport.state` updater takes (see the field).
+    pub fn transport_gate(&self) -> Arc<tokio::sync::Mutex<()>> {
+        self.transport_gate.clone()
+    }
+
     /// Enqueue one envelope. Returns `false` when the bounded queue was full
     /// (storage is lagging — the caller should surface that honestly); the
     /// envelope is still delivered, blocking until there is room.
@@ -3120,7 +3130,7 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
             }
         })
         .expect("spawning the storage writer thread");
-    StorageHandle { tx, failed }
+    StorageHandle { tx, failed, transport_gate: Arc::new(tokio::sync::Mutex::new(())) }
 }
 
 // ---------------------------------------------------------------------------

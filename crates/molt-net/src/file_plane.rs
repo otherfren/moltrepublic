@@ -70,15 +70,22 @@ pub async fn publish_series_metered<S: crate::supervisor::StateStore>(
     store: &S,
     now: u64,
 ) -> Result<(u64, u16), NetError> {
-    let mut state = store.load().await;
-    let mut cur = state.group.unwrap_or_default();
-    if !crate::group_runtime::consume_resend_round(&mut cur, now) {
+    let mut granted = false;
+    store
+        .update(|state| {
+            let mut cur = state.group.unwrap_or_default();
+            granted = crate::group_runtime::consume_resend_round(&mut cur, now);
+            if granted {
+                state.group = Some(cur);
+            }
+            granted
+        })
+        .await;
+    if !granted {
         return Err(NetError::Framing(
-            "publish budget spent — upload held until the hour rolls".to_string(),
+            "publish budget spent - upload held until the hour rolls".to_string(),
         ));
     }
-    state.group = Some(cur);
-    store.save(state).await;
     publish_series(chan, exporter, share_id, bytes, cap).await
 }
 

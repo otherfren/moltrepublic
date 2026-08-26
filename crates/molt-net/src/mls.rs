@@ -75,7 +75,7 @@ fn ratchet_window() -> SenderRatchetConfiguration {
 }
 
 /// The snapshot schema version (bumped on any incompatible blob layout).
-const SNAPSHOT_VERSION: u8 = 3;
+const SNAPSHOT_VERSION: u8 = 4;
 
 /// Everything that can go wrong inside the MLS layer. All variants are local
 /// bugs or corrupt/hostile wire input — never a transient network condition.
@@ -233,7 +233,7 @@ pub const NO_CARRIER_STAMP: u64 = 0;
 /// Timestamp first (concept §1: "lowest `created_at`, then lowest event id"),
 /// the digest LAST — a digest-first order would be grindable, since a
 /// committer can cheaply search for bytes that hash low.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CommitKey {
     /// The sender's `created_at` (seconds) — the carrier event's timestamp.
     pub created_at: u64,
@@ -305,6 +305,24 @@ struct MlsSnapshot {
     exporter_ring: Vec<[u8; EXPORTER_LEN]>,
     /// v3: the ring entries' epochs, head-aligned (bincode is positional —
     /// appended field, dispatched by the version byte).
+    exporter_ring_epochs: Vec<u64>,
+    /// v4: the PRIOR-STATE SLOT (N3 §1) rides the snapshot — a node that
+    /// restarted between two concurrent same-epoch commits decided the
+    /// tiebreak differently from one that did not (no slot = the loser's
+    /// commit is refused instead of rewound onto): a silent fork among
+    /// survivors (review 2026-08-25 M3).
+    prior: Option<(u64, Vec<u8>, CommitKey, Vec<String>)>,
+}
+
+/// The v3 layout (ring + epochs, no prior slot).
+#[derive(Serialize, Deserialize)]
+struct MlsSnapshotV3 {
+    version: u8,
+    name: String,
+    signer_pub: Vec<u8>,
+    group_id: Vec<u8>,
+    storage: Vec<u8>,
+    exporter_ring: Vec<[u8; EXPORTER_LEN]>,
     exporter_ring_epochs: Vec<u64>,
 }
 
@@ -907,6 +925,7 @@ impl MlsMember {
             storage,
             exporter_ring: self.exporter_ring.clone(),
             exporter_ring_epochs: self.exporter_ring_epochs.clone(),
+            prior: self.prior.clone(),
         };
         bincode::serialize(&snap).map_err(|e| MlsError::Snapshot(format!("encoding snapshot: {e}")))
     }
@@ -921,6 +940,20 @@ impl MlsMember {
         let snap: MlsSnapshot = match blob.first() {
             Some(&SNAPSHOT_VERSION) => bincode::deserialize(blob)
                 .map_err(|e| MlsError::Snapshot(format!("decoding snapshot: {e}")))?,
+            Some(3) => {
+                let v3: MlsSnapshotV3 = bincode::deserialize(blob)
+                    .map_err(|e| MlsError::Snapshot(format!("decoding v3 snapshot: {e}")))?;
+                MlsSnapshot {
+                    version: SNAPSHOT_VERSION,
+                    name: v3.name,
+                    signer_pub: v3.signer_pub,
+                    group_id: v3.group_id,
+                    storage: v3.storage,
+                    exporter_ring: v3.exporter_ring,
+                    exporter_ring_epochs: v3.exporter_ring_epochs,
+                    prior: None,
+                }
+            }
             Some(2) => {
                 let v2: MlsSnapshotV2 = bincode::deserialize(blob)
                     .map_err(|e| MlsError::Snapshot(format!("decoding v2 snapshot: {e}")))?;
@@ -932,6 +965,7 @@ impl MlsMember {
                     storage: v2.storage,
                     exporter_ring: v2.exporter_ring,
                     exporter_ring_epochs: Vec::new(),
+                    prior: None,
                 }
             }
             Some(1) => {
@@ -945,6 +979,7 @@ impl MlsMember {
                     storage: v1.storage,
                     exporter_ring: Vec::new(),
                     exporter_ring_epochs: Vec::new(),
+                    prior: None,
                 }
             }
             other => {
@@ -975,8 +1010,8 @@ impl MlsMember {
             signer,
             name: snap.name,
             group: Some(group),
-            // a restored snapshot has no in-flight commit of its own
-            prior: None,
+            // v4 carries the slot; older blobs restore without one
+            prior: snap.prior,
             roster_keys: None,
             rewind_forbidden: Vec::new(),
             // v2 blobs carry the ring; a v1 blob restored it empty above
@@ -1338,6 +1373,50 @@ mod tests {
             !matches!(cara.decrypt(&stolen), Ok(MlsIncoming::Application { .. })),
             "the re-keying coordinator must reject the evicted leaf's sends"
         );
+    }
+
+    /// **The prior slot survives a snapshot round trip (M3).** A node that
+    /// restarted between two concurrent same-epoch commits must decide the
+    /// tiebreak exactly like one that did not — else survivors fork.
+    #[test]
+    fn the_prior_slot_survives_snapshot_and_restore() {
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        let bob = MlsMember::new(&key(2), "bob").expect("bob");
+        let cara = MlsMember::new(&key(3), "cara").expect("cara");
+        founder.create_group().expect("create");
+        let welcome = founder
+            .add_members(&[
+                bob.key_package().expect("bob kp"),
+                cara.key_package().expect("cara kp"),
+            ])
+            .expect("add")
+            .expect("welcome");
+        let mut cara = cara;
+        cara.join_from_welcome(&welcome).expect("cara joins");
+        let bob2 = MlsMember::new(&key(2), "bob").expect("bob2");
+        let (_commit, _) = cara
+            .restore_member("bob", &bob2.key_package().expect("kp"), 100)
+            .expect("restore");
+        assert!(cara.prior.is_some(), "the committer armed its slot");
+        let blob = cara.snapshot().expect("snapshot");
+        let restored = MlsMember::restore(&blob).expect("restore");
+        assert_eq!(
+            restored.prior.as_ref().map(|p| (p.0, p.2, p.3.clone())),
+            cara.prior.as_ref().map(|p| (p.0, p.2, p.3.clone())),
+            "epoch, key and removed leaves ride the snapshot"
+        );
+        // and a pre-v4 blob still restores, without a slot
+        let v3 = MlsSnapshotV3 {
+            version: 3,
+            name: "cara".into(),
+            signer_pub: cara.signer.public().to_vec(),
+            group_id: cara.group.as_ref().expect("group").group_id().as_slice().to_vec(),
+            storage: bincode::deserialize::<MlsSnapshot>(&blob).expect("v4").storage,
+            exporter_ring: cara.exporter_ring.clone(),
+            exporter_ring_epochs: cara.exporter_ring_epochs.clone(),
+        };
+        let old = MlsMember::restore(&bincode::serialize(&v3).expect("v3 bytes")).expect("v3");
+        assert!(old.prior.is_none());
     }
 
     /// **A leaf added under a key that is not the member's anchored identity

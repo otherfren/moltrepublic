@@ -260,7 +260,7 @@ pub fn import_stage(
                 stem.parse::<u64>().ok().map(|at| (at, &e.data))
             })
             .collect();
-        snaps.sort_by(|a, b| b.0.cmp(&a.0));
+        snaps.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
         let (at_seq, data) = snaps.first().ok_or_else(|| {
             StorageError::Corrupt(
                 "blob carries neither log/000001.mlog nor a snapshot (no genesis)".to_string(),

@@ -401,6 +401,25 @@ pub trait StateStore: Send + Sync + Clone + 'static {
     fn load(&self) -> impl std::future::Future<Output = TransportState> + Send;
     /// Persist a snapshot (atomic rewrite; implementations may queue).
     fn save(&self, state: TransportState) -> impl std::future::Future<Output = ()> + Send;
+    /// Read-modify-write as ONE step: `f` sees the current state and says
+    /// whether it changed anything (then it is saved). Every writer of the
+    /// group runtime goes through here — the inbox (claim sheets), the
+    /// outbox (cursor, resend budget) and the file plane (budget) used to
+    /// `load → mutate → save(whole)` independently and lost each other's
+    /// writes at the awaits in between (review 2026-08-25 M7). The default
+    /// is the plain sequence for stores that cannot do better; the two real
+    /// stores override it atomically.
+    fn update<F>(&self, f: F) -> impl std::future::Future<Output = ()> + Send
+    where
+        F: FnOnce(&mut TransportState) -> bool + Send,
+    {
+        async move {
+            let mut state = self.load().await;
+            if f(&mut state) {
+                self.save(state).await;
+            }
+        }
+    }
 }
 
 /// How the supervisor talks to the engine: deliveries and transport
@@ -1794,10 +1813,46 @@ impl StateStore for MemStateStore {
             *s = state;
         }
     }
+
+    // in place under the one mutex: atomic by construction
+    async fn update<F>(&self, f: F)
+    where
+        F: FnOnce(&mut TransportState) -> bool + Send,
+    {
+        if let Ok(mut s) = self.state.lock() {
+            let _ = f(&mut s);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    /// `update` is one step: a hundred concurrent updaters never lose a
+    /// write (the load/save pair they replaced did, at the awaits between).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn state_updates_never_lose_each_other() {
+        use super::StateStore;
+        let store = super::MemStateStore::default();
+        let mut tasks = Vec::new();
+        for _ in 0..100 {
+            let store = store.clone();
+            tasks.push(tokio::spawn(async move {
+                store
+                    .update(|st| {
+                        let mut g = st.group.clone().unwrap_or_default();
+                        g.resend_rounds += 1;
+                        st.group = Some(g);
+                        true
+                    })
+                    .await;
+            }));
+        }
+        for t in tasks {
+            t.await.expect("task");
+        }
+        assert_eq!(store.load().await.group.unwrap_or_default().resend_rounds, 100);
+    }
+
     use super::*;
 
     #[test]
