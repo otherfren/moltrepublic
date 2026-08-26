@@ -446,7 +446,7 @@ fn a_shed_decline_stays_unacked_for_the_resend() {
         );
     }
     let accepted = |st: &crate::State, seq: u64| {
-        st.accepted.get("petra").is_some_and(|w| w.is_accepted(seq))
+        st.delivery.accepted.get("petra").is_some_and(|w| w.is_accepted(seq))
     };
     assert!(accepted(&walter, per_member), "parked voices are accepted and acked");
     // the voice the park sheds must NOT be marked accepted

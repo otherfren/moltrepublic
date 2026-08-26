@@ -59,7 +59,7 @@ impl State {
     /// receive path) stay unstamped — they are never fanned out, and a zero
     /// serializes away (byte-identical legacy log frames).
     pub(crate) fn make_env(&mut self, by: MemberId, body: WorkspaceEvent) -> EventEnvelope {
-        let prev_seq = if by == self.member() { self.last_own_ackable } else { 0 };
+        let prev_seq = if by == self.member() { self.delivery.last_own_ackable } else { 0 };
         let env = EventEnvelope {
             seq: self.next_seq,
             ts: now_secs(),
@@ -96,7 +96,7 @@ impl State {
             && crate::net::crosses_wire(&env.body)
             && env.by == self.member()
         {
-            self.last_mesh_out = self.presence_now();
+            self.delivery.last_mesh_out = self.presence_now();
         }
         // delivery guarantee §4.6: the debounced live ratchet persist rides
         // RECORD (traffic-coupled), because the presence tick is a 30 s beat
@@ -443,11 +443,11 @@ impl State {
         // replica this check reads — joins its chain. `MlsCommit`s are
         // excluded: they never reach a peer's engine, so a chain through one
         // would wedge every successor at the receiver.
-        if env.seq > self.last_own_ackable
+        if env.seq > self.delivery.last_own_ackable
             && env.by == self.member()
             && !matches!(env.body, WorkspaceEvent::MlsCommit { .. })
         {
-            self.last_own_ackable = env.seq;
+            self.delivery.last_own_ackable = env.seq;
         }
     }
 
@@ -664,23 +664,23 @@ impl State {
         self.wake_at = None;
         // the accept windows belong to the OLD workspace's senders — leaking
         // them would dedup-drop the NEXT workspace's fresh envelopes
-        self.accepted.clear();
-        self.accepted_dirty = false;
-        self.accepted_saved_at = 0;
-        self.mls_persisted_at = 0;
-        self.ack_due.clear();
-        self.last_own_ackable = 0;
-        self.ordered_park.clear();
+        self.delivery.accepted.clear();
+        self.delivery.accepted_dirty = false;
+        self.delivery.accepted_saved_at = 0;
+        self.delivery.mls_persisted_at = 0;
+        self.delivery.ack_due.clear();
+        self.delivery.last_own_ackable = 0;
+        self.delivery.ordered_park.clear();
         // send-failure presence pins belong to the OLD workspace's mesh —
         // dropping them stops a same-named member showing offline in the next
-        self.net_unreachable.clear();
-        self.net_link_down.clear();
-        self.net_send_stuck.clear();
+        self.delivery.unreachable.clear();
+        self.delivery.link_down.clear();
+        self.delivery.send_stuck.clear();
         // …as does the transport-kind affordance flag (§10.7/§6.5)
         self.session.transport = String::new();
         // …and the read cursors, which belong to the OLD workspace (B2)
         self.read_cursors.clear();
-        self.last_mesh_out = 0;
+        self.delivery.last_mesh_out = 0;
         // a runtime-derived Degraded belongs to the mesh that just ended —
         // it resets with its backing maps (a Down verdict is the open/config
         // path's and stays until the next resolve)
@@ -727,7 +727,7 @@ impl State {
         self.chain_anchors.clear();
         self.chain_member_relays.clear();
         self.split_noted.clear();
-        self.last_group_ack = None;
+        self.delivery.last_group_ack = None;
         self.pending_declines.clear();
         self.pending_withdrawals.clear();
         self.file_series.clear();

@@ -462,6 +462,71 @@ pub(crate) struct NostrTransport {
     pub(crate) rotation_seed: [u8; 32],
 }
 
+/// The delivery-guarantee bookkeeping of the open workspace
+/// (`docs_archive/transport/delivery_guarantee.md`): the per-sender accept
+/// windows and their persist debounces, the due ACKs, the G7 in-order park,
+/// the send/link trouble pins that drive presence and health, and the last
+/// broadcast claim sheet. Active-workspace scope: `reset_workspace_state`
+/// clears every field.
+pub(crate) struct DeliveryState {
+    /// The last broadcast claim sheet published, so an unchanged one is not
+    /// republished — full state means silence is the correct steady state.
+    pub(crate) last_group_ack: Option<molt_net::group_ack::GroupAck>,
+    /// Per SENDER: which of that sender's log seqs this engine has accepted
+    /// (delivery guarantee §4.2 — the envelope-level dedup twin of the mesh
+    /// ACK payload). Loaded from `transport.state` at open, mutated on every
+    /// authenticated wire delivery, persisted debounced + at close. Active-
+    /// workspace scope — [`State::reset_workspace_state`] clears it.
+    pub(crate) accepted: std::collections::BTreeMap<MemberId, molt_core::AcceptedWindow>,
+    /// Whether [`Self::accepted`] changed since it was last persisted (the
+    /// debounced save on the presence tick checks this).
+    pub(crate) accepted_dirty: bool,
+    /// Per SENDER: when a delivery ACK to them is due (`member →
+    /// presence_now deadline`). Every accepted OR duplicate delivery arms
+    /// this (a dup means the previous ack was lost or lags — re-acking
+    /// closes that loop); the presence tick flushes what is due. Runtime-
+    /// only, workspace scope.
+    pub(crate) ack_due: std::collections::HashMap<MemberId, u64>,
+    /// The seq of this node's last OWN ackable envelope (`MlsCommit`s
+    /// excluded) — the tail of the G7 in-order chain `make_env` stamps as
+    /// `prev_seq`. Derived in `apply` (live records and the open replay),
+    /// runtime-only, workspace scope.
+    pub(crate) last_own_ackable: u64,
+    /// G7 in-order hold: per SENDER, wire envelopes whose `prev_seq` is not
+    /// yet in the accept window (`seq → (envelope, parked_at)`). Deliberately
+    /// NOT accept-marked while parked: the sender keeps them unacked and a
+    /// crash simply re-earns them via the resend machinery. Drained in seq
+    /// order as predecessors land; a stale entry (pathological chain) is
+    /// released loudly by the delivery tick after
+    /// [`crate::net::ORDERED_PARK_GIVEUP_SECS`]. Runtime-only, workspace
+    /// scope.
+    #[allow(clippy::type_complexity)]
+    pub(crate) ordered_park:
+        std::collections::HashMap<MemberId, std::collections::BTreeMap<u64, (molt_core::EventEnvelope, u64)>>,
+    /// `presence_now` of the last persisted accept-window save (debounce).
+    pub(crate) accepted_saved_at: u64,
+    /// `presence_now` of the last debounced live MLS-ratchet merge into
+    /// `transport.state` (§4.6 / E6 — bounds the hard-kill regression).
+    pub(crate) mls_persisted_at: u64,
+    /// Members whose sends keep failing (outbox backoff): their pill is
+    /// pinned unreachable (state 2) regardless of how fresh the last-seen
+    /// stamp is, until the next real sighting clears the pin. Runtime-only,
+    /// active-workspace scope — [`State::reset_workspace_state`] clears it
+    /// at the close/switch boundary so a pin never leaks into the next.
+    pub(crate) unreachable: std::collections::HashSet<MemberId>,
+    /// Inbound legs currently down (member → reason), reported by the
+    /// resubscribe watchdog — drives `NetHealth::Degraded` (Stage B).
+    pub(crate) link_down: std::collections::BTreeMap<MemberId, String>,
+    /// Outbound legs whose sends keep failing (member → reason) — set by
+    /// `NetSendFailed`, cleared by `NetSendOk` (Stage B).
+    pub(crate) send_stuck: std::collections::BTreeMap<MemberId, String>,
+    /// `presence_now` of the last wire-crossing frame the engine emitted to a
+    /// real mesh (stamped in [`State::record`]). Read by the debounced live
+    /// MLS-ratchet persist (`persist_mls_if_due` — "did anything go out since
+    /// the last snapshot?"). Runtime-only; reset with the workspace.
+    pub(crate) last_mesh_out: u64,
+}
+
 pub(crate) struct State {
     pub(crate) config: GroupConfig,
     ev_tx: broadcast::Sender<Event>,
@@ -552,9 +617,7 @@ pub(crate) struct State {
     /// wakeup its outbox reads. `None` on a legacy/queue workspace, and on a
     /// Nostr one whose MLS group or relay set did not come up.
     pub(crate) group_net: Option<GroupNet>,
-    /// The last broadcast claim sheet published, so an unchanged one is not
-    /// republished — full state means silence is the correct steady state.
-    pub(crate) last_group_ack: Option<molt_net::group_ack::GroupAck>,
+    pub(crate) delivery: DeliveryState,
     /// Live recovery-inbox tasks (N4b step 5), one per minted link.
     ///
     /// They MUST be aborted when the workspace closes. The loopback twin gets
@@ -723,59 +786,6 @@ pub(crate) struct State {
     /// of the last fired wake): new proposals inside the window do not
     /// re-spawn the wake command — one nudge, then the agent reads state.
     pub(crate) wake_at: Option<u64>,
-    /// Per SENDER: which of that sender's log seqs this engine has accepted
-    /// (delivery guarantee §4.2 — the envelope-level dedup twin of the mesh
-    /// ACK payload). Loaded from `transport.state` at open, mutated on every
-    /// authenticated wire delivery, persisted debounced + at close. Active-
-    /// workspace scope — [`State::reset_workspace_state`] clears it.
-    pub(crate) accepted: std::collections::BTreeMap<MemberId, molt_core::AcceptedWindow>,
-    /// Whether [`Self::accepted`] changed since it was last persisted (the
-    /// debounced save on the presence tick checks this).
-    pub(crate) accepted_dirty: bool,
-    /// Per SENDER: when a delivery ACK to them is due (`member →
-    /// presence_now deadline`). Every accepted OR duplicate delivery arms
-    /// this (a dup means the previous ack was lost or lags — re-acking
-    /// closes that loop); the presence tick flushes what is due. Runtime-
-    /// only, workspace scope.
-    pub(crate) ack_due: std::collections::HashMap<MemberId, u64>,
-    /// The seq of this node's last OWN ackable envelope (`MlsCommit`s
-    /// excluded) — the tail of the G7 in-order chain `make_env` stamps as
-    /// `prev_seq`. Derived in `apply` (live records and the open replay),
-    /// runtime-only, workspace scope.
-    pub(crate) last_own_ackable: u64,
-    /// G7 in-order hold: per SENDER, wire envelopes whose `prev_seq` is not
-    /// yet in the accept window (`seq → (envelope, parked_at)`). Deliberately
-    /// NOT accept-marked while parked: the sender keeps them unacked and a
-    /// crash simply re-earns them via the resend machinery. Drained in seq
-    /// order as predecessors land; a stale entry (pathological chain) is
-    /// released loudly by the delivery tick after
-    /// [`crate::net::ORDERED_PARK_GIVEUP_SECS`]. Runtime-only, workspace
-    /// scope.
-    #[allow(clippy::type_complexity)]
-    pub(crate) ordered_park:
-        std::collections::HashMap<MemberId, std::collections::BTreeMap<u64, (molt_core::EventEnvelope, u64)>>,
-    /// `presence_now` of the last persisted accept-window save (debounce).
-    pub(crate) accepted_saved_at: u64,
-    /// `presence_now` of the last debounced live MLS-ratchet merge into
-    /// `transport.state` (§4.6 / E6 — bounds the hard-kill regression).
-    pub(crate) mls_persisted_at: u64,
-    /// Members whose sends keep failing (outbox backoff): their pill is
-    /// pinned unreachable (state 2) regardless of how fresh the last-seen
-    /// stamp is, until the next real sighting clears the pin. Runtime-only,
-    /// active-workspace scope — [`State::reset_workspace_state`] clears it
-    /// at the close/switch boundary so a pin never leaks into the next.
-    pub(crate) net_unreachable: std::collections::HashSet<MemberId>,
-    /// Inbound legs currently down (member → reason), reported by the
-    /// resubscribe watchdog — drives `NetHealth::Degraded` (Stage B).
-    pub(crate) net_link_down: std::collections::BTreeMap<MemberId, String>,
-    /// Outbound legs whose sends keep failing (member → reason) — set by
-    /// `NetSendFailed`, cleared by `NetSendOk` (Stage B).
-    pub(crate) net_send_stuck: std::collections::BTreeMap<MemberId, String>,
-    /// `presence_now` of the last wire-crossing frame the engine emitted to a
-    /// real mesh (stamped in [`State::record`]). Read by the debounced live
-    /// MLS-ratchet persist (`persist_mls_if_due` — "did anything go out since
-    /// the last snapshot?"). Runtime-only; reset with the workspace.
-    pub(crate) last_mesh_out: u64,
     /// Are clearnet relays activated for THIS session? Runtime-only **on
     /// purpose** — it is never persisted, so every start re-arms the gate and
     /// no clearnet packet leaves before the user acts again
@@ -1015,7 +1025,20 @@ impl State {
             transport_kind: None,
             nostr: None,
             group_net: None,
-            last_group_ack: None,
+            delivery: DeliveryState {
+                last_group_ack: None,
+                accepted: std::collections::BTreeMap::new(),
+                accepted_dirty: false,
+                accepted_saved_at: 0,
+                mls_persisted_at: 0,
+                ack_due: std::collections::HashMap::new(),
+                last_own_ackable: 0,
+                ordered_park: std::collections::HashMap::new(),
+                unreachable: std::collections::HashSet::new(),
+                link_down: std::collections::BTreeMap::new(),
+                send_stuck: std::collections::BTreeMap::new(),
+                last_mesh_out: 0,
+            },
             recovery_inboxes: Vec::new(),
             seat_inbox: None,
             reattach_attempts: 0,
@@ -1050,17 +1073,6 @@ impl State {
             mesh_extension_at: std::collections::HashMap::new(),
             poke_at: std::collections::HashMap::new(),
             wake_at: None,
-            accepted: std::collections::BTreeMap::new(),
-            accepted_dirty: false,
-            accepted_saved_at: 0,
-            mls_persisted_at: 0,
-            ack_due: std::collections::HashMap::new(),
-            last_own_ackable: 0,
-            ordered_park: std::collections::HashMap::new(),
-            net_unreachable: std::collections::HashSet::new(),
-            net_link_down: std::collections::BTreeMap::new(),
-            net_send_stuck: std::collections::BTreeMap::new(),
-            last_mesh_out: 0,
             // the STORED decision is what a fresh process starts from
             // (ADR-0004 amendment): an operator who acknowledged clearnet
             // exposure is not asked again on every restart
@@ -1132,7 +1144,7 @@ impl State {
     pub(crate) fn presence_of(&self, member: &str, last_seen: u64, now: u64) -> u8 {
         if member == self.member() {
             0
-        } else if self.net_unreachable.contains(member) {
+        } else if self.delivery.unreachable.contains(member) {
             2
         } else {
             let s = molt_core::presence_state(now, last_seen);

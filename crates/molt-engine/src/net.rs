@@ -651,10 +651,10 @@ impl State {
         // flush a dirty accept window FIRST: the writer processes messages in
         // order, and the merge below SEALS `transport.state` against later
         // saves — enqueued before it, this one still lands (§4.7)
-        if self.accepted_dirty {
+        if self.delivery.accepted_dirty {
             if let Some(active) = self.active.as_ref() {
-                active.handle.save_accepted(self.accepted.clone());
-                self.accepted_dirty = false;
+                active.handle.save_accepted(self.delivery.accepted.clone());
+                self.delivery.accepted_dirty = false;
             }
         }
         // the group runtime's ratchet, on the same terms: stop it, then merge
@@ -997,10 +997,10 @@ impl State {
         // REBUILD (extension) for members still in the mesh — clearing it
         // would launder a genuinely dead outbound leg back to green; only a
         // successful send (NetSendOk) clears it.
-        self.net_link_down.clear();
-        self.net_send_stuck.retain(|m, _| peer_names.contains(m));
+        self.delivery.link_down.clear();
+        self.delivery.send_stuck.retain(|m, _| peer_names.contains(m));
         for p in &peer_names {
-            self.net_link_down.insert(p.clone(), "connecting".to_string());
+            self.delivery.link_down.insert(p.clone(), "connecting".to_string());
         }
         self.recompute_net_health();
         Some(NetRuntime {
@@ -1057,14 +1057,14 @@ impl State {
         // keyed by name must not swallow the rejoiner's request because the
         // lost device asked within the last thirty seconds
         self.chain_served_at.remove(member);
-        if self.accepted.remove(member).is_some() {
-            self.accepted_dirty = true;
+        if self.delivery.accepted.remove(member).is_some() {
+            self.delivery.accepted_dirty = true;
         }
         // any pending ack deadline refers to the OLD window — drop it too
-        self.ack_due.remove(member);
+        self.delivery.ack_due.remove(member);
         // parked successors chain into the OLD incarnation's seq space; the
         // new incarnation resends its own history anyway (G7)
-        self.ordered_park.remove(member);
+        self.delivery.ordered_park.remove(member);
     }
 
     /// Mark `seq` from `from` as engine-accepted (delivery guarantee §4.2 —
@@ -1072,9 +1072,9 @@ impl State {
     /// held it: the envelope is a duplicate/resend and the caller drops it
     /// (G2). Freshness dirties the window for the debounced persist.
     pub(crate) fn accept_envelope(&mut self, from: &MemberId, seq: u64) -> bool {
-        let fresh = self.accepted.entry(from.clone()).or_default().accept(seq);
+        let fresh = self.delivery.accepted.entry(from.clone()).or_default().accept(seq);
         if fresh {
-            self.accepted_dirty = true;
+            self.delivery.accepted_dirty = true;
         }
         fresh
     }
@@ -1087,7 +1087,7 @@ impl State {
     /// reopen's rewind-resend re-encrypts a step or two past what the peers
     /// consumed instead of replaying a whole session into replay rejection.
     pub(crate) fn persist_mls_if_due(&mut self, now: u64) {
-        if now.saturating_sub(self.mls_persisted_at) < MLS_PERSIST_SECS {
+        if now.saturating_sub(self.delivery.mls_persisted_at) < MLS_PERSIST_SECS {
             return;
         }
         // A Nostr workspace has no `NetRuntime`, but it very much has a live
@@ -1099,7 +1099,7 @@ impl State {
             let snap = group.mls.lock().ok().and_then(|g| g.snapshot().ok());
             if let (Some(snap), Some(active)) = (snap, self.active.as_ref()) {
                 if active.handle.merge_mls_async(snap) {
-                    self.mls_persisted_at = now;
+                    self.delivery.mls_persisted_at = now;
                 }
             }
             return;
@@ -1117,7 +1117,7 @@ impl State {
             .map(|m| self.member_last_seen(m))
             .max()
             .unwrap_or(0);
-        if self.last_mesh_out < self.mls_persisted_at && heard < self.mls_persisted_at {
+        if self.delivery.last_mesh_out < self.delivery.mls_persisted_at && heard < self.delivery.mls_persisted_at {
             return;
         }
         let Some((Some(mls), _creds)) = net.crypto_for_close() else {
@@ -1128,7 +1128,7 @@ impl State {
             // dropped one (writer backpressure) retries on the next beat
             if active.handle.merge_mls_async(mls) {
                 tracing::debug!("live MLS ratchet persist (debounced)");
-                self.mls_persisted_at = now;
+                self.delivery.mls_persisted_at = now;
             }
         }
     }
@@ -1138,15 +1138,15 @@ impl State {
     /// Fire-and-forget like the supervisor's cursor saves — a lost save only
     /// regresses the window, which resends + re-dedup absorb (§4.7).
     pub(crate) fn save_accepted_if_due(&mut self, now: u64) {
-        if !self.accepted_dirty
-            || now.saturating_sub(self.accepted_saved_at) < ACCEPT_SAVE_SECS
+        if !self.delivery.accepted_dirty
+            || now.saturating_sub(self.delivery.accepted_saved_at) < ACCEPT_SAVE_SECS
         {
             return;
         }
         if let Some(active) = self.active.as_ref() {
-            active.handle.save_accepted(self.accepted.clone());
-            self.accepted_dirty = false;
-            self.accepted_saved_at = now;
+            active.handle.save_accepted(self.delivery.accepted.clone());
+            self.delivery.accepted_dirty = false;
+            self.delivery.accepted_saved_at = now;
         }
     }
 
@@ -1185,11 +1185,11 @@ impl State {
         // were published at epochs its exporter ring can never open — parking
         // would hold the whole catch-up hostage to frames that cannot exist
         // for it. The first envelope delivers as the ordering baseline.
-        let has_history = self.accepted.get(&from).is_some_and(|w| w.high > 0);
+        let has_history = self.delivery.accepted.get(&from).is_some_and(|w| w.high > 0);
         if envelope.prev_seq != 0
             && has_history
             && !self
-                .accepted
+                .delivery.accepted
                 .get(&from)
                 .is_some_and(|w| w.is_accepted(envelope.prev_seq))
         {
@@ -1209,7 +1209,7 @@ impl State {
     /// and arm an ACK — the reported window tells the sender exactly which
     /// predecessor is missing, so its resend closes the gap fast.
     pub(crate) fn park_ordered(&mut self, from: &MemberId, envelope: EventEnvelope) {
-        let park = self.ordered_park.entry(from.clone()).or_default();
+        let park = self.delivery.ordered_park.entry(from.clone()).or_default();
         if park.len() >= ORDERED_PARK_MAX && !park.contains_key(&envelope.seq) {
             // shed the NEWEST (furthest from deliverable) — the resend
             // machinery re-offers it once the chain caught up
@@ -1223,34 +1223,34 @@ impl State {
         }
         tracing::debug!(%from, seq = envelope.seq, prev = envelope.prev_seq, "holding an out-of-order envelope for its predecessor");
         let now = self.presence_now();
-        self.ordered_park
+        self.delivery.ordered_park
             .entry(from.clone())
             .or_default()
             .entry(envelope.seq)
             .or_insert((envelope, now));
         let due = now + ACK_DEBOUNCE_SECS;
-        self.ack_due.entry(from.clone()).or_insert(due);
+        self.delivery.ack_due.entry(from.clone()).or_insert(due);
     }
 
     /// G7: the next parked envelope from `from` whose predecessor is now
     /// accepted (ascending seq = chain order), if any.
     fn take_ready_parked(&mut self, from: &MemberId) -> Option<EventEnvelope> {
         let ready = {
-            let park = self.ordered_park.get(from)?;
+            let park = self.delivery.ordered_park.get(from)?;
             park.iter()
                 .find(|(_, (env, _))| {
                     env.prev_seq == 0
                         || self
-                            .accepted
+                            .delivery.accepted
                             .get(from)
                             .is_some_and(|w| w.is_accepted(env.prev_seq))
                 })
                 .map(|(seq, _)| *seq)?
         };
-        let park = self.ordered_park.get_mut(from)?;
+        let park = self.delivery.ordered_park.get_mut(from)?;
         let (env, _) = park.remove(&ready)?;
         if park.is_empty() {
-            self.ordered_park.remove(from);
+            self.delivery.ordered_park.remove(from);
         }
         Some(env)
     }
@@ -1262,7 +1262,7 @@ impl State {
     /// backoff caps at 600 s), so honest chains never trip it.
     pub(crate) fn release_stale_parked(&mut self, now: u64) {
         let stale: Vec<(MemberId, u64)> = self
-            .ordered_park
+            .delivery.ordered_park
             .iter()
             .flat_map(|(m, park)| {
                 park.iter()
@@ -1272,10 +1272,10 @@ impl State {
             })
             .collect();
         for (member, seq) in stale {
-            let Some(park) = self.ordered_park.get_mut(&member) else { continue };
+            let Some(park) = self.delivery.ordered_park.get_mut(&member) else { continue };
             let Some((env, _)) = park.remove(&seq) else { continue };
             if park.is_empty() {
-                self.ordered_park.remove(&member);
+                self.delivery.ordered_park.remove(&member);
             }
             tracing::warn!(%member, seq, prev = env.prev_seq, "a parked envelope's predecessor never arrived - releasing it unordered");
             let _ = self.deliver_gated(member.clone(), env);
@@ -1314,7 +1314,7 @@ impl State {
         // what stops its resend loop (§4.3). `or_insert` keeps the earliest
         // deadline of a burst — one ack answers all of it.
         let due = self.presence_now() + ACK_DEBOUNCE_SECS;
-        self.ack_due.entry(from.clone()).or_insert(due);
+        self.delivery.ack_due.entry(from.clone()).or_insert(due);
         if !fresh {
             tracing::debug!(%from, seq = envelope.seq, "dropping an already-accepted envelope (duplicate/resend)");
             return Ok(Reply::Ack);
@@ -2748,7 +2748,7 @@ impl State {
     /// quiet republic the steady state is zero frames.
     fn flush_group_ack(&mut self, due: &[MemberId]) {
         for m in due {
-            self.ack_due.remove(m);
+            self.delivery.ack_due.remove(m);
         }
         // every subject we owe, plus everyone the last sheet already spoke
         // about — dropping a subject from the sheet would read as "no longer
@@ -2759,14 +2759,14 @@ impl State {
             .iter()
             .cloned()
             .chain(
-                self.last_group_ack
+                self.delivery.last_group_ack
                     .as_ref()
                     .map(|a| a.claims.keys().cloned().collect::<Vec<_>>())
                     .unwrap_or_default(),
             )
             .collect();
         for m in subjects {
-            if let Some(win) = self.accepted.get(&m) {
+            if let Some(win) = self.delivery.accepted.get(&m) {
                 claims.insert(m, win.clone());
             }
         }
@@ -2774,12 +2774,12 @@ impl State {
             return;
         }
         let ack = molt_net::group_ack::GroupAck::new(self.member(), claims);
-        if self.last_group_ack.as_ref() == Some(&ack) {
+        if self.delivery.last_group_ack.as_ref() == Some(&ack) {
             return; // nothing changed — say nothing
         }
         if let Some(group) = self.group_net.as_ref() {
             group.handle.publish_ack(ack.clone());
-            self.last_group_ack = Some(ack);
+            self.delivery.last_group_ack = Some(ack);
         }
     }
 
@@ -3146,7 +3146,7 @@ impl State {
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
         if self.net_generation_current(generation) {
-            self.net_unreachable.remove(&member);
+            self.delivery.unreachable.remove(&member);
             let now = self.presence_now();
             self.stamp_member_pill(&member, now);
             self.recompute_net_health();
@@ -3191,11 +3191,11 @@ impl State {
             return Ok(Reply::Ack);
         }
         tracing::warn!(%member, %reason, "sends to a member keep failing - outbox is backing off");
-        self.net_send_stuck.insert(member.clone(), reason);
+        self.delivery.send_stuck.insert(member.clone(), reason);
         // the group runtime names the OWN seat for its broadcast outbox: a
         // presence pin on this node could never lift (nothing sights itself)
         if member != self.member() {
-            self.net_unreachable.insert(member);
+            self.delivery.unreachable.insert(member);
         }
         self.refresh_member_pills();
         self.recompute_net_health();
@@ -3210,12 +3210,12 @@ impl State {
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
         if self.net_generation_current(generation) {
-            self.net_link_down.remove(&member);
+            self.delivery.link_down.remove(&member);
             // delivery guarantee §4.3: a (re)established leg gets an ACK right
             // away (the next presence tick flushes it), so a peer resuming or
             // rewinding trims its resend range to what this node still misses
-            if self.accepted.contains_key(&member) {
-                self.ack_due.insert(member.clone(), self.presence_now());
+            if self.delivery.accepted.contains_key(&member) {
+                self.delivery.ack_due.insert(member.clone(), self.presence_now());
             }
             self.recompute_net_health();
         }
@@ -3231,7 +3231,7 @@ impl State {
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
         if self.net_generation_current(generation) {
-            self.net_link_down.insert(member, reason);
+            self.delivery.link_down.insert(member, reason);
             self.recompute_net_health();
         }
         Ok(Reply::Ack)
@@ -3245,7 +3245,7 @@ impl State {
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
         if self.net_generation_current(generation) {
-            self.net_send_stuck.remove(&member);
+            self.delivery.send_stuck.remove(&member);
             self.recompute_net_health();
         }
         Ok(Reply::Ack)
@@ -3280,14 +3280,14 @@ impl State {
         if matches!(self.session.net_health, molt_core::NetHealth::Down { .. }) {
             return;
         }
-        let health = if self.net_link_down.is_empty() && self.net_send_stuck.is_empty() {
+        let health = if self.delivery.link_down.is_empty() && self.delivery.send_stuck.is_empty() {
             molt_core::NetHealth::Ok
         } else {
             let parts: Vec<String> = self
-                .net_link_down
+                .delivery.link_down
                 .iter()
                 .map(|(m, r)| format!("link to {m}: {r}"))
-                .chain(self.net_send_stuck.iter().map(|(m, r)| format!("sends to {m}: {r}")))
+                .chain(self.delivery.send_stuck.iter().map(|(m, r)| format!("sends to {m}: {r}")))
                 .collect();
             molt_core::NetHealth::Degraded {
                 reason: parts.join("; "),
@@ -3325,12 +3325,12 @@ impl State {
             }
             // a stuck broadcast outbox names no peer — the channel is the
             // trouble, so its reason joins the channel verdict
-            parts.extend(self.net_send_stuck.values().cloned());
+            parts.extend(self.delivery.send_stuck.values().cloned());
             // SELF-HEAL (detached_reattach.md §2.4): the deaf-node signature
             // — the OWN outbox stalls (nobody acks) while frames arrive that
             // no held key opens. A healthy rejoiner counting a laggard's
             // stale frames never stalls, so it never triggers.
-            if !self.net_send_stuck.is_empty() && h.opaque_frames > 0 {
+            if !self.delivery.send_stuck.is_empty() && h.opaque_frames > 0 {
                 self.maybe_self_heal_reattach();
             }
             if parts.is_empty() {
@@ -3382,11 +3382,11 @@ impl State {
     /// sender's events. Best-effort off the actor (the send_ping path); a
     /// lost ack is re-armed by the sender's next resend arriving as a dup.
     pub(crate) fn flush_due_acks(&mut self, now: u64) {
-        if self.ack_due.is_empty() {
+        if self.delivery.ack_due.is_empty() {
             return;
         }
         let due: Vec<MemberId> = self
-            .ack_due
+            .delivery.ack_due
             .iter()
             .filter(|(_, at)| **at <= now)
             .map(|(m, _)| m.clone())
@@ -3408,13 +3408,13 @@ impl State {
                 // no live mesh to ack over — drop the deadlines (the sender's
                 // resend after the mesh returns re-arms them)
                 for m in &due {
-                    self.ack_due.remove(m);
+                    self.delivery.ack_due.remove(m);
                 }
                 return;
             };
             if !net.is_real() {
                 for m in &due {
-                    self.ack_due.remove(m);
+                    self.delivery.ack_due.remove(m);
                 }
                 return;
             }
@@ -3427,8 +3427,8 @@ impl State {
             (transport, group, peers)
         };
         for member in due {
-            self.ack_due.remove(&member);
-            let Some(window) = self.accepted.get(&member) else {
+            self.delivery.ack_due.remove(&member);
+            let Some(window) = self.delivery.accepted.get(&member) else {
                 continue; // nothing ever accepted — nothing to report
             };
             let Some(peer) = peers.iter().find(|p| p.member == member) else {
@@ -3524,7 +3524,7 @@ impl State {
         let now = self.presence_now();
         let me = self.member();
         let active = self.session.active_workspace.clone();
-        let unreachable = &self.net_unreachable;
+        let unreachable = &self.delivery.unreachable;
         // §6.5 (N5.5): the open workspace's transport decides how silence
         // ages — see `presence_of`, the shared derivation this mirrors
         let coarse = self.nostr.is_some();
@@ -4283,7 +4283,7 @@ mod tests {
     #[test]
     fn a_stuck_group_outbox_joins_the_channel_verdict() {
         let mut st = presence_fixture();
-        st.net_send_stuck
+        st.delivery.send_stuck
             .insert("ada".to_string(), "no relay accepted the frame".to_string());
         st.apply_group_health(molt_net::group_runtime::GroupHealth {
             subscribed: true,
@@ -4352,10 +4352,10 @@ mod tests {
         let mut st = presence_fixture();
         st.cmd_net_link_down("bob".to_string(), "gone".to_string(), None).expect("ack");
         st.cmd_net_send_failed("cid".to_string(), "gone".to_string(), None).expect("ack");
-        assert!(!st.net_link_down.is_empty() && !st.net_send_stuck.is_empty());
+        assert!(!st.delivery.link_down.is_empty() && !st.delivery.send_stuck.is_empty());
         st.reset_workspace_state();
         assert!(
-            st.net_link_down.is_empty() && st.net_send_stuck.is_empty(),
+            st.delivery.link_down.is_empty() && st.delivery.send_stuck.is_empty(),
             "the close/switch boundary clears the link state"
         );
     }
@@ -4371,22 +4371,22 @@ mod tests {
             assert!(w.accept(3));
             w
         };
-        st.accepted.insert("bob".to_string(), win);
-        st.ack_due.insert("bob".to_string(), T);
-        st.ack_due.insert("cid".to_string(), T + 100);
+        st.delivery.accepted.insert("bob".to_string(), win);
+        st.delivery.ack_due.insert("bob".to_string(), T);
+        st.delivery.ack_due.insert("cid".to_string(), T + 100);
         st.flush_due_acks(T + 1);
         assert!(
-            !st.ack_due.contains_key("bob"),
+            !st.delivery.ack_due.contains_key("bob"),
             "the due deadline is consumed (no mesh here: dropped - resends re-arm)"
         );
-        assert!(st.ack_due.contains_key("cid"), "a future deadline stays armed");
+        assert!(st.delivery.ack_due.contains_key("cid"), "a future deadline stays armed");
 
         // link-up arms an immediate ack — but only with a window to report
-        st.ack_due.clear();
+        st.delivery.ack_due.clear();
         st.cmd_net_link_up("cid".to_string(), None).expect("ack");
-        assert!(st.ack_due.is_empty(), "no window for cid - nothing to report");
+        assert!(st.delivery.ack_due.is_empty(), "no window for cid - nothing to report");
         st.cmd_net_link_up("bob".to_string(), None).expect("ack");
-        assert_eq!(st.ack_due.get("bob"), Some(&T), "bob's window arms a due-now ack");
+        assert_eq!(st.delivery.ack_due.get("bob"), Some(&T), "bob's window arms a due-now ack");
     }
 
     /// V1 (delivery_guarantee.md): an announce that carries no queue for THIS
@@ -4440,10 +4440,10 @@ mod tests {
         let mut st = presence_fixture();
         st.cmd_net_send_failed("bob".to_string(), "gone".to_string(), None)
             .expect("ack");
-        assert!(st.net_unreachable.contains("bob"));
+        assert!(st.delivery.unreachable.contains("bob"));
         st.reset_workspace_state();
         assert!(
-            st.net_unreachable.is_empty(),
+            st.delivery.unreachable.is_empty(),
             "the close/switch boundary clears the pins"
         );
     }
@@ -4461,11 +4461,11 @@ mod tests {
         )
         .expect("ack");
         assert!(
-            st.net_send_stuck.contains_key("ada"),
+            st.delivery.send_stuck.contains_key("ada"),
             "the channel trouble is recorded"
         );
         assert!(
-            !st.net_unreachable.contains("ada"),
+            !st.delivery.unreachable.contains("ada"),
             "the own seat is never pinned unreachable"
         );
     }

@@ -1077,10 +1077,10 @@ mod tests {
             op: Some(molt_core::ReactOp::Add),
         };
         deliver(&mut st, "peer-2", 5, body.clone());
-        assert!(st.ack_due.contains_key("peer-2"), "a fresh delivery arms an ack");
-        st.ack_due.clear();
+        assert!(st.delivery.ack_due.contains_key("peer-2"), "a fresh delivery arms an ack");
+        st.delivery.ack_due.clear();
         deliver(&mut st, "peer-2", 5, body);
-        assert!(st.ack_due.contains_key("peer-2"), "a duplicate re-arms the ack");
+        assert!(st.delivery.ack_due.contains_key("peer-2"), "a duplicate re-arms the ack");
     }
 
     /// E7 finding 1, the semantic pin: a recovered seat's fresh incarnation
@@ -1152,7 +1152,7 @@ mod tests {
         deliver_env(&mut st, chat(12, 10, 3, "B"));
         assert_eq!(st.chat.len(), 1, "B must not become visible before A");
         assert!(
-            !st.accepted["peer-2"].is_accepted(12),
+            !st.delivery.accepted["peer-2"].is_accepted(12),
             "a parked envelope is NOT accept-marked - the sender keeps resending it"
         );
         // a resent copy of B while parked is absorbed
@@ -1163,8 +1163,8 @@ mod tests {
         assert_eq!(st.chat.len(), 3, "A and the drained B are both visible");
         assert_eq!(st.chat[1].body, "A");
         assert_eq!(st.chat[2].body, "B", "order is the sender's, not arrival");
-        assert!(st.accepted["peer-2"].is_accepted(10) && st.accepted["peer-2"].is_accepted(12));
-        assert!(st.ordered_park.is_empty(), "the park drained");
+        assert!(st.delivery.accepted["peer-2"].is_accepted(10) && st.delivery.accepted["peer-2"].is_accepted(12));
+        assert!(st.delivery.ordered_park.is_empty(), "the park drained");
     }
 
     /// A fresh, VISIBLE chat message (recent ts — `land_chat`'s epoch-old
@@ -1316,7 +1316,7 @@ mod tests {
         deliver_env(&mut st, chat(12, 11, 1, "first contact"));
         assert_eq!(st.chat.len(), 1, "nothing to order against - it must deliver");
         assert!(
-            st.accepted["peer-2"].is_accepted(12),
+            st.delivery.accepted["peer-2"].is_accepted(12),
             "…and it seeds the window as the ordering baseline"
         );
         // from the baseline on, G7 is fully in force: a successor parks…
@@ -1405,7 +1405,7 @@ mod tests {
         assert_eq!(st.chat.len(), 1, "parked, not applied");
         // a recovery reset forgets the old incarnation's park
         st.reset_peer_accept_window(&"peer-2".to_string());
-        assert!(st.ordered_park.is_empty(), "the reset clears the park");
+        assert!(st.delivery.ordered_park.is_empty(), "the reset clears the park");
 
         // the reset also forgot the history, so re-seed before parking again;
         // the valve releases it (loudly) after the giveup window
@@ -1432,7 +1432,7 @@ mod tests {
         assert_eq!(st.chat.len(), 2, "inside the window it stays held");
         st.release_stale_parked(1_750_000_000 + crate::net::ORDERED_PARK_GIVEUP_SECS + 1);
         assert_eq!(st.chat.len(), 3, "the valve releases rather than wedges");
-        assert!(st.ordered_park.is_empty());
+        assert!(st.delivery.ordered_park.is_empty());
     }
 
     // ---- read receipts (Lesebestätigung) ---------------------------------

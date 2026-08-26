@@ -1245,9 +1245,9 @@ impl State {
         // (open_stored_workspace already reset the workspace-scoped state, so
         // this load survives). An old transport.state reads as empty — every
         // arriving envelope is fresh, exactly the pre-guarantee behavior.
-        self.accepted = transport_state.accepted.clone();
-        self.accepted_dirty = false;
-        self.accepted_saved_at = 0;
+        self.delivery.accepted = transport_state.accepted.clone();
+        self.delivery.accepted_dirty = false;
+        self.delivery.accepted_saved_at = 0;
         // the transport context changes with the workspace: tear the old mesh
         // down and abandon any still-running founder bootstrap for the workspace
         // we are leaving (its ready would be ws-id-rejected anyway; this reaps
@@ -1613,7 +1613,7 @@ impl State {
         });
         // a send-failure pin survives the rebuild until the next sighting
         for m in &mut ws.members {
-            if self.net_unreachable.contains(&m.name) {
+            if self.delivery.unreachable.contains(&m.name) {
                 m.state = 2;
             }
         }
