@@ -8,7 +8,8 @@ use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 use crate::labels::to_screen;
 use crate::mirror::sort_ws_items;
-use crate::{AppWindow, Ctx, WorkspaceItem};
+use crate::app::Ctx;
+use crate::{AppWindow, WorkspaceItem};
 
 pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     {

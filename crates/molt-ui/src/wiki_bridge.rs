@@ -12,9 +12,22 @@ use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use crate::i18n::{error_toast, localize_wiki_err, Lexicon};
 use crate::models::{sync_vec_model, sync_wiki_blocks};
 use crate::settings::browse_start_dir;
+use crate::app::Ctx;
 use crate::{
-    patchview, wiki, AppWindow, Ctx, DiffRow, DiffSeg, PatchNavRow, PatchView,
-    Strings, WikiBlock, WikiChangeRow, WikiNavRow, WikiSpan, WikiState, WikiTabRow,
+    patchview,
+    wiki,
+    AppWindow,
+    DiffRow,
+    DiffSeg,
+    PatchNavRow,
+    PatchView,
+    Strings,
+    WikiBlock,
+    WikiChangeRow,
+    WikiNavRow,
+    WikiSpan,
+    WikiState,
+    WikiTabRow,
 };
 
 /// `WikiNavRow.status` / `WikiTabRow.status` code for a doc's

@@ -9,7 +9,8 @@ use molt_core::Command;
 use slint::{ComponentHandle, Model};
 
 use crate::i18n::error_toast;
-use crate::{AppWindow, Ctx, InvitePreview, LinkPreview, RelayPick};
+use crate::app::Ctx;
+use crate::{AppWindow, InvitePreview, LinkPreview, RelayPick};
 
 pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     // The join preview: the same molt-core invite parser the engine's join

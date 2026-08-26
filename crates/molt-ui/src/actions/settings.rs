@@ -15,7 +15,8 @@ use crate::settings::{
     apply_settings_fields, browse_start_dir, read_settings_draft, save_draft, settings_draft_differs,
     stored_settings,
 };
-use crate::{AppScreen, AppWindow, BackupRow, Ctx, Strings, Theme};
+use crate::app::Ctx;
+use crate::{AppScreen, AppWindow, BackupRow, Strings, Theme};
 
 pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     {

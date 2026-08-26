@@ -10,7 +10,8 @@ use slint::{ComponentHandle, Model};
 
 use crate::i18n::Lexicon;
 use crate::models::sync_strings;
-use crate::{AppWindow, Ctx};
+use crate::app::Ctx;
+use crate::{AppWindow};
 
 pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     {

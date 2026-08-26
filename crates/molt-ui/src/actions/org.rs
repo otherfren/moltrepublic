@@ -11,7 +11,8 @@ use slint::ComponentHandle;
 use crate::i18n::error_toast;
 use crate::images::{fit_member_image, image_from_bytes, proposal_image_from_b64, ImageFitError};
 use crate::labels::default_op;
-use crate::{AppWindow, Ctx, Strings};
+use crate::app::Ctx;
+use crate::{AppWindow, Strings};
 
 pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     // The Organization tables' sort/filter. View-local presentation like

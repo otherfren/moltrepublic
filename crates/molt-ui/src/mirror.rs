@@ -7,10 +7,13 @@
 use std::sync::{Arc, Mutex};
 
 use molt_core::relay::{RelayBlock, RelayKind, RelayStatus};
-use molt_core::{Command, Reply, SessionScope, SessionSettings, SessionView, Surface};
+use molt_core::{Command, Event, Reply, SessionScope, SessionSettings, SessionView, Surface};
 use molt_engine::WalletHandle;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
+use tokio::sync::broadcast::error::RecvError;
 
+use crate::alerts::alert_unless_own;
+use crate::app::Ctx;
 use crate::i18n::{
     apply_strings, localize_headline, localize_log_line, localize_net_reason,
     localize_recover_failed, localize_recover_note, localize_s3_verdict,
@@ -1374,4 +1377,151 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     // the picture budget this republic still carries: the engine stays the
     // authority, this is what the member-picture fit aims at
     ui.set_mp_img_budget(i32::try_from(b.org_stats.image_budget).unwrap_or(i32::MAX));
+}
+
+/// The live-mirror task: the first full session + surfaces push, then a
+/// re-read on every engine event - session changes repaint the session
+/// (a run-scoped tick only its run), surface events re-read the surfaces,
+/// and the alert/toast side effects ride the same stream. Never holds
+/// state: a lagged receiver simply re-reads everything.
+pub(crate) fn spawn_mirror(ctx: &Ctx) {
+    let Ctx {
+        rt,
+        wallet: w,
+        weak,
+        last_settings,
+        chat_ui,
+    } = ctx.clone();
+    rt.spawn(async move {
+        let mut rx = w.subscribe();
+        push_session(&w, &weak, &last_settings, SessionScope::Full, &chat_ui).await;
+        push_surfaces(&w, &weak, &chat_ui).await;
+        loop {
+            match rx.recv().await {
+                Ok(Event::SessionChanged { scope }) => {
+                    push_session(&w, &weak, &last_settings, scope, &chat_ui).await;
+                    // A Full session change can mean a workspace was
+                    // opened or closed — the surface state (replayed
+                    // chat history!) changed with it, without any
+                    // chat/proposal event firing. Run-scoped ticks
+                    // (90 ms) deliberately skip this.
+                    if scope == SessionScope::Full {
+                        // a Full change can be a workspace open/close:
+                        // proposal ids are per-workspace counters, so a
+                        // stale inline-viewer id would light up an id-
+                        // colliding card in the NEXT workspace with the
+                        // previous one's decoded image — drop it
+                        let weak2 = weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak2.upgrade() {
+                                ui.set_img_inline_id(-1);
+                            }
+                        });
+                        push_surfaces(&w, &weak, &chat_ui).await;
+                    }
+                }
+                // Any surface event (chat / propose / approve / …) re-reads
+                // the surfaces, so the GUI mirrors what an MCP agent did.
+                // An Event::Chat carries id+channel and could tick unread
+                // counters directly, but the re-read stays the single
+                // source of truth — event payloads never drive state.
+                // A finished download additionally toasts its outcome
+                // (the table repaints via the same re-read).
+                // alert sounds: an INCOMING chat message (never our own
+                // echo) and a new vote play the configured alert — read
+                // from the last APPLIED settings, so an unsaved draft
+                // never changes behavior
+                Ok(Event::Chat { from, .. }) => {
+                    alert_unless_own(&last_settings, |s| s.sound_message.clone(), &weak, from);
+                    push_surfaces(&w, &weak, &chat_ui).await;
+                }
+                // only a vote somebody ELSE initiated rings — the
+                // proposer already knows what they just did
+                Ok(Event::Proposed { by, .. }) => {
+                    alert_unless_own(&last_settings, |s| s.sound_vote.clone(), &weak, by);
+                    push_surfaces(&w, &weak, &chat_ui).await;
+                }
+                // a poke addressed to THIS seat toasts who poked and
+                // rings its own sound (the engine already gated opt-in +
+                // cooldown); the sender side confirms quietly. No
+                // push_surfaces — a poke changes no surface state.
+                Ok(Event::Poked { by, to }) => {
+                    alert_unless_own(&last_settings, |s| s.sound_poke.clone(), &weak, by.clone());
+                    let weak2 = weak.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        let Some(ui) = weak2.upgrade() else { return };
+                        let st = ui.global::<Strings>();
+                        let me = ui.get_node_member();
+                        if to.as_str() == me.as_str() {
+                            ui.invoke_show_toast(format!("{by} {}", st.get_toast_poked()).into());
+                        } else if by.as_str() == me.as_str() {
+                            ui.invoke_show_toast(
+                                format!("{} {to}", st.get_toast_poke_sent()).into(),
+                            );
+                        }
+                    });
+                }
+                // WP4b: checkpoint lifecycle closure for the operator —
+                // sealed toasts the height, stale tells them to re-cut
+                Ok(Event::CheckpointSealed { height, .. }) => {
+                    let weak2 = weak.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        let Some(ui) = weak2.upgrade() else { return };
+                        let msg = ui.global::<Strings>().get_toast_checkpoint_sealed();
+                        ui.invoke_show_toast(format!("{msg} #{height}").into());
+                    });
+                    push_surfaces(&w, &weak, &chat_ui).await;
+                }
+                // CheckpointStale is NOT toasted: the automation re-cuts
+                // by itself on the very next commit — a "propose again"
+                // instruction would be noise (the event stays on the
+                // stream for MCP observers)
+                Ok(Event::CheckpointStale { .. }) => {
+                    push_surfaces(&w, &weak, &chat_ui).await;
+                }
+                Ok(Event::FileTransfer { phase, .. }) => {
+                    let weak2 = weak.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        let Some(ui) = weak2.upgrade() else { return };
+                        let st = ui.global::<Strings>();
+                        match &phase {
+                            molt_core::TransferPhase::Done { path } => {
+                                ui.invoke_show_toast(
+                                    format!("{} {path}", st.get_toast_dl_done()).into(),
+                                );
+                            }
+                            molt_core::TransferPhase::Failed { reason } => {
+                                ui.invoke_show_toast_error(
+                                    format!("{} {reason}", st.get_toast_dl_failed()).into(),
+                                );
+                            }
+                            _ => {}
+                        }
+                    });
+                    push_surfaces(&w, &weak, &chat_ui).await;
+                }
+                Ok(Event::UiActionRequested { action }) => {
+                    // gui_over_mcp.md, the drive half: perform the verb
+                    // through the SAME callbacks a human's click takes,
+                    // then publish — both queue on the event loop, so
+                    // the publish claim is post-perform. A pure view
+                    // change may not ring the engine, hence the
+                    // explicit publish.
+                    let weak2 = weak.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak2.upgrade() {
+                            perform_ui_action(&ui, &action);
+                        }
+                    });
+                    publish_ui_state(&w, &weak).await;
+                }
+                Ok(_) => push_surfaces(&w, &weak, &chat_ui).await,
+                Err(RecvError::Lagged(_)) => {
+                    push_session(&w, &weak, &last_settings, SessionScope::Full, &chat_ui).await;
+                    push_surfaces(&w, &weak, &chat_ui).await;
+                }
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
 }

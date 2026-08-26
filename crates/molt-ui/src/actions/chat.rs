@@ -13,7 +13,8 @@ use crate::channels::{
     selected_channel_org, vote_jump_command,
 };
 use crate::i18n::error_toast;
-use crate::{AppWindow, Ctx, Poke, Strings};
+use crate::app::Ctx;
+use crate::{AppWindow, Poke, Strings};
 
 pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     {
