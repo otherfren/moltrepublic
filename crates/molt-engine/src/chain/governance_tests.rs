@@ -72,7 +72,7 @@ fn a_block_that_missed_the_disk_is_not_broadcast() {
     let seq_before = peer.next_seq;
     let chat_before = peer.chat.len();
     peer.adopt_committed_block(block.clone(), 1);
-    assert_eq!(peer.chain.len(), 2, "the sealed block is appended locally");
+    assert_eq!(peer.chain.blocks.len(), 2, "the sealed block is appended locally");
     assert_eq!(
         peer.next_seq, seq_before,
         "no envelope may be minted for a block the disk never took"
@@ -84,7 +84,7 @@ fn a_block_that_missed_the_disk_is_not_broadcast() {
     let _tmp = attach_storage(&mut peer, false);
     let seq_before = peer.next_seq;
     peer.adopt_committed_block(block, 1);
-    assert_eq!(peer.chain.len(), 2);
+    assert_eq!(peer.chain.blocks.len(), 2);
     assert!(
         peer.next_seq > seq_before,
         "a durable seal broadcasts its Committed envelope"
@@ -237,7 +237,7 @@ fn a_withdraw_turns_the_card_terminal_without_forging_a_vote() {
     assert!(p.decliners.is_empty(), "no vote forged");
     assert_eq!(p.declined_by, "", "no decliner named");
     assert!(
-        !peer.pending_sigs.contains_key(&id.0),
+        !peer.chain.pending_sigs.contains_key(&id.0),
         "collected signatures are cleared"
     );
     // terminal: a second withdraw refuses
@@ -885,7 +885,7 @@ fn a_decline_for_an_implausible_id_is_dropped() {
         1,
         WorkspaceEvent::Declined { id: ProposalId(u64::MAX), by: "petra".to_string(), hash: String::new() },
     );
-    assert!(peer.pending_declines.is_empty(), "garbage never parks");
+    assert!(peer.chain.pending_declines.is_empty(), "garbage never parks");
     assert_eq!(peer.next_id, before, "and never moves the mint counter");
 }
 
@@ -929,7 +929,7 @@ fn a_decline_after_the_own_approval_still_works() {
     // signature — one member holds one stance, never both
     assert!(
         !peer
-            .pending_sigs
+            .chain.pending_sigs
             .get(&9)
             .is_some_and(|s| s.sigs.iter().any(|a| a.member == "walter")),
         "the own signature is retracted by the decline"
@@ -992,7 +992,7 @@ fn approvals_from_non_members_never_enter_the_pending_set() {
         walter.receive_approval(1, &format!("ghost{i}"), 1, "ff");
     }
     assert!(
-        walter.pending_sigs.get(&1).map_or(0, |p| p.sigs.len()) <= 2,
+        walter.chain.pending_sigs.get(&1).map_or(0, |p| p.sigs.len()) <= 2,
         "ghost names must not grow the set"
     );
 }
@@ -1076,7 +1076,7 @@ fn an_unverifiable_approval_is_not_displayed_as_consent() {
     assert_eq!(walter.chain_approval_count(1), 1, "the genuine one displays");
     walter.chain_sign_and_gossip_approval(1);
     assert_eq!(
-        walter.chain_head.as_ref().expect("head").height,
+        walter.chain.head.as_ref().expect("head").height,
         1,
         "verification costs no liveness - the block seals"
     );
@@ -1126,9 +1126,9 @@ fn a_forged_own_approval_is_not_re_signed_at_the_rebase() {
     );
     b.commit_applied(2, &["petra", "dora"]);
     walter.receive_block(b.blocks[1].clone());
-    assert_eq!(walter.chain_head.as_ref().expect("head").height, 1);
+    assert_eq!(walter.chain.head.as_ref().expect("head").height, 1);
     let mine = walter
-        .pending_sigs
+        .chain.pending_sigs
         .get(&1)
         .is_some_and(|p| p.sigs.iter().any(|a| a.member == "walter"));
     assert!(!mine, "walter never decided on #1 - the re-base must not sign it");
@@ -1159,9 +1159,9 @@ fn a_declined_own_approval_is_not_re_signed_at_the_rebase() {
         },
     );
     walter.cmd_approve(ProposalId(1)).expect("walter approves");
-    assert!(walter.own_approvals.contains(&1));
+    assert!(walter.chain.own_approvals.contains(&1));
     walter.cmd_decline(ProposalId(1)).expect("…then retracts");
-    assert!(!walter.own_approvals.contains(&1), "the register forgets");
+    assert!(!walter.chain.own_approvals.contains(&1), "the register forgets");
     wire(
         &mut walter,
         "petra",
@@ -1175,7 +1175,7 @@ fn a_declined_own_approval_is_not_re_signed_at_the_rebase() {
     b.commit_applied(2, &["petra", "dora", "eve"]);
     walter.receive_block(b.blocks[1].clone());
     let mine = walter
-        .pending_sigs
+        .chain.pending_sigs
         .get(&1)
         .is_some_and(|p| p.sigs.iter().any(|a| a.member == "walter"));
     assert!(!mine, "a retracted approval must not come back at the re-base");
@@ -1211,7 +1211,7 @@ fn the_own_log_rebuilds_the_decision_register() {
             sig: "irrelevant-for-the-register".to_string(),
         },
     });
-    assert!(walter.own_approvals.contains(&1), "an own Approved rebuilds it");
+    assert!(walter.chain.own_approvals.contains(&1), "an own Approved rebuilds it");
     walter.apply(&molt_core::EventEnvelope {
         prev_seq: 0,
         seq: 3,
@@ -1223,7 +1223,7 @@ fn the_own_log_rebuilds_the_decision_register() {
             hash: String::new(),
         },
     });
-    assert!(!walter.own_approvals.contains(&1), "an own Declined clears it");
+    assert!(!walter.chain.own_approvals.contains(&1), "an own Declined clears it");
 }
 
 /// **Junk never evicts a verified signature.** "Latest wins" let one
@@ -1263,7 +1263,7 @@ fn junk_does_not_evict_a_verified_signature() {
     walter.receive_approval(1, "petra", 1, "deadbeef");
     assert_eq!(walter.chain_approval_count(1), 1, "the genuine one stands");
     let kept = walter
-        .pending_sigs
+        .chain.pending_sigs
         .get(&1)
         .and_then(|p| p.sigs.iter().find(|a| a.member == "petra"))
         .map(|a| a.sig.clone());
@@ -1351,7 +1351,7 @@ fn a_current_decliners_stale_signature_does_not_seal() {
     // walter co-signs: 2 collected — but dora is a CURRENT decliner
     walter.chain_sign_and_gossip_approval(1);
     assert_eq!(
-        walter.chain_head.as_ref().expect("head").height,
+        walter.chain.head.as_ref().expect("head").height,
         0,
         "no block seals while a counted signer's decline stands"
     );
@@ -1462,7 +1462,7 @@ fn an_over_subscribed_voter_still_reads_approved_on_the_applied_card() {
         },
     );
     assert!(
-        !peer.pending_sigs.contains_key(&1),
+        !peer.chain.pending_sigs.contains_key(&1),
         "a terminal card collects no pending signatures"
     );
 }
@@ -1509,7 +1509,7 @@ fn an_applied_card_reports_the_block_signers() {
 }
 
 /// **The `seen` trap.** Once a checkpoint drops the history below the cut,
-/// the double-apply guard can no longer be read off `self.chain`: the
+/// the double-apply guard can no longer be read off `self.chain.blocks`: the
 /// blocks carrying those proposal ids are gone. It has to come from the
 /// blob's `consumed_ids` — which is exactly what a walk state carried
 /// across the prune, or rebuilt from the surviving blocks, gets wrong.
@@ -1537,9 +1537,9 @@ fn an_id_consumed_below_the_cut_cannot_replay_on_a_pruned_holder() {
 
     let mut peer = chain_peer("walter", &b, pre_cut);
     peer.receive_block(anchor);
-    assert!(peer.checkpoint_blob.is_some(), "the cut sealed and anchored");
-    assert_eq!(peer.chain.len(), 1, "history below the cut is dropped");
-    assert_eq!(peer.chain_head.as_ref().expect("head").height, 3);
+    assert!(peer.chain.checkpoint_blob.is_some(), "the cut sealed and anchored");
+    assert_eq!(peer.chain.blocks.len(), 1, "history below the cut is dropped");
+    assert_eq!(peer.chain.head.as_ref().expect("head").height, 3);
 
     // proposal 1 was consumed at height 1 — a block this holder no longer
     // has. Re-offering it must still be refused.
@@ -1548,20 +1548,20 @@ fn an_id_consumed_below_the_cut_cannot_replay_on_a_pruned_holder() {
     assert_eq!(replay.height, 4, "the replay sits on top of the anchor");
     peer.receive_block(replay);
     assert_eq!(
-        peer.chain_head.as_ref().expect("head").height,
+        peer.chain.head.as_ref().expect("head").height,
         3,
         "an id consumed below the cut cannot re-apply after the prune"
     );
-    assert_eq!(peer.chain.len(), 1, "the refused block is not retained");
+    assert_eq!(peer.chain.blocks.len(), 1, "the refused block is not retained");
 
     // …while a FRESH id on the same suffix still extends it, so the test
     // cannot pass by the holder having stopped accepting anything
     b.blocks.pop();
-    b.head_hash = block_hash(&b.republic_id, &peer.chain[0]);
+    b.head_hash = block_hash(&b.republic_id, &peer.chain.blocks[0]);
     b.commit_applied(9, &["petra", "walter"]);
     peer.receive_block(b.blocks.last().expect("fresh block").clone());
     assert_eq!(
-        peer.chain_head.as_ref().expect("head").height,
+        peer.chain.head.as_ref().expect("head").height,
         4,
         "a fresh id extends the pruned holder"
     );
@@ -1591,7 +1591,7 @@ fn a_refused_block_does_not_poison_the_walk() {
     };
     peer.receive_block(b.seal(1, change, &["petra"]));
     assert_eq!(
-        peer.chain_head.as_ref().expect("head").height,
+        peer.chain.head.as_ref().expect("head").height,
         0,
         "a below-threshold block is refused"
     );
@@ -1600,7 +1600,7 @@ fn a_refused_block_does_not_poison_the_walk() {
     b.commit_applied(7, &["petra", "walter"]);
     peer.receive_block(b.blocks[1].clone());
     assert_eq!(
-        peer.chain_head.as_ref().expect("head").height,
+        peer.chain.head.as_ref().expect("head").height,
         1,
         "a refused block must not burn its proposal id"
     );
@@ -1617,15 +1617,15 @@ fn incremental_extension_equals_full_verification_at_every_prefix() {
     for (i, block) in b.blocks[1..].iter().enumerate() {
         peer.receive_block(block.clone());
         let full = verify_chain(&b.blocks[..=i + 1]).expect("the prefix verifies in full");
-        let cached = peer.chain_head.as_ref().expect("head");
+        let cached = peer.chain.head.as_ref().expect("head");
         assert_eq!(cached.height, full.height);
         assert_eq!(cached.hash, full.hash, "prefix {} diverged", i + 1);
         assert_eq!(cached.identities, full.identities);
         assert!(
-            peer.chain_walk
+            peer.chain.walk
                 .as_ref()
                 .expect("the walk is kept")
-                .describes(&peer.chain, peer.checkpoint_blob.as_ref()),
+                .describes(&peer.chain.blocks, peer.chain.checkpoint_blob.as_ref()),
             "the cached walk must describe the chain it was built on"
         );
     }
@@ -1661,12 +1661,12 @@ fn regossiped_proposals_and_approvals_are_idempotent() {
     let petra_sig = identity_sign(b.key("petra"), &bytes);
     walter.receive_approval(1, "petra", 1, &petra_sig);
     walter.receive_approval(1, "petra", 1, &petra_sig);
-    let sigs = &walter.pending_sigs.get(&1).expect("pending set").sigs;
+    let sigs = &walter.chain.pending_sigs.get(&1).expect("pending set").sigs;
     assert_eq!(sigs.len(), 1, "one signature per member: {sigs:?}");
 
     // walter co-signs — the block seals at 2-of-3
     walter.chain_sign_and_gossip_approval(1);
-    assert_eq!(walter.chain_head.as_ref().expect("head").height, 1);
+    assert_eq!(walter.chain.head.as_ref().expect("head").height, 1);
     assert!(
         matches!(walter.proposals.get(&1), Some(p) if p.state == ProposalState::Applied),
         "the proposal committed"
@@ -1680,7 +1680,7 @@ fn regossiped_proposals_and_approvals_are_idempotent() {
         "a committed proposal stays committed"
     );
     assert_eq!(
-        walter.chain_head.as_ref().expect("head").height,
+        walter.chain.head.as_ref().expect("head").height,
         1,
         "no second block for the same proposal"
     );
@@ -1728,13 +1728,13 @@ fn a_catchup_answer_reserves_open_governance() {
     walter.receive_proposed(1, Surface::Memory, payload, "peer");
     walter.receive_approval(1, "petra", 1, &relayed_sig);
     assert_eq!(
-        walter.pending_sigs.get(&1).map(|s| s.sigs.len()),
+        walter.chain.pending_sigs.get(&1).map(|s| s.sigs.len()),
         Some(1),
         "the reopened member sees the collected approval count"
     );
     walter.chain_sign_and_gossip_approval(1);
     assert_eq!(
-        walter.chain_head.as_ref().expect("head").height,
+        walter.chain.head.as_ref().expect("head").height,
         1,
         "the recovered proposal is fully approvable - the block seals"
     );
@@ -1766,7 +1766,7 @@ fn a_sealed_vote_appends_its_summary_to_the_discussion() {
     };
     petra.receive_proposed(id, surface, payload, "peer");
     let walter_sig = walter
-        .pending_sigs
+        .chain.pending_sigs
         .get(&id)
         .expect("walter's pending set")
         .sigs
@@ -1777,7 +1777,7 @@ fn a_sealed_vote_appends_its_summary_to_the_discussion() {
         .clone();
     petra.receive_approval(id, "walter", 1, &walter_sig);
     petra.chain_sign_and_gossip_approval(id);
-    assert_eq!(petra.chain_head.as_ref().expect("head").height, 1, "sealed at m");
+    assert_eq!(petra.chain.head.as_ref().expect("head").height, 1, "sealed at m");
     // the SEALER's log carries the summary, in the vote's own channel
     let sum = petra
         .chat_visible()

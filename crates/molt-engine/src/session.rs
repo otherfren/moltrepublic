@@ -1357,7 +1357,7 @@ impl State {
             };
             "detached".to_string()
         } else if self.persist
-            && self.chain_head.is_some()
+            && self.chain.head.is_some()
             && transport_state.mls.is_none()
             && transport_state.mesh.is_empty()
             && transport_state.smp_queues.is_none()
@@ -1505,7 +1505,7 @@ impl State {
         // pull any blocks committed while we were away — a broadcast request the
         // outbox delivers once the resumed mesh connects; any survivor re-serves
         // its chain suffix (no-op when we are already current)
-        if let Some(height) = self.chain_head.as_ref().map(|h| h.height) {
+        if let Some(height) = self.chain.head.as_ref().map(|h| h.height) {
             self.request_catchup(height + 1);
         }
         self.refresh_active_entry();
@@ -2150,7 +2150,7 @@ impl State {
                 return Err(MoltError::WikiExport("proof needs chain governance"));
             }
             Some(
-                crate::wiki_export::bundle_from_chain(&self.chain)
+                crate::wiki_export::bundle_from_chain(&self.chain.blocks)
                     .ok_or(MoltError::WikiExport("proof needs the genesis block"))?,
             )
         } else {

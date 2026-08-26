@@ -56,17 +56,17 @@ impl State {
         // the adoption pays for the next append too.
         match self.walk_own(&chain) {
             Ok(walk) => {
-                self.chain = chain;
-                self.chain_head = Some(walk.head.clone());
-                self.chain_walk = Some(walk);
+                self.chain.blocks = chain;
+                self.chain.head = Some(walk.head.clone());
+                self.chain.walk = Some(walk);
                 self.bump_next_id_past_chain();
                 self.apply_chain_to_state();
             }
             Err(e) => {
                 tracing::warn!(error = %e, "rejecting an unverifiable chain");
-                self.chain.clear();
-                self.chain_head = None;
-                self.chain_walk = None;
+                self.chain.blocks.clear();
+                self.chain.head = None;
+                self.chain.walk = None;
                 self.set_checkpoint_blob(None);
             }
         }
@@ -95,7 +95,7 @@ impl State {
     /// wherever the walk adopts or extends; `max` keeps it monotone.
     pub(super) fn bump_next_id_past_chain(&mut self) {
         if let Some(top) = self
-            .chain_walk
+            .chain.walk
             .as_ref()
             .and_then(|w| w.seen.iter().next_back())
         {
@@ -110,8 +110,8 @@ impl State {
     /// replaced at the same coverage, which is why this is a setter and not
     /// a comment asking callers to remember.
     pub(crate) fn set_checkpoint_blob(&mut self, blob: Option<molt_core::CheckpointState>) {
-        self.checkpoint_blob = blob;
-        self.chain_walk = None;
+        self.chain.checkpoint_blob = blob;
+        self.chain.walk = None;
     }
 
     /// The transport anchor to ADDRESS this member at right now: the seat's
@@ -125,7 +125,7 @@ impl State {
     /// addresses a key a recovered member no longer holds, and the send
     /// simply vanishes.
     pub(crate) fn working_nostr_pk(&self, member: &str) -> String {
-        if let Some(pk) = self.chain_anchors.get(member) {
+        if let Some(pk) = self.chain.anchors.get(member) {
             return pk.clone();
         }
         self.replica
@@ -140,7 +140,7 @@ impl State {
     /// GROUP pool — a founding member never declared anything because the
     /// genesis pool it co-signed covers it. The split-detection input (R4).
     pub(crate) fn member_relays(&self, member: &str) -> Vec<String> {
-        if let Some(declared) = self.chain_member_relays.get(member) {
+        if let Some(declared) = self.chain.member_relays.get(member) {
             return declared.clone();
         }
         self.effective_relays()
@@ -178,7 +178,7 @@ impl State {
     /// marker. Rides every chain adoption/append.
     pub(crate) fn note_relay_splits(&mut self) {
         for (a, b) in self.relay_splits() {
-            if self.split_noted.insert((a.clone(), b.clone())) {
+            if self.chain.split_noted.insert((a.clone(), b.clone())) {
                 let bridge = self.member_relays(&a).first().cloned().unwrap_or_default();
                 tracing::warn!(%a, %b, %bridge, "relay split - no shared relay");
             }
@@ -298,10 +298,10 @@ impl State {
     /// The ratified GROUP pool: the checkpoint summary's if this holder
     /// pruned, else the genesis block's. Empty on a non-Nostr chain.
     pub(crate) fn ratified_relays(&self) -> Vec<String> {
-        if let Some(blob) = &self.checkpoint_blob {
+        if let Some(blob) = &self.chain.checkpoint_blob {
             return blob.relays.clone();
         }
-        self.chain
+        self.chain.blocks
             .first()
             .and_then(|b| match &b.change {
                 ChainChange::Genesis { relays, .. } => Some(relays.clone()),
@@ -326,11 +326,11 @@ impl State {
                 surface,
                 payload,
             } => {
-                self.chain_applied
+                self.chain.applied
                     .entry(*surface)
                     .or_default()
                     .push((Some(*proposal_id), payload.clone()));
-                self.chain_applied_sigs
+                self.chain.applied_sigs
                     .insert(*proposal_id, block.sigs.clone());
                 // R6: a committed pool edit reaches the live transport
                 if payload.get("op").and_then(serde_json::Value::as_str) == Some("set_relays") {
@@ -353,11 +353,11 @@ impl State {
                 ..
             } => {
                 if let Some(pk) = nostr_pk.as_ref().filter(|p| !p.is_empty()) {
-                    self.chain_anchors.insert(member.clone(), pk.clone());
+                    self.chain.anchors.insert(member.clone(), pk.clone());
                 }
                 // R3b: the relay ledger follows the same last-wins fold
                 if !relays.is_empty() {
-                    self.chain_member_relays.insert(member.clone(), relays.clone());
+                    self.chain.member_relays.insert(member.clone(), relays.clone());
                     self.note_relay_splits();
                 }
             }
@@ -371,7 +371,7 @@ impl State {
     /// The one fold both the per-block append and the whole-chain rebuild
     /// end on.
     fn adopt_head_roster(&mut self) {
-        if let Some(head) = &self.chain_head {
+        if let Some(head) = &self.chain.head {
             if let Some(r) = &mut self.replica {
                 r.identities = head.identities.clone();
                 r.roster = head.identities.iter().map(|i| i.member.clone()).collect();
@@ -428,7 +428,7 @@ impl State {
         // Replay-resurrected open cards settle to Applied.
         let mut materialize: Vec<(u64, Surface, serde_json::Value)> = Vec::new();
         let mut settle: Vec<(u64, Surface)> = Vec::new();
-        if let Some(blob) = &self.checkpoint_blob {
+        if let Some(blob) = &self.chain.checkpoint_blob {
             for (surface, entries) in &blob.applied {
                 for (id, payload) in entries {
                     match self.proposals.get(id) {
@@ -451,7 +451,7 @@ impl State {
                 }
             }
         }
-        for block in &self.chain {
+        for block in &self.chain.blocks {
             if let ChainChange::Applied {
                 proposal_id,
                 surface,
@@ -487,7 +487,7 @@ impl State {
         // membership blocks carry no proposal id — settle by content, the
         // `after_block_applied` pattern
         let membership: Vec<ChainChange> = self
-            .chain
+            .chain.blocks
             .iter()
             .filter(|b| matches!(b.change, ChainChange::Membership { .. }))
             .map(|b| b.change.clone())
@@ -510,7 +510,7 @@ impl State {
         > = std::collections::HashMap::new();
         // WP4b: a pruned holder seeds the projection from the checkpoint
         // blob — the pre-cut applied entries stay readable after the drop
-        if let Some(blob) = &self.checkpoint_blob {
+        if let Some(blob) = &self.chain.checkpoint_blob {
             for (surface, entries) in &blob.applied {
                 let list = projected.entry(*surface).or_default();
                 for (id, payload) in entries {
@@ -520,7 +520,7 @@ impl State {
         }
         let mut sigs: std::collections::HashMap<u64, Vec<molt_core::RosterAttestation>> =
             std::collections::HashMap::new();
-        for block in &self.chain {
+        for block in &self.chain.blocks {
             if let ChainChange::Applied {
                 proposal_id,
                 surface,
@@ -534,8 +534,8 @@ impl State {
                 sigs.insert(*proposal_id, block.sigs.clone());
             }
         }
-        self.chain_applied = projected;
-        self.chain_applied_sigs = sigs;
+        self.chain.applied = projected;
+        self.chain.applied_sigs = sigs;
         // the gossip-replayed proposal CARDS are older than the chain on a
         // reopen (`open_stored_workspace` replays them first) — settle them
         // against the verified truth or every restart resurrects decided
@@ -550,21 +550,21 @@ impl State {
         // design — so folding the surviving suffix alone would silently
         // re-address every recovered member to the key it no longer holds.
         let mut anchors: std::collections::HashMap<molt_core::MemberId, String> = self
-            .checkpoint_blob
+            .chain.checkpoint_blob
             .as_ref()
             .map(|b| b.anchors.iter().cloned().collect())
             .unwrap_or_default();
-        anchors.extend(working_anchors(&self.chain));
-        self.chain_anchors = anchors;
+        anchors.extend(working_anchors(&self.chain.blocks));
+        self.chain.anchors = anchors;
         // …and the relay ledger, seeded from the blob for the same reason
         // (the declaring blocks are gone after a cut — R3b/v6)
         let mut ledger: std::collections::HashMap<molt_core::MemberId, Vec<String>> = self
-            .checkpoint_blob
+            .chain.checkpoint_blob
             .as_ref()
             .map(|b| b.member_relays.iter().cloned().collect())
             .unwrap_or_default();
-        ledger.extend(declared_relays(&self.chain));
-        self.chain_member_relays = ledger;
+        ledger.extend(declared_relays(&self.chain.blocks));
+        self.chain.member_relays = ledger;
         self.note_relay_splits();
         // R6: an adopted chain may carry pool edits this node has not lived
         // through (catch-up, restore) — adopt the governed pool it lands on
@@ -577,7 +577,7 @@ impl State {
     /// governance approvals (a reopen that lost `transport.state`'s
     /// `identity_sk`, or a pre-chain workspace). Cheap invariant check, logged.
     pub(crate) fn note_governance_readiness(&self) {
-        if self.chain_head.is_some() && self.identity_sk.is_none() {
+        if self.chain.head.is_some() && self.identity_sk.is_none() {
             tracing::warn!(
                 republic = %self.republic_id(),
                 "chain workspace has no local signing key - it can follow governance but not co-sign it"
@@ -602,8 +602,8 @@ impl State {
     /// per-surface block order, best-effort.
     pub(crate) fn cmd_read_chain(&self) -> Result<molt_core::Reply, molt_core::MoltError> {
         let mut blocks: Vec<molt_core::ChainBlockView> =
-            self.chain.iter().rev().map(chain_block_view).collect();
-        if let Some(blob) = &self.checkpoint_blob {
+            self.chain.blocks.iter().rev().map(chain_block_view).collect();
+        if let Some(blob) = &self.chain.checkpoint_blob {
             let mut pre: Vec<molt_core::ChainBlockView> = Vec::new();
             for (surface, entries) in &blob.applied {
                 for (id, payload) in entries {

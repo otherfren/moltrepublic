@@ -38,14 +38,14 @@ impl State {
     /// A workspace whose governance runs through the chain (real m-of-n
     /// signatures) rather than the single-operator path.
     pub(crate) fn is_chain_governed(&self) -> bool {
-        self.chain_head.is_some()
+        self.chain.head.is_some()
     }
 
     /// The committed change a pending proposal would enact. A registered change
     /// (any kind — e.g. a `Membership` re-admission) wins; otherwise it is a
     /// gated `Applied` reconstructed from the surface proposal.
     pub(super) fn proposal_change(&self, id: u64) -> Option<ChainChange> {
-        if let Some(change) = self.proposal_changes.get(&id) {
+        if let Some(change) = self.chain.proposal_changes.get(&id) {
             return Some(change.clone());
         }
         let p = self.proposals.get(&id)?;
@@ -79,7 +79,7 @@ impl State {
         // its id (the approval surface), and reading that record as a
         // collision would refuse the legitimate re-serve of the very change
         // it belongs to
-        if let Some(existing) = self.proposal_changes.get(&id) {
+        if let Some(existing) = self.chain.proposal_changes.get(&id) {
             return existing == change;
         }
         match self.proposals.get(&id) {
@@ -111,7 +111,7 @@ impl State {
     pub(crate) fn chain_approval_count(&self, id: u64) -> usize {
         // L2: the DISPLAYED count is the verified one — raw collected sigs
         // could inflate progress with junk a peer gossiped
-        self.pending_sigs.get(&id).map(|p| p.verified.len()).unwrap_or(0)
+        self.chain.pending_sigs.get(&id).map(|p| p.verified.len()).unwrap_or(0)
     }
 
     /// The replay guard every AUTOMATIC co-sign runs (a consented restore,
@@ -120,12 +120,12 @@ impl State {
     /// must not amplify into fresh `Approved` gossip. Headless (no chain
     /// head) there is no target, hence nothing standing.
     pub(super) fn own_signature_stands(&self, id: u64) -> bool {
-        let Some(head) = self.chain_head.as_ref() else {
+        let Some(head) = self.chain.head.as_ref() else {
             return false;
         };
         let me = self.member();
         let target = head.height + 1;
-        self.pending_sigs
+        self.chain.pending_sigs
             .get(&id)
             .is_some_and(|p| p.height == target && p.sigs.iter().any(|a| a.member == me))
     }
@@ -135,7 +135,7 @@ impl State {
     /// envelope out over the mesh). Then try to seal. The proposer's own
     /// co-signature and every explicit approve funnel through here.
     pub(crate) fn chain_sign_and_gossip_approval(&mut self, id: u64) {
-        let (Some(sk), Some(head)) = (self.identity_sk.as_ref(), self.chain_head.as_ref()) else {
+        let (Some(sk), Some(head)) = (self.identity_sk.as_ref(), self.chain.head.as_ref()) else {
             return;
         };
         let height = head.height + 1;
@@ -146,10 +146,10 @@ impl State {
         let sig = molt_storage::identity_sign(sk, &bytes);
         let me = self.member();
         // the decision register: the ONLY writer (see `rebase_pending_approvals`)
-        self.own_approvals.insert(id);
+        self.chain.own_approvals.insert(id);
         // the own signature is genuine by construction (L2)
         self.collect_sig(id, height, &me, &sig, true);
-        if let Some(p) = self.pending_sigs.get_mut(&id) {
+        if let Some(p) = self.chain.pending_sigs.get_mut(&id) {
             p.verified.insert(me.clone());
         }
         let env = self.make_env(
@@ -171,7 +171,7 @@ impl State {
     /// block's m signatures stay the only chain truth.
     pub(super) fn stash_voted(&mut self, id: u64) {
         let members: Vec<molt_core::MemberId> = self
-            .pending_sigs
+            .chain.pending_sigs
             .get(&id)
             .map(|s| s.sigs.iter().map(|a| a.member.clone()).collect())
             .unwrap_or_default();
@@ -192,8 +192,8 @@ impl State {
     /// first) and its registered chain change. Idempotent.
     pub(super) fn forget_vote(&mut self, id: u64) {
         self.stash_voted(id);
-        self.pending_sigs.remove(&id);
-        self.proposal_changes.remove(&id);
+        self.chain.pending_sigs.remove(&id);
+        self.chain.proposal_changes.remove(&id);
     }
 
     /// [`State::forget_vote`] for a sealed change that carries no proposal
@@ -202,7 +202,7 @@ impl State {
     /// id), every passive applier and a catch-up all settle identically.
     pub(super) fn forget_votes_for(&mut self, sealed: &ChainChange) {
         let ids: Vec<u64> = self
-            .proposal_changes
+            .chain.proposal_changes
             .iter()
             .filter(|(_, c)| *c == sealed)
             .map(|(id, _)| *id)
@@ -236,7 +236,7 @@ impl State {
         // without bound. Roster membership (not link identity) is the rule:
         // the WP2 re-serve legitimately relays other members' signatures.
         if !self
-            .chain_head
+            .chain.head
             .as_ref()
             .is_some_and(|h| h.identities.iter().any(|i| i.member == member))
         {
@@ -245,7 +245,7 @@ impl State {
         if !verified && member == self.member() {
             return;
         }
-        let entry = self.pending_sigs.entry(id).or_default();
+        let entry = self.chain.pending_sigs.entry(id).or_default();
         if height > entry.height {
             entry.height = height;
             entry.sigs.clear();
@@ -271,7 +271,7 @@ impl State {
     /// else is "not verifiable yet", which callers treat as not-displayed
     /// rather than dropped (liveness: an approval may outrun its card).
     fn approval_verifies(&self, id: u64, height: u64, member: &str, sig: &str) -> bool {
-        let Some(head) = self.chain_head.as_ref() else {
+        let Some(head) = self.chain.head.as_ref() else {
             return false;
         };
         if height != head.height + 1 {
@@ -290,7 +290,7 @@ impl State {
     /// card (or its registered change) just landed, so sigs that outran it
     /// become displayable now.
     pub(crate) fn reverify_pending(&mut self, id: u64) {
-        let Some(pending) = self.pending_sigs.get(&id) else {
+        let Some(pending) = self.chain.pending_sigs.get(&id) else {
             return;
         };
         let height = pending.height;
@@ -302,7 +302,7 @@ impl State {
             .collect();
         for (member, sig) in candidates {
             if self.approval_verifies(id, height, &member, &sig) {
-                if let Some(p) = self.pending_sigs.get_mut(&id) {
+                if let Some(p) = self.chain.pending_sigs.get_mut(&id) {
                     p.verified.insert(member);
                 }
             }
@@ -314,7 +314,7 @@ impl State {
     /// lowest-named valid signers are chosen, so two nodes that both reach the
     /// threshold seal the byte-identical block (it self-dedups on receipt).
     pub(crate) fn try_commit(&mut self, id: u64) {
-        let Some(head) = self.chain_head.clone() else {
+        let Some(head) = self.chain.head.clone() else {
             return;
         };
         // already committed?
@@ -326,7 +326,7 @@ impl State {
             return;
         };
         let bytes = approval_bytes(&self.republic_id(), target, &change);
-        let Some(pending) = self.pending_sigs.get(&id) else {
+        let Some(pending) = self.chain.pending_sigs.get(&id) else {
             return;
         };
         if pending.height != target {
@@ -480,7 +480,7 @@ impl State {
         };
         let durable = active
             .handle
-            .persist_chain_blocking(self.checkpoint_blob.clone(), self.chain.clone());
+            .persist_chain_blocking(self.chain.checkpoint_blob.clone(), self.chain.blocks.clone());
         if !durable {
             // The writer also raises its `failed` flag, which the next
             // `record` turns into the operator's "storage-failed" notice.
@@ -497,14 +497,14 @@ impl State {
     /// state. Returns whether it was accepted. **Does not persist** — the
     /// caller does, once per batch ([`State::persist_chain_now`]).
     pub(super) fn append_committed_block(&mut self, block: ChainBlock) -> bool {
-        // verify BEFORE appending — the block only ever touches `self.chain`
+        // verify BEFORE appending — the block only ever touches `self.chain.blocks`
         // once it has passed, so there is nothing to roll back
         match self.extend_own(&block) {
             Ok(head) => {
-                self.chain_head = Some(head);
+                self.chain.head = Some(head);
                 // an append only ADDS to the projection — no whole-chain refold
                 self.project_one(&block);
-                self.chain.push(block);
+                self.chain.blocks.push(block);
                 self.bump_next_id_past_chain();
                 true
             }
@@ -534,7 +534,7 @@ impl State {
                     p.state = ProposalState::Applied;
                 }
                 self.stash_voted(*proposal_id);
-                self.pending_sigs.remove(proposal_id);
+                self.chain.pending_sigs.remove(proposal_id);
                 self.emit(Event::Applied {
                     id: ProposalId(*proposal_id),
                     surface: *surface,
@@ -597,7 +597,7 @@ impl State {
                 match self.own_checkpoint_state(upto) {
                     Ok(blob) => {
                         self.set_checkpoint_blob(Some(blob));
-                        self.chain.retain(|b| b.height >= anchor_height);
+                        self.chain.blocks.retain(|b| b.height >= anchor_height);
                         self.apply_chain_to_state();
                         self.emit(Event::CheckpointSealed {
                             height: anchor_height,
@@ -661,12 +661,12 @@ impl State {
     /// that still stands, only its position moved — so re-express it (the human
     /// is not asked again). Proposals this node did not approve are just cleared.
     pub(super) fn rebase_pending_approvals(&mut self) {
-        let Some(head) = self.chain_head.as_ref() else {
+        let Some(head) = self.chain.head.as_ref() else {
             return;
         };
         let target = head.height + 1;
         let stale: Vec<u64> = self
-            .pending_sigs
+            .chain.pending_sigs
             .iter()
             .filter(|(_, p)| p.height < target)
             .map(|(id, _)| *id)
@@ -677,7 +677,7 @@ impl State {
         // not linger as bookkeeping a late Approved could resurrect
         let head_height = head.height;
         let swept: Vec<u64> = self
-            .proposal_changes
+            .chain.proposal_changes
             .iter()
             .filter(|(_, c)| {
                 matches!(c, ChainChange::Checkpoint { upto, .. } if *upto < head_height)
@@ -685,8 +685,8 @@ impl State {
             .map(|(id, _)| *id)
             .collect();
         for id in swept {
-            self.proposal_changes.remove(&id);
-            self.pending_sigs.remove(&id);
+            self.chain.proposal_changes.remove(&id);
+            self.chain.pending_sigs.remove(&id);
             // closure for the proposer/operator: this cut can never seal —
             // re-propose at the new head (the stale loop below can no
             // longer see these entries, so the emit lives HERE)
@@ -696,8 +696,8 @@ impl State {
             // the LOCAL decision register, never the wire-collected set: a
             // peer can put junk under this node's name into `pending_sigs`,
             // and re-signing from there was a threshold bypass (2026-08-25)
-            let mine = self.own_approvals.contains(&id);
-            self.pending_sigs.remove(&id);
+            let mine = self.chain.own_approvals.contains(&id);
+            self.chain.pending_sigs.remove(&id);
             // WP4b: a checkpoint's change is CUT-bound (upto == height - 1,
             // enforced by the verifier) — after the head moved, re-signing
             // the old cut could only seal an invalid block. Drop it; the
@@ -721,7 +721,7 @@ impl State {
 
     /// [`State::verify_own`], keeping the walk.
     pub(crate) fn walk_own(&self, blocks: &[ChainBlock]) -> Result<ChainWalk, String> {
-        match &self.checkpoint_blob {
+        match &self.chain.checkpoint_blob {
             None => walk_chain(blocks),
             Some(blob) => walk_suffix_chain(blob, blocks, &self.republic_id()),
         }
@@ -742,13 +742,13 @@ impl State {
     /// **refused** block leaves it intact (`step` is atomic), so a peer
     /// spamming bad blocks cannot force a re-walk per block either.
     fn extend_own(&mut self, block: &ChainBlock) -> Result<ChainHead, String> {
-        let mut walk = match self.chain_walk.take() {
-            Some(w) if w.describes(&self.chain, self.checkpoint_blob.as_ref()) => w,
-            _ => self.walk_own(&self.chain)?,
+        let mut walk = match self.chain.walk.take() {
+            Some(w) if w.describes(&self.chain.blocks, self.chain.checkpoint_blob.as_ref()) => w,
+            _ => self.walk_own(&self.chain.blocks)?,
         };
         let stepped = walk.step(block);
         let head = walk.head.clone();
-        self.chain_walk = Some(walk);
+        self.chain.walk = Some(walk);
         stepped.map(|()| head)
     }
 
@@ -759,10 +759,10 @@ impl State {
         &self,
         upto: u64,
     ) -> Result<molt_core::CheckpointState, String> {
-        match &self.checkpoint_blob {
-            None => checkpoint_state(&self.chain, upto),
+        match &self.chain.checkpoint_blob {
+            None => checkpoint_state(&self.chain.blocks, upto),
             // the anchor block in chain[0] is state-neutral for the fold
-            Some(blob) => fold_state(blob.clone(), &self.chain, upto),
+            Some(blob) => fold_state(blob.clone(), &self.chain.blocks, upto),
         }
     }
 
@@ -815,7 +815,7 @@ impl State {
         // must not also become a surface proposal — `proposal_change` would
         // keep resolving it to the chain change, so approvals of this
         // "surface proposal" would sign that change's bytes.
-        if self.proposal_changes.contains_key(&id) {
+        if self.chain.proposal_changes.contains_key(&id) {
             tracing::warn!(%id, "refusing a surface proposal whose id names a chain change");
             return false;
         }
@@ -823,7 +823,7 @@ impl State {
         // guard, blob-seeded on a pruned holder) can only be a stale resend —
         // a fresh card would resurrect a decided vote. The reopen twin of
         // this guard is `settle_cards_against_chain`.
-        if self.chain_walk.as_ref().is_some_and(|w| w.seen.contains(&id)) {
+        if self.chain.walk.as_ref().is_some_and(|w| w.seen.contains(&id)) {
             tracing::debug!(%id, "refusing a proposal the chain already consumed");
             return false;
         }
@@ -868,7 +868,7 @@ impl State {
         // adopt it, clear the real signatures, and — since rebase only
         // sweeps heights BELOW the target — never recover, permanently
         // freezing the proposal (governance-liveness DoS). Bound it here.
-        let target = self.chain_head.as_ref().map(|h| h.height + 1);
+        let target = self.chain.head.as_ref().map(|h| h.height + 1);
         if target.is_some_and(|t| height > t) {
             tracing::warn!(%id, height, "dropping an approval for an implausible future height");
             return;
@@ -883,7 +883,7 @@ impl State {
         let verified = self.approval_verifies(id, height, by, sig);
         self.collect_sig(id, height, by, sig, verified);
         if verified {
-            if let Some(p) = self.pending_sigs.get_mut(&id) {
+            if let Some(p) = self.chain.pending_sigs.get_mut(&id) {
                 p.verified.insert(by.to_string());
             }
         }
@@ -909,7 +909,7 @@ impl State {
             // sign different bytes than everyone else
             .filter(|(id, _)| {
                 !matches!(
-                    self.proposal_changes.get(id),
+                    self.chain.proposal_changes.get(id),
                     Some(ChainChange::Membership { .. })
                 )
             })
@@ -922,7 +922,7 @@ impl State {
                 surface: p.surface,
                 payload: p.payload.clone(),
             });
-            if let Some(pending) = self.pending_sigs.get(id) {
+            if let Some(pending) = self.chain.pending_sigs.get(id) {
                 // L2: only VERIFIED signatures are re-served — junk a peer
                 // once gossiped must not be amplified to the next node
                 for a in pending.sigs.iter().filter(|a| pending.verified.contains(&a.member)) {
@@ -967,7 +967,7 @@ impl State {
                 // the same Membership exclusion as the Proposed loop above —
                 // a membership id must never re-serve, in any clothing
                 !matches!(
-                    self.proposal_changes.get(id),
+                    self.chain.proposal_changes.get(id),
                     Some(ChainChange::Membership { .. })
                 ) && p.decliners.iter().any(|d| d == &me)
                     && match p.state {
@@ -984,7 +984,7 @@ impl State {
             // a registered voice recomputes its anchor from the own record;
             // a parked voice re-serves the hash it ARRIVED with (D1)
             .map(|(id, p)| (*id, crate::State::decline_payload_hash(&p.payload)))
-            .chain(self.pending_declines.iter().filter_map(|(id, parked)| {
+            .chain(self.chain.pending_declines.iter().filter_map(|(id, parked)| {
                 parked
                     .iter()
                     .find(|(m, _, _)| m == &me)

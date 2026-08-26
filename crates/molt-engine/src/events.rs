@@ -322,7 +322,7 @@ impl State {
                 // under the serving peer), so a restart rebuilds it here —
                 // else the next re-base drops the standing decision
                 if *by == self.member() {
-                    self.own_approvals.insert(id.0);
+                    self.chain.own_approvals.insert(id.0);
                 }
                 // D2 replay twin of the live clears: the newest stance wins
                 // — an own log that recorded decline-then-approve must
@@ -713,30 +713,30 @@ impl State {
         if let Some(group) = self.group_net.take() {
             tokio::spawn(async move { group.handle.shutdown().await });
         }
-        self.chain.clear();
-        self.chain_head = None;
+        self.chain.blocks.clear();
+        self.chain.head = None;
         self.set_checkpoint_blob(None);
-        self.pending_served_blob = None;
-        self.chain_applied.clear();
-        self.pending_sigs.clear();
-        self.own_approvals.clear();
-        self.chain_served_at.clear();
+        self.chain.pending_served_blob = None;
+        self.chain.applied.clear();
+        self.chain.pending_sigs.clear();
+        self.chain.own_approvals.clear();
+        self.chain.served_at.clear();
         // the chain PROJECTIONS too (review E5): a chainless workspace opened
         // next has nothing to refold them from, so they bled across
-        self.chain_applied_sigs.clear();
-        self.chain_anchors.clear();
-        self.chain_member_relays.clear();
-        self.split_noted.clear();
+        self.chain.applied_sigs.clear();
+        self.chain.anchors.clear();
+        self.chain.member_relays.clear();
+        self.chain.split_noted.clear();
         self.delivery.last_group_ack = None;
-        self.pending_declines.clear();
-        self.pending_withdrawals.clear();
+        self.chain.pending_declines.clear();
+        self.chain.pending_withdrawals.clear();
         self.files.series.clear();
         self.files.pending.clear();
         self.files.serving.clear();
         self.files.announced.clear();
-        self.proposal_changes.clear();
-        self.pending_blocks.clear();
-        self.catchup_from = None;
+        self.chain.proposal_changes.clear();
+        self.chain.pending_blocks.clear();
+        self.chain.catchup_from = None;
         self.pending_recovery.clear();
         self.chat.clear();
         self.chat_pos.clear();

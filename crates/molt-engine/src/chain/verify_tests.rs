@@ -134,9 +134,9 @@ fn malicious_checkpoint_heights_are_refused_not_panics() {
     let mut peer = chain_peer("walter", &b, b.blocks.clone());
     let mut bomb = blob.clone();
     bomb.upto = u64::MAX;
-    peer.pending_served_blob = Some(bomb);
+    peer.chain.pending_served_blob = Some(bomb);
     peer.try_adopt_from_blob(); // must not panic
-    assert!(peer.pending_served_blob.is_none(), "the overflow blob is dropped");
+    assert!(peer.chain.pending_served_blob.is_none(), "the overflow blob is dropped");
 }
 
 /// Review findings, pinned: (1) the anchor must not be circularly
@@ -660,7 +660,7 @@ fn a_threshold_restored_block_re_admits_a_member() {
     // petra proposes re-admitting walter and co-signs (1 of 2 — pending)
     let id = petra.propose_membership(MembershipOp::Restored, "walter", &walter_pk, None, Vec::new(), None);
     assert_eq!(
-        petra.chain_head.as_ref().expect("head").height,
+        petra.chain.head.as_ref().expect("head").height,
         0,
         "one signature does not re-admit"
     );
@@ -668,7 +668,7 @@ fn a_threshold_restored_block_re_admits_a_member() {
     // walter learns the proposal + petra's signature, then co-signs
     walter.receive_membership_proposal(id, MembershipOp::Restored, "walter", &walter_pk, None, Vec::new(), None);
     let petra_sig = petra
-        .pending_sigs
+        .chain.pending_sigs
         .get(&id)
         .expect("petra's pending set")
         .sigs
@@ -681,11 +681,11 @@ fn a_threshold_restored_block_re_admits_a_member() {
     walter.chain_sign_and_gossip_approval(id);
 
     // the Restored block seals at 2-of-2
-    let head = walter.chain_head.as_ref().expect("head");
+    let head = walter.chain.head.as_ref().expect("head");
     assert_eq!(head.height, 1);
     assert!(
         matches!(
-            walter.chain.last().expect("block").change,
+            walter.chain.blocks.last().expect("block").change,
             ChainChange::Membership {
                 op: MembershipOp::Restored,
                 ..

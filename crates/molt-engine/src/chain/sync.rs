@@ -20,7 +20,7 @@ impl State {
     /// already filled, or — when it is ahead of us — buffer it and request the
     /// missing suffix (catch-up).
     pub(crate) fn receive_block(&mut self, block: ChainBlock) {
-        let Some(head) = self.chain_head.clone() else {
+        let Some(head) = self.chain.head.clone() else {
             // a headless rejoiner (total device loss) bootstraps its chain from
             // the genesis a survivor serves, then drains whatever else arrived
             // first; a non-genesis block is buffered until the genesis lands
@@ -36,19 +36,19 @@ impl State {
                     }
                 }
                 self.adopt_chain(vec![block]);
-                if self.chain_head.is_some() {
+                if self.chain.head.is_some() {
                     self.drain_buffered_blocks();
                     self.persist_chain_now();
                 }
             } else {
                 // L3: headless too, the buffer is size-capped (no head to
                 // window against) — shed the highest, the re-serve re-earns
-                self.pending_blocks.insert(block.height, block);
-                while self.pending_blocks.len()
+                self.chain.pending_blocks.insert(block.height, block);
+                while self.chain.pending_blocks.len()
                     > usize::try_from(CATCHUP_BUFFER_WINDOW).unwrap_or(usize::MAX)
                 {
-                    if let Some(top) = self.pending_blocks.keys().next_back().copied() {
-                        self.pending_blocks.remove(&top);
+                    if let Some(top) = self.chain.pending_blocks.keys().next_back().copied() {
+                        self.chain.pending_blocks.remove(&top);
                     } else {
                         break;
                     }
@@ -76,7 +76,7 @@ impl State {
             // the buffer is capped — when full the HIGHEST height is shed
             // (furthest from applicable; a re-served suffix re-earns it).
             let anchor_ok = self
-                .pending_served_blob
+                .chain.pending_served_blob
                 .as_ref()
                 .is_some_and(|blob| {
                     block.height > blob.upto
@@ -86,11 +86,11 @@ impl State {
                 tracing::warn!(height = block.height, head = head.height, "refusing to buffer a block far past the head");
                 return;
             }
-            self.pending_blocks.retain(|h, _| *h > head.height);
-            self.pending_blocks.insert(block.height, block);
-            while self.pending_blocks.len() > usize::try_from(CATCHUP_BUFFER_WINDOW).unwrap_or(usize::MAX) {
-                if let Some(top) = self.pending_blocks.keys().next_back().copied() {
-                    self.pending_blocks.remove(&top);
+            self.chain.pending_blocks.retain(|h, _| *h > head.height);
+            self.chain.pending_blocks.insert(block.height, block);
+            while self.chain.pending_blocks.len() > usize::try_from(CATCHUP_BUFFER_WINDOW).unwrap_or(usize::MAX) {
+                if let Some(top) = self.chain.pending_blocks.keys().next_back().copied() {
+                    self.chain.pending_blocks.remove(&top);
                 } else {
                     break;
                 }
@@ -110,8 +110,8 @@ impl State {
         if self.append_committed_block(block.clone()) {
             self.after_block_applied(&block);
             // the head advanced — a catch-up request that reached this height is done
-            if self.catchup_from.is_some_and(|f| f <= block.height) {
-                self.catchup_from = None;
+            if self.chain.catchup_from.is_some_and(|f| f <= block.height) {
+                self.chain.catchup_from = None;
             }
             true
         } else {
@@ -122,26 +122,26 @@ impl State {
     /// Apply buffered catch-up blocks while the next height is available, then
     /// drop any stale buffered blocks at or below the head.
     fn drain_buffered_blocks(&mut self) {
-        while let Some(head) = self.chain_head.clone() {
+        while let Some(head) = self.chain.head.clone() {
             let next = head.height + 1;
-            let Some(block) = self.pending_blocks.remove(&next) else {
+            let Some(block) = self.chain.pending_blocks.remove(&next) else {
                 break;
             };
             if !self.apply_next_block(block) {
                 break;
             }
         }
-        let head_h = self.chain_head.as_ref().map_or(0, |h| h.height);
-        self.pending_blocks.retain(|h, _| *h > head_h);
+        let head_h = self.chain.head.as_ref().map_or(0, |h| h.height);
+        self.chain.pending_blocks.retain(|h, _| *h > head_h);
     }
 
     /// Broadcast a catch-up request for every block from `from` onward (deduped
     /// while the same gap is outstanding). No-op if we cannot be behind.
     pub(crate) fn request_catchup(&mut self, from: u64) {
-        if self.chain_head.is_none() || self.catchup_from == Some(from) {
+        if self.chain.head.is_none() || self.chain.catchup_from == Some(from) {
             return;
         }
-        self.catchup_from = Some(from);
+        self.chain.catchup_from = Some(from);
         let me = self.member();
         tracing::debug!(me = %me, from, "chain catch-up requested");
         let env = self.make_env(me, WorkspaceEvent::ChainRequest { from_height: from });
@@ -154,7 +154,7 @@ impl State {
     /// everyone — independent of who originally committed each block.
     pub(crate) fn serve_chain_from(&mut self, from: u64) {
         let blocks: Vec<ChainBlock> = self
-            .chain
+            .chain.blocks
             .iter()
             .filter(|b| b.height >= from)
             .cloned()
@@ -167,7 +167,7 @@ impl State {
         // WP4b: a pruned holder cannot serve below its anchor — it serves
         // the BLOB instead, ahead of the anchor/suffix, so the requester
         // can hard-verify and re-anchor (suffix rules)
-        if let (Some(blob), Some(anchor)) = (&self.checkpoint_blob, self.chain.first()) {
+        if let (Some(blob), Some(anchor)) = (&self.chain.checkpoint_blob, self.chain.blocks.first()) {
             // strictly below: a requester missing only the anchor block can
             // verify it against its own history — the full-state blob would
             // be pure fan-out amplification
@@ -200,11 +200,11 @@ impl State {
     /// node anywhere still holds a genesis. Everything above arrives over the
     /// ordinary catch-up, once the rejoiner has a head and asking works.
     pub(crate) fn anchor_bootstrap(&self) -> Vec<WorkspaceEvent> {
-        let Some(anchor) = self.chain.first() else {
+        let Some(anchor) = self.chain.blocks.first() else {
             return Vec::new();
         };
         let mut out = Vec::new();
-        if let Some(blob) = &self.checkpoint_blob {
+        if let Some(blob) = &self.chain.checkpoint_blob {
             out.push(WorkspaceEvent::CheckpointServed { blob: blob.clone() });
         }
         out.push(WorkspaceEvent::Committed(anchor.clone()));
@@ -229,7 +229,7 @@ impl State {
     /// smaller hash wins the single branch, so adopt it and re-base the
     /// displaced proposal. A deeper conflict is logged (deep reorg is Phase 3).
     fn tie_break(&mut self, block: ChainBlock) {
-        let Some(existing) = self.chain.iter().find(|b| b.height == block.height) else {
+        let Some(existing) = self.chain.blocks.iter().find(|b| b.height == block.height) else {
             return;
         };
         if existing == &block {
@@ -238,12 +238,12 @@ impl State {
         let rid = self.republic_id();
         let incoming = molt_storage::content_hash(&block_link_bytes(&rid, &block));
         let current = molt_storage::content_hash(&block_link_bytes(&rid, existing));
-        let is_tip = self.chain.last().is_some_and(|b| b.height == block.height);
+        let is_tip = self.chain.blocks.last().is_some_and(|b| b.height == block.height);
         // CHEAP FIRST (review C5): a ground low-hash block costs a full
         // re-walk per frame; the signatures are what any contender must
         // carry, so they are checked against the roster before anything
         // moves (the roster is stable across blocks — `Joined` is refused)
-        let signed = self.chain_head.as_ref().is_some_and(|h| {
+        let signed = self.chain.head.as_ref().is_some_and(|h| {
             block_signers(&rid, &h.identities, &block)
                 .is_ok_and(|signers| signers.len() >= usize::from(h.rule_m))
         });
@@ -253,10 +253,10 @@ impl State {
         }
         if is_tip && incoming < current {
             // the incoming block wins the tip; swap it in and re-verify
-            let displaced = self.chain.pop();
-            self.chain.push(block.clone());
-            if let Ok(head) = self.verify_own(&self.chain) {
-                self.chain_head = Some(head);
+            let displaced = self.chain.blocks.pop();
+            self.chain.blocks.push(block.clone());
+            if let Ok(head) = self.verify_own(&self.chain.blocks) {
+                self.chain.head = Some(head);
                 self.apply_chain_to_state();
                 // the displaced proposal returns to pending and re-bases —
                 // but ONLY a card with a deliberation behind it (a proposer
@@ -284,9 +284,9 @@ impl State {
                 self.persist_chain_now();
             } else {
                 // revert — should not happen for a verified block
-                self.chain.pop();
+                self.chain.blocks.pop();
                 if let Some(b) = displaced {
-                    self.chain.push(b);
+                    self.chain.blocks.push(b);
                 }
             }
         }

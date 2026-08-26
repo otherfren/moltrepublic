@@ -617,7 +617,7 @@ impl State {
                 .unwrap_or_default()
                 .split_whitespace()
                 .collect();
-            for (m, reach) in &self.chain_member_relays {
+            for (m, reach) in &self.chain.member_relays {
                 if reach.iter().any(|r| new_pool.contains(&r.as_str())) {
                     continue;
                 }
@@ -877,13 +877,13 @@ impl State {
                 return WithdrawOutcome::Ignored;
             }
             self.next_id = self.next_id.max(id.saturating_add(1));
-            if !self.pending_withdrawals.contains_key(&id)
-                && self.pending_withdrawals.len() >= PARKED_DECLINE_IDS_MAX
+            if !self.chain.pending_withdrawals.contains_key(&id)
+                && self.chain.pending_withdrawals.len() >= PARKED_DECLINE_IDS_MAX
             {
                 tracing::warn!(%id, %by, "withdraw park full - dropping");
                 return WithdrawOutcome::Ignored;
             }
-            self.pending_withdrawals
+            self.chain.pending_withdrawals
                 .entry(id)
                 .or_insert((by.to_string(), ts));
             return WithdrawOutcome::Parked;
@@ -898,15 +898,15 @@ impl State {
         p.state = ProposalState::Rejected;
         p.withdrawn = true;
         p.declined_at = ts; // retention + the "when" label; declined_by stays empty
-        self.pending_sigs.remove(&id);
-        self.own_approvals.remove(&id);
-        self.pending_declines.remove(&id);
+        self.chain.pending_sigs.remove(&id);
+        self.chain.own_approvals.remove(&id);
+        self.chain.pending_declines.remove(&id);
         WithdrawOutcome::Withdrawn
     }
 
     /// Register a parked withdraw for a proposal that just became known.
     pub(crate) fn register_parked_withdrawal(&mut self, id: u64) -> WithdrawOutcome {
-        let Some((by, ts)) = self.pending_withdrawals.remove(&id) else {
+        let Some((by, ts)) = self.chain.pending_withdrawals.remove(&id) else {
             return WithdrawOutcome::Ignored;
         };
         self.register_withdraw(id, &by, ts)
@@ -1010,15 +1010,15 @@ impl State {
         if id > self.next_id.saturating_add(PARKED_DECLINE_ID_WINDOW) {
             return false; // garbage — accept and drop
         }
-        if self.pending_declines.contains_key(&id) {
+        if self.chain.pending_declines.contains_key(&id) {
             return false;
         }
         let member_parked = self
-            .pending_declines
+            .chain.pending_declines
             .values()
             .filter(|p| p.iter().any(|(m, _, _)| m == by))
             .count();
-        self.pending_declines.len() >= PARKED_DECLINE_IDS_MAX
+        self.chain.pending_declines.len() >= PARKED_DECLINE_IDS_MAX
             || member_parked >= PARKED_DECLINES_PER_MEMBER_MAX
     }
 
@@ -1048,18 +1048,18 @@ impl State {
             // with the parked voice
             self.next_id = self.next_id.max(id.saturating_add(1));
             let member_parked = self
-                .pending_declines
+                .chain.pending_declines
                 .values()
                 .filter(|p| p.iter().any(|(m, _, _)| m == by))
                 .count();
-            if !self.pending_declines.contains_key(&id)
-                && (self.pending_declines.len() >= PARKED_DECLINE_IDS_MAX
+            if !self.chain.pending_declines.contains_key(&id)
+                && (self.chain.pending_declines.len() >= PARKED_DECLINE_IDS_MAX
                     || member_parked >= PARKED_DECLINES_PER_MEMBER_MAX)
             {
                 tracing::warn!(%id, %by, "decline park full - dropping");
                 return DeclineOutcome::Known;
             }
-            let parked = self.pending_declines.entry(id).or_default();
+            let parked = self.chain.pending_declines.entry(id).or_default();
             if !parked.iter().any(|(m, _, _)| m == by) {
                 parked.push((by.to_string(), ts, hash.to_string()));
             }
@@ -1077,14 +1077,14 @@ impl State {
         // D2 (last vote counts, decided 2026-08-16): the decline RETRACTS
         // this member's collected signature — one member, one stance.
         // Deterministic on every caller (applier, wire, park drain, replay).
-        if let Some(pending) = self.pending_sigs.get_mut(&id) {
+        if let Some(pending) = self.chain.pending_sigs.get_mut(&id) {
             pending.sigs.retain(|a| a.member != by);
             pending.verified.remove(by);
         }
         // …and the OWN decision register with it, or the next re-base would
         // put the retracted signature straight back (review 2026-08-25)
         if is_own {
-            self.own_approvals.remove(&id);
+            self.chain.own_approvals.remove(&id);
         }
         p.decliners.push(by.to_string());
         if p.decliners.len() > veto_room {
@@ -1105,7 +1105,7 @@ impl State {
     /// the park entry is consumed.
     pub(crate) fn register_parked_declines(&mut self, id: u64) -> ParkDrain {
         let mut drain = ParkDrain { voices: Vec::new(), rejected: false };
-        let Some(parked) = self.pending_declines.remove(&id) else {
+        let Some(parked) = self.chain.pending_declines.remove(&id) else {
             return drain;
         };
         for (by, ts, hash) in parked {
@@ -1301,7 +1301,7 @@ impl State {
         // is its own (self-cosign or the one explicit approve)
         let mut approved_by_me = if self.is_chain_governed() {
             let me = self.member();
-            self.pending_sigs
+            self.chain.pending_sigs
                 .get(&id)
                 .is_some_and(|s| s.verified.contains(&me))
         } else {
@@ -1323,7 +1323,7 @@ impl State {
             // L2: the pills show VERIFIED voices only — a raw collected
             // sig could paint a forged stance onto a named seat
             let signed: Vec<String> = self
-                .pending_sigs
+                .chain.pending_sigs
                 .get(&id)
                 .map(|s| s.verified.iter().cloned().collect())
                 .unwrap_or_default();
@@ -1367,8 +1367,8 @@ impl State {
             // chain scan made every snapshot O(cards × chain) once ALL
             // applied history materializes cards. Only a Membership card
             // (its block carries no proposal id) still matches by content.
-            let sealed = self.chain_applied_sigs.get(&id).or_else(|| {
-                self.chain.iter().rev().find_map(|blk| match &blk.change {
+            let sealed = self.chain.applied_sigs.get(&id).or_else(|| {
+                self.chain.blocks.iter().rev().find_map(|blk| match &blk.change {
                 molt_core::ChainChange::Membership { op: bop, member, .. }
                     if seat == Some(member.as_str())
                         && matches!(
@@ -1587,7 +1587,7 @@ impl State {
             .get(&Surface::Organization)
             .into_iter()
             .flatten()
-            .chain(self.chain_applied.get(&Surface::Organization).into_iter().flatten())
+            .chain(self.chain.applied.get(&Surface::Organization).into_iter().flatten())
             .map(|(_, v)| v)
     }
 
@@ -1756,7 +1756,7 @@ impl State {
             // plus the chain (real threshold) projection — one of the
             // two is always empty for a given workspace, so this is a concat
             let mut v = self.applied.get(&surface).cloned().unwrap_or_default();
-            if let Some(chain) = self.chain_applied.get(&surface) {
+            if let Some(chain) = self.chain.applied.get(&surface) {
                 v.extend(chain.iter().cloned());
             }
             v
@@ -1915,7 +1915,7 @@ impl State {
         }
         if self.is_chain_governed() {
             !self
-                .pending_sigs
+                .chain.pending_sigs
                 .get(&id)
                 .is_some_and(|s| s.sigs.iter().any(|a| a.member == member))
         } else if member == self.member() {
@@ -2093,7 +2093,7 @@ impl State {
                     self.chat_visible().count()
                 } else {
                     self.applied.get(&s).map(|v| v.len()).unwrap_or(0)
-                        + self.chain_applied.get(&s).map(|v| v.len()).unwrap_or(0)
+                        + self.chain.applied.get(&s).map(|v| v.len()).unwrap_or(0)
                 };
                 SurfaceStat {
                     surface: s,

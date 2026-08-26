@@ -44,10 +44,10 @@ impl State {
     ///   staled it lands here again and re-proposes at the new head, so
     ///   there is at most one auto-propose per committed block.
     pub(super) fn maybe_auto_checkpoint(&mut self) {
-        if self.chain.len() < AUTO_CHECKPOINT_MIN_LEN {
+        if self.chain.blocks.len() < AUTO_CHECKPOINT_MIN_LEN {
             return;
         }
-        let Some(head) = self.chain_head.as_ref() else {
+        let Some(head) = self.chain.head.as_ref() else {
             return;
         };
         // Only a buffered block ADJACENT to head pins the cut: it is about
@@ -56,7 +56,7 @@ impl State {
         // — gating on "any buffered block" let one plausible far-future
         // claim freeze compaction until a drain cleared it (known-debt
         // refinement, 2026-08-16 list).
-        if self.catchup_from.is_some() || self.pending_blocks.contains_key(&(head.height + 1)) {
+        if self.chain.catchup_from.is_some() || self.chain.pending_blocks.contains_key(&(head.height + 1)) {
             return;
         }
         let me = self.member();
@@ -74,9 +74,9 @@ impl State {
             .proposals
             .values()
             .any(|p| p.state == ProposalState::Proposed)
-            || !self.pending_sigs.is_empty()
+            || !self.chain.pending_sigs.is_empty()
             || self
-                .proposal_changes
+                .chain.proposal_changes
                 .values()
                 .any(|c| matches!(c, ChainChange::Checkpoint { .. }));
         if vote_open {
@@ -84,7 +84,7 @@ impl State {
         }
         match self.cmd_propose_checkpoint() {
             Ok(_) => {
-                tracing::info!(len = self.chain.len(), "auto-proposed a compaction checkpoint");
+                tracing::info!(len = self.chain.blocks.len(), "auto-proposed a compaction checkpoint");
             }
             Err(e) => tracing::warn!(error = %e, "auto-checkpoint propose failed"),
         }
@@ -102,7 +102,7 @@ impl State {
                 "checkpoints need a chain-governed republic".into(),
             ));
         }
-        let Some(head) = self.chain_head.as_ref() else {
+        let Some(head) = self.chain.head.as_ref() else {
             return Err(molt_core::MoltError::BadPayload("no chain head".into()));
         };
         let upto = head.height;
@@ -112,7 +112,7 @@ impl State {
         let state_hash = checkpoint_state_hash(&state);
         let id = self.next_id;
         self.next_id += 1;
-        self.proposal_changes.insert(
+        self.chain.proposal_changes.insert(
             id,
             ChainChange::Checkpoint {
                 upto,
@@ -151,7 +151,7 @@ impl State {
             return;
         }
         self.next_id = self.next_id.max(id.saturating_add(1));
-        let Some(head) = self.chain_head.as_ref() else {
+        let Some(head) = self.chain.head.as_ref() else {
             return;
         };
         if head.height != upto {
@@ -188,14 +188,14 @@ impl State {
         // second id would mint one registry entry + one signed Approved
         // per frame (1:1 outbound amplification); the first id IS the cut
         if self
-            .proposal_changes
+            .chain.proposal_changes
             .iter()
             .any(|(other, c)| *other != id && *c == this)
         {
             tracing::debug!(%id, upto, "ignoring a duplicate checkpoint cut under a fresh id");
             return;
         }
-        self.proposal_changes.insert(id, this);
+        self.chain.proposal_changes.insert(id, this);
         // replay guard: one signature per member per cut
         if self.own_signature_stands(id) {
             return;
@@ -211,7 +211,7 @@ impl State {
         // only useful when we are strictly BEHIND the served cut (head ==
         // upto means only the anchor is missing — the normal apply path
         // covers that without the full-state blob)
-        let behind = match &self.chain_head {
+        let behind = match &self.chain.head {
             None => true,
             Some(head) => head.height < blob.upto,
         };
@@ -222,7 +222,7 @@ impl State {
         // overwritable slot would let one insider race garbage over a
         // legitimate blob forever (griefing; per-peer stashes are the
         // fuller fix, doc §B.6)
-        if self.pending_served_blob.is_some() {
+        if self.chain.pending_served_blob.is_some() {
             return;
         }
         let rid = molt_storage::republic_id(
@@ -235,7 +235,7 @@ impl State {
             tracing::warn!("dropping a served checkpoint blob that does not recompute to this republic");
             return;
         }
-        self.pending_served_blob = Some(blob);
+        self.chain.pending_served_blob = Some(blob);
         self.try_adopt_from_blob();
     }
 
@@ -244,31 +244,31 @@ impl State {
     /// suffix verification — all-or-nothing, nothing is trusted from the
     /// stash until it passes.
     pub(crate) fn try_adopt_from_blob(&mut self) {
-        let Some(blob) = self.pending_served_blob.clone() else {
+        let Some(blob) = self.chain.pending_served_blob.clone() else {
             return;
         };
         // the chain advanced past the cut through the normal apply path —
         // the stash is dead weight now
         if self
-            .chain_head
+            .chain.head
             .as_ref()
             .is_some_and(|h| h.height > blob.upto)
         {
-            self.pending_served_blob = None;
+            self.chain.pending_served_blob = None;
             return;
         }
         // an attacker-served blob.upto could be u64::MAX; a saturating add
         // makes the lookup miss rather than overflow (overflow-checks abort)
         let Some(anchor_height) = blob.upto.checked_add(1) else {
-            self.pending_served_blob = None;
+            self.chain.pending_served_blob = None;
             return;
         };
-        if !self.pending_blocks.contains_key(&anchor_height) {
+        if !self.chain.pending_blocks.contains_key(&anchor_height) {
             return;
         }
         let mut candidate = Vec::new();
         let mut h = anchor_height;
-        while let Some(b) = self.pending_blocks.get(&h) {
+        while let Some(b) = self.chain.pending_blocks.get(&h) {
             candidate.push(b.clone());
             let Some(next) = h.checked_add(1) else { break };
             h = next;
@@ -277,10 +277,10 @@ impl State {
             Ok(head) => {
                 let new_height = head.height;
                 self.set_checkpoint_blob(Some(blob));
-                self.chain = candidate.clone();
-                self.chain_head = Some(head);
-                self.pending_served_blob = None;
-                self.pending_blocks.retain(|h, _| *h > new_height);
+                self.chain.blocks = candidate.clone();
+                self.chain.head = Some(head);
+                self.chain.pending_served_blob = None;
+                self.chain.pending_blocks.retain(|h, _| *h > new_height);
                 self.apply_chain_to_state();
                 // The cards are settled: `apply_chain_to_state` folded the
                 // blob's consumed ids (else they zombie as Proposed and the
@@ -322,15 +322,15 @@ impl State {
                 }
                 self.rebase_pending_approvals();
                 self.persist_chain_now();
-                if self.catchup_from.is_some_and(|f| f <= new_height) {
-                    self.catchup_from = None;
+                if self.chain.catchup_from.is_some_and(|f| f <= new_height) {
+                    self.chain.catchup_from = None;
                 }
                 tracing::info!(height = new_height, "re-anchored on a served checkpoint");
             }
             Err(e) => {
                 // drop THIS stash so a later honest re-serve can land — a
                 // failed pairing must not wedge the slot forever
-                self.pending_served_blob = None;
+                self.chain.pending_served_blob = None;
                 tracing::warn!(error = %e, "served checkpoint blob + suffix do not verify - stash cleared");
             }
         }

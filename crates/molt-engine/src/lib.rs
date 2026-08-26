@@ -588,6 +588,110 @@ pub(crate) struct FilePlane {
     pub(crate) announced: HashMap<molt_core::MessageId, u64>,
 }
 
+/// The republic's persistent commit-block chain on this holder
+/// (`docs_archive/chain/persistent_chain.md`) and everything derived from
+/// or feeding it: the verified blocks + head + cached walk, the checkpoint
+/// blobs, the applied / signature / anchor / relay-ledger projections, the
+/// ephemeral vote collections (signatures, declines, withdrawals, the exact
+/// change per open proposal) and the catch-up buffer. Rebuilt from the chain
+/// or the gossip, never trusted from elsewhere; `reset_workspace_state`
+/// clears it with the workspace.
+pub(crate) struct ChainProjection {
+    /// The republic's persistent commit-block chain — the converged, verified
+    /// governance record (`docs_archive/chain/persistent_chain.md`). Block 0 is the
+    /// founding; empty when no chain-aware workspace is open.
+    pub(crate) blocks: Vec<molt_core::ChainBlock>,
+    /// The verified head of [`State::chain`] (`None` = empty chain).
+    pub(crate) head: Option<chain::ChainHead>,
+    /// The verification walk over [`State::chain`], kept so appending a block
+    /// costs that block's signatures instead of a re-walk from the anchor.
+    /// Runtime-only and always re-derivable; `None` simply means the next
+    /// append pays one full verification and re-fills it. Never trusted
+    /// blindly — [`chain::ChainWalk::describes`] must still match the chain,
+    /// and [`State::set_checkpoint_blob`] clears it.
+    pub(crate) walk: Option<chain::ChainWalk>,
+    /// WP4b: a SERVED blob awaiting its anchor block (runtime-only, never
+    /// persisted — re-served on the next catch-up if lost).
+    pub(crate) pending_served_blob: Option<molt_core::CheckpointState>,
+    /// WP4b: the checkpoint blob a PRUNED holder anchors on — `Some` once
+    /// history below a sealed checkpoint was dropped locally; [`State::chain`]
+    /// then starts with the checkpoint block instead of the genesis.
+    pub(crate) checkpoint_blob: Option<molt_core::CheckpointState>,
+    /// The gated surfaces' applied logs **derived from the chain** — a separate
+    /// projection from the legacy log-driven [`State::applied`] so the two never
+    /// collide: a single-operator workspace keeps its counted governance in
+    /// `applied` (chain genesis-only → this stays empty), while real
+    /// threshold-committed governance lands here. Reads combine both. Re-folded
+    /// wholesale on every chain change, so a re-base is free. Same
+    /// `(proposal id, payload)` shape as [`State::applied`]; the id is always
+    /// present here (every `Applied` block names its proposal).
+    pub(crate) applied: HashMap<Surface, Vec<(Option<u64>, Value)>>,
+    /// The sealing signatures per Applied proposal id — a chain PROJECTION
+    /// like [`State::chain_applied`], maintained by the same two writers
+    /// (full re-fold + append). `ProposalView` building reads voters from
+    /// here in O(1); the per-card reverse chain scan it replaces made every
+    /// snapshot O(cards × chain) once ALL applied history materializes
+    /// cards (review 2026-08-16).
+    pub(crate) applied_sigs: HashMap<u64, Vec<molt_core::RosterAttestation>>,
+    /// WORKING transport anchors — `member -> nostr_pk` for every seat a
+    /// `Restored` block re-anchored. A chain PROJECTION like
+    /// [`State::chain_applied`]: rebuilt from the chain, never persisted
+    /// separately, so it cannot drift from what the blocks say.
+    ///
+    /// The roster's anchor is the immutable FOUNDING record and stays that
+    /// way; this is where a recovered seat's current key lives. Read it
+    /// through [`State::working_nostr_pk`] — a send site that reaches for
+    /// `identities[i].nostr_pk` addresses a key the member no longer holds,
+    /// and does so silently.
+    pub(crate) anchors: HashMap<MemberId, String>,
+    /// The relay LEDGER (R3b): each seat's DECLARED reachable pool, folded
+    /// from `Membership` blocks exactly like [`State::chain_anchors`] (and
+    /// seeded from the checkpoint summary after a cut). Read through
+    /// [`State::member_relays`], which falls back to the ratified group pool
+    /// for seats that never declared. The split-detection input (R4).
+    pub(crate) member_relays: HashMap<MemberId, Vec<String>>,
+    /// R4: split pairs already warned about (runtime-only) — the log line
+    /// fires once per pair, the members-surface marker stays live.
+    pub(crate) split_noted: std::collections::HashSet<(MemberId, MemberId)>,
+    /// Ephemeral per-proposal signature collection for chain governance
+    /// (keyed by proposal id; never persisted, rebuilt from gossip). Once a
+    /// proposal gathers m distinct signatures the committer seals a block.
+    pub(crate) pending_sigs: HashMap<u64, chain::PendingApproval>,
+    /// The proposals THIS node signed (its own decisions), written only by
+    /// the own signing path. The re-base re-expresses a standing decision
+    /// from here — never from `pending_sigs`, whose entries any peer fills
+    /// under any roster name (review 2026-08-25: a forged own entry made
+    /// the node sign for real).
+    pub(crate) own_approvals: std::collections::BTreeSet<u64>,
+    /// When this node last served a catch-up to each requester: a
+    /// `ChainRequest` is an amplifier (the whole chain + blob + open cards
+    /// per frame, into the durable log), so one requester is served at
+    /// most once per [`net::CHAIN_SERVE_DEBOUNCE_SECS`] (review C3).
+    pub(crate) served_at: HashMap<MemberId, u64>,
+    /// Declines waiting for their proposal (keyed by proposal id, one entry
+    /// per member with the decline's ts): a decline travels on a different
+    /// sender's G7 chain than its proposal, and an own-log decline replays
+    /// before a re-served foreign proposal returns — parked votes register
+    /// the moment the proposal is known ([`State::register_decline`]).
+    /// Ephemeral and bounded, like the signature collection above.
+    pub(crate) pending_declines: HashMap<u64, Vec<(MemberId, u64, String)>>,
+    /// Parked withdraws whose proposal is not known yet (one slot per id —
+    /// a withdraw has exactly one legitimate author), the decline park's
+    /// sibling. Drained by `receive_proposed`.
+    pub(crate) pending_withdrawals: HashMap<u64, (MemberId, u64)>,
+    /// The exact [`molt_core::ChainChange`] each open proposal is voting on
+    /// (keyed by proposal id) — so approvers sign, and the committer seals, the
+    /// SAME bytes for any change kind (a gated `Applied` or a `Membership`
+    /// re-admission). Ephemeral, rebuilt from the proposal gossip.
+    pub(crate) proposal_changes: HashMap<u64, molt_core::ChainChange>,
+    /// Out-of-order catch-up buffer: blocks received ahead of our head (keyed
+    /// by height), applied as the head advances to meet them. Ephemeral.
+    pub(crate) pending_blocks: std::collections::BTreeMap<u64, molt_core::ChainBlock>,
+    /// The height a catch-up request is currently outstanding for (dedups the
+    /// request while a gap persists; cleared when the head reaches it).
+    pub(crate) catchup_from: Option<u64>,
+}
+
 pub(crate) struct State {
     pub(crate) config: GroupConfig,
     ev_tx: broadcast::Sender<Event>,
@@ -692,99 +796,7 @@ pub(crate) struct State {
     /// `(member, new_anchor) → unix stamp` map that swallows relay replays
     /// of an accepted request (the accept window does not cover 1059 wraps).
     pub(crate) unsolicited_cooldown: std::collections::HashMap<(String, String), u64>,
-    /// The republic's persistent commit-block chain — the converged, verified
-    /// governance record (`docs_archive/chain/persistent_chain.md`). Block 0 is the
-    /// founding; empty when no chain-aware workspace is open.
-    pub(crate) chain: Vec<molt_core::ChainBlock>,
-    /// The verified head of [`State::chain`] (`None` = empty chain).
-    pub(crate) chain_head: Option<chain::ChainHead>,
-    /// The verification walk over [`State::chain`], kept so appending a block
-    /// costs that block's signatures instead of a re-walk from the anchor.
-    /// Runtime-only and always re-derivable; `None` simply means the next
-    /// append pays one full verification and re-fills it. Never trusted
-    /// blindly — [`chain::ChainWalk::describes`] must still match the chain,
-    /// and [`State::set_checkpoint_blob`] clears it.
-    pub(crate) chain_walk: Option<chain::ChainWalk>,
-    /// WP4b: a SERVED blob awaiting its anchor block (runtime-only, never
-    /// persisted — re-served on the next catch-up if lost).
-    pub(crate) pending_served_blob: Option<molt_core::CheckpointState>,
-    /// WP4b: the checkpoint blob a PRUNED holder anchors on — `Some` once
-    /// history below a sealed checkpoint was dropped locally; [`State::chain`]
-    /// then starts with the checkpoint block instead of the genesis.
-    pub(crate) checkpoint_blob: Option<molt_core::CheckpointState>,
-    /// The gated surfaces' applied logs **derived from the chain** — a separate
-    /// projection from the legacy log-driven [`State::applied`] so the two never
-    /// collide: a single-operator workspace keeps its counted governance in
-    /// `applied` (chain genesis-only → this stays empty), while real
-    /// threshold-committed governance lands here. Reads combine both. Re-folded
-    /// wholesale on every chain change, so a re-base is free. Same
-    /// `(proposal id, payload)` shape as [`State::applied`]; the id is always
-    /// present here (every `Applied` block names its proposal).
-    pub(crate) chain_applied: HashMap<Surface, Vec<(Option<u64>, Value)>>,
-    /// The sealing signatures per Applied proposal id — a chain PROJECTION
-    /// like [`State::chain_applied`], maintained by the same two writers
-    /// (full re-fold + append). `ProposalView` building reads voters from
-    /// here in O(1); the per-card reverse chain scan it replaces made every
-    /// snapshot O(cards × chain) once ALL applied history materializes
-    /// cards (review 2026-08-16).
-    pub(crate) chain_applied_sigs: HashMap<u64, Vec<molt_core::RosterAttestation>>,
-    /// WORKING transport anchors — `member -> nostr_pk` for every seat a
-    /// `Restored` block re-anchored. A chain PROJECTION like
-    /// [`State::chain_applied`]: rebuilt from the chain, never persisted
-    /// separately, so it cannot drift from what the blocks say.
-    ///
-    /// The roster's anchor is the immutable FOUNDING record and stays that
-    /// way; this is where a recovered seat's current key lives. Read it
-    /// through [`State::working_nostr_pk`] — a send site that reaches for
-    /// `identities[i].nostr_pk` addresses a key the member no longer holds,
-    /// and does so silently.
-    pub(crate) chain_anchors: HashMap<MemberId, String>,
-    /// The relay LEDGER (R3b): each seat's DECLARED reachable pool, folded
-    /// from `Membership` blocks exactly like [`State::chain_anchors`] (and
-    /// seeded from the checkpoint summary after a cut). Read through
-    /// [`State::member_relays`], which falls back to the ratified group pool
-    /// for seats that never declared. The split-detection input (R4).
-    pub(crate) chain_member_relays: HashMap<MemberId, Vec<String>>,
-    /// R4: split pairs already warned about (runtime-only) — the log line
-    /// fires once per pair, the members-surface marker stays live.
-    pub(crate) split_noted: std::collections::HashSet<(MemberId, MemberId)>,
-    /// Ephemeral per-proposal signature collection for chain governance
-    /// (keyed by proposal id; never persisted, rebuilt from gossip). Once a
-    /// proposal gathers m distinct signatures the committer seals a block.
-    pub(crate) pending_sigs: HashMap<u64, chain::PendingApproval>,
-    /// The proposals THIS node signed (its own decisions), written only by
-    /// the own signing path. The re-base re-expresses a standing decision
-    /// from here — never from `pending_sigs`, whose entries any peer fills
-    /// under any roster name (review 2026-08-25: a forged own entry made
-    /// the node sign for real).
-    pub(crate) own_approvals: std::collections::BTreeSet<u64>,
-    /// When this node last served a catch-up to each requester: a
-    /// `ChainRequest` is an amplifier (the whole chain + blob + open cards
-    /// per frame, into the durable log), so one requester is served at
-    /// most once per [`net::CHAIN_SERVE_DEBOUNCE_SECS`] (review C3).
-    pub(crate) chain_served_at: HashMap<MemberId, u64>,
-    /// Declines waiting for their proposal (keyed by proposal id, one entry
-    /// per member with the decline's ts): a decline travels on a different
-    /// sender's G7 chain than its proposal, and an own-log decline replays
-    /// before a re-served foreign proposal returns — parked votes register
-    /// the moment the proposal is known ([`State::register_decline`]).
-    /// Ephemeral and bounded, like the signature collection above.
-    pub(crate) pending_declines: HashMap<u64, Vec<(MemberId, u64, String)>>,
-    /// Parked withdraws whose proposal is not known yet (one slot per id —
-    /// a withdraw has exactly one legitimate author), the decline park's
-    /// sibling. Drained by `receive_proposed`.
-    pub(crate) pending_withdrawals: HashMap<u64, (MemberId, u64)>,
-    /// The exact [`molt_core::ChainChange`] each open proposal is voting on
-    /// (keyed by proposal id) — so approvers sign, and the committer seals, the
-    /// SAME bytes for any change kind (a gated `Applied` or a `Membership`
-    /// re-admission). Ephemeral, rebuilt from the proposal gossip.
-    pub(crate) proposal_changes: HashMap<u64, molt_core::ChainChange>,
-    /// Out-of-order catch-up buffer: blocks received ahead of our head (keyed
-    /// by height), applied as the head advances to meet them. Ephemeral.
-    pub(crate) pending_blocks: std::collections::BTreeMap<u64, molt_core::ChainBlock>,
-    /// The height a catch-up request is currently outstanding for (dedups the
-    /// request while a gap persists; cleared when the head reaches it).
-    pub(crate) catchup_from: Option<u64>,
+    pub(crate) chain: ChainProjection,
     /// Recoveries this node is coordinating, keyed by the returning **member**
     /// (so the trigger fires whether this node commits the Restored block or
     /// receives it): the fresh KeyPackage + reply queue, kept until the Restored
@@ -1068,24 +1080,26 @@ impl State {
             reattach_attempts: 0,
             last_reattach: None,
             unsolicited_cooldown: std::collections::HashMap::new(),
-            chain: Vec::new(),
-            chain_head: None,
-            chain_walk: None,
-            pending_served_blob: None,
-            checkpoint_blob: None,
-            chain_applied: HashMap::new(),
-            chain_applied_sigs: HashMap::new(),
-            chain_anchors: HashMap::new(),
-            chain_member_relays: HashMap::new(),
-            split_noted: std::collections::HashSet::new(),
-            pending_sigs: HashMap::new(),
-            own_approvals: std::collections::BTreeSet::new(),
-            chain_served_at: HashMap::new(),
-            pending_declines: HashMap::new(),
-            pending_withdrawals: HashMap::new(),
-            proposal_changes: HashMap::new(),
-            pending_blocks: std::collections::BTreeMap::new(),
-            catchup_from: None,
+            chain: ChainProjection {
+                blocks: Vec::new(),
+                head: None,
+                walk: None,
+                pending_served_blob: None,
+                checkpoint_blob: None,
+                applied: HashMap::new(),
+                applied_sigs: HashMap::new(),
+                anchors: HashMap::new(),
+                member_relays: HashMap::new(),
+                split_noted: std::collections::HashSet::new(),
+                pending_sigs: HashMap::new(),
+                own_approvals: std::collections::BTreeSet::new(),
+                served_at: HashMap::new(),
+                pending_declines: HashMap::new(),
+                pending_withdrawals: HashMap::new(),
+                proposal_changes: HashMap::new(),
+                pending_blocks: std::collections::BTreeMap::new(),
+                catchup_from: None,
+            },
             pending_recovery: HashMap::new(),
             recovery_tickets: HashMap::new(),
             recovery_mesh_window: std::collections::HashSet::new(),

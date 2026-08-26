@@ -28,10 +28,10 @@ fn a_far_future_buffered_block_does_not_pin_the_auto_checkpoint() {
     // a far-future claim in the buffer must NOT hold the compaction
     let mut peer = chain_peer("petra", &b, b.blocks.clone());
     dummy.height = head_h + 2;
-    peer.pending_blocks.insert(head_h + 2, dummy.clone());
+    peer.chain.pending_blocks.insert(head_h + 2, dummy.clone());
     peer.maybe_auto_checkpoint();
     assert!(
-        peer.proposal_changes
+        peer.chain.proposal_changes
             .values()
             .any(|c| matches!(c, ChainChange::Checkpoint { .. })),
         "a gap block cannot apply next - the cut must still be proposed"
@@ -41,11 +41,11 @@ fn a_far_future_buffered_block_does_not_pin_the_auto_checkpoint() {
     // to move and the cut would be stale on arrival
     let mut peer = chain_peer("petra", &b, b.blocks.clone());
     dummy.height = head_h + 1;
-    peer.pending_blocks.insert(head_h + 1, dummy);
+    peer.chain.pending_blocks.insert(head_h + 1, dummy);
     peer.maybe_auto_checkpoint();
     assert!(
         !peer
-            .proposal_changes
+            .chain.proposal_changes
             .values()
             .any(|c| matches!(c, ChainChange::Checkpoint { .. })),
         "an adjacent buffered block keeps pinning the auto-checkpoint"
@@ -71,7 +71,7 @@ fn only_one_cut_per_head_registers() {
         walter.receive_checkpoint_proposal(id, 0, &ours);
     }
     let cuts = walter
-        .proposal_changes
+        .chain.proposal_changes
         .values()
         .filter(|c| matches!(c, ChainChange::Checkpoint { .. }))
         .count();
@@ -227,11 +227,11 @@ fn a_checkpoint_proposal_seals_via_verify_before_sign() {
         other => panic!("unexpected: {other:?}"),
     };
     assert_eq!(
-        petra.pending_sigs.get(&id).map(|p| p.sigs.len()),
+        petra.chain.pending_sigs.get(&id).map(|p| p.sigs.len()),
         Some(1),
         "the proposer co-signed its own cut"
     );
-    let (upto, state_hash) = match petra.proposal_changes.get(&id) {
+    let (upto, state_hash) = match petra.chain.proposal_changes.get(&id) {
         Some(ChainChange::Checkpoint { upto, state_hash }) => {
             (*upto, state_hash.clone())
         }
@@ -241,13 +241,13 @@ fn a_checkpoint_proposal_seals_via_verify_before_sign() {
 
     // a WRONG hash is refused: nothing registered, nothing signed
     walter.receive_checkpoint_proposal(id, upto, "00");
-    assert!(!walter.proposal_changes.contains_key(&id));
-    assert!(!walter.pending_sigs.contains_key(&id));
+    assert!(!walter.chain.proposal_changes.contains_key(&id));
+    assert!(!walter.chain.pending_sigs.contains_key(&id));
 
     // the truthful gossip: walter recomputes, matches, auto-co-signs
     walter.receive_checkpoint_proposal(id, upto, &state_hash);
     let petra_sig = petra
-        .pending_sigs
+        .chain.pending_sigs
         .get(&id)
         .expect("petra's set")
         .sigs
@@ -257,17 +257,17 @@ fn a_checkpoint_proposal_seals_via_verify_before_sign() {
         .clone();
     walter.receive_approval(id, "petra", 2, &petra_sig);
     assert_eq!(
-        walter.chain_head.as_ref().expect("head").height,
+        walter.chain.head.as_ref().expect("head").height,
         2,
         "the checkpoint sealed at 2-of-2 on walter"
     );
     assert!(matches!(
-        walter.chain.last().expect("block").change,
+        walter.chain.blocks.last().expect("block").change,
         ChainChange::Checkpoint { .. }
     ));
     // petra converges from walter's signature the same way
     let walter_sig = walter
-        .chain
+        .chain.blocks
         .last()
         .expect("block")
         .sigs
@@ -277,15 +277,15 @@ fn a_checkpoint_proposal_seals_via_verify_before_sign() {
         .sig
         .clone();
     petra.receive_approval(id, "walter", 2, &walter_sig);
-    assert_eq!(petra.chain_head.as_ref().expect("head").height, 2);
+    assert_eq!(petra.chain.head.as_ref().expect("head").height, 2);
     assert_eq!(
-        block_hash(&b.republic_id, petra.chain.last().expect("b")),
-        block_hash(&b.republic_id, walter.chain.last().expect("b")),
+        block_hash(&b.republic_id, petra.chain.blocks.last().expect("b")),
+        block_hash(&b.republic_id, walter.chain.blocks.last().expect("b")),
         "both nodes sealed the byte-identical checkpoint block"
     );
     // the sealed proposal's bookkeeping is gone on both
-    assert!(!petra.proposal_changes.contains_key(&id));
-    assert!(!walter.proposal_changes.contains_key(&id));
+    assert!(!petra.chain.proposal_changes.contains_key(&id));
+    assert!(!walter.chain.proposal_changes.contains_key(&id));
 }
 
 /// WP4b stage 4: sealing a checkpoint DROPS the summarized history
@@ -305,16 +305,16 @@ fn a_sealed_checkpoint_drops_history_and_the_holder_keeps_governing() {
     let petra_sig = identity_sign(b.key("petra"), &bytes);
     walter.receive_approval(40, "petra", 2, &petra_sig);
     // sealed AND pruned: only the anchor remains, the blob anchors
-    assert_eq!(walter.chain_head.as_ref().expect("head").height, 2);
-    assert_eq!(walter.chain.len(), 1, "history below the cut is dropped");
+    assert_eq!(walter.chain.head.as_ref().expect("head").height, 2);
+    assert_eq!(walter.chain.blocks.len(), 1, "history below the cut is dropped");
     assert!(matches!(
-        walter.chain.first().expect("anchor").change,
+        walter.chain.blocks.first().expect("anchor").change,
         ChainChange::Checkpoint { .. }
     ));
-    let blob = walter.checkpoint_blob.clone().expect("blob anchors the holder");
+    let blob = walter.chain.checkpoint_blob.clone().expect("blob anchors the holder");
     assert_eq!(blob.upto, 1);
     // pre-cut applied entries survive in the read projection
-    let mem = walter.chain_applied.get(&Surface::Memory).expect("projection");
+    let mem = walter.chain.applied.get(&Surface::Memory).expect("projection");
     assert_eq!(mem.len(), 1, "the pre-cut applied entry stays readable");
     // the pruned holder keeps governing: a fresh applied change seals
     // on top of the suffix (verify runs the suffix rules)
@@ -330,26 +330,26 @@ fn a_sealed_checkpoint_drops_history_and_the_holder_keeps_governing() {
     walter.receive_approval(41, "petra", 3, &petra_sig);
     walter.chain_sign_and_gossip_approval(41);
     assert_eq!(
-        walter.chain_head.as_ref().expect("head").height,
+        walter.chain.head.as_ref().expect("head").height,
         3,
         "the pruned holder extends its suffix"
     );
     assert_eq!(
-        walter.chain_applied.get(&Surface::Memory).map(|v| v.len()),
+        walter.chain.applied.get(&Surface::Memory).map(|v| v.len()),
         Some(2),
         "pre- and post-cut entries read together"
     );
     // reopen-style: a fresh holder re-anchors on blob + suffix
     let mut reopened = chain_peer("walter", &b, b.blocks.clone());
-    reopened.checkpoint_blob = Some(blob);
-    reopened.adopt_chain(walter.chain.clone());
+    reopened.chain.checkpoint_blob = Some(blob);
+    reopened.adopt_chain(walter.chain.blocks.clone());
     assert_eq!(
-        reopened.chain_head.as_ref().expect("head").height,
+        reopened.chain.head.as_ref().expect("head").height,
         3,
         "a pruned chain re-adopts from the persisted blob"
     );
     assert_eq!(
-        reopened.chain_applied.get(&Surface::Memory).map(|v| v.len()),
+        reopened.chain.applied.get(&Surface::Memory).map(|v| v.len()),
         Some(2)
     );
     // …and the Accepted cards match an unpruned holder's (review
@@ -376,7 +376,7 @@ fn a_sealed_checkpoint_drops_history_and_the_holder_keeps_governing() {
 /// Drive one gated proposal through `s` to a sealed block: peer
 /// approval first, then the local co-sign seals at 2-of-2.
 fn seal_one(s: &mut crate::State, b: &Builder, peer: &str, id: u64) {
-    let target = s.chain_head.as_ref().expect("head").height + 1;
+    let target = s.chain.head.as_ref().expect("head").height + 1;
     let payload = json!({"op": "add_note", "id": id});
     s.receive_proposed(id, Surface::Memory, payload.clone(), "peer");
     let change = ChainChange::Applied {
@@ -389,7 +389,7 @@ fn seal_one(s: &mut crate::State, b: &Builder, peer: &str, id: u64) {
     s.receive_approval(id, peer, target, &sig);
     s.chain_sign_and_gossip_approval(id);
     assert_eq!(
-        s.chain_head.as_ref().expect("head").height,
+        s.chain.head.as_ref().expect("head").height,
         target,
         "the driven proposal seals"
     );
@@ -397,7 +397,7 @@ fn seal_one(s: &mut crate::State, b: &Builder, peer: &str, id: u64) {
 
 /// The pending checkpoint cut registered in `s`, if any.
 fn pending_cut(s: &crate::State) -> Option<u64> {
-    s.proposal_changes.values().find_map(|c| match c {
+    s.chain.proposal_changes.values().find_map(|c| match c {
         ChainChange::Checkpoint { upto, .. } => Some(*upto),
         _ => None,
     })
@@ -418,7 +418,7 @@ fn the_lowest_member_auto_proposes_a_checkpoint_at_the_trigger_length() {
     seal_one(&mut petra, &b, "walter", 90);
     assert_eq!(pending_cut(&petra), None, "below the trigger: no cut");
     seal_one(&mut petra, &b, "walter", 300);
-    let head = petra.chain_head.as_ref().expect("head").height;
+    let head = petra.chain.head.as_ref().expect("head").height;
     assert_eq!(
         pending_cut(&petra),
         Some(head),
@@ -447,7 +447,7 @@ fn a_passively_applied_block_never_auto_proposes() {
     // the trigger length arrives via the PASSIVE path — no cut
     b.commit_applied(400, &["petra", "walter"]);
     petra.receive_block(b.blocks.last().expect("built block").clone());
-    assert_eq!(petra.chain.len(), AUTO_CHECKPOINT_MIN_LEN, "passively at length");
+    assert_eq!(petra.chain.blocks.len(), AUTO_CHECKPOINT_MIN_LEN, "passively at length");
     assert_eq!(
         pending_cut(&petra),
         None,
@@ -455,7 +455,7 @@ fn a_passively_applied_block_never_auto_proposes() {
     );
     // the next SELF-sealed block fires it
     seal_one(&mut petra, &b, "walter", 90);
-    let head = petra.chain_head.as_ref().expect("head").height;
+    let head = petra.chain.head.as_ref().expect("head").height;
     assert_eq!(
         pending_cut(&petra),
         Some(head),
@@ -479,7 +479,7 @@ fn no_auto_checkpoint_while_a_vote_is_open() {
         "no cut while another vote is open"
     );
     // resolving the open vote triggers the cut on ITS commit
-    let target = petra.chain_head.as_ref().expect("head").height + 1;
+    let target = petra.chain.head.as_ref().expect("head").height + 1;
     let change = ChainChange::Applied {
         proposal_id: 91,
         surface: Surface::Memory,
@@ -507,7 +507,7 @@ fn a_staled_auto_cut_re_proposes_on_the_next_commit() {
     // an interfering surface vote seals first — the cut goes stale
     // (id 300: well clear of the auto-cut's freshly minted next_id)
     seal_one(&mut petra, &b, "walter", 300);
-    let head = petra.chain_head.as_ref().expect("head").height;
+    let head = petra.chain.head.as_ref().expect("head").height;
     assert_eq!(
         pending_cut(&petra),
         Some(head),
@@ -538,25 +538,25 @@ fn a_lagging_holder_re_anchors_on_a_served_blob() {
 
     // the laggard holds only the genesis
     let mut lag = chain_peer("walter", &b, b.blocks[..1].to_vec());
-    assert_eq!(lag.chain_head.as_ref().expect("head").height, 0);
+    assert_eq!(lag.chain.head.as_ref().expect("head").height, 0);
     // a forged blob (wrong founding) dies at the rid check
     let mut forged = blob.clone();
     forged.founding_name = "Fake".to_string();
     lag.receive_checkpoint_blob(forged);
-    assert!(lag.pending_served_blob.is_none());
+    assert!(lag.chain.pending_served_blob.is_none());
     // the served pieces arrive in any order: blob, tail, anchor
     lag.receive_checkpoint_blob(blob.clone());
     lag.receive_block(suffix_tail);
-    assert_eq!(lag.chain_head.as_ref().expect("head").height, 0, "waits for the anchor");
+    assert_eq!(lag.chain.head.as_ref().expect("head").height, 0, "waits for the anchor");
     lag.receive_block(anchor);
     assert_eq!(
-        lag.chain_head.as_ref().expect("head").height,
+        lag.chain.head.as_ref().expect("head").height,
         3,
         "re-anchored on blob + anchor + suffix"
     );
-    assert!(lag.checkpoint_blob.is_some());
+    assert!(lag.chain.checkpoint_blob.is_some());
     assert_eq!(
-        lag.chain_applied.get(&Surface::Memory).map(|v| v.len()),
+        lag.chain.applied.get(&Surface::Memory).map(|v| v.len()),
         Some(2),
         "pre-cut and post-cut entries both readable"
     );
@@ -575,22 +575,22 @@ fn a_checkpoint_proposal_never_signs_a_colliding_id() {
     walter.receive_membership_proposal(5, MembershipOp::Restored, "petra", &b.pk("petra"), None, Vec::new(), None);
     walter.receive_checkpoint_proposal(5, 1, &hash);
     assert!(
-        !walter.pending_sigs.contains_key(&5),
+        !walter.chain.pending_sigs.contains_key(&5),
         "an occupied id must never be auto-signed"
     );
     assert!(matches!(
-        walter.proposal_changes.get(&5),
+        walter.chain.proposal_changes.get(&5),
         Some(ChainChange::Membership { .. })
     ));
     // id already names a SURFACE proposal → refused too
     walter.receive_proposed(6, Surface::Memory, json!({"op": "add_note"}), "peer");
     walter.receive_checkpoint_proposal(6, 1, &hash);
-    assert!(!walter.pending_sigs.contains_key(&6));
+    assert!(!walter.chain.pending_sigs.contains_key(&6));
     // a replayed valid frame does not amplify into more signatures
     walter.receive_checkpoint_proposal(9, 1, &hash);
-    let sigs = walter.pending_sigs.get(&9).map(|p| p.sigs.len());
+    let sigs = walter.chain.pending_sigs.get(&9).map(|p| p.sigs.len());
     walter.receive_checkpoint_proposal(9, 1, &hash);
-    assert_eq!(walter.pending_sigs.get(&9).map(|p| p.sigs.len()), sigs);
+    assert_eq!(walter.chain.pending_sigs.get(&9).map(|p| p.sigs.len()), sigs);
     // the gossip frame is wire-scoped
     assert!(crate::net::crosses_wire(&WorkspaceEvent::CheckpointProposed {
         id: ProposalId(1),
@@ -614,10 +614,10 @@ fn a_stale_checkpoint_proposal_dies_on_rebase() {
     // another applied block races the checkpoint to height 2
     b.commit_applied(7, &["petra", "walter"]);
     petra.receive_block(b.blocks.last().expect("block").clone());
-    assert_eq!(petra.chain_head.as_ref().expect("head").height, 2);
+    assert_eq!(petra.chain.head.as_ref().expect("head").height, 2);
     assert!(
-        !petra.proposal_changes.contains_key(&id)
-            && !petra.pending_sigs.contains_key(&id),
+        !petra.chain.proposal_changes.contains_key(&id)
+            && !petra.chain.pending_sigs.contains_key(&id),
         "the stale cut is dropped, not re-signed"
     );
 }
@@ -768,7 +768,7 @@ fn a_checkpoint_cut_keeps_only_the_latest_avatar_per_member() {
         .map(|(m, p)| ((*m).to_string(), p.image.clone(), p.desc.to_string()))
         .collect();
     let mut cut = chain_signer("walter", &b, vec![b.blocks[0].clone()]);
-    cut.chain_applied.insert(Surface::Organization, org);
+    cut.chain.applied.insert(Surface::Organization, org);
     let after: Vec<(String, String, String)> = cut
         .member_profiles()
         .iter()
@@ -805,8 +805,8 @@ fn a_checkpoint_seal_writes_the_chain_once() {
     let petra_sig = identity_sign(b.key("petra"), &bytes);
     CHAIN_PERSISTS.with(|c| c.set(0));
     walter.receive_approval(40, "petra", 2, &petra_sig);
-    assert_eq!(walter.chain_head.as_ref().expect("head").height, 2, "sealed");
-    assert_eq!(walter.chain.len(), 1, "and cut");
+    assert_eq!(walter.chain.head.as_ref().expect("head").height, 2, "sealed");
+    assert_eq!(walter.chain.blocks.len(), 1, "and cut");
     assert_eq!(
         CHAIN_PERSISTS.with(std::cell::Cell::get),
         1,
@@ -814,12 +814,12 @@ fn a_checkpoint_seal_writes_the_chain_once() {
     );
 
     // a passive holder applies the broadcast block: one write for the batch
-    let sealed = walter.chain.first().expect("anchor").clone();
+    let sealed = walter.chain.blocks.first().expect("anchor").clone();
     let mut petra = chain_peer("petra", &b, b.blocks.clone());
     CHAIN_PERSISTS.with(|c| c.set(0));
     petra.receive_block(sealed);
-    assert_eq!(petra.chain_head.as_ref().expect("head").height, 2, "applied");
-    assert_eq!(petra.chain.len(), 1, "and cut");
+    assert_eq!(petra.chain.head.as_ref().expect("head").height, 2, "applied");
+    assert_eq!(petra.chain.blocks.len(), 1, "and cut");
     assert_eq!(
         CHAIN_PERSISTS.with(std::cell::Cell::get),
         1,

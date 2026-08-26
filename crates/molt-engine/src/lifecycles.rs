@@ -1630,7 +1630,7 @@ impl State {
             return false;
         }
         let member = self.member();
-        let Some(head) = self.chain_head.as_ref() else {
+        let Some(head) = self.chain.head.as_ref() else {
             return false;
         };
         let Some(anchored) = head
@@ -2219,7 +2219,7 @@ impl State {
         //
         // After the runtime, because the request is an envelope the outbox has
         // to carry.
-        if let Some(height) = self.chain_head.as_ref().map(|h| h.height) {
+        if let Some(height) = self.chain.head.as_ref().map(|h| h.height) {
             self.request_catchup(height + 1);
         }
         // the seat is provably back (the Restored block sealed at m) — the

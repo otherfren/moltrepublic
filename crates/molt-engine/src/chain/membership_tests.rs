@@ -42,7 +42,7 @@ fn a_membership_proposal_with_an_implausible_id_is_not_recorded() {
     );
     assert_eq!(walter.next_id, next_before, "next_id is not poisoned");
     assert!(!walter.proposals.contains_key(&hostile), "no phantom card");
-    assert!(!walter.proposal_changes.contains_key(&hostile), "nothing registered");
+    assert!(!walter.chain.proposal_changes.contains_key(&hostile), "nothing registered");
 }
 
 /// An applied MEMBERSHIP card reads its voters from the sealed block
@@ -71,7 +71,7 @@ fn an_applied_membership_card_reports_the_block_signers() {
     b.push(block);
     let mut peer = chain_peer_3("walter", &b);
     assert_eq!(
-        peer.chain_head.as_ref().map(|h| h.height),
+        peer.chain.head.as_ref().map(|h| h.height),
         Some(1),
         "the membership block adopted"
     );
@@ -144,7 +144,7 @@ fn a_coordinator_re_admits_only_a_valid_seat_proof() {
         .verify_and_propose_restore(true, "dora", &b.pk("dora"), kp_hex, ticket, &good, "", &[], "", "")
         .expect("a valid seat proof re-admits");
     assert!(matches!(
-        coord.proposal_changes.get(&id),
+        coord.chain.proposal_changes.get(&id),
         Some(ChainChange::Membership {
             op: MembershipOp::Restored,
             ..
@@ -186,9 +186,9 @@ fn a_consented_restore_seals_at_m_equals_n() {
         Vec::new(),
         Some(consent),
     );
-    let head = petra.chain_head.as_ref().expect("head");
+    let head = petra.chain.head.as_ref().expect("head");
     assert_eq!(head.height, 1, "petra's signature + walter's consent reach 2-of-2");
-    verify_chain(&petra.chain).expect("an adopting reader accepts the consented block");
+    verify_chain(&petra.chain.blocks).expect("an adopting reader accepts the consented block");
 }
 
 /// The approval surface (recovery approval design, 2026-08-08): a
@@ -294,13 +294,13 @@ fn a_membership_proposal_is_a_visible_approvable_record() {
     );
     assert!(
         !walter
-            .pending_sigs
+            .chain.pending_sigs
             .get(&id)
             .is_some_and(|p| p.sigs.iter().any(|a| a.member == "walter")),
         "a consent-less restore never auto-signs - the human vote is the content"
     );
     let petra_sig = coord
-        .pending_sigs
+        .chain.pending_sigs
         .get(&id)
         .expect("petra's pending set")
         .sigs
@@ -311,7 +311,7 @@ fn a_membership_proposal_is_a_visible_approvable_record() {
         .clone();
     walter.receive_approval(id, "petra", 1, &petra_sig);
     assert_eq!(
-        walter.chain_head.as_ref().expect("head").height,
+        walter.chain.head.as_ref().expect("head").height,
         0,
         "1 signature + no consent stays open"
     );
@@ -321,17 +321,17 @@ fn a_membership_proposal_is_a_visible_approvable_record() {
     walter.cmd_approve(ProposalId(id)).expect("approve accepts the id");
 
     // petra + walter = 2-of-3: sealed, settled
-    assert_eq!(walter.chain_head.as_ref().expect("head").height, 1);
+    assert_eq!(walter.chain.head.as_ref().expect("head").height, 1);
     assert_eq!(
         walter.proposals.get(&id).map(|p| p.state),
         Some(ProposalState::Applied),
         "the commit settles the record"
     );
     assert!(
-        !walter.pending_sigs.contains_key(&id) && !walter.proposal_changes.contains_key(&id),
+        !walter.chain.pending_sigs.contains_key(&id) && !walter.chain.proposal_changes.contains_key(&id),
         "the vote bookkeeping is dropped"
     );
-    verify_chain(&walter.chain).expect("the sealed chain verifies from zero");
+    verify_chain(&walter.chain.blocks).expect("the sealed chain verifies from zero");
 }
 
 /// Auto-approval (recovery_auto_approval.md §3): a survivor that RECEIVES
@@ -388,7 +388,7 @@ fn a_consented_restore_is_approved_without_a_human() {
     // the receipt alone put walter's REAL signature into the pending set
     assert!(
         walter
-            .pending_sigs
+            .chain.pending_sigs
             .get(&id)
             .is_some_and(|p| p.sigs.iter().any(|a| a.member == "walter")),
         "a verified consent auto-signs on receipt"
@@ -396,7 +396,7 @@ fn a_consented_restore_is_approved_without_a_human() {
     // …and petra's gossiped signature completes the threshold: petra +
     // walter + dora's consent = 3-of-4, sealed with no cmd_approve call
     let petra_sig = coord
-        .pending_sigs
+        .chain.pending_sigs
         .get(&id)
         .expect("petra's pending set")
         .sigs
@@ -406,13 +406,13 @@ fn a_consented_restore_is_approved_without_a_human() {
         .sig
         .clone();
     walter.receive_approval(id, "petra", 1, &petra_sig);
-    assert_eq!(walter.chain_head.as_ref().expect("head").height, 1);
+    assert_eq!(walter.chain.head.as_ref().expect("head").height, 1);
     assert_eq!(
         walter.proposals.get(&id).map(|p| p.state),
         Some(ProposalState::Applied),
         "the commit settles the record without a human approve"
     );
-    verify_chain(&walter.chain).expect("the sealed chain verifies from zero");
+    verify_chain(&walter.chain.blocks).expect("the sealed chain verifies from zero");
 }
 
 /// The chain IS the replay register (field storm 2026-08-24): every
@@ -433,7 +433,7 @@ fn a_chain_known_anchor_is_a_replay() {
         Vec::new(),
         Some(consent),
     );
-    assert_eq!(petra.chain_head.as_ref().expect("head").height, 1, "sealed");
+    assert_eq!(petra.chain.head.as_ref().expect("head").height, 1, "sealed");
     assert!(petra.anchor_seen_in_chain("ab"), "a Restored block's anchor counts");
     assert!(!petra.anchor_seen_in_chain(&"99".repeat(32)), "a fresh salt passes");
     assert!(!petra.anchor_seen_in_chain(""), "empty is never a hit");
@@ -504,7 +504,7 @@ fn a_forged_consent_never_auto_signs() {
     );
     assert!(
         !walter
-            .pending_sigs
+            .chain.pending_sigs
             .get(&7)
             .is_some_and(|p| p.sigs.iter().any(|a| a.member == "walter")),
         "a forged consent must wait for a human, never auto-sign"
@@ -535,7 +535,7 @@ fn a_restore_claiming_a_foreign_anchor_never_auto_signs() {
     );
     assert!(
         !walter
-            .pending_sigs
+            .chain.pending_sigs
             .get(&7)
             .is_some_and(|p| p.sigs.iter().any(|a| a.member == "walter")),
         "an anchor collision must wait for a human, never auto-sign"
@@ -617,7 +617,7 @@ fn a_rejoin_over_a_foreign_relay_is_refused_naming_it() {
         .expect("the same declaration passes once the pool carries it");
     // …and the block carries the seat's OWN declaration (its ledger entry)
     assert!(matches!(
-        coord2.proposal_changes.get(&id),
+        coord2.chain.proposal_changes.get(&id),
         Some(ChainChange::Membership { relays, .. }) if *relays == declared
     ));
 }
@@ -653,7 +653,7 @@ fn a_restored_commit_triggers_the_coordinators_rekey() {
     let block = b.seal(1, change, &["petra", "walter"]);
     coord.receive_block(block);
 
-    assert_eq!(coord.chain_head.as_ref().expect("head").height, 1);
+    assert_eq!(coord.chain.head.as_ref().expect("head").height, 1);
     assert!(
         !coord.pending_recovery.contains_key("walter"),
         "the coordinator consumed the pending recovery on the Restored commit"
@@ -820,7 +820,7 @@ fn a_restored_commit_without_a_pending_recovery_is_inert() {
     node.receive_block(block);
 
     // the chain extends …
-    assert_eq!(node.chain_head.as_ref().expect("head").height, 1);
+    assert_eq!(node.chain.head.as_ref().expect("head").height, 1);
     // … but the re-key trigger stayed inert: no envelope of any kind was
     // recorded (make_env is the only seq stamp, so an MlsCommit broadcast
     // or a chat notice would have advanced next_seq) …

@@ -882,7 +882,7 @@ impl State {
     /// the merge (review 2026-08-25). A workspace without a chain sets no
     /// authority — its adds stay unchecked, as before.
     fn arm_mls_roster_authority(&self, mls: &std::sync::Arc<std::sync::Mutex<molt_net::MlsMember>>) {
-        let Some(head) = self.chain_head.as_ref() else {
+        let Some(head) = self.chain.head.as_ref() else {
             return;
         };
         let keys: std::collections::BTreeMap<String, Vec<u8>> = head
@@ -1056,7 +1056,7 @@ impl State {
         // a fresh incarnation asks for its catch-up anew: the C3 debounce
         // keyed by name must not swallow the rejoiner's request because the
         // lost device asked within the last thirty seconds
-        self.chain_served_at.remove(member);
+        self.chain.served_at.remove(member);
         if self.delivery.accepted.remove(member).is_some() {
             self.delivery.accepted_dirty = true;
         }
@@ -1679,17 +1679,17 @@ impl State {
                 // to serve, and one requester at most once per debounce
                 let now = self.presence_now();
                 let beyond_head = self
-                    .chain_head
+                    .chain.head
                     .as_ref()
                     .is_some_and(|h| from_height > h.height);
                 let recently = self
-                    .chain_served_at
+                    .chain.served_at
                     .get(&from)
                     .is_some_and(|t| now.saturating_sub(*t) < CHAIN_SERVE_DEBOUNCE_SECS);
                 if beyond_head || recently {
                     tracing::debug!(%from, from_height, beyond_head, recently, "chain catch-up request not served");
                 } else {
-                    self.chain_served_at.insert(from.clone(), now);
+                    self.chain.served_at.insert(from.clone(), now);
                     self.serve_chain_from(from_height);
                     // WP2: the requester is (re)joining the conversation — beyond
                     // the committed suffix it also lost the ephemeral open
@@ -2230,7 +2230,7 @@ impl State {
         // earlier frame of this broadcast) already coordinates — a second,
         // ticketed request would re-key with its KeyPackage while the first
         // block's Welcome goes to a dead anchor, stranding the seat
-        if self.proposal_changes.values().any(|c| {
+        if self.chain.proposal_changes.values().any(|c| {
             matches!(c, molt_core::ChainChange::Membership {
                 op: molt_core::MembershipOp::Restored,
                 member: m,

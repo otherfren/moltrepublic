@@ -129,7 +129,7 @@ impl State {
     ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        self.proposal_changes.insert(
+        self.chain.proposal_changes.insert(
             id,
             ChainChange::Membership {
                 op,
@@ -187,7 +187,7 @@ impl State {
             return;
         }
         self.next_id = self.next_id.max(id.saturating_add(1));
-        self.proposal_changes.insert(id, change);
+        self.chain.proposal_changes.insert(id, change);
         // L2: signatures that OUTRAN this change become displayable now
         self.reverify_pending(id);
         // recovery_auto_approval.md §3: a consent this node can verify itself
@@ -209,7 +209,7 @@ impl State {
         // open at once — one re-admission per seat plus slack for Joined
         // seats not on the roster yet
         let pending_membership = self
-            .proposal_changes
+            .chain.proposal_changes
             .values()
             .filter(|c| matches!(c, ChainChange::Membership { .. }))
             .count();
@@ -218,7 +218,7 @@ impl State {
             .as_ref()
             .map(|r| r.roster.len().saturating_add(8))
             .unwrap_or(16);
-        if pending_membership >= cap && !self.proposal_changes.contains_key(&id) {
+        if pending_membership >= cap && !self.chain.proposal_changes.contains_key(&id) {
             tracing::warn!(%id, "refusing a membership proposal beyond the pending cap");
             return false;
         }
@@ -263,7 +263,7 @@ impl State {
             nostr_pk,
             consent: Some(consent),
             ..
-        }) = self.proposal_changes.get(&id)
+        }) = self.chain.proposal_changes.get(&id)
         else {
             return;
         };
@@ -282,7 +282,7 @@ impl State {
         if me == member {
             return;
         }
-        let Some(head) = self.chain_head.as_ref() else {
+        let Some(head) = self.chain.head.as_ref() else {
             return;
         };
         let Some(anchored) = head
@@ -460,17 +460,17 @@ impl State {
             nostr_pk,
             consent,
             ..
-        }) = self.proposal_changes.get(&id)
+        }) = self.chain.proposal_changes.get(&id)
         else {
             return None;
         };
         if !self.pending_recovery.contains_key(member) {
             return None;
         }
-        let head = self.chain_head.as_ref()?;
+        let head = self.chain.head.as_ref()?;
         let roster: Vec<String> = head.identities.iter().map(|i| i.member.clone()).collect();
         let mut approved: BTreeSet<String> = self
-            .pending_sigs
+            .chain.pending_sigs
             .get(&id)
             .map(|p| p.verified.iter().cloned().collect())
             .unwrap_or_default();
@@ -504,7 +504,7 @@ impl State {
         if !self.pending_recovery.contains_key(member) {
             return None;
         }
-        let head = self.chain_head.as_ref()?;
+        let head = self.chain.head.as_ref()?;
         let roster: Vec<String> = head.identities.iter().map(|i| i.member.clone()).collect();
         let mut approved: BTreeSet<String> =
             block.sigs.iter().map(|a| a.member.clone()).collect();
@@ -540,7 +540,7 @@ impl State {
         {
             return true;
         }
-        if self.chain.iter().any(|b| {
+        if self.chain.blocks.iter().any(|b| {
             matches!(&b.change, ChainChange::Membership {
                 op: MembershipOp::Restored,
                 nostr_pk: Some(a),
@@ -549,7 +549,7 @@ impl State {
         }) {
             return true;
         }
-        self.checkpoint_blob
+        self.chain.checkpoint_blob
             .as_ref()
             .is_some_and(|blob| blob.anchors.iter().any(|(_, a)| a == pk))
     }
@@ -594,14 +594,14 @@ impl State {
                 // member's reply queue so it rejoins the group AND catches its
                 // state up over this same channel (option A). Off the actor.
                 if let Some(transport) = self.net.as_ref().and_then(|n| n.runtime_transport()) {
-                    let chain_json = match &self.checkpoint_blob {
+                    let chain_json = match &self.chain.checkpoint_blob {
                         // a pruned coordinator serves blob + suffix — the
                         // rejoiner verifies via the suffix rules (4c)
                         Some(blob) => serde_json::to_string(&ServedChainWire::Pruned {
                             checkpoint_blob: blob.clone(),
-                            blocks: self.chain.clone(),
+                            blocks: self.chain.blocks.clone(),
                         }),
-                        None => serde_json::to_string(&self.chain),
+                        None => serde_json::to_string(&self.chain.blocks),
                     }
                     .unwrap_or_default();
                     crate::recovery::spawn_welcome_send(

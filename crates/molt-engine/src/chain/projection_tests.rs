@@ -478,13 +478,13 @@ fn the_appended_projection_equals_the_whole_chain_rebuild() {
     for block in b.blocks[1..].iter().rev() {
         peer.receive_block(block.clone());
     }
-    assert_eq!(peer.chain.len(), 4, "the whole suffix drained");
+    assert_eq!(peer.chain.blocks.len(), 4, "the whole suffix drained");
 
-    let incremental = (peer.chain_applied.clone(), peer.chain_anchors.clone());
+    let incremental = (peer.chain.applied.clone(), peer.chain.anchors.clone());
     peer.apply_chain_to_state();
     assert_eq!(
         incremental,
-        (peer.chain_applied.clone(), peer.chain_anchors.clone()),
+        (peer.chain.applied.clone(), peer.chain.anchors.clone()),
         "the appended projection must equal the whole-chain rebuild"
     );
 }
@@ -579,7 +579,7 @@ fn seal_wiki(
     id: u64,
     payload: serde_json::Value,
 ) {
-    let target = s.chain_head.as_ref().expect("head").height + 1;
+    let target = s.chain.head.as_ref().expect("head").height + 1;
     s.receive_proposed(id, Surface::Memory, payload.clone(), "peer");
     let change = ChainChange::Applied {
         proposal_id: id,
@@ -590,7 +590,7 @@ fn seal_wiki(
     let sig = identity_sign(b.key(peer), &bytes);
     s.receive_approval(id, peer, target, &sig);
     s.chain_sign_and_gossip_approval(id);
-    assert_eq!(s.chain_head.as_ref().expect("head").height, target, "sealed");
+    assert_eq!(s.chain.head.as_ref().expect("head").height, target, "sealed");
 }
 
 /// The pull-back visibility gate: a record remembers who proposed it,
@@ -646,7 +646,7 @@ fn a_pool_edit_commits_under_threshold_and_moves_the_effective_pool() {
     // petra learns the proposal + walter's signature, then co-signs
     petra.receive_proposed(id, surface, payload, "peer");
     let walter_sig = walter
-        .pending_sigs
+        .chain.pending_sigs
         .get(&id)
         .expect("walter's pending set")
         .sigs
@@ -657,7 +657,7 @@ fn a_pool_edit_commits_under_threshold_and_moves_the_effective_pool() {
         .clone();
     petra.receive_approval(id, "walter", 1, &walter_sig);
     petra.chain_sign_and_gossip_approval(id);
-    assert_eq!(petra.chain_head.as_ref().expect("head").height, 1, "sealed at m");
+    assert_eq!(petra.chain.head.as_ref().expect("head").height, 1, "sealed at m");
     assert_eq!(
         petra.effective_relays(),
         vec!["wss://relay.one".to_string(), "wss://relay.three.example".to_string()],
@@ -785,7 +785,7 @@ fn a_feature_edit_commits_under_threshold_and_moves_the_effective_set() {
     );
     petra.receive_proposed(id, surface, payload, "peer");
     let walter_sig = walter
-        .pending_sigs
+        .chain.pending_sigs
         .get(&id)
         .expect("walter's pending set")
         .sigs
@@ -796,7 +796,7 @@ fn a_feature_edit_commits_under_threshold_and_moves_the_effective_set() {
         .clone();
     petra.receive_approval(id, "walter", 1, &walter_sig);
     petra.chain_sign_and_gossip_approval(id);
-    assert_eq!(petra.chain_head.as_ref().expect("head").height, 1, "sealed at m");
+    assert_eq!(petra.chain.head.as_ref().expect("head").height, 1, "sealed at m");
     assert_eq!(
         petra.effective_features(),
         vec!["memory".to_string(), "quests".to_string()],
@@ -986,7 +986,7 @@ fn an_unknown_effective_key_does_not_brick_feature_governance() {
     let mut petra = chain_signer("petra", &b, b.blocks.clone());
     petra.receive_proposed(id, surface, payload, "peer");
     let walter_sig = walter
-        .pending_sigs
+        .chain.pending_sigs
         .get(&id)
         .expect("walter's pending set")
         .sigs
@@ -1153,7 +1153,7 @@ fn read_chain_lists_blocks_newest_first_and_survives_the_prune() {
     let bytes = approval_bytes(&b.republic_id, 3, &change);
     let petra_sig = identity_sign(b.key("petra"), &bytes);
     walter.receive_approval(40, "petra", 3, &petra_sig);
-    assert_eq!(walter.chain.len(), 1, "history below the cut is dropped");
+    assert_eq!(walter.chain.blocks.len(), 1, "history below the cut is dropped");
 
     // pruned holder: the real anchor keeps its height, then the synthetic
     // pre-cut applied views (newest first, signers gone), genesis last

@@ -41,13 +41,13 @@ fn a_headless_node_refuses_another_republics_genesis() {
     let b = Builder::new(&["petra", "walter"], 2);
     let other = Builder::new(&["mallory", "walter"], 2);
     let mut walter = chain_peer("walter", &b, b.blocks.clone());
-    walter.chain.clear();
-    walter.chain_head = None;
-    walter.chain_walk = None;
+    walter.chain.blocks.clear();
+    walter.chain.head = None;
+    walter.chain.walk = None;
     walter.receive_block(other.blocks[0].clone());
-    assert!(walter.chain_head.is_none(), "a foreign genesis is not adopted");
+    assert!(walter.chain.head.is_none(), "a foreign genesis is not adopted");
     walter.receive_block(b.blocks[0].clone());
-    assert!(walter.chain_head.is_some(), "the own genesis is");
+    assert!(walter.chain.head.is_some(), "the own genesis is");
 }
 
 /// KEYSTONE for `tie_break` (previously untested): two members seal
@@ -117,8 +117,8 @@ fn tie_break_drops_a_materialized_card_with_its_displaced_block() {
     );
 
     peer.receive_block(winner);
-    assert_eq!(peer.chain.len(), 2);
-    let tip = peer.chain.last().expect("tip");
+    assert_eq!(peer.chain.blocks.len(), 2);
+    let tip = peer.chain.blocks.last().expect("tip");
     assert!(
         matches!(&tip.change, ChainChange::Applied { proposal_id, .. } if *proposal_id == winner_id),
         "the lower hash holds the tip"
@@ -161,13 +161,13 @@ fn a_peer_adopts_a_broadcast_block_and_converges() {
     });
     peer.adopt_chain(genesis);
     assert!(peer.is_chain_governed());
-    assert_eq!(peer.chain_head.as_ref().expect("head").height, 0);
+    assert_eq!(peer.chain.head.as_ref().expect("head").height, 0);
 
     peer.receive_block(block);
-    assert_eq!(peer.chain.len(), 2, "the peer adopted the broadcast block");
-    assert_eq!(peer.chain_head.as_ref().expect("head").height, 1);
+    assert_eq!(peer.chain.blocks.len(), 2, "the peer adopted the broadcast block");
+    assert_eq!(peer.chain.head.as_ref().expect("head").height, 1);
     let applied = peer
-        .chain_applied
+        .chain.applied
         .get(&Surface::Memory)
         .expect("memory projection");
     assert_eq!(applied.len(), 1);
@@ -184,12 +184,12 @@ fn a_peer_adopts_a_broadcast_block_and_converges() {
         },
         &["petra", "walter"],
     );
-    forged.prev = peer.chain_head.as_ref().expect("head").hash.clone();
+    forged.prev = peer.chain.head.as_ref().expect("head").hash.clone();
     if let ChainChange::Applied { payload, .. } = &mut forged.change {
         *payload = json!({ "op": "add_note", "title": "forged" });
     }
     peer.receive_block(forged);
-    assert_eq!(peer.chain.len(), 2, "a tampered block is hard-rejected");
+    assert_eq!(peer.chain.blocks.len(), 2, "a tampered block is hard-rejected");
 }
 
 /// A block arriving ahead of our head is buffered, then applied once the
@@ -207,15 +207,15 @@ fn out_of_order_blocks_buffer_and_converge() {
     // the height-2 block arrives first — a gap, so it is buffered
     peer.receive_block(block2);
     assert_eq!(
-        peer.chain_head.as_ref().expect("head").height,
+        peer.chain.head.as_ref().expect("head").height,
         0,
         "a gap block is buffered, not applied"
     );
-    assert_eq!(peer.pending_blocks.len(), 1);
+    assert_eq!(peer.chain.pending_blocks.len(), 1);
     // the height-1 block fills the gap; the buffered height-2 drains behind it
     peer.receive_block(block1);
-    assert_eq!(peer.chain_head.as_ref().expect("head").height, 2);
-    assert!(peer.pending_blocks.is_empty(), "the buffer drained");
+    assert_eq!(peer.chain.head.as_ref().expect("head").height, 2);
+    assert!(peer.chain.pending_blocks.is_empty(), "the buffer drained");
 }
 
 /// One survivor holding the full chain re-serves a lagging member the whole
@@ -230,7 +230,7 @@ fn a_survivor_serves_a_lagging_member_the_full_suffix() {
     let full = b.blocks.clone();
 
     let mut peer = chain_peer("walter", &b, genesis);
-    assert_eq!(peer.chain_head.as_ref().expect("head").height, 0);
+    assert_eq!(peer.chain.head.as_ref().expect("head").height, 0);
 
     // the survivor serves every block from the peer's head+1 (=1) onward,
     // straight out of its own chain — exactly what serve_chain_from does
@@ -240,11 +240,11 @@ fn a_survivor_serves_a_lagging_member_the_full_suffix() {
         peer.receive_block(bl); // delivered newest-first to exercise buffering
     }
     assert_eq!(
-        peer.chain_head.as_ref().expect("head").height,
+        peer.chain.head.as_ref().expect("head").height,
         2,
         "the lagging member caught up to the survivor"
     );
-    assert!(peer.pending_blocks.is_empty());
+    assert!(peer.chain.pending_blocks.is_empty());
 }
 
 /// Split a bootstrap offer back into the shape `verify_served` takes.
@@ -306,7 +306,7 @@ fn the_served_anchor_is_the_smallest_prefix_that_verifies() {
     b.push(anchor.clone());
     let mut pruned = chain_peer("walter", &b, b.blocks[..3].to_vec());
     pruned.receive_block(anchor);
-    assert!(pruned.checkpoint_blob.is_some(), "the holder pruned");
+    assert!(pruned.chain.checkpoint_blob.is_some(), "the holder pruned");
 
     let offer = pruned.anchor_bootstrap();
     let (blob, blocks) = split_bootstrap(&offer);
@@ -320,11 +320,11 @@ fn the_served_anchor_is_the_smallest_prefix_that_verifies() {
     // …and broadcasting it must not disturb the SERVER: a 445 reaches
     // every member, so the offer travels back through this node's own
     // apply path (and through every survivor's) as a duplicate
-    let before = (pruned.chain.clone(), pruned.chain_head.clone());
+    let before = (pruned.chain.blocks.clone(), pruned.chain.head.clone());
     pruned.serve_chain_anchor();
-    assert_eq!(pruned.chain, before.0, "serving must not move the server's chain");
+    assert_eq!(pruned.chain.blocks, before.0, "serving must not move the server's chain");
     assert_eq!(
-        pruned.chain_head.as_ref().map(|h| h.height),
+        pruned.chain.head.as_ref().map(|h| h.height),
         before.1.as_ref().map(|h| h.height),
         "nor its head"
     );
@@ -349,11 +349,11 @@ fn a_far_future_block_is_refused_not_buffered() {
     };
     walter.receive_block(junk(u64::MAX / 2));
     assert!(
-        walter.pending_blocks.is_empty(),
+        walter.chain.pending_blocks.is_empty(),
         "a block far past the head never buffers"
     );
     walter.receive_block(junk(3));
-    assert_eq!(walter.pending_blocks.len(), 1, "a near gap buffers for the drain");
+    assert_eq!(walter.chain.pending_blocks.len(), 1, "a near gap buffers for the drain");
 }
 
 /// **The catch-up is linear.** Draining a buffered suffix used to verify
@@ -381,7 +381,7 @@ fn catching_up_verifies_each_block_once() {
     let writes = CHAIN_PERSISTS.with(std::cell::Cell::get);
 
     assert_eq!(
-        peer.chain_head.as_ref().expect("head").height,
+        peer.chain.head.as_ref().expect("head").height,
         u64::try_from(N).expect("small chain"),
         "the whole suffix drained"
     );
@@ -413,7 +413,7 @@ fn an_accepted_block_is_written_once_and_a_refused_one_not_at_all() {
 
     CHAIN_PERSISTS.with(|c| c.set(0));
     peer.receive_block(b.blocks[1].clone());
-    assert_eq!(peer.chain_head.as_ref().expect("head").height, 1);
+    assert_eq!(peer.chain.head.as_ref().expect("head").height, 1);
     assert_eq!(
         CHAIN_PERSISTS.with(std::cell::Cell::get),
         1,
@@ -431,7 +431,7 @@ fn an_accepted_block_is_written_once_and_a_refused_one_not_at_all() {
     );
     CHAIN_PERSISTS.with(|c| c.set(0));
     peer.receive_block(refused);
-    assert_eq!(peer.chain_head.as_ref().expect("head").height, 1);
+    assert_eq!(peer.chain.head.as_ref().expect("head").height, 1);
     assert_eq!(
         CHAIN_PERSISTS.with(std::cell::Cell::get),
         0,
@@ -458,19 +458,19 @@ fn a_headless_rejoiner_bootstraps_from_a_served_genesis() {
     // a block arrives before the genesis — buffered, still headless
     rejoiner.receive_block(block2);
     assert!(!rejoiner.is_chain_governed());
-    assert_eq!(rejoiner.pending_blocks.len(), 1);
+    assert_eq!(rejoiner.chain.pending_blocks.len(), 1);
 
     // the survivor serves the genesis — adopt it as the root
     rejoiner.receive_block(genesis_block);
     assert!(rejoiner.is_chain_governed(), "adopted the served genesis");
-    assert_eq!(rejoiner.chain_head.as_ref().expect("head").height, 0);
+    assert_eq!(rejoiner.chain.head.as_ref().expect("head").height, 0);
 
     // the middle block fills the gap; the buffered tail drains behind it
     rejoiner.receive_block(block1);
     assert_eq!(
-        rejoiner.chain_head.as_ref().expect("head").height,
+        rejoiner.chain.head.as_ref().expect("head").height,
         2,
         "the rejoiner caught up the full chain from genesis"
     );
-    assert!(rejoiner.pending_blocks.is_empty());
+    assert!(rejoiner.chain.pending_blocks.is_empty());
 }
