@@ -54,6 +54,10 @@ pub struct MlsChannel {
     /// sends. In-memory for now: it grows with in-flight messages until the
     /// persistent (crash-safe) encrypted outbox lands with the runtime mesh —
     /// the current sole caller is a bounded test, so it never leaks in practice.
+    ///
+    /// QUEUE PATH ONLY (the loopback mesh, THE test transport): the 445
+    /// runtime's [`Self::group_frame`] bypasses it by design, so in
+    /// production this map stays empty and `evict_*` never run.
     cache: Arc<Mutex<BTreeMap<u64, Vec<u8>>>>,
     /// Bumped whenever a commit merges (the epoch advanced). The group is
     /// node-global but each per-peer recv loop holds its own future-epoch
@@ -236,41 +240,16 @@ impl MlsChannel {
         };
         match m.decrypt_at(wire, created_at) {
             Ok(MlsIncoming::Application { from, plaintext }) => {
-                // a delivery ACK (delivery guarantee §4.3): the peer reports
-                // what it has engine-accepted of OUR events. Authenticated by
-                // the MLS credential (`from`) — the recv loop additionally
-                // pins it to the link's member before applying it. Checked
-                // BEFORE the envelope parse; its NUL-prefixed tag can never be
-                // valid `EventEnvelope` JSON.
-                if let Some(payload) = plaintext.strip_prefix(crate::MESH_ACK_TAG) {
-                    return match serde_json::from_slice::<molt_core::AcceptedWindow>(payload) {
-                        Ok(win) => MlsDecode::Ack(from, Box::new(win)),
-                        Err(_) => MlsDecode::Discard,
-                    };
-                }
-                // the BROADCAST ack (N5.3): its own tag, because one 445
-                // reaches everyone and the sheet must say whose acceptance it
-                // reports — the leg that answered that on the mesh is gone
-                match crate::group_ack::GroupAck::from_frame(&plaintext) {
-                    Ok(ack) => return MlsDecode::GroupAck(from, Box::new(ack)),
-                    Err(crate::group_ack::GroupAckError::NotAnAck) => {}
-                    Err(e) => {
-                        tracing::debug!(error = %e, "dropping an unusable group ack");
-                        return MlsDecode::Discard;
+                // control frames, one table (`CONTROL_FRAMES`): the frame's
+                // tag picks its parser, an unusable frame of a known kind is
+                // dropped. Checked BEFORE the envelope parse; a NUL-prefixed
+                // tag can never be valid `EventEnvelope` JSON.
+                for (tag, parse) in CONTROL_FRAMES {
+                    if plaintext.starts_with(tag) {
+                        return parse(from, &plaintext).unwrap_or(MlsDecode::Discard);
                     }
                 }
-                // a poke: its own tag for the same reason as the acks — the
-                // tag IS the version boundary, and an older build that
-                // predates it lands in the NUL discard below
-                match crate::poke::Poke::from_frame(&plaintext) {
-                    Ok(poke) => return MlsDecode::Poke(from, Box::new(poke)),
-                    Err(crate::poke::PokeError::NotAPoke) => {}
-                    Err(e) => {
-                        tracing::debug!(error = %e, "dropping an unusable poke");
-                        return MlsDecode::Discard;
-                    }
-                }
-                // the `\x00molt-mesh-*` space is reserved for control frames; a
+                // the `\x00molt-*` space is reserved for control frames; a
                 // JSON envelope never starts with NUL. An unknown control tag (a
                 // newer control frame this build predates) is dropped as a no-op,
                 // never mis-parsed as an event.
@@ -326,6 +305,45 @@ pub(crate) struct GroupFrame {
     pub(crate) stamp: Option<u64>,
 }
 
+/// A control frame's parser: the whole MLS plaintext (tag included), the
+/// authenticated sender → the decode, or `None` for an unusable frame of
+/// this kind (dropped).
+type ControlParser = fn(MemberId, &[u8]) -> Option<MlsDecode>;
+
+/// The control frames the MLS plaintext can carry, by tag — the ONE place
+/// that lists them. Each tag is its own version boundary: a build that
+/// predates a tag drops the frame at the NUL rule in
+/// [`MlsChannel::decode_at`], never mis-parsing it as an event.
+const CONTROL_FRAMES: &[(&[u8], ControlParser)] = &[
+    // a delivery ACK (delivery guarantee §4.3): the peer reports what it has
+    // engine-accepted of OUR events. Authenticated by the MLS credential
+    // (`from`) — the recv loop additionally pins it to the link's member
+    (crate::MESH_ACK_TAG, |from, frame| {
+        let payload = frame.strip_prefix(crate::MESH_ACK_TAG)?;
+        let win = serde_json::from_slice::<molt_core::AcceptedWindow>(payload).ok()?;
+        Some(MlsDecode::Ack(from, Box::new(win)))
+    }),
+    // the BROADCAST ack (N5.3): its own tag, because one 445 reaches
+    // everyone and the sheet must say whose acceptance it reports
+    (crate::group_ack::GROUP_ACK_TAG, |from, frame| {
+        match crate::group_ack::GroupAck::from_frame(frame) {
+            Ok(ack) => Some(MlsDecode::GroupAck(from, Box::new(ack))),
+            Err(e) => {
+                tracing::debug!(error = %e, "dropping an unusable group ack");
+                None
+            }
+        }
+    }),
+    // a poke: its own tag for the same reason as the acks
+    (crate::poke::POKE_TAG, |from, frame| match crate::poke::Poke::from_frame(frame) {
+        Ok(poke) => Some(MlsDecode::Poke(from, Box::new(poke))),
+        Err(e) => {
+            tracing::debug!(error = %e, "dropping an unusable poke");
+            None
+        }
+    }),
+];
+
 /// What the recv loop should do with one inbound MLS message.
 #[derive(Debug)]
 pub(crate) enum MlsDecode {
@@ -333,7 +351,9 @@ pub(crate) enum MlsDecode {
     Deliver(MemberId, Box<EventEnvelope>),
     /// A delivery ACK (delivery guarantee §4.3): the authenticated sender
     /// reports its accept window over OUR events — advance that peer's
-    /// `acked_floor`, stamp presence, deliver nothing.
+    /// `acked_floor`, stamp presence, deliver nothing. Produced and consumed
+    /// on the queue legs (the loopback mesh) only; the 445 runtime acks with
+    /// [`Self::GroupAck`] and treats one of these as presence, nothing more.
     Ack(MemberId, Box<molt_core::AcceptedWindow>),
     /// A BROADCAST claim sheet (N5.3): the authenticated sender reports what
     /// it accepted, per subject. The receiver acts only on its OWN entry.
@@ -376,10 +396,11 @@ const RESEND_MAX_BACKOFF_SECS: u64 = 600;
 /// on the health surface (loud, honest — G4); resending continues.
 const RESEND_GIVEUP_REWINDS: u32 = 8;
 
-/// What one wire message carries: the per-link wire seq (the receiver's
-/// order/dedup key) and the sender's original envelope. From T2 on this
-/// rides inside MLS ciphertext; today it is the plaintext of the per-queue
-/// wrap.
+/// What one wire message carries on the PLAINTEXT path (`mls: None`): the
+/// per-link wire seq (the receiver's order/dedup key) and the sender's
+/// original envelope, as the plaintext of the per-queue wrap. That path is
+/// the demo mesh and the loopback tests; every MLS-keyed leg carries group
+/// ciphertext instead, and the 445 runtime never produces one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireFrame {
     /// Wire-format version.
@@ -1255,68 +1276,88 @@ async fn epoch_changed(rx: &mut Option<watch::Receiver<u64>>) {
     }
 }
 
+/// One held future-epoch message of a queue leg: the reassembly id, the
+/// bytes, and the acks that fire once it is consumed.
+type HeldMessage = ([u8; 16], Vec<u8>, Vec<AckToken>);
+
+/// How a queue leg ingests one held message (the mesh's half of
+/// [`crate::epoch_hold::drain_until_no_progress`]).
+struct MeshHeldIngest<'a, K> {
+    ch: &'a MlsChannel,
+    sink: &'a K,
+    peer: &'a PeerLink,
+}
+
+impl<K: EngineSink> crate::epoch_hold::HeldIngest<HeldMessage> for MeshHeldIngest<'_, K> {
+    async fn ingest(&mut self, item: &mut HeldMessage) -> crate::epoch_hold::Held {
+        use crate::epoch_hold::Held;
+        let (_, bytes, held) = item;
+        match self.ch.decode(bytes) {
+            MlsDecode::Deliver(from, env) => {
+                self.sink.peer_seen(&self.peer.member).await;
+                if self.sink.deliver(&from, *env).await.is_err() {
+                    return Held::Stop;
+                }
+                ack_all(std::mem::take(held));
+                Held::Progress
+            }
+            // a BROADCAST sheet on a queue leg: the mesh has per-leg acks
+            // and no use for one, and acting on it would apply a broadcast
+            // claim through pairwise bookkeeping
+            MlsDecode::GroupAck(_, _) => Held::Consumed,
+            // a nudge held across an epoch advance is stale by the time it
+            // lands: stamp presence, drop the nudge (a late poke is noise)
+            MlsDecode::Poke(_, _) => {
+                self.sink.peer_seen(&self.peer.member).await;
+                ack_all(std::mem::take(held));
+                Held::Progress
+            }
+            MlsDecode::Ack(_, _) => {
+                // an ack held across an epoch advance: stamp presence and
+                // let it go — its window is stale by now, and the peer's
+                // next debounced ack (dup-triggered resends guarantee one)
+                // supersedes it. Floor advance needs log+state, which this
+                // drain deliberately does not carry.
+                self.sink.peer_seen(&self.peer.member).await;
+                ack_all(std::mem::take(held));
+                Held::Progress
+            }
+            MlsDecode::EpochAdvanced(readmitted) => {
+                for m in &readmitted {
+                    self.sink.rekeyed(m).await;
+                }
+                ack_all(std::mem::take(held));
+                Held::Progress
+            }
+            MlsDecode::FutureEpoch => Held::Still, // still ahead
+            MlsDecode::Discard => Held::Opaque,
+        }
+    }
+}
+
 /// Retry every held future-epoch message after an epoch advance, in hold
 /// order (= the sender-ratchet generation order); keep passing while progress
-/// is made (a held commit can unlock further messages). Returns `false` when
-/// the engine sink is gone and the recv task must stop.
+/// is made (a held commit can unlock further messages) — the shared loop,
+/// M5 rule included: a message still undecodable after the terminating
+/// pass is acked away and counted. Returns `false` when the engine sink is
+/// gone and the recv task must stop.
 async fn drain_epoch_buffer<K: EngineSink>(
     ch: &MlsChannel,
     sink: &K,
     peer: &PeerLink,
-    epoch_buffer: &mut Vec<([u8; 16], Vec<u8>, Vec<AckToken>)>,
+    epoch_buffer: &mut Vec<HeldMessage>,
 ) -> bool {
-    let mut progressed = true;
-    while progressed && !epoch_buffer.is_empty() {
-        progressed = false;
-        for (id, bytes, held) in std::mem::take(epoch_buffer) {
-            match ch.decode(&bytes) {
-                MlsDecode::Deliver(from, env) => {
-                    progressed = true;
-                    sink.peer_seen(&peer.member).await;
-                    if sink.deliver(&from, *env).await.is_err() {
-                        return false;
-                    }
-                    ack_all(held);
-                }
-                // a BROADCAST sheet on a queue leg: the mesh has per-leg acks
-                // and no use for one, and acting on it would apply a broadcast
-                // claim through pairwise bookkeeping
-                MlsDecode::GroupAck(_, _) => {}
-                // a nudge held across an epoch advance is stale by the time it
-                // lands: stamp presence, drop the nudge (a late poke is noise)
-                MlsDecode::Poke(_, _) => {
-                    progressed = true;
-                    sink.peer_seen(&peer.member).await;
-                    ack_all(held);
-                }
-                MlsDecode::Ack(_, _) => {
-                    // an ack held across an epoch advance: stamp presence and
-                    // let it go — its window is stale by now, and the peer's
-                    // next debounced ack (dup-triggered resends guarantee one)
-                    // supersedes it. Floor advance needs log+state, which this
-                    // drain deliberately does not carry.
-                    progressed = true;
-                    sink.peer_seen(&peer.member).await;
-                    ack_all(held);
-                }
-                MlsDecode::EpochAdvanced(readmitted) => {
-                    progressed = true;
-                    for m in &readmitted {
-                        sink.rekeyed(m).await;
-                    }
-                    ack_all(held);
-                }
-                MlsDecode::FutureEpoch => {
-                    epoch_buffer.push((id, bytes, held)); // still ahead
-                }
-                MlsDecode::Discard => {
-                    tracing::warn!(peer = %peer.member, total = count_discarded(), action = "dropped", "held MLS message did not decode after the epoch advance");
-                    ack_all(held);
-                }
+    let mut ingest = MeshHeldIngest { ch, sink, peer };
+    match crate::epoch_hold::drain_until_no_progress(epoch_buffer, &mut ingest).await {
+        Err(()) => false,
+        Ok(lost) => {
+            for (_, _, held) in lost {
+                tracing::warn!(peer = %peer.member, total = count_discarded(), action = "dropped", "held MLS message did not decode after the epoch advance");
+                ack_all(held);
             }
+            true
         }
     }
-    true
 }
 
 /// Future-epoch messages held per peer awaiting their re-key commit. The

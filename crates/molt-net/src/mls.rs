@@ -157,6 +157,11 @@ pub enum MlsIncoming {
 /// would advance the epoch on a change the republic never decided, and
 /// every node that refused it would then be on a different epoch: the
 /// permanent split concept §5 warns about.
+///
+/// TEST-ONLY until N6 wires it (`nostr_n4_plan.md`): no implementor and no
+/// caller exist outside the keystone test, so the seam is `cfg(test)` rather
+/// than a public API that promises a gate nothing enforces yet (review M12).
+#[cfg(test)]
 pub trait ChainOracle: Send + Sync + 'static {
     /// Does a threshold-decided chain block with this hash authorize a
     /// group-data change? Pure over the applied chain.
@@ -201,6 +206,7 @@ const EXPORTER_LEN: usize = 32;
 /// Why a group-data change was refused. Both cases are hard drops — there
 /// is no "apply provisionally" path, for the same reason `verify_chain` is
 /// all-or-nothing: a partially-trusted change could fork state.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum GroupDataRefused {
     /// The commit carries no chain-block binding at all.
@@ -754,7 +760,9 @@ impl MlsMember {
 
     /// The N3 §5 gate: may a group-data change carrying `block_hash` be
     /// applied? Call this BEFORE processing such a commit — a refusal must
-    /// drop the commit with the epoch untouched.
+    /// drop the commit with the epoch untouched. Test-only until N6 wires
+    /// it (see [`ChainOracle`]).
+    #[cfg(test)]
     pub fn authorize_group_data(
         &self,
         oracle: &dyn ChainOracle,

@@ -539,7 +539,306 @@ enum StallRound {
     Granted { floor: u64, heal: bool },
 }
 
-/// Read the log from the broadcast cursor and publish this node's own events.
+/// A doubling delay: starts at [`RESEND_AFTER_SECS`], doubles per
+/// escalation, capped at [`RESEND_MAX_BACKOFF_SECS`]; a reset returns it to
+/// the start. Pure — the loop owns the clocks. Two live in the outbox, and
+/// they are deliberately separate (review M6): the held-frame retry and the
+/// stall clock must not inflate or reset each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Backoff {
+    secs: u64,
+}
+
+impl Backoff {
+    const fn new() -> Backoff {
+        Backoff {
+            secs: RESEND_AFTER_SECS,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.secs = RESEND_AFTER_SECS;
+    }
+
+    /// Double toward the ceiling; returns the new delay in seconds.
+    fn escalate(&mut self) -> u64 {
+        self.secs = self.secs.saturating_mul(2).min(RESEND_MAX_BACKOFF_SECS);
+        self.secs
+    }
+
+    fn secs(&self) -> u64 {
+        self.secs
+    }
+
+    fn delay(&self) -> Duration {
+        Duration::from_secs(self.secs)
+    }
+}
+
+/// The outbox's held-frame state: a publish chain that ran dry holds the
+/// cursor at the failed envelope. `reported` = the surface was told
+/// (`send_failed`), and the engine lifts that flag on `send_ok` and on
+/// nothing else, so the first success afterwards owes it (field
+/// 2026-08-24: "Reconnecting… no relay accepted the frame" long after the
+/// relays were back). `permanent` = a local, deterministic refusal: reported
+/// like an outage but never retried on the timer (the answer is the same
+/// in an hour, and every retry re-frames the envelope — a ratchet
+/// generation per try). Its own escalation, not the stall clock's (M6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HeldFrame {
+    reported: bool,
+    permanent: bool,
+    backoff: Backoff,
+}
+
+impl HeldFrame {
+    const fn new() -> HeldFrame {
+        HeldFrame {
+            reported: false,
+            permanent: false,
+            backoff: Backoff::new(),
+        }
+    }
+
+    /// A publish went through: the hold is over. `true` when the surface
+    /// is owed a `send_ok` (a failure had been reported).
+    fn published(&mut self) -> bool {
+        let owed = self.reported;
+        self.reported = false;
+        self.permanent = false;
+        self.backoff.reset();
+        owed
+    }
+
+    /// A publish chain ran dry (and the surface was told).
+    fn failed(&mut self, permanent: bool) {
+        self.reported = true;
+        self.permanent = permanent;
+    }
+
+    /// Is the held-frame timer armed? Only for a reported TRANSIENT hold.
+    fn retry_armed(&self) -> bool {
+        self.reported && !self.permanent
+    }
+
+    /// The timer's delay, capped at the retry ceiling so a relay outage is
+    /// re-tried at least every `retry_cap`.
+    fn retry_in(&self, retry_cap: Duration) -> Duration {
+        self.backoff.delay().min(retry_cap)
+    }
+}
+
+/// The stall clock: when the proven floor last moved and how hard the
+/// outbox is backing off. ANCHORED (`since`), not recomputed per iteration:
+/// traffic must not starve the timer — a chatty republic would otherwise
+/// never resend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StallClock {
+    last_floor: Option<u64>,
+    backoff: Backoff,
+    rounds_without_progress: u32,
+    /// The stall was reported on the health surface (G4).
+    reported: bool,
+    since: Option<tokio::time::Instant>,
+}
+
+impl StallClock {
+    const fn new() -> StallClock {
+        StallClock {
+            last_floor: None,
+            backoff: Backoff::new(),
+            rounds_without_progress: 0,
+            reported: false,
+            since: None,
+        }
+    }
+
+    /// The republic's proven floor after a pass. `None < Some(_)` for
+    /// Options, which is what is wanted: the first real floor de-escalates
+    /// from "nothing proven", and a floor that REGRESSES (a peer whose
+    /// window persistence lost a beat) does not — the guarantee only ever
+    /// counts forward progress as progress. Returns `true` when a reported
+    /// stall must now be cleared on the surface.
+    fn observe_floor(&mut self, floor: Option<u64>) -> bool {
+        if floor <= self.last_floor {
+            return false;
+        }
+        self.last_floor = floor;
+        self.backoff.reset();
+        self.rounds_without_progress = 0;
+        std::mem::take(&mut self.reported)
+    }
+
+    fn disarm(&mut self) {
+        self.since = None;
+    }
+
+    fn armed(&self) -> bool {
+        self.since.is_some()
+    }
+
+    /// Keep (or set) the anchor and return the deadline it implies.
+    fn deadline(&mut self, now: tokio::time::Instant) -> tokio::time::Instant {
+        *self.since.get_or_insert(now) + self.backoff.delay()
+    }
+
+    /// Escalate and re-anchor at `now` — after a spent OR a granted round
+    /// (a stale anchor past its deadline would fire on every iteration: a
+    /// hot loop of loads, log reads and warnings for the rest of the hour).
+    fn escalate(&mut self, now: tokio::time::Instant) {
+        self.backoff.escalate();
+        self.since = Some(now);
+    }
+
+    /// A granted round is one more without progress. `true` exactly once:
+    /// when the give-up count is reached and the stall is not yet reported
+    /// (loud, honest, and NOT a stop — the resends keep trying at the cap).
+    fn round_granted(&mut self) -> bool {
+        self.rounds_without_progress = self.rounds_without_progress.saturating_add(1);
+        if self.rounds_without_progress >= RESEND_GIVEUP_ROUNDS && !self.reported {
+            self.reported = true;
+            return true;
+        }
+        false
+    }
+}
+
+/// What the outbox does after a publish pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Action {
+    /// Nothing to re-offer: sleep on a wakeup, a claim sheet, a stop, or the
+    /// held-frame timer.
+    Idle,
+    /// An own-ackable tail sits above a proven floor: run the stall clock.
+    Stall,
+}
+
+/// The stall decision. Resend ONLY when somebody has proven something AND
+/// we have an own ackable envelope above that floor (`tail`) — and never on
+/// a PERMANENT hold, even above a proven floor: the stall clock would
+/// otherwise rewind and re-fail it every round (a resend round and a
+/// ratchet generation per frame, for nothing); it waits for an append.
+fn stall_decision(tail: bool, held: &HeldFrame) -> Action {
+    if !tail || held.permanent {
+        Action::Idle
+    } else {
+        Action::Stall
+    }
+}
+
+/// How one publish pass ended.
+#[derive(Debug)]
+enum PassOutcome {
+    /// Every own envelope of the batch went out (or was skipped as
+    /// unframeable); the cursor advanced past the batch.
+    Done,
+    /// A publish chain ran dry: the cursor holds at the failed envelope,
+    /// the surface was told.
+    Held,
+    /// The runtime was told to stop; what went out before is persisted.
+    Stopped,
+}
+
+/// One publish pass: read the log from the broadcast cursor, MLS-frame and
+/// publish every own envelope in order, persist the cursor.
+///
+/// NO rewind here. It sat at the loop top through N5.2, where it was inert
+/// because nothing ever acked — N5.3's acks made it live, and a rewind on
+/// every wakeup re-publishes the whole unacked tail on every appended
+/// envelope, with the hourly budget gating only the persisted write
+/// downstream. The budget must ration the PUBLISH, so the rewind happens
+/// exactly once per granted round, in the stall clock.
+#[allow(clippy::too_many_arguments)]
+async fn publish_pass<L, S, K>(
+    channel: &GroupChannel,
+    mls: &MlsChannel,
+    cfg: &GroupNetConfig,
+    log: &L,
+    store: &S,
+    sink: &K,
+    held: &mut HeldFrame,
+    stop: &mut watch::Receiver<bool>,
+) -> PassOutcome
+where
+    L: OutboxLog,
+    S: StateStore,
+    K: EngineSink,
+{
+    let state = store.load().await;
+    let start = state.group.unwrap_or_default().log_seq;
+    let batch = log.read_from(start + 1).await;
+    let mut published_through = start;
+    for env in batch {
+        // AUTHOR, not `crosses_wire` — the same filter the queue outbox
+        // uses. It matters more than it looks: the genesis `Founded` is
+        // self-authored on every node, so seq 1 must ride the wire or the
+        // receiver never accepts it and every later own event parks on
+        // `prev_seq = 1` until the give-up timer.
+        if env.by != cfg.member {
+            published_through = env.seq;
+            continue;
+        }
+        let Some(frame) = mls.group_frame(&env) else {
+            // a LOCAL framing error is not resendable — skipping it is the
+            // only way forward, and it is loud
+            tracing::error!(seq = env.seq, "MLS-framing a group frame failed — skipped");
+            published_through = env.seq;
+            continue;
+        };
+        match publish_with_backoff(channel, &frame, cfg, stop).await {
+            Ok(()) => {
+                tracing::debug!(me = %cfg.member, seq = env.seq, "group frame published");
+                if held.published() {
+                    // the backoff exit — the channel publishes again
+                    sink.send_ok(&cfg.member).await;
+                }
+                published_through = env.seq;
+            }
+            // hold the cursor exactly here in EVERY failure case: nothing
+            // recovers a skipped envelope, so advancing past an
+            // unpublished one would lose it permanently. What differs is
+            // only what the operator is told.
+            Err(stall) => {
+                // a stop is a shutdown, not an outage — crying send_failed
+                // here painted a red pill onto every clean close that
+                // happened to catch a publish mid-backoff
+                if matches!(stall, PublishStall::Stopped) {
+                    // drain, don't discard: the frames that went out
+                    // before the stop stay published (review M9)
+                    persist_cursor(store, start, published_through).await;
+                    return PassOutcome::Stopped;
+                }
+                let permanent = matches!(stall, PublishStall::Permanent(_));
+                let reason = match stall {
+                    // a wedge, not an outage: the node writes nothing more
+                    // until this envelope can go out, across restarts.
+                    // Loud, and naming the real cause — the propose-time
+                    // size gate (`molt-engine/proposals.rs`) is what keeps
+                    // this unreachable in the first place
+                    PublishStall::Permanent(why) => {
+                        tracing::error!(
+                            seq = env.seq,
+                            reason = %why,
+                            "a group frame can never be published — the outbox holds here"
+                        );
+                        why
+                    }
+                    _ => "no relay accepted the frame".to_string(),
+                };
+                sink.send_failed(&cfg.member, &reason).await;
+                held.failed(permanent);
+                persist_cursor(store, start, published_through).await;
+                return PassOutcome::Held;
+            }
+        }
+    }
+    persist_cursor(store, start, published_through).await;
+    PassOutcome::Done
+}
+
+/// Read the log from the broadcast cursor and publish this node's own
+/// events; between passes, run the stall clock over the proven floor
+/// (delivery guarantee §4.4) and the held-frame timer.
 #[allow(clippy::too_many_arguments)]
 async fn outbox_loop<L, S, K>(
     channel: GroupChannel,
@@ -556,138 +855,33 @@ async fn outbox_loop<L, S, K>(
     S: StateStore,
     K: EngineSink,
 {
-    // the stall clock: when the proven floor last moved, and how hard we are
-    // currently backing off
-    let mut last_floor: Option<u64> = None;
-    let mut backoff_secs = RESEND_AFTER_SECS;
-    let mut rounds_without_progress: u32 = 0;
-    let mut stall_reported = false;
-    let mut stalled_since: Option<tokio::time::Instant> = None;
-    // whether a failed publish chain was reported (`send_failed`): the
-    // engine lifts that flag on `send_ok` and on nothing else, so the first
-    // success afterwards owes it — or the surface stays amber for ever
-    // (field 2026-08-24: "Reconnecting… no relay accepted the frame" long
-    // after the relays were back)
-    let mut publish_failed_reported = false;
-    // a PERMANENT refusal (local, deterministic) is reported like an outage
-    // but never retried on the timer: the answer is the same in an hour,
-    // and every retry would re-frame the envelope (a ratchet generation
-    // per try) and log the error again. It waits for an append.
-    let mut held_permanent = false;
-    // the held-frame retry has its own escalation: sharing the stall
-    // clock's would let an outage inflate the first stall deadline, and a
-    // success reset an escalated stall backoff under a give-up count
-    let mut held_backoff_secs = RESEND_AFTER_SECS;
+    let mut stall = StallClock::new();
+    let mut held = HeldFrame::new();
     loop {
-        // NO rewind here. It sat at the loop top through N5.2, where it was
-        // inert because nothing ever acked — N5.3's acks made it live, and a
-        // rewind on every wakeup re-publishes the whole unacked tail on every
-        // appended envelope, with the hourly budget gating only the persisted
-        // write downstream. The budget must ration the PUBLISH, so the rewind
-        // happens exactly once per granted round, below.
-        let state = store.load().await;
-        let start = state.group.unwrap_or_default().log_seq;
-        let batch = log.read_from(start + 1).await;
-        let mut published_through = start;
-        for env in batch {
-            // AUTHOR, not `crosses_wire` — the same filter the queue outbox
-            // uses. It matters more than it looks: the genesis `Founded` is
-            // self-authored on every node, so seq 1 must ride the wire or the
-            // receiver never accepts it and every later own event parks on
-            // `prev_seq = 1` until the give-up timer.
-            if env.by != cfg.member {
-                published_through = env.seq;
-                continue;
-            }
-            let Some(frame) = mls.group_frame(&env) else {
-                // a LOCAL framing error is not resendable — skipping it is the
-                // only way forward, and it is loud
-                tracing::error!(seq = env.seq, "MLS-framing a group frame failed — skipped");
-                published_through = env.seq;
-                continue;
-            };
-            match publish_with_backoff(&channel, &frame, &cfg, &mut stop).await {
-                Ok(()) => {
-                    tracing::debug!(me = %cfg.member, seq = env.seq, "group frame published");
-                    if publish_failed_reported {
-                        // the backoff exit — the channel publishes again
-                        publish_failed_reported = false;
-                        held_permanent = false;
-                        held_backoff_secs = RESEND_AFTER_SECS;
-                        sink.send_ok(&cfg.member).await;
-                    }
-                    published_through = env.seq;
-                }
-                // hold the cursor exactly here in EVERY failure case: nothing
-                // recovers a skipped envelope, so advancing past an
-                // unpublished one would lose it permanently. What differs is
-                // only what the operator is told.
-                Err(stall) => {
-                    // a stop is a shutdown, not an outage — crying send_failed
-                    // here painted a red pill onto every clean close that
-                    // happened to catch a publish mid-backoff
-                    if matches!(stall, PublishStall::Stopped) {
-                        // drain, don't discard: the frames that went out
-                        // before the stop stay published (review M9)
-                        persist_cursor(&store, start, published_through).await;
-                        return;
-                    }
-                    held_permanent = matches!(stall, PublishStall::Permanent(_));
-                    let reason = match stall {
-                        // a wedge, not an outage: the node writes nothing more
-                        // until this envelope can go out, across restarts.
-                        // Loud, and naming the real cause — the propose-time
-                        // size gate (`molt-engine/proposals.rs`) is what keeps
-                        // this unreachable in the first place
-                        PublishStall::Permanent(why) => {
-                            tracing::error!(
-                                seq = env.seq,
-                                reason = %why,
-                                "a group frame can never be published — the outbox holds here"
-                            );
-                            why
-                        }
-                        _ => "no relay accepted the frame".to_string(),
-                    };
-                    sink.send_failed(&cfg.member, &reason).await;
-                    publish_failed_reported = true;
-                    stalled_since = None;
-                    break;
-                }
-            }
+        match publish_pass(&channel, &mls, &cfg, &log, &store, &sink, &mut held, &mut stop).await {
+            PassOutcome::Stopped => return,
+            PassOutcome::Held => stall.disarm(),
+            PassOutcome::Done => {}
         }
-        persist_cursor(&store, start, published_through).await;
         // --- the stall clock -------------------------------------------------
         let state = store.load().await;
         let floor = group_floor(&state, &cfg);
         let cursor = state.group.unwrap_or_default().log_seq;
-        // `None < Some(_)` for Options, which is what is wanted here: the
-        // first real floor de-escalates from "nothing proven", and a floor
-        // that REGRESSES (a peer whose window persistence lost a beat) does
-        // not — the guarantee only ever counts forward progress as progress.
-        if floor > last_floor {
-            // the republic confirmed progress — de-escalate entirely
-            last_floor = floor;
-            backoff_secs = RESEND_AFTER_SECS;
-            rounds_without_progress = 0;
-            if stall_reported {
-                stall_reported = false;
-                // clear it on the members it was raised against — naming this
-                // node would have the surface blame the operator's own seat
-                // for a peer that stopped acking
-                for m in &cfg.members {
-                    sink.send_ok(m).await;
-                }
+        if stall.observe_floor(floor) {
+            // the republic confirmed progress — clear the report on the
+            // members it was raised against (naming this node would have
+            // the surface blame the operator's own seat for a peer that
+            // stopped acking)
+            for m in &cfg.members {
+                sink.send_ok(m).await;
             }
         }
-        // resend ONLY when somebody has proven something AND we have an own
-        // ackable envelope above that floor.
-        //
-        // "cursor > floor" alone is not that: the broadcast cursor walks over
-        // FOREIGN envelopes too, and a member that mostly listens would sit
-        // permanently above a frozen floor — reporting "deliveries keep going
-        // unacknowledged" on a perfectly healthy republic. The mesh learned
-        // this as its own-ackable span guard; this is the same rule.
+        // "cursor > floor" alone is not an own-ackable tail: the broadcast
+        // cursor walks over FOREIGN envelopes too, and a member that mostly
+        // listens would sit permanently above a frozen floor — reporting
+        // "deliveries keep going unacknowledged" on a perfectly healthy
+        // republic. The mesh learned this as its own-ackable span guard;
+        // this is the same rule.
         let tail = match floor {
             Some(f) if cursor > f => log
                 .read_from(f + 1)
@@ -696,17 +890,14 @@ async fn outbox_loop<L, S, K>(
                 .any(|e| crate::supervisor::own_ackable(&cfg.member, e)),
             _ => false,
         };
-        // a PERMANENT hold waits for an append even above a proven floor:
-        // the stall clock would otherwise rewind and re-fail it every round
-        // (a resend round and a ratchet generation per frame, for nothing)
-        if !tail || held_permanent {
+        if stall_decision(tail, &held) == Action::Idle {
             tracing::debug!(
                 me = %cfg.member,
                 ?floor,
                 cursor,
                 "outbox idle — no own-ackable tail; sleeping on wakeup"
             );
-            stalled_since = None;
+            stall.disarm();
             // a HELD frame (the publish chain ran dry) below any proven floor
             // has no stall clock to bring it back: without its own timer it
             // waited for the next own append — on a quiet seat, never. The
@@ -714,8 +905,8 @@ async fn outbox_loop<L, S, K>(
             // so a relay outage is re-tried at least every `retry_cap`; the
             // first success resets it. No rewind, no resend budget: this is
             // the same pass continuing, not a re-offer of proven frames.
-            let retry_in = Duration::from_secs(held_backoff_secs).min(cfg.retry_cap);
-            let retry_armed = publish_failed_reported && !held_permanent;
+            let retry_in = held.retry_in(cfg.retry_cap);
+            let retry_armed = held.retry_armed();
             tokio::select! {
                 r = wakeup.changed() => {
                     if r.is_err() {
@@ -727,9 +918,8 @@ async fn outbox_loop<L, S, K>(
                 () = ack_wake.notified() => {}
                 _ = stop.changed() => return,
                 () = tokio::time::sleep(retry_in), if retry_armed => {
-                    held_backoff_secs =
-                        held_backoff_secs.saturating_mul(2).min(RESEND_MAX_BACKOFF_SECS);
-                    tracing::info!(me = %cfg.member, backoff_secs = held_backoff_secs, "held frame - retrying the publish");
+                    let backoff_secs = held.backoff.escalate();
+                    tracing::info!(me = %cfg.member, backoff_secs, "held frame - retrying the publish");
                 }
             }
             continue;
@@ -738,15 +928,11 @@ async fn outbox_loop<L, S, K>(
             me = %cfg.member,
             ?floor,
             cursor,
-            backoff_secs,
-            armed = stalled_since.is_some(),
+            backoff_secs = stall.backoff.secs(),
+            armed = stall.armed(),
             "outbox tail unacked — stall clock running"
         );
-        // ANCHORED, not recomputed per iteration: traffic must not starve the
-        // timer. The mesh calls this `stalled_since` and the distinction is
-        // the whole point — a chatty republic would otherwise never resend.
-        let since = *stalled_since.get_or_insert_with(tokio::time::Instant::now);
-        let deadline = since + Duration::from_secs(backoff_secs);
+        let deadline = stall.deadline(tokio::time::Instant::now());
         let fired = tokio::select! {
             r = wakeup.changed() => {
                 if r.is_err() {
@@ -755,7 +941,7 @@ async fn outbox_loop<L, S, K>(
                 false // new work first; the stall clock keeps running
             }
             // a floor advance de-escalates at the loop top; the anchored
-            // clock is kept by `get_or_insert`, so a sheet can never starve it
+            // clock is kept by `deadline`, so a sheet can never starve it
             () = ack_wake.notified() => false,
             _ = stop.changed() => return,
             () = tokio::time::sleep_until(deadline) => true,
@@ -800,7 +986,7 @@ async fn outbox_loop<L, S, K>(
             .await;
         let f = match round {
             StallRound::NoFloor => {
-                stalled_since = None;
+                stall.disarm();
                 continue;
             }
             StallRound::Spent(f) => {
@@ -808,11 +994,7 @@ async fn outbox_loop<L, S, K>(
                     floor = f,
                     "the resend budget for this hour is spent — holding the tail"
                 );
-                backoff_secs = backoff_secs.saturating_mul(2).min(RESEND_MAX_BACKOFF_SECS);
-                // re-anchor, exactly like a granted round: a stale anchor
-                // past its deadline fires on every iteration — a hot loop
-                // of loads, log reads and warnings for the rest of the hour
-                stalled_since = Some(tokio::time::Instant::now());
+                stall.escalate(tokio::time::Instant::now());
                 continue;
             }
             StallRound::Granted { floor, heal } => {
@@ -825,24 +1007,20 @@ async fn outbox_loop<L, S, K>(
                 floor
             }
         };
-        rounds_without_progress = rounds_without_progress.saturating_add(1);
+        let report = stall.round_granted();
         tracing::warn!(
             floor = f,
             cursor,
-            attempt = rounds_without_progress,
+            attempt = stall.rounds_without_progress,
             "unacknowledged deliveries — re-offering the tail"
         );
-        if rounds_without_progress >= RESEND_GIVEUP_ROUNDS && !stall_reported {
-            // loud, honest, and NOT a stop: the surface names it while the
-            // resends keep trying at the cap
-            stall_reported = true;
+        if report {
             for m in &cfg.members {
                 sink.send_failed(m, "not acknowledging deliveries - still resending")
                     .await;
             }
         }
-        backoff_secs = backoff_secs.saturating_mul(2).min(RESEND_MAX_BACKOFF_SECS);
-        stalled_since = Some(tokio::time::Instant::now());
+        stall.escalate(tokio::time::Instant::now());
     }
 }
 
@@ -1101,40 +1279,43 @@ async fn retry_epoch_hold<L: OutboxLog, S: StateStore, K: EngineSink>(
     seen: &mut SeenCiphertexts,
     hold: &mut Vec<(String, u64)>,
 ) -> Result<u64, ()> {
-    let mut lost = 0u64;
-    loop {
-        let mut progress = false;
-        let mut still = Vec::new();
-        // opaque THIS pass is not opaque for good while the pass is still
-        // merging commits: a laggard two epochs behind holds frames sealed
-        // under the epoch the NEXT held commit opens (review M5). They are
-        // counted lost only by the terminating no-progress pass.
-        let mut opaque = Vec::new();
-        for (content, at) in std::mem::take(hold) {
-            match ingest_one(mls, log, store, sink, me, seen, (&content, at)).await {
-                Ingest::EngineGone => return Err(()),
-                Ingest::FutureEpoch => still.push((content, at)),
-                Ingest::Opaque => opaque.push((content, at)),
-                // a held COMMIT merged during the retry: forget the
-                // re-admitted members' windows before their held frames
-                // (later in this very pass) are delivered
-                Ingest::EpochAdvanced(readmitted) => {
-                    for m in &readmitted {
-                        sink.rekeyed(m).await;
-                    }
-                    progress = true;
+    let mut ingest = GroupHeldIngest { mls, log, store, sink, me, seen };
+    crate::epoch_hold::drain_until_no_progress(hold, &mut ingest)
+        .await
+        .map(|lost| u64::try_from(lost.len()).unwrap_or(u64::MAX))
+}
+
+/// How the 445 inbox ingests one held frame (the group runtime's half of
+/// [`crate::epoch_hold::drain_until_no_progress`]).
+struct GroupHeldIngest<'a, L, S, K> {
+    mls: &'a MlsChannel,
+    log: &'a L,
+    store: &'a S,
+    sink: &'a K,
+    me: &'a MemberId,
+    seen: &'a mut SeenCiphertexts,
+}
+
+impl<L: OutboxLog, S: StateStore, K: EngineSink> crate::epoch_hold::HeldIngest<(String, u64)>
+    for GroupHeldIngest<'_, L, S, K>
+{
+    async fn ingest(&mut self, item: &mut (String, u64)) -> crate::epoch_hold::Held {
+        use crate::epoch_hold::Held;
+        let (content, at) = item;
+        match ingest_one(self.mls, self.log, self.store, self.sink, self.me, self.seen, (content, *at)).await {
+            Ingest::EngineGone => Held::Stop,
+            Ingest::FutureEpoch => Held::Still,
+            Ingest::Opaque => Held::Opaque,
+            // a held COMMIT merged during the retry: forget the
+            // re-admitted members' windows before their held frames
+            // (later in this very pass) are delivered
+            Ingest::EpochAdvanced(readmitted) => {
+                for m in &readmitted {
+                    self.sink.rekeyed(m).await;
                 }
-                _ => progress = true,
+                Held::Progress
             }
-        }
-        if progress {
-            still.extend(opaque);
-        } else {
-            lost += u64::try_from(opaque.len()).unwrap_or(u64::MAX);
-        }
-        *hold = still;
-        if !progress || hold.is_empty() {
-            return Ok(lost);
+            Ingest::Delivered | Ingest::Acked | Ingest::Nothing => Held::Progress,
         }
     }
 }
@@ -2177,6 +2358,88 @@ mod tests {
     }
 
     /// A floor at or above the cursor never pushes it forward.
+    /// The doubling delay: 10 → 20 → … → 600 and no further; a reset
+    /// returns to the start.
+    #[test]
+    fn a_backoff_doubles_to_the_ceiling_and_resets() {
+        let mut b = Backoff::new();
+        assert_eq!(b.secs(), RESEND_AFTER_SECS);
+        assert_eq!(b.escalate(), 20);
+        assert_eq!(b.escalate(), 40);
+        for _ in 0..10 {
+            b.escalate();
+        }
+        assert_eq!(b.secs(), RESEND_MAX_BACKOFF_SECS, "capped");
+        assert_eq!(b.delay(), Duration::from_secs(RESEND_MAX_BACKOFF_SECS));
+        b.reset();
+        assert_eq!(b.secs(), RESEND_AFTER_SECS);
+    }
+
+    /// M6: a transient hold arms the held-frame timer, a permanent one
+    /// never does; the first publish afterwards owes exactly one `send_ok`
+    /// and resets the escalation.
+    #[test]
+    fn a_held_frame_arms_the_timer_for_a_transient_refusal_only() {
+        let mut held = HeldFrame::new();
+        assert!(!held.retry_armed(), "nothing held, nothing armed");
+        assert!(!held.published(), "no report, no send_ok owed");
+
+        held.failed(false);
+        assert!(held.retry_armed(), "a transient hold retries on the timer");
+        held.backoff.escalate();
+        assert_eq!(held.retry_in(Duration::from_secs(5)), Duration::from_secs(5), "capped at retry_cap");
+        assert_eq!(held.retry_in(Duration::from_secs(60)), Duration::from_secs(20));
+        assert!(held.published(), "the first success owes the send_ok");
+        assert!(!held.published(), "…once");
+        assert_eq!(held.backoff.secs(), RESEND_AFTER_SECS, "a success resets the escalation");
+
+        held.failed(true);
+        assert!(!held.retry_armed(), "a permanent refusal never arms the timer");
+        assert_eq!(stall_decision(true, &held), Action::Idle, "…and idles even above a proven floor");
+        assert!(held.published());
+        assert!(!held.permanent, "a success clears the permanent hold");
+    }
+
+    /// The stall decision: an own-ackable tail above a proven floor runs
+    /// the clock; no tail idles.
+    #[test]
+    fn the_stall_decision_needs_an_own_ackable_tail() {
+        let held = HeldFrame::new();
+        assert_eq!(stall_decision(false, &held), Action::Idle);
+        assert_eq!(stall_decision(true, &held), Action::Stall);
+    }
+
+    /// The stall clock de-escalates on FORWARD floor progress only, clears
+    /// a reported stall exactly then, and reports once at the give-up count.
+    #[test]
+    fn the_stall_clock_counts_forward_progress_only_and_reports_once() {
+        let mut clock = StallClock::new();
+        clock.observe_floor(None);
+        assert_eq!(clock.last_floor, None, "nothing proven yet");
+        clock.observe_floor(Some(3));
+        assert_eq!(clock.last_floor, Some(3), "the first real floor is progress");
+        clock.observe_floor(Some(2));
+        assert_eq!(clock.last_floor, Some(3), "a regressing floor is not");
+
+        let mut reported = 0;
+        for _ in 0..RESEND_GIVEUP_ROUNDS + 3 {
+            if clock.round_granted() {
+                reported += 1;
+            }
+            clock.escalate(tokio::time::Instant::now());
+        }
+        assert_eq!(reported, 1, "reported exactly once, at the give-up count");
+        assert!(clock.armed());
+        assert_eq!(clock.backoff.secs(), RESEND_MAX_BACKOFF_SECS);
+
+        assert!(clock.observe_floor(Some(4)), "progress clears the report…");
+        assert_eq!(clock.rounds_without_progress, 0);
+        assert_eq!(clock.backoff.secs(), RESEND_AFTER_SECS, "…and de-escalates entirely");
+        assert!(!clock.observe_floor(Some(5)), "…and there is nothing left to clear");
+        clock.disarm();
+        assert!(!clock.armed());
+    }
+
     #[test]
     fn a_rewind_only_ever_moves_backwards() {
         let mut st = TransportState {
