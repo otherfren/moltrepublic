@@ -428,12 +428,19 @@ Dedupe `{old_path, new_path}` per file, then void unconditionally.
 Resolver-dependent. Grant `Local` to bare `localhost` and IP literals
 only.
 
-### K4 [LOW] `ReadSession` carries every unsealed workspace's recovery phrase (+ S3 secret + MCP token) - OPEN (product call)
-`WorkspaceInfo.seed` rides the most frequent read, over cleartext TCP on
-the documented LAN setup. Fix direction: strip `seed` / `s3_secret_key`
-from the MCP-facing reply, a `RevealSeed { id }` tool on both surfaces
-for the GUI's hold-to-peek; state in `mcp-security.md` that TCP is
-cleartext. Product may accept the exposure - then the doc must say so.
+### K4 [HIGH] `ReadSession` carried every unsealed workspace's recovery phrase - FIXED (2026-08-26)
+`WorkspaceInfo.seed` (a demo-era display field of the first scaffold,
+`8b7c54ff`) and the two wizard phrases rode the most frequent read, over
+cleartext TCP; `mcp-security.md` even documented it as "the agent holds
+the same bytes". The operator's rule (2026-08-26): a phrase is private and
+never shared. Fix: the three fields are `#[serde(skip_serializing)]` -
+no wire form of the session carries them, on any surface; the GUI reads
+them in-process. Test: `no_recovery_phrase_ever_serializes`.
+OPEN (product call): `settings.s3_secret_key` and `mcp_token` still ride
+`read_session` (`save_settings` is wholesale and requires them back).
+OPEN: a headless node has no way to show its phrase to the operator except
+the device files - a local CLI (`moltd --reveal-seed <id>`) would close
+that without touching the network surface.
 
 ### K5 [STYLE] Em dashes / prose in `Display` strings; stale contract docs - OPEN
 `ChatNotGated`, `AlreadyApproved`, `DiscussionClosed`,

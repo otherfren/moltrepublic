@@ -694,6 +694,12 @@ pub struct WorkspaceInfo {
     /// from — a secret. Populated from the device-sealed seed while the
     /// workspace is unsealed; cleared to "" the moment it is sealed at rest
     /// (no key material on disk means none in session memory either).
+    ///
+    /// NEVER SERIALIZED: an in-process display value for the GUI's
+    /// hold-to-peek only. It rode `read_session` to every MCP client until
+    /// 2026-08-26 (review K4); a phrase is private and leaves the process on
+    /// no surface. Reads back as "" from any wire form.
+    #[serde(skip_serializing, default)]
     pub seed: String,
     /// The effective global anonymity network (`"tor" | "none"`) when this
     /// entry was founded/joined — a display label (routing always follows
@@ -2917,6 +2923,8 @@ pub struct CreateState {
     /// when the ritual opened — a read-only display value, never a choice.
     pub net: String,
     /// The founder's recovery phrase (shown during the ritual, then gone).
+    /// NEVER SERIALIZED — see `WorkspaceInfo::seed`.
+    #[serde(skip_serializing, default)]
     pub seed: String,
     /// Whether the FOUNDER's own phrase backup is confirmed (the re-typed
     /// phrase matched — `seed_backup_confirmation.md` ❻½). The ritual
@@ -2954,7 +2962,8 @@ pub struct JoinState {
     pub inviter: String,
     /// The joiner's freshly generated recovery phrase, shown once during the
     /// join (its identity + own workspace derive from it). Empty while idle.
-    #[serde(default)]
+    /// NEVER SERIALIZED — see `WorkspaceInfo::seed`.
+    #[serde(skip_serializing, default)]
     pub seed: String,
     /// The founder's proposed final DAO name, surfaced when the ritual reaches
     /// the ratification step (empty until then).

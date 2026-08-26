@@ -1843,6 +1843,33 @@ mod tests {
     /// A well-formed message id for the argument-mapping tests.
     const HEX_ID: &str = "00112233445566778899aabbccddeeff";
 
+    /// **No recovery phrase ever leaves the process.** `read_session`
+    /// serialized the whole `SessionView`, and `WorkspaceInfo.seed` (a
+    /// demo-era display field) plus the two wizard phrases rode along —
+    /// every MCP client, over cleartext TCP, held every phrase on the
+    /// device (review 2026-08-25 K4; the operator's rule: private, never
+    /// shared). The fields never serialize now, so no surface can leak
+    /// them by accident.
+    #[test]
+    fn no_recovery_phrase_ever_serializes() {
+        let phrase = "abandon ability able about above absent absorb abstract";
+        let sv = molt_core::SessionView {
+            workspaces: vec![molt_core::WorkspaceInfo {
+                seed: phrase.to_string(),
+                ..molt_core::WorkspaceInfo::demo_set().remove(0)
+            }],
+            create: molt_core::CreateState { seed: phrase.to_string(), ..Default::default() },
+            join: molt_core::JoinState { seed: phrase.to_string(), ..Default::default() },
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&sv).expect("serializes");
+        assert!(!json.contains(phrase), "a phrase is in the wire form: {json}");
+        assert!(!json.contains("\"seed\""), "a seed key is in the wire form");
+        // …and a view read back without them is the same view
+        let back: molt_core::SessionView = serde_json::from_str(&json).expect("reads back");
+        assert_eq!(back.workspaces[0].seed, "", "the phrase stays in-process");
+    }
+
     /// **`save_settings` builds from exactly what its schema requires.**
     /// The builder demanded `file_cap_bytes` (absent from the schema) and
     /// silently defaulted `download_dir` — the H5 class the "every field

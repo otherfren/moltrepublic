@@ -182,13 +182,24 @@ cannot tell "omitted" from "set to the default" (H5, fixed 2026-08-07).
   their node process (stdio mode) stop it by closing the transport.
 * **Clipboard** (copy seed / invite / message / log, paste). The clipboard is
   a device of the GUI machine, not shared state. An agent already holds the
-  same bytes from `read_session` / `read_state`; a clipboard tool would only
-  let a remote client snoop on or overwrite the local user's clipboard.
+  same bytes from `read_session` / `read_state` — EXCEPT the recovery
+  phrase, which no surface ever serializes (below); a clipboard tool would
+  only let a remote client snoop on or overwrite the local user's clipboard.
 * **View-local state**: list sort order on the Open screen, the collapsed
   sidebar, open modals, form drafts, hold-to-peek seed reveal. None of it
-  exists in the engine; the data behind it is fully readable over MCP (e.g.
+  exists in the engine; the data behind it is readable over MCP (e.g.
   `workspaces[].last_sync_min` for sorting) and the *effects* (e.g. actually
   starting a restore) go through the shared commands.
+* **The recovery phrase** (`workspaces[].seed`, the wizards' `create.seed` /
+  `join.seed`) is the one exception to "the same bytes": it is private and
+  leaves the process on NO surface. Since 2026-08-26 the fields never
+  serialize (`#[serde(skip_serializing)]`), so `read_session` — and every
+  other wire form of the session — carries none of it; the GUI reads it
+  in-process for its hold-to-peek and the wizard's write-it-down step. A
+  headless operator gets the phrase from the wizard on a GUI node, or from
+  the device (`keys/seed.sealed` + the device key), never from the MCP
+  endpoint. Note that the endpoint is cleartext TCP: loopback or an SSH
+  tunnel only.
 * **Preview helpers**: the GUI's live invite parse and duplicate-name check
   are conveniences over the same rules the engine enforces — `join_start` /
   `create_start` re-validate and return the authoritative error to MCP
