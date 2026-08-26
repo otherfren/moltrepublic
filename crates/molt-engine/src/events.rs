@@ -703,7 +703,7 @@ impl State {
         // …and so are the relay-plane file fetches (FP3): private inbound
         // subscriptions; their landing write runs inside spawn_blocking,
         // which an abort never interrupts mid-file
-        for fetch in self.file_fetches.drain(..) {
+        for fetch in self.files.fetches.drain(..) {
             fetch.abort();
         }
         // the group runtime's OUTBOX is DRAINED, not aborted: a frame between
@@ -730,10 +730,10 @@ impl State {
         self.delivery.last_group_ack = None;
         self.pending_declines.clear();
         self.pending_withdrawals.clear();
-        self.file_series.clear();
-        self.file_pending.clear();
-        self.file_serving.clear();
-        self.file_announced.clear();
+        self.files.series.clear();
+        self.files.pending.clear();
+        self.files.serving.clear();
+        self.files.announced.clear();
         self.proposal_changes.clear();
         self.pending_blocks.clear();
         self.catchup_from = None;
@@ -749,8 +749,8 @@ impl State {
         self.chat_pruned_counts.clear();
         self.compacted_at = 0;
         self.parked.clear();
-        self.share_paths.clear();
-        self.downloads.clear();
+        self.files.share_paths.clear();
+        self.files.downloads.clear();
         self.applied.clear();
         for s in Surface::ALL {
             self.applied.insert(s, Vec::new());

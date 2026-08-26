@@ -417,9 +417,9 @@ fn the_share_card_carries_its_availability_word() {
 
     let word = |st: &State| st.uploads_view()[0].availability.clone();
     assert_eq!(word(&st), "sharer-only", "no stamp: the sharer must serve");
-    st.file_series.insert(id, 7);
+    st.files.series.insert(id, 7);
     assert_eq!(word(&st), "relay-held", "a live stamp: the relays serve");
-    st.file_series.remove(&id);
+    st.files.series.remove(&id);
     let rm = st.make_env(
         "me".to_string(),
         molt_core::WorkspaceEvent::FileRemoved { index: 0, id: Some(id), by: "me".to_string() },

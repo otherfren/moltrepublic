@@ -1811,10 +1811,10 @@ impl State {
                 let from_sharer =
                     matches!(self.chat_by_id(&id), Ok((_, msg)) if msg.from == from);
                 let plausible = at <= crate::now_secs().saturating_add(WIRE_STAMP_SKEW_SECS);
-                let newer = self.file_series.get(&id).map_or(true, |old| at > *old);
+                let newer = self.files.series.get(&id).map_or(true, |old| at > *old);
                 if from_sharer && plausible && newer {
-                    self.file_series.insert(id, at);
-                    if let Some((target, dest)) = self.file_pending.remove(&id) {
+                    self.files.series.insert(id, at);
+                    if let Some((target, dest)) = self.files.pending.remove(&id) {
                         self.spawn_nostr_fetch(id, at, target, dest);
                     }
                 } else if !from_sharer {
@@ -1902,10 +1902,10 @@ impl State {
         target: crate::transfer::FetchTarget,
         dest: crate::transfer::DestSpec,
     ) {
-        if let Some(at) = self.file_series.get(&id).copied() {
+        if let Some(at) = self.files.series.get(&id).copied() {
             self.spawn_nostr_fetch(id, at, target, dest);
         } else {
-            self.file_pending.insert(id, (target, dest));
+            self.files.pending.insert(id, (target, dest));
             let me = self.member();
             let env = self.make_env(me, WorkspaceEvent::FileWanted { id });
             self.record(env);
@@ -1930,7 +1930,7 @@ impl State {
         if !self.net_scope_current(generation) {
             return Ok(Reply::Ack);
         }
-        if self.file_pending.remove(&id).is_some() {
+        if self.files.pending.remove(&id).is_some() {
             self.set_download_phase(
                 id,
                 molt_core::TransferPhase::Failed {
@@ -1976,8 +1976,8 @@ impl State {
             self.net_scope,
             cmd_tx,
         );
-        self.file_fetches.retain(|h| !h.is_finished());
-        self.file_fetches.push(fetch);
+        self.files.fetches.retain(|h| !h.is_finished());
+        self.files.fetches.push(fetch);
     }
 
     /// A `FileWanted` broadcast landed: ONLY the sharer answers (every
@@ -1994,7 +1994,7 @@ impl State {
             ),
             Err(_) => return,
         };
-        if !is_mine || self.chat_ts_aged_out(ts) || self.file_serving.contains(&id) {
+        if !is_mine || self.chat_ts_aged_out(ts) || self.files.serving.contains(&id) {
             return;
         }
         // the size is known here — an over-cap share must not cost a full
@@ -2009,7 +2009,7 @@ impl State {
             return;
         }
         let now = crate::now_secs();
-        if let Some(at) = self.file_series.get(&id).copied() {
+        if let Some(at) = self.files.series.get(&id).copied() {
             // a standing series re-announces instead of re-publishing (one
             // stored copy serves everyone within relay retention) — UNLESS
             // this requester evidently just saw the stamp and still asks
@@ -2017,17 +2017,17 @@ impl State {
             // sealed under an epoch it cannot open) and only a FRESH
             // publish under the current secret converges (review 2026-08-10)
             let recently_announced = self
-                .file_announced
+                .files.announced
                 .get(&id)
                 .is_some_and(|t| now.saturating_sub(*t) < 300);
             if now.saturating_sub(at) < 86_400 && !recently_announced {
-                self.file_announced.insert(id, now);
+                self.files.announced.insert(id, now);
                 let env = self.make_env(me, WorkspaceEvent::FileServed { id, at });
                 self.record(env);
                 return;
             }
         }
-        let Some(path) = self.share_paths.get(&id).cloned() else {
+        let Some(path) = self.files.share_paths.get(&id).cloned() else {
             return;
         };
         let Some((channel, _, current)) = self.nostr_file_context() else {
@@ -2053,7 +2053,7 @@ impl State {
         else {
             return;
         };
-        self.file_serving.insert(id);
+        self.files.serving.insert(id);
         crate::transfer::spawn_series_publish(
             channel,
             exporter,
@@ -2078,13 +2078,13 @@ impl State {
         if !self.net_scope_current(generation) {
             return Ok(Reply::Ack);
         }
-        self.file_serving.remove(&id);
+        self.files.serving.remove(&id);
         if at == 0 {
             return Ok(Reply::Ack); // the publish failed — honest silence, the
                                    // requester's park runs into its watchdog
         }
-        self.file_series.insert(id, at);
-        self.file_announced.insert(id, crate::now_secs());
+        self.files.series.insert(id, at);
+        self.files.announced.insert(id, crate::now_secs());
         let me = self.member();
         let env = self.make_env(me, WorkspaceEvent::FileServed { id, at });
         self.record(env);
@@ -2141,7 +2141,7 @@ impl State {
             return;
         }
         let size = file.size;
-        let Some(path) = self.share_paths.get(&id).cloned() else {
+        let Some(path) = self.files.share_paths.get(&id).cloned() else {
             refuse("this node no longer knows the shared file's local path");
             return;
         };
@@ -2151,7 +2151,7 @@ impl State {
             size,
             req.id,
             req.reply,
-            self.file_serve_slots.clone(),
+            self.files.serve_slots.clone(),
         );
     }
 
@@ -4020,20 +4020,20 @@ mod tests {
         // another member announcing the sharer's series: dropped
         st.cmd_net_delivered("peer-2".to_string(), served("peer-2", 1, 1_000), None)
             .expect("ack");
-        assert!(st.file_series.is_empty(), "a non-sharer's announcement must not count");
+        assert!(st.files.series.is_empty(), "a non-sharer's announcement must not count");
         // the sharer with an absurd future stamp: dropped
         let future = crate::now_secs() + 1_000_000;
         st.cmd_net_delivered("peer-1".to_string(), served("peer-1", 2, future), None)
             .expect("ack");
-        assert!(st.file_series.is_empty(), "a far-future stamp must not count");
+        assert!(st.files.series.is_empty(), "a far-future stamp must not count");
         // the sharer's plausible stamp lands…
         st.cmd_net_delivered("peer-1".to_string(), served("peer-1", 3, 5_000), None)
             .expect("ack");
-        assert_eq!(st.file_series.get(&sid), Some(&5_000));
+        assert_eq!(st.files.series.get(&sid), Some(&5_000));
         // …and an older redelivery does not regress it
         st.cmd_net_delivered("peer-1".to_string(), served("peer-1", 4, 4_000), None)
             .expect("ack");
-        assert_eq!(st.file_series.get(&sid), Some(&5_000), "at-least-once must not rewind");
+        assert_eq!(st.files.series.get(&sid), Some(&5_000), "at-least-once must not rewind");
     }
 
     // --- real presence: numeric stamps, aging, the activity trio -----------
@@ -4333,7 +4333,7 @@ mod tests {
             let _hold = tx;
             std::future::pending::<()>().await;
         });
-        st.file_fetches.push(task.abort_handle());
+        st.files.fetches.push(task.abort_handle());
         st.reset_workspace_state();
         rt.block_on(async {
             tokio::time::timeout(std::time::Duration::from_secs(5), rx)
@@ -4341,7 +4341,7 @@ mod tests {
                 .expect("the fetch task must be aborted at the workspace boundary")
                 .expect_err("the sender drops with the aborted future, unused");
         });
-        assert!(st.file_fetches.is_empty(), "the handle list is cleared");
+        assert!(st.files.fetches.is_empty(), "the handle list is cleared");
     }
 
     /// Link/send-stuck state is scoped to the workspace: the close/switch

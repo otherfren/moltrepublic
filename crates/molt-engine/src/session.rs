@@ -1552,7 +1552,7 @@ impl State {
                 continue;
             };
             if msg.from == me && msg.file.as_ref().is_some_and(|f| f.available) {
-                self.share_paths.insert(id, std::path::PathBuf::from(path));
+                self.files.share_paths.insert(id, std::path::PathBuf::from(path));
             }
         }
     }

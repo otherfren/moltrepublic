@@ -102,7 +102,7 @@ impl State {
         // user's own FILE is never touched; what falls is our record that we
         // serve it, after which a download request meets the honest
         // `Refused`/`FileExpired` the read path already produces.
-        self.share_paths.retain(|id, _| self.chat_pos.contains_key(id));
+        self.files.share_paths.retain(|id, _| self.chat_pos.contains_key(id));
         if let Some(active) = self.active.as_mut() {
             let before = active.prefs.shared_files.len();
             let live: std::collections::HashSet<String> =
@@ -220,8 +220,8 @@ mod tests {
                 body: molt_core::WorkspaceEvent::Chat(m),
             });
         }
-        st.share_paths.insert(old.id, std::path::PathBuf::from("/tmp/ancient.pdf"));
-        st.share_paths.insert(new.id, std::path::PathBuf::from("/tmp/recent.pdf"));
+        st.files.share_paths.insert(old.id, std::path::PathBuf::from("/tmp/ancient.pdf"));
+        st.files.share_paths.insert(new.id, std::path::PathBuf::from("/tmp/recent.pdf"));
 
         let (dump, dropped) = st.compact_chat(1_000).expect("something ages out");
         assert_eq!(dropped, 1);
@@ -233,10 +233,10 @@ mod tests {
         assert!(st.chat_pruned, "the node is marked pruned (positions are dead)");
         assert_eq!(st.chat_pruned_counts.get("petra").copied(), Some(1));
         assert!(
-            !st.share_paths.contains_key(&old.id),
+            !st.files.share_paths.contains_key(&old.id),
             "the dropped message's share is forgotten with it"
         );
-        assert!(st.share_paths.contains_key(&new.id), "a live share stays");
+        assert!(st.files.share_paths.contains_key(&new.id), "a live share stays");
 
         // a second round with nothing eligible is a no-op
         assert!(st.compact_chat(1_000).is_none());

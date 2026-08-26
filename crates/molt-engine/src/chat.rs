@@ -448,7 +448,7 @@ impl State {
                 },
             )
         };
-        if self.downloads.get(&id).is_some_and(|d| {
+        if self.files.downloads.get(&id).is_some_and(|d| {
             d.phase == "requested" || d.phase == "transferring"
         }) {
             return Err(MoltError::BadPayload(
@@ -465,7 +465,7 @@ impl State {
         let me = self.member();
         if from == me {
             // my own share: no network involved — an honest local copy
-            let source = self.share_paths.get(&id).cloned().ok_or_else(|| {
+            let source = self.files.share_paths.get(&id).cloned().ok_or_else(|| {
                 MoltError::Engine(
                     "this node no longer knows the shared file's local path".into(),
                 )
@@ -533,7 +533,7 @@ impl State {
     /// Remember one of MY shares' local source path — runtime map + the
     /// per-workspace prefs sidecar (survives restarts; never wire/log).
     fn remember_share_path(&mut self, id: MessageId, path: &str) {
-        self.share_paths.insert(id, std::path::PathBuf::from(path));
+        self.files.share_paths.insert(id, std::path::PathBuf::from(path));
         if let Some(active) = &mut self.active {
             active
                 .prefs
@@ -545,7 +545,7 @@ impl State {
 
     /// Forget a share's source path (share removed).
     pub(crate) fn forget_share_path(&mut self, id: &MessageId) {
-        self.share_paths.remove(id);
+        self.files.share_paths.remove(id);
         if let Some(active) = &mut self.active {
             if active.prefs.shared_files.remove(&id.to_string()).is_some() {
                 active.handle.set_prefs(active.prefs.clone());
@@ -581,7 +581,7 @@ impl State {
                 error: reason.clone(),
             },
         };
-        self.downloads.insert(id, view);
+        self.files.downloads.insert(id, view);
         self.emit(Event::FileTransfer { id, phase });
     }
 

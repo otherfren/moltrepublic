@@ -2037,11 +2037,11 @@ impl State {
                     // the sharer's log-anchored sha256 ("" = legacy share,
                     // honestly unknown) — what a download must reproduce
                     checksum: f.checksum.clone(),
-                    download: self.downloads.get(&m.id).cloned(),
+                    download: self.files.downloads.get(&m.id).cloned(),
                     // §5.5: ONE derived word, no extra state — a live stamp
                     // outranks `available` (relay copies outlive a removal
                     // until retention prunes them)
-                    availability: if self.file_series.contains_key(&m.id) {
+                    availability: if self.files.series.contains_key(&m.id) {
                         "relay-held"
                     } else if f.available {
                         "sharer-only"

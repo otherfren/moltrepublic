@@ -548,6 +548,46 @@ pub(crate) struct PresenceState {
     pub(crate) clock_override: Option<u64>,
 }
 
+/// The file plane of the open workspace: this seat's own shares and their
+/// live download status, the sharer-side serve throttle, and the RELAY plane's
+/// series stamps, pending fetches, in-flight publishes and fetch tasks
+/// (`file_transfer_nostr.md`). Active-workspace scope: `reset_workspace_state`
+/// clears the relay-plane maps and aborts the fetches.
+pub(crate) struct FilePlane {
+    /// MY shares: message id → local source path (runtime mirror of
+    /// `prefs.shared_files`; NEVER wire, NEVER log — the paths would leak
+    /// this node's filesystem layout).
+    pub(crate) share_paths: HashMap<MessageId, std::path::PathBuf>,
+    /// Requester-side live download status per share (runtime-only; feeds
+    /// [`molt_core::UploadView::download`]).
+    pub(crate) downloads: HashMap<MessageId, molt_core::DownloadView>,
+    /// Sharer-side serve throttle: at most 2 concurrent uploads; further
+    /// requests queue on the semaphore instead of saturating the uplink.
+    pub(crate) serve_slots: std::sync::Arc<tokio::sync::Semaphore>,
+    /// RELAY file plane (`file_transfer_nostr.md`): the known publish stamp
+    /// per share — what a fetch names the series' h-tag window with.
+    /// Runtime-only; re-learned from `FileServed` announcements (a fetch
+    /// without a stamp asks via `FileWanted`).
+    pub(crate) series: HashMap<molt_core::MessageId, u64>,
+    /// Downloads waiting for a `FileServed` announcement: the fetch spawns
+    /// the moment the stamp arrives. Runtime-only.
+    pub(crate) pending:
+        HashMap<molt_core::MessageId, (crate::transfer::FetchTarget, crate::transfer::DestSpec)>,
+    /// Shares whose lazy series publish is in flight (sharer-side dedup —
+    /// a burst of `FileWanted`s must not publish the series N times).
+    pub(crate) serving: std::collections::HashSet<molt_core::MessageId>,
+    /// Abort handles of running relay-plane fetch tasks (FP3): each holds
+    /// a PRIVATE subscription no net teardown reaches, so the workspace
+    /// boundary ends them explicitly. Inbound-only readers — abort is safe
+    /// (the landing write runs inside `spawn_blocking`, which an abort
+    /// never interrupts mid-file).
+    pub(crate) fetches: Vec<tokio::task::AbortHandle>,
+    /// Sharer-side: when this node last ANNOUNCED each share's stamp — a
+    /// `FileWanted` right after an announce means the requester cannot use
+    /// that series (pruned/foreign epoch) and a fresh publish is due.
+    pub(crate) announced: HashMap<molt_core::MessageId, u64>,
+}
+
 pub(crate) struct State {
     pub(crate) config: GroupConfig,
     ev_tx: broadcast::Sender<Event>,
@@ -587,20 +627,11 @@ pub(crate) struct State {
     /// guaranteed), drained when the `Chat` lands. Bounded; runtime-only —
     /// never persisted, a restart loses parked refs (ephemerality is fine).
     pub(crate) parked: net::ParkedRefs,
-    /// MY shares: message id → local source path (runtime mirror of
-    /// `prefs.shared_files`; NEVER wire, NEVER log — the paths would leak
-    /// this node's filesystem layout).
-    pub(crate) share_paths: HashMap<MessageId, std::path::PathBuf>,
-    /// Requester-side live download status per share (runtime-only; feeds
-    /// [`molt_core::UploadView::download`]).
-    pub(crate) downloads: HashMap<MessageId, molt_core::DownloadView>,
+    pub(crate) files: FilePlane,
     /// The GUI's last published rendering claim (`gui_over_mcp.md`):
     /// written only by `Command::UiPublish` (the window's live mirror),
     /// read back over `read_ui_state`. `None` = no window published yet.
     pub(crate) ui_state: Option<molt_core::UiSnapshot>,
-    /// Sharer-side serve throttle: at most 2 concurrent uploads; further
-    /// requests queue on the semaphore instead of saturating the uplink.
-    pub(crate) file_serve_slots: std::sync::Arc<tokio::sync::Semaphore>,
     /// Applied transition log per gated surface: `(proposal id, payload)`
     /// pairs — one source for the payload and its origin, so the snapshot's
     /// parallel id track can never drift. `None` = origin unknown (restored
@@ -743,28 +774,6 @@ pub(crate) struct State {
     /// a withdraw has exactly one legitimate author), the decline park's
     /// sibling. Drained by `receive_proposed`.
     pub(crate) pending_withdrawals: HashMap<u64, (MemberId, u64)>,
-    /// RELAY file plane (`file_transfer_nostr.md`): the known publish stamp
-    /// per share — what a fetch names the series' h-tag window with.
-    /// Runtime-only; re-learned from `FileServed` announcements (a fetch
-    /// without a stamp asks via `FileWanted`).
-    pub(crate) file_series: HashMap<molt_core::MessageId, u64>,
-    /// Downloads waiting for a `FileServed` announcement: the fetch spawns
-    /// the moment the stamp arrives. Runtime-only.
-    pub(crate) file_pending:
-        HashMap<molt_core::MessageId, (crate::transfer::FetchTarget, crate::transfer::DestSpec)>,
-    /// Shares whose lazy series publish is in flight (sharer-side dedup —
-    /// a burst of `FileWanted`s must not publish the series N times).
-    pub(crate) file_serving: std::collections::HashSet<molt_core::MessageId>,
-    /// Abort handles of running relay-plane fetch tasks (FP3): each holds
-    /// a PRIVATE subscription no net teardown reaches, so the workspace
-    /// boundary ends them explicitly. Inbound-only readers — abort is safe
-    /// (the landing write runs inside `spawn_blocking`, which an abort
-    /// never interrupts mid-file).
-    pub(crate) file_fetches: Vec<tokio::task::AbortHandle>,
-    /// Sharer-side: when this node last ANNOUNCED each share's stamp — a
-    /// `FileWanted` right after an announce means the requester cannot use
-    /// that series (pruned/foreign epoch) and a fresh publish is due.
-    pub(crate) file_announced: HashMap<molt_core::MessageId, u64>,
     /// The exact [`molt_core::ChainChange`] each open proposal is voting on
     /// (keyed by proposal id) — so approvers sign, and the committer seals, the
     /// SAME bytes for any change kind (a gated `Applied` or a `Membership`
@@ -1020,10 +1029,17 @@ impl State {
             chat_pruned_counts: std::collections::BTreeMap::new(),
             compacted_at: 0,
             parked: net::ParkedRefs::new(),
-            share_paths: HashMap::new(),
-            downloads: HashMap::new(),
+            files: FilePlane {
+                share_paths: HashMap::new(),
+                downloads: HashMap::new(),
+                serve_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
+                series: HashMap::new(),
+                pending: HashMap::new(),
+                serving: std::collections::HashSet::new(),
+                fetches: Vec::new(),
+                announced: HashMap::new(),
+            },
             ui_state: None,
-            file_serve_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
             applied,
             proposals: HashMap::new(),
             next_id: 1,
@@ -1067,11 +1083,6 @@ impl State {
             chain_served_at: HashMap::new(),
             pending_declines: HashMap::new(),
             pending_withdrawals: HashMap::new(),
-            file_series: HashMap::new(),
-            file_pending: HashMap::new(),
-            file_serving: std::collections::HashSet::new(),
-            file_fetches: Vec::new(),
-            file_announced: HashMap::new(),
             proposal_changes: HashMap::new(),
             pending_blocks: std::collections::BTreeMap::new(),
             catchup_from: None,
@@ -1326,8 +1337,8 @@ impl State {
                 // the sharer's repeated-want rule re-publishes (review
                 // 2026-08-10: the stale stamp made every retry replay the
                 // same dead window)
-                self.file_series.remove(&id);
-                self.file_pending.remove(&id);
+                self.files.series.remove(&id);
+                self.files.pending.remove(&id);
                 self.set_download_phase(id, molt_core::TransferPhase::Failed { reason });
                 Ok(Reply::Ack)
             }
