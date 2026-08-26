@@ -514,15 +514,44 @@ The `threshold` schema text (`2..=members`), the boot line and the
 S3 / Tor arms, the MCP tool descriptions, `main.rs` and the rendered
 `config.toml` comments use `-` (style sweep 2026-08-26).
 
-### F11 [REFACTOR] `molt-ui/src/lib.rs` (14.4k lines) - OPEN
-`run_app` is one 2,150-line function; tests are 4,950 lines in the same
-file; five copies of the in-place `VecModel` diff; six copies of the
-"toggle then push_surfaces" tail. Proposed split: `app.rs` (+ a `Ctx`),
-`actions/{settings,workspace,relays,ritual,chat,org}.rs`, `mirror.rs`,
-`models.rs` (one generic `sync_model`), `images.rs`, `labels.rs`,
-`i18n.rs`, `surfaces.rs`, `channels.rs`, `alerts.rs`, `net_tor.rs`,
-`wiki_bridge.rs`, `src/tests/*`. Mechanical moves first, then the
-`Ctx` / `sync_model` collapses.
+### F11 [REFACTOR] `molt-ui/src/lib.rs` (14.4k lines) - FIXED
+Split by responsibility, `.slint`-free, no behaviour change (every
+callback registration and every test carried over one-to-one, 179 tests
+green after each move). `lib.rs` is the crate docs, the module list and
+the public re-exports (`run_app`, `LinkKind`, `link_kind`, the window
+glob). The map, with line counts:
+
+- `app.rs` (267) - `run_app`: window, wiring, mirror, event loop; `Ctx`
+  (`rt`, `wallet`, `weak`, `last_settings`, `chat_ui`) is what every
+  callback captures, with `issue` / `issue_then_toast` / `issue_draft` /
+  `refresh_surfaces` as its methods - the ~70 hand-cloned capture blocks
+  and the six "toggle UI state, then spawn push_surfaces" tails are gone.
+- `actions/{settings 328, workspace 172, relays 229, ritual 389, chat
+  237, org 498}.rs` - the callback wiring, one `wire(ui, ctx)` each.
+- `mirror.rs` (1525) - `push_session` / `apply_session` / `apply_runs` /
+  `apply_relays`, `push_surfaces` / `apply_surfaces`, the UI snapshot
+  publish, `spawn_mirror` (the event loop task).
+- `surfaces.rs` (1557) - the `Send` bundle + `gather_surfaces`, the
+  UI-local `ChatUiState`, proposal/chain/table rows, display titles.
+- `chat_log.rs` (375), `channels.rs` (309) - chat rows and the chat bus.
+- `settings.rs` (219) - the draft read/apply/dirty check and the
+  three-door save.
+- `models.rs` (77) - ONE `sync_model(rc, items, eq, set)` behind the
+  former `sync_rows` / `sync_vec_model` / `sync_wiki_blocks` copies
+  (`sync_rows` / `sync_strings` stay as wrappers); the in-place patch
+  semantics are unchanged - a `ModelRc` is never replaced once it is a
+  `VecModel`.
+- `images.rs` (241), `labels.rs` (453), `i18n.rs` (1427), `alerts.rs`
+  (180), `net_tor.rs` (178), `wiki_bridge.rs` (936).
+- `tests/{i18n,images,chat_log,channels,surfaces,labels,mirror,ritual,
+  net_tor,settings,relays}.rs` and `tests/gui/{snapshot,wiki,poke,layout,
+  recovery_backup,chat}.rs` (helpers in `gui/mod.rs`), 5.1k lines, behind
+  one `#[cfg(test)] mod tests;` with the prelude in `tests/mod.rs`.
+
+`pub(crate)` is kept to what crosses a module boundary. Not done, by
+choice: rustfmt over the moved code (it would bury the mechanical moves
+in a reformat diff) and a further split of `i18n.rs` (a lexicon table)
+or `mirror.rs` / `surfaces.rs` (each one responsibility).
 
 ## 9. MCP tool privileges (audit 2026-08-26)
 
