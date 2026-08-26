@@ -7,15 +7,13 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use molt_core::{Command, Surface};
-use molt_engine::WalletHandle;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
-use tokio::runtime::Handle;
 
 use crate::i18n::{error_toast, localize_wiki_err, Lexicon};
 use crate::models::{sync_vec_model, sync_wiki_blocks};
 use crate::settings::browse_start_dir;
 use crate::{
-    issue, patchview, wiki, AppWindow, DiffRow, DiffSeg, PatchNavRow, PatchView,
+    patchview, wiki, AppWindow, Ctx, DiffRow, DiffSeg, PatchNavRow, PatchView,
     Strings, WikiBlock, WikiChangeRow, WikiNavRow, WikiSpan, WikiState, WikiTabRow,
 };
 
@@ -777,19 +775,18 @@ pub(crate) fn wiki_export_toast(lang: i32, ex: &molt_core::ExportState) -> Optio
 /// asynchronously in `SessionView::wiki_export` (toasted from the mirror),
 /// so only an immediate refusal (no target, empty wiki, a proof without a
 /// chain) toasts from here.
-pub(crate) fn wire_wiki_export(ui: &AppWindow, rt: &Handle, wallet: &WalletHandle) {
+pub(crate) fn wire_wiki_export(ui: &AppWindow, cx: &Ctx) {
     {
-        let rt = rt.clone();
-        let weak = ui.as_weak();
+        let cx = cx.clone();
         ui.on_mem_export_pick(move || {
-            let weak = weak.clone();
+            let weak = cx.weak.clone();
             // only the property read runs on the UI thread; the stat in
             // browse_start_dir moves to a blocking task
             let draft = weak
                 .upgrade()
                 .map(|ui| ui.get_mem_export_dir().to_string())
                 .unwrap_or_default();
-            rt.spawn(async move {
+            cx.rt.spawn(async move {
                 let start_dir = tokio::task::spawn_blocking(move || browse_start_dir(&draft))
                     .await
                     .ok()
@@ -811,14 +808,9 @@ pub(crate) fn wire_wiki_export(ui: &AppWindow, rt: &Handle, wallet: &WalletHandl
         });
     }
     {
-        let rt = rt.clone();
-        let weak = ui.as_weak();
-        let wallet = wallet.clone();
+        let cx = cx.clone();
         ui.on_wiki_export(move |dest, proof| {
-            issue(
-                &rt,
-                &wallet,
-                &weak,
+            cx.issue(
                 Command::WikiExport {
                     dest: dest.to_string(),
                     proof,
@@ -836,16 +828,14 @@ pub(crate) fn wire_wiki_export(ui: &AppWindow, rt: &Handle, wallet: &WalletHandl
 /// the proposal carries the changes now.
 pub(crate) fn wire_wiki_vote(
     ui: &AppWindow,
-    rt: &Handle,
-    wallet: &WalletHandle,
+    cx: &Ctx,
     model: &Rc<RefCell<wiki::Wiki>>,
     last: &Rc<RefCell<Option<(wiki::DocId, bool)>>>,
 ) {
     let m = model.clone();
     let la = last.clone();
     let weak = ui.as_weak();
-    let rt = rt.clone();
-    let wh = wallet.clone();
+    let cx = cx.clone();
     ui.global::<WikiState>().on_cs_vote(move || {
         let Some(ui) = weak.upgrade() else { return };
         let Some(patch) = m.borrow().build_patch() else {
@@ -886,8 +876,8 @@ pub(crate) fn wire_wiki_vote(
         // task — clearing the changeset goes through the same WikiState
         // door the panel button uses, back on the UI thread
         let weak2 = ui.as_weak();
-        let wh = wh.clone();
-        rt.spawn(async move {
+        let wh = cx.wallet.clone();
+        cx.rt.spawn(async move {
             let outcome = wh
                 .execute(Command::Propose {
                     surface: Surface::Memory,

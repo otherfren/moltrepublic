@@ -291,24 +291,28 @@ pub fn run_app(
     // first-seen times) — UI-local by design, see [`ChatUiState`].
     let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
 
+    // what every callback captures: one clone per closure
+    let ctx = Ctx {
+        rt: rt.clone(),
+        wallet: wallet.clone(),
+        weak: ui.as_weak(),
+        last_settings: last_settings.clone(),
+        chat_ui: chat_ui.clone(),
+    };
+
     // The Multisig-Wiki mock's state machine + its WikiState bridge —
     // UI-local by design, EXCEPT the changeset vote: that one proposes on
     // the real gated Memory surface, so it is wired with the handles.
     let (wiki_model, wiki_last) = wire_wiki(&ui);
-    wire_wiki_vote(&ui, &rt, &wallet, &wiki_model, &wiki_last);
+    wire_wiki_vote(&ui, &ctx, &wiki_model, &wiki_last);
     wire_patch_view(&ui);
-    wire_wiki_export(&ui, &rt, &wallet);
+    wire_wiki_export(&ui, &ctx);
 
     // --- actions: each becomes a Command on the shared engine ---
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_navigate(move |screen| {
-            issue(
-                &rt,
-                &w,
-                &weak,
+            cx.issue(
                 Command::Navigate {
                     screen: to_screen(screen),
                 },
@@ -316,23 +320,16 @@ pub fn run_app(
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_set_language(move |idx| {
             let lang = if idx == 1 { "de" } else { "en" }.to_string();
-            issue(&rt, &w, &weak, Command::SetLanguage { lang });
+            cx.issue(Command::SetLanguage { lang });
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_set_fonts(move |app, nav, editor| {
-            issue(
-                &rt,
-                &w,
-                &weak,
+            cx.issue(
                 Command::SetFonts {
                     app: u16::try_from(app).unwrap_or(14),
                     nav: u16::try_from(nav).unwrap_or(13),
@@ -344,14 +341,9 @@ pub fn run_app(
     {
         // The in-app ThemeSwitch fires Theme.picked; route it to a command so the
         // theme change round-trips through the engine (co-equal with MCP).
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.global::<Theme>().on_picked(move |i| {
-            issue(
-                &rt,
-                &w,
-                &weak,
+            cx.issue(
                 Command::SetTheme {
                     theme: theme_name(i),
                 },
@@ -359,28 +351,22 @@ pub fn run_app(
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
-        let last = last_settings.clone();
+        let cx = ctx.clone();
         ui.on_save_settings(move || {
-            let Some(ui) = weak.upgrade() else {
+            let Some(ui) = cx.weak.upgrade() else {
                 return;
             };
-            let settings = read_settings_draft(&ui, &stored_settings(&last));
+            let settings = read_settings_draft(&ui, &stored_settings(&cx.last_settings));
             let wake = ui.get_cfg_poke_wake().to_string();
-            issue_draft(&rt, &w, &ui.as_weak(), wake, settings);
+            cx.issue_draft(wake, settings);
         });
     }
     {
         // Rotate the MCP token: mint a fresh one, drop it into the draft, and
         // persist the settings in one go (Slint cannot generate randomness).
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
-        let last = last_settings.clone();
+        let cx = ctx.clone();
         ui.on_rotate_token(move || {
-            let Some(ui) = weak.upgrade() else {
+            let Some(ui) = cx.weak.upgrade() else {
                 return;
             };
             // a failed mint leaves the OLD token in place: overwriting it
@@ -390,9 +376,9 @@ pub fn run_app(
                 return;
             };
             ui.set_cfg_mcp_token(token.into());
-            let settings = read_settings_draft(&ui, &stored_settings(&last));
+            let settings = read_settings_draft(&ui, &stored_settings(&cx.last_settings));
             let wake = ui.get_cfg_poke_wake().to_string();
-            issue_draft(&rt, &w, &ui.as_weak(), wake, settings);
+            cx.issue_draft(wake, settings);
         });
     }
     {
@@ -400,11 +386,9 @@ pub fn run_app(
         // so the user can validate endpoint + credentials before saving.
         // The engine runs a real SigV4-signed HEAD over the configured
         // dialer; the verdict streams back into `cfg-s3-test`.
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_test_s3(move |target| {
-            let Some(ui) = weak.upgrade() else {
+            let Some(ui) = cx.weak.upgrade() else {
                 return;
             };
             // one account for every bucket — only the bucket differs, and
@@ -414,10 +398,7 @@ pub fn run_app(
             } else {
                 (molt_core::S3Target::Workspaces, ui.get_cfg_s3_bucket())
             };
-            issue(
-                &rt,
-                &w,
-                &ui.as_weak(),
+            cx.issue(
                 Command::NetTestS3 {
                     target,
                     endpoint: ui.get_cfg_s3_endpoint().to_string(),
@@ -434,11 +415,9 @@ pub fn run_app(
         // "is Tor actually there?" has normally not saved yet. The engine
         // runs the two-rung ladder off-actor and streams the rung it reached
         // back into `cfg-tor-test`.
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_test_tor(move || {
-            let Some(ui) = weak.upgrade() else {
+            let Some(ui) = cx.weak.upgrade() else {
                 return;
             };
             let (network, mode, port) = tor_probe_args(
@@ -446,10 +425,7 @@ pub fn run_app(
                 ui.get_cfg_tor_mode_index(),
                 ui.get_cfg_tor_port(),
             );
-            issue(
-                &rt,
-                &w,
-                &ui.as_weak(),
+            cx.issue(
                 Command::NetTestTor {
                     network,
                     mode,
@@ -464,25 +440,21 @@ pub fn run_app(
         // the configured bucket). Fired on opening the backup tab and by
         // the explicit refresh button; the honest outcome streams back into
         // `cfg-bk-list` and the orphan rows.
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_list_backups(move || {
-            issue(&rt, &w, &weak, Command::NetListBackups);
+            cx.issue(Command::NetListBackups);
         });
     }
     {
         // S7: fetch a bucket-only workspace onto this device — sealed; the
         // outcome arrives on the session notice (backup-fetched/-failed)
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_backup_fetch(move |id| {
-            if let Some(ui) = weak.upgrade() {
+            if let Some(ui) = cx.weak.upgrade() {
                 ui.set_bk_fetched("".into());
                 ui.set_bk_fetch_error("".into());
             }
-            issue(&rt, &w, &weak, Command::BackupFetch { id: id.to_string() });
+            cx.issue(Command::BackupFetch { id: id.to_string() });
         });
     }
     {
@@ -490,11 +462,9 @@ pub fn run_app(
         // own parser so the message under the field is localized; the engine
         // re-validates and stays the gate. The draft is cleared only once the
         // engine actually accepted the entry.
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_relay_add(move |url| {
-            let Some(ui) = weak.upgrade() else {
+            let Some(ui) = cx.weak.upgrade() else {
                 return;
             };
             let pool: Vec<String> = ui
@@ -507,9 +477,9 @@ pub fn run_app(
                 return;
             }
             ui.set_relay_error("".into());
-            let w = w.clone();
+            let w = cx.wallet.clone();
             let weak = ui.as_weak();
-            rt.spawn(async move {
+            cx.rt.spawn(async move {
                 let res = w
                     .execute(Command::RelayAdd {
                         url: url.to_string(),
@@ -534,14 +504,9 @@ pub fn run_app(
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_relay_remove(move |url| {
-            issue(
-                &rt,
-                &w,
-                &weak,
+            cx.issue(
                 Command::RelayRemove {
                     url: url.to_string(),
                 },
@@ -549,14 +514,9 @@ pub fn run_app(
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_relay_move(move |url, up| {
-            issue(
-                &rt,
-                &w,
-                &weak,
+            cx.issue(
                 Command::RelayMove {
                     url: url.to_string(),
                     up,
@@ -567,14 +527,9 @@ pub fn run_app(
     {
         // `accept_clearnet` rides in from the GUI's warning dialog — the
         // engine enforces it either way, so an MCP agent faces the same gate.
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_relay_confirm(move |url, accept_clearnet| {
-            issue(
-                &rt,
-                &w,
-                &weak,
+            cx.issue(
                 Command::RelayConfirm {
                     url: url.to_string(),
                     accept_clearnet,
@@ -583,14 +538,9 @@ pub fn run_app(
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_relay_revoke(move |url| {
-            issue(
-                &rt,
-                &w,
-                &weak,
+            cx.issue(
                 Command::RelayRevoke {
                     url: url.to_string(),
                 },
@@ -600,25 +550,20 @@ pub fn run_app(
     {
         // Session-only clearnet activation: never persisted, so a restart
         // re-arms the gate by itself.
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_relay_clearnet_session(move |unlock| {
-            issue(&rt, &w, &weak, Command::RelayClearnetSession { unlock });
+            cx.issue(Command::RelayClearnetSession { unlock });
         });
     }
     {
         // Leaving settings is guarded: a clean draft navigates straight back;
         // a dirty one raises the unsaved-changes modal (save / discard / stay).
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
-        let last = last_settings.clone();
+        let cx = ctx.clone();
         ui.on_close_settings(move || {
-            let Some(ui) = weak.upgrade() else {
+            let Some(ui) = cx.weak.upgrade() else {
                 return;
             };
-            let dirty = last
+            let dirty = cx.last_settings
                 .lock()
                 .ok()
                 .and_then(|l| l.clone())
@@ -626,10 +571,7 @@ pub fn run_app(
             if dirty {
                 ui.set_confirm_leave_open(true);
             } else {
-                issue(
-                    &rt,
-                    &w,
-                    &ui.as_weak(),
+                cx.issue(
                     Command::Navigate {
                         screen: to_screen(ui.get_settings_return()),
                     },
@@ -641,20 +583,17 @@ pub fn run_app(
         // Modal "Save & continue": persist the draft, then leave — but only
         // when the engine accepted it (a validation error keeps the user on
         // the settings screen, with the error as a toast).
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
-        let last = last_settings.clone();
+        let cx = ctx.clone();
         ui.on_save_and_leave(move || {
-            let Some(ui) = weak.upgrade() else {
+            let Some(ui) = cx.weak.upgrade() else {
                 return;
             };
-            let settings = read_settings_draft(&ui, &stored_settings(&last));
+            let settings = read_settings_draft(&ui, &stored_settings(&cx.last_settings));
             let wake = ui.get_cfg_poke_wake().to_string();
             let screen = to_screen(ui.get_settings_return());
-            let w = w.clone();
+            let w = cx.wallet.clone();
             let weak = ui.as_weak();
-            rt.spawn(async move {
+            cx.rt.spawn(async move {
                 match save_draft(&w, wake, settings).await {
                     Ok(()) => {
                         let _ = w.execute(Command::Navigate { screen }).await;
@@ -673,21 +612,15 @@ pub fn run_app(
     {
         // Modal "Discard & continue": reset the draft to the live session
         // values, then leave.
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
-        let last = last_settings.clone();
+        let cx = ctx.clone();
         ui.on_discard_and_leave(move || {
-            let Some(ui) = weak.upgrade() else {
+            let Some(ui) = cx.weak.upgrade() else {
                 return;
             };
-            if let Some(s) = last.lock().ok().and_then(|l| l.clone()) {
+            if let Some(s) = cx.last_settings.lock().ok().and_then(|l| l.clone()) {
                 apply_settings_fields(&ui, &s);
             }
-            issue(
-                &rt,
-                &w,
-                &ui.as_weak(),
+            cx.issue(
                 Command::Navigate {
                     screen: to_screen(ui.get_settings_return()),
                 },
@@ -706,16 +639,15 @@ pub fn run_app(
     // Likewise, quitting from the settings screen with unsaved draft edits
     // raises the save/discard/stay modal instead of silently dropping them.
     {
-        let weak = ui.as_weak();
-        let last = last_settings.clone();
+        let cx = ctx.clone();
         ui.window().on_close_requested(move || {
-            if let Some(ui) = weak.upgrade() {
+            if let Some(ui) = cx.weak.upgrade() {
                 if ui.get_screen() == AppScreen::Main || ui.get_run_active() {
                     ui.set_confirm_quit_open(true);
                     return slint::CloseRequestResponse::KeepWindowShown;
                 }
                 let dirty = ui.get_screen() == AppScreen::Settings
-                    && last
+                    && cx.last_settings
                         .lock()
                         .ok()
                         .and_then(|l| l.clone())
@@ -729,14 +661,9 @@ pub fn run_app(
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_open_workspace(move |id| {
-            issue(
-                &rt,
-                &w,
-                &weak,
+            cx.issue(
                 Command::OpenWorkspace { id: id.to_string() },
             );
         });
@@ -744,14 +671,9 @@ pub fn run_app(
     // real at-rest sealing (S6) — same commands as the MCP
     // encrypt_/decrypt_workspace tools; the engine verifies the phrase
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_encrypt_workspace(move |id, phrase| {
-            issue(
-                &rt,
-                &w,
-                &weak,
+            cx.issue(
                 Command::EncryptWorkspace {
                     id: id.to_string(),
                     phrase: phrase.to_string(),
@@ -760,14 +682,9 @@ pub fn run_app(
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_decrypt_workspace(move |id, phrase| {
-            issue(
-                &rt,
-                &w,
-                &weak,
+            cx.issue(
                 Command::DecryptWorkspace {
                     id: id.to_string(),
                     phrase: phrase.to_string(),
@@ -776,35 +693,23 @@ pub fn run_app(
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_close_workspace(move || {
-            issue(&rt, &w, &weak, Command::CloseWorkspace);
+            cx.issue(Command::CloseWorkspace);
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_delete_workspace(move |id| {
-            issue(
-                &rt,
-                &w,
-                &weak,
+            cx.issue(
                 Command::DeleteWorkspace { id: id.to_string() },
             );
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_set_ws_backup(move |id, enabled| {
-            issue(
-                &rt,
-                &w,
-                &weak,
+            cx.issue(
                 Command::SetWorkspaceBackup {
                     id: id.to_string(),
                     enabled,
@@ -815,14 +720,9 @@ pub fn run_app(
     // the real manual export — same command as the MCP export_workspace
     // tool; the honest outcome streams back via the session's export state
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_export_workspace(move |id, dest, passphrase| {
-            issue(
-                &rt,
-                &w,
-                &weak,
+            cx.issue(
                 Command::ExportWorkspace {
                     id: id.to_string(),
                     dest: dest.to_string(),
@@ -862,54 +762,30 @@ pub fn run_app(
     // Rust, single writer) and push_surfaces re-applies it each time; the
     // engine's ReadMembers/ReadUploads stay the full projections for MCP.
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
-        let chat_ui = chat_ui.clone();
+        let cx = ctx.clone();
         ui.on_sort_members(move |column| {
-            if let Ok(mut st) = chat_ui.lock() {
+            if let Ok(mut st) = cx.chat_ui.lock() {
                 st.sort_members_by(column.as_str());
             }
-            let w = w.clone();
-            let weak = weak.clone();
-            let chat_ui = chat_ui.clone();
-            rt.spawn(async move {
-                push_surfaces(&w, &weak, &chat_ui).await;
-            });
+            cx.refresh_surfaces();
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
-        let chat_ui = chat_ui.clone();
+        let cx = ctx.clone();
         ui.on_sort_uploads(move |column| {
-            if let Ok(mut st) = chat_ui.lock() {
+            if let Ok(mut st) = cx.chat_ui.lock() {
                 st.sort_uploads_by(column.as_str());
             }
-            let w = w.clone();
-            let weak = weak.clone();
-            let chat_ui = chat_ui.clone();
-            rt.spawn(async move {
-                push_surfaces(&w, &weak, &chat_ui).await;
-            });
+            cx.refresh_surfaces();
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
-        let chat_ui = chat_ui.clone();
+        let cx = ctx.clone();
         ui.on_filter_uploads(move |needle| {
-            if let Ok(mut st) = chat_ui.lock() {
+            if let Ok(mut st) = cx.chat_ui.lock() {
                 st.set_uploads_filter(needle.to_string());
             }
-            let w = w.clone();
-            let weak = weak.clone();
-            let chat_ui = chat_ui.clone();
-            rt.spawn(async move {
-                push_surfaces(&w, &weak, &chat_ui).await;
-            });
+            cx.refresh_surfaces();
         });
     }
     {
@@ -917,20 +793,12 @@ pub fn run_app(
         // gated surfaces' applied log): step the UI-local page, then
         // re-push — the push clamps against the list's current length and
         // echoes "page x of y" back into the surface tab.
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
-        let chat_ui = chat_ui.clone();
+        let cx = ctx.clone();
         ui.on_page_list(move |surface, list, delta| {
-            if let Ok(mut st) = chat_ui.lock() {
+            if let Ok(mut st) = cx.chat_ui.lock() {
                 st.page_list_by(surface.as_str(), list.as_str(), delta);
             }
-            let w = w.clone();
-            let weak = weak.clone();
-            let chat_ui = chat_ui.clone();
-            rt.spawn(async move {
-                push_surfaces(&w, &weak, &chat_ui).await;
-            });
+            cx.refresh_surfaces();
         });
     }
     {
@@ -938,40 +806,24 @@ pub fn run_app(
         // pre-filtered to that member. The view switch is the same engine
         // command the nav issues; the filter itself stays single-writer in
         // ChatUiState and the push echoes it into the filter box.
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
-        let chat_ui = chat_ui.clone();
+        let cx = ctx.clone();
         ui.on_jump_member_uploads(move |member| {
-            if let Ok(mut st) = chat_ui.lock() {
+            if let Ok(mut st) = cx.chat_ui.lock() {
                 st.set_uploads_filter(member.to_string());
             }
-            issue(
-                &rt,
-                &w,
-                &weak,
+            cx.issue(
                 Command::SelectView {
                     surface: Surface::Organization,
                     view: "uploads".to_string(),
                 },
             );
-            let w = w.clone();
-            let weak = weak.clone();
-            let chat_ui = chat_ui.clone();
-            rt.spawn(async move {
-                push_surfaces(&w, &weak, &chat_ui).await;
-            });
+            cx.refresh_surfaces();
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_restore_start(move |way, target, secret| {
-            issue(
-                &rt,
-                &w,
-                &weak,
+            cx.issue(
                 Command::RestoreStart {
                     way: way.to_string(),
                     target: target.to_string(),
@@ -984,40 +836,31 @@ pub fn run_app(
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_restore_cancel(move || {
-            issue(&rt, &w, &weak, Command::RestoreCancel);
+            cx.issue(Command::RestoreCancel);
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_restore_finish(move || {
-            issue(&rt, &w, &weak, Command::RestoreFinish);
+            cx.issue(Command::RestoreFinish);
         });
     }
     {
-        let rt_adopt = rt.clone();
-        let w_adopt = wallet.clone();
-        let weak_adopt = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_adopt_invite_relays(move |link| {
             let Ok(inv) = molt_engine::FoundingInvite::parse(&link) else {
                 return;
             };
             for url in inv.handover.relays {
-                issue(&rt_adopt, &w_adopt, &weak_adopt, Command::RelayAdd { url: url.clone() });
+                cx.issue(Command::RelayAdd { url: url.clone() });
                 // an ONION relay needs no exposure decision — confirm it
                 // outright. A clearnet one keeps its acknowledgement: making
                 // the convenient path the less private one is exactly what
                 // this button must not do.
                 if molt_core::relay::relay_kind(&url) == molt_core::relay::RelayKind::Onion {
-                    issue(
-                        &rt_adopt,
-                        &w_adopt,
-                        &weak_adopt,
+                    cx.issue(
                         Command::RelayConfirm { url, accept_clearnet: false },
                     );
                 }
@@ -1025,10 +868,9 @@ pub fn run_app(
         });
     }
     {
-        let st_toggle = chat_ui.clone();
-        let weak_toggle = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_cw_toggle_relay(move |idx| {
-            let Ok(mut st) = st_toggle.lock() else { return };
+            let Ok(mut st) = cx.chat_ui.lock() else { return };
             let rows = st.create_pick_rows();
             let Some((url, _)) = rows.get(usize::try_from(idx).unwrap_or(0)) else {
                 return;
@@ -1039,7 +881,7 @@ pub fn run_app(
                 .into_iter()
                 .map(|(url, picked)| RelayPick { url: url.into(), picked })
                 .collect();
-            if let Some(ui) = weak_toggle.upgrade() {
+            if let Some(ui) = cx.weak.upgrade() {
                 ui.set_cw_relay_picks(slint::ModelRc::new(slint::VecModel::from(rows)));
             }
         });
@@ -1059,23 +901,17 @@ pub fn run_app(
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
-        let st_pick = chat_ui.clone();
+        let cx = ctx.clone();
         ui.on_create_start(move |name, member, threshold, members| {
             // the founder's pick: every dialable relay the wizard did not
             // deselect. Empty means "no explicit choice" to the engine, which
             // is exactly right when nothing was deselected.
-            let picked = st_pick
+            let picked = cx.chat_ui
                 .lock()
                 .ok()
                 .map(|st| st.create_pick())
                 .unwrap_or_default();
-            issue(
-                &rt,
-                &w,
-                &weak,
+            cx.issue(
                 Command::CreateStart {
                     name: name.to_string(),
                     member: member.to_string(),
@@ -1087,31 +923,22 @@ pub fn run_app(
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_create_cancel(move || {
-            issue(&rt, &w, &weak, Command::CreateCancel);
+            cx.issue(Command::CreateCancel);
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_create_finish(move || {
-            issue(&rt, &w, &weak, Command::CreateFinish);
+            cx.issue(Command::CreateFinish);
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         // the debounced wiki-draft persist (WP-D) — an opaque blob hop
         ui.on_wiki_draft_save(move |draft| {
-            issue(
-                &rt,
-                &w,
-                &weak,
+            cx.issue(
                 Command::WikiDraftSave {
                     draft: draft.to_string(),
                 },
@@ -1119,15 +946,13 @@ pub fn run_app(
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         // workspace entry: fetch the stored draft, hand it to the wiki
         // model over the WikiState bridge (the completion is Send-bound)
         ui.on_wiki_draft_load(move || {
-            let w = w.clone();
-            let weak2 = weak.clone();
-            rt.spawn(async move {
+            let w = cx.wallet.clone();
+            let weak2 = cx.weak.clone();
+            cx.rt.spawn(async move {
                 let draft = match w.execute(Command::WikiDraftLoad).await {
                     Ok(Reply::WikiDraft { draft }) => draft,
                     _ => String::new(),
@@ -1141,17 +966,12 @@ pub fn run_app(
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         // the ❻½ phrase-backup confirmation — founder or joiner, the
         // engine routes by the running ritual (a mismatch surfaces as an
         // honest error toast)
         ui.on_confirm_seed_backup(move |phrase| {
-            issue(
-                &rt,
-                &w,
-                &weak,
+            cx.issue(
                 Command::ConfirmSeedBackup {
                     phrase: phrase.to_string(),
                 },
@@ -1159,12 +979,11 @@ pub fn run_app(
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_create_propose(move |name, agenda| {
             // the wizard's checkbox selection; the engine canonicalizes
-            let features = weak
+            let features = cx
+                .weak
                 .upgrade()
                 .map(|ui| {
                     // quests/vault/wallet have no wizard checkbox (locked
@@ -1176,10 +995,7 @@ pub fn run_app(
                     .collect()
                 })
                 .unwrap_or_default();
-            issue(
-                &rt,
-                &w,
-                &weak,
+            cx.issue(
                 Command::CreatePropose {
                     name: name.to_string(),
                     agenda: agenda.to_string(),
@@ -1189,22 +1005,20 @@ pub fn run_app(
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_join_start(move |invite, member| {
             // not the plain issue(): a REFUSED start (bad link, no relay,
             // already running) must re-arm the optimistic jw-starting latch,
             // or the join button stays dead with nothing running. An accepted
             // start needs no reset here — the engine session flips jw-step
             // and the form is gone.
-            let w = w.clone();
-            let weak = weak.clone();
+            let w = cx.wallet.clone();
+            let weak = cx.weak.clone();
             let cmd = Command::JoinStart {
                 invite: invite.to_string(),
                 member: member.to_string(),
             };
-            rt.spawn(async move {
+            cx.rt.spawn(async move {
                 if let Err(e) = w.execute(cmd).await {
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade() {
@@ -1217,30 +1031,23 @@ pub fn run_app(
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_join_cancel(move || {
             // leaving the run re-arms the start latch: the form comes back
             // with a clickable button
-            if let Some(ui) = weak.upgrade() {
+            if let Some(ui) = cx.weak.upgrade() {
                 ui.set_jw_starting(false);
             }
-            issue(&rt, &w, &weak, Command::JoinCancel);
+            cx.issue(Command::JoinCancel);
         });
     }
     // recovery (total-loss rejoin): the coordinator mints a link for an
     // anchored seat; the returning member rejoins from link + phrase. Both
     // are human decisions — tools on both surfaces, co-equal with MCP.
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_recover_invite(move |member| {
-            issue(
-                &rt,
-                &w,
-                &weak,
+            cx.issue(
                 Command::RecoverInviteStart {
                     member: member.to_string(),
                 },
@@ -1248,14 +1055,9 @@ pub fn run_app(
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_recover_start(move |link, phrase| {
-            issue(
-                &rt,
-                &w,
-                &weak,
+            cx.issue(
                 Command::RecoverStart {
                     link: link.to_string(),
                     phrase: phrase.to_string(),
@@ -1264,52 +1066,39 @@ pub fn run_app(
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_join_confirm_charter(move || {
-            issue(&rt, &w, &weak, Command::JoinConfirmCharter);
+            cx.issue(Command::JoinConfirmCharter);
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_join_decline_charter(move || {
-            issue(&rt, &w, &weak, Command::JoinDeclineCharter);
+            cx.issue(Command::JoinDeclineCharter);
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_join_finish(move || {
-            issue(&rt, &w, &weak, Command::JoinFinish);
+            cx.issue(Command::JoinFinish);
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_select_surface(move |key| {
             let Some(surface) = Surface::parse(&key) else {
                 return;
             };
-            issue(&rt, &w, &weak, Command::SelectSurface { surface });
+            cx.issue(Command::SelectSurface { surface });
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_select_view(move |key, view| {
             let Some(surface) = Surface::parse(&key) else {
                 return;
             };
-            issue(
-                &rt,
-                &w,
-                &weak,
+            cx.issue(
                 Command::SelectView {
                     surface,
                     view: view.to_string(),
@@ -1318,10 +1107,7 @@ pub fn run_app(
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
-        let chat_ui = chat_ui.clone();
+        let cx = ctx.clone();
         ui.on_send_chat(move |body, quote| {
             let body = body.trim().to_string();
             if body.is_empty() {
@@ -1330,12 +1116,12 @@ pub fn run_app(
             // "" = no quote; a legacy row without an id can't be quoted
             let quote = quote.parse::<MessageId>().ok();
             // compose files into the channel this window has selected
-            let channel = chat_ui
+            let channel = cx.chat_ui
                 .lock()
                 .ok()
                 .map(|s| s.selected.clone())
                 .unwrap_or_default();
-            issue(&rt, &w, &weak, Command::Chat { body, quote, channel });
+            cx.issue(Command::Chat { body, quote, channel });
         });
     }
     {
@@ -1344,10 +1130,7 @@ pub fn run_app(
         // so co-equality holds — an MCP agent passes its own filter and
         // neither operator can hijack the other's view. The canonical key
         // is echoed back into `selected-channel` (single writer: Rust).
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
-        let chat_ui = chat_ui.clone();
+        let cx = ctx.clone();
         ui.on_select_channel(move |key| {
             let Some(ch) = parse_channel_key(&key) else {
                 return;
@@ -1357,7 +1140,7 @@ pub fn run_app(
             let ch = match ch.normalized() {
                 Ok(ch) => ch,
                 Err(e) => {
-                    if let Some(ui) = weak.upgrade() {
+                    if let Some(ui) = cx.weak.upgrade() {
                         // a normalization refusal is a plain String — wrap
                         // it as the payload error it is, so it localizes
                         ui.invoke_show_toast_error(error_toast(
@@ -1368,7 +1151,7 @@ pub fn run_app(
                     return;
                 }
             };
-            if let Some(ui) = weak.upgrade() {
+            if let Some(ui) = cx.weak.upgrade() {
                 ui.set_selected_channel(channel_key(&ch).as_str().into());
                 ui.set_selected_channel_votable(matches!(ch, ChannelRef::Patch { .. }));
                 // instant banner feedback — for a fresh (still empty) topic
@@ -1380,7 +1163,7 @@ pub fn run_app(
                 // …and the read-only flag from the proposal cache, so the
                 // compose row collapses on the click, not a push later (the
                 // push then re-decides from the engine's annotation)
-                let (closed, org) = chat_ui
+                let (closed, org) = cx.chat_ui
                     .lock()
                     .map(|st| {
                         (
@@ -1394,18 +1177,13 @@ pub fn run_app(
                 // section the click came from while the push is in flight
                 ui.set_selected_channel_org(org);
             }
-            if let Ok(mut st) = chat_ui.lock() {
+            if let Ok(mut st) = cx.chat_ui.lock() {
                 // bumps the push generation: every in-flight push read
                 // for the previous selection is stale from this moment
                 st.select(ch);
             }
             // re-read through the engine filter (the point of the bus)
-            let w = w.clone();
-            let weak = weak.clone();
-            let chat_ui = chat_ui.clone();
-            rt.spawn(async move {
-                push_surfaces(&w, &weak, &chat_ui).await;
-            });
+            cx.refresh_surfaces();
         });
     }
     {
@@ -1413,44 +1191,36 @@ pub fn run_app(
         // channel names the proposal, the proposal cache names its hosting
         // surface — the jump reuses the sidebar's own SelectView /
         // SelectSurface commands (no new engine verb).
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
-        let chat_ui = chat_ui.clone();
+        let cx = ctx.clone();
         ui.on_jump_to_vote(move || {
-            let Some(cmd) = chat_ui
+            let Some(cmd) = cx.chat_ui
                 .lock()
                 .ok()
                 .and_then(|st| vote_jump_command(&st.selected, &st.proposals))
             else {
                 return;
             };
-            issue(&rt, &w, &weak, cmd);
+            cx.issue(cmd);
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_delete_chat(move |id| {
             let Ok(id) = id.parse::<MessageId>() else {
                 return; // legacy row without an id — nothing to address
             };
-            issue(&rt, &w, &weak, Command::DeleteChat { id });
+            cx.issue(Command::DeleteChat { id });
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
-        let chat_ui = chat_ui.clone();
+        let cx = ctx.clone();
         ui.on_share_pick(move || {
-            let w = w.clone();
-            let weak = weak.clone();
+            let w = cx.wallet.clone();
+            let weak = cx.weak.clone();
             // a share files into the channel this window has selected —
             // captured at click time (the view the sharer was looking at),
             // same source as compose (concept Q8)
-            let channel = chat_ui
+            let channel = cx.chat_ui
                 .lock()
                 .ok()
                 .map(|s| s.selected.clone())
@@ -1458,7 +1228,7 @@ pub fn run_app(
             // the native picker runs async (XDG portal) off the UI thread;
             // the engine derives the metadata + real sha256 from this path
             // and posts the share when hashing completes
-            rt.spawn(async move {
+            cx.rt.spawn(async move {
                 let Some(file) = rfd::AsyncFileDialog::new().pick_file().await else {
                     return; // cancelled
                 };
@@ -1477,19 +1247,17 @@ pub fn run_app(
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_download_file(move |id| {
             let Ok(id) = id.parse::<MessageId>() else {
                 return; // legacy row without an id — nothing to address
             };
-            let w = w.clone();
-            let weak = weak.clone();
+            let w = cx.wallet.clone();
+            let weak = cx.weak.clone();
             // save-dialog per download (product decision): the user picks
             // the destination, then the engine fetches peer-to-peer;
             // completion/failure surfaces via Event::FileTransfer
-            rt.spawn(async move {
+            cx.rt.spawn(async move {
                 let Some(dest) = rfd::AsyncFileDialog::new().save_file().await else {
                     return; // cancelled
                 };
@@ -1508,32 +1276,26 @@ pub fn run_app(
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_remove_file(move |id| {
             let Ok(id) = id.parse::<MessageId>() else {
                 return; // legacy row without an id — nothing to address
             };
-            let msg = weak
+            let msg = cx
+                .weak
                 .upgrade()
                 .map(|ui| ui.global::<Strings>().get_toast_file_removed().to_string())
                 .unwrap_or_default();
-            issue_then_toast(&rt, &w, &weak, Command::RemoveFile { id }, msg);
+            cx.issue_then_toast(Command::RemoveFile { id }, msg);
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_toggle_reaction(move |id, emoji| {
             let Ok(id) = id.parse::<MessageId>() else {
                 return; // legacy row without an id — nothing to address
             };
-            issue(
-                &rt,
-                &w,
-                &weak,
+            cx.issue(
                 Command::ReactChat {
                     id,
                     emoji: emoji.to_string(),
@@ -1542,9 +1304,7 @@ pub fn run_app(
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_propose(move |key, title| {
             let title = title.trim().to_string();
             if title.is_empty() {
@@ -1557,7 +1317,7 @@ pub fn run_app(
                 return;
             }
             let payload = serde_json::json!({ "op": default_op(surface), "title": title });
-            issue(&rt, &w, &weak, Command::Propose { surface, payload });
+            cx.issue(Command::Propose { surface, payload });
         });
     }
     // R6 pool-edit modal: the draft is a row table. Seed copies the
@@ -1618,15 +1378,13 @@ pub fn run_app(
     // (sign-what-you-see: members vote on the actual image; the engine
     // refuses anything over its cap with an honest error toast).
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_org_propose(move |op, value| {
             if op.as_str() == "set_image" {
-                let w = w.clone();
-                let weak = weak.clone();
+                let w = cx.wallet.clone();
+                let weak = cx.weak.clone();
                 let path = value.to_string();
-                rt.spawn(async move {
+                cx.rt.spawn(async move {
                     let read = tokio::task::spawn_blocking({
                         let path = path.clone();
                         move || std::fs::read(&path)
@@ -1710,14 +1468,12 @@ pub fn run_app(
                 "op": op.as_str(),
                 "value": value.as_str(),
             });
-            let msg = weak
+            let msg = cx
+                .weak
                 .upgrade()
                 .map(|ui| ui.global::<Strings>().get_toast_proposed().to_string())
                 .unwrap_or_default();
-            issue_then_toast(
-                &rt,
-                &w,
-                &weak,
+            cx.issue_then_toast(
                 Command::Propose {
                     surface: Surface::Organization,
                     payload,
@@ -1732,9 +1488,7 @@ pub fn run_app(
     // everything else is a plain payload. The engine refuses a profile op
     // proposed for another seat, so `member` is always the own one.
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_member_propose(move |op, member, value| {
             if op.as_str() != "set_member_image" {
                 // a removal carries no value at all - the payload is what
@@ -1748,14 +1502,12 @@ pub fn run_app(
                         "value": value.as_str(),
                     })
                 };
-                let msg = weak
+                let msg = cx
+                    .weak
                     .upgrade()
                     .map(|ui| ui.global::<Strings>().get_toast_proposed().to_string())
                     .unwrap_or_default();
-                issue_then_toast(
-                    &rt,
-                    &w,
-                    &weak,
+                cx.issue_then_toast(
                     Command::Propose {
                         surface: Surface::Organization,
                         payload,
@@ -1764,15 +1516,16 @@ pub fn run_app(
                 );
                 return;
             }
-            let budget = weak
+            let budget = cx
+                .weak
                 .upgrade()
                 .map(|ui| usize::try_from(ui.get_mp_img_budget()).unwrap_or(0))
                 .unwrap_or(0);
-            let w = w.clone();
-            let weak = weak.clone();
+            let w = cx.wallet.clone();
+            let weak = cx.weak.clone();
             let member = member.to_string();
             let path = value.to_string();
-            rt.spawn(async move {
+            cx.rt.spawn(async move {
                 let read = tokio::task::spawn_blocking({
                     let path = path.clone();
                     move || std::fs::read(&path)
@@ -1848,11 +1601,10 @@ pub fn run_app(
     }
     // pick the own seat's picture — same picker set as the republic image
     {
-        let rt = rt.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_mp_img_pick(move || {
-            let weak = weak.clone();
-            rt.spawn(async move {
+            let weak = cx.weak.clone();
+            cx.rt.spawn(async move {
                 let picker = rfd::AsyncFileDialog::new()
                     // no "svg": the engine refuses it, and a square check
                     // on a vector is meaningless
@@ -1879,11 +1631,10 @@ pub fn run_app(
     // portal, like the chat share picker) — only the path lands in the
     // draft; proposing it ships the file REFERENCE, never bytes
     {
-        let rt = rt.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_org_logo_pick(move || {
-            let weak = weak.clone();
-            rt.spawn(async move {
+            let weak = cx.weak.clone();
+            cx.rt.spawn(async move {
                 let picker = rfd::AsyncFileDialog::new()
                     // no "svg" (L1, 2026-08-16): the engine refuses SVG proposals —
                     // offering a format the vote will bounce is a trap
@@ -1904,10 +1655,9 @@ pub fn run_app(
     // portal, like the logo picker) — the picked path lands in the modal's
     // draft field, which stays hand-editable as a fallback
     {
-        let rt = rt.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_ws_dir_pick(move || {
-            let weak = weak.clone();
+            let weak = cx.weak.clone();
             // only the property read happens on the UI thread; the stat in
             // browse_start_dir moves to a blocking task (a draft pointing at
             // a hung mount must not freeze the event loop)
@@ -1915,7 +1665,7 @@ pub fn run_app(
                 .upgrade()
                 .map(|ui| ui.get_ws_dir_draft().to_string())
                 .unwrap_or_default();
-            rt.spawn(async move {
+            cx.rt.spawn(async move {
                 let start_dir = tokio::task::spawn_blocking(move || browse_start_dir(&draft))
                     .await
                     .ok()
@@ -1966,11 +1716,10 @@ pub fn run_app(
     // save dialog points; the suggested name is the proposal's file-name
     // value. Local bytes → the write happens right here, no engine hop.
     {
-        let rt = rt.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_save_proposal_image(move |img_b64, name| {
             use base64::Engine as _;
-            let Some(ui) = weak.upgrade() else {
+            let Some(ui) = cx.weak.upgrade() else {
                 return;
             };
             // an empty/absent payload decodes to zero bytes — that is a
@@ -1985,8 +1734,8 @@ pub fn run_app(
                 }
             };
             let saved_prefix = ui.global::<Strings>().get_toast_dl_done();
-            let weak = weak.clone();
-            rt.spawn(async move {
+            let weak = cx.weak.clone();
+            cx.rt.spawn(async move {
                 let Some(dest) = rfd::AsyncFileDialog::new()
                     .set_file_name(name.as_str())
                     .save_file()
@@ -2018,14 +1767,9 @@ pub fn run_app(
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_approve(move |id| {
-            issue(
-                &rt,
-                &w,
-                &weak,
+            cx.issue(
                 Command::Approve {
                     proposal: ProposalId(id as u64),
                 },
@@ -2033,14 +1777,9 @@ pub fn run_app(
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_decline(move |id| {
-            issue(
-                &rt,
-                &w,
-                &weak,
+            cx.issue(
                 Command::Decline {
                     proposal: ProposalId(id as u64),
                 },
@@ -2048,16 +1787,11 @@ pub fn run_app(
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         // right-click on a member: the directed nudge (co-equal MCP tool: poke).
         // One door for all nine name sites — the Poke global (theme.slint).
         ui.global::<Poke>().on_go(move |member| {
-            issue(
-                &rt,
-                &w,
-                &weak,
+            cx.issue(
                 Command::Poke {
                     member: member.to_string(),
                 },
@@ -2065,25 +1799,18 @@ pub fn run_app(
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         // closing the recovery-link dialog acknowledges the notice that
         // opened it — otherwise the one-shot link re-opens it on the next
         // fresh window (co-equal MCP tool: clear_notice)
         ui.on_clear_notice(move || {
-            issue(&rt, &w, &weak, Command::ClearNotice);
+            cx.issue(Command::ClearNotice);
         });
     }
     {
-        let rt = rt.clone();
-        let w = wallet.clone();
-        let weak = ui.as_weak();
+        let cx = ctx.clone();
         ui.on_withdraw(move |id| {
-            issue(
-                &rt,
-                &w,
-                &weak,
+            cx.issue(
                 Command::Withdraw {
                     proposal: ProposalId(id as u64),
                 },
@@ -2093,10 +1820,13 @@ pub fn run_app(
 
     // --- live-mirror: re-read and re-render on every engine change ---
     {
-        let weak = ui.as_weak();
-        let w = wallet.clone();
-        let last_settings = last_settings.clone();
-        let chat_ui = chat_ui.clone();
+        let Ctx {
+            wallet: w,
+            weak,
+            last_settings,
+            chat_ui,
+            ..
+        } = ctx.clone();
         rt.spawn(async move {
             let mut rx = w.subscribe();
             push_session(&w, &weak, &last_settings, SessionScope::Full, &chat_ui).await;
@@ -2232,6 +1962,46 @@ pub fn run_app(
     }
 
     ui.run()
+}
+
+/// What every callback captures: the runtime, the shared engine handle,
+/// the window, and the two UI-local states the mirror task shares with the
+/// callbacks. One clone per closure; the methods are the three ways a
+/// click reaches the engine plus the surfaces re-read a view-local change
+/// needs (sort, filter, page, channel - state the engine never sees).
+#[derive(Clone)]
+pub(crate) struct Ctx {
+    pub(crate) rt: Handle,
+    pub(crate) wallet: WalletHandle,
+    pub(crate) weak: slint::Weak<AppWindow>,
+    pub(crate) last_settings: Arc<Mutex<Option<SessionSettings>>>,
+    pub(crate) chat_ui: Arc<Mutex<ChatUiState>>,
+}
+
+impl Ctx {
+    /// Fire a command; an engine error surfaces as a toast ([`issue`]).
+    pub(crate) fn issue(&self, cmd: Command) {
+        issue(&self.rt, &self.wallet, &self.weak, cmd);
+    }
+
+    /// [`issue_then_toast`]: the success toast fires only on success.
+    pub(crate) fn issue_then_toast(&self, cmd: Command, toast: String) {
+        issue_then_toast(&self.rt, &self.wallet, &self.weak, cmd, toast);
+    }
+
+    /// [`issue_draft`]: the settings draft through its three doors.
+    pub(crate) fn issue_draft(&self, wake: String, settings: SessionSettings) {
+        issue_draft(&self.rt, &self.wallet, &self.weak, wake, settings);
+    }
+
+    /// Re-read and re-push the surfaces after a UI-local change the engine
+    /// does not announce (a sort, a filter, a page, the channel selection).
+    pub(crate) fn refresh_surfaces(&self) {
+        let cx = self.clone();
+        self.rt.spawn(async move {
+            push_surfaces(&cx.wallet, &cx.weak, &cx.chat_ui).await;
+        });
+    }
 }
 
 /// [`issue`], plus a success toast that only fires if the command SUCCEEDED.
@@ -7241,7 +7011,14 @@ mod gui_tests {
         });
 
         let ui = AppWindow::new().expect("headless window");
-        wire_wiki_export(&ui, rt.handle(), &w);
+        let cx = Ctx {
+            rt: rt.handle().clone(),
+            wallet: w.clone(),
+            weak: ui.as_weak(),
+            last_settings: Arc::new(Mutex::new(None)),
+            chat_ui: Arc::new(Mutex::new(ChatUiState::default())),
+        };
+        wire_wiki_export(&ui, &cx);
 
         // --- the proof flag: no chain here, so the engine must refuse
         let refused = tmp.path().join("refused");
