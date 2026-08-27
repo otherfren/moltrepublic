@@ -362,7 +362,7 @@ fn spawn_actor(
     state.demo_mesh = seams.demo_mesh;
     state.reopen_seam = seams.reopen_seam;
     // the presence ticker lives as long as the actor: it re-ages the member
-    // pills from their real last-seen stamps (net.rs::cmd_net_presence_tick)
+    // pills from their real last-seen stamps (net/presence.rs::cmd_net_presence_tick)
     state.spawn_ticker_every(Command::NetPresenceTick, PRESENCE_TICK_MS);
     // the delivery-guarantee beat: due ACKs + the debounced accept-window /
     // live-ratchet persists — fast, because the 30 s presence tick alone
@@ -1418,7 +1418,7 @@ impl State {
             Command::UiAction { action } => self.cmd_ui_action(action),
             Command::ReadChain => self.cmd_read_chain(),
 
-            // net.rs (engine-internal, sent by the node's own supervisor)
+            // net/ (engine-internal, sent by the node's own supervisor)
             Command::NetDelivered {
                 from,
                 envelope,

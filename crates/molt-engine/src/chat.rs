@@ -15,7 +15,7 @@
 //! [`State::record`] (apply + persist). Nothing here mutates `self.chat`
 //! directly. Fan-out to other members is not chat's business either:
 //! `record` publishes to the transport feed and the outbox does the rest
-//! (`net.rs`) — on a session-only context that means the loopback demo
+//! (`net/`) — on a session-only context that means the loopback demo
 //! mesh, whose peers answer through their own engines.
 
 use molt_core::{
@@ -88,7 +88,7 @@ impl State {
     /// patch ids stay writable (chat-bus Q4: a ref may arrive before — or
     /// forever without — its referent, and must never error). Enforced on
     /// the LOCAL send paths only (`cmd_chat`, `cmd_share_file`); the wire
-    /// receive path (`net.rs`) stays permissive so logs converge even when
+    /// receive path (`net/ingest.rs`) stays permissive so logs converge even when
     /// a peer's message was in flight while the vote decided.
     pub(crate) fn ensure_channel_writable(&self, channel: &ChannelRef) -> Result<(), MoltError> {
         if let ChannelRef::Patch { id } = channel {
@@ -698,7 +698,7 @@ impl State {
     // ---- the one place each chat verb's event shape exists ---------------
     //
     // Local commands (validated above) and link-authenticated wire arrivals
-    // (validated in `net.rs`) both come through these: build the
+    // (validated in `net/ingest.rs`) both come through these: build the
     // WorkspaceEvent, record it (apply + persist + outbox) and emit the
     // operator event. `by` is the acting identity the CALLER established —
     // the local member here, the link identity on the wire.
@@ -781,7 +781,7 @@ impl State {
 
     /// Resolve a message id through the id→position map: the position (as
     /// the legacy `index` new events still record for older readers) plus
-    /// the message itself. Shared with the wire arms in `net.rs` — one
+    /// the message itself. Shared with the wire arms in `net/ingest.rs` — one
     /// lookup, one legacy-index derivation.
     pub(crate) fn chat_by_id(&self, id: &MessageId) -> Result<(u64, &ChatMessage), MoltError> {
         let pos = *self
