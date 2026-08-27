@@ -142,6 +142,38 @@ impl DestSpec {
 
 /// The final path a resolved destination writes to: the exact file when the
 /// caller named one (overwrite), otherwise the first free collision variant.
+/// Where a fetch lands: the resolved destination with its directory
+/// created, and the `.part` path the bytes go into before the rename.
+struct Landing {
+    resolved: ResolvedDest,
+    part: PathBuf,
+}
+
+/// Resolve `dest` for `name`, create its directory and name the `.part`
+/// file - the first half of every landing (queue plane, relay plane,
+/// local copy).
+fn prepare_landing(dest: &DestSpec, name: &str, id_hex: &str) -> Result<Landing, String> {
+    let resolved = dest.resolve(name);
+    std::fs::create_dir_all(&resolved.dir)
+        .map_err(|e| format!("creating {}: {e}", resolved.dir.display()))?;
+    let part = resolved.dir.join(format!(".molt-download-{id_hex}.part"));
+    Ok(Landing { resolved, part })
+}
+
+/// Move a fully written `.part` into place - the last half of every
+/// landing. An explicit target overwrites (the caller named that exact
+/// file; the GUI's save dialog already confirmed the replace); a
+/// directory or the default location dodges collisions instead. A failed
+/// rename removes the `.part`.
+fn finish_landing(landing: &Landing) -> Result<PathBuf, String> {
+    let final_path = final_path(&landing.resolved);
+    std::fs::rename(&landing.part, &final_path).map_err(|e| {
+        let _ = std::fs::remove_file(&landing.part);
+        format!("moving into place: {e}")
+    })?;
+    Ok(final_path)
+}
+
 fn final_path(resolved: &ResolvedDest) -> PathBuf {
     if resolved.exact {
         resolved.dir.join(&resolved.name)
@@ -474,10 +506,8 @@ where
         return Err("the fetch request could not be recorded".to_string());
     }
 
-    let resolved = dest.resolve(&target.name);
-    std::fs::create_dir_all(&resolved.dir)
-        .map_err(|e| format!("creating {}: {e}", resolved.dir.display()))?;
-    let part_path = resolved.dir.join(format!(".molt-download-{}.part", target.id_hex));
+    let landing = prepare_landing(dest, &target.name, &target.id_hex)?;
+    let part_path: &Path = &landing.part;
     let cleanup = |part: &Path| {
         let _ = std::fs::remove_file(part);
     };
@@ -487,7 +517,7 @@ where
     let mut ack_target: Option<(SndQueueAddr, WrapKey)> = None;
 
     let result = async {
-        let mut part = std::fs::File::create(&part_path)
+        let mut part = std::fs::File::create(part_path)
             .map_err(|e| format!("creating {}: {e}", part_path.display()))?;
         let mut reasm = molt_net::Reassembler::new();
         let mut hasher = Sha256::new();
@@ -650,18 +680,12 @@ where
         part.sync_all()
             .map_err(|e| format!("syncing {}: {e}", part_path.display()))?;
         drop(part);
-        // an explicit target overwrites (the caller named that exact file —
-        // the GUI's save dialog already confirmed the replace); a directory
-        // or the default location dodges collisions instead
-        let final_path = final_path(&resolved);
-        std::fs::rename(&part_path, &final_path)
-            .map_err(|e| format!("moving into place: {e}"))?;
-        Ok(final_path)
+        finish_landing(&landing)
     }
     .await;
 
     if result.is_err() {
-        cleanup(&part_path);
+        cleanup(part_path);
         // tell the sharer to stop streaming instead of blocking on acks that
         // will never come — best-effort, the sharer also has its own timeout
         if let Some((ack_snd, ack_wrap)) = &ack_target {
@@ -944,24 +968,16 @@ pub(crate) fn spawn_nostr_fetch(
             let id_hex = target.id_hex.clone();
             let name = target.name.clone();
             tokio::task::spawn_blocking(move || -> Result<String, String> {
-                let resolved = dest.resolve(&name);
-                std::fs::create_dir_all(&resolved.dir)
-                    .map_err(|e| format!("creating {}: {e}", resolved.dir.display()))?;
-                let part = resolved.dir.join(format!(".molt-download-{id_hex}.part"));
-                if let Err(e) = std::fs::write(&part, &bytes) {
-                    let _ = std::fs::remove_file(&part);
+                let landing = prepare_landing(&dest, &name, &id_hex)?;
+                if let Err(e) = std::fs::write(&landing.part, &bytes) {
+                    let _ = std::fs::remove_file(&landing.part);
                     return Err(format!("writing: {e}"));
                 }
                 // durable before the rename, like the queue-plane landing
-                if let Ok(f) = std::fs::File::open(&part) {
+                if let Ok(f) = std::fs::File::open(&landing.part) {
                     let _ = f.sync_all();
                 }
-                let final_path = final_path(&resolved);
-                std::fs::rename(&part, &final_path).map_err(|e| {
-                    let _ = std::fs::remove_file(&part);
-                    format!("moving into place: {e}")
-                })?;
-                Ok(final_path.display().to_string())
+                Ok(finish_landing(&landing)?.display().to_string())
             })
             .await
             .unwrap_or_else(|e| Err(format!("write task failed: {e}")))
@@ -1045,16 +1061,14 @@ pub(crate) fn spawn_local_copy(
 ) {
     tokio::spawn(async move {
         let result = tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
-            let resolved = dest.resolve(&target.name);
-            std::fs::create_dir_all(&resolved.dir)
-                .map_err(|e| format!("creating {}: {e}", resolved.dir.display()))?;
-            let part = resolved.dir.join(format!(".molt-download-{}.part", target.id_hex));
+            let landing = prepare_landing(&dest, &target.name, &target.id_hex)?;
+            let part: &Path = &landing.part;
             // copy first, then verify the bytes that ACTUALLY landed (the
             // source may be rewritten between the hash and the copy) — the
             // .part is removed on any failure, like the network path
             let copy_and_verify = || -> Result<(), String> {
-                std::fs::copy(&source, &part).map_err(|e| format!("copying: {e}"))?;
-                let (landed, _) = hash_file(&part)
+                std::fs::copy(&source, part).map_err(|e| format!("copying: {e}"))?;
+                let (landed, _) = hash_file(part)
                     .map_err(|e| format!("reading the copied file failed: {e}"))?;
                 if !target.checksum.is_empty() && landed != target.checksum {
                     return Err(
@@ -1064,15 +1078,10 @@ pub(crate) fn spawn_local_copy(
                 Ok(())
             };
             if let Err(e) = copy_and_verify() {
-                let _ = std::fs::remove_file(&part);
+                let _ = std::fs::remove_file(part);
                 return Err(e);
             }
-            let final_path = final_path(&resolved);
-            std::fs::rename(&part, &final_path).map_err(|e| {
-                let _ = std::fs::remove_file(&part);
-                format!("moving into place: {e}")
-            })?;
-            Ok(final_path)
+            finish_landing(&landing)
         })
         .await
         .unwrap_or_else(|e| Err(format!("copy task failed: {e}")));
