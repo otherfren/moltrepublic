@@ -1195,34 +1195,18 @@ impl State {
         self.presence.clock_override.unwrap_or_else(now_secs)
     }
 
-    /// The 0/1/2 presence pill for one member, the single derivation every
-    /// surface shares: THIS node is always online (it is the one running —
-    /// it never hears itself on the wire, so its stamp would otherwise age
-    /// out); a send-failure pin forces offline; everyone else ages from
-    /// their real last-seen stamp.
+    /// The 0/1/2 presence pill for one member of the open workspace - the
+    /// single derivation every surface shares ([`net::pill_state`]; the
+    /// presence tick writes the very same answer onto the pills).
     pub(crate) fn presence_of(&self, member: &str, last_seen: u64, now: u64) -> u8 {
-        if member == self.member() {
-            0
-        } else if self.delivery.unreachable.contains(member) {
-            2
-        } else {
-            let s = molt_core::presence_state(now, last_seen);
-            // §6.5 (N5.5): presence over relays is traffic-derived and
-            // COARSE — short silence is not absence (no keepalives by
-            // design), so a stamped member ages to stale. The lift ends at
-            // `COARSE_SECS`: past a week silence IS absence, and a seat
-            // carrying only its founding stamp must not glow yellow for
-            // ever.
-            if s == 2
-                && self.nostr.is_some()
-                && last_seen != molt_core::MemberInfo::NEVER
-                && now.saturating_sub(last_seen) <= molt_core::MemberInfo::COARSE_SECS
-            {
-                1
-            } else {
-                s
-            }
-        }
+        net::pill_state(
+            &self.member(),
+            &self.delivery.unreachable,
+            self.nostr.is_some(),
+            member,
+            last_seen,
+            now,
+        )
     }
 
     /// The member roster: the open workspace's, else the boot group's.

@@ -474,3 +474,53 @@ fn upload_availability_follows_the_real_stamps() {
     st.cmd_net_peer_seen("cid".to_string(), None).expect("ack");
     assert!(cid_online(&st), "a sighting makes the sharer reachable");
 }
+
+/// `State::presence_of` and the ticker's pill refresh are ONE derivation:
+/// for every member / pin / transport / stamp combination the on-demand
+/// answer equals the pill the refresh writes on the active entry.
+#[test]
+fn presence_of_and_the_pill_refresh_agree_on_every_input() {
+    let stamps = [
+        MemberInfo::NEVER,
+        T,
+        T - MemberInfo::ONLINE_SECS - 1,
+        T - MemberInfo::STALE_SECS - 1,
+        T - MemberInfo::COARSE_SECS,
+        T - MemberInfo::COARSE_SECS - 1,
+    ];
+    for coarse in [false, true] {
+        for pinned in [false, true] {
+            for stamp in stamps {
+                let mut st = presence_fixture();
+                if coarse {
+                    st.nostr = Some(crate::NostrTransport {
+                        sk: zeroize::Zeroizing::new(vec![7u8; 32]),
+                        relays: vec!["ws://relay.example".to_string()],
+                        rotation_seed: [0u8; 32],
+                    });
+                }
+                if pinned {
+                    st.delivery.unreachable.insert("bob".to_string());
+                }
+                let active = st.session.active_workspace.clone();
+                let entry = st
+                    .session
+                    .workspaces
+                    .iter_mut()
+                    .find(|w| w.id == active)
+                    .expect("active entry");
+                for m in &mut entry.members {
+                    m.last_seen = stamp;
+                }
+                st.cmd_net_presence_tick().expect("tick");
+                for name in ["ada", "bob", "cid"] {
+                    assert_eq!(
+                        pill(&st, name).state,
+                        st.presence_of(name, stamp, T),
+                        "member={name} coarse={coarse} pinned={pinned} stamp={stamp}"
+                    );
+                }
+            }
+        }
+    }
+}

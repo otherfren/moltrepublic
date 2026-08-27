@@ -39,6 +39,7 @@ mod demo_mesh;
 mod files;
 mod ingest;
 mod presence;
+pub(crate) use presence::pill_state;
 mod recovery;
 #[cfg(test)]
 pub(crate) use ingest::{CHAIN_SERVE_DEBOUNCE_SECS, PARKED_READS_PER_FRAME};

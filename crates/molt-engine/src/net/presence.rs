@@ -7,6 +7,42 @@
 
 use super::*;
 
+/// The 0/1/2 pill derivation of the ACTIVE workspace, shared by
+/// [`State::presence_of`] (one member, on demand) and the tick's
+/// `refresh_member_pills` (every pill): THIS node is always online (it is
+/// the one running - it never hears itself on the wire, so its stamp would
+/// otherwise age out); a send-failure pin forces offline; everyone else
+/// ages from their real last-seen stamp. `coarse` is §6.5 (N5.5): presence
+/// over relays is traffic-derived and COARSE - short silence is not absence
+/// (no keepalives by design), so a stamped member ages to stale. The lift
+/// ends at `COARSE_SECS`: past a week silence IS absence, and a seat
+/// carrying only its founding stamp must not glow yellow for ever.
+pub(crate) fn pill_state(
+    me: &str,
+    unreachable: &std::collections::HashSet<MemberId>,
+    coarse: bool,
+    member: &str,
+    last_seen: u64,
+    now: u64,
+) -> u8 {
+    if member == me {
+        0
+    } else if unreachable.contains(member) {
+        2
+    } else {
+        let s = molt_core::presence_state(now, last_seen);
+        if s == 2
+            && coarse
+            && last_seen != molt_core::MemberInfo::NEVER
+            && now.saturating_sub(last_seen) <= molt_core::MemberInfo::COARSE_SECS
+        {
+            1
+        } else {
+            s
+        }
+    }
+}
+
 impl State {
     /// Passive presence: stamp the member with the engine clock's real
     /// unix time (authenticated inbound traffic is the ONLY thing that
@@ -278,29 +314,16 @@ impl State {
         let active = self.session.active_workspace.clone();
         let unreachable = &self.delivery.unreachable;
         // §6.5 (N5.5): the open workspace's transport decides how silence
-        // ages — see `presence_of`, the shared derivation this mirrors
+        // ages — `pill_state`, the one derivation `presence_of` shares
         let coarse = self.nostr.is_some();
         let mut changed = false;
         for entry in &mut self.session.workspaces {
             let is_active = entry.id == active;
             for m in &mut entry.members {
-                let state = if is_active && m.name == me {
-                    0
-                } else if is_active && unreachable.contains(&m.name) {
-                    2
+                let state = if is_active {
+                    pill_state(&me, unreachable, coarse, &m.name, m.last_seen, now)
                 } else {
-                    let s = molt_core::presence_state(now, m.last_seen);
-                    if s == 2
-                        && is_active
-                        && coarse
-                        && m.last_seen != molt_core::MemberInfo::NEVER
-                        && now.saturating_sub(m.last_seen)
-                            <= molt_core::MemberInfo::COARSE_SECS
-                    {
-                        1
-                    } else {
-                        s
-                    }
+                    molt_core::presence_state(now, m.last_seen)
                 };
                 if m.state != state {
                     m.state = state;
