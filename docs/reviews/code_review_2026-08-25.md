@@ -1,15 +1,19 @@
 # Code review 2026-08-25 (security, correctness, style, refactoring)
 
-Status: **OPEN WORK** for the items marked OPEN below; every item marked
-FIXED landed on master the same night (`2714d814` core patch parser,
-`584125ec` outbox timer, `7ccdbd15` governance + wire ingest + MLS
-authority, `919ad6bc` roster verifiers, `83d72c39` Tor lanes + dedup ring,
-`7e350909` storage seal, `ecf9b640` MCP schema / config mode / diff,
-`5a421487` the follow-ups a second review pass over that diff raised). The
-review covered every crate: eight independent read-only passes (one per
-area), each finding verified against the code before it was accepted, the
-CRITICAL/HIGH ones reproduced by a red test before the fix. Items already
-listed in `docs_archive/reviews/total_review.md` (L1-L15) or
+Status: **OPEN WORK** only for the six items still marked OPEN / PARTLY
+FIXED below (R4, R9, M2, T10, P8, P10 - design or product calls, listed
+with their fix direction in `docs/reviews/known_debt.md`). Everything
+else landed on master: the CRITICAL/HIGH fixes the same night
+(`2714d814`..`ecf9b640`, follow-ups `5a421487`), the MEDIUM/LOW batches
+on 2026-08-26 (`ff044d38`..`afd16726`, the MCP host boundary `2cace65b`,
+section 9), the style sweep (`ee7a1088`), and the refactor splits by
+worktree agents on 2026-08-26/27 (molt-ui `0b5b19ba`, net/storage dedupe
+`9b1805aa`, `chain/` `be10ede7`, ritual ladder `9d6114ca`, engine
+`lib.rs`/`net/` `bd8c93bd`). The review covered every crate: eight
+independent read-only passes (one per area), each finding verified
+against the code before it was accepted, the CRITICAL/HIGH ones
+reproduced by a red test before the fix. Items already listed in
+`docs_archive/reviews/total_review.md` (L1-L15) or
 `docs/reviews/known_debt.md` are not repeated.
 
 Severity: CRITICAL = threshold/authorization bypass · HIGH = a single
@@ -22,7 +26,7 @@ last one is gone the document moves to `docs_archive/reviews/`.
 
 ---
 
-## 1. Governance chain (`molt-engine/src/chain.rs`)
+## 1. Governance chain (`molt-engine/src/chain/`, was `chain.rs` before C10)
 
 ### C1 [CRITICAL] A forged wire `Approved{by: victim}` became the victim's real signature at the next re-base - FIXED
 `rebase_pending_approvals` inferred "this node approved X" from the
@@ -139,7 +143,7 @@ six drifted doc comments, the `dead_code` allow on `PendingRecovery`
 deadlines; `a_double_recovery_of_the_same_seat_still_converges_both_ways`
 timed out once in six runs on the pre-split `chain.rs` as well).
 
-## 2. Engine wire ingest and state (`net.rs`, `events.rs`, `proposals.rs`, `session.rs`, `chat.rs`, `transfer.rs`, `configstore.rs`)
+## 2. Engine wire ingest and state (`net/`, was `net.rs` before E8; `events.rs`, `proposals.rs`, `session.rs`, `chat.rs`, `transfer.rs`, `configstore.rs`)
 
 ### E1 [HIGH] Wire `MembershipProposed` was recorded and applied BEFORE its gates - FIXED
 One `id = u64::MAX - 1` set `next_id = u64::MAX` on every node (every
@@ -237,7 +241,7 @@ R11 already moved the bootstrap into `loopback_mesh.rs`; the remaining
 loopback-only code is the demo mesh, now its own module, and a cargo
 feature was rejected for the reason `loopback_mesh.rs` documents.
 
-## 3. Founding ritual and recovery (`founding.rs`, `nostr_ritual.rs`, `recovery.rs`, `lifecycles.rs`, `relay_msg.rs`)
+## 3. Founding ritual and recovery (`founding.rs`, `nostr_ritual.rs`, `ritual_member.rs` since R11, `recovery.rs`, `lifecycles.rs`, `relay_msg.rs`)
 
 ### R1 [MEDIUM] Member-side roster verifiers weaker than `verify_genesis` - FIXED
 `verify_sealed_roster` / `verify_seal_proposal` now enforce distinct
