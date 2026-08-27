@@ -20,12 +20,18 @@
 //! of being counted as an invented peer.
 //!
 //! The implementation is split by concern: [`chat`] (the ungated surface,
-//! typed messages, reactions, deletion), [`net`] (the `molt-net` glue: the
-//! log-backed outbox feed, the inbound `Net*` handlers, and the loopback
-//! demo mesh whose peers replaced the old reply simulator), [`proposals`]
-//! (the gated propose/approve/apply machine and snapshots), [`session`]
-//! (navigation, settings, workspaces) and [`lifecycles`] (the three
-//! engine-run mocks: restore / create / join over one `RunCore`).
+//! typed messages, reactions, deletion, the wire appliers and the P6
+//! parking buffer), [`net`] (the `molt-net` glue as a module directory:
+//! the log-backed outbox feed and the net builders in `mod.rs`, the
+//! delivery guarantee, wire ingest, the relay file plane, coordinator-side
+//! recovery, presence + net health, and the loopback demo mesh whose peers
+//! replaced the old reply simulator), [`proposals`] (the gated
+//! propose/approve/apply machine and snapshots), [`session`] (navigation,
+//! settings, workspaces) and [`lifecycles`] (the three engine-run mocks:
+//! restore / create / join over one `RunCore`). `State` groups its
+//! workspace-scoped bookkeeping into sub-structs ([`DeliveryState`],
+//! [`PresenceState`], [`FilePlane`], [`ChainProjection`],
+//! [`RecoveryState`]); the unit tests live under `tests/`.
 
 mod backup;
 mod chain;

@@ -23,7 +23,7 @@ eight passes); its CRITICAL/HIGH items were fixed the same night. The items
 still OPEN there, by id (each carries its fix direction in the review):
 
 - Chain: C3 residual (a non-logged direct serve).
-- Engine: E3 residual (insider system line) · E8 `lib.rs`/`net.rs` split.
+- Engine: E3 residual (insider system line).
 - Ritual/recovery: R4 (design: a survivor capturing a reattaching seat) ·
   R9 residual (`nostr_sk` in the two `Net*Sealed` commands).
 - MLS/delivery: M1 residual (`ChainOracle` allowance design) · M2 open half

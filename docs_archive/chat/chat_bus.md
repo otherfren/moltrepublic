@@ -37,7 +37,7 @@ change, it is the honest continuation of what the transport already does:
   the serde `type` tag of the `WorkspaceEvent` inside the envelope. Chat,
   `Proposed`, `Approved`, `Committed`, `ChainRequest`, `MembershipProposed`,
   `MlsCommit` all ride the same stream (`crosses_wire`,
-  `molt-engine/src/net.rs`).
+  `molt-engine/src/net/mod.rs`).
 - The UI already renders chat as **one flat list** filtered client-side
   (sub-views "today"/"archive"); there are no rooms/threads today.
 
@@ -250,7 +250,7 @@ Accepted in the 2026-07-10 review — documented, not fixed:
   peer has the genuine message (from a quote, a parked reaction, a file ref)
   can race a forged `Chat` carrying that id. First-writer-wins dedup drops the
   loser; the winner holds the id — divergence is limited to that one message.
-  The receive path (`net.rs`, `Chat` arm) WARN-logs the collision with BOTH
+  The receive path (`net/ingest.rs`, `Chat` arm) WARN-logs the collision with BOTH
   identities (`from` and the stored author), which is the audit trail.
   Accepted because members are rostered, MLS-authenticated humans in small
   republics and chat is ephemeral; the real fix — sender-bound (signed) ids —

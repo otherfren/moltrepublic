@@ -186,15 +186,56 @@ At most `PARKED_READS_PER_FRAME` (16) targets per frame. Test:
 encrypt/decrypt refusals cut to one clause; the GUI's German arms follow
 (style sweep 2026-08-26).
 
-### E8 [REFACTOR] `lib.rs` / `net.rs` structure - OPEN
-`lib.rs`: 4,150 of 5,835 lines are tests → `src/tests/*`; `State` (90
-fields) → `DeliveryState` / `PresenceState` / `FilePlane` /
-`ChainProjection` / `RecoveryState` sub-structs (closes E5 structurally);
-`spawn_actor`'s 13 positional args → a `SpawnSeams` struct. `net.rs`: demo
-mesh, `ParkedRefs` + `wire_*` (→ `chat.rs`), delivery ticks, ingest, file
-plane (→ `transfer.rs`), recovery (→ `recovery.rs`), presence (`presence_of`
-vs `refresh_member_pills` duplicate); ~1,800 lines of loopback-only mesh
-code behind a feature/module. `transfer.rs` landing sequence three times.
+### E8 [REFACTOR] `lib.rs` / `net.rs` structure - FIXED
+Twenty-seven mechanical commits, each suite-green (569/570 tests, clippy
+0), each a flatten-checked move (no line lost or invented, visibility
+and `use` plumbing aside); no log line or user-facing string changed.
+
+`lib.rs` 5,873 → 1,757 lines. The 4,170 test lines became
+`src/tests/` (`mod.rs` 16 plumbing, `support.rs` 354 shared fixtures,
+`chat_tests.rs` 770, `governance_tests.rs` 909, `founding_tests.rs`
+355, `join_tests.rs` 375, `recovery_tests.rs` 478, `session_tests.rs`
+156, `workspace_tests.rs` 838); `crate::tests::plain_state` /
+`tiny_bmp_header` keep their paths. `State` (90 fields) folded five
+groups into sub-structs, one commit each, every access a scripted
+rewrite verified by the compiler and every reset path (`State::new`,
+`reset_workspace_state`, `reset_peer_accept_window`) touching the
+identical field list before and after: `self.delivery: DeliveryState`
+(12: accept windows + persist debounces, ACK deadlines, the G7 park,
+the `unreachable` / `link_down` / `send_stuck` pins, the last group
+ack), `self.presence: PresenceState` (3: poke / wake cooldowns, the
+clock seam), `self.files: FilePlane` (8: shares, downloads, the serve
+throttle, the relay plane's series / pending / serving / fetches /
+announced), `self.chain: ChainProjection` (18: `blocks`, `head`,
+`walk`, the checkpoint blobs, the `applied` / `applied_sigs` /
+`anchors` / `member_relays` projections, the vote collections, the
+catch-up buffer - closes E5 structurally) and `self.recovery:
+RecoveryState` (14: coordinator + rejoiner side; `ctx` keeps its
+`Zeroizing` phrase, the struct derives no `Debug`). `spawn_actor`
+takes a `SpawnSeams` struct (`Default` = every seam off); the public
+spawners are unchanged.
+
+`net.rs` 4,710 → the module directory `net/` (every `crate::net::…`
+path still resolves via `mod.rs` re-exports): `mod.rs` (733) - the sink
+traits, `crosses_wire`, `NetRuntime`, the real/group net builders,
+teardown and the generation guards; `delivery.rs` (440) - the delivery
+guarantee (accept windows, G7 park, ACK flush, MLS persist, the tick,
+`send_ping`); `ingest.rs` (586) - `deliver_gated`; `files.rs` (352) -
+the relay file plane; `recovery.rs` (849) - coordinator-side recovery
+(request ingest, inboxes, link mint, announce, mesh extension);
+`presence.rs` (338) - presence + net health; `demo_mesh.rs` (309) -
+the loopback demo peers (the molt-core `mockrand` guard names it).
+`ParkedRefs` / `PendingRef` and the `wire_*` appliers moved to
+`chat.rs`. The net tests are `net/<module>_tests.rs` +
+`net/test_support.rs`. `presence_of` and `refresh_member_pills` agreed
+on every input (pinned first by
+`presence_of_and_the_pill_refresh_agree_on_every_input`, 72 cases) and
+now share `net::pill_state`. `transfer.rs`: the three landing
+sequences are `prepare_landing` + `finish_landing`. Not done: the
+review's "~1,800 lines of loopback-only mesh code behind a feature" -
+R11 already moved the bootstrap into `loopback_mesh.rs`; the remaining
+loopback-only code is the demo mesh, now its own module, and a cargo
+feature was rejected for the reason `loopback_mesh.rs` documents.
 
 ## 3. Founding ritual and recovery (`founding.rs`, `nostr_ritual.rs`, `recovery.rs`, `lifecycles.rs`, `relay_msg.rs`)
 
