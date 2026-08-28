@@ -1500,6 +1500,10 @@ fn org_op_label(lang: i32, op: &str) -> Option<&'static str> {
         (_, "remove_image") => "Remove logo",
         (1, "set_chat_retention") => "Chat-Löschfrist",
         (_, "set_chat_retention") => "Chat retention",
+        (1, "set_relays") => "Relay-Pool",
+        (_, "set_relays") => "Relay pool",
+        // the product term in both languages (Strings.cw-features)
+        (_, "set_features") => "Features",
         _ => return None,
     })
 }

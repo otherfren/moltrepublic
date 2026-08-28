@@ -126,6 +126,14 @@ fn org_titles_render_in_the_active_language_from_the_op_placeholder() {
     let note = serde_json::json!({"op": "add_note", "title": "budget"});
     assert_eq!(display_title(0, &note), "budget");
     assert_eq!(display_title(1, &note), "budget");
+    // the two ops that carry no user title at all must not leak their
+    // op code (user report 2026-08-28: "set_features" on the card)
+    let features = serde_json::json!({"op": "set_features", "value": "memory files"});
+    assert_eq!(display_title(0, &features), "Features");
+    assert_eq!(display_title(1, &features), "Features");
+    let relays = serde_json::json!({"op": "set_relays", "value": "wss://a"});
+    assert_eq!(display_title(0, &relays), "Relay pool");
+    assert_eq!(display_title(1, &relays), "Relay-Pool");
 }
 
 /// WP1: an applied log line carries the id of the proposal that produced
