@@ -237,7 +237,9 @@ pub(crate) fn view_icon(key: &str) -> &'static str {
         "history" => "📜",
         "send" => "📤",
         "receive" => "📥",
-        "settings" => "⚙️",
+        "settings" | "config" => "⚙️",
+        "browse" => "📂",
+        "upload" => "⬆️",
         _ => "▪️",
     }
 }
@@ -348,6 +350,7 @@ pub(crate) fn surface_name(lang: i32, sf: Surface) -> &'static str {
             // both languages - it is the product's word for it
             Surface::Vault => "Vault",
             Surface::Wallet => "Wallet",
+            Surface::Files => "Shared Files",
         }
     } else {
         match sf {
@@ -357,6 +360,7 @@ pub(crate) fn surface_name(lang: i32, sf: Surface) -> &'static str {
             Surface::Quests => "Kanban",
             Surface::Vault => "Vault",
             Surface::Wallet => "Wallet",
+            Surface::Files => "Shared Files",
         }
     }
 }
@@ -390,6 +394,9 @@ pub(crate) fn view_label(lang: i32, key: &str, en: &str) -> String {
         "send" => "Senden",
         "receive" => "Empfangen",
         "settings" => "Einstellungen",
+        "browse" => "Durchsuchen...",
+        "upload" => "Hochladen",
+        "config" => "Konfiguration",
         // Status, Multisig-Wiki, Board — shared or product terms
         _ => en,
     }
@@ -403,6 +410,7 @@ pub(crate) fn default_op(sf: Surface) -> &'static str {
         Surface::Quests => "add_quest",
         Surface::Vault => "seal_secret",
         Surface::Wallet => "transfer",
+        Surface::Files => "share",
         // organization changes come from the dedicated edit modals
         // (org-propose carries the specific op); chat is ungated
         Surface::Chat | Surface::Organization => "note",

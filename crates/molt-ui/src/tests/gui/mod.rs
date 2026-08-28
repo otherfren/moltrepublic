@@ -12,6 +12,7 @@
 //! layer, where nothing could observe it.
 
 mod chat;
+mod files;
 mod layout;
 mod poke;
 mod recovery_backup;
