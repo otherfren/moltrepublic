@@ -3,9 +3,10 @@
 Status: **BUILT (2026-08-21)** except §7, which stays open BY DECISION: the
 second bucket is configuration only until a consumer is designed. Since
 2026-08-28 that consumer has a NAME and a surface — Shared Files, a
-badged design mock behind the `files` charter feature, gated by the
-`shared_files` store switch — but still no writer; the wire key
-`media_s3_bucket` keeps its historical name. Keystones:
+badged design mock behind the `files` charter feature; the bucket is an
+OPTIONAL extra backup of them (the seats replicate shared files among
+themselves) — but still no writer; the wire key `media_s3_bucket` keeps
+its historical name. Keystones:
 `molt-engine/src/backup.rs` (`quota_candidates` unit tests),
 `molt-engine/tests/backup_ticker.rs` (the two quota tests),
 `molt-engine/tests/s3_test_button.rs` (per-bucket probe + verdict
@@ -171,12 +172,12 @@ the extra height scrolls.
 
 The consumer is decided (user, 2026-08-28): **Shared Files** — files are
 chunked and replicated by the seats, torrent-style over a distributed hash
-map; the bucket is the seed. The surface exists as a design mock
+map; the bucket is NOT required for that, it is an optional extra backup
+of the shared files. The surface exists as a design mock
 (`surfaces.slint::FilesPane`: Browse with a per-file replication meter
 `1.00..N`, Upload queue, Config), behind the `files` charter feature
-(locked off in the wizard, voted in under Organization › Status › Features)
-and the node-local `shared_files` switch (`[storage]`, default off — Browse
-and Upload say "not configured" until switch, account and bucket are set).
+(locked off in the wizard, voted in under Organization › Status › Features);
+Browse and Upload always render, nothing gates them on S3.
 
 Still unanswered, and needed before anything writes: the chunk/DHT layer
 vs. the recorded "445 chunking, NOT an external blob server" decision, who

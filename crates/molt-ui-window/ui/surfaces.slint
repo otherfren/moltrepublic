@@ -3906,10 +3906,7 @@ export component ReplMeter inherits HorizontalLayout {
 
 export component FilesPane inherits VerticalLayout {
     in property <string> view;
-    // the APPLIED store is usable — Rust-computed, the panes' one gate
-    in property <bool> ready;
-    // the config view's summary lines
-    in property <bool> store-on;
+    // the config view's line: the applied backup bucket ("" = not set)
     in property <string> bucket;
     callback open-settings();
     spacing: 8px;
@@ -3935,35 +3932,7 @@ export component FilesPane inherits VerticalLayout {
     property <float> quota-used: 1.2;
     property <float> quota-limit: 5.0;
 
-    // the honest state: nothing to browse or upload into without the store
-    if (root.view == "browse" || root.view == "upload") && !root.ready: VerticalLayout {
-        spacing: 8px;
-        PaneHeader {
-            glyph: root.view == "upload" ? "⬆️" : "📂";
-            title: root.view == "upload" ? Strings.sf-title-upload : Strings.sf-title-browse;
-        }
-        PanePanel {
-            sf-unconfigured := Text {
-                text: Strings.sf-not-configured;
-                color: Theme.warn;
-                font-size: Theme.fs-body;
-                font-weight: 600;
-            }
-            HorizontalLayout {
-                alignment: start;
-                AppButton {
-                    icon: @image-url("assets/gear.svg");
-                    icon-set: true;
-                    label: Strings.sf-open-settings;
-                    clicked => {
-                        root.open-settings();
-                    }
-                }
-            }
-        }
-    }
-
-    if root.view == "browse" && root.ready: VerticalLayout {
+    if root.view == "browse": VerticalLayout {
         spacing: 8px;
         PaneHeader {
             glyph: "📂";
@@ -4058,7 +4027,7 @@ export component FilesPane inherits VerticalLayout {
         }
     }
 
-    if root.view == "upload" && root.ready: VerticalLayout {
+    if root.view == "upload": VerticalLayout {
         spacing: 8px;
         PaneHeader {
             glyph: "⬆️";
@@ -4178,19 +4147,11 @@ export component FilesPane inherits VerticalLayout {
             GridLayout {
                 spacing: 8px;
                 Row {
-                    Text { text: Strings.sf-cfg-store; color: Theme.faint; font-size: Theme.fs-cap; font-weight: 600; }
-                    Text {
-                        text: root.store-on ? Strings.sf-on : Strings.sf-off;
-                        color: root.store-on ? Theme.good : Theme.warn;
-                        font-size: Theme.fs-body;
-                        font-weight: 600;
-                    }
-                }
-                Row {
                     Text { text: Strings.sf-cfg-bucket; color: Theme.faint; font-size: Theme.fs-cap; font-weight: 600; }
+                    // optional, so an unset bucket is a fact, not a warning
                     Text {
                         text: root.bucket == "" ? Strings.sf-not-set : root.bucket;
-                        color: root.bucket == "" ? Theme.warn : Theme.text;
+                        color: root.bucket == "" ? Theme.faint : Theme.text;
                         font-size: Theme.fs-body;
                         overflow: elide;
                     }

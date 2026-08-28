@@ -226,18 +226,11 @@ component S3BucketGroup inherits DetailGroup {
     // "" untested · "testing" · "ok" · "error: …"
     in property <string> test-state;
     in property <string> cap-hint;
-    // the store switch (Shared Files); an empty label hides the row
-    in property <string> switch-label;
-    in-out property <bool> switch-on;
     in property <string> bucket-placeholder;
     // the shared account is filled in, so a probe can actually be signed
     in property <bool> account-ready;
     callback test();
     pack: true;
-    if root.switch-label != "": AppCheck {
-        label: root.switch-label;
-        checked <=> root.switch-on;
-    }
     HorizontalLayout {
         spacing: 12px;
         FieldLabel {
@@ -1792,17 +1785,14 @@ export component AppWindow inherits Window {
     in-out property <string> cfg-s3-max: "0";
     // pushed from Rust: "" untested · "testing" · "ok" · "error: …"
     in property <string> cfg-s3-test;
-    // Bucket 2: the Shared Files store (the wire key keeps its historical
-    // name). Nothing writes to it yet - the surface is a design mock.
+    // Bucket 2: an extra backup of the Shared Files (the wire key keeps its
+    // historical name). Nothing writes to it yet - the surface is a design
+    // mock.
     in-out property <string> cfg-media-s3-bucket;
     in-out property <string> cfg-media-s3-max: "0";
     in property <string> cfg-media-s3-test;
-    in-out property <bool> cfg-shared-files: false;
     // pushed from Rust from the APPLIED settings, never the draft: the
-    // store is usable (switch + account + bucket) - the Shared Files panes
-    // gate on it - and the two lines its Config view states
-    in property <bool> sf-ready: false;
-    in property <bool> sf-store-on: false;
+    // bucket the Shared Files config view states
     in property <string> sf-bucket;
     // run a live signed probe against ONE bucket in the draft:
     // "workspaces" | "media"
@@ -6867,8 +6857,6 @@ export component AppWindow inherits Window {
                         }
                         if s.key == "files": FilesPane {
                             view: root.selected-view;
-                            ready: root.sf-ready;
-                            store-on: root.sf-store-on;
                             bucket: root.sf-bucket;
                             open-settings => {
                                 if (root.screen != AppScreen.settings) {
@@ -7936,8 +7924,6 @@ export component AppWindow inherits Window {
                                 cap <=> root.cfg-media-s3-max;
                                 test-state: root.cfg-media-s3-test;
                                 cap-hint: Strings.set-s3-max-hint-media;
-                                switch-label: Strings.set-s3-shared-files;
-                                switch-on <=> root.cfg-shared-files;
                                 account-ready: root.cfg-s3-endpoint != "" && root.cfg-s3-access != "";
                                 test => {
                                     root.test-s3("media");

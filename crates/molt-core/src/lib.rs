@@ -364,21 +364,18 @@ pub struct SessionSettings {
     /// neighbouring `file_cap_bytes` reads 0 as "off"; here 0 is "no limit".
     #[serde(default)]
     pub s3_max_bytes: u64,
-    /// The Shared Files bucket at the same endpoint and credentials as the
-    /// backup bucket above - one S3 account, several buckets. No cover-name
-    /// default like the backup bucket: empty means "not configured", not
-    /// "some name nobody chose". The wire key keeps its historical name;
-    /// nothing writes to it yet (`docs/storage/s3_buckets.md` §7).
+    /// The Shared Files BACKUP bucket at the same endpoint and credentials
+    /// as the workspace-backup bucket above - one S3 account, several
+    /// buckets. Optional: the seats replicate shared files among
+    /// themselves, the bucket is an extra copy. No cover-name default:
+    /// empty means "not configured". The wire key keeps its historical
+    /// name; nothing writes to it yet (`docs/storage/s3_buckets.md` §7).
     #[serde(default)]
     pub media_s3_bucket: String,
     /// Byte quota for the Shared Files bucket, `0` = no limit. Stored and
     /// shown; with no writer there is nothing to enforce it against yet.
     #[serde(default)]
     pub media_s3_max_bytes: u64,
-    /// The Shared Files store is on. Off by default; the surface's panes
-    /// stay "not configured" until this AND the bucket above are set.
-    #[serde(default)]
-    pub shared_files: bool,
     /// MCP server TCP port.
     pub mcp_port: u16,
     /// MCP client allowlist (`"127.0.0.1" | "0.0.0.0" | comma-separated`).
@@ -525,7 +522,6 @@ impl Default for SessionSettings {
             s3_max_bytes: 0,
             media_s3_bucket: String::new(),
             media_s3_max_bytes: 0,
-            shared_files: false,
             mcp_port: 4040,
             mcp_allow: "127.0.0.1".to_string(),
             mcp_token: String::new(),
@@ -6488,17 +6484,6 @@ mod tests {
             Ok(vec!["files".to_string(), "memory".to_string()])
         );
         assert!(!Surface::LEGACY_FEATURES.contains(&"files"));
-    }
-
-    /// The Shared Files store is off until the operator turns it on, and a
-    /// settings blob written before the flag existed reads as off.
-    #[test]
-    fn shared_files_defaults_off_and_is_optional_on_the_wire() {
-        assert!(!SessionSettings::default().shared_files);
-        let mut v = serde_json::to_value(SessionSettings::default()).expect("serialize");
-        v.as_object_mut().expect("object").remove("shared_files");
-        let back: SessionSettings = serde_json::from_value(v).expect("pre-flag settings parse");
-        assert!(!back.shared_files);
     }
 
     /// BYTE-IDENTITY PIN — `molt-roster-v5`: the ratified FEATURE SET

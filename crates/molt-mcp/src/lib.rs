@@ -574,9 +574,6 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
         s3_max_bytes: bytes("s3_max_bytes")?,
         media_s3_bucket: text("media_s3_bucket")?,
         media_s3_max_bytes: bytes("media_s3_max_bytes")?,
-        // required like every other field: absent must not silently switch
-        // an operator's store off (review 2026-08-28)
-        shared_files: flag("shared_files")?,
         sound_message: text("sound_message")?,
         sound_vote: text("sound_vote")?,
         // added after the everything-required contract froze: optional, and
@@ -1075,9 +1072,8 @@ pub fn tools() -> Vec<ToolDef> {
                     "s3_interval_min": { "type": "integer" },
                     "s3_keep_copies": { "type": "integer" },
                     "s3_max_bytes": { "type": "integer", "description": "byte quota for the backup bucket; 0 = no limit" },
-                    "media_s3_bucket": { "type": "string", "description": "a SECOND bucket at the same endpoint/credentials, the Shared Files store (the key keeps its historical name). Nothing writes to it yet" },
-                    "media_s3_max_bytes": { "type": "integer", "description": "byte quota for the Shared Files bucket; 0 = no limit" },
-                    "shared_files": { "type": "boolean", "description": "the Shared Files store on/off (off = its panes show \"not configured\")" },
+                    "media_s3_bucket": { "type": "string", "description": "a SECOND bucket at the same endpoint/credentials: an extra backup of the Shared Files (the key keeps its historical name). Nothing writes to it yet" },
+                    "media_s3_max_bytes": { "type": "integer", "description": "byte quota for the Shared Files backup bucket; 0 = no limit" },
                     "sound_message": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
                     "sound_vote": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
                     "sound_poke": { "type": "string", "enum": ["none", "bell", "chime", "pop"], "description": "optional; absent = \"none\"" },
@@ -1088,8 +1084,8 @@ pub fn tools() -> Vec<ToolDef> {
                 "required": [
                     "s3_backup", "s3_endpoint", "s3_access_key", "s3_bucket",
                     "s3_interval_min", "s3_keep_copies", "s3_max_bytes",
-                    "media_s3_bucket", "media_s3_max_bytes", "shared_files",
-                    "sound_message", "sound_vote", "read_receipts", "file_cap_bytes"
+                    "media_s3_bucket", "media_s3_max_bytes", "sound_message",
+                    "sound_vote", "read_receipts", "file_cap_bytes"
                 ]
             }),
             build: |args| Ok(Command::SaveSettings {
@@ -1111,9 +1107,8 @@ pub fn tools() -> Vec<ToolDef> {
                     "s3_interval_min": { "type": "integer" },
                     "s3_keep_copies": { "type": "integer" },
                     "s3_max_bytes": { "type": "integer", "description": "byte quota for the backup bucket; 0 = no limit. Over it the oldest copies go first, never a workspace's newest" },
-                    "media_s3_bucket": { "type": "string", "description": "a second bucket at the same endpoint/credentials, the Shared Files store (the key keeps its historical name); nothing writes to it yet" },
-                    "media_s3_max_bytes": { "type": "integer", "description": "byte quota for the Shared Files bucket; 0 = no limit" },
-                    "shared_files": { "type": "boolean", "description": "the Shared Files store on/off (off = its panes show \"not configured\")" },
+                    "media_s3_bucket": { "type": "string", "description": "a second bucket at the same endpoint/credentials: an extra backup of the Shared Files (the key keeps its historical name); nothing writes to it yet" },
+                    "media_s3_max_bytes": { "type": "integer", "description": "byte quota for the Shared Files backup bucket; 0 = no limit" },
                     "file_cap_bytes": { "type": "integer", "description": "per-file byte cap for sharing over relays; 0 = sharing off" },
                     "sound_message": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
                     "sound_vote": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
@@ -2063,10 +2058,9 @@ mod tests {
     }
 
     /// Shared Files is a charter feature an agent can found with or vote
-    /// in, a surface it can read, and its store switch rides the settings
-    /// tools fail-safe: absent from save_settings = off.
+    /// in, and a surface it can read.
     #[test]
-    fn shared_files_reaches_the_feature_surface_and_settings_schemas() {
+    fn shared_files_reaches_the_feature_and_surface_schemas() {
         let create = (tool_named("create_propose").schema)();
         assert!(create["properties"]["features"]["items"]["enum"]
             .as_array()
@@ -2081,23 +2075,6 @@ mod tests {
             build("read_state", &json!({ "surface": "files" })),
             Ok(Command::ReadState { surface: molt_core::Surface::Files, .. })
         ));
-
-        let save = (tool_named("save_settings").schema)();
-        assert_eq!(save["properties"]["shared_files"]["type"], "boolean");
-        assert!(
-            save["required"].as_array().expect("required").contains(&json!("shared_files")),
-            "a wholesale save must name the store switch - absent must not wipe it"
-        );
-        let mut args = required_args("save_settings");
-        args.remove("shared_files");
-        assert!(build("save_settings", &Value::Object(args.clone())).is_err());
-        args.insert("shared_files".to_string(), json!(true));
-        match build("save_settings", &Value::Object(args)).expect("builds") {
-            Command::SaveSettings { settings } => assert!(settings.shared_files),
-            other => panic!("not a save: {other:?}"),
-        }
-        let patch = (tool_named("patch_settings").schema)();
-        assert_eq!(patch["properties"]["shared_files"]["type"], "boolean");
     }
 
     #[test]

@@ -132,7 +132,6 @@ pub(crate) fn read_settings_draft(ui: &AppWindow, stored: &SessionSettings) -> S
             &ui.get_cfg_media_s3_max(),
             stored.media_s3_max_bytes,
         ),
-        shared_files: ui.get_cfg_shared_files(),
         mcp_port: ui.get_cfg_mcp_port() as u16,
         mcp_allow: ui.get_cfg_mcp_allow().to_string(),
         mcp_token: ui.get_cfg_mcp_token().to_string(),
@@ -189,15 +188,6 @@ pub(crate) fn issue_draft(
     });
 }
 
-/// The Shared Files store is usable: switched on, with the shared account
-/// and ITS bucket set (the backup bucket is not the store).
-pub(crate) fn files_ready(s: &SessionSettings) -> bool {
-    s.shared_files
-        && !s.s3_endpoint.is_empty()
-        && !s.s3_access_key.is_empty()
-        && !s.media_s3_bucket.is_empty()
-}
-
 /// Push one settings value into the draft form fields (the mirror on real
 /// changes, and the leave-guard's "discard" reset).
 pub(crate) fn apply_settings_fields(ui: &AppWindow, s: &SessionSettings) {
@@ -214,7 +204,6 @@ pub(crate) fn apply_settings_fields(ui: &AppWindow, s: &SessionSettings) {
     ui.set_cfg_s3_max(mib_label(s.s3_max_bytes).into());
     ui.set_cfg_media_s3_bucket(s.media_s3_bucket.clone().into());
     ui.set_cfg_media_s3_max(mib_label(s.media_s3_max_bytes).into());
-    ui.set_cfg_shared_files(s.shared_files);
     ui.set_cfg_mcp_port(s.mcp_port as i32);
     ui.set_cfg_mcp_allow(s.mcp_allow.clone().into());
     ui.set_cfg_mcp_token(s.mcp_token.clone().into());

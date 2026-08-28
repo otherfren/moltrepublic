@@ -26,7 +26,7 @@ use crate::labels::{
 };
 use crate::models::{sync_model, sync_rows, sync_strings};
 use crate::net_tor::{net_health_pill, tor_test_detail, tor_test_tone, tor_verdict_copy_for};
-use crate::settings::{apply_settings_fields, files_ready, settings_draft_differs};
+use crate::settings::{apply_settings_fields, settings_draft_differs};
 use crate::surfaces::{
     chain_row, gather_surfaces, page_of, page_slice, to_decided_row, to_proposal_row, ChatUiState,
     SurfacesBundle,
@@ -748,9 +748,8 @@ pub(crate) fn apply_session(
     // save would leave it stale (the draft-protection `editing` flag
     // suppresses the mirror exactly then)
     ui.set_cw_net(molt_core::effective_net_label(&sv.settings.anonymity).into());
-    // the Shared Files panes gate on the APPLIED store, not the draft
-    ui.set_sf_ready(files_ready(&sv.settings));
-    ui.set_sf_store_on(sv.settings.shared_files);
+    // the Shared Files config view states the APPLIED backup bucket, not
+    // the draft
     ui.set_sf_bucket(sv.settings.media_s3_bucket.clone().into());
 
     // the relay pool is edited LIVE through the Relay* commands, so it is not

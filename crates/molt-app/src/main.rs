@@ -257,7 +257,6 @@ fn main() -> anyhow::Result<()> {
             s3_max_bytes: config.storage.s3_max_bytes,
             media_s3_bucket: config.storage.media_s3_bucket.clone(),
             media_s3_max_bytes: config.storage.media_s3_max_bytes,
-            shared_files: config.storage.shared_files,
             sound_message: config.storage.sound_message.clone(),
             sound_vote: config.storage.sound_vote.clone(),
             sound_poke: config.storage.sound_poke.clone(),

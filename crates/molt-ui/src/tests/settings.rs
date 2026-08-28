@@ -83,12 +83,10 @@ fn both_buckets_round_trip_through_the_settings_draft() {
         s3_max_bytes: 500_000_000,
         media_s3_bucket: "clips".to_string(),
         media_s3_max_bytes: 3 * 1024 * 1024 * 1024,
-        shared_files: true,
         ..SessionSettings::default()
     };
     apply_settings_fields(&ui, &stored);
     let draft = read_settings_draft(&ui, &stored);
-    assert!(draft.shared_files, "the store switch rides the draft");
     assert_eq!(draft.s3_endpoint, "https://backup.example.org");
     assert_eq!(draft.s3_bucket, "media-archive");
     assert_eq!(draft.media_s3_bucket, "clips");
@@ -109,31 +107,3 @@ fn both_buckets_round_trip_through_the_settings_draft() {
     );
 }
 
-/// The Shared Files panes open only on a COMPLETE store: the switch on
-/// AND the account AND the bucket - any one missing is "not configured".
-#[test]
-fn files_ready_needs_the_switch_and_the_whole_target() {
-    let full = SessionSettings {
-        s3_endpoint: "https://s3.example.org".to_string(),
-        s3_access_key: "AK".to_string(),
-        media_s3_bucket: "clips".to_string(),
-        shared_files: true,
-        ..SessionSettings::default()
-    };
-    assert!(files_ready(&full));
-    for (name, broken) in [
-        ("switch off", SessionSettings { shared_files: false, ..full.clone() }),
-        ("no endpoint", SessionSettings { s3_endpoint: String::new(), ..full.clone() }),
-        ("no key", SessionSettings { s3_access_key: String::new(), ..full.clone() }),
-        ("no bucket", SessionSettings { media_s3_bucket: String::new(), ..full.clone() }),
-    ] {
-        assert!(!files_ready(&broken), "{name} must read as not configured");
-    }
-    // the BACKUP bucket is not the store
-    let backup_only = SessionSettings {
-        s3_bucket: "media-archive".to_string(),
-        media_s3_bucket: String::new(),
-        ..full
-    };
-    assert!(!files_ready(&backup_only));
-}

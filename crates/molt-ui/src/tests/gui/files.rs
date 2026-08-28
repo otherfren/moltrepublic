@@ -3,9 +3,9 @@
 
 use super::*;
 
-/// Shared Files with the given store readiness, on `view`.
+/// Shared Files on `view`.
 #[cfg(feature = "live-preview")]
-fn files_window(ready: bool, view: &str) -> AppWindow {
+fn files_window(view: &str) -> AppWindow {
     let ui = AppWindow::new().expect("headless window");
     ui.window().set_size(slint::PhysicalSize::new(1200, 800));
     ui.set_screen(AppScreen::Main);
@@ -16,7 +16,6 @@ fn files_window(ready: bool, view: &str) -> AppWindow {
         gated: true,
         ..SurfaceTab::default()
     }])));
-    ui.set_sf_ready(ready);
     apply_strings(&ui, 0);
     ui.show().expect("show headless");
     ui
@@ -29,29 +28,23 @@ fn has(ui: &AppWindow, id: &str) -> bool {
         .is_some()
 }
 
-/// **Browse and Upload say "not configured" until the store is on, and
-/// show the mock once it is.** The gate is one Rust-computed flag
-/// (`files_ready`), so a half-configured bucket cannot open the pane.
+/// **Browse and Upload always show the mock, badged** - the seats
+/// replicate shared files among themselves, so no S3 bucket gates them
+/// (user decision 2026-08-28).
 #[cfg(feature = "live-preview")]
 #[test]
-fn browse_and_upload_gate_on_the_store() {
+fn browse_and_upload_always_render_the_badged_mock() {
     i_slint_backend_testing::init_no_event_loop();
-    for view in ["browse", "upload"] {
-        let off = files_window(false, view);
-        assert!(has(&off, "FilesPane::sf-unconfigured"), "{view}: the honest line");
-        assert!(!has(&off, "FilesPane::sf-table"), "{view}: no mock table while off");
-        assert!(!has(&off, "FilesPane::sf-queue"), "{view}: no mock queue while off");
-        let on = files_window(true, view);
-        assert!(!has(&on, "FilesPane::sf-unconfigured"), "{view}: configured");
+    let browse = files_window("browse");
+    assert!(has(&browse, "FilesPane::sf-table"));
+    let upload = files_window("upload");
+    assert!(has(&upload, "FilesPane::sf-queue"));
+    for ui in [&browse, &upload] {
         assert!(
-            has(&on, "FilesPane::sf-table") || has(&on, "FilesPane::sf-queue"),
-            "{view}: the mock renders"
-        );
-        assert!(
-            i_slint_backend_testing::ElementHandle::find_by_element_type_name(&on, "MockBadge")
+            i_slint_backend_testing::ElementHandle::find_by_element_type_name(ui, "MockBadge")
                 .next()
                 .is_some(),
-            "{view}: a mock is badged"
+            "a mock is badged"
         );
     }
 }
@@ -62,7 +55,7 @@ fn browse_and_upload_gate_on_the_store() {
 #[test]
 fn every_browse_row_shows_its_replication() {
     i_slint_backend_testing::init_no_event_loop();
-    let ui = files_window(true, "browse");
+    let ui = files_window("browse");
     let rows = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "FilesPane::sf-row")
         .count();
     let meters =
@@ -81,13 +74,13 @@ fn every_browse_row_shows_its_replication() {
     }
 }
 
-/// **Config always renders, and its Settings button is the door** to
-/// Settings › S3 config (tab 3), with the way back remembered.
+/// **Config renders, and its Settings button is the door** to Settings ›
+/// S3 config (tab 3), with the way back remembered.
 #[cfg(feature = "live-preview")]
 #[test]
 fn config_opens_the_s3_settings_tab() {
     i_slint_backend_testing::init_no_event_loop();
-    let ui = files_window(false, "config");
+    let ui = files_window("config");
     assert!(has(&ui, "FilesPane::sf-config"));
     let went: Rc<RefCell<Option<AppScreen>>> = Rc::new(RefCell::new(None));
     ui.on_navigate({
