@@ -48,7 +48,14 @@ Read first: `founding_ritual.md` (the deliberation step this extends),
 ### D1 — Feature keys are the optional surface keys
 
 `memory`, `quests`, `vault`, `wallet` — strings equal to `Surface` keys, so no
-second vocabulary exists. Chat and Organization are core, never in the set:
+second vocabulary exists (`files` joined 2026-08-28: Shared Files, locked off
+in the wizard like the others, enable-able in the Organization modal; as a
+surface added after checkpoint-v7 its applied group reaches the checkpoint
+preimage only once it holds state — `Surface::CHECKPOINT_V7_SURFACES`,
+tag `v8`. Mixed builds: a seat on a build that predates the key cannot
+parse the blocks that follow its first applied change and strands itself
+— every seat must be current before `files` is voted in). Chat and
+Organization are core, never in the set:
 the wizard's Chat checkbox is display only (checked, disabled). The stored
 set is **sorted + deduped** (canonicalized at every ingest, like the relay
 tokens in `cmd_propose`).

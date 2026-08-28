@@ -12,7 +12,19 @@ and in development (`docs/chain/wallet_treasury_design.md`, next stop
 the dep-lock spike); Kanban and Vault have fresh design-mock rounds and
 their concept docs (`docs/kanban/kanban_workflows.md` §2–§5+§7,
 `docs/vault/vault_threshold_disclosure.md`) — both docs carry open
-questions that gate any real build.
+questions that gate any real build. Shared Files (2026-08-28) is the
+fifth mock: its real build waits on `docs/storage/s3_buckets.md` §7, and
+the engine refuses proposals on it until a vote view exists.
+
+## Charter features are a hand-rolled column per feature
+
+Every feature key is wired by hand at ~19 sites (wizard grid, both
+`CharterView`s, the Organization list, the enable modal's arming
+expression + payload string, `mirror.rs` setters) — the `files` rollout
+(2026-08-28) was the fifth copy. Fix direction: one `FeatureRow
+{key,label,checked,enabled}` model built in Rust from
+`Surface::ALL.filter(is_charter_feature)`, rendered by ONE component at
+all five sites.
 
 
 

@@ -159,7 +159,7 @@ finding, the same as a bug.
   The same rule holds for its sibling layouts: `molt-republic-id-v2`
   (`molt_storage::republic_id` — le32-length-prefixed + entry-counted, so the
   preimage stays injective for arbitrary field content; never regress it to
-  separators) and `molt-chain-checkpoint-v7`
+  separators) and `molt-chain-checkpoint-v8`
   (`molt_core::checkpoint_canonical_bytes` — both identity tables hash all
   three anchors (v2), the ratified relay pool rides along (v3), the applied
   projection is SUMMARIZED rather than archived (v4, `applied_lww_slot`),
@@ -167,7 +167,12 @@ finding, the same as a bug.
   strands every seat that had recovered — the relay LEDGER as well (v6,
   R3b): a cut must not forget who declared which relays — and the ratified
   founding feature set (v7, conditional like roster-v5: a state without one
-  hashes as v6)). Each has byte-pin tests that go red on an unbumped change.
+  hashes as v6), and a surface added AFTER v7 (`files`) gets its applied
+  group only once it holds state (v8, conditional: the six
+  `Surface::CHECKPOINT_V7_SURFACES` groups are always there, an empty later
+  group is invisible — `genesis_base` seeds only the six, `fold_one` adds
+  the rest on first use, so old cuts keep their bytes AND their JSON
+  shape)). Each has byte-pin tests that go red on an unbumped change.
 - **Additive-only event evolution.** New `WorkspaceEvent` fields get
   `#[serde(default)]`; an older reader meeting an unknown variant must not write.
 - **Chat addressing is by `MessageId` — never reintroduce indices.** Every chat
