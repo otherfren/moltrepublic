@@ -529,6 +529,12 @@ impl State {
         // D7: no governance on a surface the charter has not enabled
         // (Organization itself always passes — set_features rides it)
         self.require_feature(surface)?;
+        // Shared Files is a design mock with no vote view: a proposal on it
+        // could be shown or decided nowhere, so none is opened - on every
+        // frontend alike (co-equality)
+        if surface == Surface::Files {
+            return Err(MoltError::BadPayload("shared files has no governance yet".into()));
+        }
         // set_relays: store the CANONICAL spelling (review 2026-08-09). The
         // parser accepts-and-rewrites ":443", a trailing "/" and uppercase;
         // recording the raw token instead would poison every later

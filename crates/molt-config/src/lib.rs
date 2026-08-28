@@ -95,13 +95,17 @@ pub struct StorageConfig {
     /// 0 = no limit. Mirrors `molt_core::SessionSettings::s3_max_bytes`.
     #[serde(default)]
     pub s3_max_bytes: u64,
-    /// Media bucket at the SAME endpoint and credentials (empty = not
-    /// configured). Mirrors `molt_core::SessionSettings::media_s3_bucket`.
+    /// Shared Files bucket at the SAME endpoint and credentials (empty =
+    /// not configured; the key keeps its historical name). Mirrors
+    /// `molt_core::SessionSettings::media_s3_bucket`.
     #[serde(default)]
     pub media_s3_bucket: String,
-    /// Byte quota for the media bucket, 0 = no limit.
+    /// Byte quota for the Shared Files bucket, 0 = no limit.
     #[serde(default)]
     pub media_s3_max_bytes: u64,
+    /// The Shared Files store is on (off by default).
+    #[serde(default)]
+    pub shared_files: bool,
     /// Where downloaded chat files land when no explicit destination is
     /// given. `~` expands to $HOME.
     #[serde(default = "default_download_dir")]
@@ -156,6 +160,7 @@ impl Default for StorageConfig {
             s3_max_bytes: 0,
             media_s3_bucket: String::new(),
             media_s3_max_bytes: 0,
+            shared_files: false,
             download_dir: default_download_dir(),
             file_cap_bytes: default_file_cap_bytes(),
             sound_message: default_sound(),
@@ -456,10 +461,13 @@ pub struct Settings {
     pub s3_keep_copies: u16,
     /// Byte quota for the backup bucket, 0 = no limit.
     pub s3_max_bytes: u64,
-    /// Media bucket at the same endpoint/credentials (empty = unconfigured).
+    /// Shared Files bucket at the same endpoint/credentials (empty =
+    /// unconfigured).
     pub media_s3_bucket: String,
-    /// Byte quota for the media bucket, 0 = no limit.
+    /// Byte quota for the Shared Files bucket, 0 = no limit.
     pub media_s3_max_bytes: u64,
+    /// The Shared Files store is on.
+    pub shared_files: bool,
     /// Where downloaded chat files land when no explicit destination is given.
     pub download_dir: String,
     /// Per-file byte cap for the relay file plane.
@@ -520,6 +528,7 @@ impl Default for Settings {
             s3_max_bytes: 0,
             media_s3_bucket: String::new(),
             media_s3_max_bytes: 0,
+            shared_files: false,
             download_dir: default_download_dir(),
             file_cap_bytes: default_file_cap_bytes(),
             sound_message: default_sound(),
@@ -583,6 +592,7 @@ impl From<&Config> for Settings {
             s3_max_bytes: c.storage.s3_max_bytes,
             media_s3_bucket: c.storage.media_s3_bucket.clone(),
             media_s3_max_bytes: c.storage.media_s3_max_bytes,
+            shared_files: c.storage.shared_files,
             download_dir: c.storage.download_dir.clone(),
             file_cap_bytes: c.storage.file_cap_bytes,
             sound_message: c.storage.sound_message.clone(),
@@ -650,11 +660,13 @@ s3_keep_copies = {s3_keep_copies}
 # node wrote; over the limit the oldest copies go first, never a workspace's
 # newest one.
 s3_max_bytes = {s3_max_bytes}
-# Bucket 2: media, at the same endpoint and credentials.
-# Configured here, but nothing writes media to S3 yet.
+# Bucket 2: Shared Files, at the same endpoint and credentials. The key keeps
+# its historical name; nothing writes to it yet.
 media_s3_bucket = {media_s3_bucket}
-# Byte quota for the media bucket. 0 = no limit.
+# Byte quota for the Shared Files bucket. 0 = no limit.
 media_s3_max_bytes = {media_s3_max_bytes}
+# The Shared Files store: off = the surface shows "not configured".
+shared_files = {shared_files}
 # Where downloaded chat files land ("~" = $HOME).
 download_dir = {download_dir}
 # Per-file byte cap for sharing over relays (chunk publishes load the pool).
@@ -726,6 +738,7 @@ font_editor = {font_editor}
         s3_max_bytes = settings.s3_max_bytes,
         media_s3_bucket = toml_str(&settings.media_s3_bucket),
         media_s3_max_bytes = settings.media_s3_max_bytes,
+        shared_files = settings.shared_files,
         download_dir = toml_str(&settings.download_dir),
         file_cap_bytes = settings.file_cap_bytes,
         sound_message = toml_str(&settings.sound_message),
@@ -846,6 +859,9 @@ pub fn salvage(text: &str) -> Settings {
             .and_then(|p| u64::try_from(p).ok())
         {
             s.media_s3_max_bytes = v;
+        }
+        if let Some(b) = storage.get("shared_files").and_then(toml::Value::as_bool) {
+            s.shared_files = b;
         }
         let valid_sound = |v: &str| matches!(v, "none" | "bell" | "chime" | "pop");
         if let Some(v) = storage.get("sound_message").and_then(toml::Value::as_str) {
@@ -1106,6 +1122,7 @@ pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
         "media_s3_max_bytes",
         i64::try_from(settings.media_s3_max_bytes).unwrap_or(i64::MAX),
     );
+    set_bool(storage, "shared_files", settings.shared_files);
     set_str(storage, "download_dir", &settings.download_dir);
     set_int(
         storage,
@@ -1324,13 +1341,18 @@ mod tests {
         let text = render(&Settings::default());
         let older: String = text
             .lines()
-            .filter(|l| !l.starts_with("media_s3_") && !l.starts_with("s3_max_bytes"))
+            .filter(|l| {
+                !l.starts_with("media_s3_")
+                    && !l.starts_with("s3_max_bytes")
+                    && !l.starts_with("shared_files")
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let c = parse(&older).expect("a pre-media config still parses");
         assert_eq!(c.storage.s3_max_bytes, 0);
         assert_eq!(c.storage.media_s3_bucket, "");
         assert_eq!(c.storage.media_s3_max_bytes, 0);
+        assert!(!c.storage.shared_files, "the store stays off until switched on");
         // …and the backup target it did configure is untouched
         assert_eq!(c.storage.s3_bucket, default_s3_bucket());
     }
@@ -1411,6 +1433,7 @@ mod tests {
             // a SECOND bucket at the same endpoint and credentials
             media_s3_bucket: "vacation-clips".to_string(),
             media_s3_max_bytes: 5 * 1024 * 1024 * 1024,
+            shared_files: true,
             sound_message: "chime".to_string(),
             sound_vote: "pop".to_string(),
             sound_poke: "bell".to_string(),

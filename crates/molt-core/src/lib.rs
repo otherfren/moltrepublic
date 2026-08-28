@@ -25,7 +25,8 @@ pub mod chain;
 pub mod relay;
 pub mod wiki_fold;
 pub use chain::{
-    applied_lww_slot, approval_bytes, block_link_bytes, checkpoint_canonical_bytes, ChainBlock,
+    applied_lww_slot, approval_bytes, block_link_bytes, checkpoint_applied_shape,
+    checkpoint_canonical_bytes, ChainBlock,
     ChainChange, CheckpointState, MembershipOp, GENESIS_PREV,
 };
 
@@ -61,11 +62,30 @@ pub enum Surface {
     Vault,
     /// Shared funds (Monero multisig in production). Gated.
     Wallet,
+    /// Shared files: chunked and replicated across the seats (a design
+    /// mock today). Gated. Added after checkpoint-v7 — see
+    /// [`Surface::CHECKPOINT_V7_SURFACES`].
+    Files,
 }
 
 impl Surface {
     /// Every surface, in display (= navigation) order.
-    pub const ALL: [Surface; 6] = [
+    pub const ALL: [Surface; 7] = [
+        Surface::Organization,
+        Surface::Chat,
+        Surface::Memory,
+        Surface::Quests,
+        Surface::Vault,
+        Surface::Wallet,
+        Surface::Files,
+    ];
+
+    /// The surfaces whose applied group EVERY checkpoint carries, empty or
+    /// not — the set frozen by `molt-chain-checkpoint-v7`. A surface added
+    /// later gets its group only once it holds state (and the tag moves
+    /// to v8), so a cut made before the surface existed keeps its bytes
+    /// and its JSON shape for every build. FROZEN: never add to it.
+    pub const CHECKPOINT_V7_SURFACES: [Surface; 6] = [
         Surface::Organization,
         Surface::Chat,
         Surface::Memory,
@@ -83,6 +103,7 @@ impl Surface {
             Surface::Quests => "quests",
             Surface::Vault => "vault",
             Surface::Wallet => "wallet",
+            Surface::Files => "files",
         }
     }
 
@@ -189,6 +210,12 @@ impl Surface {
                 ("receive", "Receive"),
                 ("status", "Status"),
                 ("settings", "Settings"),
+            ],
+            Surface::Files => &[
+                ("browse", "Browse..."),
+                ("upload", "Upload"),
+                // the node-local store settings (Settings › S3 config)
+                ("config", "Config"),
             ],
         }
     }
@@ -337,17 +364,21 @@ pub struct SessionSettings {
     /// neighbouring `file_cap_bytes` reads 0 as "off"; here 0 is "no limit".
     #[serde(default)]
     pub s3_max_bytes: u64,
-    /// The MEDIA bucket at the same endpoint and credentials as the backup
-    /// bucket above - one S3 account, several buckets. No cover-name default
-    /// like the backup bucket: empty means "not configured", not "some name
-    /// nobody chose". Configuration only - nothing writes media to S3 yet
-    /// (`docs/storage/s3_buckets.md` §7), and the GUI says so.
+    /// The Shared Files bucket at the same endpoint and credentials as the
+    /// backup bucket above - one S3 account, several buckets. No cover-name
+    /// default like the backup bucket: empty means "not configured", not
+    /// "some name nobody chose". The wire key keeps its historical name;
+    /// nothing writes to it yet (`docs/storage/s3_buckets.md` §7).
     #[serde(default)]
     pub media_s3_bucket: String,
-    /// Byte quota for the media bucket, `0` = no limit. Stored and shown;
-    /// with no writer there is nothing to enforce it against yet.
+    /// Byte quota for the Shared Files bucket, `0` = no limit. Stored and
+    /// shown; with no writer there is nothing to enforce it against yet.
     #[serde(default)]
     pub media_s3_max_bytes: u64,
+    /// The Shared Files store is on. Off by default; the surface's panes
+    /// stay "not configured" until this AND the bucket above are set.
+    #[serde(default)]
+    pub shared_files: bool,
     /// MCP server TCP port.
     pub mcp_port: u16,
     /// MCP client allowlist (`"127.0.0.1" | "0.0.0.0" | comma-separated`).
@@ -494,6 +525,7 @@ impl Default for SessionSettings {
             s3_max_bytes: 0,
             media_s3_bucket: String::new(),
             media_s3_max_bytes: 0,
+            shared_files: false,
             mcp_port: 4040,
             mcp_allow: "127.0.0.1".to_string(),
             mcp_token: String::new(),
@@ -528,7 +560,7 @@ pub enum S3Target {
     /// names no target keeps addressing exactly what it used to.
     #[default]
     Workspaces,
-    /// The media bucket - configured, no consumer yet.
+    /// The Shared Files bucket - configured, nothing writes to it yet.
     Media,
 }
 
@@ -6434,6 +6466,39 @@ mod tests {
         let legacy_bytes = roster_canonical_bytes("f00", 2, 3, &legacy, "charter", &[], None);
         assert_eq!(legacy_bytes.len(), 329 - 64);
         assert_ne!(legacy_bytes, bytes);
+    }
+
+    /// Shared Files is the seventh surface: an optional charter feature
+    /// (locked off in the wizard, voted in later) with the three nav views
+    /// the GUI routes on — and a key `set_features` accepts.
+    #[test]
+    fn shared_files_is_an_optional_surface_with_three_views() {
+        assert_eq!(Surface::ALL.last(), Some(&Surface::Files));
+        assert_eq!(Surface::Files.as_str(), "files");
+        assert_eq!(Surface::parse("files"), Some(Surface::Files));
+        assert!(Surface::Files.is_charter_feature());
+        assert!(Surface::Files.is_gated());
+        assert_eq!(
+            Surface::Files.views().iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+            ["browse", "upload", "config"]
+        );
+        assert_eq!(Surface::Files.default_view(), "browse");
+        assert_eq!(
+            canonical_features(&["files".to_string(), "memory".to_string()]),
+            Ok(vec!["files".to_string(), "memory".to_string()])
+        );
+        assert!(!Surface::LEGACY_FEATURES.contains(&"files"));
+    }
+
+    /// The Shared Files store is off until the operator turns it on, and a
+    /// settings blob written before the flag existed reads as off.
+    #[test]
+    fn shared_files_defaults_off_and_is_optional_on_the_wire() {
+        assert!(!SessionSettings::default().shared_files);
+        let mut v = serde_json::to_value(SessionSettings::default()).expect("serialize");
+        v.as_object_mut().expect("object").remove("shared_files");
+        let back: SessionSettings = serde_json::from_value(v).expect("pre-flag settings parse");
+        assert!(!back.shared_files);
     }
 
     /// BYTE-IDENTITY PIN — `molt-roster-v5`: the ratified FEATURE SET

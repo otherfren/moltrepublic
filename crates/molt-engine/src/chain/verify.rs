@@ -539,7 +539,13 @@ fn genesis_base(
         relays: relays.to_vec(),
         founding_features: features.map(<[String]>::to_vec),
         roster: identities.to_vec(),
-        applied: Surface::ALL.into_iter().map(|s| (s, Vec::new())).collect(),
+        // the v7 group set only: a surface added later joins in `fold_one`
+        // with its first entry, so a blob cut before it existed keeps its
+        // shape for every build (molt_core::Surface::CHECKPOINT_V7_SURFACES)
+        applied: Surface::CHECKPOINT_V7_SURFACES
+            .into_iter()
+            .map(|s| (s, Vec::new()))
+            .collect(),
         consumed_ids: Vec::new(),
         anchors: Vec::new(),
         member_relays: Vec::new(),
@@ -559,6 +565,16 @@ fn fold_one(state: &mut molt_core::CheckpointState, block: &ChainBlock) -> Resul
             surface,
             payload,
         } => {
+            if !state.applied.iter().any(|(s, _)| s == surface) {
+                // keep Surface::ALL order, whichever surface shows up first
+                let rank = |s: &Surface| Surface::ALL.iter().position(|x| x == s);
+                let at = state
+                    .applied
+                    .iter()
+                    .position(|(s, _)| rank(s) > rank(surface))
+                    .unwrap_or(state.applied.len());
+                state.applied.insert(at, (*surface, Vec::new()));
+            }
             if let Some((_, list)) = state.applied.iter_mut().find(|(s, _)| s == surface) {
                 // §B.6a (v4): a checkpoint SUMMARIZES. A last-write-wins slot
                 // keeps only its latest entry — the answer `org_effective`
@@ -991,6 +1007,11 @@ pub(crate) fn walk_suffix_chain(
     if blob.upto != *upto {
         return Err("checkpoint blob does not cover the anchored upto".to_string());
     }
+    // the applied groups must have the one shape every holder builds: an
+    // empty later group is invisible to the hash, so a phantom one would
+    // pass the signature and then decide where fold_one files that
+    // surface's first entry (review 2026-08-28)
+    molt_core::checkpoint_applied_shape(&blob.applied).map_err(|e| format!("checkpoint blob: {e}"))?;
     if &checkpoint_state_hash(blob) != state_hash {
         return Err("checkpoint blob does not match the signed state hash".to_string());
     }

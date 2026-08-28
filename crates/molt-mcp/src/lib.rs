@@ -236,7 +236,7 @@ set_features {value: \"memory quests\"}, set_member_image {member,value,bytes_b6
 /remove_member_image/set_member_desc {member,value} (own seat only, square \
 picture); memory add_note {title}, wiki_patch \
 {value: git-format patch, summary}; quests/vault/wallet add_quest/seal_secret/ \
-transfer {title}. Traps: founding/join/recovery need a confirmed relay \
+transfer {title}; files takes no proposal yet (refused). Traps: founding/join/recovery need a confirmed relay \
 (relay_add, then confirm); mark_channel_read moves your PRIVATE cursor while \
 mark_read broadcasts read receipts; restore_start = offline knowledge from a \
 backup blob, recover_start = rejoin the live republic; navigate/select_* only \
@@ -574,6 +574,9 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
         s3_max_bytes: bytes("s3_max_bytes")?,
         media_s3_bucket: text("media_s3_bucket")?,
         media_s3_max_bytes: bytes("media_s3_max_bytes")?,
+        // required like every other field: absent must not silently switch
+        // an operator's store off (review 2026-08-28)
+        shared_files: flag("shared_files")?,
         sound_message: text("sound_message")?,
         sound_vote: text("sound_vote")?,
         // added after the everything-required contract froze: optional, and
@@ -611,12 +614,13 @@ fn surface_enum() -> Value {
         "memory",
         "quests",
         "vault",
-        "wallet"
+        "wallet",
+        "files"
     ])
 }
 
 fn gated_enum() -> Value {
-    json!(["organization", "memory", "quests", "vault", "wallet"])
+    json!(["organization", "memory", "quests", "vault", "wallet", "files"])
 }
 
 /// One MCP tool: name, wire schema and command builder side by side — a
@@ -801,7 +805,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "propose",
             command: "propose",
-            description: "Put an object forward for threshold approval on a gated surface. An Organization set_image payload must embed the actual image as base64 `bytes_b64` and the bytes must DECODE as a picture (png/jpeg/webp/gif/bmp, ≤8192x8192; svg is refused) - sign-what-you-see: members vote on the image, so undecodable bytes are refused here and dropped by every peer. Payload size is capped at what one relay message can carry (about 64 KiB of image for a small roster); an over-size proposal is refused with the exact figure that fits. Organization op set_features enables charter features: value = space-separated keys among memory/quests/vault/wallet, the FULL target set - it must keep every enabled feature (enable-only, never off again) and add at least one. Proposing on a surface whose feature is not enabled is refused (status.features lists the enabled set). Memory op wiki_patch is a wiki changeset vote: `value` carries a raw git-format patch (unified diffs; rename/new/deleted headers), `summary` a short count string like \"+2 -1 →1 ~34\" - the GUI's changeset vote emits exactly this shape and renders the patch in its diff viewer.",
+            description: "Put an object forward for threshold approval on a gated surface. An Organization set_image payload must embed the actual image as base64 `bytes_b64` and the bytes must DECODE as a picture (png/jpeg/webp/gif/bmp, ≤8192x8192; svg is refused) - sign-what-you-see: members vote on the image, so undecodable bytes are refused here and dropped by every peer. Payload size is capped at what one relay message can carry (about 64 KiB of image for a small roster); an over-size proposal is refused with the exact figure that fits. Organization op set_features enables charter features: value = space-separated keys among memory/quests/vault/wallet/files, the FULL target set - it must keep every enabled feature (enable-only, never off again) and add at least one. files is a newer key: every seat must run a build that knows it, an older seat drops the blocks that follow. Proposing on a surface whose feature is not enabled is refused (status.features lists the enabled set). Memory op wiki_patch is a wiki changeset vote: `value` carries a raw git-format patch (unified diffs; rename/new/deleted headers), `summary` a short count string like \"+2 -1 →1 ~34\" - the GUI's changeset vote emits exactly this shape and renders the patch in its diff viewer.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1071,8 +1075,9 @@ pub fn tools() -> Vec<ToolDef> {
                     "s3_interval_min": { "type": "integer" },
                     "s3_keep_copies": { "type": "integer" },
                     "s3_max_bytes": { "type": "integer", "description": "byte quota for the backup bucket; 0 = no limit" },
-                    "media_s3_bucket": { "type": "string", "description": "a SECOND bucket at the same endpoint/credentials, for media. Configured only: nothing writes media to S3 yet" },
-                    "media_s3_max_bytes": { "type": "integer", "description": "byte quota for the media bucket; 0 = no limit" },
+                    "media_s3_bucket": { "type": "string", "description": "a SECOND bucket at the same endpoint/credentials, the Shared Files store (the key keeps its historical name). Nothing writes to it yet" },
+                    "media_s3_max_bytes": { "type": "integer", "description": "byte quota for the Shared Files bucket; 0 = no limit" },
+                    "shared_files": { "type": "boolean", "description": "the Shared Files store on/off (off = its panes show \"not configured\")" },
                     "sound_message": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
                     "sound_vote": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
                     "sound_poke": { "type": "string", "enum": ["none", "bell", "chime", "pop"], "description": "optional; absent = \"none\"" },
@@ -1083,8 +1088,8 @@ pub fn tools() -> Vec<ToolDef> {
                 "required": [
                     "s3_backup", "s3_endpoint", "s3_access_key", "s3_bucket",
                     "s3_interval_min", "s3_keep_copies", "s3_max_bytes",
-                    "media_s3_bucket", "media_s3_max_bytes", "sound_message",
-                    "sound_vote", "read_receipts", "file_cap_bytes"
+                    "media_s3_bucket", "media_s3_max_bytes", "shared_files",
+                    "sound_message", "sound_vote", "read_receipts", "file_cap_bytes"
                 ]
             }),
             build: |args| Ok(Command::SaveSettings {
@@ -1106,8 +1111,9 @@ pub fn tools() -> Vec<ToolDef> {
                     "s3_interval_min": { "type": "integer" },
                     "s3_keep_copies": { "type": "integer" },
                     "s3_max_bytes": { "type": "integer", "description": "byte quota for the backup bucket; 0 = no limit. Over it the oldest copies go first, never a workspace's newest" },
-                    "media_s3_bucket": { "type": "string", "description": "a second bucket at the same endpoint/credentials, for media; configured only, nothing writes media to S3 yet" },
-                    "media_s3_max_bytes": { "type": "integer", "description": "byte quota for the media bucket; 0 = no limit" },
+                    "media_s3_bucket": { "type": "string", "description": "a second bucket at the same endpoint/credentials, the Shared Files store (the key keeps its historical name); nothing writes to it yet" },
+                    "media_s3_max_bytes": { "type": "integer", "description": "byte quota for the Shared Files bucket; 0 = no limit" },
+                    "shared_files": { "type": "boolean", "description": "the Shared Files store on/off (off = its panes show \"not configured\")" },
                     "file_cap_bytes": { "type": "integer", "description": "per-file byte cap for sharing over relays; 0 = sharing off" },
                     "sound_message": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
                     "sound_vote": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
@@ -1558,7 +1564,7 @@ pub fn tools() -> Vec<ToolDef> {
                 "properties": {
                     "name": { "type": "string", "description": "the final republic name to ratify" },
                     "agenda": { "type": "string", "description": "the free-text charter/agenda to ratify" },
-                    "features": { "type": "array", "items": { "type": "string", "enum": ["memory", "quests", "vault", "wallet"] }, "description": "the optional surfaces to activate (chat is always on); omitted = none. memory (the shared wiki) and wallet are real; quests and vault have no real surface yet - the GUI wizard locks them off, prefer leaving them out" }
+                    "features": { "type": "array", "items": { "type": "string", "enum": ["memory", "quests", "vault", "wallet", "files"] }, "description": "the optional surfaces to activate (chat is always on); omitted = none. memory (the shared wiki) and wallet are real; quests, vault and files have no real surface yet - the GUI wizard locks them off, prefer leaving them out" }
                 },
                 "required": ["name"]
             }),
@@ -2028,8 +2034,14 @@ mod tests {
     /// required" rule was written against (review 2026-08-25).
     #[test]
     fn save_settings_builds_from_exactly_its_schemas_required_list() {
-        let def = tool_named("save_settings");
-        let schema = (def.schema)();
+        let args = required_args("save_settings");
+        build("save_settings", &Value::Object(args)).expect("every required field given builds");
+    }
+
+    /// Exactly the tool's `required` list, each with a value of its
+    /// schema type.
+    fn required_args(name: &str) -> serde_json::Map<String, Value> {
+        let schema = (tool_named(name).schema)();
         let props = schema["properties"].as_object().expect("properties");
         let required = schema["required"].as_array().expect("required");
         let mut args = serde_json::Map::new();
@@ -2047,7 +2059,45 @@ mod tests {
             };
             args.insert(k.to_string(), v);
         }
-        build("save_settings", &Value::Object(args)).expect("every required field given builds");
+        args
+    }
+
+    /// Shared Files is a charter feature an agent can found with or vote
+    /// in, a surface it can read, and its store switch rides the settings
+    /// tools fail-safe: absent from save_settings = off.
+    #[test]
+    fn shared_files_reaches_the_feature_surface_and_settings_schemas() {
+        let create = (tool_named("create_propose").schema)();
+        assert!(create["properties"]["features"]["items"]["enum"]
+            .as_array()
+            .expect("feature enum")
+            .contains(&json!("files")));
+        let read = (tool_named("read_state").schema)();
+        assert!(read["properties"]["surface"]["enum"]
+            .as_array()
+            .expect("surface enum")
+            .contains(&json!("files")));
+        assert!(matches!(
+            build("read_state", &json!({ "surface": "files" })),
+            Ok(Command::ReadState { surface: molt_core::Surface::Files, .. })
+        ));
+
+        let save = (tool_named("save_settings").schema)();
+        assert_eq!(save["properties"]["shared_files"]["type"], "boolean");
+        assert!(
+            save["required"].as_array().expect("required").contains(&json!("shared_files")),
+            "a wholesale save must name the store switch - absent must not wipe it"
+        );
+        let mut args = required_args("save_settings");
+        args.remove("shared_files");
+        assert!(build("save_settings", &Value::Object(args.clone())).is_err());
+        args.insert("shared_files".to_string(), json!(true));
+        match build("save_settings", &Value::Object(args)).expect("builds") {
+            Command::SaveSettings { settings } => assert!(settings.shared_files),
+            other => panic!("not a save: {other:?}"),
+        }
+        let patch = (tool_named("patch_settings").schema)();
+        assert_eq!(patch["properties"]["shared_files"]["type"], "boolean");
     }
 
     #[test]

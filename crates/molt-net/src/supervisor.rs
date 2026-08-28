@@ -258,7 +258,13 @@ impl MlsChannel {
                 }
                 match serde_json::from_slice::<EventEnvelope>(&plaintext) {
                     Ok(env) => MlsDecode::Deliver(from, Box::new(env)),
-                    Err(_) => MlsDecode::Discard,
+                    // loud: a frame this build cannot parse is most likely a
+                    // newer variant (a surface this build predates), and a
+                    // seat silently dropping it strands itself at that height
+                    Err(e) => {
+                        tracing::warn!(len = plaintext.len(), error = %e, "discarding an undecodable event frame");
+                        MlsDecode::Discard
+                    }
                 }
             }
             // a merged commit advanced the epoch — held future-epoch messages

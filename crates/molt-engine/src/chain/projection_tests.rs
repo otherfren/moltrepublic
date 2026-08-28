@@ -1071,6 +1071,29 @@ fn the_feature_baseline_follows_the_ratified_selection() {
     assert_eq!(st.effective_features(), vec!["wallet".to_string()]);
 }
 
+/// Shared Files is a mock: even with the feature voted in, a proposal on
+/// it is refused - nothing could show or decide it. Without the feature
+/// the D7 gate speaks first.
+#[test]
+fn a_files_proposal_is_refused_even_with_the_feature_on() {
+    let b = Builder::new_on_relays(&["petra", "walter"], 2, Vec::new());
+    let mut st = chain_signer("walter", &b, b.blocks.clone());
+    if let Some(r) = st.replica.as_mut() {
+        r.features = Some(vec!["files".to_string()]);
+    }
+    let err = st
+        .cmd_propose(Surface::Files, json!({ "op": "share", "title": "x" }))
+        .expect_err("refused");
+    assert!(matches!(err, molt_core::MoltError::BadPayload(_)), "{err}");
+    if let Some(r) = st.replica.as_mut() {
+        r.features = Some(Vec::new());
+    }
+    assert!(matches!(
+        st.cmd_propose(Surface::Files, json!({ "op": "share" })),
+        Err(molt_core::MoltError::FeatureDisabled("files"))
+    ));
+}
+
 /// R6: an edit that would strand a member — a new pool sharing no relay
 /// with what that member is on record as reaching — is refused at
 /// propose time, naming the member and its relay (the R4 split it would
