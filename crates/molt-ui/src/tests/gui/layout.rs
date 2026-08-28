@@ -843,3 +843,53 @@ fn the_vault_seal_button_opens_its_dialog() {
         "the seal dialog must open"
     );
 }
+
+/// **Organization → Members: every row cell starts where its header
+/// starts** - at every font (the header's spacers stayed 56/22/70/180px
+/// while the rows scaled: "2 min ago" under "public key") and with long,
+/// short and empty content (a content-sized stretch column drifts the
+/// columns behind it).
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_members_table_header_lines_up_with_its_rows() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = members_window(false);
+    ui.set_org_chain_governed(true);
+    let seat = |name: &str, last: &str, uploads: i32| MemberRow {
+        name: name.into(),
+        id: "9f".repeat(8).into(),
+        pk: "3c".repeat(32).into(),
+        last: last.into(),
+        uploads,
+        desc: "Gründungsmitglied, Kassenwart und Protokoll.".into(),
+        ..MemberRow::default()
+    };
+    ui.set_org_members(ModelRc::new(VecModel::from(vec![
+        seat("walter", "2 min ago", 3),
+        seat("bartholomaeus-von-habsburg", "22.07.2026", 0),
+        seat("bo", "", 0),
+    ])));
+
+    let x_of = |id: &str| -> Vec<f32> {
+        i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, id)
+            .filter(|e| e.size().width > 0.0)
+            .map(|e| e.absolute_position().x)
+            .collect()
+    };
+    for font in [14.0_f32, 20.0, 28.0] {
+        ui.global::<Theme>().set_fs_app(font);
+        for col in ["name", "desc", "id", "pk", "last", "uploads", "recover"] {
+            let header = x_of(&format!("AppWindow::om-h-{col}"));
+            let rows = x_of(&format!("AppWindow::om-r-{col}"));
+            assert_eq!(header.len(), 1, "font {font}: one {col} header");
+            assert_eq!(rows.len(), 3, "font {font}: three {col} cells");
+            for (i, x) in rows.iter().enumerate() {
+                assert!(
+                    (x - header[0]).abs() < 1.0,
+                    "font {font}: column {col} row {i} starts at {x}, its header at {}",
+                    header[0]
+                );
+            }
+        }
+    }
+}

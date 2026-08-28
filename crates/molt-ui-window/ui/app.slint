@@ -5836,9 +5836,10 @@ export component AppWindow inherits Window {
                                             padding-right: 12px;
                                             spacing: 10px;
                                             Rectangle { width: 9px; }
-                                            // the picture column carries no
-                                            // header - the pictures say it
-                                            Rectangle { width: 56px; }
+                                            // no header over the pictures. Every
+                                            // width here mirrors the row cell,
+                                            // ui-scale included
+                                            Rectangle { width: 56px * Theme.ui-scale; }
                                             // Name outweighs the identity
                                             // columns: when space gets tight
                                             // ID and key give way first.
@@ -5846,18 +5847,22 @@ export component AppWindow inherits Window {
                                             // click (the ▲/▼ marks the
                                             // active one); the profile and
                                             // recovery action columns stay
-                                            // plain labels.
-                                            SortHeader {
+                                            // plain labels. Stretch columns pin
+                                            // preferred-width 0 in header AND
+                                            // row - the stretch share is added
+                                            // on top of it
+                                            om-h-name := SortHeader {
                                                 label: Strings.ow-col-name;
                                                 active: root.om-sort-column == "name";
                                                 desc: !root.om-sort-ascending;
                                                 horizontal-stretch: 3;
                                                 min-width: 100px;
+                                                preferred-width: 0px;
                                                 clicked => {
                                                     root.sort-members("name");
                                                 }
                                             }
-                                            Text {
+                                            om-h-desc := Text {
                                                 text: Strings.mp-col-desc;
                                                 color: Theme.faint;
                                                 font-size: Theme.fs-cap;
@@ -5877,54 +5882,56 @@ export component AppWindow inherits Window {
                                             // pencil sits here - without the
                                             // spacer every column behind it
                                             // would drift out of the grid
-                                            Rectangle { width: 22px; }
-                                            SortHeader {
+                                            Rectangle { width: 22px * Theme.ui-scale; }
+                                            om-h-id := SortHeader {
                                                 label: Strings.om-col-id;
                                                 active: root.om-sort-column == "id";
                                                 desc: !root.om-sort-ascending;
                                                 horizontal-stretch: 1;
                                                 min-width: 40px;
                                                 max-width: 130px;
+                                                preferred-width: 0px;
                                                 clicked => {
                                                     root.sort-members("id");
                                                 }
                                             }
-                                            SortHeader {
+                                            om-h-pk := SortHeader {
                                                 label: Strings.om-col-pk;
                                                 active: root.om-sort-column == "pk";
                                                 desc: !root.om-sort-ascending;
                                                 horizontal-stretch: 1;
                                                 min-width: 40px;
                                                 max-width: 130px;
+                                                preferred-width: 0px;
                                                 clicked => {
                                                     root.sort-members("pk");
                                                 }
                                             }
-                                            SortHeader {
+                                            om-h-last := SortHeader {
                                                 label: Strings.om-col-last;
                                                 active: root.om-sort-column == "last";
                                                 desc: !root.om-sort-ascending;
-                                                width: 100px;
+                                                width: 100px * Theme.ui-scale;
                                                 clicked => {
                                                     root.sort-members("last");
                                                 }
                                             }
-                                            SortHeader {
+                                            om-h-uploads := SortHeader {
                                                 label: Strings.om-col-uploads;
                                                 active: root.om-sort-column == "uploads";
                                                 desc: !root.om-sort-ascending;
-                                                width: 70px;
+                                                width: 70px * Theme.ui-scale;
                                                 align: end;
                                                 clicked => {
                                                     root.sort-members("uploads");
                                                 }
                                             }
-                                            Text {
+                                            om-h-recover := Text {
                                                 text: Strings.om-col-recovery;
                                                 color: Theme.faint;
                                                 font-size: Theme.fs-cap;
                                                 font-weight: 700;
-                                                width: 180px;
+                                                width: 180px * Theme.ui-scale;
                                                 horizontal-alignment: right;
                                             }
                                         }
@@ -6050,10 +6057,11 @@ export component AppWindow inherits Window {
                                                         }
                                                     }
                                                 }
-                                                VerticalLayout {
+                                                om-r-name := VerticalLayout {
                                                     alignment: start;
                                                     horizontal-stretch: 3;
                                                     min-width: 100px;
+                                                    preferred-width: 0px;
                                                     Text {
                                                         text: m.name == root.node-member ? "\{m.name} \{Strings.om-me}" : m.name;
                                                         color: m.name == root.node-member ? Theme.accent : Theme.text;
@@ -6078,7 +6086,7 @@ export component AppWindow inherits Window {
                                                 // off; the row's own menu area
                                                 // gets the right-click, so no
                                                 // TouchArea sits on top here
-                                                Rectangle {
+                                                om-r-desc := Rectangle {
                                                     horizontal-stretch: 2;
                                                     min-width: 90px;
                                                     // a wrapping Text reports
@@ -6126,10 +6134,11 @@ export component AppWindow inherits Window {
                                                 // full key ("—" on a workspace
                                                 // without anchored identities),
                                                 // each with a copy-to-clipboard
-                                                HorizontalLayout {
+                                                om-r-id := HorizontalLayout {
                                                     horizontal-stretch: 1;
                                                     min-width: 40px;
                                                     max-width: 130px;
+                                                    preferred-width: 0px;
                                                     spacing: 4px;
                                                     cross-axis-alignment: center;
                                                     Text {
@@ -6152,10 +6161,11 @@ export component AppWindow inherits Window {
                                                         }
                                                     }
                                                 }
-                                                HorizontalLayout {
+                                                om-r-pk := HorizontalLayout {
                                                     horizontal-stretch: 1;
                                                     min-width: 40px;
                                                     max-width: 130px;
+                                                    preferred-width: 0px;
                                                     spacing: 4px;
                                                     cross-axis-alignment: center;
                                                     Text {
@@ -6178,11 +6188,11 @@ export component AppWindow inherits Window {
                                                         }
                                                     }
                                                 }
-                                                Text {
+                                                om-r-last := Text {
                                                     text: m.last;
                                                     color: Theme.faint;
                                                     font-size: Theme.fs-cap;
-                                                    width: 100px;
+                                                    width: 100px * Theme.ui-scale;
                                                     height: Theme.fs-body * 1.4;
                                                     vertical-alignment: center;
                                                     overflow: elide;
@@ -6193,7 +6203,7 @@ export component AppWindow inherits Window {
                                                 // filter pre-filled to this
                                                 // member (view switch + filter
                                                 // both run through Rust)
-                                                HorizontalLayout {
+                                                om-r-uploads := HorizontalLayout {
                                                     width: 70px * Theme.ui-scale;
                                                     alignment: end;
                                                     cross-axis-alignment: center;
@@ -6219,7 +6229,7 @@ export component AppWindow inherits Window {
                                                 // engine's notices drive the
                                                 // dialog: pending → link or a
                                                 // calm failed state
-                                                HorizontalLayout {
+                                                om-r-recover := HorizontalLayout {
                                                     width: 180px * Theme.ui-scale;
                                                     alignment: end;
                                                     cross-axis-alignment: center;
