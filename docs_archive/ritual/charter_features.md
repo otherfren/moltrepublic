@@ -178,6 +178,9 @@ surface lands (the established stepwise-UI modus; never fake, always badged).
   and in the Organization features modal like quests/vault — the surface
   ships much later. `set_features` still carries an already-enabled wallet
   along (enable-only), and MCP keeps the full key set.*
+  *Amended 2026-08-29 (user decision): the Organization modal locks
+  Kanban too; Vault and Shared Files stay enable-able there and carry
+  " (ui mock)" after the name, in the modal and in the Status list.*
 - **Ratification card:** between agenda and the confirm/decline buttons, the
   five rows with their on/off state — the member sees the whole selection it
   signs, not only the enabled part. Read-only.

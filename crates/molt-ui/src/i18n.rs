@@ -820,6 +820,8 @@ lexicon! {
     feat_vault: "Vault", "Vault";
     feat_wallet: "Wallet", "Wallet";
     feat_files: "Shared Files", "Shared Files";
+    // suffix on the two enable-able features whose pane is still a mock
+    feat_mock: " (ui mock)", " (ui mock)";
     jw_back_to_start: "Back to start", "Zurück zum Start";
     jw_ratify_title: "Ratify the charter", "Satzung ratifizieren";
     jw_ratify_confirm: "Confirm & join", "Bestätigen & beitreten";

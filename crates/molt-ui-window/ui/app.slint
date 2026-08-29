@@ -1691,7 +1691,6 @@ export component AppWindow inherits Window {
     in property <bool> org-feat-files;
     property <bool> org-features-modal-open: false;
     property <bool> of-memory-draft;
-    property <bool> of-quests-draft;
     property <bool> of-vault-draft;
     property <bool> of-files-draft;
     property <bool> org-relays-modal-open: false;
@@ -5652,11 +5651,11 @@ export component AppWindow inherits Window {
                                             }
                                             Row {
                                                 AppCheck { label: Strings.feat-quests; checked: root.org-feat-quests; enabled: false; }
-                                                AppCheck { label: Strings.feat-vault; checked: root.org-feat-vault; enabled: false; }
+                                                AppCheck { label: Strings.feat-vault + Strings.feat-mock; checked: root.org-feat-vault; enabled: false; }
                                             }
                                             Row {
                                                 AppCheck { label: Strings.feat-wallet; checked: root.org-feat-wallet; enabled: false; }
-                                                AppCheck { label: Strings.feat-files; checked: root.org-feat-files; enabled: false; }
+                                                AppCheck { label: Strings.feat-files + Strings.feat-mock; checked: root.org-feat-files; enabled: false; }
                                             }
                                         }
                                         AppButton {
@@ -5668,7 +5667,6 @@ export component AppWindow inherits Window {
                                             tooltip-left: true;
                                             clicked => {
                                                 root.of-memory-draft = root.org-feat-memory;
-                                                root.of-quests-draft = root.org-feat-quests;
                                                 root.of-vault-draft = root.org-feat-vault;
                                                 root.of-files-draft = root.org-feat-files;
                                                 root.org-features-modal-open = true;
@@ -9087,7 +9085,6 @@ export component AppWindow inherits Window {
         body: "";
         confirm-label: Strings.oc-propose;
         confirm-enabled: (root.of-memory-draft && !root.org-feat-memory)
-            || (root.of-quests-draft && !root.org-feat-quests)
             || (root.of-vault-draft && !root.org-feat-vault)
             || (root.of-files-draft && !root.org-feat-files);
         dismissed => {
@@ -9099,11 +9096,12 @@ export component AppWindow inherits Window {
             // modal is open, and the stale draft would then propose a set
             // omitting it - refused by the engine for a box the user never
             // touched (review 2026-08-12)
-            // wallet has no draft (locked below) — but an ALREADY enabled
-            // wallet must ride along: the target set is enable-only
+            // quests and wallet have no draft (locked below) — but an
+            // ALREADY enabled one must ride along: the target set is
+            // enable-only
             root.org-propose("set_features",
                 (root.of-memory-draft || root.org-feat-memory ? " memory" : "")
-                + (root.of-quests-draft || root.org-feat-quests ? " quests" : "")
+                + (root.org-feat-quests ? " quests" : "")
                 + (root.of-vault-draft || root.org-feat-vault ? " vault" : "")
                 + (root.org-feat-wallet ? " wallet" : "")
                 + (root.of-files-draft || root.org-feat-files ? " files" : ""));
@@ -9116,27 +9114,28 @@ export component AppWindow inherits Window {
                 checked <=> root.of-memory-draft;
                 enabled: !root.org-feat-memory;
             }
+            // kanban and wallet are not built yet: locked here exactly like
+            // in the founding wizard (an already enabled one stays shown)
             AppCheck {
                 label: Strings.feat-quests;
-                checked <=> root.of-quests-draft;
-                enabled: !root.org-feat-quests;
+                checked: root.org-feat-quests;
+                enabled: false;
             }
+            // vault and files: locked in the wizard, but voted in here -
+            // a mock pane behind a real charter feature, and the label
+            // says so (user decision 2026-08-29)
             AppCheck {
-                label: Strings.feat-vault;
+                label: Strings.feat-vault + Strings.feat-mock;
                 checked <=> root.of-vault-draft;
                 enabled: !root.org-feat-vault;
             }
-            // wallet is not built yet: locked here exactly like in the
-            // founding wizard (an already enabled one stays shown)
             AppCheck {
                 label: Strings.feat-wallet;
                 checked: root.org-feat-wallet;
                 enabled: false;
             }
-            // files: locked in the wizard, but voted in here (a mock pane
-            // behind a real charter feature, like quests and vault)
             AppCheck {
-                label: Strings.feat-files;
+                label: Strings.feat-files + Strings.feat-mock;
                 checked <=> root.of-files-draft;
                 enabled: !root.org-feat-files;
             }
