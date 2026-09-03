@@ -159,7 +159,7 @@ finding, the same as a bug.
   The same rule holds for its sibling layouts: `molt-republic-id-v2`
   (`molt_storage::republic_id` — le32-length-prefixed + entry-counted, so the
   preimage stays injective for arbitrary field content; never regress it to
-  separators) and `molt-chain-checkpoint-v7`
+  separators) and `molt-chain-checkpoint-v8`
   (`molt_core::checkpoint_canonical_bytes` — both identity tables hash all
   three anchors (v2), the ratified relay pool rides along (v3), the applied
   projection is SUMMARIZED rather than archived (v4, `applied_lww_slot`),
@@ -167,7 +167,16 @@ finding, the same as a bug.
   strands every seat that had recovered — the relay LEDGER as well (v6,
   R3b): a cut must not forget who declared which relays — and the ratified
   founding feature set (v7, conditional like roster-v5: a state without one
-  hashes as v6)). Each has byte-pin tests that go red on an unbumped change.
+  hashes as v6), and an applied group for a surface outside the frozen
+  `Surface::CHECKPOINT_V7_SURFACES` (v8, conditional: `genesis_base` seeds
+  only the frozen six, `fold_one` adds a later surface's group with its
+  first entry, so a cut made before that surface existed keeps its bytes
+  and its JSON shape; under v8 a presence byte precedes the feature run,
+  the group count is explicit, and every group present is hashed, so a
+  phantom group fails the signed hash). A new surface therefore only
+  extends `Surface::ALL`, never the frozen set; its first applied block
+  strands any seat on a build that predates it (`charter_features.md`
+  D1)). Each has byte-pin tests that go red on an unbumped change.
 - **Additive-only event evolution.** New `WorkspaceEvent` fields get
   `#[serde(default)]`; an older reader meeting an unknown variant must not write.
 - **Chat addressing is by `MessageId` — never reintroduce indices.** Every chat

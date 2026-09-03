@@ -349,9 +349,10 @@ pub struct CheckpointState {
     /// The CURRENT roster after every membership block `<= upto`, in
     /// chain order (deterministic — the block sequence is totally ordered).
     pub roster: Vec<MemberIdentity>,
-    /// The applied projection: per surface (in [`Surface::ALL`] order,
-    /// surfaces without entries included empty), the `(proposal id,
-    /// payload)` list in block order — **summarized**, not archived: a
+    /// The applied projection: per surface (in [`Surface::ALL`] order; the
+    /// [`Surface::CHECKPOINT_V7_SURFACES`] included empty, a later surface
+    /// only once it holds state), the `(proposal id, payload)` list in
+    /// block order — **summarized**, not archived: a
     /// last-write-wins slot keeps only its latest entry, accumulating items
     /// all survive ([`applied_lww_slot`], v4).
     pub applied: Vec<(Surface, Vec<(u64, Value)>)>,
@@ -444,7 +445,12 @@ pub fn applied_lww_slot(surface: Surface, payload: &Value) -> Option<String> {
 }
 
 /// **What checkpoint signers hash.** The canonical, versioned
-/// serialization of [`CheckpointState`] (`molt-chain-checkpoint-v7` — v7
+/// serialization of [`CheckpointState`] (`molt-chain-checkpoint-v8` — v8
+/// carries an applied group for a surface outside the frozen
+/// [`Surface::CHECKPOINT_V7_SURFACES`], conditionally: the group exists
+/// only once that surface holds state, so every cut made before it keeps
+/// its bytes; under v8 a presence byte precedes the feature run and the
+/// group count is explicit; v7
 /// carries the ratified founding FEATURE SET (roster-v5), conditionally:
 /// a state without one hashes byte-identically to v6; v6
 /// carries the relay LEDGER, without which a cut forgets every declared
@@ -464,11 +470,32 @@ pub fn applied_lww_slot(surface: Surface, payload: &Value) -> Option<String> {
 /// `serde_json::Map` is a BTreeMap here (no `preserve_order` feature —
 /// pinned by `serde_json_object_serializes_with_sorted_keys`).
 pub fn checkpoint_canonical_bytes(s: &CheckpointState) -> Vec<u8> {
+    let groups: Vec<(&str, &[(u64, Value)])> = s
+        .applied
+        .iter()
+        .map(|(sf, entries)| (sf.as_str(), entries.as_slice()))
+        .collect();
+    canonical_bytes_over(s, &groups)
+}
+
+/// The layout over the applied groups as KEYS, so the v8 branch (a group
+/// outside the frozen set) is pinned without such a surface existing.
+fn canonical_bytes_over(s: &CheckpointState, groups: &[(&str, &[(u64, Value)])]) -> Vec<u8> {
     let mut out = Vec::new();
+    // v8: a group outside the frozen v7 set — `fold_one` adds one with its
+    // first entry, so a cut made before that surface existed keeps its
+    // bytes. Every group present is hashed (a phantom one fails the signed
+    // hash); the tag then no longer tells None from Some on the feature
+    // set (presence byte), and the group count is explicit.
+    let later = groups.iter().any(|(key, _)| {
+        !Surface::CHECKPOINT_V7_SURFACES.iter().any(|sf| sf.as_str() == *key)
+    });
     // v7 carries the ratified founding FEATURE SET — conditionally, like
     // roster-v5 itself: a state without one (every pre-v5 republic) hashes
     // byte-identically to v6, so existing checkpoints keep verifying.
-    out.extend_from_slice(if s.founding_features.is_some() {
+    out.extend_from_slice(if later {
+        b"molt-chain-checkpoint-v8\0".as_slice()
+    } else if s.founding_features.is_some() {
         b"molt-chain-checkpoint-v7\0".as_slice()
     } else {
         b"molt-chain-checkpoint-v6\0".as_slice()
@@ -494,6 +521,9 @@ pub fn checkpoint_canonical_bytes(s: &CheckpointState) -> Vec<u8> {
     }
     // v7: the ratified founding feature set (see the field's own doc).
     // Written only when present, so a v6 state stays byte-identical.
+    if later {
+        out.push(u8::from(s.founding_features.is_some()));
+    }
     if let Some(features) = &s.founding_features {
         out.extend_from_slice(&u64::try_from(features.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
         for f in features {
@@ -506,10 +536,13 @@ pub fn checkpoint_canonical_bytes(s: &CheckpointState) -> Vec<u8> {
         put_bytes(&mut out, i.identity_pk.as_bytes());
         put_bytes(&mut out, i.nostr_pk.as_bytes());
     }
-    for (surface, entries) in &s.applied {
-        put_bytes(&mut out, surface.as_str().as_bytes());
+    if later {
+        out.extend_from_slice(&u64::try_from(groups.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
+    }
+    for (key, entries) in groups {
+        put_bytes(&mut out, key.as_bytes());
         out.extend_from_slice(&u64::try_from(entries.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
-        for (id, payload) in entries {
+        for (id, payload) in *entries {
             out.extend_from_slice(&id.to_le_bytes());
             put_bytes(&mut out, &serde_json::to_vec(payload).expect("a serde_json::Value serializes - an empty frame would sign a different payload"));
         }
@@ -607,28 +640,23 @@ mod tests {
         );
     }
 
-    /// A small, hand-built checkpoint state — the fixture the byte pin and
-    /// the slot tests share.
-    /// L14 guard: `Surface::ALL` and the checkpoint tag must move
-    /// TOGETHER. The applied section emits one group per `Surface::ALL`
-    /// entry (empty ones included — `genesis_base` shapes every real
-    /// state that way), so a 7th surface changes every checkpoint
-    /// preimage; under an unchanged tag, old and new builds then hash the
-    /// same chain differently and diverge silently. This test goes red on
-    /// the surface-set edit so the tag bump lands in the SAME commit.
+    /// L14 guard, permanent form: the always-present group set is
+    /// [`Surface::CHECKPOINT_V7_SURFACES`], FROZEN — never `Surface::ALL`.
+    /// `ALL` may grow: a later surface reaches a cut with its first applied
+    /// entry (v8, `fold_one`), so a checkpoint made before it existed keeps
+    /// its bytes on every build. Red only when the frozen set is touched.
     #[test]
-    fn the_checkpoint_tag_binds_the_surface_set() {
+    fn the_v7_group_set_is_frozen() {
         assert_eq!(
-            Surface::ALL.map(|s| s.as_str()),
+            Surface::CHECKPOINT_V7_SURFACES.map(|s| s.as_str()),
             ["organization", "chat", "memory", "quests", "vault", "wallet"],
-            "Surface::ALL changed — every checkpoint preimage changed with \
-             it; bump the checkpoint tag in THIS commit"
+            "the v7 group set is frozen — a change here re-hashes every cut checkpoint"
         );
         // a real (genesis_base-shaped) state carries one applied group per
-        // surface, empty ones included — pin that the bytes really contain
-        // one length-prefixed group key per Surface::ALL entry
+        // frozen surface, empty ones included — pin that the bytes really
+        // contain one length-prefixed group key per entry
         let mut s = pinned_state();
-        s.applied = Surface::ALL
+        s.applied = Surface::CHECKPOINT_V7_SURFACES
             .into_iter()
             .map(|sf| {
                 (
@@ -644,9 +672,9 @@ mod tests {
         let bytes = checkpoint_canonical_bytes(&s);
         assert!(
             bytes.starts_with(b"molt-chain-checkpoint-v6\0"),
-            "the surface set and the checkpoint tag move together"
+            "the frozen set alone stays on the old tag"
         );
-        for sf in Surface::ALL {
+        for sf in Surface::CHECKPOINT_V7_SURFACES {
             let mut needle = Vec::new();
             let name = sf.as_str().as_bytes();
             needle.extend_from_slice(
@@ -658,6 +686,124 @@ mod tests {
                 "the applied section must carry a group for {sf:?}"
             );
         }
+    }
+
+    /// **The `-v8` byte pin.** A group for a surface outside the frozen v7
+    /// set — one `Surface::ALL` grew by later — moves the tag, adds a
+    /// feature-set presence byte (the tag no longer tells `None` from
+    /// `Some`) and an explicit group count (no longer the implied six).
+    /// Nothing is skipped: a phantom empty group changes the bytes, so the
+    /// signed hash refuses it and no shape check is needed. Pinned over
+    /// keys, because no such surface exists in this build — that is the
+    /// point of the rule.
+    #[test]
+    fn checkpoint_canonical_bytes_are_pinned_at_v8() {
+        let s = pinned_state();
+        let org: Vec<(u64, Value)> =
+            vec![(7, json!({ "op": "set_name", "value": "Chess Club Reloaded" }))];
+        let later: Vec<(u64, Value)> = vec![(9, json!({ "op": "share", "value": "x" }))];
+        let six: Vec<(&str, &[(u64, Value)])> = Surface::CHECKPOINT_V7_SURFACES
+            .iter()
+            .map(|sf| {
+                (
+                    sf.as_str(),
+                    if *sf == Surface::Organization { org.as_slice() } else { &[] },
+                )
+            })
+            .collect();
+        // the key form hashes exactly as the struct form — the six alone
+        // stay on the old layout
+        let mut as_struct = s.clone();
+        as_struct.applied = Surface::CHECKPOINT_V7_SURFACES
+            .into_iter()
+            .map(|sf| (sf, if sf == Surface::Organization { org.clone() } else { Vec::new() }))
+            .collect();
+        let base = canonical_bytes_over(&s, &six);
+        assert_eq!(base, checkpoint_canonical_bytes(&as_struct));
+        assert!(base.starts_with(b"molt-chain-checkpoint-v6\0"));
+
+        // a phantom EMPTY later group is not invisible: the bytes change,
+        // so a served blob carrying one fails its signed hash
+        let mut with_empty = six.clone();
+        with_empty.push(("later", &[]));
+        let phantom = canonical_bytes_over(&s, &with_empty);
+        assert!(phantom.starts_with(b"molt-chain-checkpoint-v8\0"));
+        assert_ne!(phantom, base);
+
+        // the independent recomputation, like the v6/v7 pins
+        let mut with_state = six.clone();
+        with_state.push(("later", later.as_slice()));
+        let mut want = Vec::new();
+        want.extend_from_slice(b"molt-chain-checkpoint-v8\0");
+        let put = |out: &mut Vec<u8>, b: &[u8]| {
+            out.extend_from_slice(&u32::try_from(b.len()).unwrap_or(0).to_le_bytes());
+            out.extend_from_slice(b);
+        };
+        put(&mut want, b"f00");
+        put(&mut want, b"Chess Club");
+        want.push(2);
+        want.push(2);
+        want.extend_from_slice(&2u64.to_le_bytes());
+        for (m, pk) in [("petra", "aa"), ("walter", "bb")] {
+            put(&mut want, m.as_bytes());
+            put(&mut want, pk.as_bytes());
+            put(&mut want, "cc".repeat(32).as_bytes());
+        }
+        put(&mut want, b"play chess");
+        want.extend_from_slice(&1u64.to_le_bytes());
+        put(&mut want, b"wss://relay.example");
+        // v8: the feature-set presence byte — `None` here, so no run follows
+        want.push(0);
+        want.extend_from_slice(&2u64.to_le_bytes());
+        for (m, pk) in [("petra", "aa"), ("walter", "bb")] {
+            put(&mut want, m.as_bytes());
+            put(&mut want, pk.as_bytes());
+            put(&mut want, "cc".repeat(32).as_bytes());
+        }
+        // v8: the explicit group count, then every group in state order
+        want.extend_from_slice(&7u64.to_le_bytes());
+        for (key, entries) in &with_state {
+            put(&mut want, key.as_bytes());
+            want.extend_from_slice(&u64::try_from(entries.len()).expect("small").to_le_bytes());
+            for (id, payload) in *entries {
+                want.extend_from_slice(&id.to_le_bytes());
+                put(&mut want, &serde_json::to_vec(payload).expect("serializes"));
+            }
+        }
+        want.extend_from_slice(&2u64.to_le_bytes());
+        want.extend_from_slice(&3u64.to_le_bytes());
+        want.extend_from_slice(&7u64.to_le_bytes());
+        want.extend_from_slice(&1u64.to_le_bytes());
+        put(&mut want, b"petra");
+        put(&mut want, "ab".repeat(32).as_bytes());
+        want.extend_from_slice(&1u64.to_le_bytes());
+        put(&mut want, b"petra");
+        want.extend_from_slice(&1u64.to_le_bytes());
+        put(&mut want, b"wss://other.example");
+        want.extend_from_slice(&9u64.to_le_bytes());
+        assert_eq!(
+            canonical_bytes_over(&s, &with_state),
+            want,
+            "the v8 layout moved — bump the tag and move this pin with it"
+        );
+
+        // under one tag the presence byte must tell None from Some([])
+        // from Some([x]): three different tables
+        let none = canonical_bytes_over(&s, &with_state);
+        let mut some = s.clone();
+        some.founding_features = Some(Vec::new());
+        let empty = canonical_bytes_over(&some, &with_state);
+        some.founding_features = Some(vec!["memory".to_string()]);
+        let one = canonical_bytes_over(&some, &with_state);
+        for b in [&none, &empty, &one] {
+            assert!(b.starts_with(b"molt-chain-checkpoint-v8\0"));
+        }
+        assert_ne!(none, empty, "v8 must tell an absent feature set from an empty one");
+        assert_ne!(empty, one);
+        let k = none.iter().zip(&empty).position(|(a, b)| a != b).expect("they differ");
+        assert_eq!((none[k], empty[k]), (0, 1), "the presence byte");
+        assert_eq!(&empty[k + 1..k + 9], &0u64.to_le_bytes());
+        assert_eq!(&empty[k + 9..], &none[k + 1..]);
     }
 
     fn pinned_state() -> CheckpointState {

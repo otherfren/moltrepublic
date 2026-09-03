@@ -64,8 +64,22 @@ pub enum Surface {
 }
 
 impl Surface {
-    /// Every surface, in display (= navigation) order.
+    /// Every surface, in display (= navigation) order. May grow: a surface
+    /// added here reaches a checkpoint with its first applied entry (v8),
+    /// never through [`Surface::CHECKPOINT_V7_SURFACES`].
     pub const ALL: [Surface; 6] = [
+        Surface::Organization,
+        Surface::Chat,
+        Surface::Memory,
+        Surface::Quests,
+        Surface::Vault,
+        Surface::Wallet,
+    ];
+
+    /// The surfaces whose applied group EVERY checkpoint carries, empty or
+    /// not — the set `molt-chain-checkpoint-v7` froze. FROZEN: adding to
+    /// it re-hashes every cut checkpoint.
+    pub const CHECKPOINT_V7_SURFACES: [Surface; 6] = [
         Surface::Organization,
         Surface::Chat,
         Surface::Memory,

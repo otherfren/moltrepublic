@@ -1,8 +1,8 @@
 # Kompaktierung: WP4a ephemeres Pruning · WP4b Chain-Checkpoint
 
 > **STATUS: BUILT.** WP4a complete 2026-07-25; WP4b stages landed through
-> 2026-08-03 (checkpoint layout now at `molt-chain-checkpoint-v7`, see
-> CLAUDE.md). The remaining items named in §B.8 are declared v1 limits,
+> 2026-08-03 (checkpoint layout now at `molt-chain-checkpoint-v8`,
+> conditional, see CLAUDE.md). The remaining items named in §B.8 are declared v1 limits,
 > not open work. Original decision record below.
 >
 > **ENTSCHIEDEN (2026-07-17, Diskussion mit dem User).**

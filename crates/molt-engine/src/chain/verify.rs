@@ -539,7 +539,13 @@ fn genesis_base(
         relays: relays.to_vec(),
         founding_features: features.map(<[String]>::to_vec),
         roster: identities.to_vec(),
-        applied: Surface::ALL.into_iter().map(|s| (s, Vec::new())).collect(),
+        // the frozen v7 set only — a surface added later joins in
+        // `fold_one` with its first entry, so a cut made before it existed
+        // keeps its bytes and its JSON shape on every build
+        applied: Surface::CHECKPOINT_V7_SURFACES
+            .into_iter()
+            .map(|s| (s, Vec::new()))
+            .collect(),
         consumed_ids: Vec::new(),
         anchors: Vec::new(),
         member_relays: Vec::new(),
@@ -552,13 +558,24 @@ fn genesis_base(
 /// at every checkpoint — O(n) instead of O(n·checkpoints)). Checkpoint and
 /// Genesis blocks are state-neutral; `consumed_ids` stays UNSORTED here
 /// and is sorted per hash in [`hash_walk_state`].
-fn fold_one(state: &mut molt_core::CheckpointState, block: &ChainBlock) -> Result<(), String> {
+pub(crate) fn fold_one(state: &mut molt_core::CheckpointState, block: &ChainBlock) -> Result<(), String> {
     match &block.change {
         ChainChange::Applied {
             proposal_id,
             surface,
             payload,
         } => {
+            if !state.applied.iter().any(|(s, _)| s == surface) {
+                // a surface outside the frozen set: its group is born with
+                // its first entry, at its Surface::ALL position
+                let rank = |s: &Surface| Surface::ALL.iter().position(|x| x == s);
+                let at = state
+                    .applied
+                    .iter()
+                    .position(|(s, _)| rank(s) > rank(surface))
+                    .unwrap_or(state.applied.len());
+                state.applied.insert(at, (*surface, Vec::new()));
+            }
             if let Some((_, list)) = state.applied.iter_mut().find(|(s, _)| s == surface) {
                 // §B.6a (v4): a checkpoint SUMMARIZES. A last-write-wins slot
                 // keeps only its latest entry — the answer `org_effective`

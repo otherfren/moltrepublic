@@ -529,6 +529,86 @@ fn a_summarized_away_payload_can_never_re_apply() {
     );
 }
 
+/// A cut carries exactly the frozen v7 groups until a later surface holds
+/// state: `genesis_base` seeds `Surface::CHECKPOINT_V7_SURFACES`, never
+/// `Surface::ALL`, so a surface added later leaves every earlier
+/// checkpoint's bytes and JSON shape alone. Latent while the two sets are
+/// equal; red the day `ALL` grows and `genesis_base` was not left alone.
+#[test]
+fn a_cut_seeds_exactly_the_frozen_v7_groups() {
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    b.commit_org(1, "set_name", "X", &["petra", "walter"]);
+    let st = checkpoint_state(&b.blocks, 1).expect("state@1");
+    assert_eq!(
+        st.applied.iter().map(|(s, _)| *s).collect::<Vec<_>>(),
+        Surface::CHECKPOINT_V7_SURFACES.to_vec()
+    );
+}
+
+/// A surface whose group the state does not carry yet gets one with its
+/// first applied entry, at its `Surface::ALL` position — the path a surface
+/// added after v7 takes. Exercised by dropping a frozen group, since no
+/// later surface exists in this build.
+#[test]
+fn the_fold_creates_a_missing_group_at_its_all_position() {
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    b.commit_org(1, "set_name", "X", &["petra", "walter"]);
+    let mut st = checkpoint_state(&b.blocks, 1).expect("state@1");
+    st.applied.retain(|(s, _)| *s != Surface::Quests);
+    let block = b.seal(
+        2,
+        ChainChange::Applied {
+            proposal_id: 2,
+            surface: Surface::Quests,
+            payload: json!({ "op": "add_quest", "title": "x" }),
+        },
+        &["petra", "walter"],
+    );
+    fold_one(&mut st, &block).expect("folds");
+    assert_eq!(
+        st.applied.iter().map(|(s, _)| *s).collect::<Vec<_>>(),
+        Surface::CHECKPOINT_V7_SURFACES.to_vec(),
+        "re-created at its ALL position"
+    );
+    let (_, quests) = st
+        .applied
+        .iter()
+        .find(|(s, _)| *s == Surface::Quests)
+        .expect("the group appears with its first entry");
+    assert_eq!(quests.len(), 1);
+}
+
+/// A served blob whose applied groups deviate from the one shape every
+/// holder builds — one dropped, or two swapped — fails the signed state
+/// hash: the hash covers the group list whole, so no shape check exists.
+#[test]
+fn a_blob_with_a_dropped_or_reordered_group_fails_the_signed_hash() {
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    b.commit_org(1, "set_name", "X", &["petra", "walter"]);
+    b.commit_applied(2, &["petra", "walter"]);
+    let honest = checkpoint_state(&b.blocks, 2).expect("state@2");
+    let cut = b.seal(
+        3,
+        ChainChange::Checkpoint {
+            upto: 2,
+            state_hash: checkpoint_state_hash(&honest),
+        },
+        &["petra", "walter"],
+    );
+    b.push(cut);
+    let suffix: Vec<ChainBlock> = b.blocks[3..].to_vec();
+    verify_suffix_chain(&honest, &suffix, &b.republic_id).expect("the honest blob verifies");
+
+    let mut dropped = honest.clone();
+    dropped.applied.retain(|(s, _)| *s != Surface::Wallet);
+    let err = verify_suffix_chain(&dropped, &suffix, &b.republic_id).expect_err("a dropped group");
+    assert!(err.contains("signed state hash"), "{err}");
+    let mut swapped = honest.clone();
+    swapped.applied.swap(1, 2);
+    let err = verify_suffix_chain(&swapped, &suffix, &b.republic_id).expect_err("swapped groups");
+    assert!(err.contains("signed state hash"), "{err}");
+}
+
 /// **A suffix holder folding onto a summarized blob lands where a full
 /// holder folding from the genesis does.** Without it, the first cut
 /// after a prune would disagree across the republic — the pruned nodes

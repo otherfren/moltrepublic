@@ -48,7 +48,13 @@ Read first: `founding_ritual.md` (the deliberation step this extends),
 ### D1 — Feature keys are the optional surface keys
 
 `memory`, `quests`, `vault`, `wallet` — strings equal to `Surface` keys, so no
-second vocabulary exists. Chat and Organization are core, never in the set:
+second vocabulary exists. A key added later (a new `Surface::ALL` entry)
+reaches the checkpoint with its first applied block only
+(`molt-chain-checkpoint-v8`, conditional; `Surface::CHECKPOINT_V7_SURFACES`
+stays frozen), so earlier cuts keep their bytes — but a seat on a build that
+predates the key cannot parse the blocks that follow and strands itself:
+every seat must be current before such a key is voted in. Chat and
+Organization are core, never in the set:
 the wizard's Chat checkbox is display only (checked, disabled). The stored
 set is **sorted + deduped** (canonicalized at every ingest, like the relay
 tokens in `cmd_propose`).
