@@ -39,6 +39,7 @@ mod compaction;
 mod chat;
 mod configstore;
 mod events;
+mod files_state;
 mod founding;
 mod lifecycles;
 mod loopback_mesh;

@@ -64,6 +64,24 @@ fn right_click(ui: &AppWindow, area: &i_slint_backend_testing::ElementHandle, fx
     });
 }
 
+/// One real left click at the centre of `area`.
+#[cfg(feature = "live-preview")]
+fn click(ui: &AppWindow, area: &i_slint_backend_testing::ElementHandle) {
+    let pos = area.absolute_position();
+    let size = area.size();
+    let at = slint::LogicalPosition::new(pos.x + size.width / 2.0, pos.y + size.height / 2.0);
+    ui.window()
+        .dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at });
+    ui.window().dispatch_event(slint::platform::WindowEvent::PointerPressed {
+        position: at,
+        button: slint::platform::PointerEventButton::Left,
+    });
+    ui.window().dispatch_event(slint::platform::WindowEvent::PointerReleased {
+        position: at,
+        button: slint::platform::PointerEventButton::Left,
+    });
+}
+
 /// The open poke menu, found by the title its single item carries.
 #[cfg(feature = "live-preview")]
 fn poke_menu_open(

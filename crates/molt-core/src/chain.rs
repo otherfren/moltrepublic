@@ -417,6 +417,18 @@ pub struct CheckpointState {
 /// accumulates, so a malformed entry can never collapse two seats into one.
 #[must_use]
 pub fn applied_lww_slot(surface: Surface, payload: &Value) -> Option<String> {
+    // Shared Files: one slot per share — the latest persist/unpersist IS
+    // the file's state (`persistent_uploads.md` D1)
+    if surface == Surface::Files {
+        return match payload.get("op").and_then(Value::as_str)? {
+            "persist" | "unpersist" => payload
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+                .map(|id| format!("files.{id}")),
+            _ => None,
+        };
+    }
     if surface != Surface::Organization {
         return None;
     }
@@ -1062,9 +1074,21 @@ mod tests {
         // an op this build never heard of accumulates
         assert_eq!(applied_lww_slot(Surface::Organization, &op("set_mascot")), None);
         assert_eq!(applied_lww_slot(Surface::Organization, &json!({})), None);
+        // Shared Files: the latest op per share id is the file's state
+        let share = |op: &str| json!({"op": op, "id": "ab".repeat(16)});
+        assert_eq!(
+            applied_lww_slot(Surface::Files, &share("persist")),
+            Some(format!("files.{}", "ab".repeat(16)))
+        );
+        assert_eq!(
+            applied_lww_slot(Surface::Files, &share("unpersist")),
+            applied_lww_slot(Surface::Files, &share("persist")),
+            "persist and unpersist of one share share a slot"
+        );
+        assert_eq!(applied_lww_slot(Surface::Files, &json!({"op": "persist", "id": "nope"})), None);
         // and no other surface declares slots — a note is a distinct object
         for s in Surface::ALL {
-            if s != Surface::Organization {
+            if s != Surface::Organization && s != Surface::Files {
                 assert_eq!(
                     applied_lww_slot(s, &op("add_note")),
                     None,

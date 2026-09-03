@@ -871,6 +871,13 @@ lexicon! {
     ou_col_checksum: "Checksum", "Checksum";
     ou_col_download: "Download", "Download";
     ou_col_expires: "Expires in", "Läuft ab in";
+    ou_col_persist: "Persist", "Dauerhaft";
+    ou_col_unpersist: "Unpersist", "Befristen";
+    ou_persist: "persist", "dauerhaft";
+    ou_unpersist: "unpersist", "befristen";
+    ou_empty_persistent: "No persistent uploads yet.", "Noch keine dauerhaften Uploads.";
+    ou_note_persistent: "A vote pinned these shares: no expiry, listed for good - the bytes stay with the sharer. Unpersist restarts the clock.", "Eine Abstimmung hat diese Shares fixiert: kein Ablauf, dauerhaft gelistet - die Bytes bleiben beim Teilenden. Befristen startet die Frist neu.";
+    ou_copy: "Copy", "Kopieren";
     ou_gone: "gone", "weg";
     ou_download: "Download", "Download";
     ou_offline: "user offline", "Nutzer offline";

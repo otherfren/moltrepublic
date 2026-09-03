@@ -410,6 +410,8 @@ fn the_chat_offers_one_writable_view() {
 /// and never the rendered labels.
 fn upload(user: &str, name: &str, checksum: &str, ts: u64, bytes: u64) -> UploadRowData {
     UploadRowData {
+        persistent: false,
+        vote: String::new(),
         id: String::new(),
         user: user.to_string(),
         date: format!("{}", u64::MAX - ts),
@@ -627,4 +629,15 @@ fn list_page_state_steps_clamps_and_resets() {
     // a workspace switch resets the pages with the rest of the state
     st.enter_workspace("ws-b");
     assert_eq!(st.clamp_list_page("memory", "applied", 100), 0);
+}
+
+/// The Shared Files nav row: shares, the screen, or a vote on record keep
+/// it - an open persist on a share that just aged out stays reachable.
+#[test]
+fn the_files_row_stays_for_votes_on_record() {
+    use crate::surfaces::files_row_visible;
+    assert!(!files_row_visible(0, false, false));
+    assert!(files_row_visible(1, false, false));
+    assert!(files_row_visible(0, true, false));
+    assert!(files_row_visible(0, false, true));
 }

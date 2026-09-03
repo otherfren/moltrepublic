@@ -8,6 +8,7 @@ mod support;
 pub(crate) use support::{plain_state, tiny_bmp_header};
 
 mod chat_tests;
+mod files_tests;
 mod founding_tests;
 mod governance_tests;
 mod join_tests;

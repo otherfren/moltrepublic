@@ -56,9 +56,9 @@ predates the key cannot parse the blocks that follow and strands itself:
 every seat must be current before such a key is voted in. Chat,
 Organization and Shared Files are core, never in the set:
 the wizard's Chat checkbox is display only (checked, disabled). Shared Files
-(the ungated uploads table, 2026-09-03) has a CONDITIONAL nav row: rendered
-only while a share is listed or the surface is on screen - a GUI rule,
-`select_view files/uploads` is always accepted. The stored
+(the uploads tables, gated by the persist/unpersist votes, 2026-09-03) has a
+CONDITIONAL nav row: rendered only while a share is listed or the surface
+is on screen - a GUI rule, `select_view files/uploads` is always accepted. The stored
 set is **sorted + deduped** (canonicalized at every ingest, like the relay
 tokens in `cmd_propose`).
 

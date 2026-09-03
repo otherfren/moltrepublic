@@ -28,7 +28,8 @@ use crate::models::{sync_model, sync_rows, sync_strings};
 use crate::net_tor::{net_health_pill, tor_test_detail, tor_test_tone, tor_verdict_copy_for};
 use crate::settings::{apply_settings_fields, settings_draft_differs};
 use crate::surfaces::{
-    chain_row, gather_surfaces, page_of, page_slice, to_decided_row, to_proposal_row, ChatUiState,
+    chain_row, files_row_visible, gather_surfaces, page_of, page_slice, to_decided_row,
+    to_proposal_row, ChatUiState,
     SurfacesBundle,
     LIST_PAGE_SIZE,
 };
@@ -1067,7 +1068,16 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     // window shows, so a push racing a select can never drop the row from
     // under the pane. Never refused engine-side, like the empty-hidden
     // Pending/Accepted/Declined views.
-    let files_row = b.uploads_total > 0 || ui.get_selected_surface().as_str() == "files";
+    let has_votes = b
+        .surfaces
+        .iter()
+        .find(|s| s.key == "files")
+        .is_some_and(|s| !s.pending.is_empty() || !s.declined.is_empty() || !s.accepted.is_empty());
+    let files_row = files_row_visible(
+        b.uploads_total,
+        ui.get_selected_surface().as_str() == "files",
+        has_votes,
+    );
     let tabs: Vec<SurfaceTab> = b
         .surfaces
         .iter()
@@ -1328,8 +1338,15 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
             status: u.status.as_str().into(),
             status_kind: u.status_kind,
             availability: u.availability.as_str().into(),
+            persistent: u.persistent,
+            checksum_full: u.checksum_full.as_str().into(),
+            vote: u.vote.as_str().into(),
         })
         .collect();
+    // the two Shared Files tables: the vote decides the row set
+    let (persistent, uploads): (Vec<UploadRow>, Vec<UploadRow>) =
+        uploads.into_iter().partition(|u| u.persistent);
+    sync_rows(&ui.get_org_persistent(), persistent, |m| ui.set_org_persistent(m));
     sync_rows(&ui.get_org_uploads(), uploads, |m| ui.set_org_uploads(m));
 
     // the tables' sort/filter echo: the headers render the ▲/▼ arrow from

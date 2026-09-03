@@ -603,6 +603,9 @@ impl State {
             }
         }
         validate_org_payload(surface, &payload)?;
+        if surface == Surface::Files {
+            self.prepare_files_proposal(&mut payload)?;
+        }
         validate_payload_fits(surface, &payload, &self.roster())?;
         // R6: a pool edit that would strand a DECLARED member — sharing no
         // relay with what that seat is on record as reaching (R3b) — is the
@@ -739,6 +742,11 @@ impl State {
             // (The nav hides such a surface, so a GUI member could not even
             // SEE the card it would be co-signing.)
             self.require_feature(p.surface)?;
+            // a Files vote is checked against THIS seat's own view of the
+            // share - the payload arrived over the wire with no such check
+            if p.surface == Surface::Files {
+                self.check_files_vote(&p.payload)?;
+            }
             // D2 (last vote counts, decided 2026-08-16): an approve over
             // the own standing decline RETRACTS the decline below — the
             // newest stance wins, mirroring the decline's signature
@@ -1607,12 +1615,6 @@ impl State {
         ts != 0 && ts < cutoff
     }
 
-    /// [`State::aged_out_at`] against the current cutoff — for single-message
-    /// checks. (The bulk filter computes the cutoff once instead; this fold
-    /// of the org log is too dear per message.)
-    pub(crate) fn chat_ts_aged_out(&self, ts: u64) -> bool {
-        Self::aged_out_at(self.chat_retention_cutoff(), ts)
-    }
 }
 
 /// The retention read-filter boundary, a pure function of the message
@@ -1750,13 +1752,6 @@ impl State {
             self.chat_visible_in(view)
                 .filter(|m| channel.map_or(true, |c| &m.channel == c))
                 .map(|m| (None, serde_json::to_value(m).unwrap_or_default()))
-                .collect()
-        } else if surface == Surface::Files {
-            // the uploads table IS the surface's state (ungated, like chat):
-            // one read contract for the GUI pane and an agent's read_state
-            self.uploads_view()
-                .into_iter()
-                .map(|u| (None, serde_json::to_value(u).unwrap_or_default()))
                 .collect()
         } else {
             // the surface's applied log is the single-operator projection
@@ -1937,6 +1932,7 @@ impl State {
     /// workspaces); presence is the REAL last-seen stamp, aged live at
     /// read time (a send-failure pin wins) — prose is rendered UI-side.
     pub(crate) fn members_view(&self) -> Vec<MemberView> {
+        let uploads = self.uploads_view();
         let now = self.presence_now();
         let entry = self
             .session
@@ -1987,10 +1983,7 @@ impl State {
                         .iter()
                         .filter(|(pid, p)| self.waits_on(**pid, p, &member))
                         .count(),
-                    uploads: self
-                        .chat_visible()
-                        .filter(|m| m.from == member && m.file.is_some())
-                        .count(),
+                    uploads: uploads.iter().filter(|u| u.member == member).count(),
                     split,
                     member,
                     id,
@@ -2011,6 +2004,7 @@ impl State {
     /// `retention_days` — the one knob chat filters on; 0 = unknown age,
     /// no deadline), past which the share leaves every read surface.
     pub(crate) fn uploads_view(&self) -> Vec<UploadView> {
+        use crate::files_state::{FileState, ShareIdentity};
         let retention_secs = self.org_effective().retention_days * 86_400;
         let me = self.member();
         let now = self.presence_now();
@@ -2029,36 +2023,82 @@ impl State {
                 .unwrap_or(molt_core::MemberInfo::NEVER);
             self.presence_of(member, last_seen, now)
         };
-        self.chat_visible()
+        let row = |id: molt_core::MessageId, ident: ShareIdentity, available: bool, expires_ts: u64, persistent: bool| {
+            UploadView {
+                id,
+                member: ident.by.clone(),
+                ts: ident.shared_ts,
+                name: ident.name,
+                kind: ident.kind,
+                size: ident.size,
+                available,
+                expires_ts,
+                online: ident.by == me || presence(&ident.by) != 2,
+                // the sharer's log-anchored sha256 ("" = legacy share,
+                // honestly unknown) — what a download must reproduce
+                checksum: ident.checksum,
+                download: self.files.downloads.get(&id).cloned(),
+                // §5.5: ONE derived word, no extra state — a live stamp
+                // outranks `available` (relay copies outlive a removal
+                // until retention prunes them)
+                availability: if self.files.series.contains_key(&id) {
+                    "relay-held"
+                } else if available {
+                    "sharer-only"
+                } else {
+                    "gone"
+                }
+                .to_string(),
+                persistent,
+            }
+        };
+        // the plain shares: chat messages inside the window that no vote
+        // touched (a voted share renders from its block below)
+        let states = self.files_state();
+        let mut rows: Vec<UploadView> = self
+            .chat_visible()
+            .filter(|m| !states.contains_key(&m.id))
             .filter_map(|m| {
-                m.file.as_ref().map(|f| UploadView {
-                    id: m.id,
-                    member: m.from.clone(),
-                    ts: m.ts,
-                    name: f.name.clone(),
-                    kind: f.kind.clone(),
-                    size: f.size,
-                    available: f.available,
-                    expires_ts: if m.ts == 0 { 0 } else { m.ts.saturating_add(retention_secs) },
-                    online: m.from == me || presence(&m.from) != 2,
-                    // the sharer's log-anchored sha256 ("" = legacy share,
-                    // honestly unknown) — what a download must reproduce
-                    checksum: f.checksum.clone(),
-                    download: self.files.downloads.get(&m.id).cloned(),
-                    // §5.5: ONE derived word, no extra state — a live stamp
-                    // outranks `available` (relay copies outlive a removal
-                    // until retention prunes them)
-                    availability: if self.files.series.contains_key(&m.id) {
-                        "relay-held"
-                    } else if f.available {
-                        "sharer-only"
-                    } else {
-                        "gone"
-                    }
-                    .to_string(),
+                m.file.as_ref().map(|f| {
+                    let ident = ShareIdentity {
+                        by: m.from.clone(),
+                        name: f.name.clone(),
+                        kind: f.kind.clone(),
+                        size: f.size,
+                        checksum: f.checksum.clone(),
+                        shared_ts: m.ts,
+                    };
+                    let expires = if m.ts == 0 { 0 } else { m.ts.saturating_add(retention_secs) };
+                    row(m.id, ident, f.available, expires, false)
                 })
             })
-            .collect()
+            .collect();
+        // the voted shares: identity from the block, availability from the
+        // live message while it is still in the log
+        let mut voted: Vec<(&molt_core::MessageId, &FileState)> = states.iter().collect();
+        voted.sort_by_key(|(id, _)| **id);
+        let clock = crate::now_secs();
+        for (id, st) in voted {
+            // the live message's word, else the block's (a foreign share is
+            // what the vote said, an own one needs its path)
+            let available = self
+                .chat_by_id(id)
+                .ok()
+                .and_then(|(_, m)| m.file.as_ref().map(|f| f.available))
+                .unwrap_or_else(|| {
+                    st.identity().by != me || self.files.share_paths.contains_key(id)
+                });
+            match st {
+                FileState::Persistent(meta) => rows.push(row(*id, meta.clone(), available, 0, true)),
+                FileState::Unpersisted(meta, at) => {
+                    let deadline = at.saturating_add(retention_secs);
+                    if deadline >= clock {
+                        rows.push(row(*id, meta.clone(), available, deadline, false));
+                    }
+                }
+            }
+        }
+        rows
     }
 
     pub(crate) fn status(&self) -> StatusView {
@@ -2098,8 +2138,6 @@ impl State {
                 let applied = if s == Surface::Chat {
                     // count what the read contract shows (retention window)
                     self.chat_visible().count()
-                } else if s == Surface::Files {
-                    self.uploads_view().len()
                 } else {
                     self.applied.get(&s).map(|v| v.len()).unwrap_or(0)
                         + self.chain.applied.get(&s).map(|v| v.len()).unwrap_or(0)

@@ -65,6 +65,30 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     }
 
     {
+        // the two Shared Files votes: the engine fills a persist's identity
+        // and refuses what the tables cannot take; an unpersist carries the
+        // stamp its fresh window starts from
+        let cx = ctx.clone();
+        ui.on_persist_upload(move |id| {
+            cx.issue(Command::Propose {
+                surface: Surface::Files,
+                payload: serde_json::json!({ "op": "persist", "id": id.as_str() }),
+            });
+        });
+        let cx = ctx.clone();
+        ui.on_unpersist_upload(move |id| {
+            cx.issue(Command::Propose {
+                surface: Surface::Files,
+                payload: serde_json::json!({
+                    "op": "unpersist",
+                    "id": id.as_str(),
+                    "at": crate::labels::unix_now(),
+                }),
+            });
+        });
+    }
+
+    {
         // A member row's uploads count: jump to Shared Files → Uploads
         // pre-filtered to that member. The view switch is the same engine
         // command the nav issues; the filter itself stays single-writer in

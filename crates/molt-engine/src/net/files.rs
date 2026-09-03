@@ -162,15 +162,11 @@ impl State {
     /// publish the series N times.
     pub(super) fn serve_file_wanted(&mut self, id: MessageId) {
         let me = self.member();
-        let (is_mine, ts, size) = match self.chat_by_id(&id) {
-            Ok((_, msg)) => (
-                msg.from == me && msg.file.as_ref().is_some_and(|f| f.available),
-                msg.ts,
-                msg.file.as_ref().map_or(0, |f| f.size),
-            ),
+        let (is_mine, size) = match self.share_identity(&id) {
+            Ok((ident, available)) => (ident.by == me && available, ident.size),
             Err(_) => return,
         };
-        if !is_mine || self.chat_ts_aged_out(ts) || self.files.serving.contains(&id) {
+        if !is_mine || self.share_expired(&id) || self.files.serving.contains(&id) {
             return;
         }
         // the size is known here — an over-cap share must not cost a full
@@ -288,7 +284,8 @@ impl State {
         let me = self.member();
         // silent unless this node is the sharer — never refuse a share we
         // simply don't have; the actual sharer answers
-        let is_my_share = matches!(self.chat_by_id(&id), Ok((_, msg)) if msg.from == me);
+        let is_my_share = matches!(self.chat_by_id(&id), Ok((_, msg)) if msg.from == me)
+            || matches!(self.share_identity(&id), Ok((ident, _)) if ident.by == me);
         if !is_my_share {
             return;
         }
@@ -299,24 +296,22 @@ impl State {
             };
             crate::transfer::spawn_send_refusal(transport.clone(), req.reply.clone(), frame);
         };
-        let (_, msg) = self.chat_by_id(&id).expect("just checked it is our share");
-        let Some(file) = msg.file.as_ref() else {
+        let Ok((ident, available)) = self.share_identity(&id) else {
             refuse("the message carries no file");
             return;
         };
-        if !file.available {
+        if !available {
             refuse("the sharer removed the file - no longer available");
             return;
         }
-        // uploads are ephemeral like chat: once the share aged out of the
-        // sharer's own read contract it is not served any more, even to a
-        // requester whose engine skipped its local check (near the boundary
-        // this is an honest refusal, not a hang)
-        if self.chat_ts_aged_out(msg.ts) {
+        // a share past its window is not served, even to a requester whose
+        // local check lagged (an honest refusal near the boundary, not a
+        // hang); a persisted share has no window
+        if self.share_expired(&id) {
             refuse("the share aged out of the chat retention window");
             return;
         }
-        let size = file.size;
+        let size = ident.size;
         let Some(path) = self.files.share_paths.get(&id).cloned() else {
             refuse("this node no longer knows the shared file's local path");
             return;
@@ -340,8 +335,8 @@ impl State {
     ) -> Result<Reply, MoltError> {
         // the share must still exist and be available — the honest guard
         // before broadcasting a request every member will decrypt
-        let (_, msg) = self.chat_by_id(&id)?;
-        if !msg.file.as_ref().is_some_and(|f| f.available) {
+        let (_, available) = self.share_identity(&id)?;
+        if !available {
             return Err(MoltError::FileUnavailable(id));
         }
         let me = self.member();

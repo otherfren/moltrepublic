@@ -188,6 +188,9 @@ export struct UploadRow {
     // §5.5: the relay plane's raw availability word — "relay-held" (the
     // relays serve it, no live sharer needed) · "sharer-only" · "gone"
     availability: string,
+    persistent: bool, // a vote pinned it (Persistent Uploads)
+    checksum-full: string, // the full sha256 for the modal ("" = legacy)
+    vote: string, // an open persist/unpersist vote's "n/m", "" = none
 }
 
 // One row of the founding-ritual member list: the founder plus one per
@@ -867,6 +870,13 @@ export global Strings {
     in property <string> ou-col-checksum;
     in property <string> ou-col-download;
     in property <string> ou-col-expires;
+    in property <string> ou-col-persist;
+    in property <string> ou-col-unpersist;
+    in property <string> ou-persist;
+    in property <string> ou-unpersist;
+    in property <string> ou-empty-persistent;
+    in property <string> ou-note-persistent;
+    in property <string> ou-copy;
     in property <string> ou-download;
     in property <string> ou-offline;
     in property <string> ou-gone;

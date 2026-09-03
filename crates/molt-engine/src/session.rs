@@ -1548,10 +1548,11 @@ impl State {
             let Ok(id) = id_hex.parse::<molt_core::MessageId>() else {
                 continue;
             };
-            let Ok((_, msg)) = self.chat_by_id(&id) else {
+            // the live message, or the persist block once it left the log
+            let Ok((ident, available)) = self.share_identity(&id) else {
                 continue;
             };
-            if msg.from == me && msg.file.as_ref().is_some_and(|f| f.available) {
+            if ident.by == me && available {
                 self.files.share_paths.insert(id, std::path::PathBuf::from(path));
             }
         }

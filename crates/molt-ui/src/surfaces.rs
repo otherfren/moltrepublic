@@ -267,6 +267,11 @@ pub(crate) struct UploadRowData {
     /// behind the shortened `checksum` cell, so a pasted full checksum
     /// still finds its row.
     pub(crate) checksum_full: String,
+    /// A vote pinned this share: it lists under Persistent Uploads.
+    pub(crate) persistent: bool,
+    /// An open persist/unpersist vote on this share, as its "n/m" ("" =
+    /// none) — the row's button shows it and stays disabled meanwhile.
+    pub(crate) vote: String,
 }
 
 /// One chat-channel sidebar row (plain, `Send` twin of the Slint
@@ -737,6 +742,8 @@ pub(crate) async fn gather_surfaces(
         Ok(Reply::Uploads { uploads: rows }) => rows
             .into_iter()
             .map(|u| UploadRowData {
+                persistent: u.persistent,
+                vote: String::new(),
                 id: u.id.to_string(),
                 user: u.member,
                 date: file_date_label(u.ts),
@@ -948,6 +955,20 @@ pub(crate) async fn gather_surfaces(
     sort_members(&mut members, &members_sort, members_asc);
     let mut uploads = filter_uploads(uploads, &uploads_filter);
     sort_uploads(&mut uploads, &uploads_sort, uploads_asc);
+    // an open Shared Files vote marks its row (the button shows the count)
+    let open_votes: HashMap<String, String> = all_pending
+        .iter()
+        .filter(|p| p.surface == Surface::Files)
+        .filter_map(|p| {
+            let id = p.payload.get("id").and_then(serde_json::Value::as_str)?;
+            Some((id.to_string(), format!("{}/{}", p.approvals, p.threshold)))
+        })
+        .collect();
+    for u in &mut uploads {
+        if let Some(v) = open_votes.get(&u.id) {
+            u.vote = v.clone();
+        }
+    }
     // titles come from the cache, so a patch channel keeps its name (and
     // its ✓/⊘ state line) after the proposal left the Proposed-only read
     let titles = known_titles(lang, &known);
@@ -1043,6 +1064,13 @@ pub(crate) async fn gather_surfaces(
         "ui: bundle gathered"
     );
     Some((my_gen, bundle))
+}
+
+/// Whether the Shared Files nav row exists: something is shared, the
+/// surface is on screen, or a vote (open or decided) is on record - an
+/// open persist on a share that just aged out must stay reachable.
+pub(crate) fn files_row_visible(uploads_total: usize, on_screen: bool, has_votes: bool) -> bool {
+    uploads_total > 0 || on_screen || has_votes
 }
 
 /// Project one surface snapshot into plain display data. `me` is the local
@@ -1549,6 +1577,23 @@ pub(crate) fn display_title(lang: i32, v: &serde_json::Value) -> String {
             (_, "remove_member_image") => format!("Remove picture: {member}"),
             (1, _) => format!("Beschreibung: {member}"),
             (_, _) => format!("Description: {member}"),
+        };
+    }
+    // a Shared Files vote is about ONE share: the title names the file
+    if let (Some(op @ ("persist" | "unpersist")), Some(name)) =
+        (op, v.get("name").and_then(serde_json::Value::as_str))
+    {
+        let by = v.get("by").and_then(serde_json::Value::as_str).unwrap_or("");
+        let head = match (lang, op) {
+            (1, "persist") => "Dauerhaft",
+            (_, "persist") => "Persist",
+            (1, _) => "Befristen",
+            (_, _) => "Unpersist",
+        };
+        return if by.is_empty() {
+            format!("{head}: {name}")
+        } else {
+            format!("{head}: {name} · {by}")
         };
     }
     // a wiki changeset vote: localized label + the language-neutral

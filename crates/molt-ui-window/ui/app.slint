@@ -830,6 +830,9 @@ component SortHeader inherits Rectangle {
     in property <bool> desc;
     in property <LayoutAlignment> align: start;
     callback clicked();
+    // a stretch column must collapse exactly like its cells do (min-width
+    // 0 on the instance) - the label elides instead of holding it open
+    clip: true;
     ta := TouchArea {
         mouse-cursor: MouseCursor.pointer;
         clicked => {
@@ -845,6 +848,7 @@ component SortHeader inherits Rectangle {
             font-size: Theme.fs-cap;
             font-weight: 700;
             vertical-alignment: center;
+            overflow: elide;
         }
         if root.active: Text {
             text: root.desc ? "▼" : "▲";
@@ -852,6 +856,297 @@ component SortHeader inherits Rectangle {
             font-size: 9px;
             vertical-alignment: center;
         }
+    }
+}
+
+
+// The Shared Files table, ONE component for both views: `persistent`
+// swaps the tail columns (expires + persist ↔ unpersist). Header and rows
+// are separate layouts, so every fixed width carries ui-scale on BOTH
+// sides and the stretch column has preferred-width 0 on both.
+component UploadsTable inherits Rectangle {
+    in property <[UploadRow]> rows;
+    in property <bool> persistent: false;
+    in property <string> sort-column;
+    in property <bool> sort-ascending: true;
+    in property <string> filter;
+    in property <string> node-member;
+    callback sort(string);
+    callback download(string);
+    callback persist(string);
+    callback unpersist(string);
+    callback show-checksum(string, string);
+    background: Theme.panel;
+    border-radius: Theme.win95 ? 0px : 8px;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    clip: true;
+    ou-fl := Flickable {
+        width: 100%;
+        height: 100%;
+        viewport-width: max(self.width, ou-list.min-width);
+        viewport-height: ou-list.preferred-height + 8px;
+        ou-list := VerticalLayout {
+            padding: 8px;
+            spacing: 4px;
+            alignment: start;
+            // table header — every column sorts on click (toggle asc/desc;
+            // the ▲/▼ marks the active one). Date, size and expiry order
+            // by their underlying numeric values in Rust, never the
+            // rendered labels.
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 10px;
+                SortHeader {
+                    label: Strings.ou-col-user;
+                    active: root.sort-column == "user";
+                    desc: !root.sort-ascending;
+                    width: 110px * Theme.ui-scale;
+                    clicked => { root.sort("user"); }
+                }
+                SortHeader {
+                    label: Strings.ou-col-date;
+                    active: root.sort-column == "date";
+                    desc: !root.sort-ascending;
+                    width: 90px * Theme.ui-scale;
+                    clicked => { root.sort("date"); }
+                }
+                // the stretch column: the same floor as its cells (an
+                // eliding Text keeps its ellipsis), so header and rows
+                // collapse identically; below the floor the table scrolls
+                SortHeader {
+                    label: Strings.ou-col-file;
+                    active: root.sort-column == "file";
+                    desc: !root.sort-ascending;
+                    horizontal-stretch: 1;
+                    preferred-width: 0px;
+                    min-width: 120px * Theme.ui-scale;
+                    clicked => { root.sort("file"); }
+                }
+                ou-h-type := SortHeader {
+                    label: Strings.ou-col-type;
+                    active: root.sort-column == "type";
+                    desc: !root.sort-ascending;
+                    align: center;
+                    width: 60px * Theme.ui-scale;
+                    clicked => { root.sort("type"); }
+                }
+                SortHeader {
+                    label: Strings.ou-col-size;
+                    active: root.sort-column == "size";
+                    desc: !root.sort-ascending;
+                    align: end;
+                    width: 70px * Theme.ui-scale;
+                    clicked => { root.sort("size"); }
+                }
+                SortHeader {
+                    label: Strings.ou-col-checksum;
+                    active: root.sort-column == "checksum";
+                    desc: !root.sort-ascending;
+                    align: center;
+                    width: 70px * Theme.ui-scale;
+                    clicked => { root.sort("checksum"); }
+                }
+                SortHeader {
+                    label: Strings.ou-col-download;
+                    active: root.sort-column == "download";
+                    desc: !root.sort-ascending;
+                    align: center;
+                    width: 110px * Theme.ui-scale;
+                    clicked => { root.sort("download"); }
+                }
+                if !root.persistent: SortHeader {
+                    label: Strings.ou-col-expires;
+                    active: root.sort-column == "expires";
+                    desc: !root.sort-ascending;
+                    align: end;
+                    width: 90px * Theme.ui-scale;
+                    clicked => { root.sort("expires"); }
+                }
+                // the vote column: the button IS the header's meaning
+                SortHeader {
+                    label: root.persistent ? Strings.ou-col-unpersist : Strings.ou-col-persist;
+                    active: false;
+                    desc: false;
+                    align: center;
+                    width: 90px * Theme.ui-scale;
+                }
+            }
+            Rectangle {
+                height: 1px;
+                background: Theme.line;
+            }
+            if root.rows.length == 0: Text {
+                // an active filter that matches nothing says so, honestly —
+                // never "no files shared yet"
+                text: root.filter != "" ? Strings.ou-no-match
+                    : (root.persistent ? Strings.ou-empty-persistent : Strings.ou-empty);
+                color: Theme.faint;
+                font-size: Theme.fs-cap;
+            }
+            for u in root.rows: Rectangle {
+                height: 40px * Theme.ui-scale;
+                border-radius: Theme.win95 ? 0px : 6px;
+                background: Theme.panel-2;
+                border-width: 1px;
+                border-color: Theme.line;
+                opacity: u.available ? 1.0 : 0.55;
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 10px;
+                    // the sharer's name is a poke target like every other one
+                    ContextMenuArea {
+                        width: 110px * Theme.ui-scale;
+                        enabled: Poke.shows(u.user);
+                        Menu {
+                            MenuItem {
+                                title: Strings.mem-poke;
+                                enabled: Poke.on;
+                                activated => {
+                                    Poke.go(u.user);
+                                }
+                            }
+                        }
+                        Text {
+                            text: u.user;
+                            color: u.user == root.node-member ? Theme.accent : Theme.text;
+                            font-size: Theme.fs-body;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            // the column width lives on the menu area above
+                            width: 100%;
+                            overflow: elide;
+                        }
+                    }
+                    Text {
+                        text: u.date;
+                        color: Theme.dim;
+                        font-size: Theme.fs-cap;
+                        vertical-alignment: center;
+                        width: 90px * Theme.ui-scale;
+                    }
+                    Text {
+                        text: u.name;
+                        color: Theme.text;
+                        font-size: Theme.fs-body;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        preferred-width: 0px;
+                        min-width: 120px * Theme.ui-scale;
+                        overflow: elide;
+                    }
+                    ou-r-type := Text {
+                        text: u.kind;
+                        color: Theme.dim;
+                        font-size: Theme.fs-cap;
+                        vertical-alignment: center;
+                        horizontal-alignment: center;
+                        width: 60px * Theme.ui-scale;
+                    }
+                    Text {
+                        text: u.size;
+                        color: Theme.dim;
+                        font-size: Theme.fs-cap;
+                        vertical-alignment: center;
+                        width: 70px * Theme.ui-scale;
+                        horizontal-alignment: right;
+                    }
+                    // the full sha256 lives behind the info button (the
+                    // cell used to elide it); a legacy share has none
+                    HorizontalLayout {
+                        width: 70px * Theme.ui-scale;
+                        alignment: center;
+                        ou-info := AppButton {
+                            height: 26px * Theme.ui-scale;
+                            pad: 6px;
+                            y: (parent.height - self.height) / 2;
+                            emoji: "ℹ️";
+                            enabled: u.checksum-full != "";
+                            clicked => {
+                                root.show-checksum(u.name, u.checksum-full);
+                            }
+                        }
+                    }
+                    // user-to-user transfer: the button needs the sharer
+                    // reachable — offline shows the hint instead
+                    HorizontalLayout {
+                        width: 110px * Theme.ui-scale;
+                        alignment: center;
+                        spacing: 6px;
+                        // live download status: the percent while moving, a
+                        // check/warn mark after
+                        if u.status != "": Text {
+                            text: u.status;
+                            color: u.status-kind == 3 ? Theme.bad
+                                : u.status-kind == 2 ? Theme.accent
+                                : Theme.dim;
+                            font-size: Theme.fs-cap;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                        // §5.5: a relay-held series downloads WITHOUT a
+                        // live sharer — the button follows the fact, and a
+                        // gone share says the one word instead of "offline"
+                        if (u.online || u.availability == "relay-held")
+                            && u.status-kind != 1: AppButton {
+                            height: 28px * Theme.ui-scale;
+                            pad: 10px;
+                            y: (parent.height - self.height) / 2;
+                            label: Strings.ou-download;
+                            enabled: u.available && u.id != "";
+                            clicked => {
+                                root.download(u.id);
+                            }
+                        }
+                        if !u.online && u.availability != "relay-held"
+                            && u.status-kind != 1: Text {
+                            text: u.availability == "gone" ? Strings.ou-gone : Strings.ou-offline;
+                            color: Theme.faint;
+                            font-size: Theme.fs-cap;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                    }
+                    if !root.persistent: Text {
+                        text: u.expires;
+                        color: u.available ? Theme.dim : Theme.faint;
+                        font-size: Theme.fs-cap;
+                        vertical-alignment: center;
+                        width: 90px * Theme.ui-scale;
+                        horizontal-alignment: right;
+                    }
+                    // the vote: one button per row, or the open vote's
+                    // count while one is running (no double proposals)
+                    HorizontalLayout {
+                        width: 90px * Theme.ui-scale;
+                        alignment: center;
+                        AppButton {
+                            height: 28px * Theme.ui-scale;
+                            pad: 8px;
+                            y: (parent.height - self.height) / 2;
+                            label: u.vote != "" ? u.vote
+                                : (root.persistent ? Strings.ou-unpersist : Strings.ou-persist);
+                            enabled: u.vote == "" && u.id != "";
+                            clicked => {
+                                if (root.persistent) {
+                                    root.unpersist(u.id);
+                                } else {
+                                    root.persist(u.id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ScrollHint {
+        x: parent.width - 7px;
+        view-h: ou-fl.height;
+        content-h: ou-fl.viewport-height;
+        scroll-y: ou-fl.viewport-y;
     }
 }
 
@@ -925,6 +1220,8 @@ export component AppWindow inherits Window {
     // ReadUploads (the same projections the MCP tools of those names read)
     in property <[MemberRow]> org-members;
     in property <[UploadRow]> org-uploads;
+    // the vote-pinned shares (Shared Files → Persistent Uploads)
+    in property <[UploadRow]> org-persistent;
     // the tables' presentation state (sorting/filtering runs in Rust over
     // the mirrored rows and lives in the UI-local state there — these echo
     // it back so the headers render the ▲/▼ arrow and the filter box
@@ -939,6 +1236,18 @@ export component AppWindow inherits Window {
     callback sort-uploads(string);
     // uploads filter needle edited (matches user/filename/checksum in Rust)
     callback filter-uploads(string);
+    // the two Shared Files votes, by the share's chat message id
+    callback persist-upload(string);
+    callback unpersist-upload(string);
+    // the checksum modal: the file name and its full sha256
+    in-out property <bool> checksum-modal-open: false;
+    in-out property <string> checksum-modal-name;
+    in-out property <string> checksum-modal-hash;
+    function open-checksum(name: string, hash: string) {
+        root.checksum-modal-name = name;
+        root.checksum-modal-hash = hash;
+        root.checksum-modal-open = true;
+    }
     // a member row's uploads count: jump to Shared Files → Uploads with
     // the filter pre-filled to that member's name
     callback jump-member-uploads(string);
@@ -1162,7 +1471,7 @@ export component AppWindow inherits Window {
     // focus while it is up (Enter = action, Escape = cancel); when the LAST
     // modal closes — by button, key or scrim — the root scope re-takes
     // focus so the global key handler keeps hearing the keyboard
-    property <bool> any-modal-open: root.confirm-close-open
+    property <bool> any-modal-open: root.checksum-modal-open || root.confirm-close-open
         || root.confirm-leave-open
         || root.confirm-abort-ritual-open
         || root.confirm-quit-open
@@ -2388,7 +2697,7 @@ export component AppWindow inherits Window {
                                 // pane — the chat surface owns that pane, and
                                 // collapsing Organization here would hide the
                                 // row the user just used.
-                                if s.key == "organization" && v.key == "pending"
+                                if (s.key == "organization" || s.key == "files") && v.key == "pending"
                                     && s.pending-count > 0: VerticalLayout {
                                     spacing: 1px;
                                     for p in s.pending: ViewRow {
@@ -6266,7 +6575,10 @@ export component AppWindow inherits Window {
                         // Shared Files → Uploads: every file shared into the
                         // chat. Only metadata lives here — the bytes move
                         // user-to-user via the share link (real transfer).
-                        if s.key == "files" && root.selected-view == "uploads": VerticalLayout {
+                        // Shared Files: the temporary and the persistent
+                        // table share one filter and one sort (view state),
+                        // over two row sets the mirror splits by the vote
+                        if s.key == "files" && (root.selected-view == "uploads" || root.selected-view == "persistent"): VerticalLayout {
                             padding: 8px;
                             spacing: 8px;
                             // one filter needle across user, filename and
@@ -6324,260 +6636,36 @@ export component AppWindow inherits Window {
                                     }
                                 }
                             }
-                            Rectangle {
+                            if root.selected-view == "uploads": UploadsTable {
                                 vertical-stretch: 1;
-                                background: Theme.panel;
-                                border-radius: Theme.win95 ? 0px : 8px;
-                                border-width: Theme.border-w;
-                                border-color: Theme.line;
-                                clip: true;
-                                ou-fl := Flickable {
-                                    width: 100%;
-                                    height: 100%;
-                                    viewport-width: self.width;
-                                    viewport-height: ou-list.preferred-height + 8px;
-                                    ou-list := VerticalLayout {
-                                        padding: 8px;
-                                        spacing: 4px;
-                                        alignment: start;
-                                        // table header — every column sorts
-                                        // on click (toggle asc/desc; the
-                                        // ▲/▼ marks the active one). Date,
-                                        // size and expiry order by their
-                                        // underlying numeric values in
-                                        // Rust, never the rendered labels.
-                                        HorizontalLayout {
-                                            padding-left: 12px;
-                                            padding-right: 12px;
-                                            spacing: 10px;
-                                            SortHeader {
-                                                label: Strings.ou-col-user;
-                                                active: root.ou-sort-column == "user";
-                                                desc: !root.ou-sort-ascending;
-                                                width: 110px;
-                                                clicked => {
-                                                    root.sort-uploads("user");
-                                                }
-                                            }
-                                            SortHeader {
-                                                label: Strings.ou-col-date;
-                                                active: root.ou-sort-column == "date";
-                                                desc: !root.ou-sort-ascending;
-                                                width: 90px;
-                                                clicked => {
-                                                    root.sort-uploads("date");
-                                                }
-                                            }
-                                            SortHeader {
-                                                label: Strings.ou-col-file;
-                                                active: root.ou-sort-column == "file";
-                                                desc: !root.ou-sort-ascending;
-                                                horizontal-stretch: 1;
-                                                clicked => {
-                                                    root.sort-uploads("file");
-                                                }
-                                            }
-                                            SortHeader {
-                                                label: Strings.ou-col-type;
-                                                active: root.ou-sort-column == "type";
-                                                desc: !root.ou-sort-ascending;
-                                                width: 60px;
-                                                clicked => {
-                                                    root.sort-uploads("type");
-                                                }
-                                            }
-                                            SortHeader {
-                                                label: Strings.ou-col-size;
-                                                active: root.ou-sort-column == "size";
-                                                desc: !root.ou-sort-ascending;
-                                                width: 70px;
-                                                align: end;
-                                                clicked => {
-                                                    root.sort-uploads("size");
-                                                }
-                                            }
-                                            SortHeader {
-                                                label: Strings.ou-col-checksum;
-                                                active: root.ou-sort-column == "checksum";
-                                                desc: !root.ou-sort-ascending;
-                                                width: 100px;
-                                                align: end;
-                                                clicked => {
-                                                    root.sort-uploads("checksum");
-                                                }
-                                            }
-                                            SortHeader {
-                                                label: Strings.ou-col-download;
-                                                active: root.ou-sort-column == "download";
-                                                desc: !root.ou-sort-ascending;
-                                                width: 110px;
-                                                align: center;
-                                                clicked => {
-                                                    root.sort-uploads("download");
-                                                }
-                                            }
-                                            SortHeader {
-                                                label: Strings.ou-col-expires;
-                                                active: root.ou-sort-column == "expires";
-                                                desc: !root.ou-sort-ascending;
-                                                width: 90px;
-                                                align: end;
-                                                clicked => {
-                                                    root.sort-uploads("expires");
-                                                }
-                                            }
-                                        }
-                                        Rectangle {
-                                            height: 1px;
-                                            background: Theme.line;
-                                        }
-                                        if root.org-uploads.length == 0: Text {
-                                            // an active filter that matches
-                                            // nothing says so, honestly —
-                                            // never "no files shared yet"
-                                            text: root.ou-filter == "" ? Strings.ou-empty : Strings.ou-no-match;
-                                            color: Theme.faint;
-                                            font-size: Theme.fs-cap;
-                                        }
-                                        for u in root.org-uploads: Rectangle {
-                                            height: 40px * Theme.ui-scale;
-                                            border-radius: Theme.win95 ? 0px : 6px;
-                                            background: Theme.panel-2;
-                                            border-width: 1px;
-                                            border-color: Theme.line;
-                                            opacity: u.available ? 1.0 : 0.55;
-                                            HorizontalLayout {
-                                                padding-left: 12px;
-                                                padding-right: 12px;
-                                                spacing: 10px;
-                                                // the sharer's name is a poke
-                                                // target like every other one
-                                                ContextMenuArea {
-                                                    width: 110px;
-                                                    enabled: Poke.shows(u.user);
-                                                    Menu {
-                                                        MenuItem {
-                                                            title: Strings.mem-poke;
-                                                            enabled: Poke.on;
-                                                            activated => {
-                                                                Poke.go(u.user);
-                                                            }
-                                                        }
-                                                    }
-                                                    Text {
-                                                        text: u.user;
-                                                        color: u.user == root.node-member ? Theme.accent : Theme.text;
-                                                        font-size: Theme.fs-body;
-                                                        font-weight: 700;
-                                                        vertical-alignment: center;
-                                                        // the column width lives on the menu area above
-                                                        width: 100%;
-                                                        overflow: elide;
-                                                    }
-                                                }
-                                                Text {
-                                                    text: u.date;
-                                                    color: Theme.dim;
-                                                    font-size: Theme.fs-cap;
-                                                    vertical-alignment: center;
-                                                    width: 90px;
-                                                }
-                                                Text {
-                                                    text: u.name;
-                                                    color: Theme.text;
-                                                    font-size: Theme.fs-body;
-                                                    vertical-alignment: center;
-                                                    horizontal-stretch: 1;
-                                                    overflow: elide;
-                                                }
-                                                Text {
-                                                    text: u.kind;
-                                                    color: Theme.dim;
-                                                    font-size: Theme.fs-cap;
-                                                    vertical-alignment: center;
-                                                    width: 60px;
-                                                }
-                                                Text {
-                                                    text: u.size;
-                                                    color: Theme.dim;
-                                                    font-size: Theme.fs-cap;
-                                                    vertical-alignment: center;
-                                                    width: 70px;
-                                                    horizontal-alignment: right;
-                                                }
-                                                Text {
-                                                    text: u.checksum;
-                                                    color: Theme.faint;
-                                                    font-size: Theme.fs-cap;
-                                                    vertical-alignment: center;
-                                                    width: 100px;
-                                                    horizontal-alignment: right;
-                                                    overflow: elide;
-                                                }
-                                                // user-to-user transfer: the
-                                                // button needs the sharer
-                                                // reachable — offline shows
-                                                // the hint instead
-                                                HorizontalLayout {
-                                                    width: 110px * Theme.ui-scale;
-                                                    alignment: center;
-                                                    spacing: 6px;
-                                                    // live download status: the
-                                                    // percent while moving, a
-                                                    // check/warn mark after
-                                                    if u.status != "": Text {
-                                                        text: u.status;
-                                                        color: u.status-kind == 3 ? Theme.bad
-                                                            : u.status-kind == 2 ? Theme.accent
-                                                            : Theme.dim;
-                                                        font-size: Theme.fs-cap;
-                                                        vertical-alignment: center;
-                                                        horizontal-alignment: center;
-                                                    }
-                                                    // §5.5: a relay-held series downloads WITHOUT a
-                                                    // live sharer — the button follows the fact, and a
-                                                    // gone share says the one word instead of "offline"
-                                                    if (u.online || u.availability == "relay-held")
-                                                        && u.status-kind != 1: AppButton {
-                                                        height: 28px * Theme.ui-scale;
-                                                        pad: 10px;
-                                                        y: (parent.height - self.height) / 2;
-                                                        label: Strings.ou-download;
-                                                        enabled: u.available && u.id != "";
-                                                        clicked => {
-                                                            root.download-file(u.id);
-                                                        }
-                                                    }
-                                                    if !u.online && u.availability != "relay-held"
-                                                        && u.status-kind != 1: Text {
-                                                        text: u.availability == "gone" ? Strings.ou-gone : Strings.ou-offline;
-                                                        color: Theme.faint;
-                                                        font-size: Theme.fs-cap;
-                                                        vertical-alignment: center;
-                                                        horizontal-alignment: center;
-                                                    }
-                                                }
-                                                Text {
-                                                    text: u.expires;
-                                                    color: u.available ? Theme.dim : Theme.faint;
-                                                    font-size: Theme.fs-cap;
-                                                    vertical-alignment: center;
-                                                    width: 90px;
-                                                    horizontal-alignment: right;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                ScrollHint {
-                                    x: parent.width - 7px;
-                                    view-h: ou-fl.height;
-                                    content-h: ou-fl.viewport-height;
-                                    scroll-y: ou-fl.viewport-y;
-                                }
+                                rows: root.org-uploads;
+                                persistent: false;
+                                sort-column: root.ou-sort-column;
+                                sort-ascending: root.ou-sort-ascending;
+                                filter: root.ou-filter;
+                                node-member: root.node-member;
+                                sort(col) => { root.sort-uploads(col); }
+                                download(id) => { root.download-file(id); }
+                                persist(id) => { root.persist-upload(id); }
+                                unpersist(id) => { root.unpersist-upload(id); }
+                                show-checksum(name, hash) => { root.open-checksum(name, hash); }
+                            }
+                            if root.selected-view == "persistent": UploadsTable {
+                                vertical-stretch: 1;
+                                rows: root.org-persistent;
+                                persistent: true;
+                                sort-column: root.ou-sort-column;
+                                sort-ascending: root.ou-sort-ascending;
+                                filter: root.ou-filter;
+                                node-member: root.node-member;
+                                sort(col) => { root.sort-uploads(col); }
+                                download(id) => { root.download-file(id); }
+                                persist(id) => { root.persist-upload(id); }
+                                unpersist(id) => { root.unpersist-upload(id); }
+                                show-checksum(name, hash) => { root.open-checksum(name, hash); }
                             }
                             Text {
-                                text: Strings.ou-note;
+                                text: root.selected-view == "persistent" ? Strings.ou-note-persistent : Strings.ou-note;
                                 color: Theme.faint;
                                 font-size: Theme.fs-cap;
                                 wrap: word-wrap;
@@ -6588,7 +6676,7 @@ export component AppWindow inherits Window {
                         // retention changes in voting — the same proposal cards
                         // (and the same approve/decline commands) as every
                         // other gated surface
-                        if s.key == "organization" && root.selected-view == "pending": VerticalLayout {
+                        if (s.key == "organization" || s.key == "files") && root.selected-view == "pending": VerticalLayout {
                             padding: 8px;
                             spacing: 12px;
                             // a heading that owns the pane, not a shy caption
@@ -6669,7 +6757,7 @@ export component AppWindow inherits Window {
                         // read-only cards (the decision fell); the list keeps
                         // only declines inside the retention window, so the
                         // pane empties on the same rhythm as the group chat
-                        if s.key == "organization" && root.selected-view == "declined": VerticalLayout {
+                        if (s.key == "organization" || s.key == "files") && root.selected-view == "declined": VerticalLayout {
                             padding: 8px;
                             spacing: 12px;
                             Text {
@@ -6741,7 +6829,7 @@ export component AppWindow inherits Window {
                         // decided, the engine refuses new writes there.
                         // Rows without a proposal id (legacy dumps) offer
                         // no jump: the UI must not fake an address.
-                        if s.key == "organization" && root.selected-view == "accepted": VerticalLayout {
+                        if (s.key == "organization" || s.key == "files") && root.selected-view == "accepted": VerticalLayout {
                             padding: 8px;
                             spacing: 12px;
                             Text {
@@ -9008,6 +9096,30 @@ export component AppWindow inherits Window {
         cancel-label: Strings.jw-busy-cancel;
         cancelled => {
             root.join-cancel();
+        }
+    }
+
+    // Modal: a share's full sha256 (the table shows an info button, not an
+    // elided hash); Copy puts it on the clipboard and closes
+    if root.checksum-modal-open: ConfirmModal {
+        dialog-width: 560px;
+        title: root.checksum-modal-name;
+        body: Strings.ou-col-checksum;
+        confirm-label: Strings.ou-copy;
+        dismissed => {
+            root.checksum-modal-open = false;
+        }
+        confirmed => {
+            root.copy-text(root.checksum-modal-hash);
+            root.checksum-modal-open = false;
+        }
+        checksum-modal-hash := Text {
+            text: root.checksum-modal-hash;
+            color: Theme.text;
+            font-size: Theme.fs-body;
+            font-family: "monospace";
+            wrap: char-wrap;
+            preferred-width: 0px;
         }
     }
 

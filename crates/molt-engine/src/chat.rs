@@ -428,25 +428,25 @@ impl State {
         dest: Option<String>,
     ) -> Result<Reply, MoltError> {
         let (from, target) = {
-            let (_, msg) = self.chat_by_id(&id)?;
-            let file = msg.file.as_ref().ok_or(MoltError::NoFile(id))?;
-            if !file.available {
+            // the live message, or the persist block once the message left
+            // the log (`persistent_uploads.md` D2)
+            let (ident, available) = self.share_identity(&id)?;
+            if !available {
                 return Err(MoltError::FileUnavailable(id));
             }
-            // uploads are ephemeral like chat: a share that aged out of the
-            // retention window left the read contract (it is not in the
-            // uploads table any more), so downloading it is refused too —
-            // before any task spawns or a download phase is recorded
-            if self.chat_ts_aged_out(msg.ts) {
+            // a share that left the tables is refused here too - before any
+            // task spawns or a download phase is recorded (ONE rule:
+            // share_expiry - the chat window, never for a persisted share)
+            if self.share_expired(&id) {
                 return Err(MoltError::FileExpired(id));
             }
             (
-                msg.from.clone(),
+                ident.by.clone(),
                 crate::transfer::FetchTarget {
                     id_hex: id.to_string(),
-                    name: file.name.clone(),
-                    size: file.size,
-                    checksum: file.checksum.clone(),
+                    name: ident.name.clone(),
+                    size: ident.size,
+                    checksum: ident.checksum.clone(),
                 },
             )
         };
@@ -516,6 +516,10 @@ impl State {
     /// for everyone, permanently (an event — replay reproduces it).
     pub(crate) fn cmd_remove_file(&mut self, id: MessageId) -> Result<Reply, MoltError> {
         let me = self.member();
+        // a vote pinned it: the republic decides its fate, not one seat
+        if self.is_persistent_share(&id) {
+            return Err(MoltError::BadPayload("persistent - unpersist first".into()));
+        }
         let index = {
             let (index, msg) = self.chat_by_id(&id)?;
             let file = msg.file.as_ref().ok_or(MoltError::NoFile(id))?;
@@ -686,6 +690,10 @@ impl State {
     /// tombstone here, message intact everywhere else, permanently.
     pub(crate) fn cmd_delete_chat(&mut self, id: MessageId) -> Result<Reply, MoltError> {
         let me = self.member();
+        // a tombstone drops the share with the body: not for a pinned one
+        if self.is_persistent_share(&id) {
+            return Err(MoltError::BadPayload("persistent - unpersist first".into()));
+        }
         let (index, msg) = self.chat_by_id(&id)?;
         // the caller must be the author in OUR log — wire_delete's mirror
         if msg.from != me {

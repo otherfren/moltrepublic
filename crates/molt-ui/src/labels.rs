@@ -218,6 +218,7 @@ pub(crate) fn view_icon(key: &str) -> &'static str {
         "status" => "📡",
         "members" => "👥",
         "uploads" => "📎",
+        "persistent" => "📌",
         "pending" => "🗳️",
         "declined" => "🚫",
         "today" => "💬",
@@ -374,6 +375,7 @@ pub(crate) fn view_label(lang: i32, key: &str, en: &str) -> String {
     match key {
         "members" => "Mitglieder",
         "uploads" => "Temporäre Uploads",
+        "persistent" => "Dauerhafte Uploads",
         "pending" => "Ausstehend",
         "declined" => "Abgelehnt",
         "today" => "Allgemein",

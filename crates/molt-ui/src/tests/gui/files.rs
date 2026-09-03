@@ -67,7 +67,7 @@ fn the_shared_files_row_appears_with_the_first_share() {
     let tab = surface_tab(&ui, "files").expect("one share: the Shared Files row");
     assert_eq!(tab.name.as_str(), "Shared Files");
     let views: Vec<String> = tab.views.iter().map(|v| v.key.to_string()).collect();
-    assert_eq!(views, ["uploads"]);
+    assert_eq!(views, ["uploads", "persistent", "pending", "accepted", "declined"]);
     assert_eq!(
         tab.views.row_data(0).map(|v| v.name.to_string()),
         Some("Temporary Uploads".to_string())
@@ -115,4 +115,182 @@ fn the_shared_files_row_stays_while_selected_and_leaves_with_the_selection() {
         surface_tab(&ui, "files").is_none(),
         "nothing shared and not selected: no row"
     );
+}
+
+/// A 1-of-3 republic-in-a-box whose own vote decides (no self-cosign, so
+/// a proposal is visibly open first).
+fn one_of_three() -> WalletHandle {
+    molt_engine::spawn(
+        GroupConfig {
+            threshold: 1,
+            self_cosign: false,
+            ..GroupConfig::demo()
+        },
+        SessionView::default(),
+    )
+}
+
+/// Poll until the share lists, returning its id.
+async fn listed_share(w: &WalletHandle) -> String {
+    for _ in 0..200 {
+        if let Ok(Reply::Uploads { uploads }) = w.execute(Command::ReadUploads).await {
+            if let Some(u) = uploads.first() {
+                return u.id.to_string();
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("the share never listed");
+}
+
+async fn propose_files(w: &WalletHandle, payload: serde_json::Value) -> ProposalId {
+    match w
+        .execute(Command::Propose {
+            surface: Surface::Files,
+            payload,
+        })
+        .await
+        .expect("the files proposal is accepted")
+    {
+        Reply::Proposed { id } => id,
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// The two tables follow the vote: an open persist marks its row, the
+/// applied vote moves it to Persistent Uploads, an unpersist moves it back.
+#[test]
+fn a_persist_vote_moves_the_row_and_an_unpersist_vote_moves_it_back() {
+    i_slint_backend_testing::init_no_event_loop();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    let w = one_of_three();
+    let ui = AppWindow::new().expect("headless window");
+    let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+    let last: Arc<Mutex<Option<SessionSettings>>> = Arc::new(Mutex::new(None));
+    let shared = tmp.path().join("protokoll.pdf");
+    std::fs::write(&shared, b"minutes").expect("write the file to share");
+
+    rt.block_on(async {
+        w.execute(Command::ShareFile {
+            path: shared.display().to_string(),
+            channel: ChannelRef::Group,
+        })
+        .await
+        .expect("share");
+        let id = listed_share(&w).await;
+        mirror(&w, &ui, &last, &chat_ui).await;
+        assert_eq!(ui.get_org_uploads().row_count(), 1);
+        assert_eq!(ui.get_org_persistent().row_count(), 0);
+
+        let pid = propose_files(&w, serde_json::json!({"op": "persist", "id": id})).await;
+        mirror(&w, &ui, &last, &chat_ui).await;
+        let row = ui.get_org_uploads().row_data(0).expect("still temporary");
+        assert_eq!(row.vote.as_str(), "0/1", "the open vote marks the row");
+        let files = surface_tab(&ui, "files").expect("the files tab");
+        assert_eq!(files.pending_count, 1, "…and the nav counts it");
+
+        w.execute(Command::Approve { proposal: pid }).await.expect("approve");
+        mirror(&w, &ui, &last, &chat_ui).await;
+        assert_eq!(ui.get_org_uploads().row_count(), 0, "left Temporary");
+        let row = ui.get_org_persistent().row_data(0).expect("now persistent");
+        assert!(row.persistent);
+        assert_eq!(row.vote.as_str(), "");
+        assert_eq!(row.name.as_str(), "protokoll.pdf");
+        assert_eq!(row.checksum_full.len(), 64, "the full sha256 rides the row");
+
+        let pid = propose_files(
+            &w,
+            serde_json::json!({"op": "unpersist", "id": id, "at": crate::labels::unix_now()}),
+        )
+        .await;
+        w.execute(Command::Approve { proposal: pid }).await.expect("approve");
+        mirror(&w, &ui, &last, &chat_ui).await;
+        assert_eq!(ui.get_org_persistent().row_count(), 0);
+        assert_eq!(ui.get_org_uploads().row_count(), 1, "back in Temporary");
+        assert!(!ui.get_org_uploads().row_data(0).expect("row").persistent);
+    });
+}
+
+/// A Shared Files window with rows pushed straight into the models.
+#[cfg(feature = "live-preview")]
+fn files_window(rows: Vec<UploadRow>) -> AppWindow {
+    let ui = AppWindow::new().expect("headless window");
+    ui.window().set_size(slint::PhysicalSize::new(1200, 800));
+    ui.set_screen(AppScreen::Main);
+    ui.set_selected_surface("files".into());
+    ui.set_selected_view("uploads".into());
+    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: "files".into(),
+        ..SurfaceTab::default()
+    }])));
+    ui.set_org_uploads(ModelRc::new(VecModel::from(rows)));
+    apply_strings(&ui, 0);
+    ui.show().expect("show headless");
+    ui
+}
+
+/// The checksum cell is an info button; a real click opens the modal on
+/// the FULL hash (the cell used to elide it).
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_info_button_opens_the_checksum_modal_with_the_full_hash() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = files_window(vec![UploadRow {
+        id: "cc".repeat(16).into(),
+        name: "protokoll.pdf".into(),
+        user: "walter".into(),
+        kind: "PDF".into(),
+        checksum: "ab12…".into(),
+        checksum_full: "ab".repeat(32).into(),
+        available: true,
+        online: true,
+        ..UploadRow::default()
+    }]);
+    let button = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "UploadsTable::ou-info")
+        .next()
+        .expect("the info button");
+    click(&ui, &button);
+    assert!(ui.get_checksum_modal_open(), "the click opens the modal");
+    assert_eq!(ui.get_checksum_modal_hash().as_str(), "ab".repeat(32));
+    assert_eq!(ui.get_checksum_modal_name().as_str(), "protokoll.pdf");
+}
+
+/// The Type column: header and cells share one box at every font size
+/// (both scale, both centre) — the members-table rule.
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_type_column_header_lines_up_with_its_cells() {
+    i_slint_backend_testing::init_no_event_loop();
+    let row = |kind: &str| UploadRow {
+        id: "cc".repeat(16).into(),
+        name: "a-rather-long-file-name-to-push-the-columns.pdf".into(),
+        user: "bartholomaeus-von-habsburg".into(),
+        kind: kind.into(),
+        available: true,
+        ..UploadRow::default()
+    };
+    let ui = files_window(vec![row("PDF"), row(""), row("SPREADSHEET")]);
+    let boxes = |id: &str| -> Vec<(f32, f32)> {
+        i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, id)
+            .filter(|e| e.size().width > 0.0)
+            .map(|e| (e.absolute_position().x, e.size().width))
+            .collect()
+    };
+    for font in [14.0_f32, 20.0, 28.0] {
+        ui.global::<Theme>().set_fs_app(font);
+        let header = boxes("UploadsTable::ou-h-type");
+        let cells = boxes("UploadsTable::ou-r-type");
+        assert_eq!(header.len(), 1, "font {font}: one Type header");
+        assert_eq!(cells.len(), 3, "font {font}: three Type cells");
+        for (i, (x, w)) in cells.iter().enumerate() {
+            assert!(
+                (x - header[0].0).abs() < 1.0 && (w - header[0].1).abs() < 1.0,
+                "font {font}: Type cell {i} is at {x}/{w}, its header at {}/{}",
+                header[0].0,
+                header[0].1
+            );
+        }
+    }
 }

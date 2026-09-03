@@ -225,6 +225,15 @@ impl State {
                     tracing::warn!(from = %from, surface = ?surface, "dropping a proposal too large to publish");
                     return Ok(Reply::Ack);
                 }
+                // a Files vote must have the shape every seat can check
+                // (op, id, identity, stamp) - the approve door then
+                // matches it against this seat's own share
+                if surface == molt_core::Surface::Files {
+                    if let Err(e) = crate::files_state::validate_files_payload(&payload) {
+                        tracing::warn!(from = %from, error = %e, "dropping a malformed files proposal");
+                        return Ok(Reply::Ack);
+                    }
+                }
                 // (2) a set_image must decode as a picture (WP3); a
                 // set_member_image must also be square (the wire twin of
                 // the propose gate — one contract, both doors)
@@ -549,7 +558,7 @@ impl State {
                 // and a redelivered OLD announcement must not regress a
                 // newer stamp (at-least-once delivery)
                 let from_sharer =
-                    matches!(self.chat_by_id(&id), Ok((_, msg)) if msg.from == from);
+                    matches!(self.share_identity(&id), Ok((ident, _)) if ident.by == from);
                 let plausible = at <= crate::now_secs().saturating_add(WIRE_STAMP_SKEW_SECS);
                 let newer = self.files.series.get(&id).map_or(true, |old| at > *old);
                 if from_sharer && plausible && newer {

@@ -102,12 +102,25 @@ impl State {
         // user's own FILE is never touched; what falls is our record that we
         // serve it, after which a download request meets the honest
         // `Refused`/`FileExpired` the read path already produces.
-        self.files.share_paths.retain(|id, _| self.chat_pos.contains_key(id));
+        // …unless a vote pinned it (`persistent_uploads.md` D2): the block
+        // outlives the message, and so must the sharer's path to the bytes
+        let states = self.files_state();
+        let pinned: std::collections::HashSet<String> = states
+            .keys()
+            .filter(|id| !self.share_expired_in(&states, id))
+            .map(|id| id.to_string())
+            .collect();
+        self.files
+            .share_paths
+            .retain(|id, _| self.chat_pos.contains_key(id) || pinned.contains(&id.to_string()));
         if let Some(active) = self.active.as_mut() {
             let before = active.prefs.shared_files.len();
             let live: std::collections::HashSet<String> =
                 dump.chat.iter().map(|m| m.id.to_string()).collect();
-            active.prefs.shared_files.retain(|id, _| live.contains(id));
+            active
+                .prefs
+                .shared_files
+                .retain(|id, _| live.contains(id) || pinned.contains(id));
             if active.prefs.shared_files.len() != before {
                 active.handle.set_prefs(active.prefs.clone());
             }

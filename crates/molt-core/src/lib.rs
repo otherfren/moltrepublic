@@ -40,10 +40,9 @@ pub type MemberId = String;
 /// are presentation only and may repeat; the id never does.
 pub type WorkspaceId = String;
 
-/// The shared surfaces. [`Surface::Chat`] and [`Surface::Files`] are ungated
-/// (a message or a share changes no shared state); every other surface —
-/// Organization included — changes the shared state only through a
-/// threshold-approved proposal.
+/// The shared surfaces. [`Surface::Chat`] is ungated (a message changes no
+/// shared state); every other surface — Organization included — changes the
+/// shared state only through a threshold-approved proposal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Surface {
@@ -62,9 +61,11 @@ pub enum Surface {
     Vault,
     /// Shared funds (Monero multisig in production). Gated.
     Wallet,
-    /// The files shared into the chat (the uploads table). Ungated and core:
-    /// a share is a chat message. Added after checkpoint-v7 — never in
-    /// [`Surface::CHECKPOINT_V7_SURFACES`].
+    /// The files shared into the chat: the temporary uploads table (chat
+    /// messages) and the persistent one (a vote pinned the share — its
+    /// identity lives in the applied block, so it outlives the message).
+    /// Core (never a feature key), gated: the persist/unpersist ops. Added
+    /// after checkpoint-v7 — never in [`Surface::CHECKPOINT_V7_SURFACES`].
     Files,
 }
 
@@ -108,10 +109,9 @@ impl Surface {
     }
 
     /// Whether changes to this surface require a threshold of approvals.
-    /// Chat and Files are ungated — a message or a share changes no shared
-    /// state.
+    /// Chat is the only ungated surface — a message changes no shared state.
     pub fn is_gated(self) -> bool {
-        !matches!(self, Surface::Chat | Surface::Files)
+        !matches!(self, Surface::Chat)
     }
 
     /// Parse a surface from its lowercase name.
@@ -210,9 +210,16 @@ impl Surface {
                 ("status", "Status"),
                 ("settings", "Settings"),
             ],
-            // every file shared into the chat; the GUI shows the surface
-            // only while this table is non-empty
-            Surface::Files => &[("uploads", "Temporary Uploads")],
+            // the GUI shows the surface only while a share is listed (or
+            // it is on screen); the three outcome views hide while empty,
+            // exactly like Organization's
+            Surface::Files => &[
+                ("uploads", "Temporary Uploads"),
+                ("persistent", "Persistent Uploads"),
+                ("pending", "Pending"),
+                ("accepted", "Accepted"),
+                ("declined", "Declined"),
+            ],
         }
     }
 
@@ -5633,6 +5640,10 @@ pub struct UploadView {
     /// sharer), `"gone"` (withdrawn and not on the relays). Additive.
     #[serde(default)]
     pub availability: String,
+    /// A vote pinned this share (`persistent_uploads.md` D1): it never
+    /// expires and lists under Persistent Uploads, not Temporary.
+    #[serde(default)]
+    pub persistent: bool,
 }
 
 /// A one-shot status summary of the running group.
@@ -6459,19 +6470,20 @@ mod tests {
         assert_ne!(legacy_bytes, bytes);
     }
 
-    /// Shared Files is the seventh surface and a CORE one like Chat: never
-    /// a feature key, never gated (a share is a chat message), one nav view —
-    /// the uploads table that used to live under Organization.
+    /// Shared Files is the seventh surface and a CORE one: never a feature
+    /// key, gated (persist/unpersist are votes), its temporary and
+    /// persistent tables plus the three outcome views — and the uploads
+    /// table that used to live under Organization.
     #[test]
-    fn shared_files_is_a_core_ungated_surface_with_the_uploads_view() {
+    fn shared_files_is_a_core_gated_surface_with_the_two_upload_views() {
         assert_eq!(Surface::ALL.last(), Some(&Surface::Files));
         assert_eq!(Surface::Files.as_str(), "files");
         assert_eq!(Surface::parse("files"), Some(Surface::Files));
         assert!(!Surface::Files.is_charter_feature());
-        assert!(!Surface::Files.is_gated());
+        assert!(Surface::Files.is_gated());
         assert_eq!(
             Surface::Files.views().iter().map(|(k, _)| *k).collect::<Vec<_>>(),
-            ["uploads"]
+            ["uploads", "persistent", "pending", "accepted", "declined"]
         );
         assert_eq!(Surface::Files.default_view(), "uploads");
         assert!(
