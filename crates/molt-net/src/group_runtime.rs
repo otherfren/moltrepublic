@@ -28,6 +28,7 @@ use molt_core::{MemberId, TransportState};
 use tokio::sync::{mpsc, watch};
 
 use crate::ritual_net::{GroupChannel, GroupRecv};
+use crate::mls::MlsError;
 use crate::supervisor::{EngineSink, MlsChannel, MlsDecode, OutboxLog, StateStore};
 
 /// How long the inbox waits per receive slice — short enough that a stopped
@@ -1169,8 +1170,8 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
 ) -> Ingest {
     let (content, created_at) = frame;
     // an exact re-delivery of a frame this node already consumed: turn
-    // around before the ratchet is asked (a second decrypt is at best a
-    // SecretReuseError logged at ERROR by openmls, at worst wasted work)
+    // around before the ratchet is asked (a second decrypt is a wasted
+    // `MlsError::Stale` round)
     if seen.seen(content) {
         tracing::debug!(me = %me, "dropping an exact re-delivery of a consumed frame");
         return Ingest::Nothing;
@@ -1203,6 +1204,7 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
             | MlsDecode::GroupAck(..)
             | MlsDecode::Poke(..)
             | MlsDecode::Discard
+            | MlsDecode::Failed(_)
     ) {
         seen.note(content);
     }
@@ -1253,6 +1255,19 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
         MlsDecode::FutureEpoch => Ingest::FutureEpoch,
         MlsDecode::EpochAdvanced(readmitted) => Ingest::EpochAdvanced(readmitted),
         MlsDecode::Discard => Ingest::Nothing,
+        // relays replay the whole day window on every subscribe, and a
+        // publisher hears its own frames back: both routine, neither the
+        // operator's business. Anything else is the ONE line for a frame
+        // this seat cannot read.
+        MlsDecode::Failed(MlsError::Stale(reason)) => {
+            tracing::debug!(me = %me, reason, "dropping a stale group frame");
+            Ingest::Nothing
+        }
+        MlsDecode::Failed(MlsError::OwnEcho) => Ingest::Nothing,
+        MlsDecode::Failed(e) => {
+            tracing::warn!(me = %me, error = %e, "dropping an undecryptable group frame");
+            Ingest::Nothing
+        }
     }
 }
 

@@ -34,7 +34,7 @@ use tokio::sync::{watch, Notify, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::chunk::{chunk_message, msg_id, PushOutcome, Reassembler};
-use crate::mls::{MlsIncoming, MlsMember};
+use crate::mls::{MlsError, MlsIncoming, MlsMember};
 use crate::wrap::{unwrap_block, wrap, WrapKey};
 use crate::{AckToken, NetError, RcvQueue, SndQueueAddr, Transport};
 
@@ -294,8 +294,10 @@ impl MlsChannel {
                 self.epoch_bump.send_modify(|n| *n = n.wrapping_add(1));
                 MlsDecode::EpochAdvanced(readmitted)
             }
-            // proposals / replays / past-window / garbage: redelivery cannot help
-            Ok(MlsIncoming::Proposal) | Err(_) => MlsDecode::Discard,
+            // proposals: nothing to deliver
+            Ok(MlsIncoming::Proposal) => MlsDecode::Discard,
+            // the caller logs by class: openmls's own error lines are off
+            Err(e) => MlsDecode::Failed(e),
         }
     }
 }
@@ -374,6 +376,9 @@ pub(crate) enum MlsDecode {
     /// epoch, so the engine forgets their old incarnation's accept window
     /// in-stream (live incident 2026-08-09 §2).
     EpochAdvanced(Vec<MemberId>),
+    /// The ratchet refused the frame. [`MlsError::Stale`] and
+    /// [`MlsError::OwnEcho`] are routine, anything else is worth a line.
+    Failed(MlsError),
     /// Encrypted at an epoch this node has not reached — hold it (acks
     /// unfired) and retry after the next commit merges.
     FutureEpoch,
@@ -1336,7 +1341,7 @@ impl<K: EngineSink> crate::epoch_hold::HeldIngest<HeldMessage> for MeshHeldInges
                 Held::Progress
             }
             MlsDecode::FutureEpoch => Held::Still, // still ahead
-            MlsDecode::Discard => Held::Opaque,
+            MlsDecode::Discard | MlsDecode::Failed(_) => Held::Opaque,
         }
     }
 }
@@ -1697,7 +1702,7 @@ where
                         epoch_buffer.push((id.0, complete, acks));
                     }
                 }
-                MlsDecode::Discard => {
+                MlsDecode::Discard | MlsDecode::Failed(_) => {
                     // loud, with a running count: a silently-dropped inbound
                     // message is how a dead leg hides (Stage B §3.3). Replays
                     // of redelivered blocks land here too — routine weather,
@@ -2036,7 +2041,7 @@ mod tests {
         bad.extend_from_slice(b"{not json");
         let ct = founder.encrypt(&bad).expect("encrypt bad ack");
         assert!(
-            matches!(recv.decode(&ct), MlsDecode::Discard),
+            matches!(recv.decode(&ct), MlsDecode::Discard | MlsDecode::Failed(_)),
             "a malformed ack payload is dropped"
         );
     }
@@ -2141,7 +2146,7 @@ mod tests {
         // an unknown NUL-prefixed control frame: dropped, never mis-parsed
         let unknown = founder.encrypt(b"\x00molt-mesh-future-v9").expect("encrypt unknown");
         assert!(
-            matches!(recv.decode(&unknown), MlsDecode::Discard),
+            matches!(recv.decode(&unknown), MlsDecode::Discard | MlsDecode::Failed(_)),
             "an unknown reserved control tag is a dropped no-op"
         );
 

@@ -719,6 +719,11 @@ fn run_headless(
     Ok(())
 }
 
+/// `openmls=off`: the whole crate, deliberately - its per-frame ERROR
+/// lines duplicate the failure the group runtime reports (not its
+/// diagnostics; `RUST_LOG` brings those back).
+const DEFAULT_LOG_FILTER: &str = "info,zbus=error,openmls=off";
+
 /// Logs go to stderr — in headless/stdio mode, stdout is the MCP channel.
 ///
 /// zbus is capped at ERROR by default: the XDG-portal request pattern
@@ -730,7 +735,7 @@ fn run_headless(
 /// `RUST_LOG` overrides the whole filter for debugging.
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,zbus=error"));
+        .unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_FILTER));
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(filter)
@@ -747,6 +752,15 @@ mod tests {
 
     fn ip(s: &str) -> IpAddr {
         s.parse().expect("valid ip literal")
+    }
+
+    /// `EnvFilter::new` drops only a bad directive (with an eprintln);
+    /// `try_new` refuses it, so a typo in the default is a red test here,
+    /// not a quieter terminal.
+    #[test]
+    fn the_default_log_filter_parses_and_silences_openmls() {
+        let filter = EnvFilter::try_new(DEFAULT_LOG_FILTER).expect("a valid filter");
+        assert!(filter.to_string().contains("openmls=off"));
     }
 
     #[test]

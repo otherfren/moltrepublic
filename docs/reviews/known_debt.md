@@ -27,6 +27,20 @@ all five sites.
 
 
 
+## The consumed-frame ring is in-memory: every start re-decrypts the day window
+
+The 445 subscription names the day's `h` tag with no `since` (`place_req`
+clamps a reconnect to cursor − 48 h anyway), so every subscribe replays
+the window; `SeenCiphertexts` starts empty per runtime, and each consumed
+frame costs one outer AEAD plus a ratchet lookup ending in
+`MlsError::Stale` (debug since 2026-09-03). Own echoes and frames sealed
+outside the 8-deep exporter ring replay the same way and no ring catches
+them. Cost: bounded by `MAX_STORED_EVENTS_PER_REQ` per start, no loss.
+Fix direction, if ever: a ring INSIDE `MlsMember` (noted under the member
+lock, snapshotted with the ratchet, so it can never run ahead of it) - a
+separate file cannot hold that invariant. Open: a v3 snapshot blob strands
+a downgraded seat.
+
 ## Review 2026-08-25 — the deferred findings
 
 `docs/reviews/code_review_2026-08-25.md` holds the full review (every crate,

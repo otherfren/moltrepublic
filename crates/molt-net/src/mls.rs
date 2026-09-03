@@ -39,6 +39,7 @@
 //! (the last open T2 piece).
 
 use ed25519_dalek::SigningKey;
+use openmls::framing::errors::{MessageDecryptionError, SecretTreeError};
 use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
@@ -94,6 +95,30 @@ pub enum MlsError {
     /// The persisted snapshot could not be encoded/decoded.
     #[error("mls snapshot: {0}")]
     Snapshot(String),
+    /// The ratchet already spent this generation, or it lies behind the
+    /// out-of-order window: a replay, nothing to do.
+    #[error("mls: stale frame - {0}")]
+    Stale(&'static str),
+    /// Our own frame, echoed back by the transport.
+    #[error("mls: own frame echoed back")]
+    OwnEcho,
+}
+
+/// A `process_message` failure by class: the routine ones get their own
+/// variant so the caller can keep them off the operator's terminal.
+fn classify_process_error<E: std::fmt::Debug>(e: ProcessMessageError<E>) -> MlsError {
+    match e {
+        ProcessMessageError::ValidationError(ValidationError::UnableToDecrypt(
+            MessageDecryptionError::SecretTreeError(SecretTreeError::SecretReuseError),
+        )) => MlsError::Stale("generation already spent"),
+        ProcessMessageError::ValidationError(ValidationError::UnableToDecrypt(
+            MessageDecryptionError::SecretTreeError(SecretTreeError::TooDistantInThePast),
+        )) => MlsError::Stale("generation behind the window"),
+        ProcessMessageError::ValidationError(ValidationError::CannotDecryptOwnMessage) => {
+            MlsError::OwnEcho
+        }
+        e => MlsError::Wire(format!("processing message: {e:?}")),
+    }
 }
 
 /// What a decrypted inbound MLS message turned out to be.
@@ -650,7 +675,7 @@ impl MlsMember {
         }
         let processed = group
             .process_message(&self.provider, protocol)
-            .map_err(|e| MlsError::Wire(format!("processing message: {e:?}")))?;
+            .map_err(classify_process_error)?;
         let from = String::from_utf8_lossy(processed.credential().serialized_content()).into_owned();
         // during a REWIND only: the commit we are about to undo removed
         // these leaves — one of them re-deciding the epoch with a lower
@@ -1070,6 +1095,34 @@ mod tests {
             }
             other => panic!("expected an application message, got {other:?}"),
         }
+    }
+
+    /// A second decrypt of a consumed generation is a replay with its own
+    /// class - the caller must not have to read openmls's error text.
+    #[test]
+    fn a_replayed_ciphertext_is_stale_not_a_wire_error() {
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        let bob = MlsMember::new(&key(2), "bob").expect("bob");
+        founder.create_group().expect("create group");
+        let welcome = founder
+            .add_members(&[bob.key_package().expect("bob kp")])
+            .expect("add")
+            .expect("welcome");
+        let mut bob = bob;
+        bob.join_from_welcome(&welcome).expect("bob joins");
+        let ct = founder.encrypt(b"once").expect("encrypt");
+        assert_app(bob.decrypt(&ct).expect("first decrypt"), "founder", b"once");
+        assert!(matches!(bob.decrypt(&ct), Err(MlsError::Stale(_))));
+    }
+
+    /// The transport hands a member its own frames back (a relay replays
+    /// the day window to its publisher too): its own class, no wire error.
+    #[test]
+    fn an_own_frame_echoed_back_is_not_a_wire_error() {
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        founder.create_group().expect("create group");
+        let ct = founder.encrypt(b"mine").expect("encrypt");
+        assert!(matches!(founder.decrypt(&ct), Err(MlsError::OwnEcho)));
     }
 
     /// N4 §6.1 (the N3 §5.5 debt): the exporter ring survives the
@@ -1553,8 +1606,9 @@ mod tests {
         let delayed = founder.encrypt(b"sent before the re-key").expect("enc");
 
         // the delayed epoch-N message arriving AFTER the re-key is rejected
+        // as stale (max_past_epochs = 0), never as a wire error
         assert!(
-            !matches!(cara.decrypt(&delayed), Ok(MlsIncoming::Application { .. })),
+            matches!(cara.decrypt(&delayed), Err(MlsError::Stale(_))),
             "past-epoch messages must not decrypt after a re-key"
         );
     }
@@ -1630,8 +1684,8 @@ mod tests {
     fn garbage_ciphertext_is_rejected() {
         let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
         founder.create_group().expect("create group");
-        assert!(founder.decrypt(b"not an mls message").is_err());
-        assert!(founder.decrypt(&[]).is_err());
+        assert!(matches!(founder.decrypt(b"not an mls message"), Err(MlsError::Wire(_))));
+        assert!(matches!(founder.decrypt(&[]), Err(MlsError::Wire(_))));
     }
 
     /// A solo founder (n = 1) has a group but no one to add.
@@ -1828,7 +1882,7 @@ mod tests {
         );
         // INNER: …and the evicted leaf's old-epoch message is STILL rejected
         assert!(
-            alice.decrypt_at(&old_epoch_wire, 8_000).is_err(),
+            matches!(alice.decrypt_at(&old_epoch_wire, 8_000), Err(MlsError::Stale(_))),
             "max_past_epochs = 0 must still refuse an old-epoch message"
         );
 
