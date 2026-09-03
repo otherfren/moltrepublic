@@ -12,7 +12,7 @@
 #   molt-core    domain types, Command/Event/Surface contract, errors — no I/O
 #   molt-config  config.toml schema, render, salvage, round-trip write (no I/O deps)
 #   molt-storage encrypted append-only workspace storage: event log, snapshots, keys
-#   molt-net     the transport: MLS-protected payloads over queue transports (loopback today, Nostr relays in build)
+#   molt-net     the transport: MLS-protected payloads over Nostr relays (production) or the loopback hub (tests); Tor dialer, S3
 #   molt-engine  the wallet-core actor: single owning task, WalletHandle
 #   molt-mcp     MCP frontend (the headless operator; stdio or tcp)
 #   molt-ui-window  the Slint-compiled window (own crate: the ~400k-line
@@ -20,9 +20,9 @@
 #   molt-ui      Slint GUI frontend logic (the live-mirror operator)
 #   molt-app     the binary: ui-mode (GUI + MCP) | headless (MCP-only)
 #
-# Future surface crates (molt-board / molt-memory / molt-treasury / molt-vault /
-# molt-policy, per moltrepublic_backend_plan R2–R6) plug into molt-engine behind
-# the same Surface/Approvable contract; they are not scaffolded yet.
+# Surfaces (`molt_core::Surface`) are not crates: each plugs into molt-engine
+# behind the same gated-proposal contract inside these crates; the open surface
+# plans (wallet, kanban, vault) live under docs/.
 
 [workspace]
 resolver = "2"
