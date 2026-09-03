@@ -169,7 +169,7 @@ export struct MemberRow {
     desc: string, // the seat's description ("" = none)
 }
 
-// One row of the Organization → Uploads table (engine ReadUploads — the
+// One row of the Shared Files → Uploads table (engine ReadUploads — the
 // same projection the MCP read_uploads tool serves). Labels arrive
 // pre-rendered from Rust.
 export struct UploadRow {
@@ -276,7 +276,7 @@ export struct ViewItem {
     icon: string,
 }
 
-// One of the five surfaces, with live counts and its log + pending proposals.
+// One surface, with live counts and its log + pending proposals.
 export struct SurfaceTab {
     key: string,
     name: string,
@@ -858,7 +858,7 @@ export global Strings {
     in property <string> mp-desc-body;
     in property <string> mp-desc-ph;
     in property <string> mp-img-too-big; // over the republic's picture budget
-    // Organization → Uploads table
+    // Shared Files → Uploads table
     in property <string> ou-col-user;
     in property <string> ou-col-date;
     in property <string> ou-col-file;

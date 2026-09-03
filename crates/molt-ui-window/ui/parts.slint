@@ -161,6 +161,7 @@ export component SurfaceRow inherits Rectangle {
                 : root.s.key == "memory" ? @image-url("assets/memory.svg")
                 : root.s.key == "quests" ? @image-url("assets/board.svg")
                 : root.s.key == "vault" ? @image-url("assets/vault.svg")
+                : root.s.key == "files" ? @image-url("assets/folder.svg")
                 : @image-url("assets/treasury.svg");
             colorize: Theme.accent;
             width: 20px;

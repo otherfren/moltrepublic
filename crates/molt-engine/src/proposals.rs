@@ -524,7 +524,7 @@ impl State {
         mut payload: Value,
     ) -> Result<Reply, MoltError> {
         if !surface.is_gated() {
-            return Err(MoltError::ChatNotGated);
+            return Err(MoltError::NotGated(surface));
         }
         // D7: no governance on a surface the charter has not enabled
         // (Organization itself always passes — set_features rides it)
@@ -1751,6 +1751,13 @@ impl State {
                 .filter(|m| channel.map_or(true, |c| &m.channel == c))
                 .map(|m| (None, serde_json::to_value(m).unwrap_or_default()))
                 .collect()
+        } else if surface == Surface::Files {
+            // the uploads table IS the surface's state (ungated, like chat):
+            // one read contract for the GUI pane and an agent's read_state
+            self.uploads_view()
+                .into_iter()
+                .map(|u| (None, serde_json::to_value(u).unwrap_or_default()))
+                .collect()
         } else {
             // the surface's applied log is the single-operator projection
             // plus the chain (real threshold) projection — one of the
@@ -1995,7 +2002,7 @@ impl State {
             .collect()
     }
 
-    /// The Organization → Uploads table: every file shared into the chat
+    /// The Shared Files → Temporary Uploads table: every file shared into the chat
     /// (within the retention window — [`State::chat_visible`]), in log order.
     /// Only metadata — the bytes move user-to-user over a dedicated encrypted
     /// queue, which is why a download needs the sharer online; the checksum
@@ -2091,6 +2098,8 @@ impl State {
                 let applied = if s == Surface::Chat {
                     // count what the read contract shows (retention window)
                     self.chat_visible().count()
+                } else if s == Surface::Files {
+                    self.uploads_view().len()
                 } else {
                     self.applied.get(&s).map(|v| v.len()).unwrap_or(0)
                         + self.chain.applied.get(&s).map(|v| v.len()).unwrap_or(0)

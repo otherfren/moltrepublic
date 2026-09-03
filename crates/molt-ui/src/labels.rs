@@ -348,6 +348,7 @@ pub(crate) fn surface_name(lang: i32, sf: Surface) -> &'static str {
             // both languages - it is the product's word for it
             Surface::Vault => "Vault",
             Surface::Wallet => "Wallet",
+            Surface::Files => "Shared Files",
         }
     } else {
         match sf {
@@ -357,6 +358,7 @@ pub(crate) fn surface_name(lang: i32, sf: Surface) -> &'static str {
             Surface::Quests => "Kanban",
             Surface::Vault => "Vault",
             Surface::Wallet => "Wallet",
+            Surface::Files => "Shared Files",
         }
     }
 }
@@ -404,8 +406,8 @@ pub(crate) fn default_op(sf: Surface) -> &'static str {
         Surface::Vault => "seal_secret",
         Surface::Wallet => "transfer",
         // organization changes come from the dedicated edit modals
-        // (org-propose carries the specific op); chat is ungated
-        Surface::Chat | Surface::Organization => "note",
+        // (org-propose carries the specific op); chat and files are ungated
+        Surface::Chat | Surface::Files | Surface::Organization => "note",
     }
 }
 

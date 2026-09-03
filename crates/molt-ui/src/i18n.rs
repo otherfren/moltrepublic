@@ -59,7 +59,7 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
     }
     match e {
         E::UnknownProposal(id) => format!("Unbekannter Vorschlag #{}", id.0),
-        E::ChatNotGated => "Chat ist ungated - zum Schreiben den Chat-Befehl nutzen, nicht propose".to_string(),
+        E::NotGated(sf) => format!("{} ist ungated - nichts vorzuschlagen", sf.as_str()),
         E::BadPayload(t) => format!("Ungültige Payload: {t}"),
         E::FeatureDisabled(k) => format!("{k}: nicht aktiviert"),
         E::AlreadyTerminal(id, st) => format!("Vorschlag #{} ist bereits {st:?}", id.0),

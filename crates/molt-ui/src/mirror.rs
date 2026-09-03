@@ -1061,9 +1061,17 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         ui.set_chain_pages(i32::try_from(pages).unwrap_or(1));
     }
     ui.set_threshold_badge(b.threshold_badge.clone().into());
+    // Shared Files is a nav row only while something is shared - or while
+    // it is the surface on screen (an agent's select_view, the last share
+    // aging out under the reader). Decided HERE, against the selection this
+    // window shows, so a push racing a select can never drop the row from
+    // under the pane. Never refused engine-side, like the empty-hidden
+    // Pending/Accepted/Declined views.
+    let files_row = b.uploads_total > 0 || ui.get_selected_surface().as_str() == "files";
     let tabs: Vec<SurfaceTab> = b
         .surfaces
         .iter()
+        .filter(|s| s.key != "files" || files_row)
         .map(|s| {
             // the paged lists (page size LIST_PAGE_SIZE, pager row in the
             // .slint side): a gated surface's log IS its applied/accepted
@@ -1266,7 +1274,7 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         }
     }
 
-    // the Organization tables (Members / Uploads). The avatars go through
+    // the Members / Uploads tables. The avatars go through
     // the path-keyed cache: `sync_rows` below rewrites EVERY row on EVERY
     // push, so decoding here would re-decode the whole roster per tick
     let members: Vec<MemberRow> = AVATARS.with_borrow_mut(|cache| {

@@ -604,19 +604,28 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
     })
 }
 
+/// The schema enums, derived from the ONE vocabulary (`Surface::ALL`) so
+/// a new surface can never be selectable in the engine and unknown here.
+fn surface_keys(keep: fn(&molt_core::Surface) -> bool) -> Value {
+    Value::Array(
+        molt_core::Surface::ALL
+            .iter()
+            .filter(|s| keep(s))
+            .map(|s| json!(s.as_str()))
+            .collect(),
+    )
+}
+
 fn surface_enum() -> Value {
-    json!([
-        "organization",
-        "chat",
-        "memory",
-        "quests",
-        "vault",
-        "wallet"
-    ])
+    surface_keys(|_| true)
 }
 
 fn gated_enum() -> Value {
-    json!(["organization", "memory", "quests", "vault", "wallet"])
+    surface_keys(|s| s.is_gated())
+}
+
+fn feature_enum() -> Value {
+    surface_keys(|s| s.is_charter_feature())
 }
 
 /// One MCP tool: name, wire schema and command builder side by side — a
@@ -857,7 +866,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "read_state",
             command: "read_state",
-            description: "Read the projected state of one surface. A CHAT read sends read receipts for the messages it returns (retrieval is the agent's way of seeing them - agents and humans light the same dots; silent while this node's receipts are off), so there is no need to call mark_read after reading. Chat messages each carry their stable 32-char hex `id` - the handle for react_chat, delete_chat, download_file, remove_file and chat_send's `quote` - plus the channel they file under, and the snapshot enumerates every channel seen in the log (`channels`). Each enumerated patch channel carries the vote's lifecycle in `state` (\"proposed\"/\"applied\"/\"rejected\"; absent for group/topic channels and unknown referents): a decided vote's discussion is READ-ONLY - chat_send/share_file into it are refused - but stays readable here. Pass `channel` to get only the messages of that view; channels are tags on the one shared stream, not boundaries, and the enumeration still lists all of them. Pass `view` (chat only) to narrow the read: \"unread\" keeps only the messages after this seat's read cursor; \"today\" and omitting it both give the whole retention window. The filters compose. On gated surfaces, `applied_ids` runs positionally parallel to `applied` and names the proposal each applied entry came from (null = origin unknown: legacy data) - the back-link from an accepted change to its `{\"kind\":\"patch\",\"id\":N}` discussion channel.",
+            description: "Read the projected state of one surface. A CHAT read sends read receipts for the messages it returns (retrieval is the agent's way of seeing them - agents and humans light the same dots; silent while this node's receipts are off), so there is no need to call mark_read after reading. Chat messages each carry their stable 32-char hex `id` - the handle for react_chat, delete_chat, download_file, remove_file and chat_send's `quote` - plus the channel they file under, and the snapshot enumerates every channel seen in the log (`channels`). Each enumerated patch channel carries the vote's lifecycle in `state` (\"proposed\"/\"applied\"/\"rejected\"; absent for group/topic channels and unknown referents): a decided vote's discussion is READ-ONLY - chat_send/share_file into it are refused - but stays readable here. Pass `channel` to get only the messages of that view; channels are tags on the one shared stream, not boundaries, and the enumeration still lists all of them. Pass `view` (chat only) to narrow the read: \"unread\" keeps only the messages after this seat's read cursor; \"today\" and omitting it both give the whole retention window. The filters compose. On gated surfaces, `applied_ids` runs positionally parallel to `applied` and names the proposal each applied entry came from (null = origin unknown: legacy data) - the back-link from an accepted change to its `{\"kind\":\"patch\",\"id\":N}` discussion channel. On `files`, `applied` is the uploads table (the read_uploads rows).",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -911,7 +920,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "read_uploads",
             command: "read_uploads",
-            description: "The Organization → Uploads table: every file shared into the chat (metadata only - bytes move user-to-user via the share link), with sharer, timestamp, availability, and the retention deadline (`expires_ts`) - uploads are ephemeral like chat and age out of the read (and become undownloadable) after the org's chat retention window. The `id` is the chat message id `download_file` takes.",
+            description: "The Shared Files → Temporary Uploads table: every file shared into the chat (metadata only - bytes move user-to-user via the share link), with sharer, timestamp, availability, and the retention deadline (`expires_ts`) - uploads are ephemeral like chat and age out of the read (and become undownloadable) after the org's chat retention window. The `id` is the chat message id `download_file` takes.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ReadUploads),
         },
@@ -985,7 +994,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "select_view",
             command: "select_view",
-            description: "Select a surface and one of its sub-views (organization: status/members/uploads/pending/declined · chat: today · memory: brain/proposals/accepted/denied · quests: board/plan/create/proposals/my-quests/archive · vault: secrets/requests/proposals/unsealed · wallet: balance/history/send/receive/status/settings).",
+            description: "Select a surface and one of its sub-views (organization: status/members/pending/accepted/declined · chat: today · memory: brain/proposals/accepted/denied · quests: board/plan/create/proposals/my-quests/archive · vault: secrets/requests/proposals/unsealed · wallet: balance/history/send/receive/status/settings · files: uploads).",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1558,7 +1567,7 @@ pub fn tools() -> Vec<ToolDef> {
                 "properties": {
                     "name": { "type": "string", "description": "the final republic name to ratify" },
                     "agenda": { "type": "string", "description": "the free-text charter/agenda to ratify" },
-                    "features": { "type": "array", "items": { "type": "string", "enum": ["memory", "quests", "vault", "wallet"] }, "description": "the optional surfaces to activate (chat is always on); omitted = none. memory (the shared wiki) and wallet are real; quests and vault have no real surface yet - the GUI wizard locks them off, prefer leaving them out" }
+                    "features": { "type": "array", "items": { "type": "string", "enum": feature_enum() }, "description": "the optional surfaces to activate (chat is always on); omitted = none. memory (the shared wiki) and wallet are real; quests and vault have no real surface yet - the GUI wizard locks them off, prefer leaving them out" }
                 },
                 "required": ["name"]
             }),

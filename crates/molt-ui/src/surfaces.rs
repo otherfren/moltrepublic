@@ -59,7 +59,7 @@ fn toggle_sort(active: &mut String, ascending: &mut bool, column: &str) {
     }
 }
 
-/// Sort the Organization → Uploads rows by a header column key ("user" /
+/// Sort the Shared Files → Uploads rows by a header column key ("user" /
 /// "date" / "file" / "type" / "size" / "checksum" / "download" /
 /// "expires"); an empty or unknown key keeps the engine order. Text
 /// columns compare case-insensitively; date/size/expiry sort by the
@@ -147,9 +147,13 @@ pub(crate) struct SurfacesBundle {
     /// Organization → Members table rows (engine `ReadMembers`), already
     /// ordered by the active sort.
     pub(crate) members: Vec<MemberRowData>,
-    /// Organization → Uploads table rows (engine `ReadUploads`), already
+    /// Shared Files → Uploads table rows (engine `ReadUploads`), already
     /// thinned by the filter and ordered by the active sort.
     pub(crate) uploads: Vec<UploadRowData>,
+    /// How many shares the engine lists BEFORE the filter: the Shared Files
+    /// nav row exists only while this is non-zero (or the surface is on
+    /// screen) - a filter matching nothing must not hide the surface.
+    pub(crate) uploads_total: usize,
     /// Members sort echo: active column ("" = roster order) + direction —
     /// the headers render the ▲/▼ from these.
     pub(crate) members_sort: String,
@@ -230,7 +234,7 @@ pub(crate) struct MemberRowData {
     pub(crate) desc: String,
 }
 
-/// One rendered row of the Organization → Uploads table (labels are
+/// One rendered row of the Shared Files → Uploads table (labels are
 /// pre-rendered here; the .slint side only displays).
 pub(crate) struct UploadRowData {
     /// The carrying chat message id (hex) — what download-file takes.
@@ -320,7 +324,7 @@ pub(crate) struct ChatUiState {
     pub(crate) members_sort: String,
     /// Members sort direction (meaningful only while `members_sort` != "").
     pub(crate) members_asc: bool,
-    /// Organization → Uploads sort: active column ("" = engine order).
+    /// Shared Files → Uploads sort: active column ("" = engine order).
     pub(crate) uploads_sort: String,
     /// Uploads sort direction (meaningful only while `uploads_sort` != "").
     pub(crate) uploads_asc: bool,
@@ -706,8 +710,9 @@ pub(crate) async fn gather_surfaces(
         Ok(Reply::State(snap)) => Some(snap),
         _ => None,
     };
-    // the Organization tables ride the same push: the engine's ReadMembers /
-    // ReadUploads (the projections the MCP tools of the same name read)
+    // the Members and Uploads tables ride the same push: the engine's
+    // ReadMembers / ReadUploads (the projections the MCP tools of the same
+    // name read)
     let members: Vec<MemberRowData> = match wallet.execute(Command::ReadMembers).await {
         Ok(Reply::Members { members: rows }) => rows
             .into_iter()
@@ -933,10 +938,11 @@ pub(crate) async fn gather_surfaces(
             list_pages,
         )
     };
-    // the Organization tables' presentation pass (UI-local, like the
+    // the Members/Uploads tables' presentation pass (UI-local, like the
     // channel selection): thin the uploads by the filter needle, then
     // order both tables by their active sort column — the engine's
     // ReadMembers/ReadUploads projections stay the full, untouched truth
+    let uploads_total = uploads.len();
     let (members_sort, members_asc, uploads_sort, uploads_asc, uploads_filter) = org_view;
     let mut members = members;
     sort_members(&mut members, &members_sort, members_asc);
@@ -1015,6 +1021,7 @@ pub(crate) async fn gather_surfaces(
         selected_decision,
         members,
         uploads,
+        uploads_total,
         members_sort,
         members_asc,
         uploads_sort,

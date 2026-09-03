@@ -12,7 +12,7 @@
 //! There is no I/O here. The actor that *executes* commands lives in
 //! `molt-engine`; the frontends that *issue* them live in `molt-mcp` and
 //! `molt-ui`. See `documents` in `../../moltrepublic-docs` for the design
-//! (the generalized approval engine, R0, and the five surfaces).
+//! (the generalized approval engine, R0, and the surfaces).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -40,9 +40,10 @@ pub type MemberId = String;
 /// are presentation only and may repeat; the id never does.
 pub type WorkspaceId = String;
 
-/// The shared surfaces. [`Surface::Chat`] is ungated (a message changes no
-/// shared state); every other surface — Organization included — changes the
-/// shared state only through a threshold-approved proposal.
+/// The shared surfaces. [`Surface::Chat`] and [`Surface::Files`] are ungated
+/// (a message or a share changes no shared state); every other surface —
+/// Organization included — changes the shared state only through a
+/// threshold-approved proposal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Surface {
@@ -61,19 +62,24 @@ pub enum Surface {
     Vault,
     /// Shared funds (Monero multisig in production). Gated.
     Wallet,
+    /// The files shared into the chat (the uploads table). Ungated and core:
+    /// a share is a chat message. Added after checkpoint-v7 — never in
+    /// [`Surface::CHECKPOINT_V7_SURFACES`].
+    Files,
 }
 
 impl Surface {
     /// Every surface, in display (= navigation) order. May grow: a surface
     /// added here reaches a checkpoint with its first applied entry (v8),
     /// never through [`Surface::CHECKPOINT_V7_SURFACES`].
-    pub const ALL: [Surface; 6] = [
+    pub const ALL: [Surface; 7] = [
         Surface::Organization,
         Surface::Chat,
         Surface::Memory,
         Surface::Quests,
         Surface::Vault,
         Surface::Wallet,
+        Surface::Files,
     ];
 
     /// The surfaces whose applied group EVERY checkpoint carries, empty or
@@ -97,13 +103,15 @@ impl Surface {
             Surface::Quests => "quests",
             Surface::Vault => "vault",
             Surface::Wallet => "wallet",
+            Surface::Files => "files",
         }
     }
 
     /// Whether changes to this surface require a threshold of approvals.
-    /// Chat is the only ungated surface — a message changes no shared state.
+    /// Chat and Files are ungated — a message or a share changes no shared
+    /// state.
     pub fn is_gated(self) -> bool {
-        !matches!(self, Surface::Chat)
+        !matches!(self, Surface::Chat | Surface::Files)
     }
 
     /// Parse a surface from its lowercase name.
@@ -113,10 +121,10 @@ impl Surface {
 
     /// Whether this surface is an optional **charter feature**
     /// (`docs_archive/ritual/charter_features.md` D1): activated at founding or by a
-    /// later threshold vote, never deactivated. Chat and Organization are
-    /// core — always on, never in a feature set.
+    /// later threshold vote, never deactivated. Organization, Chat and Files
+    /// are core — always on, never in a feature set.
     pub fn is_charter_feature(self) -> bool {
-        !matches!(self, Surface::Organization | Surface::Chat)
+        !matches!(self, Surface::Organization | Surface::Chat | Surface::Files)
     }
 
     /// The D6 legacy baseline: what a republic founded before roster-v5
@@ -144,8 +152,6 @@ impl Surface {
             Surface::Organization => &[
                 ("status", "Status"),
                 ("members", "Members"),
-                // every file shared into the chat (the uploads table)
-                ("uploads", "Temporary Uploads"),
                 // in-voting organization changes (charter / name / image /
                 // retention); the GUI shows this entry only while non-empty
                 ("pending", "Pending"),
@@ -204,6 +210,9 @@ impl Surface {
                 ("status", "Status"),
                 ("settings", "Settings"),
             ],
+            // every file shared into the chat; the GUI shows the surface
+            // only while this table is non-empty
+            Surface::Files => &[("uploads", "Temporary Uploads")],
         }
     }
 
@@ -3633,7 +3642,7 @@ pub enum Command {
     /// Read the member table of the open workspace (Organization → Members):
     /// one [`MemberView`] per roster member.
     ReadMembers,
-    /// Read every file shared into the chat (Organization → Uploads): one
+    /// Read every file shared into the chat (Shared Files → Uploads): one
     /// [`UploadView`] per share, newest last (log order).
     ReadUploads,
     /// Read the persistent chain as display data (the Chain-History view):
@@ -5180,7 +5189,7 @@ pub enum Reply {
         /// `None` while no window published anything.
         snapshot: Option<UiSnapshot>,
     },
-    /// Every file shared into the chat (Organization → Uploads). Struct
+    /// Every file shared into the chat (Shared Files → Uploads). Struct
     /// variant for the same reason as [`Reply::Members`].
     Uploads {
         /// One row per share, log order.
@@ -5577,7 +5586,7 @@ pub struct DownloadView {
     pub error: String,
 }
 
-/// One file shared into the chat (Organization → Uploads). Only metadata
+/// One file shared into the chat (Shared Files → Uploads). Only metadata
 /// travels in the chat — the bytes stay on the sharer's disk and move
 /// user-to-user over a dedicated encrypted queue when a member downloads
 /// ([`FileMeta`]), which is why a download needs the sharer online.
@@ -5941,9 +5950,9 @@ pub enum MoltError {
     /// The named proposal does not exist.
     #[error("unknown proposal {0:?}")]
     UnknownProposal(ProposalId),
-    /// A proposal was attempted on the ungated chat surface.
-    #[error("chat is ungated - use chat, not propose")]
-    ChatNotGated,
+    /// A proposal was attempted on an ungated surface (chat, files).
+    #[error("{} is ungated - nothing to propose", .0.as_str())]
+    NotGated(Surface),
     /// The proposal payload was malformed.
     #[error("bad payload: {0}")]
     BadPayload(String),
@@ -6448,6 +6457,32 @@ mod tests {
         let legacy_bytes = roster_canonical_bytes("f00", 2, 3, &legacy, "charter", &[], None);
         assert_eq!(legacy_bytes.len(), 329 - 64);
         assert_ne!(legacy_bytes, bytes);
+    }
+
+    /// Shared Files is the seventh surface and a CORE one like Chat: never
+    /// a feature key, never gated (a share is a chat message), one nav view —
+    /// the uploads table that used to live under Organization.
+    #[test]
+    fn shared_files_is_a_core_ungated_surface_with_the_uploads_view() {
+        assert_eq!(Surface::ALL.last(), Some(&Surface::Files));
+        assert_eq!(Surface::Files.as_str(), "files");
+        assert_eq!(Surface::parse("files"), Some(Surface::Files));
+        assert!(!Surface::Files.is_charter_feature());
+        assert!(!Surface::Files.is_gated());
+        assert_eq!(
+            Surface::Files.views().iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+            ["uploads"]
+        );
+        assert_eq!(Surface::Files.default_view(), "uploads");
+        assert!(
+            !Surface::Organization.views().iter().any(|(k, _)| *k == "uploads"),
+            "the uploads view moved out of Organization"
+        );
+        assert_eq!(
+            canonical_features(&["files".to_string()]),
+            Err("files is always on".to_string())
+        );
+        assert!(!Surface::LEGACY_FEATURES.contains(&"files"));
     }
 
     /// BYTE-IDENTITY PIN — `molt-roster-v5`: the ratified FEATURE SET

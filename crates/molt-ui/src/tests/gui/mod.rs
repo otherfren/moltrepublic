@@ -12,6 +12,7 @@
 //! layer, where nothing could observe it.
 
 mod chat;
+mod files;
 mod layout;
 mod poke;
 mod recovery_backup;
@@ -128,12 +129,14 @@ fn rt() -> tokio::runtime::Runtime {
         .expect("runtime")
 }
 
+/// The nav's tab for a surface key, if the window lists it.
+fn surface_tab(ui: &AppWindow, key: &str) -> Option<SurfaceTab> {
+    ui.get_surfaces().iter().find(|s| s.key == key)
+}
+
 /// How many chat rows the window is showing right now.
 fn chat_rows(ui: &AppWindow) -> usize {
-    ui.get_surfaces()
-        .iter()
-        .find(|s| s.key == "chat")
-        .map_or(0, |s| s.log.row_count())
+    surface_tab(ui, "chat").map_or(0, |s| s.log.row_count())
 }
 
 /// A sealed workspace ON DISK, demo-grade (empty identities and

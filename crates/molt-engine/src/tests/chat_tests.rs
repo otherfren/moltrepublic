@@ -26,7 +26,7 @@ fn chat_is_ungated_and_propose_rejects_chat() {
                 payload: json!({"op":"x"}),
             })
             .await;
-        assert!(matches!(err, Err(MoltError::ChatNotGated)));
+        assert!(matches!(err, Err(MoltError::NotGated(Surface::Chat))));
     });
 }
 

@@ -15,7 +15,7 @@ use crate::app::Ctx;
 use crate::{AppWindow, Strings};
 
 pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
-    // The Organization tables' sort/filter. View-local presentation like
+    // The Members/Uploads tables' sort/filter. View-local presentation like
     // the Open/backup lists — but these mirrored rows are rebuilt from the
     // engine on every push, so the state lives in ChatUiState (toggle in
     // Rust, single writer) and push_surfaces re-applies it each time; the
@@ -65,7 +65,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     }
 
     {
-        // A member row's uploads count: jump to Organization → Uploads
+        // A member row's uploads count: jump to Shared Files → Uploads
         // pre-filtered to that member. The view switch is the same engine
         // command the nav issues; the filter itself stays single-writer in
         // ChatUiState and the push echoes it into the filter box.
@@ -76,7 +76,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             }
             cx.issue(
                 Command::SelectView {
-                    surface: Surface::Organization,
+                    surface: Surface::Files,
                     view: "uploads".to_string(),
                 },
             );

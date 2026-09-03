@@ -552,7 +552,7 @@ fn sort_members_by_name_uploads_and_presence() {
     assert_eq!(names(&rows), ["bob", "Alice", "carol"], "unknown = keep");
 }
 
-/// The Organization tables' view state: clicking the active column
+/// The Members/Uploads tables' view state: clicking the active column
 /// flips the direction, a new column starts ascending, and every
 /// change bumps the push generation (stales in-flight bundles).
 #[test]
