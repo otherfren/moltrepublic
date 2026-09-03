@@ -128,7 +128,7 @@ fn org_titles_render_in_the_active_language_from_the_op_placeholder() {
     assert_eq!(display_title(1, &note), "budget");
     // the two ops that carry no user title at all must not leak their
     // op code (user report 2026-08-28: "set_features" on the card)
-    let features = serde_json::json!({"op": "set_features", "value": "memory files"});
+    let features = serde_json::json!({"op": "set_features", "value": "memory vault"});
     assert_eq!(display_title(0, &features), "Features");
     assert_eq!(display_title(1, &features), "Features");
     let relays = serde_json::json!({"op": "set_relays", "value": "wss://a"});

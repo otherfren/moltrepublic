@@ -819,8 +819,7 @@ lexicon! {
     feat_quests: "Kanban", "Kanban";
     feat_vault: "Vault", "Vault";
     feat_wallet: "Wallet", "Wallet";
-    feat_files: "Shared Files", "Shared Files";
-    // suffix on the two enable-able features whose pane is still a mock
+    // suffix on an enable-able feature whose pane is still a mock (vault)
     feat_mock: " (ui mock)", " (ui mock)";
     jw_back_to_start: "Back to start", "Zurück zum Start";
     jw_ratify_title: "Ratify the charter", "Satzung ratifizieren";
@@ -1080,10 +1079,11 @@ lexicon! {
     // one S3 account, several buckets (docs/storage/s3_buckets.md)
     set_s3_grp_account: "Endpoint & credentials", "Endpunkt & Zugangsdaten";
     set_s3_grp_backup: "Workspace backups", "Workspace-Backups";
-    set_s3_grp_media: "Shared Files backup", "Shared-Files-Backup";
+    set_s3_grp_media: "Media", "Medien";
+    set_s3_media_unused: "Stored only - nothing writes media here yet.", "Nur gespeichert - hierher schreibt noch nichts.";
     field_s3_max: "Limit (MiB)", "Limit (MiB)";
     set_s3_max_hint: "0 = no limit. Oldest copies go first, never a republic's last.", "0 = kein Limit. Älteste Kopien zuerst, nie die letzte einer Republik.";
-    set_s3_max_hint_media: "0 = no limit. Optional - the seats replicate shared files among themselves.", "0 = kein Limit. Optional - die Sitze replizieren geteilte Dateien untereinander.";
+    set_s3_max_hint_media: "0 = no limit.", "0 = kein Limit.";
     toast_backup_quota: "Backup stored, bucket quota:", "Backup gespeichert, Bucket-Limit:";
     s3_ok: "bucket reachable - credentials accepted ✓", "Bucket erreichbar - Zugangsdaten akzeptiert ✓";
     bk_col_local: "Local workspace", "Lokaler Workspace";
@@ -1400,30 +1400,6 @@ lexicon! {
     vt_f_secret: "Secret", "Geheimnis";
     vt_f_secret_ph: "the text that gets sealed", "der Text, der versiegelt wird";
     vt_mock_note: "Mock - nothing was sent", "Mock - nichts gesendet";
-    // Shared Files (design mock): chunked like a torrent, replicated by
-    // the seats; the bucket is an extra backup
-    sf_title_browse: "Shared Files", "Shared Files";
-    sf_hint_browse: "Chunked and replicated by the seats.", "Zerstückelt und von den Sitzen repliziert.";
-    sf_title_upload: "Upload", "Hochladen";
-    sf_hint_upload: "Drop a file; the seats replicate it.", "Datei ablegen; die Sitze replizieren sie.";
-    sf_title_config: "Config", "Konfiguration";
-    sf_open_settings: "Settings › S3 config", "Einstellungen › S3-Config";
-    sf_col_name: "File", "Datei";
-    sf_col_size: "Size", "Größe";
-    sf_col_by: "By", "Von";
-    sf_col_when: "When", "Wann";
-    sf_col_repl: "Replication", "Replikation";
-    sf_folder_all: "All", "Alle";
-    sf_drop: "Drop files here", "Dateien hier ablegen";
-    sf_pick: "Choose file", "Datei wählen";
-    sf_quota: "Bucket quota", "Bucket-Limit";
-    sf_queue: "Queue", "Warteschlange";
-    sf_st_chunking: "chunking", "zerstückeln";
-    sf_st_seeding: "seeding", "seeden";
-    sf_st_done: "done", "fertig";
-    sf_cfg_bucket: "Backup bucket", "Backup-Bucket";
-    sf_cfg_seats: "Seats replicating", "Replizierende Sitze";
-    sf_not_set: "not set", "nicht gesetzt";
     wl_title_balance: "Treasury balance", "Kassenstand";
     wl_hint_balance: "The shared Monero multisig wallet - no single member can spend from it.", "Die gemeinsame Monero-Multisig-Wallet - kein einzelnes Mitglied kann daraus ausgeben.";
     wl_unlocked: "unlocked", "verfügbar";

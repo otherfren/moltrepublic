@@ -1,12 +1,9 @@
-# Two S3 buckets: workspace backups and Shared Files
+# Two S3 buckets: workspace backups and media
 
 Status: **BUILT (2026-08-21)** except §7, which stays open BY DECISION: the
-second bucket is configuration only until a consumer is designed. Since
-2026-08-28 that consumer has a NAME and a surface — Shared Files, a
-badged design mock behind the `files` charter feature; the bucket is an
-OPTIONAL extra backup of them (the seats replicate shared files among
-themselves) — but still no writer; the wire key `media_s3_bucket` keeps
-its historical name. Keystones:
+media bucket is configuration only until a consumer is designed (a Shared
+Files mock surface named it their optional backup on 2026-08-28 and was
+removed again on 2026-09-03 — §7 is open as before). Keystones:
 `molt-engine/src/backup.rs` (`quota_candidates` unit tests),
 `molt-engine/tests/backup_ticker.rs` (the two quota tests),
 `molt-engine/tests/s3_test_button.rs` (per-bucket probe + verdict
@@ -168,20 +165,11 @@ same MiB is kept unrounded, so an unrelated save never re-quantizes a
 hand-written `s3_max_bytes`. The settings pane is already a Flickable, so
 the extra height scrolls.
 
-## 7. Open: how the Shared Files bucket is used
+## 7. Open: what the media bucket is for
 
-The consumer is decided (user, 2026-08-28): **Shared Files** — files are
-chunked and replicated by the seats, torrent-style over a distributed hash
-map; the bucket is NOT required for that, it is an optional extra backup
-of the shared files. The surface exists as a design mock
-(`surfaces.slint::FilesPane`: Browse with a per-file replication meter
-`1.00..N`, Upload queue, Config), behind the `files` charter feature
-(locked off in the wizard, voted in under Organization › Status › Features);
-Browse and Upload always render, nothing gates them on S3.
-
-Still unanswered, and needed before anything writes: the chunk/DHT layer
-vs. the recorded "445 chunking, NOT an external blob server" decision, who
-encrypts a blob and with which key, how the key reaches a reader, what the
-object key reveals, how the Tor posture survives a second host, and what
-the replication count is measured over (chunks per seat is the assumption
-the meter renders).
+Deliberately unanswered. Wiring it up means picking a consumer, and the
+obvious one (shared files) reopens the recorded "445 chunking, NOT an
+external blob server" decision. That needs its own design pass covering at
+minimum: who encrypts the blob and with which key, how the key reaches a
+reader, what the object key reveals, and how the Tor posture survives a
+second host. Until then the fields are configuration, and the GUI says so.

@@ -30,7 +30,7 @@ import {
 } from "parts.slint";
 // the four staged surfaces' badged DESIGN-MOCK panes (sample data lives
 // .slint-side only; the real governance views stay below in this file)
-import { FilesPane, MemoryPane, QuestsPane, VaultPane, WalletPane } from "surfaces.slint";
+import { MemoryPane, QuestsPane, VaultPane, WalletPane } from "surfaces.slint";
 
 export { Strings, Theme, WikiState, PatchView, Poke, HintTip }
 
@@ -226,11 +226,21 @@ component S3BucketGroup inherits DetailGroup {
     // "" untested · "testing" · "ok" · "error: …"
     in property <string> test-state;
     in property <string> cap-hint;
+    // set on a bucket nothing writes to yet; empty hides the line
+    in property <string> unused-note;
     in property <string> bucket-placeholder;
     // the shared account is filled in, so a probe can actually be signed
     in property <bool> account-ready;
     callback test();
     pack: true;
+    // honest first: a bucket with no consumer says so before its fields
+    if root.unused-note != "": Text {
+        text: root.unused-note;
+        color: Theme.warn;
+        font-size: Theme.fs-cap;
+        wrap: word-wrap;
+        preferred-width: 0px;
+    }
     HorizontalLayout {
         spacing: 12px;
         FieldLabel {
@@ -1373,8 +1383,8 @@ export component AppWindow inherits Window {
     property <int> cw-agenda-max: 4096;
     // the charter step's feature selection (charter_features.md): chat is
     // core and not a property; shared memory defaults on.
-    // kanban/vault/wallet/files are locked off in the wizard (not built yet)
-    // and have NO properties — re-introduce checkbox + property + Rust read
+    // kanban/vault/wallet are locked off in the wizard (not built yet) and
+    // have NO properties — re-introduce checkbox + property + Rust read
     // whole when they ship. Read by the Rust create-propose handler, reset
     // when a ritual starts.
     in-out property <bool> cw-feat-memory: true;
@@ -1419,7 +1429,6 @@ export component AppWindow inherits Window {
     in property <bool> jw-feat-quests;
     in property <bool> jw-feat-vault;
     in property <bool> jw-feat-wallet;
-    in property <bool> jw-feat-files;
     // the join sealed a workspace (join.sealed_id) — entry now waits on the
     // wizard's phrase-backup step and its join-finish()
     in property <bool> jw-sealed;
@@ -1688,11 +1697,9 @@ export component AppWindow inherits Window {
     in property <bool> org-feat-quests;
     in property <bool> org-feat-vault;
     in property <bool> org-feat-wallet;
-    in property <bool> org-feat-files;
     property <bool> org-features-modal-open: false;
     property <bool> of-memory-draft;
     property <bool> of-vault-draft;
-    property <bool> of-files-draft;
     property <bool> org-relays-modal-open: false;
     // R6 pool-edit modal: the draft as ROWS plus the space-joined payload
     // string — the Rust side keeps the two in step (set-relay-draft-rows)
@@ -1784,15 +1791,11 @@ export component AppWindow inherits Window {
     in-out property <string> cfg-s3-max: "0";
     // pushed from Rust: "" untested · "testing" · "ok" · "error: …"
     in property <string> cfg-s3-test;
-    // Bucket 2: an extra backup of the Shared Files (the wire key keeps its
-    // historical name). Nothing writes to it yet - the surface is a design
-    // mock.
+    // Bucket 2: media. Configured only - nothing writes media to S3 yet, and
+    // the panel says so rather than implying a feature that is not there.
     in-out property <string> cfg-media-s3-bucket;
     in-out property <string> cfg-media-s3-max: "0";
     in property <string> cfg-media-s3-test;
-    // pushed from Rust from the APPLIED settings, never the draft: the
-    // bucket the Shared Files config view states
-    in property <string> sf-bucket;
     // run a live signed probe against ONE bucket in the draft:
     // "workspaces" | "media"
     callback test-s3(string);
@@ -3177,7 +3180,6 @@ export component AppWindow inherits Window {
                         feat-quests: false;
                         feat-vault: false;
                         feat-wallet: false;
-                        feat-files: false;
                     }
 
                     // ---- deliberation: the phase's current interaction, on
@@ -3244,7 +3246,7 @@ export component AppWindow inherits Window {
                             }
                             // the feature selection, ratified with the
                             // charter: chat is core (locked on); kanban,
-                            // vault, wallet and files are not built yet (locked
+                            // vault and wallet are not built yet (locked
                             // off); the rest is this republic's choice -
                             // enable-only forever, so a vote can add but
                             // never remove
@@ -3280,7 +3282,6 @@ export component AppWindow inherits Window {
                                             }
                                             Row {
                                                 AppCheck { width: 180px; label: Strings.feat-wallet; checked: false; enabled: false; }
-                                                AppCheck { width: 180px; label: Strings.feat-files; checked: false; enabled: false; }
                                             }
                                         }
                                     }
@@ -4214,7 +4215,6 @@ export component AppWindow inherits Window {
                         feat-quests: root.jw-feat-quests;
                         feat-vault: root.jw-feat-vault;
                         feat-wallet: root.jw-feat-wallet;
-                        feat-files: root.jw-feat-files;
                     }
                     // the join SEALED — the shared last step, pixel-identical
                     // to the founder's; Enter republic sits in the footer
@@ -5655,7 +5655,6 @@ export component AppWindow inherits Window {
                                             }
                                             Row {
                                                 AppCheck { label: Strings.feat-wallet; checked: root.org-feat-wallet; enabled: false; }
-                                                AppCheck { label: Strings.feat-files + Strings.feat-mock; checked: root.org-feat-files; enabled: false; }
                                             }
                                         }
                                         AppButton {
@@ -5668,7 +5667,6 @@ export component AppWindow inherits Window {
                                             clicked => {
                                                 root.of-memory-draft = root.org-feat-memory;
                                                 root.of-vault-draft = root.org-feat-vault;
-                                                root.of-files-draft = root.org-feat-files;
                                                 root.org-features-modal-open = true;
                                             }
                                         }
@@ -6853,17 +6851,6 @@ export component AppWindow inherits Window {
                         if s.key == "wallet" && root.selected-view != "status": WalletPane {
                             view: root.selected-view;
                         }
-                        if s.key == "files": FilesPane {
-                            view: root.selected-view;
-                            bucket: root.sf-bucket;
-                            open-settings => {
-                                if (root.screen != AppScreen.settings) {
-                                    root.settings-return = root.screen;
-                                }
-                                root.set-tab = 3;
-                                root.navigate(AppScreen.settings);
-                            }
-                        }
 
                         // …and their REAL threshold governance (gated: memory
                         // / quests / vault / wallet — the gated organization
@@ -7922,6 +7909,7 @@ export component AppWindow inherits Window {
                                 cap <=> root.cfg-media-s3-max;
                                 test-state: root.cfg-media-s3-test;
                                 cap-hint: Strings.set-s3-max-hint-media;
+                                unused-note: Strings.set-s3-media-unused;
                                 account-ready: root.cfg-s3-endpoint != "" && root.cfg-s3-access != "";
                                 test => {
                                     root.test-s3("media");
@@ -9085,8 +9073,7 @@ export component AppWindow inherits Window {
         body: "";
         confirm-label: Strings.oc-propose;
         confirm-enabled: (root.of-memory-draft && !root.org-feat-memory)
-            || (root.of-vault-draft && !root.org-feat-vault)
-            || (root.of-files-draft && !root.org-feat-files);
+            || (root.of-vault-draft && !root.org-feat-vault);
         dismissed => {
             root.org-features-modal-open = false;
         }
@@ -9103,8 +9090,7 @@ export component AppWindow inherits Window {
                 (root.of-memory-draft || root.org-feat-memory ? " memory" : "")
                 + (root.org-feat-quests ? " quests" : "")
                 + (root.of-vault-draft || root.org-feat-vault ? " vault" : "")
-                + (root.org-feat-wallet ? " wallet" : "")
-                + (root.of-files-draft || root.org-feat-files ? " files" : ""));
+                + (root.org-feat-wallet ? " wallet" : ""));
         }
         VerticalLayout {
             spacing: 4px;
@@ -9121,9 +9107,9 @@ export component AppWindow inherits Window {
                 checked: root.org-feat-quests;
                 enabled: false;
             }
-            // vault and files: locked in the wizard, but voted in here -
-            // a mock pane behind a real charter feature, and the label
-            // says so (user decision 2026-08-29)
+            // vault: locked in the wizard, but voted in here - a mock pane
+            // behind a real charter feature, and the label says so (user
+            // decision 2026-08-29)
             AppCheck {
                 label: Strings.feat-vault + Strings.feat-mock;
                 checked <=> root.of-vault-draft;
@@ -9133,11 +9119,6 @@ export component AppWindow inherits Window {
                 label: Strings.feat-wallet;
                 checked: root.org-feat-wallet;
                 enabled: false;
-            }
-            AppCheck {
-                label: Strings.feat-files + Strings.feat-mock;
-                checked <=> root.of-files-draft;
-                enabled: !root.org-feat-files;
             }
         }
     }

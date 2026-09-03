@@ -95,12 +95,11 @@ pub struct StorageConfig {
     /// 0 = no limit. Mirrors `molt_core::SessionSettings::s3_max_bytes`.
     #[serde(default)]
     pub s3_max_bytes: u64,
-    /// Shared Files bucket at the SAME endpoint and credentials (empty =
-    /// not configured; the key keeps its historical name). Mirrors
-    /// `molt_core::SessionSettings::media_s3_bucket`.
+    /// Media bucket at the SAME endpoint and credentials (empty = not
+    /// configured). Mirrors `molt_core::SessionSettings::media_s3_bucket`.
     #[serde(default)]
     pub media_s3_bucket: String,
-    /// Byte quota for the Shared Files bucket, 0 = no limit.
+    /// Byte quota for the media bucket, 0 = no limit.
     #[serde(default)]
     pub media_s3_max_bytes: u64,
     /// Where downloaded chat files land when no explicit destination is
@@ -457,10 +456,9 @@ pub struct Settings {
     pub s3_keep_copies: u16,
     /// Byte quota for the backup bucket, 0 = no limit.
     pub s3_max_bytes: u64,
-    /// Shared Files bucket at the same endpoint/credentials (empty =
-    /// unconfigured).
+    /// Media bucket at the same endpoint/credentials (empty = unconfigured).
     pub media_s3_bucket: String,
-    /// Byte quota for the Shared Files bucket, 0 = no limit.
+    /// Byte quota for the media bucket, 0 = no limit.
     pub media_s3_max_bytes: u64,
     /// Where downloaded chat files land when no explicit destination is given.
     pub download_dir: String,
@@ -652,11 +650,10 @@ s3_keep_copies = {s3_keep_copies}
 # node wrote; over the limit the oldest copies go first, never a workspace's
 # newest one.
 s3_max_bytes = {s3_max_bytes}
-# Bucket 2: an extra backup of the Shared Files, at the same endpoint and
-# credentials (the seats replicate them among themselves). The key keeps its
-# historical name; nothing writes to it yet.
+# Bucket 2: media, at the same endpoint and credentials.
+# Configured here, but nothing writes media to S3 yet.
 media_s3_bucket = {media_s3_bucket}
-# Byte quota for the Shared Files backup bucket. 0 = no limit.
+# Byte quota for the media bucket. 0 = no limit.
 media_s3_max_bytes = {media_s3_max_bytes}
 # Where downloaded chat files land ("~" = $HOME).
 download_dir = {download_dir}

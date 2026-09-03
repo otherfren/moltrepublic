@@ -748,9 +748,6 @@ pub(crate) fn apply_session(
     // save would leave it stale (the draft-protection `editing` flag
     // suppresses the mirror exactly then)
     ui.set_cw_net(molt_core::effective_net_label(&sv.settings.anonymity).into());
-    // the Shared Files config view states the APPLIED backup bucket, not
-    // the draft
-    ui.set_sf_bucket(sv.settings.media_s3_bucket.clone().into());
 
     // the relay pool is edited LIVE through the Relay* commands, so it is not
     // a draft field: push it on every update, even while an unsaved form edit
@@ -968,7 +965,6 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     ui.set_jw_feat_quests(jw_feat("quests"));
     ui.set_jw_feat_vault(jw_feat("vault"));
     ui.set_jw_feat_wallet(jw_feat("wallet"));
-    ui.set_jw_feat_files(jw_feat("files"));
     sync_log_localized(ui.get_lang_index(), &ui.get_jw_log(), &sv.join.run.log, |m| {
         ui.set_jw_log(m)
     });
@@ -1352,7 +1348,6 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     ui.set_org_feat_quests(feat_on("quests"));
     ui.set_org_feat_vault(feat_on("vault"));
     ui.set_org_feat_wallet(feat_on("wallet"));
-    ui.set_org_feat_files(feat_on("files"));
     sync_strings(&ui.get_org_relays(), &b.org_stats.relays, |m| ui.set_org_relays(m));
     // the R6 pencil's draft prefill: the same pool, space-joined
     ui.set_org_relays_joined(b.org_stats.relays.join(" ").into());

@@ -106,4 +106,3 @@ fn both_buckets_round_trip_through_the_settings_draft() {
         "an untouched draft equals the stored settings"
     );
 }
-

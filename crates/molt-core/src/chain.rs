@@ -349,12 +349,11 @@ pub struct CheckpointState {
     /// The CURRENT roster after every membership block `<= upto`, in
     /// chain order (deterministic — the block sequence is totally ordered).
     pub roster: Vec<MemberIdentity>,
-    /// The applied projection: per surface (in [`Surface::ALL`] order; the
-    /// [`Surface::CHECKPOINT_V7_SURFACES`] included empty, a later surface
-    /// only once it holds state), the `(proposal id, payload)` list in
-    /// block order — **summarized**, not archived: a last-write-wins slot
-    /// keeps only its latest entry, accumulating items all survive
-    /// ([`applied_lww_slot`], v4).
+    /// The applied projection: per surface (in [`Surface::ALL`] order,
+    /// surfaces without entries included empty), the `(proposal id,
+    /// payload)` list in block order — **summarized**, not archived: a
+    /// last-write-wins slot keeps only its latest entry, accumulating items
+    /// all survive ([`applied_lww_slot`], v4).
     pub applied: Vec<(Surface, Vec<(u64, Value)>)>,
     /// Every proposal id consumed by an `Applied` block `<= upto`, sorted —
     /// seeds the double-apply guard of a suffix verifier.
@@ -445,12 +444,7 @@ pub fn applied_lww_slot(surface: Surface, payload: &Value) -> Option<String> {
 }
 
 /// **What checkpoint signers hash.** The canonical, versioned
-/// serialization of [`CheckpointState`] (`molt-chain-checkpoint-v8` — v8
-/// carries an applied group for a surface added AFTER v7 (Shared Files),
-/// conditionally: the group appears, and the tag moves, only once that
-/// surface holds state, so every earlier cut keeps its bytes — and, since
-/// the tag then no longer says whether a feature set is present, an
-/// explicit presence byte before the feature run; v7
+/// serialization of [`CheckpointState`] (`molt-chain-checkpoint-v7` — v7
 /// carries the ratified founding FEATURE SET (roster-v5), conditionally:
 /// a state without one hashes byte-identically to v6; v6
 /// carries the relay LEDGER, without which a cut forgets every declared
@@ -471,19 +465,10 @@ pub fn applied_lww_slot(surface: Surface, payload: &Value) -> Option<String> {
 /// pinned by `serde_json_object_serializes_with_sorted_keys`).
 pub fn checkpoint_canonical_bytes(s: &CheckpointState) -> Vec<u8> {
     let mut out = Vec::new();
-    // v8: a surface added after v7 counts only once it holds state — an
-    // empty group is skipped below, and the tag stays put, so a cut made
-    // before the surface existed hashes the same on every build.
-    let later_state = s
-        .applied
-        .iter()
-        .any(|(sf, entries)| !Surface::CHECKPOINT_V7_SURFACES.contains(sf) && !entries.is_empty());
     // v7 carries the ratified founding FEATURE SET — conditionally, like
     // roster-v5 itself: a state without one (every pre-v5 republic) hashes
     // byte-identically to v6, so existing checkpoints keep verifying.
-    out.extend_from_slice(if later_state {
-        b"molt-chain-checkpoint-v8\0".as_slice()
-    } else if s.founding_features.is_some() {
+    out.extend_from_slice(if s.founding_features.is_some() {
         b"molt-chain-checkpoint-v7\0".as_slice()
     } else {
         b"molt-chain-checkpoint-v6\0".as_slice()
@@ -509,12 +494,6 @@ pub fn checkpoint_canonical_bytes(s: &CheckpointState) -> Vec<u8> {
     }
     // v7: the ratified founding feature set (see the field's own doc).
     // Written only when present, so a v6 state stays byte-identical.
-    // v8: the tag no longer tells None from Some, so a presence byte does
-    // (review 2026-08-28 — without it the preimage stopped being injective
-    // on the feature set)
-    if later_state {
-        out.push(u8::from(s.founding_features.is_some()));
-    }
     if let Some(features) = &s.founding_features {
         out.extend_from_slice(&u64::try_from(features.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
         for f in features {
@@ -528,9 +507,6 @@ pub fn checkpoint_canonical_bytes(s: &CheckpointState) -> Vec<u8> {
         put_bytes(&mut out, i.nostr_pk.as_bytes());
     }
     for (surface, entries) in &s.applied {
-        if entries.is_empty() && !Surface::CHECKPOINT_V7_SURFACES.contains(surface) {
-            continue;
-        }
         put_bytes(&mut out, surface.as_str().as_bytes());
         out.extend_from_slice(&u64::try_from(entries.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
         for (id, payload) in entries {
@@ -561,37 +537,6 @@ pub fn checkpoint_canonical_bytes(s: &CheckpointState) -> Vec<u8> {
     }
     out.extend_from_slice(&s.upto.to_le_bytes());
     out
-}
-
-/// The ONE shape every holder builds a checkpoint's applied groups in:
-/// [`Surface::CHECKPOINT_V7_SURFACES`] first and in order, then only
-/// NON-EMPTY later surfaces in [`Surface::ALL`] order, none repeated. A
-/// served blob is checked before it is trusted: an empty later group is
-/// invisible to the hash, so a phantom one would pass the signed hash and
-/// then decide where the surface's first entry gets filed.
-pub fn checkpoint_applied_shape(applied: &[(Surface, Vec<(u64, Value)>)]) -> Result<(), String> {
-    let base = Surface::CHECKPOINT_V7_SURFACES.len();
-    if applied.len() < base
-        || applied[..base]
-            .iter()
-            .map(|(s, _)| *s)
-            .ne(Surface::CHECKPOINT_V7_SURFACES)
-    {
-        return Err("the applied groups do not start with the v7 surface set".to_string());
-    }
-    let rank = |s: &Surface| Surface::ALL.iter().position(|x| x == s);
-    let mut last = rank(&Surface::CHECKPOINT_V7_SURFACES[base - 1]);
-    for (s, entries) in &applied[base..] {
-        if entries.is_empty() {
-            return Err(format!("an empty applied group for {}", s.as_str()));
-        }
-        let r = rank(s);
-        if r <= last {
-            return Err(format!("applied group {} is out of order or repeated", s.as_str()));
-        }
-        last = r;
-    }
-    Ok(())
 }
 
 /// **What a block's content hash is taken over** — the bytes whose SHA-256
@@ -664,34 +609,26 @@ mod tests {
 
     /// A small, hand-built checkpoint state — the fixture the byte pin and
     /// the slot tests share.
-    /// L14 guard: `Surface::ALL` and the checkpoint layout must move
-    /// TOGETHER. The applied section carries one group per
-    /// [`Surface::CHECKPOINT_V7_SURFACES`] entry (empty ones included —
-    /// `genesis_base` shapes every real state that way); a surface added
-    /// LATER rides along only once it holds state, under the v8 tag, so
-    /// every checkpoint cut before it existed keeps hashing the same. An
-    /// unchanged tag on a changed preimage would make old and new builds
-    /// hash the same chain differently and diverge silently — this test
-    /// goes red on the surface-set edit so the rule lands in the SAME
-    /// commit.
+    /// L14 guard: `Surface::ALL` and the checkpoint tag must move
+    /// TOGETHER. The applied section emits one group per `Surface::ALL`
+    /// entry (empty ones included — `genesis_base` shapes every real
+    /// state that way), so a 7th surface changes every checkpoint
+    /// preimage; under an unchanged tag, old and new builds then hash the
+    /// same chain differently and diverge silently. This test goes red on
+    /// the surface-set edit so the tag bump lands in the SAME commit.
     #[test]
     fn the_checkpoint_tag_binds_the_surface_set() {
         assert_eq!(
             Surface::ALL.map(|s| s.as_str()),
-            ["organization", "chat", "memory", "quests", "vault", "wallet", "files"],
-            "Surface::ALL changed — decide how the new surface reaches the \
-             checkpoint preimage in THIS commit"
-        );
-        assert_eq!(
-            Surface::CHECKPOINT_V7_SURFACES.map(|s| s.as_str()),
             ["organization", "chat", "memory", "quests", "vault", "wallet"],
-            "the v7 group set is frozen — a change here re-hashes every cut checkpoint"
+            "Surface::ALL changed — every checkpoint preimage changed with \
+             it; bump the checkpoint tag in THIS commit"
         );
         // a real (genesis_base-shaped) state carries one applied group per
-        // v7 surface, empty ones included — pin that the bytes really
-        // contain one length-prefixed group key per entry
+        // surface, empty ones included — pin that the bytes really contain
+        // one length-prefixed group key per Surface::ALL entry
         let mut s = pinned_state();
-        s.applied = Surface::CHECKPOINT_V7_SURFACES
+        s.applied = Surface::ALL
             .into_iter()
             .map(|sf| {
                 (
@@ -709,7 +646,7 @@ mod tests {
             bytes.starts_with(b"molt-chain-checkpoint-v6\0"),
             "the surface set and the checkpoint tag move together"
         );
-        for sf in Surface::CHECKPOINT_V7_SURFACES {
+        for sf in Surface::ALL {
             let mut needle = Vec::new();
             let name = sf.as_str().as_bytes();
             needle.extend_from_slice(
@@ -721,85 +658,6 @@ mod tests {
                 "the applied section must carry a group for {sf:?}"
             );
         }
-    }
-
-    /// A surface added after v7 (Shared Files) must not disturb a single
-    /// existing checkpoint: an EMPTY group for it hashes byte-identically
-    /// to no group at all, and only real state under it bumps the tag.
-    #[test]
-    fn a_later_surface_hashes_v7_until_it_carries_state() {
-        let mut six = pinned_state();
-        six.applied = Surface::CHECKPOINT_V7_SURFACES
-            .into_iter()
-            .map(|sf| (sf, Vec::new()))
-            .collect();
-        let base = checkpoint_canonical_bytes(&six);
-
-        let mut with_empty = six.clone();
-        with_empty.applied.push((Surface::Files, Vec::new()));
-        assert_eq!(
-            checkpoint_canonical_bytes(&with_empty),
-            base,
-            "an empty later-surface group is invisible to the preimage"
-        );
-
-        let mut with_state = six.clone();
-        with_state
-            .applied
-            .push((Surface::Files, vec![(9, json!({ "op": "share", "value": "x" }))]));
-        let bytes = checkpoint_canonical_bytes(&with_state);
-        assert!(
-            bytes.starts_with(b"molt-chain-checkpoint-v8\0"),
-            "state under a later surface is a new layout"
-        );
-        assert_ne!(bytes, base);
-        // under v8 the tag no longer separates None from Some, so the
-        // presence byte must: None, Some([]) and Some([files]) are three
-        // different tables
-        let none = checkpoint_canonical_bytes(&with_state);
-        with_state.founding_features = Some(Vec::new());
-        let empty = checkpoint_canonical_bytes(&with_state);
-        with_state.founding_features = Some(vec!["files".to_string()]);
-        let some = checkpoint_canonical_bytes(&with_state);
-        for b in [&none, &empty, &some] {
-            assert!(b.starts_with(b"molt-chain-checkpoint-v8\0"));
-        }
-        assert_ne!(none, empty, "v8 must tell an absent feature set from an empty one");
-        assert_ne!(empty, some);
-        // the byte itself: `empty` is `none` with the 0 presence byte turned
-        // into 1 followed by an empty (le64 0) feature run, nothing else
-        let k = none.iter().zip(&empty).position(|(a, b)| a != b).expect("they differ");
-        assert_eq!((none[k], empty[k]), (0, 1), "the presence byte");
-        assert_eq!(&empty[k + 1..k + 9], &0u64.to_le_bytes());
-        assert_eq!(&empty[k + 9..], &none[k + 1..]);
-    }
-
-    /// A served blob must carry the applied groups in the one shape every
-    /// holder builds — a phantom empty later group would pass the hash.
-    #[test]
-    fn a_blob_with_a_phantom_or_misplaced_group_is_refused() {
-        let six: Vec<(Surface, Vec<(u64, Value)>)> = Surface::CHECKPOINT_V7_SURFACES
-            .into_iter()
-            .map(|sf| (sf, Vec::new()))
-            .collect();
-        assert!(checkpoint_applied_shape(&six).is_ok());
-        let mut with_files = six.clone();
-        with_files.push((Surface::Files, vec![(9, json!({ "op": "share" }))]));
-        assert!(checkpoint_applied_shape(&with_files).is_ok());
-
-        let mut phantom = six.clone();
-        phantom.push((Surface::Files, Vec::new()));
-        assert!(checkpoint_applied_shape(&phantom).is_err(), "empty later group");
-        let mut first = vec![(Surface::Files, Vec::new())];
-        first.extend(six.clone());
-        assert!(checkpoint_applied_shape(&first).is_err(), "later group before the base");
-        let mut twice = with_files.clone();
-        twice.push((Surface::Files, vec![(10, json!({ "op": "share" }))]));
-        assert!(checkpoint_applied_shape(&twice).is_err(), "repeated group");
-        let mut repeat_base = six.clone();
-        repeat_base.push((Surface::Chat, vec![(1, json!({}))]));
-        assert!(checkpoint_applied_shape(&repeat_base).is_err(), "a base surface again");
-        assert!(checkpoint_applied_shape(&six[..5]).is_err(), "a base surface missing");
     }
 
     fn pinned_state() -> CheckpointState {
