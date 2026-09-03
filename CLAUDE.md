@@ -1,10 +1,10 @@
 # Working in moltrepublic
 
 MoltRepublic is a real product (not a demo): a Rust workspace for founding and
-running small encrypted "republics"/DAOs over Nostr relays (NIP-EE/Marmot — in
-build, `docs_archive/transport/nostr_transport_marmot.md`; Nostr is the production
-transport since N4/N5, loopback stays the test transport),
-with MLS group encryption and a Slint GUI. Grow the UI/UX stepwise while
+running small encrypted "republics"/DAOs over Nostr relays (NIP-EE/Marmot,
+`docs_archive/transport/nostr_transport_marmot.md` — the production transport
+since N4/N5; loopback stays the test transport), with MLS group encryption
+and a Slint GUI. Grow the UI/UX stepwise while
 implementing the real thing behind the same contract — never fake behavior a
 user could mistake for real.
 
@@ -88,6 +88,15 @@ Status lines are load-bearing — a doc claiming "not yet built" for shipped
 work costs a planning session. Correct the status in the same change that
 lands the work.
 
+The read-first specs of shipping behaviour, all under `docs_archive/`:
+`ritual/founding_ritual.md` and `ritual/recovery_ritual.md` (the two
+rituals), `chain/persistent_chain.md` (the state model), `chat/chat_bus.md`,
+`transport/nostr_transport_marmot.md` + `transport/relay_pool.md` (transport
+and the user-owned relay pool), `transport/delivery_guarantee.md`,
+`security/mcp-security.md` (the MCP endpoint and the agent's host boundary),
+`ui/gui_over_mcp.md` (driving and reading the GUI headless),
+`build/reproducible-builds.md`, and the ADRs under `adr/`.
+
 After moving or renaming any document run **`python3
 scripts/check-doc-refs.py`** (exit 0 = clean). Code comments cite doc paths
 heavily, so a move silently rots them; the checker resolves every path and
@@ -145,7 +154,12 @@ finding, the same as a bug.
   fails otherwise. Adding a `Command` means updating one of those. Network/ritual
   tasks speaking *to* the engine are INTERNAL (an MCP agent must not be able to
   forge a peer/ritual member); human decisions (approve, propose, confirm) are
-  tools on **both** surfaces.
+  tools on **both** surfaces. Co-equal means the SEAT, not the machine
+  (`docs_archive/security/mcp-security.md`, audit 2026-08-26): host posture
+  (`SetNodePosture`) and any-path file access are GUI/config-only INTERNAL
+  commands, an agent gets the exchange folder `download_dir`, and the
+  recovery phrase plus the two stored secrets are `skip_serializing` — they
+  leave the process on NO surface.
 - **`WorkspaceEvent::Founded`, `SealedRoster`, and `roster_canonical_bytes`
   ripple widely.** Adding a field touches ~15 sites, many of them test harnesses
   that recompute the signed table. `roster_canonical_bytes` is versioned
@@ -193,19 +207,23 @@ finding, the same as a bug.
   chat surface's byte-identity fixtures in `molt-core` mod tests pin the legacy
   wire shape — treat a red one as a design stop. Read `docs_archive/chat/chat_bus.md`
   before touching chat/channel code.
-- **Drain the outbound path, don't `abort()` it.** In the mesh/bootstrap async
-  plumbing a node finishes as soon as its *inbound* work is done, but its own
-  last outbound frame may still be in the `channel → encrypt task → send task →
-  wire` pipeline. Aborting those tasks on completion silently drops that frame
-  and the peer waits forever (an intermittent, load-dependent deadlock). Let the
-  upstream drop its sender so the task ends by itself, then `.await` it (only
-  `abort()` the inbound reader). See `bootstrap_over_mls` / `member_bootstrap` /
-  `founder_bootstrap`.
+- **Loopback mesh (test-only): drain the outbound path, don't `abort()` it.**
+  `molt-engine/src/loopback_mesh.rs` + `molt_net::mesh` run on no production
+  path (Nostr's 445 runtime needs no per-pair mesh), but the tests lean on
+  them: a node's last outbound frame may still sit in the `channel → encrypt →
+  send` pipeline when its inbound work is done, and aborting those tasks drops
+  it — the peer waits forever (an intermittent, load-dependent deadlock). Drop
+  the sender, `.await` the task, abort only the inbound reader.
 
 ## The founding ritual is the security-critical core
 
-Read `docs_archive/ritual/founding_ritual.md` before touching `founding.rs`/`lifecycles.rs`.
-Load-bearing invariants — do not weaken them:
+Read `docs_archive/ritual/founding_ritual.md` before touching the ritual code:
+`founding.rs`, `lifecycles.rs`, `nostr_ritual.rs`, `ritual_member.rs` and
+`molt-net/src/ritual_net.rs` (production runs it over relays; loopback is the
+fast test twin). Its total-loss twin, the recovery ritual
+(`docs_archive/ritual/recovery_ritual.md`; consent + auto-approval in
+`recovery_auto_approval.md`), governs `recovery.rs` and `net/recovery.rs` —
+read it first there too. Load-bearing invariants — do not weaken them:
 
 - **Sign-what-you-see.** A member recomputes the canonical table from the
   proposal it is shown (`verify_seal_proposal`) and signs *that* — never an
@@ -239,8 +257,10 @@ Load-bearing invariants — do not weaken them:
 
 ## The persistent-change chain is the shared state model
 
-Read `docs_archive/chain/persistent_chain.md` before touching `chain.rs` (in `molt-core`
-and `molt-engine`). The republic's persistent state is a **single-branch,
+Read `docs_archive/chain/persistent_chain.md` before touching
+`molt-core/src/chain.rs` or the `molt-engine/src/chain/` module (verify,
+governance, projection, checkpoint, membership, sync). The republic's
+persistent state is a **single-branch,
 threshold-signed commit-block chain** ("git patches"); the founding is block 0.
 It is the state-model twin of the founding ritual — load-bearing invariants:
 
@@ -261,7 +281,7 @@ It is the state-model twin of the founding ritual — load-bearing invariants:
   forged genesis id → the whole chain is rejected. A partially-trusted prefix
   could fork state, so there is no soft path. Deterministic convergence demands it.
 - **Versioned byte layouts, like the roster.** `approval_bytes` /
-  `block_link_bytes` carry `molt-chain-change-v1` / `molt-chain-block-v1` — bump
+  `block_link_bytes` carry `molt-chain-change-v2` / `molt-chain-block-v1` — bump
   the tag and update `verify_chain` together if you change a layout, or
   signatures silently break. `ChainChange` is additive-only (`WorkspaceEvent`
   rule): an unknown variant must stop a reader from extending the chain.
@@ -277,15 +297,19 @@ It is the state-model twin of the founding ritual — load-bearing invariants:
   The identity signing key must reach `materialize_workspace` from the ritual
   (`ritual.founder_sk()` / `founding::member_identity`) — re-deriving it from the
   member handle gives the WRONG key (the ritual salts identity with a
-  workspace-id string). Phases 3–4 (catch-up sync, recovery) are still open.
+  workspace-id string). Phases 3–4 are built as well: catch-up sync
+  (`chain/sync.rs` — extend / tie-break / buffer + `ChainRequest`, and the
+  anchor bootstrap a coordinator hands a rejoiner) and recovery (the recovery
+  ritual, `recovery.rs`).
 
 ## Pure-Rust posture — aspirational, with known C exceptions
 
 The crypto stack aims for **pure-Rust, no C toolchain** (rustls-rustcrypto, the
-pure-Rust Ed25519, OpenMLS), and MLS/TLS/signatures hold to it. Since etappe
-N-demo (2026-07-30) the **DEFAULT build graph is ring-free**: the SMP cert-pin
-verifier and its `x509-parser`-with-`ring` dependency were deleted with the SMP
-transport. The sanctioned exceptions now:
+pure-Rust Ed25519, OpenMLS — `k256` sits in the default graph via
+`openmls_rust_crypto → hpke-rs-rust-crypto`, pure Rust and unrelated to the
+nostr backend below), and MLS/TLS/signatures hold to it. The **DEFAULT build
+graph is ring-free** since etappe N-demo (2026-07-30) deleted the SMP cert-pin
+verifier. The sanctioned exceptions:
 
 - **`libsqlite3-sys` (C) rides the OPT-IN `embedded-tor` feature** only: arti's
   `tor-dirmgr` depends on `rusqlite` non-optionally, and no arti feature removes
@@ -317,16 +341,17 @@ convergence rule, and the reusable test doubles.
 
 **Since N4/N5 (2026-08) the production transport is Nostr/NIP-EE**: founding,
 join, recovery and the running 445 group runtime all go over relays
-(`docs_archive/transport/nostr_transport_marmot.md`; the governed relay pool is
-`relay_topology_plan.md`). The SMP transport and its machinery (the
-permissive-loopback-vs-SMP creds asymmetry, `reopen_transport`, SKEY sender
-seeds, the Stage-B N-queue redundancy, self-heal/rotate/keepalive/probe) were
-removed in etappe N-demo (2026-07-30); the design docs under
-`docs_archive/transport/mesh/` are historical records. What remains beside the
-Nostr runtime: the queue-shaped `Transport` trait, the loopback hub — THE
-test transport — the supervisor's delivery-guarantee core with a
-single-queue inbound redial loop, and the T4 Tor dialer at
-`crates/molt-net/src/dial.rs` (S3 and the relay WebSockets use it). `LoopbackTransport` is **permissive** — its queues live in the shared hub,
+(`docs_archive/transport/nostr_transport_marmot.md`; the user-owned relay pool
+is `relay_pool.md`, its ratified sharing rules `nostr_transport_marmot.md`
+§10.15 — `relay_topology_plan.md` is the EXECUTED plan, not a spec). The SMP
+transport and its per-pair mesh machinery were removed in etappe N-demo
+(2026-07-30; `docs_archive/transport/mesh/` keeps the designs as history).
+What remains beside the Nostr runtime: the queue-shaped `Transport` trait,
+the loopback hub — THE test transport, with the hidden
+`__spawn_with_reopen_transport` seam for the hard-kill tests — the
+supervisor's delivery-guarantee core with a single-queue inbound redial loop,
+and the T4 Tor dialer at `crates/molt-net/src/dial.rs` (S3 and the relay
+WebSockets use it). `LoopbackTransport` is **permissive** — its queues live in the shared hub,
 so any clone can subscribe to any queue; a real transport gates receive on
 credentials, so don't lean on that forgiveness. **The delivery
 guarantee (2026-07-28, `docs_archive/transport/delivery_guarantee.md`) sits on top of
@@ -337,7 +362,7 @@ payload of `MESH_ACK_TAG` control frames, sent debounced after every delivery
 itself and keeps a monotonic `acked_floor`/`ack_seen` on each outbound
 cursor; EVERY supervisor build rewinds proven-acking peers to their floor
 under a bumped `resend_epoch` (fresh msg ids — epoch 0 is byte-identical to
-the legacy id), and a stalled tail rewinds itself on a 30s..600s backoff,
+the legacy id), and a stalled tail rewinds itself on a 10s..600s backoff,
 going loud (send_failed) after 8 fruitless rounds but never silently giving
 up. Resends are always FRESH encryptions (cache evicted on rewind). Old
 nodes never ack → they keep exactly the plain cursor behavior. The former
@@ -408,7 +433,8 @@ both verified red-without/green-with).
   is a one-time full-stack build, but RAM-light). The SAME mechanism runs the
   GUI-logic TESTS in seconds: `CARGO_TARGET_DIR=target/dev-ui
   SLINT_LIVE_PREVIEW=1 cargo test -p molt-ui --lib --features
-  molt-ui/live-preview` (verified 2026-08-15: 129 tests in ~11 s incl. build)
+  molt-ui/live-preview` (2026-08-15: 129 tests in ~11 s incl. build; 180 tests by
+  2026-09-03)
   — iterate there, and run the expensive window build ONCE per change-set.
   Dev-only: never enable the feature by default in a Cargo.toml. The .slint compiler still runs fully, so
   `dev-ui.sh build` catches .slint errors and API breaks in molt-ui; the
@@ -432,6 +458,11 @@ both verified red-without/green-with).
   embedded-tor bootstrap; the founding+join+MLS flow is proven fast over
   loopback in `crates/molt-engine/tests/two_instances.rs`.
 - **Never launch a GUI window on `DISPLAY=:0`** — that is the user's own X
-  session. There is no headless display here, so GUI changes are validated by the
-  Slint compiler (a clean `cargo build -p molt-ui-window -p molt-ui`) plus the
-  engine-level tests, not by pixels.
+  session, and there is no headless display. GUI changes are validated
+  without pixels: the Slint compiler (a clean `cargo build -p molt-ui-window
+  -p molt-ui`), the headless GUI tests in `crates/molt-ui/src/tests/gui/`
+  (the real `AppWindow` against a real engine on `i-slint-backend-testing`
+  — element geometry and real mouse events, part of the ordinary suite),
+  and `scripts/gui_walk.py`, which brings two real `moltd` nodes up on the
+  testing backend (`ui-testing` feature) and reads the window back over MCP
+  (`docs_archive/ui/gui_over_mcp.md`).
