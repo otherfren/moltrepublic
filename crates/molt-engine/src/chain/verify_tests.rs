@@ -127,7 +127,7 @@ fn malicious_checkpoint_heights_are_refused_not_panics() {
         sigs: Vec::new(),
     };
     assert!(
-        verify_suffix_chain(&blob, &[anchor0], &b.republic_id).is_err(),
+        verify_suffix_chain(&blob, &[anchor0], &b.republic_id, None).is_err(),
         "a height-0 anchor is refused, not an underflow abort"
     );
     // a served blob with upto = u64::MAX (blob.upto + 1 would overflow)
@@ -185,7 +185,7 @@ fn a_forged_roster_anchor_and_a_gap_upto_are_rejected() {
         ],
     };
     assert!(
-        verify_suffix_chain(&forged, &[anchor], &b.republic_id).is_err(),
+        verify_suffix_chain(&forged, &[anchor], &b.republic_id, None).is_err(),
         "a sock-puppet roster must never bootstrap a rejoiner"
     );
 
@@ -205,7 +205,7 @@ fn a_forged_roster_anchor_and_a_gap_upto_are_rejected() {
     chain.push(gap.clone());
     assert!(verify_chain(&chain).is_err(), "full holders refuse a gap upto");
     assert!(
-        verify_suffix_chain(&blob, &[gap], &b.republic_id).is_err(),
+        verify_suffix_chain(&blob, &[gap], &b.republic_id, None).is_err(),
         "suffix holders refuse a gap upto"
     );
 }
@@ -260,7 +260,7 @@ fn a_suffix_blob_with_an_oversized_founding_table_is_rejected() {
         sigs,
     };
     assert!(
-        verify_suffix_chain(&forged, &[anchor], &forged.republic_id).is_err(),
+        verify_suffix_chain(&forged, &[anchor], &forged.republic_id, None).is_err(),
         "a founding table larger than rule_n must be rejected"
     );
 }
@@ -301,7 +301,7 @@ fn a_resigned_roster_nostr_anchor_swap_is_rejected() {
         sigs,
     };
     assert!(
-        verify_suffix_chain(&forged, &[anchor], &b.republic_id).is_err(),
+        verify_suffix_chain(&forged, &[anchor], &b.republic_id, None).is_err(),
         "a roster entry whose nostr anchor is not its founding-table anchor must be rejected"
     );
 }
@@ -339,7 +339,7 @@ fn a_second_checkpoint_inside_a_suffix_verifies_from_the_blob() {
     verify_chain(&b.blocks).expect("full holders verify the chained checkpoints");
     // …and so do suffix holders recomputing the second cut from the blob
     let suffix: Vec<ChainBlock> = b.blocks[2..].to_vec();
-    let head = verify_suffix_chain(&blob, &suffix, &b.republic_id)
+    let head = verify_suffix_chain(&blob, &suffix, &b.republic_id, None)
         .expect("suffix holders verify the second checkpoint from the blob base");
     assert_eq!(head.height, 4);
 }
@@ -523,7 +523,7 @@ fn a_summarized_away_payload_can_never_re_apply() {
     b.commit_org(1, "set_image", "resurrected.png", &["petra", "walter"]);
     let suffix: Vec<ChainBlock> = b.blocks[3..].to_vec();
     assert!(
-        verify_suffix_chain(&blob, &suffix, &b.republic_id).is_err(),
+        verify_suffix_chain(&blob, &suffix, &b.republic_id, None).is_err(),
         "a summarized-away proposal id re-applied in the suffix - the double-apply \
          guard was repealed for exactly the entries the cut dropped"
     );
@@ -597,15 +597,15 @@ fn a_blob_with_a_dropped_or_reordered_group_fails_the_signed_hash() {
     );
     b.push(cut);
     let suffix: Vec<ChainBlock> = b.blocks[3..].to_vec();
-    verify_suffix_chain(&honest, &suffix, &b.republic_id).expect("the honest blob verifies");
+    verify_suffix_chain(&honest, &suffix, &b.republic_id, None).expect("the honest blob verifies");
 
     let mut dropped = honest.clone();
     dropped.applied.retain(|(s, _)| *s != Surface::Wallet);
-    let err = verify_suffix_chain(&dropped, &suffix, &b.republic_id).expect_err("a dropped group");
+    let err = verify_suffix_chain(&dropped, &suffix, &b.republic_id, None).expect_err("a dropped group");
     assert!(err.contains("signed state hash"), "{err}");
     let mut swapped = honest.clone();
     swapped.applied.swap(1, 2);
-    let err = verify_suffix_chain(&swapped, &suffix, &b.republic_id).expect_err("swapped groups");
+    let err = verify_suffix_chain(&swapped, &suffix, &b.republic_id, None).expect_err("swapped groups");
     assert!(err.contains("signed state hash"), "{err}");
 }
 

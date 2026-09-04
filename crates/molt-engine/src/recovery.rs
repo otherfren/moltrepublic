@@ -736,7 +736,14 @@ fn verify_served_chain(chain_json: &str, inv: &RecoveryInvite, pk: &str) -> Resu
             // hard-verified by the suffix rules (founding recomputation,
             // founding-bound anchor signatures, double-apply seed)
             let head =
-                crate::chain::verify_suffix_chain(&checkpoint_blob, &blocks, &inv.republic_id)?;
+                crate::chain::verify_suffix_chain(
+                    &checkpoint_blob,
+                    &blocks,
+                    &inv.republic_id,
+                    // a rejoiner holds no base yet: a folded cut INSIDE the
+                    // served suffix is re-verified once the tree is here
+                    None,
+                )?;
             let sealed = sealed_roster_from_blob(&checkpoint_blob);
             (blocks, head, sealed, Some(checkpoint_blob))
         }

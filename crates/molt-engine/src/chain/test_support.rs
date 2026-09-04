@@ -107,6 +107,29 @@ impl Builder {
         self.push(block);
     }
 
+    /// Commit a ratified wiki patch (a new document) — the Memory entries
+    /// a folded cut collapses into one commitment (K6).
+    pub(super) fn commit_wiki(&mut self, proposal_id: u64, path: &str, body: &str, signers: &[&str]) {
+        let height = u64::try_from(self.blocks.len()).expect("small chain");
+        let lines: Vec<&str> = body.split('\n').collect();
+        let mut patch = format!(
+            "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
+            lines.len()
+        );
+        for l in lines {
+            patch.push('+');
+            patch.push_str(l);
+            patch.push('\n');
+        }
+        let change = ChainChange::Applied {
+            proposal_id,
+            surface: Surface::Memory,
+            payload: json!({ "op": "wiki_patch", "value": patch }),
+        };
+        let block = self.seal(height, change, signers);
+        self.push(block);
+    }
+
     /// Commit an Organization edit — the surface whose ops occupy
     /// last-write-wins slots (§B.6a), so a checkpoint summarizes them.
     pub(super) fn commit_org(&mut self, proposal_id: u64, op: &str, value: &str, signers: &[&str]) {

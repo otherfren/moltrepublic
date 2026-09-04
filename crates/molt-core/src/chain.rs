@@ -157,6 +157,23 @@ pub enum ChainChange {
         /// SHA-256 (lowercase hex) over the canonical state bytes.
         state_hash: String,
     },
+    /// A cut that also FOLDS the shared memory (`knowledge_base_scale.md`
+    /// §4.9): identical to [`ChainChange::Checkpoint`] except that the
+    /// hashed state carries the wiki as ONE commitment entry instead of
+    /// every ratified patch. Its own variant because the verifier has to
+    /// know WHICH fold to run before it can recompute the hash - and
+    /// because an older build then meets an unknown variant and stops,
+    /// rather than computing a different hash and calling the cut forged.
+    ///
+    /// Once a chain carries one of these, a later legacy `Checkpoint` is
+    /// refused: what a node hashes must not depend on whether it pruned.
+    CheckpointFolded {
+        /// The last folded-in block, as in [`ChainChange::Checkpoint`].
+        upto: u64,
+        /// SHA-256 (lowercase hex) over the canonical state bytes, the
+        /// memory group summarized.
+        state_hash: String,
+    },
 }
 
 /// One committed block in the persistent chain: a threshold-signed change plus
@@ -271,12 +288,18 @@ pub fn approval_bytes(republic_id: &str, height: u64, change: &ChainChange) -> V
             }
             out
         }
-        ChainChange::Checkpoint { upto, state_hash } => {
+        ChainChange::Checkpoint { upto, state_hash }
+        | ChainChange::CheckpointFolded { upto, state_hash } => {
             let mut out = Vec::new();
             out.extend_from_slice(b"molt-chain-change-v2\0");
             put_bytes(&mut out, republic_id.as_bytes());
             out.extend_from_slice(&height.to_le_bytes());
-            out.push(3); // variant tag: checkpoint
+            // the folded cut is its own tag: the two commit to different
+            // states, so their signatures must not be interchangeable
+            out.push(match change {
+                ChainChange::CheckpointFolded { .. } => 4,
+                _ => 3,
+            });
             out.extend_from_slice(&upto.to_le_bytes());
             put_bytes(&mut out, state_hash.as_bytes());
             out
@@ -502,10 +525,26 @@ fn canonical_bytes_over(s: &CheckpointState, groups: &[(&str, &[(u64, Value)])])
     let later = groups.iter().any(|(key, _)| {
         !Surface::CHECKPOINT_V7_SURFACES.iter().any(|sf| sf.as_str() == *key)
     });
+    // v9: the memory group carries the wiki as ONE commitment entry
+    // instead of its ratified patches (`knowledge_base_scale.md` §4.9.3).
+    // Content-selected like v7 and v8, so no existing cut moves; a folded
+    // state is materially different from the same chain unfolded, and the
+    // tag has to say so.
+    let folded = groups.iter().any(|(key, entries)| {
+        *key == Surface::Memory.as_str()
+            && entries
+                .iter()
+                .any(|(_, p)| p.get("op").and_then(Value::as_str) == Some("wiki_base"))
+    });
+    // v9 inherits the v8 layout wholesale: an explicit group count and the
+    // feature-set presence byte.
+    let later = later || folded;
     // v7 carries the ratified founding FEATURE SET — conditionally, like
     // roster-v5 itself: a state without one (every pre-v5 republic) hashes
     // byte-identically to v6, so existing checkpoints keep verifying.
-    out.extend_from_slice(if later {
+    out.extend_from_slice(if folded {
+        b"molt-chain-checkpoint-v9\0".as_slice()
+    } else if later {
         b"molt-chain-checkpoint-v8\0".as_slice()
     } else if s.founding_features.is_some() {
         b"molt-chain-checkpoint-v7\0".as_slice()
@@ -918,6 +957,44 @@ mod tests {
         assert!(checkpoint_canonical_bytes(&with).starts_with(b"molt-chain-checkpoint-v7\0"));
     }
 
+    /// **The `-v9` tag rule.** A cut that folded the shared memory hashes a
+    /// materially different state than the same chain unfolded, so the tag
+    /// moves - content-selected on the commitment entry, so no existing cut
+    /// changes a byte. v9 is the v8 layout: the wide form, presence byte
+    /// and explicit group count included.
+    #[test]
+    fn a_folded_memory_group_moves_the_tag_to_v9() {
+        let base = |op: &str| {
+            let mut s = pinned_state();
+            s.applied = vec![(
+                Surface::Memory,
+                vec![(
+                    0,
+                    json!({ "op": op, "hash": "ab", "size": 3, "root": "cd" }),
+                )],
+            )];
+            s
+        };
+        let folded = base("wiki_base");
+        let plain = base("wiki_patch");
+        assert!(checkpoint_canonical_bytes(&folded).starts_with(b"molt-chain-checkpoint-v9\0"));
+        assert!(checkpoint_canonical_bytes(&plain).starts_with(b"molt-chain-checkpoint-v6\0"));
+
+        // the wide layout rides along: `None` and `Some([])` must not
+        // collide once the tag no longer tells them apart
+        let mut some = folded.clone();
+        some.founding_features = Some(Vec::new());
+        let none_b = checkpoint_canonical_bytes(&folded);
+        let some_b = checkpoint_canonical_bytes(&some);
+        assert_ne!(none_b, some_b);
+        let k = none_b
+            .iter()
+            .zip(&some_b)
+            .position(|(a, b)| a != b)
+            .expect("they differ");
+        assert_eq!((none_b[k], some_b[k]), (0, 1), "the presence byte");
+    }
+
     /// **The `-v7` byte pin** — the ratified founding FEATURE SET rides the
     /// checkpoint (`charter_features.md` D4): the suffix walk recomputes the
     /// v5 founding bytes from the blob, and a pruned republic must not lose
@@ -1286,6 +1363,29 @@ mod tests {
             approval_bytes("f00", 3, &change),
             approval_bytes("f00", 4, &change),
         );
+    }
+
+    /// A folded cut is not a legacy cut. Same `upto`, same hash, DIFFERENT
+    /// signed bytes - otherwise a signature collected for the summarized
+    /// state would also authorize the unsummarized one, and which state a
+    /// node believes would depend on which build it runs.
+    #[test]
+    fn a_folded_checkpoint_signs_different_bytes_than_a_legacy_one() {
+        let legacy = ChainChange::Checkpoint {
+            upto: 9,
+            state_hash: "ab".to_string(),
+        };
+        let folded = ChainChange::CheckpointFolded {
+            upto: 9,
+            state_hash: "ab".to_string(),
+        };
+        let a = approval_bytes("f00", 10, &legacy);
+        let b = approval_bytes("f00", 10, &folded);
+        assert_ne!(a, b);
+        assert_eq!(a.len(), b.len(), "one byte apart: the variant tag");
+        // the tag sits before `upto` (8) and the length-prefixed hash (4 + 2)
+        assert_eq!(a[a.len() - 15], 3);
+        assert_eq!(b[b.len() - 15], 4);
     }
 
     /// The block link commits to the signatures: swapping a sig changes the

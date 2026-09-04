@@ -948,7 +948,7 @@ fn implausible_wire_ids_neither_abort_nor_poison_the_mint() {
     let mut walter = chain_signer("walter", &b, b.blocks.clone());
     let before = walter.next_id;
     // the former one-frame remote abort
-    walter.receive_checkpoint_proposal(u64::MAX, 0, "00");
+    walter.receive_checkpoint_proposal(u64::MAX, 0, "00", false);
     assert_eq!(walter.next_id, before, "no mint poison from the cut");
     // the surface twin
     assert!(!walter.receive_proposed(

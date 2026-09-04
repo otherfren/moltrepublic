@@ -414,6 +414,79 @@ pub fn wiki_fold_with_rev(applied: &[serde_json::Value]) -> (BTreeMap<String, St
     (tree, rev)
 }
 
+/// **What a folded cut commits to** (`knowledge_base_scale.md` §4.9.2).
+/// The ratified tree as one canonical, versioned byte string, framed like
+/// every sibling layout in this repo: length-prefixed, never
+/// separator-joined, so no path can borrow a neighbour's bytes. Sorted by
+/// path (the map's own order), so two members that folded the same patches
+/// commit to the same value.
+///
+/// Bump the tag if the layout changes - the hash rides in a
+/// threshold-signed block, so a silent change breaks every recorded
+/// signature.
+#[must_use]
+pub fn wiki_base_canonical_bytes(tree: &BTreeMap<String, String>) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"molt-wiki-base-v1\0");
+    out.extend_from_slice(
+        &u64::try_from(tree.len())
+            .expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written")
+            .to_le_bytes(),
+    );
+    for (path, content) in tree {
+        crate::put_bytes(&mut out, path.as_bytes());
+        crate::put_bytes(&mut out, content.as_bytes());
+    }
+    out
+}
+
+/// Read back what [`wiki_base_canonical_bytes`] wrote. A fetcher checks the
+/// bytes against the chain's commitment FIRST and parses second, so this
+/// only ever sees content a threshold signed - it still refuses a malformed
+/// stream rather than guessing, because a truncated fetch is the normal
+/// failure here.
+///
+/// # Errors
+/// A wrong tag, a truncated field, a length that overruns the buffer, a
+/// non-UTF-8 field, or trailing bytes.
+pub fn wiki_base_from_canonical_bytes(bytes: &[u8]) -> Result<BTreeMap<String, String>, String> {
+    let tag = b"molt-wiki-base-v1\0";
+    let rest = bytes
+        .strip_prefix(tag.as_slice())
+        .ok_or_else(|| "not a molt-wiki-base-v1 stream".to_string())?;
+    let mut at = 0usize;
+    let mut take = |n: usize, what: &str| -> Result<&[u8], String> {
+        let end = at.checked_add(n).ok_or_else(|| format!("{what} overruns the stream"))?;
+        let slice = rest.get(at..end).ok_or_else(|| format!("{what} overruns the stream"))?;
+        at = end;
+        Ok(slice)
+    };
+    let count = u64::from_le_bytes(
+        take(8, "the entry count")?
+            .try_into()
+            .map_err(|_| "the entry count is truncated".to_string())?,
+    );
+    let mut tree = BTreeMap::new();
+    for _ in 0..count {
+        let mut field = |what: &str| -> Result<String, String> {
+            let len = u32::from_le_bytes(
+                take(4, what)?
+                    .try_into()
+                    .map_err(|_| format!("{what} is truncated"))?,
+            );
+            let raw = take(usize::try_from(len).map_err(|_| format!("{what} overruns the stream"))?, what)?;
+            String::from_utf8(raw.to_vec()).map_err(|_| format!("{what} is not utf-8"))
+        };
+        let path = field("a path")?;
+        let content = field("a document")?;
+        tree.insert(path, content);
+    }
+    if at != rest.len() {
+        return Err("trailing bytes after the tree".to_string());
+    }
+    Ok(tree)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -595,6 +668,63 @@ mod tests {
         let deep = ADD_A.replace("a.md", "x/y/z.md");
         assert!(apply_patch(&mut tree, &patch_of(&deep)).is_ok());
         assert_eq!(tree.get("x/y/z.md").map(String::as_str), Some("hello\nworld\n"));
+    }
+
+    /// **The `molt-wiki-base-v1` byte pin.** The commitment a folded cut
+    /// carries into a threshold-signed block: the digest is recorded here,
+    /// so a layout change cannot slip past review and invalidate every
+    /// signature a live republic already holds.
+    #[test]
+    fn the_base_commitment_is_pinned_at_v1() {
+        let mut tree = BTreeMap::new();
+        tree.insert("b.md".to_string(), "B".to_string());
+        tree.insert("a.md".to_string(), "A".to_string());
+        let got = wiki_base_canonical_bytes(&tree);
+
+        let mut want = Vec::new();
+        want.extend_from_slice(b"molt-wiki-base-v1\0");
+        want.extend_from_slice(&2u64.to_le_bytes());
+        for (path, content) in [("a.md", "A"), ("b.md", "B")] {
+            want.extend_from_slice(&u32::try_from(path.len()).unwrap_or(0).to_le_bytes());
+            want.extend_from_slice(path.as_bytes());
+            want.extend_from_slice(&u32::try_from(content.len()).unwrap_or(0).to_le_bytes());
+            want.extend_from_slice(content.as_bytes());
+        }
+        assert_eq!(got, want, "path order, not insertion order");
+        use sha2::Digest;
+        assert_eq!(
+            hex::encode(sha2::Sha256::digest(&got)),
+            "2349b349dfe652c735f46740cfa5e217ce0961c5b134a18b38efa05a5707c5a2"
+        );
+    }
+
+    /// The commitment travels as bytes and comes back as the same tree -
+    /// and a truncated or foreign stream is refused, never half-parsed.
+    #[test]
+    fn the_base_bytes_round_trip_and_refuse_garbage() {
+        let tree = BTreeMap::from([
+            ("a.md".to_string(), "A\n".to_string()),
+            ("f/b.md".to_string(), String::new()),
+        ]);
+        let bytes = wiki_base_canonical_bytes(&tree);
+        assert_eq!(wiki_base_from_canonical_bytes(&bytes), Ok(tree));
+        assert!(wiki_base_from_canonical_bytes(&bytes[..bytes.len() - 1]).is_err());
+        assert!(wiki_base_from_canonical_bytes(b"molt-wiki-base-v2\0").is_err());
+        let mut extra = bytes.clone();
+        extra.push(0);
+        assert!(wiki_base_from_canonical_bytes(&extra).is_err());
+    }
+
+    /// Length prefixes, not separators: a path and a body cannot trade
+    /// bytes to reach the same commitment (the `molt-republic-id-v2` rule).
+    #[test]
+    fn the_commitment_is_injective_across_the_field_boundary() {
+        let one = BTreeMap::from([("a.md".to_string(), "b.mdX".to_string())]);
+        let two = BTreeMap::from([("a.md\u{0}b.md".to_string(), "X".to_string())]);
+        assert_ne!(
+            wiki_base_canonical_bytes(&one),
+            wiki_base_canonical_bytes(&two)
+        );
     }
 
     #[test]

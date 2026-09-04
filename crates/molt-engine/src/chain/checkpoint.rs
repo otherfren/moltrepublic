@@ -106,17 +106,32 @@ impl State {
             return Err(molt_core::MoltError::BadPayload("no chain head".into()));
         };
         let upto = head.height;
-        let state = self
-            .own_checkpoint_state(upto)
+        let mut state = self
+            .own_checkpoint_state(upto, false)
             .map_err(molt_core::MoltError::BadPayload)?;
+        // K6: a republic with a wiki folds it into one commitment; one
+        // without has nothing to fold and keeps the legacy bytes
+        let folded = super::wiki_base::FOLD_CUTS && super::wiki_base::worth_folding(&state);
+        if folded {
+            let empty = std::collections::BTreeMap::new();
+            super::wiki_base::summarize_state(&mut state, self.held_wiki_base().unwrap_or(&empty))
+                .map_err(molt_core::MoltError::BadPayload)?;
+        }
         let state_hash = checkpoint_state_hash(&state);
         let id = self.next_id;
         self.next_id += 1;
         self.chain.proposal_changes.insert(
             id,
-            ChainChange::Checkpoint {
-                upto,
-                state_hash: state_hash.clone(),
+            if folded {
+                ChainChange::CheckpointFolded {
+                    upto,
+                    state_hash: state_hash.clone(),
+                }
+            } else {
+                ChainChange::Checkpoint {
+                    upto,
+                    state_hash: state_hash.clone(),
+                }
             },
         );
         let me = self.member();
@@ -126,6 +141,7 @@ impl State {
                 id: ProposalId(id),
                 upto,
                 state_hash,
+                folded,
             },
         );
         self.record(env);
@@ -145,7 +161,13 @@ impl State {
     /// lagging node simply misses this cut (v1 liveness limit, stage-5
     /// pin in `docs_archive/chain/log_compaction.md`) — the proposer re-proposes
     /// at the then-current head; a stale cut dies on re-base anyway.
-    pub(crate) fn receive_checkpoint_proposal(&mut self, id: u64, upto: u64, state_hash: &str) {
+    pub(crate) fn receive_checkpoint_proposal(
+        &mut self,
+        id: u64,
+        upto: u64,
+        state_hash: &str,
+        folded: bool,
+    ) {
         // L3: the guard runs BEFORE the bump — `id + 1` on u64::MAX was a
         // one-frame remote ABORT (overflow-checks + panic=abort), and an
         // in-range absurd id would poison the mint counter
@@ -161,7 +183,7 @@ impl State {
             tracing::debug!(%id, upto, head = head.height, "ignoring a checkpoint cut that is not our head");
             return;
         }
-        let ours = match self.own_checkpoint_state(upto) {
+        let ours = match self.own_checkpoint_state(upto, folded) {
             Ok(state) => checkpoint_state_hash(&state),
             Err(e) => {
                 tracing::warn!(%id, error = %e, "cannot recompute the proposed checkpoint state");
@@ -179,9 +201,16 @@ impl State {
         // of a human-decision change (or let human approvals of that
         // proposal silently sign checkpoint bytes). Refuse any occupied id
         // that is not this exact checkpoint.
-        let this = ChainChange::Checkpoint {
-            upto,
-            state_hash: state_hash.to_string(),
+        let this = if folded {
+            ChainChange::CheckpointFolded {
+                upto,
+                state_hash: state_hash.to_string(),
+            }
+        } else {
+            ChainChange::Checkpoint {
+                upto,
+                state_hash: state_hash.to_string(),
+            }
         };
         if !self.id_free_for(id, &this) {
             tracing::warn!(%id, "refusing a checkpoint proposal whose id names a different change");
@@ -276,7 +305,7 @@ impl State {
             let Some(next) = h.checked_add(1) else { break };
             h = next;
         }
-        match verify_suffix_chain(&blob, &candidate, &self.republic_id()) {
+        match verify_suffix_chain(&blob, &candidate, &self.republic_id(), self.held_wiki_base()) {
             Ok(head) => {
                 let new_height = head.height;
                 self.set_checkpoint_blob(Some(blob));

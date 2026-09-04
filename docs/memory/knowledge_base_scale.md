@@ -437,18 +437,23 @@ entries in order into ONE synthetic first entry and keeps every non-wiki
 entry; `consumed_ids` stays untouched (every patch id stays consumed):
 
 ```json
-(0, {"op": "wiki_base", "hash": "<64 hex>", "size": 12345, "root": "<64 hex>"})
+(0, {"op": "wiki_base", "hash": "<64 hex>", "size": 12345})
 ```
 
 - `hash` is the CONSENSUS commitment: sha256 over the canonical tree
   bytes (§4.9.2). Every signer recomputes it from its own fold, so a
   proposer cannot name a tree it did not fold.
-- `root` + `size` are the TRANSPORT commitment: the file plane's
-  `Manifest::root()`, which gates every fetched piece against the top
-  record and every chunk against it. Carried BESIDE `hash` on purpose -
-  `root` depends on `PIECE_PAYLOAD_LEN`, and a transport constant must
-  never become a consensus input. `hash` is what the chain means; `root`
-  is only how the bytes travel.
+- `size` bounds the fetch. Content-derived like `hash`, so it costs
+  nothing in consensus terms.
+- **No `root`** (corrected while building, 2026-09-05). The earlier draft
+  carried the file plane's `Manifest::root()` here "beside" the hash, on
+  the argument that a transport constant must never become a consensus
+  input - but an entry inside the hashed state IS a consensus input, so
+  that draft made `PIECE_PAYLOAD_LEN` one: two builds with different piece
+  sizes could not sign the same cut. The root now rides the holder gossip
+  instead. It still gates every fetched piece during the transfer; the
+  chain-anchored check is `hash` over the assembled bytes, which is what
+  makes a wrong root harmless rather than unverifiable.
 - **No `rev`.** `wiki_fold.rs` states that the revision is display-only
   and never consensus input; the earlier draft would have broken that.
 
@@ -637,8 +642,27 @@ per-patch provenance).
 - **K5 Search** — BUILT 2026-09-04. §4.6. `crates/molt-engine/tests/c_free_guard.rs`
   keeps the graph C-free; the index-building answer does not exist (see
   §4.6). An empty query with no filter finds NOTHING, never everything.
-- **K6 A cut carries the tree** (core fold, engine verify/checkpoint,
-  ChainChange variant). §4.9, AFTER the review gate.
+- **K6 A cut FOLDS the wiki** (§4.9), in four stages - the order is a
+  safety property, not a preference: a folded cut drops the patches, so
+  nothing may PROPOSE one before a holder keeps the tree locally and can
+  fetch a missing one. `wiki_base::FOLD_CUTS` is that switch.
+  - **K6a Layouts + verify** - BUILT 2026-09-05. `molt-wiki-base-v1` and
+    its reader (`wiki_fold.rs`), `ChainChange::CheckpointFolded` (variant
+    tag 4), the `molt-chain-checkpoint-v9` tag, `chain/wiki_base.rs` (the
+    summary), the walk (`walk_suffix_chain` anchors on either variant -
+    §4.9.4), `own_checkpoint_state(upto, folded)`, the wire's `folded`
+    flag, and the keystone that pins all four hash readings against each
+    other. Accepting a folded cut works from here; proposing one does not.
+  - **K6b The base store** - `State.chain.wiki_base` persisted beside
+    `chain.state`, filled at the cut from the fold the holder just ran,
+    and base-pending (§4.9.6) where it is missing: `wiki_base()` answers
+    the pending state, `supersede_stale_wiki` is a NO-OP, every wiki read
+    refuses by name.
+  - **K6c The transport** (§4.9.7): the tree's own job family on the file
+    plane, the holder gossip carrying the manifest root, the key (§8.4)
+    and the pace (§8.5).
+  - **K6d Flip `FOLD_CUTS`** and the `CheckpointServed` size guard
+    (§4.9.8).
 - **K7 GUI** — BUILT 2026-09-04 except the lazy tree / snapshot diet,
   which is deferred with its reason in §4.10.
 

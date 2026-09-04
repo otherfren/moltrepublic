@@ -33,6 +33,7 @@ mod membership;
 mod projection;
 mod sync;
 mod verify;
+mod wiki_base;
 
 #[cfg(test)]
 mod test_support;

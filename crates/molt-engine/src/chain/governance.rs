@@ -583,7 +583,8 @@ impl State {
             // proposal bookkeeping (the committer also cleans by id in
             // adopt_committed_block; receivers find it by content). Local
             // block-dropping below `upto` is stage 4.
-            ChainChange::Checkpoint { upto, .. } => {
+            ChainChange::Checkpoint { upto, .. } | ChainChange::CheckpointFolded { upto, .. } => {
+                let folded = matches!(block.change, ChainChange::CheckpointFolded { .. });
                 self.forget_votes_for(&block.change);
                 // B-F2: drop the summarized history locally, automatically —
                 // the vote just confirmed this summary is correct. The blob
@@ -594,7 +595,7 @@ impl State {
                 // NOT persisted here: every caller of `after_block_applied`
                 // writes the chain once after it (the seal, the tie-break,
                 // the catch-up batch), and the cut is part of that write
-                match self.own_checkpoint_state(upto) {
+                match self.own_checkpoint_state(upto, folded) {
                     Ok(blob) => {
                         self.set_checkpoint_blob(Some(blob));
                         self.chain.blocks.retain(|b| b.height >= anchor_height);
@@ -723,7 +724,7 @@ impl State {
     pub(crate) fn walk_own(&self, blocks: &[ChainBlock]) -> Result<ChainWalk, String> {
         match &self.chain.checkpoint_blob {
             None => walk_chain(blocks),
-            Some(blob) => walk_suffix_chain(blob, blocks, &self.republic_id()),
+            Some(blob) => walk_suffix_chain(blob, blocks, &self.republic_id(), self.held_wiki_base()),
         }
     }
 
@@ -758,12 +759,32 @@ impl State {
     pub(crate) fn own_checkpoint_state(
         &self,
         upto: u64,
+        folded: bool,
     ) -> Result<molt_core::CheckpointState, String> {
-        match &self.chain.checkpoint_blob {
-            None => checkpoint_state(&self.chain.blocks, upto),
+        let mut state = match &self.chain.checkpoint_blob {
+            None => checkpoint_state(&self.chain.blocks, upto)?,
             // the anchor block in chain[0] is state-neutral for the fold
-            Some(blob) => fold_state(blob.clone(), &self.chain.blocks, upto),
+            Some(blob) => fold_state(blob.clone(), &self.chain.blocks, upto)?,
+        };
+        if folded {
+            // K6: the shared memory as ONE commitment. Every signer runs
+            // this same summary over its own projection, which is what
+            // makes a folded cut sign-what-you-see.
+            let empty = std::collections::BTreeMap::new();
+            super::wiki_base::summarize_state(
+                &mut state,
+                self.held_wiki_base().unwrap_or(&empty),
+            )?;
         }
+        Ok(state)
+    }
+
+    /// The ratified wiki tree this holder keeps for its blob's commitment
+    /// (K6). `None` where there is nothing to hold - or where the tree is
+    /// still being fetched, which is why a fold refuses rather than
+    /// inventing an empty base.
+    pub(crate) fn held_wiki_base(&self) -> Option<&std::collections::BTreeMap<String, String>> {
+        self.chain.wiki_base.as_ref()
     }
 
     /// L3: a peer-chosen proposal id far past the mint counter is garbage —

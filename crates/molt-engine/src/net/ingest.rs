@@ -502,10 +502,10 @@ impl State {
             // hash from OUR chain and auto-co-sign only on a match
             // (verify-before-sign; correctness attestation, not a product
             // decision, so no human round-trip)
-            WorkspaceEvent::CheckpointProposed { id, upto, state_hash }
+            WorkspaceEvent::CheckpointProposed { id, upto, state_hash, folded }
                 if self.is_chain_governed() =>
             {
-                self.receive_checkpoint_proposal(id.0, upto, &state_hash);
+                self.receive_checkpoint_proposal(id.0, upto, &state_hash, folded);
             }
             // WP4b: a pruned peer served its blob ahead of the anchor —
             // stash it; the adopt happens hard-verified once the anchor

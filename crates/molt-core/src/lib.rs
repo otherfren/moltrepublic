@@ -2803,6 +2803,13 @@ pub enum WorkspaceEvent {
         /// The proposer's canonical state hash — receivers recompute their
         /// own and refuse to sign on mismatch.
         state_hash: String,
+        /// K6: this cut FOLDS the shared memory into one commitment
+        /// ([`ChainChange::CheckpointFolded`]). A receiver has to know
+        /// WHICH state to recompute; a build that predates the fold reads
+        /// `false` here, recomputes the legacy state, and simply does not
+        /// co-sign.
+        #[serde(default)]
+        folded: bool,
     },
     /// WP4b: a pruned holder answers a catch-up request — the checkpoint
     /// blob its suffix anchors on, served BEFORE the anchor + suffix ride

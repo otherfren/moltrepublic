@@ -686,6 +686,15 @@ pub(crate) struct ChainProjection {
     /// history below a sealed checkpoint was dropped locally; [`ChainProjection::blocks`]
     /// then starts with the checkpoint block instead of the genesis.
     pub(crate) checkpoint_blob: Option<molt_core::CheckpointState>,
+    /// K6: the ratified wiki tree behind the commitment
+    /// [`ChainProjection::checkpoint_blob`] carries
+    /// (`knowledge_base_scale.md` §4.9). A folded cut names the tree by
+    /// content hash and drops its patches; the bytes travel on the file
+    /// plane and live here once they verify against that hash. `None` =
+    /// no folded cut behind this holder, or the tree is still being
+    /// fetched (base-pending) - the two are told apart by whether the
+    /// blob's memory group carries a commitment.
+    pub(crate) wiki_base: Option<std::collections::BTreeMap<String, String>>,
     /// The gated surfaces' applied logs **derived from the chain** — a separate
     /// projection from the legacy log-driven [`State::applied`] so the two never
     /// collide: a single-operator workspace keeps its counted governance in
@@ -1273,6 +1282,7 @@ impl State {
                 walk: None,
                 pending_served_blob: None,
                 checkpoint_blob: None,
+                wiki_base: None,
                 applied: HashMap::new(),
                 applied_sigs: HashMap::new(),
                 anchors: HashMap::new(),

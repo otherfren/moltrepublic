@@ -1679,7 +1679,7 @@ fn read_chain_lists_blocks_newest_first_and_survives_the_prune() {
 
     // seal the checkpoint cut at the head (stage-3 mechanics) → auto-drop
     let hash = checkpoint_state_hash(&checkpoint_state(&b.blocks, 2).expect("state"));
-    walter.receive_checkpoint_proposal(40, 2, &hash);
+    walter.receive_checkpoint_proposal(40, 2, &hash, false);
     let change = ChainChange::Checkpoint { upto: 2, state_hash: hash };
     let bytes = approval_bytes(&b.republic_id, 3, &change);
     let petra_sig = identity_sign(b.key("petra"), &bytes);

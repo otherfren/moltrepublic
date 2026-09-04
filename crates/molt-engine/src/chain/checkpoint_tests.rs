@@ -65,10 +65,10 @@ fn only_one_cut_per_head_registers() {
     let b = Builder::new(&["petra", "walter"], 2);
     let mut walter = chain_signer("walter", &b, b.blocks.clone());
     let ours = checkpoint_state_hash(
-        &walter.own_checkpoint_state(0).expect("own projection"),
+        &walter.own_checkpoint_state(0, false).expect("own projection"),
     );
     for id in 50..60u64 {
-        walter.receive_checkpoint_proposal(id, 0, &ours);
+        walter.receive_checkpoint_proposal(id, 0, &ours, false);
     }
     let cuts = walter
         .chain.proposal_changes
@@ -151,7 +151,7 @@ fn a_suffix_chain_bootstraps_from_a_checkpoint() {
     let suffix: Vec<ChainBlock> = b.blocks[3..].to_vec();
     assert_eq!(suffix.len(), 2, "anchor + one applied block");
 
-    let head = verify_suffix_chain(&blob, &suffix, &b.republic_id)
+    let head = verify_suffix_chain(&blob, &suffix, &b.republic_id, None)
         .expect("the suffix verifies from the checkpoint anchor");
     assert_eq!(head.height, 4);
     assert_eq!(head.identities.len(), 3, "roster comes from the blob");
@@ -160,7 +160,7 @@ fn a_suffix_chain_bootstraps_from_a_checkpoint() {
     let mut forged = blob.clone();
     forged.roster[0].identity_pk = "00".repeat(32);
     assert!(
-        verify_suffix_chain(&forged, &suffix, &b.republic_id).is_err(),
+        verify_suffix_chain(&forged, &suffix, &b.republic_id, None).is_err(),
         "a doctored roster no longer hashes to the signed state"
     );
     // …and its nostr_pk twin: under checkpoint-v2 the third anchor is
@@ -170,7 +170,7 @@ fn a_suffix_chain_bootstraps_from_a_checkpoint() {
     let mut forged_npk = blob.clone();
     forged_npk.roster[0].nostr_pk = "ee".repeat(32);
     assert!(
-        verify_suffix_chain(&forged_npk, &suffix, &b.republic_id).is_err(),
+        verify_suffix_chain(&forged_npk, &suffix, &b.republic_id, None).is_err(),
         "a doctored roster nostr anchor no longer hashes to the signed state"
     );
     // a wholly self-consistent forged blob still fails the founding
@@ -183,7 +183,7 @@ fn a_suffix_chain_bootstraps_from_a_checkpoint() {
         *state_hash = alien_anchor_hash;
     }
     assert!(
-        verify_suffix_chain(&alien, &alien_suffix, &b.republic_id).is_err(),
+        verify_suffix_chain(&alien, &alien_suffix, &b.republic_id, None).is_err(),
         "a forged founding does not recompute to the real republic id"
     );
     // double-apply across the cut: proposal 1 was consumed below upto
@@ -191,7 +191,7 @@ fn a_suffix_chain_bootstraps_from_a_checkpoint() {
     replay.commit_applied(1, &["petra", "walter"]);
     let replay_suffix: Vec<ChainBlock> = replay.blocks[3..].to_vec();
     assert!(
-        verify_suffix_chain(&blob, &replay_suffix, &b.republic_id).is_err(),
+        verify_suffix_chain(&blob, &replay_suffix, &b.republic_id, None).is_err(),
         "an id consumed below the cut cannot re-apply in the suffix"
     );
     // below-threshold anchor signatures are refused
@@ -204,7 +204,7 @@ fn a_suffix_chain_bootstraps_from_a_checkpoint() {
         &["petra"],
     );
     assert!(
-        verify_suffix_chain(&blob, &[weak_anchor], &b.republic_id).is_err(),
+        verify_suffix_chain(&blob, &[weak_anchor], &b.republic_id, None).is_err(),
         "one signature is not a threshold"
     );
 }
@@ -240,12 +240,12 @@ fn a_checkpoint_proposal_seals_via_verify_before_sign() {
     assert_eq!(upto, 1, "the cut is the current head (B-F1)");
 
     // a WRONG hash is refused: nothing registered, nothing signed
-    walter.receive_checkpoint_proposal(id, upto, "00");
+    walter.receive_checkpoint_proposal(id, upto, "00", false);
     assert!(!walter.chain.proposal_changes.contains_key(&id));
     assert!(!walter.chain.pending_sigs.contains_key(&id));
 
     // the truthful gossip: walter recomputes, matches, auto-co-signs
-    walter.receive_checkpoint_proposal(id, upto, &state_hash);
+    walter.receive_checkpoint_proposal(id, upto, &state_hash, false);
     let petra_sig = petra
         .chain.pending_sigs
         .get(&id)
@@ -299,7 +299,7 @@ fn a_sealed_checkpoint_drops_history_and_the_holder_keeps_governing() {
     let mut walter = chain_signer("walter", &b, b.blocks.clone());
     // the propose flow seals the cut at 2-of-2 (stage-3 mechanics)
     let hash = checkpoint_state_hash(&checkpoint_state(&b.blocks, 1).expect("state"));
-    walter.receive_checkpoint_proposal(40, 1, &hash);
+    walter.receive_checkpoint_proposal(40, 1, &hash, false);
     let change = ChainChange::Checkpoint { upto: 1, state_hash: hash };
     let bytes = approval_bytes(&b.republic_id, 2, &change);
     let petra_sig = identity_sign(b.key("petra"), &bytes);
@@ -573,7 +573,7 @@ fn a_checkpoint_proposal_never_signs_a_colliding_id() {
     let hash = checkpoint_state_hash(&checkpoint_state(&b.blocks, 1).expect("state"));
     // id already names a pending MEMBERSHIP change → refused, unsigned
     walter.receive_membership_proposal(5, MembershipOp::Restored, "petra", &b.pk("petra"), None, Vec::new(), None);
-    walter.receive_checkpoint_proposal(5, 1, &hash);
+    walter.receive_checkpoint_proposal(5, 1, &hash, false);
     assert!(
         !walter.chain.pending_sigs.contains_key(&5),
         "an occupied id must never be auto-signed"
@@ -584,18 +584,19 @@ fn a_checkpoint_proposal_never_signs_a_colliding_id() {
     ));
     // id already names a SURFACE proposal → refused too
     walter.receive_proposed(6, Surface::Memory, json!({"op": "add_note"}), "peer");
-    walter.receive_checkpoint_proposal(6, 1, &hash);
+    walter.receive_checkpoint_proposal(6, 1, &hash, false);
     assert!(!walter.chain.pending_sigs.contains_key(&6));
     // a replayed valid frame does not amplify into more signatures
-    walter.receive_checkpoint_proposal(9, 1, &hash);
+    walter.receive_checkpoint_proposal(9, 1, &hash, false);
     let sigs = walter.chain.pending_sigs.get(&9).map(|p| p.sigs.len());
-    walter.receive_checkpoint_proposal(9, 1, &hash);
+    walter.receive_checkpoint_proposal(9, 1, &hash, false);
     assert_eq!(walter.chain.pending_sigs.get(&9).map(|p| p.sigs.len()), sigs);
     // the gossip frame is wire-scoped
     assert!(crate::net::crosses_wire(&WorkspaceEvent::CheckpointProposed {
         id: ProposalId(1),
         upto: 1,
         state_hash: hash,
+        folded: false,
     }));
 }
 
@@ -796,7 +797,7 @@ fn a_checkpoint_seal_writes_the_chain_once() {
     b.commit_applied(1, &["petra", "walter"]);
     let mut walter = chain_signer("walter", &b, b.blocks.clone());
     let hash = checkpoint_state_hash(&checkpoint_state(&b.blocks, 1).expect("state"));
-    walter.receive_checkpoint_proposal(40, 1, &hash);
+    walter.receive_checkpoint_proposal(40, 1, &hash, false);
     let change = ChainChange::Checkpoint {
         upto: 1,
         state_hash: hash,
@@ -825,4 +826,199 @@ fn a_checkpoint_seal_writes_the_chain_once() {
         1,
         "a passive receiver writes the cut chain once"
     );
+}
+
+/// **K6 keystone: one state, four readings.** A folded cut is hashed by the
+/// proposer, re-hashed by every signer before it signs, re-hashed by every
+/// walk that ever verifies the block, and finally persisted as the blob. If
+/// those readings drift apart the republic simply cannot cut, and nothing
+/// says why - so they are pinned against each other here.
+#[test]
+fn a_folded_cut_hashes_the_same_at_every_site() {
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    b.commit_wiki(1, "a.md", "A", &["petra", "walter"]);
+    b.commit_wiki(2, "notes/b.md", "B", &["petra", "walter"]);
+
+    // site 1: the proposer's own projection
+    let walter = chain_signer("walter", &b, b.blocks.clone());
+    let state = walter
+        .own_checkpoint_state(2, true)
+        .expect("the folded projection");
+    let hash = checkpoint_state_hash(&state);
+    let (_, memory) = state
+        .applied
+        .iter()
+        .find(|(s, _)| *s == Surface::Memory)
+        .expect("the memory group");
+    assert_eq!(memory.len(), 1, "two patches folded into one commitment");
+    assert_eq!(
+        memory[0].1.get("op").and_then(serde_json::Value::as_str),
+        Some("wiki_base")
+    );
+    assert_eq!(
+        state.consumed_ids,
+        vec![1, 2],
+        "the folded-away patches stay consumed - no proposal is re-appliable"
+    );
+
+    // site 2: the walk that verifies the sealed block
+    let anchor = b.seal(
+        3,
+        ChainChange::CheckpointFolded {
+            upto: 2,
+            state_hash: hash.clone(),
+        },
+        &["petra", "walter"],
+    );
+    let mut chain = b.blocks.clone();
+    chain.push(anchor.clone());
+    assert_eq!(
+        verify_chain(&chain).expect("the walk recomputes the same fold").height,
+        3
+    );
+    let forged = b.seal(
+        3,
+        ChainChange::CheckpointFolded {
+            upto: 2,
+            state_hash: molt_storage::content_hash(b"not the projection"),
+        },
+        &["petra", "walter"],
+    );
+    let mut bad = b.blocks.clone();
+    bad.push(forged);
+    assert!(verify_chain(&bad).is_err(), "a forged fold kills the chain");
+
+    // site 3: the seal path, which persists the blob and prunes
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    walter.receive_checkpoint_proposal(40, 2, &hash, true);
+    let change = ChainChange::CheckpointFolded {
+        upto: 2,
+        state_hash: hash.clone(),
+    };
+    let bytes = approval_bytes(&b.republic_id, 3, &change);
+    let petra_sig = identity_sign(b.key("petra"), &bytes);
+    walter.receive_approval(40, "petra", 3, &petra_sig);
+    assert_eq!(walter.chain.head.as_ref().expect("head").height, 3);
+    assert!(matches!(
+        walter.chain.blocks.first().expect("anchor").change,
+        ChainChange::CheckpointFolded { .. }
+    ));
+    let blob = walter.chain.checkpoint_blob.clone().expect("the blob anchors");
+    assert_eq!(
+        checkpoint_state_hash(&blob),
+        hash,
+        "the persisted blob IS the state that was signed"
+    );
+
+    // site 4: the pruned holder walks its own suffix from that anchor -
+    // the folded variant must anchor a suffix, or every upgraded node
+    // loses the workspace at the first cut
+    let payload = json!({"op": "add_note", "title": "post-cut"});
+    walter.receive_proposed(41, Surface::Memory, payload.clone(), "peer");
+    let post = ChainChange::Applied {
+        proposal_id: 41,
+        surface: Surface::Memory,
+        payload,
+    };
+    let bytes = approval_bytes(&b.republic_id, 4, &post);
+    let petra_sig = identity_sign(b.key("petra"), &bytes);
+    walter.receive_approval(41, "petra", 4, &petra_sig);
+    walter.chain_sign_and_gossip_approval(41);
+    assert_eq!(
+        walter.chain.head.as_ref().expect("head").height,
+        4,
+        "the pruned holder extends its suffix over a folded anchor"
+    );
+}
+
+/// Once folded, always folded: a legacy cut after a folded one would make
+/// the state a node believes depend on whether it happened to prune.
+#[test]
+fn a_legacy_cut_after_a_folded_one_is_refused() {
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    b.commit_wiki(1, "a.md", "A", &["petra", "walter"]);
+    let walter = chain_signer("walter", &b, b.blocks.clone());
+    let folded_hash = checkpoint_state_hash(
+        &walter.own_checkpoint_state(1, true).expect("folded projection"),
+    );
+    let anchor = b.seal(
+        2,
+        ChainChange::CheckpointFolded {
+            upto: 1,
+            state_hash: folded_hash,
+        },
+        &["petra", "walter"],
+    );
+    b.push(anchor);
+    b.commit_applied(9, &["petra", "walter"]);
+
+    let plain = chain_signer("walter", &b, b.blocks.clone());
+    let legacy_hash = checkpoint_state_hash(
+        &plain.own_checkpoint_state(3, false).expect("legacy projection"),
+    );
+    let legacy = b.seal(
+        4,
+        ChainChange::Checkpoint {
+            upto: 3,
+            state_hash: legacy_hash,
+        },
+        &["petra", "walter"],
+    );
+    let mut chain = b.blocks.clone();
+    chain.push(legacy);
+    let err = verify_chain(&chain).expect_err("a legacy cut after a folded one");
+    assert!(err.contains("after a folded cut"), "{err}");
+}
+
+/// A holder that does not hold the folded base cannot re-verify a folded
+/// cut in its suffix - and says exactly that, instead of calling the cut
+/// forged or, worse, accepting it.
+#[test]
+fn a_folded_cut_without_its_base_is_refused_by_name() {
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    b.commit_wiki(1, "a.md", "A", &["petra", "walter"]);
+    let walter = chain_signer("walter", &b, b.blocks.clone());
+    let first = checkpoint_state_hash(
+        &walter.own_checkpoint_state(1, true).expect("folded projection"),
+    );
+    let anchor = b.seal(
+        2,
+        ChainChange::CheckpointFolded {
+            upto: 1,
+            state_hash: first,
+        },
+        &["petra", "walter"],
+    );
+    b.push(anchor.clone());
+    b.commit_wiki(3, "c.md", "C", &["petra", "walter"]);
+
+    // the blob a pruned holder anchors on, and a SECOND folded cut above it
+    let blob = walter
+        .own_checkpoint_state(1, true)
+        .expect("folded projection");
+    let with_base = molt_core::wiki_fold::wiki_fold(&[json!({
+        "op": "wiki_patch",
+        "value": "diff --git a/a.md b/a.md\nnew file mode 100644\n--- /dev/null\n+++ b/a.md\n@@ -0,0 +1,1 @@\n+A\n",
+    })]);
+    let mut suffix = vec![anchor];
+    suffix.push(b.blocks[3].clone());
+    let mut folded_state = fold_state(blob.clone(), &suffix, 3).expect("fold the suffix");
+    super::wiki_base::summarize_state(&mut folded_state, &with_base)
+        .expect("the holder that has the base can fold");
+    let second = checkpoint_state_hash(&folded_state);
+    let cut = b.seal(
+        4,
+        ChainChange::CheckpointFolded {
+            upto: 3,
+            state_hash: second,
+        },
+        &["petra", "walter"],
+    );
+    suffix.push(cut);
+
+    // with the base: verifies. Without it: refused, by name.
+    assert!(verify_suffix_chain(&blob, &suffix, &b.republic_id, Some(&with_base)).is_ok());
+    let err = verify_suffix_chain(&blob, &suffix, &b.republic_id, None)
+        .expect_err("no base, no verdict");
+    assert!(err.contains("shared memory base"), "{err}");
 }

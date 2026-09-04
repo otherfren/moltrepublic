@@ -66,6 +66,7 @@ NO_BARE_SCAN_FILES = {
     "crates/molt-mcp/tests/tool_reads.rs": "wiki_get's path argument in the tool tests",
     "crates/molt-engine/src/wiki_index/graph.rs": "link-graph fixtures are wiki paths",
     "crates/molt-engine/src/wiki_index/search.rs": "search fixtures are wiki paths",
+    "crates/molt-engine/src/chain/wiki_base.rs": "the fold keystone's fixtures are wiki paths",
 }
 
 PATH_RE = re.compile(r"(?<![\w/-])((?:docs|docs_archive)/[A-Za-z0-9_./-]+\.md)")
