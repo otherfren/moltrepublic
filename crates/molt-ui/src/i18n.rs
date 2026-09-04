@@ -1303,6 +1303,7 @@ lexicon! {
     mem_cs_confirm_title: "Discard all changes?", "Alle Änderungen verwerfen?";
     mem_cs_confirm_body: "Every local change is lost - this cannot be undone.", "Alle lokalen Änderungen gehen verloren - nicht rückgängig zu machen.";
     mem_toast_net_empty: "Changes cancel out - changeset cleared", "Änderungen heben sich auf - Changeset geleert";
+    mem_toast_folder_only: "An empty folder is not a change - put a document in it", "Ein leerer Ordner ist keine Änderung - leg ein Dokument hinein";
     mem_menu_revert: "Discard changes", "Änderungen verwerfen";
     mem_menu_copy_link: "Copy link", "Link kopieren";
     mem_toast_link_md: "Link markup copied", "Link-Markup kopiert";

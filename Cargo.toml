@@ -162,7 +162,13 @@ yaml-rust2 = { version = "0.12", default-features = false }
 # (measured 2026-09-04: the pair alone is E0432). Both pure Rust; the
 # resulting graph carries no *-sys crate, which crates/molt-engine/tests/
 # c_free_guard.rs keeps true.
-tantivy = { version = "0.26", default-features = false, features = ["stopwords", "lz4-compression", "stemmer"] }
+# `stopwords` and `stemmer` were carried until 2026-09-04 and then dropped:
+# neither does anything unless a `TextAnalyzer` is REGISTERED on the index,
+# and registering a stemmer means picking a language - this wiki is German
+# and English at once, so an English stemmer on German prose would retrieve
+# WORSE than none. No stemming is the honest default; if one is ever wanted
+# it comes back with a per-document language and its own analyzer.
+tantivy = { version = "0.26", default-features = false, features = ["lz4-compression"] }
 # block-level diffs for the wiki's pending-change preview (molt-ui) — the
 # insta/cargo-insta diff engine, not a hand-rolled LCS
 similar     = "2"

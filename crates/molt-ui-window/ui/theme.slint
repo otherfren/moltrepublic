@@ -408,6 +408,8 @@ export struct WikiProp {
     key: string,
     value: string,
     link: string,
+    // 0 unchanged · 1 added · 2 changed · 3 removed - the block encoding
+    status: int,
 }
 
 // One search hit over the wiki (the engine's ranked index).
@@ -1332,6 +1334,7 @@ export global Strings {
     in property <string> mem-cs-confirm-title;
     in property <string> mem-cs-confirm-body;
     in property <string> mem-toast-net-empty;
+    in property <string> mem-toast-folder-only;
     in property <string> mem-menu-revert;
     in property <string> mem-menu-copy-link;
     in property <string> mem-toast-link-md;

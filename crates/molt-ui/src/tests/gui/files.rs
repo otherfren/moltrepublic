@@ -413,12 +413,29 @@ fn the_uploads_filter_text_is_vertically_centred() {
             (box_mid - text_mid).abs() <= 1.5,
             "font {font}: placeholder centre {text_mid} vs box centre {box_mid}"
         );
-        // …and the input the moment there is one
+        // …and the input the moment there is one. Its TEXT position is not
+        // measurable headless, so what is pinned is the precondition that
+        // makes `vertical-alignment: center` mean anything: the run SPANS
+        // the box. A short box pinned by `y` centres itself and still
+        // paints the typed text at the top edge - that was the second bug.
         ui.set_ou_filter("anna".into());
-        let input_mid = centre("AppWindow::ou-filter-in").expect("the input renders");
+        let input = i_slint_backend_testing::ElementHandle::find_by_element_id(
+            &ui,
+            "AppWindow::ou-filter-in",
+        )
+        .find(|e| e.size().height > 0.0)
+        .expect("the input renders");
+        let boxx = i_slint_backend_testing::ElementHandle::find_by_element_id(
+            &ui,
+            "AppWindow::ou-filter-box",
+        )
+        .find(|e| e.size().height > 0.0)
+        .expect("the filter box renders");
         assert!(
-            (box_mid - input_mid).abs() <= 1.5,
-            "font {font}: input centre {input_mid} vs box centre {box_mid}"
+            (input.size().height - boxx.size().height).abs() <= 0.5,
+            "font {font}: the input is {} tall inside a {} box",
+            input.size().height,
+            boxx.size().height
         );
         ui.set_ou_filter("".into());
     }

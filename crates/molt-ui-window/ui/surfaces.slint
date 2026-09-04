@@ -1556,6 +1556,17 @@ export component MemoryPane inherits VerticalLayout {
                                 for p in WikiState.props: HorizontalLayout {
                                     spacing: 8px;
                                     alignment: start;
+                                    // the same 3px rail a changed prose block
+                                    // carries: the header renders HERE, so a
+                                    // header-only edit has to colour HERE
+                                    Rectangle {
+                                        width: 3px;
+                                        border-radius: 1.5px;
+                                        background: p.status == 1 ? Theme.good
+                                            : p.status == 2 ? Theme.warn
+                                            : p.status == 3 ? Theme.bad
+                                            : transparent;
+                                    }
                                     Text {
                                         width: 120px;
                                         text: p.key;
@@ -1565,14 +1576,17 @@ export component MemoryPane inherits VerticalLayout {
                                         overflow: elide;
                                         vertical-alignment: center;
                                     }
-                                    if p.link != "": LinkRun {
+                                    if p.link != "" && p.status != 3: LinkRun {
                                         label: p.value;
                                         target: p.link;
                                         fsize: Theme.fs-cap;
                                     }
-                                    if p.link == "": Text {
+                                    // a removed value is history, not navigation
+                                    if p.link == "" || p.status == 3: Text {
                                         text: p.value;
-                                        color: Theme.text;
+                                        color: p.status == 3
+                                            ? Theme.bad.mix(Theme.dim, 0.6)
+                                            : Theme.text;
                                         font-size: Theme.fs-cap;
                                         vertical-alignment: center;
                                     }

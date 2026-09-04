@@ -48,6 +48,10 @@ pub struct InfoRow {
     pub value: String,
     /// The document it points at, "" when the value is not a link.
     pub link: String,
+    /// Same encoding as [`Block`]'s: 0 unchanged, 1 added, 2 changed,
+    /// 3 removed. The header is rendered HERE, so its changes have to
+    /// colour here - the prose diff cannot show them.
+    pub status: u8,
 }
 
 /// One inline run of a block: `link` is empty for plain text, else the
@@ -1545,16 +1549,32 @@ impl Wiki {
         let Some(d) = self.doc(id) else {
             return Vec::new();
         };
-        let Some(props) = molt_engine::properties(&d.raw).0 else {
-            return Vec::new();
-        };
+        let work = info_props(&d.raw);
+        let base = d.base.as_ref().map(|b| info_props(&b.raw));
+        let mut keys: Vec<String> = work.keys().cloned().collect();
+        if let Some(b) = &base {
+            keys.extend(b.keys().filter(|k| !work.contains_key(*k)).cloned());
+        }
+        keys.sort_unstable();
+        let empty: Vec<(String, String)> = Vec::new();
         let mut out = Vec::new();
-        for (key, value) in &props {
-            for (i, (shown, link)) in info_values(value).into_iter().enumerate() {
+        for key in keys {
+            let w = work.get(&key).unwrap_or(&empty);
+            let b = base.as_ref().and_then(|m| m.get(&key)).unwrap_or(&empty);
+            for i in 0..w.len().max(b.len()) {
+                // paired positionally, like the prose diff pairs a replace
+                let (value, status) = match (w.get(i), b.get(i)) {
+                    (Some(wv), Some(bv)) if wv == bv => (wv, 0u8),
+                    (Some(wv), Some(_)) => (wv, 2),
+                    (Some(wv), None) => (wv, 1),
+                    (None, Some(bv)) => (bv, 3),
+                    (None, None) => continue,
+                };
                 out.push(InfoRow {
                     key: if i == 0 { key.clone() } else { String::new() },
-                    value: shown,
-                    link,
+                    value: value.0.clone(),
+                    link: value.1.clone(),
+                    status,
                 });
             }
         }
@@ -1810,6 +1830,27 @@ impl Wiki {
             }
         }
         c
+    }
+
+    /// Locally added folders that hold no document. A git patch names
+    /// FILES - git has no empty directory - so these are local
+    /// scaffolding the republic cannot be asked to ratify. They are the
+    /// reason a changeset can look non-empty and still have nothing to
+    /// propose, and they must NEVER be reverted as if they were noise:
+    /// the folder is the member's work, it is just not a change yet.
+    pub fn empty_added_folders(&self) -> Vec<String> {
+        self.folders
+            .iter()
+            .filter(|f| f.added)
+            .filter(|f| {
+                let prefix = format!("{}/", f.name);
+                !self
+                    .docs
+                    .iter()
+                    .any(|d| !d.deleted && d.path.starts_with(&prefix))
+            })
+            .map(|f| f.name.clone())
+            .collect()
     }
 
     /// The net changeset as ONE git-format patch (unified diffs + git
@@ -2069,6 +2110,18 @@ fn expand_wiki_links(b: &mut Block) {
     }
     b.text = out.iter().map(|s| s.text.as_str()).collect();
     b.spans = out;
+}
+
+/// A document's header as ordered `key -> values` - the shape the infobox
+/// diffs base against working on.
+fn info_props(raw: &str) -> std::collections::BTreeMap<String, Vec<(String, String)>> {
+    let Some(props) = molt_engine::properties(raw).0 else {
+        return std::collections::BTreeMap::new();
+    };
+    props
+        .iter()
+        .map(|(k, v)| (k.clone(), info_values(v)))
+        .collect()
 }
 
 /// One header value as infobox rows: `(shown, link target)`. A mapping is
@@ -2543,6 +2596,97 @@ mod tests {
         );
         let bad = w2.docs.first().expect("bad.md").id;
         assert!(w2.infobox(bad).is_empty());
+    }
+
+    /// **A folder-only changeset has nothing to propose - and must keep
+    /// the folder.** A git patch names FILES (git has no empty directory),
+    /// so `build_patch` is `None`; the vote path used to read that as
+    /// "changes cancel out" and `revert_all` the member's folder away.
+    #[test]
+    fn a_folder_only_change_has_no_patch_and_keeps_the_folder() {
+        let mut w = Wiki::empty();
+        w.set_base(&[("a.md".to_string(), "alpha\n".to_string())], 1);
+        let name = w.new_folder();
+
+        // the panel shows work…
+        assert_eq!(w.stack_len(), 1, "the folder is on the stack");
+        // …but there is nothing a git patch can carry
+        assert!(
+            w.build_patch().is_none(),
+            "an empty folder is not expressible as a patch"
+        );
+        assert_eq!(
+            w.empty_added_folders(),
+            vec![name.clone()],
+            "…and the vote path can SAY which folder it was"
+        );
+
+        // this is what the old path did, and why the folder vanished
+        w.revert_all();
+        assert!(
+            !w.nav_rows().iter().any(|r| r.label == name),
+            "revert_all is the wrong answer here - it drops the folder"
+        );
+
+        // a document IN the folder makes it a real change
+        let mut w = Wiki::empty();
+        w.set_base(&[("a.md".to_string(), "alpha\n".to_string())], 1);
+        let name = w.new_folder();
+        let id = w.new_file();
+        w.move_to(id, Some(&name)).expect("move into the folder");
+        assert!(
+            w.empty_added_folders().is_empty(),
+            "the folder holds a document now"
+        );
+        let patch = w.build_patch().expect("a document is a patch");
+        assert!(patch.contains(&format!("b/{name}/")), "{patch}");
+    }
+
+    /// A header-only edit COLOURS. The prose diff cannot show it (the
+    /// header is stripped from both sides), so the infobox carries the
+    /// verdict instead - otherwise the changeset counter says "changed"
+    /// while every panel says "identical".
+    #[test]
+    fn a_header_only_edit_colours_in_the_infobox() {
+        let mut w = Wiki::empty();
+        w.set_base(
+            &[(
+                "a.md".to_string(),
+                "---\ntype: person\ntags: [one, two]\ncity: Berlin\n---\n# A\n".to_string(),
+            )],
+            1,
+        );
+        let id = w.docs.first().expect("a.md").id;
+        w.open(id);
+        assert!(
+            w.infobox(id).iter().all(|r| r.status == 0),
+            "an untouched document colours nothing"
+        );
+
+        // change one value, drop one, add one, and leave a list item alone
+        w.set_raw(
+            id,
+            "---\ntype: place\ntags: [one]\nfounded: 1975\n---\n# A\n",
+        );
+        let rows = w.infobox(id);
+        let row = |key: &str, i: usize| -> &InfoRow {
+            let start = rows.iter().position(|r| r.key == key).expect("key present");
+            &rows[start + i]
+        };
+        assert_eq!(row("type", 0).status, 2, "an edited value is changed");
+        assert_eq!(row("type", 0).value, "place");
+        assert_eq!(row("founded", 0).status, 1, "a new key is added");
+        assert_eq!(row("city", 0).status, 3, "a dropped key is a ghost");
+        assert_eq!(row("city", 0).value, "Berlin", "…showing what it was");
+        assert_eq!(row("tags", 0).status, 0, "the surviving item is untouched");
+        assert_eq!(row("tags", 1).status, 3, "…the dropped one is a ghost");
+
+        // …and the prose still shows nothing, which is exactly why the
+        // infobox has to
+        assert!(
+            w.preview(id).iter().all(|(_, st)| *st == BlockStatus::Same),
+            "a header-only edit leaves the prose untouched"
+        );
     }
 
     /// The readable `[[Name]]` form is a link in the preview AND resolves

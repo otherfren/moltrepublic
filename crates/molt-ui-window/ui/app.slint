@@ -6633,16 +6633,22 @@ export component AppWindow inherits Window {
                                 // the box grows with Theme.ui-scale and the
                                 // body font, so a fixed y sits the text too
                                 // high the moment either moves
+                                // AppField's idiom: the run spans the box and
+                                // centres INSIDE it. Centring the box by `y`
+                                // is not enough - a TextInput taller than one
+                                // line still paints its text at the top edge.
                                 if root.ou-filter == "": ou-filter-ph := Text {
                                     x: 10px;
-                                    y: (parent.height - self.height) / 2;
+                                    height: 100%;
+                                    vertical-alignment: center;
                                     text: Strings.ou-filter-ph;
                                     color: Theme.faint;
                                     font-size: Theme.fs-body;
                                 }
                                 ou-filter-in := TextInput {
                                     x: 10px;
-                                    y: (parent.height - self.height) / 2;
+                                    height: 100%;
+                                    vertical-alignment: center;
                                     width: parent.width - 44px;
                                     text <=> root.ou-filter;
                                     color: Theme.text;

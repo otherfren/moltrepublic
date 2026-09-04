@@ -172,6 +172,7 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
                 key: r.key.into(),
                 value: r.value.into(),
                 link: r.link.into(),
+                status: i32::from(r.status),
             })
             .collect();
         sync_model(&s.get_props(), props, PartialEq::eq, |m| s.set_props(m));
@@ -861,6 +862,16 @@ pub(crate) fn wire_wiki_vote(
     ui.global::<WikiState>().on_cs_vote(move || {
         let Some(ui) = weak.upgrade() else { return };
         let Some(patch) = m.borrow().build_patch() else {
+            // an EMPTY folder is not expressible in a git patch, and it is
+            // not noise either: reverting here threw the member's folder
+            // away and said "changes cancel out", which was true of the
+            // patch and false of their work
+            let folders = m.borrow().empty_added_folders();
+            if !folders.is_empty() {
+                let msg = ui.global::<Strings>().get_mem_toast_folder_only();
+                ui.invoke_show_toast_error(msg);
+                return;
+            }
             m.borrow_mut().revert_all();
             *la.borrow_mut() = None;
             sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
@@ -995,6 +1006,7 @@ pub(crate) fn wire_wiki_index(ui: &AppWindow, ctx: &Ctx) {
                 return;
             }
             let wh = cx.wallet.clone();
+            let asked = text.clone();
             cx.rt.spawn(async move {
                 let hits = match wh
                     .execute(Command::WikiSearch {
@@ -1013,6 +1025,11 @@ pub(crate) fn wire_wiki_index(ui: &AppWindow, ctx: &Ctx) {
                 let _ = slint::invoke_from_event_loop(move || {
                     let Some(ui) = weak.upgrade() else { return };
                     let g = ui.global::<WikiState>();
+                    // typing outruns the index: a reply that belongs to an
+                    // earlier needle must not describe the one in the field
+                    if g.get_search_query().trim() != asked {
+                        return;
+                    }
                     let rows: Vec<WikiHitRow> = hits
                         .into_iter()
                         .map(|h| WikiHitRow {
