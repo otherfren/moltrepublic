@@ -924,7 +924,8 @@ impl Wiki {
                 // …and the readable `[[Name]]` form, which carries no
                 // extension: a bare name matches the stem too
                 let mut hits = self.docs.iter().filter(|d| {
-                    !d.deleted && (d.name() == t || d.name().trim_end_matches(".md") == t)
+                    !d.deleted
+                        && (d.name() == t || d.name().strip_suffix(".md") == Some(t))
                 });
                 match (hits.next(), hits.next()) {
                     (Some(d), None) => Some(d.id),
@@ -1563,7 +1564,11 @@ impl Wiki {
     /// The active doc's cross-links: `.md` link targets in order of first
     /// appearance.
     pub fn links(&self, id: DocId) -> Vec<String> {
-        self.doc(id).map(|d| parse_links(&d.raw)).unwrap_or_default()
+        // the BODY's links: a header relation is an infobox row, not a
+        // second entry here — the graph splits the same way
+        self.doc(id)
+            .map(|d| parse_links(body_of(&d.raw)))
+            .unwrap_or_default()
     }
 
     // ---- the changeset stack ----------------------------------------------
@@ -2043,11 +2048,14 @@ fn expand_wiki_links(b: &mut Block) {
                 break;
             };
             let inner = &rest[at + 2..at + 2 + end];
+            // an empty display half falls back to the name: the index reads
+            // `[[Name|]]` as an edge, so the pane must not read it as prose
             let (target, shown) = match inner.split_once('|') {
-                Some((t, d)) => (t.trim(), d.trim()),
+                Some((t, d)) if !d.trim().is_empty() => (t.trim(), d.trim()),
+                Some((t, _)) => (t.trim(), t.trim()),
                 None => (inner.trim(), inner.trim()),
             };
-            if target.is_empty() || shown.is_empty() {
+            if target.is_empty() {
                 // not a link after all — the brackets stay the text they are
                 push(&mut out, &rest[..at + 2], "");
                 rest = &rest[at + 2..];

@@ -25,6 +25,15 @@ fn inverse_no_dev_deps(root: &str, pkg: &str) -> String {
         .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
         .output()
         .expect("cargo tree runs");
+    // an inverse query for a package that is not in the graph exits
+    // non-zero with an empty stdout - the SAME shape as "clean". Anything
+    // else non-zero (offline, a --locked mismatch, an unknown root) would
+    // otherwise read as a pass, so the stderr has to be looked at.
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success() || err.contains("did not match any packages"),
+        "cargo tree failed for -p {root} -i {pkg}: {err}"
+    );
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 

@@ -130,13 +130,15 @@ pub struct StorageConfig {
     /// 0 = no limit. Mirrors `molt_core::SessionSettings::s3_max_bytes`.
     #[serde(default)]
     pub s3_max_bytes: u64,
-    /// Media bucket at the SAME endpoint and credentials (empty = not
-    /// configured). Mirrors `molt_core::SessionSettings::media_s3_bucket`.
-    #[serde(default)]
-    pub media_s3_bucket: String,
-    /// Byte quota for the media bucket, 0 = no limit.
-    #[serde(default)]
-    pub media_s3_max_bytes: u64,
+    /// REMOVED 2026-09-04 (nothing ever wrote media to S3). The two keys
+    /// are still ACCEPTED so a config an older build wrote still opens -
+    /// `deny_unknown_fields` would refuse it otherwise - and `apply`
+    /// deletes them on the next save. Read by nothing.
+    #[serde(default, rename = "media_s3_bucket")]
+    _removed_media_bucket: Option<toml::Value>,
+    /// See [`StorageConfig::_removed_media_bucket`].
+    #[serde(default, rename = "media_s3_max_bytes")]
+    _removed_media_max: Option<toml::Value>,
     /// Where downloaded chat files land when no explicit destination is
     /// given. `~` expands to $HOME.
     #[serde(default = "default_download_dir")]
@@ -183,8 +185,8 @@ impl Default for StorageConfig {
             s3_interval_min: default_s3_interval_min(),
             s3_keep_copies: default_s3_keep_copies(),
             s3_max_bytes: 0,
-            media_s3_bucket: String::new(),
-            media_s3_max_bytes: 0,
+            _removed_media_bucket: None,
+            _removed_media_max: None,
             download_dir: default_download_dir(),
             file_cap_bytes: None,
             sound_message: default_sound(),
@@ -493,9 +495,7 @@ pub struct Settings {
     /// Byte quota for the backup bucket, 0 = no limit.
     pub s3_max_bytes: u64,
     /// Media bucket at the same endpoint/credentials (empty = unconfigured).
-    pub media_s3_bucket: String,
     /// Byte quota for the media bucket, 0 = no limit.
-    pub media_s3_max_bytes: u64,
     /// Where downloaded chat files land when no explicit destination is given.
     pub download_dir: String,
     /// Per-file byte cap for sharing: absent = no cap, 0 = off.
@@ -560,8 +560,6 @@ impl Default for Settings {
             s3_interval_min: default_s3_interval_min(),
             s3_keep_copies: default_s3_keep_copies(),
             s3_max_bytes: 0,
-            media_s3_bucket: String::new(),
-            media_s3_max_bytes: 0,
             download_dir: default_download_dir(),
             file_cap_bytes: None,
             mirror_publish_interval_secs: default_mirror_publish_interval_secs(),
@@ -626,8 +624,6 @@ impl From<&Config> for Settings {
             s3_interval_min: c.storage.s3_interval_min,
             s3_keep_copies: c.storage.s3_keep_copies,
             s3_max_bytes: c.storage.s3_max_bytes,
-            media_s3_bucket: c.storage.media_s3_bucket.clone(),
-            media_s3_max_bytes: c.storage.media_s3_max_bytes,
             download_dir: c.storage.download_dir.clone(),
             file_cap_bytes: c.storage.file_cap_bytes,
             mirror_publish_interval_secs: c.files.mirror_publish_interval_secs,
@@ -699,11 +695,6 @@ s3_keep_copies = {s3_keep_copies}
 # node wrote; over the limit the oldest copies go first, never a workspace's
 # newest one.
 s3_max_bytes = {s3_max_bytes}
-# Bucket 2: media, at the same endpoint and credentials.
-# Configured here, but nothing writes media to S3 yet.
-media_s3_bucket = {media_s3_bucket}
-# Byte quota for the media bucket. 0 = no limit.
-media_s3_max_bytes = {media_s3_max_bytes}
 # Where downloaded chat files land ("~" = $HOME).
 download_dir = {download_dir}
 # Per-file byte cap for sharing. 0 = file sharing off; absent = no cap.
@@ -782,8 +773,6 @@ font_editor = {font_editor}
         s3_interval_min = settings.s3_interval_min,
         s3_keep_copies = settings.s3_keep_copies,
         s3_max_bytes = settings.s3_max_bytes,
-        media_s3_bucket = toml_str(&settings.media_s3_bucket),
-        media_s3_max_bytes = settings.media_s3_max_bytes,
         download_dir = toml_str(&settings.download_dir),
         file_cap_line = match settings.file_cap_bytes {
             Some(n) => format!("file_cap_bytes = {n}"),
@@ -907,16 +896,6 @@ pub fn salvage(text: &str) -> Settings {
             .and_then(|p| u64::try_from(p).ok())
         {
             s.s3_max_bytes = v;
-        }
-        if let Some(v) = storage.get("media_s3_bucket").and_then(toml::Value::as_str) {
-            s.media_s3_bucket = v.to_string();
-        }
-        if let Some(v) = storage
-            .get("media_s3_max_bytes")
-            .and_then(toml::Value::as_integer)
-            .and_then(|p| u64::try_from(p).ok())
-        {
-            s.media_s3_max_bytes = v;
         }
         let valid_sound = |v: &str| matches!(v, "none" | "bell" | "chime" | "pop");
         if let Some(v) = storage.get("sound_message").and_then(toml::Value::as_str) {
@@ -1188,12 +1167,10 @@ pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
         "s3_max_bytes",
         i64::try_from(settings.s3_max_bytes).unwrap_or(i64::MAX),
     );
-    set_str(storage, "media_s3_bucket", &settings.media_s3_bucket);
-    set_int(
-        storage,
-        "media_s3_max_bytes",
-        i64::try_from(settings.media_s3_max_bytes).unwrap_or(i64::MAX),
-    );
+    // REMOVED 2026-09-04: delete the keys an older build wrote, so the
+    // option leaves the file on the first save instead of lingering
+    storage.remove("media_s3_bucket");
+    storage.remove("media_s3_max_bytes");
     set_str(storage, "download_dir", &settings.download_dir);
     match settings.file_cap_bytes {
         Some(n) => set_int(storage, "file_cap_bytes", i64::try_from(n).unwrap_or(i64::MAX)),
@@ -1439,23 +1416,35 @@ mod tests {
         assert_eq!(salvaged.font_editor, 15);
     }
 
+    /// The media bucket was REMOVED on 2026-09-04 (nothing ever wrote to
+    /// it). A config.toml in the field still carries its two keys, and
+    /// `deny_unknown_fields` would refuse the whole file over them - so a
+    /// running node must keep booting, and the keys must leave the file on
+    /// the first save rather than lingering as a dead option.
     #[test]
-    fn a_config_written_before_the_media_bucket_still_parses() {
-        // the five media keys and the backup quota are all serde-default:
-        // a config.toml in the field must keep booting untouched, with the
-        // media target simply unconfigured and no quota.
-        let text = render(&Settings::default());
-        let older: String = text
-            .lines()
-            .filter(|l| !l.starts_with("media_s3_") && !l.starts_with("s3_max_bytes"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let c = parse(&older).expect("a pre-media config still parses");
-        assert_eq!(c.storage.s3_max_bytes, 0);
-        assert_eq!(c.storage.media_s3_bucket, "");
-        assert_eq!(c.storage.media_s3_max_bytes, 0);
-        // …and the backup target it did configure is untouched
-        assert_eq!(c.storage.s3_bucket, default_s3_bucket());
+    fn a_config_carrying_the_removed_media_keys_still_boots_and_loses_them() {
+        // the two keys where an older build wrote them: inside [storage]
+        let older: String = {
+            let mut out = Vec::new();
+            for line in render(&Settings::default()).lines() {
+                out.push(line.to_string());
+                if line.starts_with("s3_max_bytes = ") {
+                    out.push("media_s3_bucket = \"vacation-clips\"".to_string());
+                    out.push("media_s3_max_bytes = 5000".to_string());
+                }
+            }
+            out.join("\n")
+        };
+        let c = parse(&older).expect("a config with the removed keys still parses");
+        assert_eq!(c.storage.s3_bucket, default_s3_bucket(), "the rest is read");
+
+        // …and a save drops them
+        let saved = update(&older, &Settings::default()).expect("update");
+        assert!(
+            !saved.lines().any(|l| l.trim_start().starts_with("media_s3_")),
+            "the removed keys must not survive a save"
+        );
+        assert!(parse(&saved).is_ok());
     }
 
     #[test]
@@ -1567,8 +1556,6 @@ mod tests {
             s3_keep_copies: 9,
             s3_max_bytes: 20 * 1024 * 1024 * 1024,
             // a SECOND bucket at the same endpoint and credentials
-            media_s3_bucket: "vacation-clips".to_string(),
-            media_s3_max_bytes: 5 * 1024 * 1024 * 1024,
             sound_message: "chime".to_string(),
             sound_vote: "pop".to_string(),
             sound_poke: "bell".to_string(),

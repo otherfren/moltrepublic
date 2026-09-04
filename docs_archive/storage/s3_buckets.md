@@ -1,13 +1,19 @@
-# Two S3 buckets: workspace backups and media
+# The S3 backup bucket (and the media bucket that was removed)
 
-Status: **BUILT (2026-08-21); §7 CLOSED 2026-09-04 as "not needed"**: the
-persistent files live on the members' machines through the mirroring
-(`docs_archive/files/mirroring.md`), so the media bucket stays
-configuration only, by decision, with no consumer planned. Keystones:
+Status: **BUILT (2026-08-21); the MEDIA BUCKET WAS REMOVED 2026-09-04** on
+the user's decision - §7 had already closed it as "not needed" (the
+persistent files live on the members' machines through the mirroring,
+`docs_archive/files/mirroring.md`), and a configuration option with no
+consumer is a question every operator has to answer for nothing. What
+went: the two `[storage]` keys, `SessionSettings.media_s3_*`,
+`S3Target::Media`, `SessionView.s3_media_test`, the Settings panel group
+and the `save_settings` fields. The two config KEYS are still ACCEPTED and
+dropped on the next save, so a config.toml in the field keeps booting.
+Everything below describes the one bucket that remains. Keystones:
 `molt-engine/src/backup.rs` (`quota_candidates` unit tests),
 `molt-engine/tests/backup_ticker.rs` (the two quota tests),
-`molt-engine/tests/s3_test_button.rs` (per-bucket probe + verdict
-invalidation), `molt-ui/src/lib.rs::s3_target_tests`.
+`molt-engine/tests/s3_test_button.rs` (the probe and the verdict
+invalidation on an account edit).
 
 ## 1. What exists today
 

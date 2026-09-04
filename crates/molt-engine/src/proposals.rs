@@ -1748,7 +1748,12 @@ impl State {
             n => n.clamp(1, WIKI_PAGE_MAX),
         })
         .unwrap_or(100);
-        let prefix = prefix.unwrap_or_default();
+        // a folder, not a string prefix: `people` must not also return
+        // `peopleX/foo.md`, which is what the tool description promises
+        let prefix = match prefix.unwrap_or_default() {
+            p if p.is_empty() || p.ends_with('/') => p,
+            p => format!("{p}/"),
+        };
         let (tree, wiki_rev) = self.wiki_base();
         let total = u64::try_from(
             tree.range(prefix.clone()..)
@@ -1951,20 +1956,36 @@ impl State {
         let stale = self.wiki_search.is_none() || self.wiki_search_epoch != epoch;
         let dirty = std::mem::take(&mut self.wiki_search_dirty);
         let failed = |e: tantivy::TantivyError| MoltError::Engine(format!("wiki index: {e}"));
-        if stale {
-            let tree = self.wiki_base().0.into_owned();
-            self.wiki_search = Some(wiki_index::search::WikiSearch::build(&tree).map_err(failed)?);
-            self.wiki_search_epoch = epoch;
+        if !stale && dirty.is_empty() {
             return Ok(());
         }
-        if dirty.is_empty() {
-            return Ok(());
+        // the cache is TAKEN so the tree can be read by reference while the
+        // index is written - `into_owned()` here would copy the whole base
+        // on every refresh, which is the copy §4.2 exists to delete
+        let cache = self.wiki_cache.take();
+        let tree = match cache.as_ref() {
+            Some(c) => &c.tree,
+            None => &std::collections::BTreeMap::new(),
+        };
+        let outcome = if stale {
+            wiki_index::search::WikiSearch::build(tree).map(|s| {
+                self.wiki_search = Some(s);
+                self.wiki_search_epoch = epoch;
+            })
+        } else {
+            match self.wiki_search.as_mut() {
+                Some(s) => s.update(tree, &dirty),
+                None => Ok(()),
+            }
+        };
+        self.wiki_cache = cache;
+        if outcome.is_err() {
+            // a half-written index must not keep answering: dropping it
+            // costs the next search a rebuild, keeping it costs every
+            // later search a stale answer
+            self.wiki_search = None;
         }
-        let tree = self.wiki_base().0.into_owned();
-        if let Some(s) = self.wiki_search.as_mut() {
-            s.update(&tree, &dirty).map_err(failed)?;
-        }
-        Ok(())
+        outcome.map_err(failed)
     }
 
     /// [`Command::WikiSearch`] (§4.6).
@@ -2023,19 +2044,22 @@ impl State {
         let epoch = self.applied_epoch;
         let stale = self.wiki_graph.is_none() || self.wiki_graph_epoch != epoch;
         let dirty = std::mem::take(&mut self.wiki_graph_dirty);
+        if !stale && dirty.is_empty() {
+            return;
+        }
+        // taken, not cloned - see `refresh_wiki_search`
+        let cache = self.wiki_cache.take();
+        let tree = match cache.as_ref() {
+            Some(c) => &c.tree,
+            None => &std::collections::BTreeMap::new(),
+        };
         if stale {
-            let tree = self.wiki_base().0.into_owned();
-            self.wiki_graph = Some(wiki_index::graph::WikiGraph::build(&tree));
+            self.wiki_graph = Some(wiki_index::graph::WikiGraph::build(tree));
             self.wiki_graph_epoch = epoch;
-            return;
+        } else if let Some(g) = self.wiki_graph.as_mut() {
+            g.update(tree, &dirty);
         }
-        if dirty.is_empty() {
-            return;
-        }
-        let tree = self.wiki_base().0.into_owned();
-        if let Some(g) = self.wiki_graph.as_mut() {
-            g.update(&tree, &dirty);
-        }
+        self.wiki_cache = cache;
     }
 
     /// The Memory projection changed in a way an APPEND cannot describe (a

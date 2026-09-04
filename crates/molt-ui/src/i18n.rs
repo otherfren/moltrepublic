@@ -750,7 +750,7 @@ lexicon! {
     set_issue: "Issue", "Erzeugen";
     set_revoke: "Revoke", "Entziehen";
     set_token_note: "Sent by clients as the token in initialize. A rotation applies to the next connection.", "Von Clients als token im initialize gesendet. Eine Rotation gilt ab der nächsten Verbindung.";
-    set_read_token_note: "Reads only: state, chain, members, file list, wiki. Empty = off.", "Liest nur: Zustand, Chain, Mitglieder, Dateiliste, Wiki. Leer = aus.";
+    set_read_token_note: "Reads only the wiki and the shared files. Empty = off.", "Liest nur das Wiki und die geteilten Dateien. Leer = aus.";
     peek_show: "Reveal", "Anzeigen";
     peek_hide: "Hide", "Verbergen";
     field_headless: "Headless (MCP only, no GUI)", "Headless (nur MCP, keine GUI)";
@@ -1097,11 +1097,8 @@ lexicon! {
     // one S3 account, several buckets (docs_archive/storage/s3_buckets.md)
     set_s3_grp_account: "Endpoint & credentials", "Endpunkt & Zugangsdaten";
     set_s3_grp_backup: "Workspace backups", "Workspace-Backups";
-    set_s3_grp_media: "Media", "Medien";
-    set_s3_media_unused: "Stored only - nothing writes media here yet.", "Nur gespeichert - hierher schreibt noch nichts.";
     field_s3_max: "Limit (MiB)", "Limit (MiB)";
     set_s3_max_hint: "0 = no limit. Oldest copies go first, never a republic's last.", "0 = kein Limit. Älteste Kopien zuerst, nie die letzte einer Republik.";
-    set_s3_max_hint_media: "0 = no limit.", "0 = kein Limit.";
     toast_backup_quota: "Backup stored, bucket quota:", "Backup gespeichert, Bucket-Limit:";
     s3_ok: "bucket reachable - credentials accepted ✓", "Bucket erreichbar - Zugangsdaten akzeptiert ✓";
     bk_col_local: "Local workspace", "Lokaler Workspace";

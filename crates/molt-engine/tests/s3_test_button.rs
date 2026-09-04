@@ -248,65 +248,11 @@ async fn a_changed_backup_target_clears_the_stale_probe_verdict() {
         "a changed backup target drops the stale reachable verdict"
     );
 }
-
-/// One account, several buckets: the media probe signs with the SHARED
-/// credentials but addresses the MEDIA bucket, and its verdict lands in the
-/// media slot only. A shared slot would let one bucket's "ok" describe the
-/// other.
+/// The shared account edited: the probe verdict goes with it - it described
+/// an account that is no longer configured. (The media bucket that used to
+/// share these credentials was removed on 2026-09-04.)
 #[tokio::test]
-async fn a_media_probe_addresses_the_media_bucket_and_its_own_slot() {
-    let (endpoint, seen) = stub_server(200).await;
-    let w = molt_engine::spawn(GroupConfig::demo(), SessionView::default());
-    let Ok(Reply::Session(sv)) = w.execute(Command::ReadSession).await else {
-        panic!("read session failed");
-    };
-    let mut settings = sv.settings.clone();
-    settings.s3_endpoint = endpoint;
-    settings.s3_access_key = "AKIAEXAMPLE".to_string();
-    settings.s3_secret_key = "secret-example".to_string();
-    settings.s3_bucket = "backup-bucket".to_string();
-    settings.media_s3_bucket = "media-bucket".to_string();
-    save_all(&w, settings).await.expect("settings saved");
-    w.execute(Command::NetTestS3 {
-        target: S3Target::Media,
-        endpoint: String::new(),
-        access_key: String::new(),
-        secret_key: String::new(),
-        bucket: String::new(),
-    })
-    .await
-    .expect("NetTestS3 accepted");
-    for _ in 0..150 {
-        let Ok(Reply::Session(sv)) = w.execute(Command::ReadSession).await else {
-            panic!("read session failed");
-        };
-        if !sv.s3_media_test.is_empty() && sv.s3_media_test != "testing" {
-            assert_eq!(sv.s3_media_test, "ok", "the media bucket answered");
-            assert_eq!(
-                sv.s3_test, "",
-                "a media probe must not write the backup bucket's verdict"
-            );
-            let seen = seen.lock().expect("seen lock").clone();
-            assert!(
-                seen.starts_with("HEAD /media-bucket HTTP/1.1"),
-                "the MEDIA bucket was probed, not the backup one: {seen}"
-            );
-            assert!(
-                seen.contains("Credential=AKIAEXAMPLE/"),
-                "signed with the one shared access key: {seen}"
-            );
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    panic!("s3_media_test never settled");
-}
-
-/// A bucket-name edit invalidates only that bucket's verdict; an edit to the
-/// shared endpoint or credentials invalidates BOTH - every verdict then
-/// describes an account that is no longer configured.
-#[tokio::test]
-async fn a_bucket_edit_clears_one_verdict_and_an_account_edit_clears_both() {
+async fn an_account_edit_clears_the_probe_verdict() {
     let endpoint = stub_server_many(200).await;
     let w = molt_engine::spawn(GroupConfig::demo(), SessionView::default());
     let Ok(Reply::Session(sv)) = w.execute(Command::ReadSession).await else {
@@ -317,60 +263,37 @@ async fn a_bucket_edit_clears_one_verdict_and_an_account_edit_clears_both() {
     settings.s3_access_key = "AKIAEXAMPLE".to_string();
     settings.s3_secret_key = "secret-example".to_string();
     settings.s3_bucket = "backup-bucket".to_string();
-    settings.media_s3_bucket = "media-bucket".to_string();
-    let probe_both = |settings: molt_core::SessionSettings| {
-        let w = &w;
-        async move {
-            save_all(w, settings)
-                .await
-                .expect("settings saved");
-            for target in [S3Target::Workspaces, S3Target::Media] {
-                w.execute(Command::NetTestS3 {
-                    target,
-                    endpoint: String::new(),
-                    access_key: String::new(),
-                    secret_key: String::new(),
-                    bucket: String::new(),
-                })
-                .await
-                .expect("probe");
-            }
-            for _ in 0..150 {
-                let Ok(Reply::Session(sv)) = w.execute(Command::ReadSession).await else {
-                    panic!("read session failed");
-                };
-                if sv.s3_test == "ok" && sv.s3_media_test == "ok" {
-                    return;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-            panic!("both verdicts never settled ok");
+    save_all(&w, settings.clone()).await.expect("save");
+    w.execute(Command::NetTestS3 {
+        endpoint: String::new(),
+        access_key: String::new(),
+        secret_key: String::new(),
+        bucket: String::new(),
+        target: molt_core::S3Target::Workspaces,
+    })
+    .await
+    .expect("probe");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let Ok(Reply::Session(sv)) = w.execute(Command::ReadSession).await else {
+            panic!("read session failed");
+        };
+        if sv.s3_test == "ok" {
+            break;
         }
-    };
-    probe_both(settings.clone()).await;
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the probe never settled: {}",
+            sv.s3_test
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 
-    // one bucket renamed → only its verdict goes
-    let mut changed = settings.clone();
-    changed.media_s3_bucket = "other-media".to_string();
-    save_all(&w, changed.clone())
-        .await
-        .expect("bucket save");
-    let Ok(Reply::Session(sv)) = w.execute(Command::ReadSession).await else {
-        panic!("read session failed");
-    };
-    assert_eq!(sv.s3_media_test, "", "the renamed bucket is unprobed again");
-    assert_eq!(sv.s3_test, "ok", "the untouched bucket keeps its verdict");
-
-    // the shared account edited → BOTH verdicts go
-    probe_both(settings.clone()).await;
     let mut rekeyed = settings.clone();
     rekeyed.s3_access_key = "AKIAOTHER".to_string();
-    save_all(&w, rekeyed)
-        .await
-        .expect("account save");
+    save_all(&w, rekeyed).await.expect("account save");
     let Ok(Reply::Session(sv)) = w.execute(Command::ReadSession).await else {
         panic!("read session failed");
     };
-    assert_eq!(sv.s3_test, "", "a new access key unproves the backup bucket");
-    assert_eq!(sv.s3_media_test, "", "…and the media bucket too");
+    assert_eq!(sv.s3_test, "", "a new access key unproves the bucket");
 }

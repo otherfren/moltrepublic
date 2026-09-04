@@ -701,7 +701,6 @@ pub(crate) fn apply_session(
     // so push it on every update — even while the user has an unsaved field
     // open and `settings_changed` is suppressed
     ui.set_cfg_s3_test(localize_s3_verdict(lang, &sv.s3_test).into());
-    ui.set_cfg_media_s3_test(localize_s3_verdict(lang, &sv.s3_media_test).into());
     ui.set_cfg_bk_list(localize_s3_verdict(lang, &sv.s3_list).into());
     // …and the same for the Tor probe's verdict. The rung's key drives the
     // "testing" affordance, the sentence and its tone come from Rust so the

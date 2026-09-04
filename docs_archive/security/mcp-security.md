@@ -78,10 +78,16 @@ A SECOND key, `[mcp].read_token`, admits the READ tools only
 in the same panel as the seat key, and it is host posture like every other
 setting there — an agent can neither issue itself one nor read one back.
 
-* The read set: `read_state`, `read_chain`, `list_proposals`, `status`,
-  `read_members`, `read_uploads`, `read_session`, `wiki_list`, `wiki_get`.
-  A tool is seat-scope unless that list names it, and a test pins the list, so
-  a new tool cannot drift into the read scope by omission.
+* The read set is the WIKI and the SHARED FILES, nothing else (product
+  decision 2026-09-04): `wiki_list`, `wiki_get`, `wiki_search`, `wiki_links`,
+  `wiki_neighbors`, `read_uploads`. A tool is seat-scope unless that list
+  names it, and a test pins the list, so a new tool cannot drift into the
+  read scope by omission.
+* **`read_state` is deliberately NOT in it.** A chat read sends this seat's
+  read receipts to the republic (retrieval is the reading), so admitting it
+  would have made the seat-scoping of `mark_read` decoration - the boundary
+  would have been bypassable by reading. The wiki tools serve the same
+  content without that side effect, which is what they exist for.
 * `tools/list` shows a read-only client only its own scope; a seat tool called
   with the read key answers `-32001 unauthorized: read-only token`.
 * **Empty means OFF**, never "unauthenticated": an empty `read_token` matches
@@ -91,9 +97,6 @@ setting there — an agent can neither issue itself one nor read one back.
   issued, so a config this build writes still opens on a build that predates it.
 * The scope is **host-local**. The republic knows no roles and no rights; the
   human narrows their own tool (see the host boundary below).
-* Caveat, deliberate: `read_state` on chat sends this seat's read receipts, so
-  a read-only client can still light the republic's read dots for this seat.
-  Retrieval IS the reading — the same rule the GUI follows.
 
 ## A TCP handshake, end to end
 

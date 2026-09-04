@@ -663,9 +663,6 @@ impl State {
         let account_changed = old.s3_endpoint != new.s3_endpoint
             || old.s3_access_key != new.s3_access_key
             || old.s3_secret_key != new.s3_secret_key;
-        if account_changed || old.media_s3_bucket != new.media_s3_bucket {
-            self.session.s3_media_test = String::new();
-        }
         let changed = account_changed || old.s3_bucket != new.s3_bucket;
         if !changed {
             return;
@@ -751,7 +748,6 @@ impl State {
         let secret_key = or_saved(secret_key, &s.s3_secret_key);
         let bucket = match target {
             molt_core::S3Target::Workspaces => or_saved(bucket, &s.s3_bucket),
-            molt_core::S3Target::Media => or_saved(bucket, &s.media_s3_bucket),
         };
         let config =
             match molt_net::s3::S3Config::from_settings(&endpoint, &access_key, &secret_key, &bucket)
@@ -796,7 +792,6 @@ impl State {
     fn set_s3_verdict(&mut self, target: molt_core::S3Target, verdict: String) {
         match target {
             molt_core::S3Target::Workspaces => self.session.s3_test = verdict,
-            molt_core::S3Target::Media => self.session.s3_media_test = verdict,
         }
     }
 

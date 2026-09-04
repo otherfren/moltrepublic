@@ -255,8 +255,6 @@ fn main() -> anyhow::Result<()> {
             s3_interval_min: config.storage.s3_interval_min,
             s3_keep_copies: config.storage.s3_keep_copies,
             s3_max_bytes: config.storage.s3_max_bytes,
-            media_s3_bucket: config.storage.media_s3_bucket.clone(),
-            media_s3_max_bytes: config.storage.media_s3_max_bytes,
             sound_message: config.storage.sound_message.clone(),
             sound_vote: config.storage.sound_vote.clone(),
             sound_poke: config.storage.sound_poke.clone(),
@@ -333,6 +331,14 @@ fn main() -> anyhow::Result<()> {
     let mcp_addr = format!("{bind_ip}:{}", config.mcp.port);
     if config.mcp.token.is_empty() {
         tracing::warn!(key = "[mcp].token", "MCP token is empty - the TCP endpoint is unauthenticated");
+        if !config.mcp.read_token.is_empty() {
+            // an empty seat token admits everybody AS THE SEAT, so the
+            // read-only key it sits next to restricts nobody
+            tracing::warn!(
+                key = "[mcp].read_token",
+                "a read-only key is set while the seat token is empty - it grants nothing"
+            );
+        }
     }
     let mcp_token = config.mcp.token.clone();
     let mcp_read_token = config.mcp.read_token.clone();

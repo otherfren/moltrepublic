@@ -372,17 +372,6 @@ pub struct SessionSettings {
     /// neighbouring `file_cap_bytes` reads 0 as "off"; here 0 is "no limit".
     #[serde(default)]
     pub s3_max_bytes: u64,
-    /// The MEDIA bucket at the same endpoint and credentials as the backup
-    /// bucket above - one S3 account, several buckets. No cover-name default
-    /// like the backup bucket: empty means "not configured", not "some name
-    /// nobody chose". Configuration only - nothing writes media to S3 yet
-    /// (`docs_archive/storage/s3_buckets.md` §7), and the GUI says so.
-    #[serde(default)]
-    pub media_s3_bucket: String,
-    /// Byte quota for the media bucket, `0` = no limit. Stored and shown;
-    /// with no writer there is nothing to enforce it against yet.
-    #[serde(default)]
-    pub media_s3_max_bytes: u64,
     /// MCP server TCP port.
     pub mcp_port: u16,
     /// MCP client allowlist (`"127.0.0.1" | "0.0.0.0" | comma-separated`).
@@ -551,8 +540,6 @@ impl Default for SessionSettings {
             s3_interval_min: default_s3_interval(),
             s3_keep_copies: default_s3_keep_copies(),
             s3_max_bytes: 0,
-            media_s3_bucket: String::new(),
-            media_s3_max_bytes: 0,
             mcp_port: 4040,
             mcp_allow: "127.0.0.1".to_string(),
             mcp_token: String::new(),
@@ -590,8 +577,6 @@ pub enum S3Target {
     /// names no target keeps addressing exactly what it used to.
     #[default]
     Workspaces,
-    /// The media bucket - configured, no consumer yet.
-    Media,
 }
 
 impl S3Target {
@@ -599,7 +584,6 @@ impl S3Target {
     pub fn as_str(self) -> &'static str {
         match self {
             S3Target::Workspaces => "workspaces",
-            S3Target::Media => "media",
         }
     }
 }
@@ -3588,10 +3572,6 @@ pub struct SessionView {
     /// flight does not look like an unsaved settings edit.
     #[serde(default)]
     pub s3_test: String,
-    /// The same verdict for the MEDIA target's probe, in its own slot so a
-    /// test of one bucket never overwrites the other's result.
-    #[serde(default)]
-    pub s3_media_test: String,
     /// Transient state of the last bucket listing ([`Command::NetListBackups`]),
     /// same rationale as [`Self::s3_test`]: `""` (never listed), `"listing"`,
     /// `"ok"`, or `"error: …"` (the honest failure class — including "no
@@ -3675,7 +3655,6 @@ impl Default for SessionView {
             theme: "classic".to_string(),
             notice: String::new(),
             s3_test: String::new(),
-            s3_media_test: String::new(),
             s3_list: String::new(),
             tor_test: TorTest::default(),
             restart_required: Vec::new(),
@@ -4737,8 +4716,7 @@ pub enum Command {
         /// slot it lands in.
         #[serde(default)]
         target: S3Target,
-        /// `"ok"` or `"error: …"`; written verbatim into `session.s3_test`
-        /// (or `session.s3_media_test` for [`S3Target::Media`]).
+        /// `"ok"` or `"error: …"`; written verbatim into `session.s3_test`.
         result: String,
     },
     /// Test whether Tor is actually there and working (the anonymity settings

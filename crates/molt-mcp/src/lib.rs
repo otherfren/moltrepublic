@@ -107,7 +107,10 @@ pub async fn serve_tcp(
 /// knows no roles — the human narrows their own tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
-    /// The read tools, nothing else.
+    /// The WIKI and the SHARED FILES, nothing else (product decision
+    /// 2026-09-04). Deliberately not `read_state`: a chat read SENDS this
+    /// seat's read receipts to the republic, so admitting it would have
+    /// made the seat-scoping of `mark_read` decoration.
     Read,
     /// The whole seat, as before.
     Seat,
@@ -240,9 +243,11 @@ async fn handle_rpc(
     if method == "initialize" {
         if let Some(cred) = auth {
             let given = params.get("token").and_then(Value::as_str).unwrap_or("");
-            // BOTH compares always run: returning on the first match would
-            // tell a prober by timing WHICH key it guessed. An empty read
-            // key matches nobody — "off", never "unauthenticated".
+            // Neither branch tells a prober WHICH key it guessed: a guess of
+            // a given length runs exactly one `ct_eq` either way, and the
+            // scope is chosen only after both verdicts exist. (The lengths
+            // themselves still leak, as they always did.) An empty read key
+            // matches nobody — "off", never "unauthenticated".
             let seat_ok = secret_eq(given, &cred.seat);
             let read_ok = !cred.read.is_empty() && secret_eq(given, &cred.read);
             let scope = if seat_ok {
@@ -687,11 +692,9 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
         s3_interval_min: port("s3_interval_min")?,
         s3_keep_copies: port("s3_keep_copies")?,
         // required like every other field, and for the same reason: absent
-        // must not silently wipe the operator's media bucket or drop a
-        // configured quota. Partial changes go through patch_settings.
+        // must not silently drop a configured quota. Partial changes go
+        // through patch_settings.
         s3_max_bytes: bytes("s3_max_bytes")?,
-        media_s3_bucket: text("media_s3_bucket")?,
-        media_s3_max_bytes: bytes("media_s3_max_bytes")?,
         sound_message: text("sound_message")?,
         sound_vote: text("sound_vote")?,
         // added after the everything-required contract froze: optional, and
@@ -1037,7 +1040,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "read_state",
             command: "read_state",
-            scope: Scope::Read,
+            scope: Scope::Seat,
             description: "Read the projected state of one surface. A CHAT read sends read receipts for the messages it returns (retrieval is the agent's way of seeing them - agents and humans light the same dots; silent while this node's receipts are off), so there is no need to call mark_read after reading. Chat messages each carry their stable 32-char hex `id` - the handle for react_chat, delete_chat, download_file, remove_file and chat_send's `quote` - plus the channel they file under, and the snapshot enumerates every channel seen in the log (`channels`). Each enumerated patch channel carries the vote's lifecycle in `state` (\"proposed\"/\"applied\"/\"rejected\"; absent for group/topic channels and unknown referents): a decided vote's discussion is READ-ONLY - chat_send/share_file into it are refused - but stays readable here. Pass `channel` to get only the messages of that view; channels are tags on the one shared stream, not boundaries, and the enumeration still lists all of them. Pass `view` (chat only) to narrow the read: \"unread\" keeps only the messages after this seat's read cursor; \"today\" and omitting it both give the whole retention window. The filters compose. On gated surfaces, `applied_ids` runs positionally parallel to `applied` and names the proposal each applied entry came from (null = origin unknown: legacy data) - the back-link from an accepted change to its `{\"kind\":\"patch\",\"id\":N}` discussion channel. On `files` the applied entries are the persist/unpersist votes; the tables themselves are read_uploads. On `memory` the whole folded wiki rides along - read a large base paged with wiki_list + wiki_get instead.",
             schema: || json!({
                 "type": "object",
@@ -1065,7 +1068,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "read_chain",
             command: "read_chain",
-            scope: Scope::Read,
+            scope: Scope::Seat,
             description: "The persistent chain as display data (Chain-History): every committed block of the open republic, newest first - genesis, applied changes, membership transitions, and checkpoint compaction cuts - each with its height, kind, target surface, display payload, consumed proposal id, and the m signers. On a pruned holder the history below the last checkpoint cut appears as summarized entries rebuilt from the checkpoint blob (height 0 - the per-block positions and signatures were dropped with the history).",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ReadChain),
@@ -1175,7 +1178,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "list_proposals",
             command: "list_proposals",
-            scope: Scope::Read,
+            scope: Scope::Seat,
             description: "List every proposal the engine currently knows about.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ListProposals),
@@ -1183,7 +1186,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "status",
             command: "status",
-            scope: Scope::Read,
+            scope: Scope::Seat,
             description: "Read a one-shot status summary of the group and surfaces.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::Status),
@@ -1191,7 +1194,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "read_members",
             command: "read_members",
-            scope: Scope::Read,
+            scope: Scope::Seat,
             description: "The Organization → Members table: one row per roster member with its anchored identity key (+ fingerprint; empty on demo workspaces), real presence (`last_seen` = unix seconds this node last observed that member - authenticated traffic, or the founding/join it signed with us; 0 = no local evidence at all; `presence` aged from it: 0 online ≤5 min, 1 stale ≤30 min, 2 offline/unreachable), how many pending proposals still await that member's vote, how many files it shared into the chat, and its vote-gated profile (`image` = local file path of the applied picture, `description`).",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ReadMembers),
@@ -1241,7 +1244,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "read_session",
             command: "read_session",
-            scope: Scope::Read,
+            scope: Scope::Seat,
             description: "Read the shared app/session state the GUI mirrors: current screen, surface + sub-view, language, workspaces, run lifecycles, and settings.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ReadSession),
@@ -1371,8 +1374,6 @@ pub fn tools() -> Vec<ToolDef> {
                     "s3_interval_min": { "type": "integer" },
                     "s3_keep_copies": { "type": "integer" },
                     "s3_max_bytes": { "type": "integer", "description": "byte quota for the backup bucket; 0 = no limit" },
-                    "media_s3_bucket": { "type": "string", "description": "a SECOND bucket at the same endpoint/credentials, for media. Configured only: nothing writes media to S3 yet" },
-                    "media_s3_max_bytes": { "type": "integer", "description": "byte quota for the media bucket; 0 = no limit" },
                     "sound_message": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
                     "sound_vote": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
                     "sound_poke": { "type": "string", "enum": ["none", "bell", "chime", "pop"], "description": "optional; absent = \"none\"" },
@@ -1385,7 +1386,7 @@ pub fn tools() -> Vec<ToolDef> {
                 "required": [
                     "s3_backup", "s3_endpoint", "s3_access_key", "s3_bucket",
                     "s3_interval_min", "s3_keep_copies", "s3_max_bytes",
-                    "media_s3_bucket", "media_s3_max_bytes", "sound_message",
+                    "sound_message",
                     "sound_vote", "read_receipts", "file_cap_bytes"
                 ]
             }),
@@ -1409,8 +1410,6 @@ pub fn tools() -> Vec<ToolDef> {
                     "s3_interval_min": { "type": "integer" },
                     "s3_keep_copies": { "type": "integer" },
                     "s3_max_bytes": { "type": "integer", "description": "byte quota for the backup bucket; 0 = no limit. Over it the oldest copies go first, never a workspace's newest" },
-                    "media_s3_bucket": { "type": "string", "description": "a second bucket at the same endpoint/credentials, for media; configured only, nothing writes media to S3 yet" },
-                    "media_s3_max_bytes": { "type": "integer", "description": "byte quota for the media bucket; 0 = no limit" },
                     "file_cap_bytes": { "type": ["integer", "null"], "description": "per-file byte cap for sharing; null = no cap, 0 = sharing off" },
                     "mirror_publish_interval_secs": { "type": "integer", "description": "seconds between two piece publishes of the file trickle (at least 1)" },
                     "mirror_daily_bytes": { "type": "integer", "description": "piece bytes the file trickle may publish per UTC day" },
@@ -1549,11 +1548,11 @@ pub fn tools() -> Vec<ToolDef> {
             name: "net_test_s3",
             command: "net_test_s3",
             scope: Scope::Seat,
-            description: "Test one of the node's S3 buckets (the settings panel's Test button): a real SigV4-signed HEAD /bucket probe over the configured transport (Tor when enabled, fail-closed). Endpoint and credentials are shared; only the bucket differs. The verdict lands in session.s3_test for target \"workspaces\" (the default) and session.s3_media_test for \"media\" - \"ok\" or \"error: …\" with the honest failure class (connect vs TLS vs 403 bad credentials vs 404 missing bucket). Omit fields to test the saved settings; pass them to test a draft.",
+            description: "Test one of the node's S3 buckets (the settings panel's Test button): a real SigV4-signed HEAD /bucket probe over the configured transport (Tor when enabled, fail-closed). The verdict lands in session.s3_test - \"ok\" or \"error: …\" with the honest failure class (connect vs TLS vs 403 bad credentials vs 404 missing bucket). Omit fields to test the saved settings; pass them to test a draft.",
             schema: || json!({
                 "type": "object",
                 "properties": {
-                    "target": { "type": "string", "enum": ["workspaces", "media"], "description": "which bucket to probe; omit = workspaces (the backup bucket)" },
+                    "target": { "type": "string", "enum": ["workspaces"], "description": "which bucket to probe; omit = workspaces (the only one)" },
                     "endpoint": { "type": "string", "description": "https://… or http://… endpoint (MinIO/onion supported, path-style); omit to use settings.s3_endpoint - shared by both buckets" },
                     "access_key": { "type": "string", "description": "access key id; omit to use the saved one" },
                     "secret_key": { "type": "string", "description": "secret key; omit to use the saved one" },
@@ -1564,10 +1563,9 @@ pub fn tools() -> Vec<ToolDef> {
                 let s = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
                 let target = match args.get("target").and_then(Value::as_str) {
                     None | Some("") | Some("workspaces") => molt_core::S3Target::Workspaces,
-                    Some("media") => molt_core::S3Target::Media,
                     Some(other) => {
                         return Err(format!(
-                            "unknown target `{other}` - use \"workspaces\" or \"media\""
+                            "unknown target `{other}` - the only bucket is \"workspaces\""
                         ))
                     }
                 };
@@ -3000,10 +2998,22 @@ mod tests {
                 "params": { "name": name, "arguments": args }
             })
         };
-        let resp = handle_rpc(&h, call("list_proposals", json!({})), Some(&cred), &mut authed)
+        let resp = handle_rpc(&h, call("wiki_list", json!({})), Some(&cred), &mut authed)
             .await
             .expect("tools/call replies");
-        assert_eq!(resp["result"]["isError"], json!(false), "a read goes through");
+        assert_eq!(
+            resp["result"]["isError"],
+            json!(false),
+            "a wiki read goes through"
+        );
+        // …and a read OUTSIDE the two areas does not
+        let resp = handle_rpc(&h, call("read_state", json!({ "surface": "chat" })), Some(&cred), &mut authed)
+            .await
+            .expect("tools/call replies");
+        assert_eq!(
+            resp["error"]["code"], -32001,
+            "chat is not the wiki: a read receipt must not ride the read key"
+        );
 
         let resp = handle_rpc(
             &h,
@@ -3068,7 +3078,9 @@ mod tests {
             .await
             .expect("tools/list replies");
         let listed = names(&resp);
-        assert!(listed.contains(&"read_state".to_string()));
+        assert!(listed.contains(&"wiki_list".to_string()));
+        assert!(listed.contains(&"read_uploads".to_string()));
+        assert!(!listed.contains(&"read_state".to_string()));
         assert!(!listed.contains(&"propose".to_string()));
         assert_eq!(
             listed.len(),
@@ -3096,19 +3108,14 @@ mod tests {
         assert_eq!(
             read,
             [
-                "list_proposals",
-                "read_chain",
-                "read_members",
-                "read_session",
-                "read_state",
                 "read_uploads",
-                "status",
                 "wiki_get",
                 "wiki_links",
                 "wiki_list",
                 "wiki_neighbors",
                 "wiki_search",
-            ]
+            ],
+            "the read key reaches the WIKI and the SHARED FILES, nothing else"
         );
     }
 

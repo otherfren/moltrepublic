@@ -81,15 +81,12 @@ fn both_buckets_round_trip_through_the_settings_draft() {
         s3_secret_key: "bak-secret".to_string(),
         s3_bucket: "media-archive".to_string(),
         s3_max_bytes: 500_000_000,
-        media_s3_bucket: "clips".to_string(),
-        media_s3_max_bytes: 3 * 1024 * 1024 * 1024,
         ..SessionSettings::default()
     };
     apply_settings_fields(&ui, &stored);
     let draft = read_settings_draft(&ui, &stored);
     assert_eq!(draft.s3_endpoint, "https://backup.example.org");
     assert_eq!(draft.s3_bucket, "media-archive");
-    assert_eq!(draft.media_s3_bucket, "clips");
     assert_eq!(
         draft.s3_access_key, "BAK",
         "one account: the credentials are not per bucket"
@@ -98,7 +95,6 @@ fn both_buckets_round_trip_through_the_settings_draft() {
         draft.s3_max_bytes, 500_000_000,
         "the hand-written byte quota survives an untouched round trip"
     );
-    assert_eq!(draft.media_s3_max_bytes, 3 * 1024 * 1024 * 1024);
     // and the form reports itself clean: an unedited draft must not make
     // the leave-guard fire
     assert!(

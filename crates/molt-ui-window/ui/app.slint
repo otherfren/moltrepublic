@@ -227,20 +227,12 @@ component S3BucketGroup inherits DetailGroup {
     in property <string> test-state;
     in property <string> cap-hint;
     // set on a bucket nothing writes to yet; empty hides the line
-    in property <string> unused-note;
     in property <string> bucket-placeholder;
     // the shared account is filled in, so a probe can actually be signed
     in property <bool> account-ready;
     callback test();
     pack: true;
     // honest first: a bucket with no consumer says so before its fields
-    if root.unused-note != "": Text {
-        text: root.unused-note;
-        color: Theme.warn;
-        font-size: Theme.fs-cap;
-        wrap: word-wrap;
-        preferred-width: 0px;
-    }
     HorizontalLayout {
         spacing: 12px;
         FieldLabel {
@@ -2153,13 +2145,6 @@ export component AppWindow inherits Window {
     in-out property <string> cfg-s3-max: "0";
     // pushed from Rust: "" untested · "testing" · "ok" · "error: …"
     in property <string> cfg-s3-test;
-    // Bucket 2: media. Configured only - nothing writes media to S3 yet, and
-    // the panel says so rather than implying a feature that is not there.
-    in-out property <string> cfg-media-s3-bucket;
-    in-out property <string> cfg-media-s3-max: "0";
-    in property <string> cfg-media-s3-test;
-    // run a live signed probe against ONE bucket in the draft:
-    // "workspaces" | "media"
     callback test-s3(string);
     // The Tor probe's verdict, pushed from Rust on every session update (it is
     // transient and lives outside the settings draft, like cfg-s3-test).
@@ -6638,23 +6623,26 @@ export component AppWindow inherits Window {
                             // checksum — the matching runs in Rust (empty =
                             // all rows); the members table's uploads-jump
                             // pre-fills it with a member name
-                            Rectangle {
+                            ou-filter-box := Rectangle {
                                 height: 34px * Theme.ui-scale;
                                 background: Theme.panel;
                                 border-radius: Theme.win95 ? 0px : 8px;
                                 border-width: Theme.border-w;
                                 border-color: ou-filter-in.has-focus ? Theme.accent : Theme.line;
                                 clip: true;
-                                if root.ou-filter == "": Text {
+                                // the box grows with Theme.ui-scale and the
+                                // body font, so a fixed y sits the text too
+                                // high the moment either moves
+                                if root.ou-filter == "": ou-filter-ph := Text {
                                     x: 10px;
-                                    y: 8px;
+                                    y: (parent.height - self.height) / 2;
                                     text: Strings.ou-filter-ph;
                                     color: Theme.faint;
                                     font-size: Theme.fs-body;
                                 }
                                 ou-filter-in := TextInput {
                                     x: 10px;
-                                    y: 8px;
+                                    y: (parent.height - self.height) / 2;
                                     width: parent.width - 44px;
                                     text <=> root.ou-filter;
                                     color: Theme.text;
@@ -7406,8 +7394,11 @@ export component AppWindow inherits Window {
                         : self.c2 <= self.width ? 2
                         : 1);
                     // x/y-anchored children carry no size constraint, so the
-                    // bar states its own height (30px per row + the gap)
-                    height: self.row1 < self.count ? 66px : 30px;
+                    // bar states its own height — MEASURED off the rows, not
+                    // a fixed 30/66px: a tab scales with Theme.ui-scale, so a
+                    // fixed height let the second row grow out of the bar and
+                    // into the panel below it (no gap at a larger font)
+                    height: set-tab-rows.preferred-height;
                     tm0 := Text { text: Strings.set-tab-general; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
                     tm1 := Text { text: Strings.set-tab-workspace; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
                     tm2 := Text { text: Strings.set-tab-backup; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
@@ -7417,7 +7408,7 @@ export component AppWindow inherits Window {
                     tm6 := Text { text: Strings.set-tab-mcp; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
                     tm7 := Text { text: Strings.set-tab-node; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
                     tm8 := Text { text: Strings.set-tab-chain; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
-                    VerticalLayout {
+                    set-tab-rows := VerticalLayout {
                         spacing: 6px;
                         alignment: start;
                         HorizontalLayout {
@@ -8119,18 +8110,6 @@ export component AppWindow inherits Window {
                                 account-ready: root.cfg-s3-endpoint != "" && root.cfg-s3-access != "";
                                 test => {
                                     root.test-s3("workspaces");
-                                }
-                            }
-                            S3BucketGroup {
-                                title: Strings.set-s3-grp-media;
-                                bucket <=> root.cfg-media-s3-bucket;
-                                cap <=> root.cfg-media-s3-max;
-                                test-state: root.cfg-media-s3-test;
-                                cap-hint: Strings.set-s3-max-hint-media;
-                                unused-note: Strings.set-s3-media-unused;
-                                account-ready: root.cfg-s3-endpoint != "" && root.cfg-s3-access != "";
-                                test => {
-                                    root.test-s3("media");
                                 }
                             }
                         }

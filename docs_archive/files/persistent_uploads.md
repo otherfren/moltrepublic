@@ -182,8 +182,9 @@ record of the question:
    holder re-publishes pruned pieces - MB scale, not GB; (b) direct
    member-to-member via an inbound onion service per node - a new
    transport capability; (c) the configured S3 media bucket as piece store
-   - GB-capable, user-owned, one central point. Recommended (a) now, (b)
-   as a later stage.
+   - GB-capable, user-owned, one central point (the media bucket was
+   REMOVED 2026-09-04, so (c) would have to reintroduce it). Recommended
+   (a) now, (b) as a later stage.
 2. Target file size (the 1 GB quota does not fit the 4 MiB cap).
 3. Keys: one random content key per file in the persist block (members
    only, MLS), pieces = AEAD(key, index); epoch-independent, byte-identical

@@ -129,11 +129,6 @@ pub(crate) fn read_settings_draft(ui: &AppWindow, stored: &SessionSettings) -> S
         s3_interval_min: ui.get_cfg_s3_interval() as u16,
         s3_keep_copies: ui.get_cfg_s3_copies() as u16,
         s3_max_bytes: mib_text_to_bytes(&ui.get_cfg_s3_max(), stored.s3_max_bytes),
-        media_s3_bucket: ui.get_cfg_media_s3_bucket().to_string(),
-        media_s3_max_bytes: mib_text_to_bytes(
-            &ui.get_cfg_media_s3_max(),
-            stored.media_s3_max_bytes,
-        ),
         mcp_port: ui.get_cfg_mcp_port() as u16,
         mcp_allow: ui.get_cfg_mcp_allow().to_string(),
         mcp_token: ui.get_cfg_mcp_token().to_string(),
@@ -205,8 +200,6 @@ pub(crate) fn apply_settings_fields(ui: &AppWindow, s: &SessionSettings) {
     ui.set_cfg_s3_interval(i32::from(s.s3_interval_min));
     ui.set_cfg_s3_copies(i32::from(s.s3_keep_copies));
     ui.set_cfg_s3_max(mib_label(s.s3_max_bytes).into());
-    ui.set_cfg_media_s3_bucket(s.media_s3_bucket.clone().into());
-    ui.set_cfg_media_s3_max(mib_label(s.media_s3_max_bytes).into());
     ui.set_cfg_mcp_port(s.mcp_port as i32);
     ui.set_cfg_mcp_allow(s.mcp_allow.clone().into());
     ui.set_cfg_mcp_token(s.mcp_token.clone().into());

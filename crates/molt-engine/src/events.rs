@@ -638,6 +638,10 @@ impl State {
             .collect();
         self.applied.clear();
         self.bump_applied_epoch();
+        // the pending-patch parse cache is keyed by proposal id, and the
+        // proposals below are replaced wholesale: a surviving entry would
+        // judge a card against a patch it no longer carries
+        self.wiki_pending.clear();
         for s in Surface::ALL {
             self.applied.insert(s, Vec::new());
         }

@@ -949,3 +949,51 @@ fn the_mcp_tab_carries_its_own_read_only_key() {
     assert_eq!(revoked.get(), 1, "the click revoked the read key");
     assert_eq!(rotated.get(), 0, "…and left the seat key alone");
 }
+
+/// **The settings tab bar keeps its distance from the panel, wrapped or
+/// not.** The bar used to state a FIXED 30/66px height while a tab scales
+/// with `Theme.ui-scale`: at a larger font the second row grew out of the
+/// bar and sat straight on the content panel.
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_settings_tabs_keep_a_gap_to_the_panel_when_they_wrap() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    ui.set_screen(AppScreen::Settings);
+    apply_strings(&ui, 1); // the German titles are the wide ones
+    ui.window().set_size(slint::PhysicalSize::new(900, 900));
+    ui.show().expect("show headless");
+
+    let bottom_of = |id: &str| -> Option<f32> {
+        i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, id)
+            .find(|e| e.size().height > 0.0)
+            .map(|e| e.absolute_position().y + e.size().height)
+    };
+    let top_of = |id: &str| -> Option<f32> {
+        i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, id)
+            .find(|e| e.size().height > 0.0)
+            .map(|e| e.absolute_position().y)
+    };
+    let rows_bottom = || -> f32 {
+        // the LOWEST tab, whatever row it ended up in
+        i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "SettingsTab")
+            .filter(|e| e.size().height > 0.0)
+            .map(|e| e.absolute_position().y + e.size().height)
+            .fold(f32::MIN, f32::max)
+    };
+    for font in [14.0_f32, 20.0, 26.0] {
+        ui.global::<Theme>().set_fs_app(font);
+        let bar = bottom_of("AppWindow::set-tabs").expect("the tab bar renders");
+        let last_tab = rows_bottom();
+        assert!(
+            last_tab <= bar + 0.5,
+            "font {font}: the lowest tab ends at {last_tab}, past the bar at {bar}"
+        );
+        let pane = top_of("AppWindow::set-pane").expect("the settings panel renders");
+        assert!(
+            pane - last_tab >= 6.0,
+            "font {font}: only {} px between the tabs and the panel",
+            pane - last_tab
+        );
+    }
+}

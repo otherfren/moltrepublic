@@ -384,3 +384,42 @@ fn the_persistent_table_carries_the_mirror_switch_quota_and_holder_count() {
         assert!(ui.get_org_mirror_used().as_str().contains(" of "), "{}", ui.get_org_mirror_used());
     });
 }
+
+/// **The uploads filter's text sits on the box's centre line, at every
+/// font size.** It used to be pinned at `y: 8px` while the box grew with
+/// `Theme.ui-scale` and the body font — so the larger the setting, the
+/// higher the text rode inside its own field.
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_uploads_filter_text_is_vertically_centred() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = files_window(vec![UploadRow {
+        id: "dd".repeat(16).into(),
+        name: "protokoll.pdf".into(),
+        ..UploadRow::default()
+    }]);
+    let centre = |id: &str| -> Option<f32> {
+        i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, id)
+            .find(|e| e.size().height > 0.0)
+            .map(|e| e.absolute_position().y + e.size().height / 2.0)
+    };
+    // ui-scale is derived from the app font, so the font IS the sweep
+    for font in [14.0_f32, 18.0, 22.0, 28.0] {
+        ui.global::<Theme>().set_fs_app(font);
+        let box_mid = centre("AppWindow::ou-filter-box").expect("the filter box renders");
+        // empty needle: the placeholder is what the user sees
+        let text_mid = centre("AppWindow::ou-filter-ph").expect("the placeholder renders");
+        assert!(
+            (box_mid - text_mid).abs() <= 1.5,
+            "font {font}: placeholder centre {text_mid} vs box centre {box_mid}"
+        );
+        // …and the input the moment there is one
+        ui.set_ou_filter("anna".into());
+        let input_mid = centre("AppWindow::ou-filter-in").expect("the input renders");
+        assert!(
+            (box_mid - input_mid).abs() <= 1.5,
+            "font {font}: input centre {input_mid} vs box centre {box_mid}"
+        );
+        ui.set_ou_filter("".into());
+    }
+}

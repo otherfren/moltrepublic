@@ -126,17 +126,13 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
         // The engine runs a real SigV4-signed HEAD over the configured
         // dialer; the verdict streams back into `cfg-s3-test`.
         let cx = ctx.clone();
-        ui.on_test_s3(move |target| {
+        ui.on_test_s3(move |_target| {
             let Some(ui) = cx.weak.upgrade() else {
                 return;
             };
-            // one account for every bucket — only the bucket differs, and
-            // all of it comes from the DRAFT so an unsaved edit is probed
-            let (target, bucket) = if target == "media" {
-                (molt_core::S3Target::Media, ui.get_cfg_media_s3_bucket())
-            } else {
-                (molt_core::S3Target::Workspaces, ui.get_cfg_s3_bucket())
-            };
+            // everything comes from the DRAFT, so an unsaved edit is what
+            // gets probed (the media bucket was removed 2026-09-04)
+            let (target, bucket) = (molt_core::S3Target::Workspaces, ui.get_cfg_s3_bucket());
             cx.issue(
                 Command::NetTestS3 {
                     target,

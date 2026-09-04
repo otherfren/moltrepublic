@@ -13,24 +13,35 @@ pub(crate) const MAX_HEADER_BYTES: usize = 64 * 1024;
 /// exists only when the FIRST line is exactly `---` and a later line is
 /// exactly `---` or `...`; anything else means the whole document is body.
 pub fn split(doc: &str) -> (Option<&str>, &str) {
+    match header_block(doc) {
+        Ok(Some((header, body))) => (Some(header), body),
+        _ => (None, doc),
+    }
+}
+
+/// The block, told apart from the two ways there is none: `Ok(None)` = no
+/// block at all (no opening line, or no closing fence), `Err` = a block
+/// that IS there and only its size disqualified it. The caller can then
+/// say which, instead of rendering 64 KiB of YAML as prose in silence.
+fn header_block(doc: &str) -> Result<Option<(&str, &str)>, ()> {
     let Some(rest) = doc
         .strip_prefix("---\n")
         .or_else(|| doc.strip_prefix("---\r\n"))
     else {
-        return (None, doc);
+        return Ok(None);
     };
     let mut offset = 0usize;
     for line in rest.split_inclusive('\n') {
         let fence = line.trim_end_matches(['\n', '\r']);
         if fence == "---" || fence == "..." {
             if offset > MAX_HEADER_BYTES {
-                return (None, doc);
+                return Err(());
             }
-            return (Some(&rest[..offset]), &rest[offset + line.len()..]);
+            return Ok(Some((&rest[..offset], &rest[offset + line.len()..])));
         }
         offset += line.len();
     }
-    (None, doc)
+    Ok(None)
 }
 
 /// The document's first ATX heading, header skipped. Display metadata.
@@ -206,8 +217,15 @@ fn parse_flat_map(p: &mut Events<'_>) -> Result<serde_json::Map<String, Value>, 
 /// A document's properties, and the reason there are none when a header
 /// stands outside the subset.
 pub fn properties(doc: &str) -> (Option<serde_json::Map<String, Value>>, Option<String>) {
-    let (Some(header), _) = split(doc) else {
-        return (None, None);
+    let header = match header_block(doc) {
+        Ok(Some((header, _))) => header,
+        Ok(None) => return (None, None),
+        Err(()) => {
+            return (
+                None,
+                Some(format!("the header is longer than {MAX_HEADER_BYTES} bytes")),
+            )
+        }
     };
     match parse(header) {
         Ok(map) => (Some(map), None),
@@ -242,9 +260,12 @@ mod tests {
     }
 
     #[test]
-    fn an_oversized_header_is_no_header() {
+    fn an_oversized_header_is_no_header_and_says_so() {
         let doc = format!("---\n{}\n---\nbody\n", "k: v\n".repeat(MAX_HEADER_BYTES / 4));
         assert_eq!(split(&doc).0, None);
+        // …and the author hears WHY, which a missing fence does not claim
+        assert!(properties(&doc).1.is_some_and(|e| e.contains("longer than")));
+        assert_eq!(properties("---\na: 1\n").1, None, "an unclosed block is no block");
     }
 
     /// The worked example of §4.4 parses to exactly the values it shows -

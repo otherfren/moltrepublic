@@ -368,10 +368,14 @@ predicate.
   meaning (unauthenticated → `Seat`). `tools/list` returns only the
   session's scope; `tools/call` on a `Seat` tool under `Read` answers
   `-32001 unauthorized: read-only token`.
-- **The Read set, pinned by a test:** `read_state`, `read_chain`,
-  `list_proposals`, `status`, `read_members`, `read_uploads`,
-  `read_session`, and the wiki tools `wiki_list`, `wiki_get`,
-  `wiki_search`, `wiki_links`, `wiki_neighbors`. Deliberately `Seat`:
+- **The Read set, pinned by a test** — NARROWED by the user 2026-09-04 to
+  the WIKI and the SHARED FILES: `wiki_list`, `wiki_get`, `wiki_search`,
+  `wiki_links`, `wiki_neighbors`, `read_uploads`. `read_state` is out, and
+  that also closes the hole the first build carried: a chat read SENDS
+  this seat's read receipts, so a read key that could call it made the
+  seat-scoping of `mark_read` decoration. Also `Seat` now: `read_chain`,
+  `list_proposals`, `status`, `read_members`, `read_session`. Deliberately
+  `Seat` from the start:
   `mark_read` / `mark_channel_read` (read receipts cross the wire),
   `download_file` (writes the host's disk), `read_ui_state` / `navigate` /
   `ui_action` (the human's screen), `wiki_draft_load` (the human's draft),
