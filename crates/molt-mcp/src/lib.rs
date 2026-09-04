@@ -712,6 +712,30 @@ pub fn tools() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "set_mirror",
+            command: "set_mirror",
+            description: "This seat's mirror consent and budget for the open republic: whether it keeps copies of the persistent files, and how many bytes in total. Declared to every member at once; per republic, never global.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "on": { "type": "boolean", "description": "mirror persistent files" },
+                    "quota_bytes": { "type": "integer", "description": "total mirror budget for this republic, bytes" }
+                },
+                "required": ["on", "quota_bytes"]
+            }),
+            build: |args| Ok(Command::SetMirror {
+                on: args.get("on").and_then(Value::as_bool).ok_or_else(|| "missing `on`".to_string())?,
+                quota_bytes: args.get("quota_bytes").and_then(Value::as_u64).ok_or_else(|| "missing `quota_bytes`".to_string())?,
+            }),
+        },
+        ToolDef {
+            name: "read_mirror",
+            command: "read_mirror",
+            description: "Who mirrors what in the open republic: this seat's switch and quota, every member's declaration (known or not), and per shared file the members holding the whole series (the sharer included) plus this seat's own held/of.",
+            schema: || json!({ "type": "object", "properties": {} }),
+            build: |_| Ok(Command::ReadMirror),
+        },
+        ToolDef {
             name: "mark_channel_read",
             command: "mark_channel_read",
             description: "Advance this seat's OWN read cursor for one channel (B2): what read_state's per-channel `unread` counts and the chat `view:\"unread\"` slice are measured against. Private to the seat (persisted locally, never on the wire) - the shared read receipts are a different mechanism. Omit `up_to` to mark the channel read through its newest visible message; pass a message id (32-char hex, from read_state) to stop at that message. The cursor only ever advances.",
@@ -1792,7 +1816,7 @@ mod tests {
         // would let any MCP client execute code as the node's user, which is
         // a different thing entirely from acting inside the republic. The
         // wholesale settings paths refuse the key for the same reason.
-        const INTERNAL: [&str; 67] = [
+        const INTERNAL: [&str; 70] = [
             // the HOST POSTURE and the two secrets (MCP audit 2026-08-26 M1/H4):
             // an agent operates the seat, not the machine — GUI / config only
             "set_node_posture",
@@ -1848,6 +1872,11 @@ mod tests {
             // the running fetch asking the actor to send one (mirroring §3.2)
             "net_piece_wanted",
             "net_piece_want_send",
+            // the mirror gossip landing (the transport speaks; an agent must
+            // not forge another seat's declaration or holdings)
+            "net_mirror_decl",
+            "net_mirror_status",
+            "net_mirror_who",
             "net_delivered",
             "net_peer_seen",
             "net_peer_rekeyed",

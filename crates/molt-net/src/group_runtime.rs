@@ -1262,6 +1262,9 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
             | MlsDecode::GroupAck(..)
             | MlsDecode::Poke(..)
             | MlsDecode::PieceWanted(..)
+            | MlsDecode::MirrorDecl(..)
+            | MlsDecode::MirrorStatus(..)
+            | MlsDecode::MirrorWho(..)
             | MlsDecode::Discard
             | MlsDecode::Failed(_)
     ) {
@@ -1315,6 +1318,29 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
                 return Ingest::Nothing;
             }
             sink.piece_wanted(&from, &want).await;
+            Ingest::Nothing
+        }
+        MlsDecode::MirrorDecl(from, decl) => {
+            sink.peer_seen(&from).await;
+            if decl.by != from {
+                tracing::warn!(%from, claimed = %decl.by, "a mirror declaration disowns its sender - dropped");
+                return Ingest::Nothing;
+            }
+            sink.mirror_decl(&from, &decl).await;
+            Ingest::Nothing
+        }
+        MlsDecode::MirrorStatus(from, status) => {
+            sink.peer_seen(&from).await;
+            if status.by != from {
+                tracing::warn!(%from, claimed = %status.by, "a mirror status disowns its sender - dropped");
+                return Ingest::Nothing;
+            }
+            sink.mirror_status(&from, &status).await;
+            Ingest::Nothing
+        }
+        MlsDecode::MirrorWho(from) => {
+            sink.peer_seen(&from).await;
+            sink.mirror_who(&from).await;
             Ingest::Nothing
         }
         // the two arms the mesh supervisor implements and this loop did not:

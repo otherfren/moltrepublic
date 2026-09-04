@@ -1,9 +1,10 @@
 # Mirroring: every consenting seat keeps the persistent files
 
 **Status: OPEN - design of 2026-09-03, decisions ratified by the user the
-same evening (§1); M1 (the piece format v2, the cap removal) and M2 (the
-trickle sender, the resumable fetch, `PieceWanted`) are BUILT, M3-M6
-open.** Follows
+same evening (§1); M1 (the piece format v2, the cap removal), M2 (the
+trickle sender, the resumable fetch, `PieceWanted`) and M3 (the
+declaration and status gossip, `set_mirror`/`read_mirror`) are BUILT,
+M4-M6 open.** Follows
 `docs_archive/files/persistent_uploads.md` (the persist/unpersist votes,
 landed the same day).
 
@@ -219,23 +220,37 @@ tick:
 - **Own shares** are never mirrored (the file IS on this disk); they count
   as held for the status.
 
-### 3.4 Declaration and status (what the members see)
+### 3.4 Declaration and status - as built in M3
 
-Two control frames, both authenticated by the MLS credential like the
-claim sheet:
+Three control frames (`molt_net::mirror_gossip`), each its own tag and
+version boundary, authenticated by the MLS credential like the poke, and
+`by` checked against it:
 
-- `MirrorDecl { on: bool, quota: u64, rev: u64 }` - sent on runtime start,
-  on change and every 6 h; stored per member in `TransportState`
-  (`mirror_decls`, last-wins by `rev`; `rev` = unix seconds of the
-  change). A member without a declaration reads "unknown".
-- `MirrorStatus { series: [(id, held: u32, of: u32)] }` - debounced (every
-  32 new pieces, every 5 min, and on completion), stored per member in
-  memory + with the accept-window saves. "Mirrored by N" = holders with
-  `held == of` plus the sharer; the progress bar draws THIS seat's bitmap.
+- `MirrorDecl { on, quota, rev }` (`\x00molt-mdecl-v1`) - sent at runtime
+  start, on `set_mirror`, and every 6 h; stored per member in
+  `TransportState.mirror.decls`, last-wins by `rev` (unix seconds of the
+  change; a lower revision never overwrites). A member without one reads
+  `known: false`.
+- `MirrorStatus { holds: [(id, held, of)] }` (`\x00molt-mstat-v1`) - what
+  the seat holds; in M3 its own available v2 shares, whole (M4 adds the
+  mirrored series). Sent when the list changed (at most once a minute)
+  and unchanged every 5 min while non-empty; stored per member in
+  `TransportState.mirror.status`, replacing the last. "Mirrored by N" =
+  the members whose status says `held == of` plus the sharer.
+- `MirrorWho` (`\x00molt-mwho-v1`) - sent ONCE per runtime start; every
+  holder answers with its status, at most once an hour.
 
-Both are gossip, never chain state; a seat that was offline learns them
-from the next periodic send, and can ask (`MirrorWho`, answered by every
-holder with its status - once per hour at most).
+All three are gossip, never chain state; a seat that was offline learns
+them from the next periodic send or its own ask at start. The beat rides
+the 30 s presence tick; this seat's own switch, quota and revision live
+in `TransportState.mirror` too (default on, 1 GiB), carried by the
+storage writer's transport merge like the cursors.
+
+`set_mirror { on, quota_bytes }` and `read_mirror` are tools on both
+surfaces (co-equal): the view lists this seat's switch and quota, every
+roster member's declaration (`known`, `on`, `quota`, `rev`) and per share
+its holders plus this seat's `held/of`; `read_uploads` rows carry
+`mirrors`, `mirror_held`, `mirror_of` as well.
 
 ### 3.5 Storage and settings
 
@@ -373,3 +388,14 @@ queue dedup) and `molt-engine/tests/file_trickle.rs` (a five-piece
 download at one piece per second, a requester closed and reopened
 mid-way resuming at its bitmap, a piece the relay lost recovered through
 `PieceWanted` against a relay whose database the test prunes).
+
+M3 decisions (2026-09-04, worker): the status persists in
+`transport.state` with the declarations (not only in memory) so a reopen
+reads "who mirrors what" before the first frame arrives; the ask goes out
+once per runtime start rather than on demand (the answer is
+rate-limited to one per holder and hour); a status frame carries at most
+4 096 series and 256 KiB; the own hold list is sorted by id so an
+unchanged set never re-sends. Keystone: `molt-engine/tests/mirror_gossip.rs`
+- a declaration reaches the peer, a shared file shows its sharer as the
+whole holder in `read_mirror` and in both seats' upload rows, and both
+survive the peer's close and reopen.

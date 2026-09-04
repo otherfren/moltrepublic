@@ -615,6 +615,17 @@ pub(crate) struct FilePlane {
     /// `FileWanted` right after an announce means the requester cannot use
     /// that series (pruned/foreign epoch) and a fresh publish is due.
     pub(crate) announced: HashMap<molt_core::MessageId, u64>,
+    /// The mirror gossip (`docs/files/mirroring.md` §3.4): this seat's
+    /// declaration and what the members told it - the runtime copy of
+    /// `transport.state`'s, loaded at open.
+    pub(crate) mirror: molt_core::MirrorState,
+    /// When this seat last sent its declaration / status, what the status
+    /// said, when it last answered an ask, and whether it asked this run.
+    pub(crate) mirror_decl_sent: u64,
+    pub(crate) mirror_status_sent: u64,
+    pub(crate) mirror_status_last: Vec<molt_core::MirrorHold>,
+    pub(crate) mirror_who_answered: u64,
+    pub(crate) mirror_who_asked: bool,
 }
 
 /// The republic's persistent commit-block chain on this holder
@@ -1090,6 +1101,12 @@ impl State {
                 serving: std::collections::HashSet::new(),
                 fetches: Vec::new(),
                 announced: HashMap::new(),
+                mirror: molt_core::MirrorState::default(),
+                mirror_decl_sent: 0,
+                mirror_status_sent: 0,
+                mirror_status_last: Vec::new(),
+                mirror_who_answered: 0,
+                mirror_who_asked: false,
             },
             ui_state: None,
             applied,
@@ -1322,6 +1339,26 @@ impl State {
                     return Ok(Reply::Ack);
                 }
                 self.cmd_net_piece_want_send(id, ranges)
+            }
+            Command::ReadMirror => Ok(Reply::Mirror(Box::new(self.mirror_view()))),
+            Command::SetMirror { on, quota_bytes } => self.cmd_set_mirror(on, quota_bytes),
+            Command::NetMirrorDecl { from, on, quota, rev, generation } => {
+                if !self.net_generation_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.cmd_net_mirror_decl(&from, on, quota, rev)
+            }
+            Command::NetMirrorStatus { from, holds, generation } => {
+                if !self.net_generation_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.cmd_net_mirror_status(&from, holds)
+            }
+            Command::NetMirrorWho { from, generation } => {
+                if !self.net_generation_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.cmd_net_mirror_who(&from)
             }
             Command::SetWakeCommand { command } => self.cmd_set_wake_command(command),
             Command::SetNodePosture { posture } => self.cmd_set_node_posture(posture),

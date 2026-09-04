@@ -2023,7 +2023,10 @@ impl State {
                 .unwrap_or(molt_core::MemberInfo::NEVER);
             self.presence_of(member, last_seen, now)
         };
+        let holders = self.mirror_holders();
         let row = |id: molt_core::MessageId, ident: ShareIdentity, available: bool, expires_ts: u64, persistent: bool| {
+            let mine = ident.by == me;
+            let pieces = ident.pieces;
             UploadView {
                 id,
                 member: ident.by.clone(),
@@ -2050,6 +2053,11 @@ impl State {
                 }
                 .to_string(),
                 persistent,
+                // mirroring §3.4: who holds the whole series (this seat's
+                // own shares count), and this seat's own copy
+                mirrors: u32::try_from(holders.get(&id).map_or(0, Vec::len)).unwrap_or(u32::MAX),
+                mirror_held: if mine { pieces } else { 0 },
+                mirror_of: pieces,
             }
         };
         // the plain shares: chat messages inside the window that no vote

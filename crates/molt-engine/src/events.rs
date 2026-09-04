@@ -741,6 +741,12 @@ impl State {
         self.files.pending.clear();
         self.files.serving.clear();
         self.files.announced.clear();
+        self.files.mirror = molt_core::MirrorState::default();
+        self.files.mirror_decl_sent = 0;
+        self.files.mirror_status_sent = 0;
+        self.files.mirror_status_last.clear();
+        self.files.mirror_who_answered = 0;
+        self.files.mirror_who_asked = false;
         self.chain.proposal_changes.clear();
         self.chain.pending_blocks.clear();
         self.chain.catchup_from = None;

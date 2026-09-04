@@ -51,6 +51,7 @@ pub mod invite;
 pub mod kinds;
 pub mod loopback;
 pub mod mesh;
+pub mod mirror_gossip;
 pub mod mls;
 pub mod nostr;
 pub mod relay_runtime;

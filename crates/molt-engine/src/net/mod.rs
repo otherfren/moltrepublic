@@ -37,6 +37,7 @@ pub(crate) use delivery::ORDERED_PARK_GIVEUP_SECS;
 use delivery::ACK_DEBOUNCE_SECS;
 mod demo_mesh;
 pub(crate) mod files;
+mod mirror;
 mod ingest;
 mod presence;
 pub(crate) use presence::pill_state;
@@ -129,6 +130,44 @@ impl EngineSink for CmdSink {
                 from: member.clone(),
                 id,
                 ranges: want.ranges.clone(),
+                generation: self.generation,
+            })
+            .await;
+    }
+
+    async fn mirror_decl(&self, member: &MemberId, decl: &molt_net::mirror_gossip::MirrorDeclFrame) {
+        let _ = self
+            .execute(Command::NetMirrorDecl {
+                from: member.clone(),
+                on: decl.on,
+                quota: decl.quota,
+                rev: decl.rev,
+                generation: self.generation,
+            })
+            .await;
+    }
+
+    async fn mirror_status(&self, member: &MemberId, status: &molt_net::mirror_gossip::MirrorStatusFrame) {
+        let holds = status
+            .holds
+            .iter()
+            .filter_map(|(id, held, of)| {
+                Some(molt_core::MirrorHold { id: id.parse().ok()?, held: *held, of: *of })
+            })
+            .collect();
+        let _ = self
+            .execute(Command::NetMirrorStatus {
+                from: member.clone(),
+                holds,
+                generation: self.generation,
+            })
+            .await;
+    }
+
+    async fn mirror_who(&self, member: &MemberId) {
+        let _ = self
+            .execute(Command::NetMirrorWho {
+                from: member.clone(),
                 generation: self.generation,
             })
             .await;

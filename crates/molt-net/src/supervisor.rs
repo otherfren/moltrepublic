@@ -361,6 +361,39 @@ const CONTROL_FRAMES: &[(&[u8], ControlParser)] = &[
             }
         }
     }),
+    // the mirror gossip (mirroring §3.4): a declaration, a hold status,
+    // the ask - each its own tag, each its own version boundary
+    (crate::mirror_gossip::MIRROR_DECL_TAG, |from, frame| {
+        match crate::mirror_gossip::MirrorDeclFrame::from_frame(frame) {
+            Ok(decl) => Some(MlsDecode::MirrorDecl(from, Box::new(decl))),
+            Err(e) => {
+                tracing::debug!(error = %e, "dropping an unusable mirror declaration");
+                None
+            }
+        }
+    }),
+    (crate::mirror_gossip::MIRROR_STATUS_TAG, |from, frame| {
+        match crate::mirror_gossip::MirrorStatusFrame::from_frame(frame) {
+            Ok(status) => Some(MlsDecode::MirrorStatus(from, Box::new(status))),
+            Err(e) => {
+                tracing::debug!(error = %e, "dropping an unusable mirror status");
+                None
+            }
+        }
+    }),
+    (crate::mirror_gossip::MIRROR_WHO_TAG, |from, frame| {
+        match crate::mirror_gossip::MirrorWhoFrame::from_frame(frame) {
+            Ok(who) if who.by == from => Some(MlsDecode::MirrorWho(from)),
+            Ok(_) => {
+                tracing::warn!(%from, "a mirror ask disowns its sender - dropped");
+                None
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "dropping an unusable mirror ask");
+                None
+            }
+        }
+    }),
 ];
 
 /// What the recv loop should do with one inbound MLS message.
@@ -385,6 +418,12 @@ pub(crate) enum MlsDecode {
     /// series; a holder answers by re-publishing them. No state, no log
     /// event - like the poke.
     PieceWanted(MemberId, Box<crate::piece_want::PieceWanted>),
+    /// A mirror declaration (mirroring §3.4): gossip, no state of the log.
+    MirrorDecl(MemberId, Box<crate::mirror_gossip::MirrorDeclFrame>),
+    /// A mirror hold status: gossip.
+    MirrorStatus(MemberId, Box<crate::mirror_gossip::MirrorStatusFrame>),
+    /// The ask: every holder answers with its status.
+    MirrorWho(MemberId),
     /// A commit merged (epoch advanced) — ack it and retry the epoch buffer.
     /// `readmitted` names the members the commit ADDED (a recovery re-key):
     /// the consumer forwards them to the engine BEFORE anything of the new
@@ -504,6 +543,29 @@ pub trait EngineSink: Send + Sync + Clone + 'static {
         want: &crate::piece_want::PieceWanted,
     ) -> impl std::future::Future<Output = ()> + Send {
         let _ = (member, want);
+        async {}
+    }
+    /// An authenticated mirror declaration from `member`. Default no-op.
+    fn mirror_decl(
+        &self,
+        member: &MemberId,
+        decl: &crate::mirror_gossip::MirrorDeclFrame,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        let _ = (member, decl);
+        async {}
+    }
+    /// An authenticated mirror hold status from `member`. Default no-op.
+    fn mirror_status(
+        &self,
+        member: &MemberId,
+        status: &crate::mirror_gossip::MirrorStatusFrame,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        let _ = (member, status);
+        async {}
+    }
+    /// `member` asks who holds what. Default no-op.
+    fn mirror_who(&self, member: &MemberId) -> impl std::future::Future<Output = ()> + Send {
+        let _ = member;
         async {}
     }
     /// Sends to `member` keep failing; the outbox is backing off.
@@ -1343,7 +1405,11 @@ impl<K: EngineSink> crate::epoch_hold::HeldIngest<HeldMessage> for MeshHeldInges
             MlsDecode::GroupAck(_, _) => Held::Consumed,
             // a nudge held across an epoch advance is stale by the time it
             // lands: stamp presence, drop the nudge (a late poke is noise)
-            MlsDecode::Poke(_, _) | MlsDecode::PieceWanted(_, _) => {
+            MlsDecode::Poke(_, _)
+            | MlsDecode::PieceWanted(_, _)
+            | MlsDecode::MirrorDecl(_, _)
+            | MlsDecode::MirrorStatus(_, _)
+            | MlsDecode::MirrorWho(_) => {
                 self.sink.peer_seen(&self.peer.member).await;
                 ack_all(std::mem::take(held));
                 Held::Progress
@@ -1655,6 +1721,27 @@ where
                         sink.piece_wanted(&from, &want).await;
                     } else {
                         tracing::warn!(peer = %peer.member, claimed = %want.by, "a piece want disowns its link - dropped");
+                    }
+                    ack_all(acks);
+                }
+                MlsDecode::MirrorDecl(from, decl) => {
+                    sink.peer_seen(&peer.member).await;
+                    if from == peer.member && decl.by == from {
+                        sink.mirror_decl(&from, &decl).await;
+                    }
+                    ack_all(acks);
+                }
+                MlsDecode::MirrorStatus(from, status) => {
+                    sink.peer_seen(&peer.member).await;
+                    if from == peer.member && status.by == from {
+                        sink.mirror_status(&from, &status).await;
+                    }
+                    ack_all(acks);
+                }
+                MlsDecode::MirrorWho(from) => {
+                    sink.peer_seen(&peer.member).await;
+                    if from == peer.member {
+                        sink.mirror_who(&from).await;
                     }
                     ack_all(acks);
                 }

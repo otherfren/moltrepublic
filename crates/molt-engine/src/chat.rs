@@ -422,6 +422,7 @@ impl State {
     ) -> Result<Reply, MoltError> {
         tracing::warn!(%name, %reason, "sharing a file failed");
         self.session.notice = format!("share-failed:{name}:{reason}");
+        self.note_mirror_holds_changed(crate::now_secs());
         self.emit_session(molt_core::SessionScope::Full);
         Ok(Reply::Ack)
     }

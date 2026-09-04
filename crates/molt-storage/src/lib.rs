@@ -3170,6 +3170,7 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                             // …and the file plane's jobs (mirroring §3.2): the
                             // same bookkeeping class as the cursors
                             ts.file_jobs = state.file_jobs;
+                            ts.mirror = state.mirror;
                             if let Err(e) = ws.write_transport_state(&ts) {
                                 fail(&failed_flag, "transport.state write", &e);
                             }

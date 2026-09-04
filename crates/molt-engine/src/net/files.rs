@@ -537,6 +537,7 @@ impl State {
     /// bitmap (`docs/files/mirroring.md` §3.2 - a restart resumes, never
     /// restarts).
     pub(crate) fn resume_file_jobs(&mut self, state: &molt_core::TransportState) {
+        self.load_mirror(state);
         for job in &state.file_jobs.publish {
             if let Ok(id) = job.series.parse::<MessageId>() {
                 self.files.series.entry(id).or_insert(job.started_at);

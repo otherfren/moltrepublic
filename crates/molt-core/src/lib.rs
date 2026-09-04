@@ -2015,6 +2015,83 @@ pub struct TransportState {
     /// Additive like `group`.
     #[serde(default, skip_serializing_if = "FileJobs::is_empty")]
     pub file_jobs: FileJobs,
+    /// The mirror gossip (`docs/files/mirroring.md` §3.4): this seat's
+    /// declaration and every member's declaration and hold status.
+    #[serde(default, skip_serializing_if = "MirrorState::is_default")]
+    pub mirror: MirrorState,
+}
+
+/// A seat's default mirror budget per republic: 1 GiB.
+pub const MIRROR_QUOTA_DEFAULT: u64 = 1024 * 1024 * 1024;
+
+fn mirror_on_default() -> bool {
+    true
+}
+
+fn mirror_quota_default() -> u64 {
+    MIRROR_QUOTA_DEFAULT
+}
+
+/// What this seat declared and what the members told it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MirrorState {
+    /// This seat mirrors persistent files (consent; on by default).
+    #[serde(default = "mirror_on_default")]
+    pub on: bool,
+    /// This seat's total mirror budget for the republic, bytes.
+    #[serde(default = "mirror_quota_default")]
+    pub quota: u64,
+    /// Revision of this seat's declaration (unix seconds of the change).
+    #[serde(default)]
+    pub rev: u64,
+    /// The other members' declarations, last-wins by revision.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub decls: BTreeMap<MemberId, MirrorDecl>,
+    /// The other members' hold status, as last reported.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub status: BTreeMap<MemberId, Vec<MirrorHold>>,
+}
+
+impl Default for MirrorState {
+    fn default() -> Self {
+        MirrorState {
+            on: true,
+            quota: MIRROR_QUOTA_DEFAULT,
+            rev: 0,
+            decls: BTreeMap::new(),
+            status: BTreeMap::new(),
+        }
+    }
+}
+
+impl MirrorState {
+    /// Nothing declared, nothing learned.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == MirrorState::default()
+    }
+}
+
+/// One member's mirror declaration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MirrorDecl {
+    /// Consent.
+    pub on: bool,
+    /// Budget, bytes.
+    pub quota: u64,
+    /// Revision (unix seconds of the change).
+    pub rev: u64,
+}
+
+/// One series a member holds: verified data pieces out of the count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MirrorHold {
+    /// The share message's stable id.
+    pub id: MessageId,
+    /// Verified data pieces.
+    pub held: u32,
+    /// The series' data piece count.
+    pub of: u32,
 }
 
 /// The file plane's persisted jobs: a restart RESUMES each at its cursor.
@@ -3796,6 +3873,9 @@ pub enum Command {
     /// Read every file shared into the chat (Shared Files → Uploads): one
     /// [`UploadView`] per share, newest last (log order).
     ReadUploads,
+    /// Read who mirrors what (`docs/files/mirroring.md` §3.4): this seat's
+    /// switch and quota, every member's declaration, per share the holders.
+    ReadMirror,
     /// Read the persistent chain as display data (the Chain-History view):
     /// one [`ChainBlockView`] per committed block of the open republic,
     /// newest first — checkpoint blocks included. A pruned holder appends
@@ -5080,6 +5160,40 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
+    /// A member's authenticated mirror declaration landed (engine-internal:
+    /// the transport speaks). Never an MCP tool.
+    NetMirrorDecl {
+        /// The MLS-authenticated declarer.
+        from: MemberId,
+        /// Consent.
+        on: bool,
+        /// Budget, bytes.
+        quota: u64,
+        /// Revision; last wins.
+        rev: u64,
+        /// Transport incarnation (stale commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// A member's authenticated hold status landed (engine-internal).
+    /// Never an MCP tool.
+    NetMirrorStatus {
+        /// The MLS-authenticated holder.
+        from: MemberId,
+        /// What it holds.
+        holds: Vec<MirrorHold>,
+        /// Transport incarnation (stale commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// A member asks who holds what (engine-internal). Never an MCP tool.
+    NetMirrorWho {
+        /// The MLS-authenticated asker.
+        from: MemberId,
+        /// Transport incarnation (stale commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
     /// The founder **accepted** the join request (engine-internal; surfaced by
     /// the off-actor join task on the founder's advisory `JoinAccepted` ack). The
     /// joiner's wizard confirms the join landed while it waits for the
@@ -5146,6 +5260,15 @@ pub enum Command {
     Poke {
         /// The roster member to poke (not this seat itself).
         member: MemberId,
+    },
+    /// This seat's mirror consent and budget for the open republic
+    /// (`docs/files/mirroring.md` §3.5): declared to the members at once.
+    /// A human decision on both surfaces.
+    SetMirror {
+        /// Mirror persistent files.
+        on: bool,
+        /// Total mirror budget for this republic, bytes.
+        quota_bytes: u64,
     },
     /// An authenticated poke arrived over the transport (engine-internal —
     /// the transport speaks to the engine; an MCP agent must not be able to
@@ -5382,6 +5505,8 @@ pub enum Reply {
         /// One row per share, log order.
         uploads: Vec<UploadView>,
     },
+    /// Who mirrors what ([`Command::ReadMirror`]).
+    Mirror(Box<MirrorView>),
     /// The whole shared session state (boxed: it is by far the largest reply).
     Session(Box<SessionView>),
     /// The persistent chain as display views (the Chain-History read),
@@ -5824,6 +5949,62 @@ pub struct UploadView {
     /// expires and lists under Persistent Uploads, not Temporary.
     #[serde(default)]
     pub persistent: bool,
+    /// Members holding the whole series, the sharer included
+    /// (`docs/files/mirroring.md` §3.4).
+    #[serde(default)]
+    pub mirrors: u32,
+    /// Data pieces THIS seat holds verified.
+    #[serde(default)]
+    pub mirror_held: u32,
+    /// The series' data piece count (0 = a legacy share).
+    #[serde(default)]
+    pub mirror_of: u32,
+}
+
+/// Who mirrors what ([`Command::ReadMirror`], `docs/files/mirroring.md`
+/// §3.4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MirrorView {
+    /// This seat mirrors persistent files.
+    pub on: bool,
+    /// This seat's budget, bytes.
+    pub quota: u64,
+    /// Bytes this seat's mirror folder holds.
+    pub used: u64,
+    /// Every roster member's declaration.
+    pub members: Vec<MirrorMemberView>,
+    /// Every share and its holders.
+    pub files: Vec<MirrorFileView>,
+}
+
+/// One member's declaration as this seat knows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MirrorMemberView {
+    /// The member.
+    pub member: MemberId,
+    /// Whether a declaration was ever heard (false = unknown).
+    pub known: bool,
+    /// Consent.
+    pub on: bool,
+    /// Budget, bytes.
+    pub quota: u64,
+    /// Revision of the declaration.
+    pub rev: u64,
+}
+
+/// One share's holders.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MirrorFileView {
+    /// The share message's stable id.
+    pub id: MessageId,
+    /// The file name.
+    pub name: String,
+    /// Members holding the whole series, the sharer included.
+    pub holders: Vec<MemberId>,
+    /// Data pieces THIS seat holds verified.
+    pub held: u32,
+    /// The series' data piece count.
+    pub of: u32,
 }
 
 /// A one-shot status summary of the running group.
