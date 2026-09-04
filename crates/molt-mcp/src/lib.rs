@@ -1093,6 +1093,14 @@ pub fn tools() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "wiki_props",
+            command: "wiki_props",
+            scope: Scope::Read,
+            description: "The header keys this republic's wiki actually uses, each with its values and how often each occurs - the ontology as it IS. Read this before writing a document's front matter: it answers \"what is usual here\" without a schema. It governs nothing; the ontology is content.",
+            schema: || json!({ "type": "object", "properties": {} }),
+            build: |_| Ok(Command::WikiProps),
+        },
+        ToolDef {
             name: "wiki_search",
             command: "wiki_search",
             scope: Scope::Read,
@@ -3116,6 +3124,7 @@ mod tests {
                 "wiki_links",
                 "wiki_list",
                 "wiki_neighbors",
+                "wiki_props",
                 "wiki_search",
             ],
             "the read key reaches the WIKI and the SHARED FILES, nothing else"

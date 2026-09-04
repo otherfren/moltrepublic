@@ -677,6 +677,78 @@ fn the_wiki_reads_page_by_prefix_and_cursor() {
     );
 }
 
+/// The ontology a republic actually has: derived from its own headers,
+/// most common value first. It is what the UI shows a member who has
+/// never written a header - decision 4 keeps the ontology CONTENT, so the
+/// only honest answer to "what should I write" is "what is written".
+#[test]
+fn the_property_inventory_is_what_the_documents_say() {
+    let add = |path: &str, body: &str| {
+        let lines: Vec<&str> = body.split('\n').collect();
+        let mut patch = format!(
+            "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
+            lines.len()
+        );
+        for l in lines {
+            patch.push('+');
+            patch.push_str(l);
+            patch.push('\n');
+        }
+        patch
+    };
+    let wp = |p: String| json!({"op": "wiki_patch", "summary": "x", "value": p});
+    let b = Builder::new(&["petra", "walter"], 2);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    for (i, (path, body)) in [
+        ("anna.md", "---\ntype: person\ntags: [berlin, gruender]\n---\n# Anna"),
+        ("bob.md", "---\ntype: person\ntags: [berlin]\n---\n# Bob"),
+        ("berlin.md", "---\ntype: place\n---\n# Berlin"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        seal_wiki(
+            &mut walter,
+            &b,
+            "petra",
+            70 + u64::try_from(i).expect("small"),
+            wp(add(path, body)),
+        );
+    }
+    walter.build_wiki_indexes_now();
+
+    let molt_core::Reply::WikiProps { keys, .. } = walter.cmd_wiki_props().expect("props") else {
+        panic!("wrong reply");
+    };
+    let by = |k: &str| {
+        keys.iter()
+            .find(|e| e.key == k)
+            .unwrap_or_else(|| panic!("key {k} missing"))
+    };
+    assert_eq!(
+        keys.iter().map(|k| k.key.as_str()).collect::<Vec<_>>(),
+        ["tags", "type"],
+        "alphabetical, and only what is actually used"
+    );
+    assert_eq!(
+        by("type")
+            .values
+            .iter()
+            .map(|v| (v.value.as_str(), v.count))
+            .collect::<Vec<_>>(),
+        [("person", 2), ("place", 1)],
+        "most common first"
+    );
+    assert_eq!(
+        by("tags")
+            .values
+            .iter()
+            .map(|v| (v.value.as_str(), v.count))
+            .collect::<Vec<_>>(),
+        [("berlin", 2), ("gruender", 1)]
+    );
+}
+
 /// `knowledge_base_scale.md` §4.5: an OFF-ACTOR build is installed only
 /// if the base it describes is still the base, and the appends that
 /// arrived while it ran are folded on afterwards. While no index exists

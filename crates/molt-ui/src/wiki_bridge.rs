@@ -179,6 +179,7 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
             })
             .collect();
         sync_model(&s.get_props(), props, PartialEq::eq, |m| s.set_props(m));
+        s.set_can_add_property(w.can_add_property());
         // …and the BYTES of the document being looked at, if this node
         // does not hold them yet (§4.10). Idempotent: the reply fills the
         // model and the next sync asks for nothing.
@@ -203,6 +204,7 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
         sync_model(&s.get_blocks(), Vec::new(), wiki_block_eq, |m| s.set_blocks(m));
         sync_model(&s.get_links(), Vec::new(), PartialEq::eq, |m| s.set_links(m));
         sync_model(&s.get_props(), Vec::new(), PartialEq::eq, |m| s.set_props(m));
+        s.set_can_add_property(false);
         sync_model(&s.get_backlinks(), Vec::new(), PartialEq::eq, |m| {
             s.set_backlinks(m);
         });
@@ -316,6 +318,11 @@ pub(crate) fn wire_wiki(
     act!(on_edited, |w, text: slint::SharedString| {
         if let Some(id) = w.active_id() {
             w.set_raw(id, &text);
+        }
+    });
+    act!(on_add_property, |w, key: slint::SharedString| {
+        if let Some(id) = w.active_id() {
+            w.start_header(id, key.as_str());
         }
     });
     act!(on_open_link, |w, target: slint::SharedString| {
@@ -1018,6 +1025,16 @@ pub(crate) fn wire_wiki_index(ui: &AppWindow, ctx: &Ctx) {
                         None => break,
                     }
                 }
+                // …and the republic's own header vocabulary, which is
+                // what a member is shown instead of a schema
+                let keys: Vec<String> = match wh.execute(Command::WikiProps).await {
+                    Ok(Reply::WikiProps { keys, .. }) => {
+                        // a hint, not a catalogue: the row sits above the
+                        // prose and must not push it off the pane
+                        keys.into_iter().take(6).map(|k| k.key).collect()
+                    }
+                    _ => Vec::new(),
+                };
                 let _ = slint::invoke_from_event_loop(move || {
                     let Some(ui) = weak.upgrade() else { return };
                     let g = ui.global::<WikiState>();
@@ -1034,6 +1051,11 @@ pub(crate) fn wire_wiki_index(ui: &AppWindow, ctx: &Ctx) {
                         .collect();
                     sync_model(&g.get_base_docs(), docs, PartialEq::eq, |m| {
                         g.set_base_docs(m);
+                    });
+                    let keys: Vec<slint::SharedString> =
+                        keys.into_iter().map(Into::into).collect();
+                    sync_model(&g.get_prop_keys(), keys, PartialEq::eq, |m| {
+                        g.set_prop_keys(m);
                     });
                     g.invoke_base_arrived();
                 });

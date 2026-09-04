@@ -1640,6 +1640,7 @@ impl State {
             } => self.cmd_wiki_list(prefix, cursor, limit),
             Command::WikiGet { path } => self.cmd_wiki_get(path),
             Command::NetWikiIndexReady { epoch } => self.cmd_net_wiki_index_ready(epoch),
+            Command::WikiProps => self.cmd_wiki_props(),
             Command::WikiLinks {
                 path,
                 direction,

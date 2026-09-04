@@ -53,6 +53,14 @@ pub(crate) struct WikiGraph {
     pub(crate) docs: BTreeMap<String, DocMeta>,
     /// Per document: its edges as written (the parse result).
     raw: BTreeMap<String, Vec<RawEdge>>,
+    /// Per document: its header's scalar `(key, value)` pairs, kept so the
+    /// inventory can be rebuilt without re-parsing the tree.
+    props: BTreeMap<String, Vec<(String, String)>>,
+    /// The republic's ONTOLOGY as it actually is: every header key in use,
+    /// each with its values and how often each occurs. Derived, so it
+    /// cannot rot - and a VIEW, never a registry: nothing here governs
+    /// what a document may say (decision 4, the ontology is content).
+    pub(crate) inventory: BTreeMap<String, BTreeMap<String, u32>>,
     /// Resolved out-edges.
     pub(crate) out: BTreeMap<String, Vec<Edge>>,
     /// Resolved in-edges, keyed by the TARGET.
@@ -86,6 +94,7 @@ impl WikiGraph {
         let Some(content) = content else {
             self.docs.remove(path);
             self.raw.remove(path);
+            self.props.remove(path);
             return;
         };
         let (props, _) = front_matter::properties(content);
@@ -117,6 +126,13 @@ impl WikiGraph {
             });
         }
         self.raw.insert(path.to_string(), edges);
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for (key, value) in &props {
+            for shown in scalar_strings(value) {
+                pairs.push((key.clone(), shown));
+            }
+        }
+        self.props.insert(path.to_string(), pairs);
     }
 
     /// Resolve every raw edge against the current document set: exact path,
@@ -173,6 +189,17 @@ impl WikiGraph {
         self.out = out;
         self.inn = inn;
         self.dangling = dangling;
+        let mut inventory: BTreeMap<String, BTreeMap<String, u32>> = BTreeMap::new();
+        for pairs in self.props.values() {
+            for (key, value) in pairs {
+                *inventory
+                    .entry(key.clone())
+                    .or_default()
+                    .entry(value.clone())
+                    .or_default() += 1;
+            }
+        }
+        self.inventory = inventory;
     }
 
     /// Documents within `depth` hops of `path`, nearest first, capped.
@@ -213,6 +240,33 @@ impl WikiGraph {
             }
         }
         found
+    }
+}
+
+/// Every scalar a header value carries, as the human reads it - one for a
+/// scalar, N for a list, the members of a qualified relation.
+fn scalar_strings(value: &Value) -> Vec<String> {
+    let one = |v: &Value| -> Option<String> {
+        match v {
+            Value::String(s) => Some(
+                front_matter::link_target(s)
+                    .unwrap_or(s)
+                    .to_string(),
+            ),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        }
+    };
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .flat_map(|i| match i {
+                Value::Object(map) => map.values().filter_map(one).collect::<Vec<_>>(),
+                other => one(other).into_iter().collect(),
+            })
+            .collect(),
+        Value::Object(map) => map.values().filter_map(one).collect(),
+        other => one(other).into_iter().collect(),
     }
 }
 

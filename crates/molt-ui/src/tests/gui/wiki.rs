@@ -596,3 +596,80 @@ fn the_changeset_panel_fits_its_header_and_its_rows() {
         );
     }
 }
+
+/// The ontology is content, not code: nothing in the UI prescribes a
+/// header, so a document without one has to OFFER it - with the keys the
+/// republic already uses. The offer disappears once a header exists.
+#[test]
+fn a_document_without_a_header_offers_the_republics_own_keys() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    ui.set_screen(AppScreen::Main);
+    ui.set_selected_surface("memory".into());
+    ui.set_selected_view("brain".into());
+    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: "memory".into(),
+        ..SurfaceTab::default()
+    }])));
+    let _wiki = wire_wiki(&ui);
+    let g = ui.global::<WikiState>();
+    g.set_base_docs(ModelRc::new(VecModel::from(vec![
+        WikiBase {
+            path: "bare.md".into(),
+            content: "# Bare\n\nNo header here.".into(),
+            loaded: true,
+        },
+        WikiBase {
+            path: "anna.md".into(),
+            content: "---\ntype: person\n---\n# Anna\n".into(),
+            loaded: true,
+        },
+    ])));
+    g.set_base_rev(1);
+    // the vocabulary the engine derived from the ratified tree
+    g.set_prop_keys(ModelRc::new(VecModel::from(vec![
+        slint::SharedString::from("tags"),
+        slint::SharedString::from("type"),
+    ])));
+    g.invoke_base_arrived();
+    let open = |path: &str| {
+        let rows = g.get_nav_rows();
+        let row = (0..rows.row_count())
+            .filter_map(|i| rows.row_data(i))
+            .find(|r| r.label.as_str() == path)
+            .expect("nav row");
+        g.invoke_nav_open(row.id);
+    };
+
+    ui.window().set_size(slint::PhysicalSize::new(1400, 900));
+    ui.show().expect("show headless");
+
+    open("bare.md");
+    assert!(g.get_can_add_property(), "a header-less document offers one");
+    // the chips render what the engine offered, plus the generic starter
+    let chips: Vec<String> =
+        i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "PropChip")
+            .filter_map(|e| e.accessible_label().map(|l| l.to_string()))
+            .collect();
+    assert_eq!(
+        chips,
+        vec!["+ Property".to_string(), "tags".to_string(), "type".to_string()],
+        "the offer leads with the generic starter, then the republic's keys"
+    );
+
+    // one click writes the syntax and hands over to the editor
+    g.invoke_add_property("type".into());
+    assert!(g.get_editing(), "the header is typed, not read");
+    assert_eq!(g.get_raw().as_str(), "---\ntype: \n---\n# Bare\n\nNo header here.");
+
+    // a document that HAS a header makes no offer
+    open("anna.md");
+    assert!(!g.get_can_add_property());
+    assert_eq!(
+        i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "PropChip")
+            .count(),
+        0,
+        "no offer, no chips"
+    );
+}

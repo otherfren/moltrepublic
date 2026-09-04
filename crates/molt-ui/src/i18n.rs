@@ -1294,6 +1294,8 @@ lexicon! {
     mem_empty: "Nothing here yet - create a new file.", "Noch nichts hier - lege eine neue Datei an.";
     mem_linked: "Linked", "Verknüpft";
     mem_backlinks: "Linked from", "Verlinkt von";
+    mem_prop_add: "Property", "Eigenschaft";
+    mem_prop_hint: "Header line 'key: value' - what the wiki can index", "Kopfzeile 'Schlüssel: Wert' - was das Wiki auswerten kann";
     mem_search_ph: "Search the wiki", "Wiki durchsuchen";
     mem_search_none: "No hit", "Kein Treffer";
     mem_search_building: "Reading the wiki - search answers in a moment", "Wiki wird gelesen - die Suche antwortet gleich";

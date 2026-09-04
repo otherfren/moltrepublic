@@ -444,6 +444,8 @@ export global WikiState {
     callback content-wanted(string);
     // …and here they are
     callback content-arrived(string, string);
+    // give the open document a front-matter block and edit it
+    callback add-property(string);
     // the ACTIVE workspace id (drafts are per workspace): a change resets
     // the model and loads that workspace's stored draft (WP-D)
     in-out property <string> ws-id;
@@ -459,6 +461,10 @@ export global WikiState {
     // the front matter as a property table (the viewer's infobox); the
     // editor keeps showing the raw header
     in-out property <[WikiProp]> props;
+    // the header keys this republic already uses (the derived ontology)
+    in-out property <[string]> prop-keys;
+    // the open document takes a header: it is here, and has none yet
+    in-out property <bool> can-add-property;
     in-out property <[string]> links;
     // who points HERE — the engine's in-edges for the open document
     in-out property <[string]> backlinks;
@@ -1299,6 +1305,8 @@ export global Strings {
     in property <string> close-ws-cancel;
     in property <string> tip-theme;
     in property <string> tip-language;
+    in property <string> mem-prop-add;
+    in property <string> mem-prop-hint;
     in property <string> tip-settings;
     in property <string> quit-title;
     in property <string> quit-body;

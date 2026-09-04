@@ -1881,6 +1881,34 @@ impl Wiki {
         c
     }
 
+    /// Whether the OPEN document can be given a header: its ratified bytes
+    /// have to be here (the lazy base) and it must not carry one already.
+    /// The UI offers the ontology only where this holds.
+    pub fn can_add_property(&self) -> bool {
+        self.active().is_some_and(header_addable)
+    }
+
+    /// Give the open document a front-matter block and put the pane in the
+    /// editor with it. `key` comes from what the republic already uses -
+    /// the ontology is content, never a schema this program prescribes.
+    pub fn start_header(&mut self, id: DocId, key: &str) -> bool {
+        let Some(d) = self.doc(id) else {
+            return false;
+        };
+        if !header_addable(d) {
+            return false;
+        }
+        let line = if key.is_empty() {
+            String::new()
+        } else {
+            format!("{key}: ")
+        };
+        let next = format!("---\n{line}\n---\n{}", d.raw);
+        self.set_raw(id, &next);
+        self.editing = true;
+        true
+    }
+
     /// One document's ratified bytes arrived (§4.10). An unedited doc
     /// follows them; an edited one keeps its working copy and now has
     /// something to diff against.
@@ -2209,6 +2237,12 @@ fn expand_wiki_links(b: &mut Block) {
     }
     b.text = out.iter().map(|s| s.text.as_str()).collect();
     b.spans = out;
+}
+
+/// A document is open to a header when its ratified bytes are here and it
+/// has none yet.
+fn header_addable(d: &Doc) -> bool {
+    d.loaded() && molt_engine::split_front_matter(&d.raw).0.is_none()
 }
 
 /// A document's header as ordered `key -> values` - the shape the infobox
@@ -2798,6 +2832,73 @@ mod tests {
         );
         let patch = w.build_patch().expect("a document is a patch");
         assert!(patch.contains(&format!("b/{name}/")), "{patch}");
+    }
+
+    /// The ontology has no schema and no dialog - the only place a member
+    /// can meet it is the open document. Starting a header from one of the
+    /// republic's own keys writes the syntax FOR them.
+    #[test]
+    fn a_key_from_the_vocabulary_starts_the_header_it_names() {
+        let mut w = Wiki::empty();
+        w.set_base(&[("a.md".to_string(), Some("# A\n".to_string()))], 1);
+        let id = w.docs.first().expect("a.md").id;
+        w.open(id);
+        assert!(w.infobox(id).is_empty(), "no header, no infobox");
+
+        assert!(w.start_header(id, "type"));
+        assert_eq!(
+            w.doc(id).expect("open").raw,
+            "---\ntype: \n---\n# A\n",
+            "the key is written out, the value is left to the member"
+        );
+        assert!(w.editing, "the header is written in the editor, not read");
+
+        // an empty vocabulary still gets a header to type into
+        let mut w2 = Wiki::empty();
+        w2.set_base(&[("b.md".to_string(), Some("# B\n".to_string()))], 1);
+        let id2 = w2.docs.first().expect("b.md").id;
+        w2.open(id2);
+        assert!(w2.start_header(id2, ""));
+        assert_eq!(w2.doc(id2).expect("open").raw, "---\n\n---\n# B\n");
+    }
+
+    /// The offer is absent while the ratified bytes are still on the wire:
+    /// writing a header over a placeholder would edit a document this node
+    /// has not read (the lazy base, §4.10).
+    #[test]
+    fn an_unfetched_document_gets_no_header_offer() {
+        let mut w = Wiki::empty();
+        w.set_base(&[("a.md".to_string(), None)], 1);
+        let id = w.docs.first().expect("a.md").id;
+        w.open(id);
+        assert!(!w.can_add_property());
+        assert!(!w.start_header(id, "type"));
+        assert_eq!(w.doc(id).expect("open").status(), Status::Unchanged);
+
+        w.load_base("a.md", "# A\n");
+        assert!(w.can_add_property());
+    }
+
+    /// A second header would be prose, not front matter - the offer has to
+    /// disappear once the document has one.
+    #[test]
+    fn a_document_that_already_has_a_header_refuses_a_second() {
+        let mut w = Wiki::empty();
+        w.set_base(
+            &[(
+                "a.md".to_string(),
+                Some("---\ntype: person\n---\n# A\n".to_string()),
+            )],
+            1,
+        );
+        let id = w.docs.first().expect("a.md").id;
+        w.open(id);
+        assert!(!w.can_add_property());
+        assert!(!w.start_header(id, "tags"));
+        assert_eq!(
+            w.doc(id).expect("open").raw,
+            "---\ntype: person\n---\n# A\n"
+        );
     }
 
     /// A header-only edit COLOURS. The prose diff cannot show it (the

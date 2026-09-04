@@ -1990,6 +1990,44 @@ impl State {
         outcome.map_err(|e| MoltError::Engine(format!("wiki index: {e}")))
     }
 
+    /// [`Command::WikiProps`]: what this republic's headers actually say.
+    /// The answer a human needs before writing one - and the reason the
+    /// ontology can stay content instead of becoming a schema.
+    pub(crate) fn cmd_wiki_props(&mut self) -> Result<Reply, MoltError> {
+        self.require_feature(Surface::Memory)?;
+        self.refresh_wiki_graph();
+        if self.wiki_graph.is_none() {
+            self.spawn_wiki_index_build();
+            return Err(self.index_building());
+        }
+        let index_rev = self.wiki_base().1;
+        let graph = self
+            .wiki_graph
+            .as_ref()
+            .ok_or_else(|| MoltError::Engine("the wiki index is unavailable".to_string()))?;
+        let keys = graph
+            .inventory
+            .iter()
+            .map(|(key, values)| {
+                let mut values: Vec<molt_core::WikiPropValue> = values
+                    .iter()
+                    .map(|(value, count)| molt_core::WikiPropValue {
+                        value: value.clone(),
+                        count: u64::from(*count),
+                    })
+                    .collect();
+                // most common first, then alphabetical - a stable order a
+                // human can learn
+                values.sort_by(|a, b| b.count.cmp(&a.count).then(a.value.cmp(&b.value)));
+                molt_core::WikiPropKey {
+                    key: key.clone(),
+                    values,
+                }
+            })
+            .collect();
+        Ok(Reply::WikiProps { keys, index_rev })
+    }
+
     /// [`Command::WikiSearch`] (§4.6).
     pub(crate) fn cmd_wiki_search(
         &mut self,

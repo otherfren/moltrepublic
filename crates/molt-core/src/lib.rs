@@ -3992,6 +3992,10 @@ pub enum Command {
         #[serde(default)]
         cursor: u32,
     },
+    /// The header keys this republic actually uses, with their values -
+    /// the ontology as it IS, derived from the fold. A view, never a
+    /// registry: it answers "what is usual here", it governs nothing.
+    WikiProps,
     /// Full-text search over the wiki (§4.6). The text is tantivy's query
     /// syntax (`+must -not "phrase" title:term`); the filters are facets.
     WikiSearch {
@@ -5708,6 +5712,13 @@ pub enum Reply {
         /// The base revision of the fold itself.
         wiki_rev: u64,
     },
+    /// The header keys in use ([`Command::WikiProps`]), alphabetical.
+    WikiProps {
+        /// One entry per key.
+        keys: Vec<WikiPropKey>,
+        /// The base revision the inventory reflects.
+        index_rev: u64,
+    },
     /// Search hits ([`Command::WikiSearch`]), best first.
     WikiSearch {
         /// The page of hits.
@@ -6099,6 +6110,25 @@ pub struct WikiEdge {
     pub header: bool,
     /// `"out"` or `"in"`.
     pub direction: String,
+}
+
+/// One value a header key carries somewhere in this republic, with how
+/// often ([`Reply::WikiProps`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiPropValue {
+    /// The value as a human reads it.
+    pub value: String,
+    /// How many documents say it.
+    pub count: u64,
+}
+
+/// One header key in use, with the values it carries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiPropKey {
+    /// The key.
+    pub key: String,
+    /// Its values, most common first.
+    pub values: Vec<WikiPropValue>,
 }
 
 /// One search hit ([`Reply::WikiSearch`], §4.6).

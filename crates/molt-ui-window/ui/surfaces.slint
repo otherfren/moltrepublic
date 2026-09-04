@@ -402,6 +402,45 @@ component LinkRun inherits Rectangle {
     }
 }
 
+// One offered header key. The republic's ontology has no schema and no
+// dialog, so a header-less document is where a member meets it: a click
+// writes the syntax, the value stays theirs.
+component PropChip inherits Rectangle {
+    in property <string> label;
+    callback clicked();
+    width: pct.preferred-width + 12px;
+    height: pct.preferred-height + 6px;
+    border-radius: Theme.win95 ? 0px : 4px;
+    border-width: Theme.border-w;
+    border-color: pca.has-hover ? Theme.accent : Theme.line;
+    background: pca.has-hover ? Theme.accent-soft : transparent;
+    accessible-role: button;
+    accessible-label: root.label;
+    pct := Text {
+        x: 6px;
+        y: (parent.height - self.height) / 2;
+        text: root.label;
+        color: pca.has-hover ? Theme.accent : Theme.faint;
+        font-size: Theme.fs-cap;
+    }
+    pca := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            root.clicked();
+        }
+        property <int> tip-gen;
+        changed has-hover => {
+            if (self.has-hover) {
+                self.tip-gen = HintTip.show(Strings.mem-prop-hint,
+                    root.absolute-position.x,
+                    root.absolute-position.y + root.height + 6px);
+            } else {
+                HintTip.hide(self.tip-gen);
+            }
+        }
+    }
+}
+
 // A block's inline runs with clickable .md links. While the whole line
 // fits unwrapped it renders as a true inline row; a longer link-bearing
 // block falls back to stacked runs (Slint has no wrapping rich text) —
@@ -1617,6 +1656,25 @@ export component MemoryPane inherits VerticalLayout {
                                         font-size: Theme.fs-cap;
                                         vertical-alignment: center;
                                     }
+                                }
+                            }
+                        }
+                        // the ontology's shop window: with no header the
+                        // document offers the keys this republic already
+                        // uses, one click each
+                        if WikiState.can-add-property: HorizontalLayout {
+                            spacing: 6px;
+                            alignment: start;
+                            PropChip {
+                                label: "+ " + Strings.mem-prop-add;
+                                clicked => {
+                                    WikiState.add-property("");
+                                }
+                            }
+                            for k in WikiState.prop-keys: PropChip {
+                                label: k;
+                                clicked => {
+                                    WikiState.add-property(k);
                                 }
                             }
                         }
