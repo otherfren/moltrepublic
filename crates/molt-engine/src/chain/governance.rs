@@ -848,7 +848,7 @@ impl State {
             // registration-time check (shared_memory_real.md §4): a patch
             // learned LATE against an already-moved base registers
             // superseded right away — no zombie pending cards on rejoiners
-            self.supersede_stale_wiki();
+            self.supersede_stale_wiki(None);
         }
         if inserted {
             // L2: signatures that OUTRAN this card become displayable now

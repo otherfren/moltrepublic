@@ -490,6 +490,7 @@ impl State {
     fn node_posture(&self) -> molt_core::NodePosture {
         molt_core::NodePosture {
             mcp_token: None,
+            mcp_read_token: None,
             s3_secret_key: None,
             ..molt_core::NodePosture::of(&self.session.settings)
         }
@@ -507,6 +508,9 @@ impl State {
         settings.download_dir = p.download_dir;
         settings.mcp_port = p.mcp_port;
         settings.mcp_allow = p.mcp_allow;
+        if let Some(token) = p.mcp_read_token {
+            settings.mcp_read_token = token;
+        }
         settings.anonymity = p.anonymity;
         settings.tor_mode = p.tor_mode;
         settings.tor_port = p.tor_port;
@@ -1108,9 +1112,9 @@ impl State {
         if live.mcp_allow != boot.mcp_allow {
             keys.push("mcp.allow".to_string());
         }
-        if live.mcp_token != boot.mcp_token {
-            keys.push("mcp.token".to_string());
-        }
+        // NOT the tokens: the accept loop reads them live per connection
+        // (`molt_mcp::live_token`), so a rotation reaches the next client
+        // without a restart
         if live.anonymity != boot.anonymity {
             keys.push("transport.anonymity.network".to_string());
         }
@@ -2447,6 +2451,7 @@ fn apply_stored_posture(target: &mut SessionSettings, stored: &SessionSettings) 
     target.mcp_port = stored.mcp_port;
     target.mcp_allow = stored.mcp_allow.clone();
     target.mcp_token = stored.mcp_token.clone();
+    target.mcp_read_token = stored.mcp_read_token.clone();
     target.anonymity = stored.anonymity.clone();
     target.tor_mode = stored.tor_mode.clone();
     target.tor_port = stored.tor_port;

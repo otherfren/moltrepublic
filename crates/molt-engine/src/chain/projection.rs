@@ -112,6 +112,9 @@ impl State {
     pub(crate) fn set_checkpoint_blob(&mut self, blob: Option<molt_core::CheckpointState>) {
         self.chain.checkpoint_blob = blob;
         self.chain.walk = None;
+        // the blob SEEDS the Memory projection, so the fold cache it fed
+        // describes a base that no longer exists (§4.1)
+        self.bump_applied_epoch();
     }
 
     /// The transport anchor to ADDRESS this member at right now: the seat's
@@ -340,7 +343,8 @@ impl State {
                 // pending wiki patches it left behind (deterministic:
                 // this runs on append, catch-up and rebuild alike)
                 if *surface == Surface::Memory {
-                    self.supersede_stale_wiki();
+                    let moved = Self::wiki_payload_paths(payload);
+                    self.supersede_stale_wiki(moved.as_ref());
                 }
             }
             // the LAST Restored block for a seat wins, and an append is the
@@ -536,6 +540,9 @@ impl State {
         }
         self.chain.applied = projected;
         self.chain.applied_sigs = sigs;
+        // a wholesale re-projection can also REMOVE entries (a re-base, a
+        // prune): the fold cache cannot be extended across it (§4.1)
+        self.bump_applied_epoch();
         // the gossip-replayed proposal CARDS are older than the chain on a
         // reopen (`open_stored_workspace` replays them first) — settle them
         // against the verified truth or every restart resurrects decided
@@ -543,7 +550,7 @@ impl State {
         self.settle_cards_against_chain();
         // …and the supersede walk reaches the same terminal states a live
         // node reached (shared_memory_real.md §4 replay determinism)
-        self.supersede_stale_wiki();
+        self.supersede_stale_wiki(None);
         // …and the working transport anchors. A pruned holder SEEDS them from
         // the blob: the `Restored` blocks that established them were dropped
         // at the cut, and the roster keeps each seat's founding anchor by

@@ -313,7 +313,7 @@ impl State {
                 if *surface == Surface::Memory {
                     // registration-time supersede check (replay twin of
                     // receive_proposed — shared_memory_real.md §4)
-                    self.supersede_stale_wiki();
+                    self.supersede_stale_wiki(None);
                 }
             }
             WorkspaceEvent::Approved { id, by, .. } => {
@@ -367,11 +367,12 @@ impl State {
                         p.state = ProposalState::Applied;
                         let payload = p.payload.clone();
                         let surface = p.surface;
+                        let moved = Self::wiki_payload_paths(&payload);
                         self.applied.entry(surface).or_default().push((Some(id.0), payload));
                         if surface == Surface::Memory {
                             // the base moved — the supersede walk runs in
                             // the legacy apply path too (§4 determinism)
-                            self.supersede_stale_wiki();
+                            self.supersede_stale_wiki(moved.as_ref());
                         }
                     }
                 }
@@ -635,6 +636,7 @@ impl State {
             .map(|(i, m)| (m.id, i))
             .collect();
         self.applied.clear();
+        self.bump_applied_epoch();
         for s in Surface::ALL {
             self.applied.insert(s, Vec::new());
         }
@@ -774,6 +776,8 @@ impl State {
         self.files.share_paths.clear();
         self.files.downloads.clear();
         self.applied.clear();
+        self.bump_applied_epoch();
+        self.wiki_pending.clear();
         for s in Surface::ALL {
             self.applied.insert(s, Vec::new());
         }

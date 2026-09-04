@@ -362,6 +362,23 @@ pub fn apply_patch(
     Ok(())
 }
 
+/// Every path a patch names, old side and new side. Superseding needs no
+/// more of the tree than these: [`apply_patch`] reads and writes only the
+/// paths it names, so its verdict over a tree RESTRICTED to them equals
+/// its verdict over the whole tree
+/// (`docs/memory/knowledge_base_scale.md` §4.2).
+pub fn touched_paths(files: &[PatchFile]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for f in files {
+        for p in [&f.old_path, &f.new_path] {
+            if !p.is_empty() {
+                out.insert(p.clone());
+            }
+        }
+    }
+    out
+}
+
 /// One applied payload into the tree: `true` when the patch applied,
 /// `false` when it was VOID (skipped) — either way deterministic.
 pub fn fold_one(tree: &mut BTreeMap<String, String>, payload: &serde_json::Value) -> bool {
@@ -410,6 +427,55 @@ mod tests {
     const EDIT_A: &str = "diff --git a/a.md b/a.md\n--- a/a.md\n+++ b/a.md\n@@ -1,2 +1,2 @@\n hello\n-world\n+welt\n";
     const DELETE_A: &str = "diff --git a/a.md b/a.md\ndeleted file mode 100644\n--- a/a.md\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-hello\n-world\n";
     const RENAME_A: &str = "diff --git a/a.md b/b.md\nsimilarity index 100%\nrename from a.md\nrename to b.md\n";
+
+    /// `knowledge_base_scale.md` §4.2: an apply reads and writes ONLY the
+    /// paths it names, so its verdict over a tree RESTRICTED to
+    /// [`touched_paths`] is its verdict over the whole tree — the
+    /// equivalence the supersede walk rides instead of cloning the tree.
+    #[test]
+    fn a_restricted_tree_reaches_the_same_verdict_as_the_whole_tree() {
+        let bases: [&[(&str, &str)]; 4] = [
+            &[],
+            &[("a.md", "hello\nworld\n")],
+            &[("a.md", "hello\nworld\n"), ("b.md", "taken\n")],
+            &[("a.md", "different\n")],
+        ];
+        for patch in [ADD_A, EDIT_A, DELETE_A, RENAME_A] {
+            let files = patch_of(patch);
+            let paths = touched_paths(&files);
+            for base in bases {
+                let mut full: BTreeMap<String, String> = base
+                    .iter()
+                    .map(|(p, c)| ((*p).to_string(), (*c).to_string()))
+                    .collect();
+                // untouched neighbours the restriction drops
+                full.insert("z/other.md".to_string(), "unrelated\n".to_string());
+                full.insert("deep/nest/x.md".to_string(), "more\n".to_string());
+                let mut restricted: BTreeMap<String, String> = paths
+                    .iter()
+                    .filter_map(|p| full.get(p).map(|c| (p.clone(), c.clone())))
+                    .collect();
+                assert_eq!(
+                    apply_patch(&mut full, &files).is_ok(),
+                    apply_patch(&mut restricted, &files).is_ok(),
+                    "restricted verdict drifted for base {base:?}"
+                );
+            }
+        }
+    }
+
+    /// Both sides of every file, empties dropped.
+    #[test]
+    fn touched_paths_name_the_old_and_the_new_side() {
+        assert_eq!(
+            touched_paths(&patch_of(RENAME_A)),
+            ["a.md".to_string(), "b.md".to_string()].into_iter().collect()
+        );
+        assert_eq!(
+            touched_paths(&patch_of(ADD_A)),
+            ["a.md".to_string()].into_iter().collect()
+        );
+    }
 
     #[test]
     fn the_happy_chain_folds_add_edit_rename_delete() {

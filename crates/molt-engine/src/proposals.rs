@@ -192,6 +192,11 @@ fn image_headroom(
     transport_plaintext_ceiling().saturating_sub(base) / 4 * 3
 }
 
+/// Default and maximum page size of a wiki listing (§4.3).
+const WIKI_PAGE_DEFAULT: u32 = 100;
+/// See [`WIKI_PAGE_DEFAULT`].
+const WIKI_PAGE_MAX: u32 = 500;
+
 /// Refuse a proposal the transport could never carry. Names the ONE thing
 /// the human can change — for an image proposal that is the image, for
 /// anything else the overshoot.
@@ -1665,29 +1670,205 @@ impl State {
             .filter(move |m| !unread || self.chat_msg_unread(m))
     }
 
-    /// Applied log of one surface, as wire values. Chat serializes its typed
-    /// messages into the same JSON shape the log always had; a `channel`
-    /// filter (chat only) keeps exactly the messages filing under that
-    /// channel — exact [`ChannelRef`] equality, so Topic names match by
-    /// exact string (pin P3) — and a `view` filter (chat only, orthogonal)
-    /// narrows to one half of the retention window ([`chat_view_admits`]).
-    /// Filtered rows keep their embedded ids; position-in-`applied` is not
-    /// an addressing scheme. Each value rides with the proposal id it came
-    /// from (`None` = no proposal origin: chat rows, pre-id dumps) — the
-    /// snapshot splits the pairs into its `applied` / `applied_ids` tracks.
     /// THE Shared-Memory base (shared_memory_real.md): the deterministic
     /// fold of the applied wiki_patch payloads in chain order over the
-    /// empty founding tree. Recomputed on demand — wiki content is small
-    /// text and one code path (live, replay, snapshot+tail) is what the
-    /// convergence keystones pin; a cache comes only if a real history
-    /// ever makes this measurable (plan decision 6).
+    /// empty founding tree. Served through the fold CACHE
+    /// (`docs/memory/knowledge_base_scale.md` §4.1): one code path still
+    /// decides the tree — the cache only decides how often it is recomputed.
     pub(crate) fn wiki_tree(&self) -> std::collections::BTreeMap<String, String> {
-        let payloads: Vec<Value> = self
-            .applied_values(Surface::Memory, None, None)
+        self.wiki_base().0.into_owned()
+    }
+
+    /// One surface's applied payloads BY REFERENCE, in fold order: the
+    /// legacy log first, then the chain's — the concat
+    /// [`State::applied_values`] builds, without its clone. Not for chat,
+    /// whose log is synthesized rather than stored.
+    pub(crate) fn applied_payloads(&self, surface: Surface) -> impl Iterator<Item = &Value> {
+        debug_assert!(surface != Surface::Chat, "chat has no stored applied log");
+        self.applied
+            .get(&surface)
             .into_iter()
+            .flatten()
+            .chain(self.chain.applied.get(&surface).into_iter().flatten())
             .map(|(_, v)| v)
-            .collect();
-        molt_core::wiki_fold::wiki_fold(&payloads)
+    }
+
+    /// [`Command::WikiList`]: one page of the folded base, metadata only
+    /// (`docs/memory/knowledge_base_scale.md` §4.3). Paths are sorted, so
+    /// a prefix selects a contiguous run and the cursor is just the last
+    /// path handed out.
+    pub(crate) fn cmd_wiki_list(
+        &mut self,
+        prefix: Option<String>,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> Result<Reply, MoltError> {
+        self.require_feature(Surface::Memory)?;
+        self.refresh_wiki_cache();
+        let page = usize::try_from(match limit {
+            0 => WIKI_PAGE_DEFAULT,
+            n => n.clamp(1, WIKI_PAGE_MAX),
+        })
+        .unwrap_or(100);
+        let prefix = prefix.unwrap_or_default();
+        let (tree, wiki_rev) = self.wiki_base();
+        let total = u64::try_from(
+            tree.range(prefix.clone()..)
+                .take_while(|(p, _)| p.starts_with(&prefix))
+                .count(),
+        )
+        .unwrap_or(u64::MAX);
+        let lower = match &cursor {
+            Some(c) => std::ops::Bound::Excluded(c.clone()),
+            None => std::ops::Bound::Included(prefix.clone()),
+        };
+        let mut docs: Vec<molt_core::WikiDocMeta> = Vec::new();
+        let mut next_cursor = None;
+        for (path, content) in tree.range((lower, std::ops::Bound::Unbounded)) {
+            if !path.starts_with(&prefix) {
+                break;
+            }
+            if docs.len() == page {
+                next_cursor = docs.last().map(|d| d.path.clone());
+                break;
+            }
+            docs.push(molt_core::WikiDocMeta {
+                path: path.clone(),
+                bytes: u64::try_from(content.len()).unwrap_or(u64::MAX),
+                title: crate::wiki_index::front_matter::first_heading(content),
+                kind: None,
+            });
+        }
+        Ok(Reply::WikiList {
+            docs,
+            next_cursor,
+            total,
+            wiki_rev,
+        })
+    }
+
+    /// [`Command::WikiGet`]: one document, in full (§4.3). An unknown path
+    /// is an error — an empty document would read like a real one.
+    pub(crate) fn cmd_wiki_get(&mut self, path: String) -> Result<Reply, MoltError> {
+        self.require_feature(Surface::Memory)?;
+        self.refresh_wiki_cache();
+        let (tree, wiki_rev) = self.wiki_base();
+        let Some(content) = tree.get(&path) else {
+            return Err(MoltError::BadPayload(format!("no such document: {path}")));
+        };
+        Ok(Reply::WikiDocument {
+            path: path.clone(),
+            content: content.clone(),
+            wiki_rev,
+            props: serde_json::Value::Null,
+            links_out: 0,
+            links_in: 0,
+        })
+    }
+
+    /// The Memory projection changed in a way an APPEND cannot describe (a
+    /// wholesale rebuild, a blob swap, a restore, a close): the fold cache
+    /// has to refold rather than extend (§4.1).
+    pub(crate) fn bump_applied_epoch(&mut self) {
+        self.applied_epoch = self.applied_epoch.wrapping_add(1);
+    }
+
+    /// The paths a Memory payload's patch names — `None` when the payload
+    /// carries no wiki patch, which leaves the supersede walk unnarrowed.
+    pub(crate) fn wiki_payload_paths(
+        payload: &Value,
+    ) -> Option<std::collections::BTreeSet<String>> {
+        if payload.get("op").and_then(Value::as_str) != Some("wiki_patch") {
+            return None;
+        }
+        let patch = payload.get("value").and_then(Value::as_str)?;
+        Some(molt_core::wiki_fold::touched_paths(
+            &molt_core::wiki_fold::parse_patch(patch),
+        ))
+    }
+
+    /// How many Memory entries each half of the fold order holds.
+    fn memory_lens(&self) -> (usize, usize) {
+        (
+            self.applied.get(&Surface::Memory).map_or(0, Vec::len),
+            self.chain
+                .applied
+                .get(&Surface::Memory)
+                .map_or(0, Vec::len),
+        )
+    }
+
+    /// The folded base and its revision — from the cache while the cache
+    /// still describes the current logs, else folded fresh. A stale cache
+    /// costs a refold HERE and never a wrong tree, which is what lets
+    /// `snapshot(&self)` read it without a mutable borrow.
+    pub(crate) fn wiki_base(
+        &self,
+    ) -> (
+        std::borrow::Cow<'_, std::collections::BTreeMap<String, String>>,
+        u64,
+    ) {
+        if let Some(c) = self.wiki_cache.as_ref() {
+            if c.epoch == self.applied_epoch && (c.legacy, c.chain) == self.memory_lens() {
+                return (std::borrow::Cow::Borrowed(&c.tree), c.rev);
+            }
+        }
+        let mut tree = std::collections::BTreeMap::new();
+        let mut rev = 0u64;
+        for payload in self.applied_payloads(Surface::Memory) {
+            if molt_core::wiki_fold::fold_one(&mut tree, payload) {
+                rev += 1;
+            }
+        }
+        (std::borrow::Cow::Owned(tree), rev)
+    }
+
+    /// Bring the fold cache up to the current logs: EXTEND it by the
+    /// appended entries when the other half stood still (the append is
+    /// then at the end of the fold order, so folding it on is exactly what
+    /// a rebuild would reach), else refold from scratch.
+    pub(crate) fn refresh_wiki_cache(&mut self) {
+        let (legacy, chain) = self.memory_lens();
+        let epoch = self.applied_epoch;
+        let mut cache = self.wiki_cache.take().filter(|c| {
+            c.epoch == epoch
+                && ((c.chain == 0 && chain == 0 && c.legacy <= legacy)
+                    || (c.legacy == legacy && c.chain <= chain))
+        });
+        if let Some(c) = cache.as_mut() {
+            let tail = self
+                .applied
+                .get(&Surface::Memory)
+                .into_iter()
+                .flatten()
+                .skip(c.legacy)
+                .chain(
+                    self.chain
+                        .applied
+                        .get(&Surface::Memory)
+                        .into_iter()
+                        .flatten()
+                        .skip(c.chain),
+                )
+                .map(|(_, v)| v);
+            for payload in tail {
+                if molt_core::wiki_fold::fold_one(&mut c.tree, payload) {
+                    c.rev = c.rev.saturating_add(1);
+                }
+            }
+            c.legacy = legacy;
+            c.chain = chain;
+        } else {
+            let (tree, rev) = self.wiki_base();
+            cache = Some(crate::WikiCache {
+                tree: tree.into_owned(),
+                rev,
+                legacy,
+                chain,
+                epoch,
+            });
+        }
+        self.wiki_cache = cache;
     }
 
     /// Whether a pending record's wiki patch still applies to `tree` —
@@ -1695,17 +1876,20 @@ impl State {
     /// Non-wiki payloads never supersede.
     fn wiki_patch_applies(
         tree: &std::collections::BTreeMap<String, String>,
-        p: &ProposalRecord,
+        pending: &crate::PendingPatch,
     ) -> bool {
-        if p.payload.get("op").and_then(Value::as_str) != Some("wiki_patch") {
-            return true;
+        // the apply reads and writes ONLY the paths the patch names, so its
+        // verdict over a tree restricted to them is the verdict over the
+        // whole tree (§4.2) — and the restriction is what keeps the walk
+        // O(touched paths) instead of O(tree) per pending card
+        let mut restricted: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        for path in &pending.paths {
+            if let Some(content) = tree.get(path) {
+                restricted.insert(path.clone(), content.clone());
+            }
         }
-        let Some(patch) = p.payload.get("value").and_then(Value::as_str) else {
-            return true; // unparseable payloads are gated at ingest
-        };
-        let mut clone = tree.clone();
-        molt_core::wiki_fold::apply_patch(&mut clone, &molt_core::wiki_fold::parse_patch(patch))
-            .is_ok()
+        molt_core::wiki_fold::apply_patch(&mut restricted, &pending.files).is_ok()
     }
 
     /// The SUPERSEDE WALK (shared_memory_real.md §4): after the Memory
@@ -1717,31 +1901,88 @@ impl State {
     /// data), so live state, replay and snapshot+tail converge. Runs
     /// inside the deterministic apply paths; it never rings frontends —
     /// the mirror tick picks the change up.
-    pub(crate) fn supersede_stale_wiki(&mut self) {
-        let has_wiki_pending = self.proposals.values().any(|p| {
-            p.surface == Surface::Memory
-                && p.state == ProposalState::Proposed
-                && p.payload.get("op").and_then(Value::as_str) == Some("wiki_patch")
-        });
-        if !has_wiki_pending {
-            return;
-        }
-        let tree = self.wiki_tree();
-        let stale: Vec<u64> = self
+    ///
+    /// `moved` names the paths an applied patch just touched: pending
+    /// patches disjoint from them kept their verdict and are skipped
+    /// (§4.2). `None` = re-check everything (registration, rebuild).
+    pub(crate) fn supersede_stale_wiki(
+        &mut self,
+        moved: Option<&std::collections::BTreeSet<String>>,
+    ) {
+        // the candidates always come from `proposals`: the parsed map below
+        // is a CACHE, so a miss costs a parse and can never hide a card
+        let cands: Vec<u64> = self
             .proposals
             .iter()
-            .filter(|(_, p)| p.surface == Surface::Memory && p.state == ProposalState::Proposed)
-            .filter(|(_, p)| !Self::wiki_patch_applies(&tree, p))
+            .filter(|(_, p)| {
+                p.surface == Surface::Memory
+                    && p.state == ProposalState::Proposed
+                    && p.payload.get("op").and_then(Value::as_str) == Some("wiki_patch")
+            })
             .map(|(id, _)| *id)
             .collect();
+        if cands.is_empty() {
+            self.wiki_pending.clear();
+            return;
+        }
+        for id in &cands {
+            if self.wiki_pending.contains_key(id) {
+                continue;
+            }
+            let Some(patch) = self
+                .proposals
+                .get(id)
+                .and_then(|p| p.payload.get("value"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            else {
+                continue; // unparseable payloads are gated at ingest
+            };
+            let files = molt_core::wiki_fold::parse_patch(&patch);
+            let paths = molt_core::wiki_fold::touched_paths(&files);
+            self.wiki_pending
+                .insert(*id, crate::PendingPatch { files, paths });
+        }
+        let live: std::collections::HashSet<u64> = cands.iter().copied().collect();
+        self.wiki_pending.retain(|id, _| live.contains(id));
+        self.refresh_wiki_cache();
+        let stale: Vec<u64> = {
+            let (tree, _) = self.wiki_base();
+            cands
+                .iter()
+                .copied()
+                .filter(|id| {
+                    let Some(pending) = self.wiki_pending.get(id) else {
+                        return false;
+                    };
+                    // a patch naming none of the moved paths kept its verdict:
+                    // nothing it reads changed
+                    if moved.is_some_and(|m| pending.paths.is_disjoint(m)) {
+                        return false;
+                    }
+                    !Self::wiki_patch_applies(&tree, pending)
+                })
+                .collect()
+        };
         for id in stale {
             if let Some(p) = self.proposals.get_mut(&id) {
                 p.state = ProposalState::Rejected;
                 p.superseded = true;
             }
+            self.wiki_pending.remove(&id);
         }
     }
 
+    /// Applied log of one surface, as wire values. Chat serializes its typed
+    /// messages into the same JSON shape the log always had; a `channel`
+    /// filter (chat only) keeps exactly the messages filing under that
+    /// channel — exact [`ChannelRef`] equality, so Topic names match by
+    /// exact string (pin P3) — and a `view` filter (chat only, orthogonal)
+    /// narrows to one half of the retention window ([`chat_view_admits`]).
+    /// Filtered rows keep their embedded ids; position-in-`applied` is not
+    /// an addressing scheme. Each value rides with the proposal id it came
+    /// from (`None` = no proposal origin: chat rows, pre-id dumps) — the
+    /// snapshot splits the pairs into its `applied` / `applied_ids` tracks.
     pub(crate) fn applied_values(
         &self,
         surface: Surface,
@@ -1859,15 +2100,13 @@ impl State {
         // Memory serves the folded BASE with every read — the one
         // projection GUI and MCP share (shared_memory_real.md WP-B)
         let (wiki_tree, wiki_rev) = if surface == Surface::Memory {
-            let payloads: Vec<Value> = self
-                .applied_values(Surface::Memory, None, None)
-                .into_iter()
-                .map(|(_, v)| v)
-                .collect();
-            let (tree, rev) = molt_core::wiki_fold::wiki_fold_with_rev(&payloads);
+            let (tree, rev) = self.wiki_base();
             (
-                tree.into_iter()
-                    .map(|(path, content)| molt_core::WikiDoc { path, content })
+                tree.iter()
+                    .map(|(path, content)| molt_core::WikiDoc {
+                        path: path.clone(),
+                        content: content.clone(),
+                    })
                     .collect(),
                 rev,
             )

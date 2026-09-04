@@ -946,7 +946,16 @@ impl State {
         }
         let by = by.to_string();
         let workspace = self.session.active_workspace.clone();
-        tracing::info!(reason, %by, "wake command spawned");
+        // How much work waits on this seat right now. The holdoff swallows a
+        // burst on purpose, so the woken agent needs the SIZE to know it must
+        // drain the stream rather than answer one card.
+        let me = self.member();
+        let pending = self
+            .proposals
+            .iter()
+            .filter(|(id, p)| self.waits_on(**id, p, &me))
+            .count();
+        tracing::info!(reason, %by, pending, "wake command spawned");
         // `Builder::spawn`, never `thread::spawn`: the latter PANICS when the
         // OS refuses a thread, and this runs on the single-owner actor - one
         // exhausted thread table would take the whole engine down.
@@ -959,6 +968,7 @@ impl State {
                     .env("MOLT_WAKE_REASON", reason)
                     .env("MOLT_WAKE_BY", &by)
                     .env("MOLT_WAKE_WORKSPACE", &workspace)
+                    .env("MOLT_WAKE_PENDING", pending.to_string())
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
@@ -2045,6 +2055,67 @@ mod tests {
         st.presence.clock_override = Some(5_000 + super::WAKE_HOLDOFF_SECS);
         st.maybe_wake_pending("peer-1");
         await_lines(&marker, 2);
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    /// The knowledge-base stream (`knowledge_base_scale.md` §4.8): a peer's
+    /// `wiki_patch` proposal wakes this seat with the vote reason AND the
+    /// size of the queue, so the agent drains `list_proposals` instead of
+    /// answering the one card the holdoff let through.
+    #[test]
+    fn a_peer_wiki_patch_wakes_the_seat_with_the_pending_count() {
+        let mut st = plain_state();
+        let marker = std::env::temp_dir().join(format!("molt-kb-wake-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        st.session.settings.poke_wake_command = format!(
+            "echo \"$MOLT_WAKE_REASON $MOLT_WAKE_PENDING\" > '{}'",
+            marker.display()
+        );
+        // patches that APPLY to the empty founding base: one that does not
+        // is superseded at registration and then waits on nobody
+        let add = |p: &str| {
+            format!("diff --git a/{p} b/{p}\nnew file mode 100644\n--- /dev/null\n+++ b/{p}\n@@ -0,0 +1,1 @@\n+hello\n")
+        };
+        for (seq, id, path) in [(1u64, 21u64, "a.md"), (2, 22, "b.md")] {
+            st.apply(&EventEnvelope {
+                prev_seq: seq - 1,
+                seq,
+                ts: seq,
+                by: "peer-1".to_string(),
+                body: WorkspaceEvent::Proposed {
+                    id: molt_core::ProposalId(id),
+                    surface: molt_core::Surface::Memory,
+                    payload: serde_json::json!({ "op": "wiki_patch", "value": add(path) }),
+                },
+            });
+        }
+        assert_eq!(
+            st.proposals
+                .values()
+                .filter(|p| p.state == molt_core::ProposalState::Proposed)
+                .count(),
+            2,
+            "both patches apply to the empty base and stay open"
+        );
+
+        // `WAKE_RUNNING` is process-wide, so a sibling test's wake can swallow
+        // one nudge: re-nudge past the holdoff until the marker appears.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let content = loop {
+            match std::fs::read_to_string(&marker) {
+                Ok(c) if !c.trim().is_empty() => break c,
+                _ => {}
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the wake command never ran"
+            );
+            let next = st.presence.clock_override.unwrap_or(9_000) + super::WAKE_HOLDOFF_SECS;
+            st.presence.clock_override = Some(next);
+            st.maybe_wake_pending("peer-1");
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        };
+        assert_eq!(content.trim(), "vote_pending 2");
         let _ = std::fs::remove_file(&marker);
     }
 }

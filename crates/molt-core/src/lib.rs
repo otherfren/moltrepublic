@@ -394,6 +394,12 @@ pub struct SessionSettings {
     /// `SetNodePosture`.
     #[serde(skip_serializing, default)]
     pub mcp_token: String,
+    /// A SECOND key admitting only the read tools
+    /// (`docs/memory/knowledge_base_scale.md` §4.7). Empty = OFF, never
+    /// "unauthenticated". Never serialized, for the same reason as
+    /// [`SessionSettings::mcp_token`]: a credential no surface reads back.
+    #[serde(skip_serializing, default)]
+    pub mcp_read_token: String,
     /// Anonymity network: `"tor" | "none"`. (`"nym"` was retired — the
     /// mixnet was never implemented and the dialer refuses it.)
     pub anonymity: String,
@@ -550,6 +556,7 @@ impl Default for SessionSettings {
             mcp_port: 4040,
             mcp_allow: "127.0.0.1".to_string(),
             mcp_token: String::new(),
+            mcp_read_token: String::new(),
             anonymity: "none".to_string(),
             tor_mode: "local".to_string(),
             tor_port: 9050,
@@ -3961,6 +3968,26 @@ pub enum Command {
     /// newest first — checkpoint blocks included. A pruned holder appends
     /// summarized pre-cut entries rebuilt from its checkpoint blob.
     ReadChain,
+    /// One page of the wiki's document list, metadata only
+    /// (`docs/memory/knowledge_base_scale.md` §4.3) — the read a knowledge
+    /// base of tens of thousands of entries is browsed with.
+    WikiList {
+        /// Only paths under this folder prefix.
+        #[serde(default)]
+        prefix: Option<String>,
+        /// Continue after this path (a previous page's `next_cursor`).
+        #[serde(default)]
+        cursor: Option<String>,
+        /// Page size, clamped to 1..=500 (0 = the default 100).
+        #[serde(default)]
+        limit: u32,
+    },
+    /// One wiki document with its content (§4.3). An unknown path is an
+    /// error, never an empty document.
+    WikiGet {
+        /// The document's path.
+        path: String,
+    },
     /// The GUI publishes what its window currently shows
     /// (`docs_archive/ui/gui_over_mcp.md`) — the read half of driving the GUI
     /// from MCP. ENGINE-INTERNAL in spirit: only the window may speak it
@@ -5457,6 +5484,10 @@ pub struct NodePosture {
     /// The MCP token; `None` keeps the stored one.
     #[serde(default)]
     pub mcp_token: Option<String>,
+    /// The read-only MCP token; `None` keeps the stored one, `Some("")`
+    /// revokes it.
+    #[serde(default)]
+    pub mcp_read_token: Option<String>,
     /// The S3 secret; `None` keeps the stored one.
     #[serde(default)]
     pub s3_secret_key: Option<String>,
@@ -5477,6 +5508,7 @@ impl NodePosture {
             tor_mode: settings.tor_mode.clone(),
             tor_port: settings.tor_port,
             mcp_token: Some(settings.mcp_token.clone()),
+            mcp_read_token: Some(settings.mcp_read_token.clone()),
             s3_secret_key: Some(settings.s3_secret_key.clone()),
         }
     }
@@ -5495,13 +5527,14 @@ pub const UI_ACTION_VERBS: [&str; 5] = [
 
 /// The settings keys [`Command::SetNodePosture`] owns — refused by
 /// `PatchSettings`, re-merged from the stored values by `SaveSettings`.
-pub const NODE_POSTURE_KEYS: [&str; 10] = [
+pub const NODE_POSTURE_KEYS: [&str; 11] = [
     "headless",
     "workspace_dir",
     "download_dir",
     "mcp_port",
     "mcp_allow",
     "mcp_token",
+    "mcp_read_token",
     "anonymity",
     "tor_mode",
     "tor_port",
@@ -5611,6 +5644,33 @@ pub enum Reply {
     WikiDraft {
         /// The serialized draft blob, exactly as saved.
         draft: String,
+    },
+    /// One page of the wiki's document list ([`Command::WikiList`]).
+    WikiList {
+        /// The page, path-sorted.
+        docs: Vec<WikiDocMeta>,
+        /// Pass back as `cursor` for the next page; `None` = last page.
+        next_cursor: Option<String>,
+        /// How many documents match the prefix in total.
+        total: u64,
+        /// The base revision this page was read at.
+        wiki_rev: u64,
+    },
+    /// One wiki document with its content ([`Command::WikiGet`]).
+    WikiDocument {
+        /// The document's path.
+        path: String,
+        /// Its full markdown content, front matter included.
+        content: String,
+        /// The base revision it was read at.
+        wiki_rev: u64,
+        /// The parsed front matter (an object, or null when there is none
+        /// or it is outside the accepted subset).
+        props: serde_json::Value,
+        /// How many links leave this document.
+        links_out: u32,
+        /// How many links point at it.
+        links_in: u32,
     },
     /// The member table (Organization → Members). A struct variant on
     /// purpose: the internally-tagged `reply` repr cannot serialize a bare
@@ -5926,6 +5986,24 @@ pub struct WikiDoc {
     pub path: String,
     /// The full markdown content.
     pub content: String,
+}
+
+/// One document's METADATA in a paged wiki listing ([`Reply::WikiList`]).
+/// Carries no content: a knowledge base of tens of thousands of entries
+/// is read page by page and fetched document by document
+/// (`docs/memory/knowledge_base_scale.md` §4.3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiDocMeta {
+    /// Normalized relative path (`file.md` or `folder/file.md`).
+    pub path: String,
+    /// The document's size in bytes.
+    pub bytes: u64,
+    /// The first markdown heading, when the document opens with one.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// The front matter's `type`, when it declares one.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 /// One block of the persistent chain as display data — the row a

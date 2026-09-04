@@ -112,3 +112,78 @@ async fn tool_built_reads_equal_engine_direct_reads() {
         }
     }
 }
+
+/// The paged wiki reads (`knowledge_base_scale.md` §4.3) map their
+/// arguments the way the engine reads them - including the two the plan
+/// leaves optional, where absent must mean "the default" and not "the
+/// empty string".
+#[tokio::test]
+async fn the_wiki_tools_build_the_reads_the_engine_serves() {
+    let w = spawn_solo();
+    let wiki_list = tool("wiki_list");
+
+    // absent optionals are None / 0, never "" - a "" prefix would read as
+    // a folder named "" and a 0 limit is the handler's default
+    let cmd = (wiki_list.build)(&json!({})).expect("wiki_list builds bare");
+    assert!(
+        matches!(
+            &cmd,
+            Command::WikiList {
+                prefix: None,
+                cursor: None,
+                limit: 0
+            }
+        ),
+        "bare wiki_list built {cmd:?}"
+    );
+    let via_tool = run(&w, cmd).await;
+    let direct = run(
+        &w,
+        Command::WikiList {
+            prefix: None,
+            cursor: None,
+            limit: 0,
+        },
+    )
+    .await;
+    assert_eq!(
+        serde_json::to_value(&via_tool).expect("reply serializes"),
+        serde_json::to_value(&direct).expect("reply serializes"),
+    );
+
+    let cmd = (wiki_list.build)(&json!({ "prefix": "people/", "cursor": "people/a.md", "limit": 5 }))
+        .expect("wiki_list builds");
+    match cmd {
+        Command::WikiList {
+            prefix,
+            cursor,
+            limit,
+        } => {
+            assert_eq!(prefix.as_deref(), Some("people/"));
+            assert_eq!(cursor.as_deref(), Some("people/a.md"));
+            assert_eq!(limit, 5);
+        }
+        other => panic!("wiki_list built {other:?}"),
+    }
+    // a wrong type is a typo the caller hears about, not a silent default
+    assert!((wiki_list.build)(&json!({ "prefix": 7 })).is_err());
+    assert!((wiki_list.build)(&json!({ "limit": -1 })).is_err());
+
+    let wiki_get = tool("wiki_get");
+    assert!(
+        (wiki_get.build)(&json!({})).is_err(),
+        "wiki_get needs a path"
+    );
+    let cmd = (wiki_get.build)(&json!({ "path": "a.md" })).expect("wiki_get builds");
+    // an empty wiki has no document, and both surfaces say so the same way
+    let via_tool = w.execute(cmd).await;
+    let direct = w
+        .execute(Command::WikiGet {
+            path: "a.md".to_string(),
+        })
+        .await;
+    assert_eq!(
+        format!("{:?}", via_tool.map(|_| ())),
+        format!("{:?}", direct.map(|_| ())),
+    );
+}

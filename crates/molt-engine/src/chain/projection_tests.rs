@@ -570,6 +570,165 @@ fn a_sealed_wiki_patch_supersedes_overlapping_pending_patches() {
     );
 }
 
+/// `knowledge_base_scale.md` §4.3: the wiki is read PAGED — a prefix
+/// selects a folder, the cursor walks the pages without gaps or repeats,
+/// the limit is clamped, and an unknown path is an error.
+#[test]
+fn the_wiki_reads_page_by_prefix_and_cursor() {
+    let add = |path: &str, body: &str| {
+        format!("diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,1 @@\n+{body}\n")
+    };
+    let wp = |p: String| json!({"op": "wiki_patch", "summary": "x", "value": p});
+    let b = Builder::new(&["petra", "walter"], 2);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    for (i, (path, body)) in [
+        ("people/anna.md", "# Anna"),
+        ("people/bob.md", "# Bob"),
+        ("root.md", "# Root"),
+        ("zoo/last.md", "no heading"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        seal_wiki(
+            &mut walter,
+            &b,
+            "petra",
+            20 + u64::try_from(i).expect("small"),
+            wp(add(path, body)),
+        );
+    }
+
+    // a whole listing: path-sorted, titles from the first heading
+    let molt_core::Reply::WikiList {
+        docs, total, next_cursor, ..
+    } = walter.cmd_wiki_list(None, None, 0).expect("list")
+    else {
+        panic!("wrong reply");
+    };
+    assert_eq!(total, 4);
+    assert_eq!(next_cursor, None, "one page holds all four");
+    let paths: Vec<&str> = docs.iter().map(|d| d.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        ["people/anna.md", "people/bob.md", "root.md", "zoo/last.md"]
+    );
+    assert_eq!(docs[0].title.as_deref(), Some("Anna"));
+    assert_eq!(docs[3].title, None, "no heading, no title");
+    assert_eq!(docs[0].bytes, 7, "\"# Anna\\n\" is seven bytes");
+
+    // the cursor walks the pages: no gap, no repeat, and it ends
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor = None;
+    loop {
+        let molt_core::Reply::WikiList {
+            docs, next_cursor, ..
+        } = walter.cmd_wiki_list(None, cursor, 1).expect("page")
+        else {
+            panic!("wrong reply");
+        };
+        seen.extend(docs.into_iter().map(|d| d.path));
+        match next_cursor {
+            Some(c) => cursor = Some(c),
+            None => break,
+        }
+        assert!(seen.len() <= 4, "the cursor did not advance");
+    }
+    assert_eq!(seen, paths, "paged == whole");
+
+    // a prefix selects the folder, and `total` counts only it
+    let molt_core::Reply::WikiList { docs, total, .. } = walter
+        .cmd_wiki_list(Some("people/".to_string()), None, 0)
+        .expect("prefixed")
+    else {
+        panic!("wrong reply");
+    };
+    assert_eq!(total, 2);
+    assert_eq!(docs.len(), 2);
+
+    // the limit is clamped, never trusted
+    let molt_core::Reply::WikiList { docs, .. } =
+        walter.cmd_wiki_list(None, None, 99_999).expect("clamped")
+    else {
+        panic!("wrong reply");
+    };
+    assert_eq!(docs.len(), 4);
+
+    // one document, in full — and an unknown path is an error
+    let molt_core::Reply::WikiDocument { content, path, .. } = walter
+        .cmd_wiki_get("people/bob.md".to_string())
+        .expect("get")
+    else {
+        panic!("wrong reply");
+    };
+    assert_eq!(path, "people/bob.md");
+    assert_eq!(content, "# Bob\n");
+    assert!(
+        walter.cmd_wiki_get("nope.md".to_string()).is_err(),
+        "an unknown path must not read as an empty document"
+    );
+}
+
+/// `knowledge_base_scale.md` §4.1: the fold cache is a pure DERIVATION.
+/// After every applied block — cache warm, cache dropped, and across a
+/// wholesale re-projection — the served base equals a fresh fold of the
+/// applied log, revision included.
+#[test]
+fn the_fold_cache_equals_a_fresh_fold_after_every_block() {
+    const ADD_A: &str = "diff --git a/a.md b/a.md\nnew file mode 100644\n--- /dev/null\n+++ b/a.md\n@@ -0,0 +1,2 @@\n+hello\n+world\n";
+    const ADD_B: &str = "diff --git a/b.md b/b.md\nnew file mode 100644\n--- /dev/null\n+++ b/b.md\n@@ -0,0 +1,1 @@\n+disjoint\n";
+    const EDIT_A: &str = "diff --git a/a.md b/a.md\n--- a/a.md\n+++ b/a.md\n@@ -1,2 +1,2 @@\n-hello\n+hallo\n world\n";
+    const RENAME_A: &str = "diff --git a/a.md b/c.md\nsimilarity index 100%\nrename from a.md\nrename to c.md\n";
+    let wp = |p: &str| json!({"op": "wiki_patch", "summary": "x", "value": p});
+    // the ORACLE is the pre-cache code path: fold the whole log from scratch
+    let fresh = |s: &crate::State| {
+        let payloads: Vec<serde_json::Value> = s
+            .applied_values(Surface::Memory, None, None)
+            .into_iter()
+            .map(|(_, v)| v)
+            .collect();
+        molt_core::wiki_fold::wiki_fold_with_rev(&payloads)
+    };
+
+    let b = Builder::new(&["petra", "walter"], 2);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    for (id, patch) in [(10u64, ADD_A), (11, ADD_B), (12, EDIT_A), (13, RENAME_A)] {
+        seal_wiki(&mut walter, &b, "petra", id, wp(patch));
+        let (tree, rev) = walter.wiki_base();
+        assert_eq!(
+            (tree.into_owned(), rev),
+            fresh(&walter),
+            "the warm cache drifted after block {id}"
+        );
+        // …and a DROPPED cache serves the same base: the fallback fold is
+        // the same function, so a missed refresh costs time, never a tree
+        walter.wiki_cache = None;
+        let (tree, rev) = walter.wiki_base();
+        assert_eq!(
+            (tree.into_owned(), rev),
+            fresh(&walter),
+            "the cold path drifted after block {id}"
+        );
+        walter.refresh_wiki_cache();
+    }
+    assert_eq!(
+        walter.wiki_tree().get("c.md").map(String::as_str),
+        Some("hallo\nworld\n"),
+        "add, edit and rename all folded"
+    );
+    assert_eq!(walter.wiki_base().1, 4, "four patches applied");
+
+    // a wholesale re-projection can REMOVE entries — the cache must refold
+    // across it rather than extend
+    walter.apply_chain_to_state();
+    let (tree, rev) = walter.wiki_base();
+    assert_eq!(
+        (tree.into_owned(), rev),
+        fresh(&walter),
+        "the cache survived a rebuild it cannot describe"
+    );
+}
+
 /// `seal_one`'s wiki twin: drive `payload` through the real chain
 /// machinery to a sealed Applied block.
 fn seal_wiki(

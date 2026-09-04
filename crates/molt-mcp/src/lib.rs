@@ -318,6 +318,28 @@ fn str_arg(args: &Value, key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("missing string argument `{key}`"))
 }
 
+/// An optional string: absent or null = none, a non-string is a typo the
+/// caller has to hear about.
+fn opt_str_arg(args: &Value, key: &str) -> Result<Option<String>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(_) => Err(format!("argument `{key}` must be a string")),
+    }
+}
+
+/// An optional count: absent or null = 0, which every handler reads as
+/// "the default".
+fn opt_u32_arg(args: &Value, key: &str) -> Result<u32, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(0),
+        Some(v) => v
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| format!("argument `{key}` must be a non-negative integer")),
+    }
+}
+
 fn bool_arg(args: &Value, key: &str) -> Result<bool, String> {
     args.get(key)
         .and_then(Value::as_bool)
@@ -619,6 +641,7 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
         mcp_port: d.mcp_port,
         mcp_allow: d.mcp_allow,
         mcp_token: d.mcp_token,
+        mcp_read_token: d.mcp_read_token,
         anonymity: d.anonymity,
         tor_mode: d.tor_mode,
         tor_port: d.tor_port,
@@ -913,7 +936,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "read_state",
             command: "read_state",
-            description: "Read the projected state of one surface. A CHAT read sends read receipts for the messages it returns (retrieval is the agent's way of seeing them - agents and humans light the same dots; silent while this node's receipts are off), so there is no need to call mark_read after reading. Chat messages each carry their stable 32-char hex `id` - the handle for react_chat, delete_chat, download_file, remove_file and chat_send's `quote` - plus the channel they file under, and the snapshot enumerates every channel seen in the log (`channels`). Each enumerated patch channel carries the vote's lifecycle in `state` (\"proposed\"/\"applied\"/\"rejected\"; absent for group/topic channels and unknown referents): a decided vote's discussion is READ-ONLY - chat_send/share_file into it are refused - but stays readable here. Pass `channel` to get only the messages of that view; channels are tags on the one shared stream, not boundaries, and the enumeration still lists all of them. Pass `view` (chat only) to narrow the read: \"unread\" keeps only the messages after this seat's read cursor; \"today\" and omitting it both give the whole retention window. The filters compose. On gated surfaces, `applied_ids` runs positionally parallel to `applied` and names the proposal each applied entry came from (null = origin unknown: legacy data) - the back-link from an accepted change to its `{\"kind\":\"patch\",\"id\":N}` discussion channel. On `files` the applied entries are the persist/unpersist votes; the tables themselves are read_uploads.",
+            description: "Read the projected state of one surface. A CHAT read sends read receipts for the messages it returns (retrieval is the agent's way of seeing them - agents and humans light the same dots; silent while this node's receipts are off), so there is no need to call mark_read after reading. Chat messages each carry their stable 32-char hex `id` - the handle for react_chat, delete_chat, download_file, remove_file and chat_send's `quote` - plus the channel they file under, and the snapshot enumerates every channel seen in the log (`channels`). Each enumerated patch channel carries the vote's lifecycle in `state` (\"proposed\"/\"applied\"/\"rejected\"; absent for group/topic channels and unknown referents): a decided vote's discussion is READ-ONLY - chat_send/share_file into it are refused - but stays readable here. Pass `channel` to get only the messages of that view; channels are tags on the one shared stream, not boundaries, and the enumeration still lists all of them. Pass `view` (chat only) to narrow the read: \"unread\" keeps only the messages after this seat's read cursor; \"today\" and omitting it both give the whole retention window. The filters compose. On gated surfaces, `applied_ids` runs positionally parallel to `applied` and names the proposal each applied entry came from (null = origin unknown: legacy data) - the back-link from an accepted change to its `{\"kind\":\"patch\",\"id\":N}` discussion channel. On `files` the applied entries are the persist/unpersist votes; the tables themselves are read_uploads. On `memory` the whole folded wiki rides along - read a large base paged with wiki_list + wiki_get instead.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -942,6 +965,37 @@ pub fn tools() -> Vec<ToolDef> {
             description: "The persistent chain as display data (Chain-History): every committed block of the open republic, newest first - genesis, applied changes, membership transitions, and checkpoint compaction cuts - each with its height, kind, target surface, display payload, consumed proposal id, and the m signers. On a pruned holder the history below the last checkpoint cut appears as summarized entries rebuilt from the checkpoint blob (height 0 - the per-block positions and signatures were dropped with the history).",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ReadChain),
+        },
+        ToolDef {
+            name: "wiki_list",
+            command: "wiki_list",
+            description: "List the shared wiki's documents - path, size and title, no content - one page at a time. `prefix` narrows to a folder, `cursor` continues a page (pass the previous reply's `next_cursor`), `limit` is clamped to 1..=500 (default 100). `total` counts everything under the prefix. Fetch a document with wiki_get.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "prefix": { "type": "string", "description": "optional: only paths under this folder" },
+                    "cursor": { "type": "string", "description": "optional: continue after this path (a previous reply's next_cursor)" },
+                    "limit": { "type": "integer", "description": "optional: page size, 1..=500 (default 100)" }
+                }
+            }),
+            build: |args| Ok(Command::WikiList {
+                prefix: opt_str_arg(args, "prefix")?,
+                cursor: opt_str_arg(args, "cursor")?,
+                limit: opt_u32_arg(args, "limit")?,
+            }),
+        },
+        ToolDef {
+            name: "wiki_get",
+            command: "wiki_get",
+            description: "One wiki document in full, front matter included. An unknown path is an error, never an empty document.",
+            schema: || json!({
+                "type": "object",
+                "properties": { "path": { "type": "string", "description": "the document's path, e.g. \"people/anna.md\"" } },
+                "required": ["path"]
+            }),
+            build: |args| Ok(Command::WikiGet {
+                path: str_arg(args, "path")?,
+            }),
         },
         ToolDef {
             name: "list_proposals",
@@ -2659,6 +2713,7 @@ mod tests {
             tor_mode: d.tor_mode.clone(),
             tor_port: d.tor_port,
             mcp_token: Some(t.to_string()),
+            mcp_read_token: None,
             s3_secret_key: None,
         };
         h.execute(Command::SetNodePosture { posture: posture("first") })

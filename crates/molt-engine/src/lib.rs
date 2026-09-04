@@ -54,6 +54,7 @@ pub use relay_msg::{known_log_shapes, LogShape};
 mod session;
 mod transfer;
 mod wiki_export;
+mod wiki_index;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -828,6 +829,32 @@ pub(crate) struct RecoveryState {
         std::sync::Arc<std::sync::Mutex<Option<molt_net::LoopbackTransport>>>,
 }
 
+/// The folded Memory base, kept across reads
+/// (`docs/memory/knowledge_base_scale.md` §4.1). A pure DERIVATION of the
+/// applied logs: dropping it costs a refold, never a different tree.
+pub(crate) struct WikiCache {
+    /// The folded tree.
+    pub(crate) tree: std::collections::BTreeMap<String, String>,
+    /// How many patches APPLIED into it (`wiki_fold_with_rev`'s revision).
+    pub(crate) rev: u64,
+    /// Entries already folded from the legacy log / from the chain log —
+    /// the concat order is legacy-then-chain, so an append extends the
+    /// cache only while the OTHER half stands still.
+    pub(crate) legacy: usize,
+    /// See [`WikiCache::legacy`].
+    pub(crate) chain: usize,
+    /// The epoch the fold was taken under.
+    pub(crate) epoch: u64,
+}
+
+/// A pending `wiki_patch` proposal, parsed once (§4.2).
+pub(crate) struct PendingPatch {
+    /// The parsed files.
+    pub(crate) files: Vec<molt_core::wiki_fold::PatchFile>,
+    /// Every path they name, old side and new side.
+    pub(crate) paths: std::collections::BTreeSet<String>,
+}
+
 pub(crate) struct State {
     pub(crate) config: GroupConfig,
     ev_tx: broadcast::Sender<Event>,
@@ -877,6 +904,17 @@ pub(crate) struct State {
     /// parallel id track can never drift. `None` = origin unknown (restored
     /// from a pre-id dump).
     pub(crate) applied: HashMap<Surface, Vec<(Option<u64>, Value)>>,
+    /// The folded Memory base, cached across reads (§4.1). Never persisted,
+    /// never consensus input — a keystone pins it equal to a fresh fold.
+    pub(crate) wiki_cache: Option<WikiCache>,
+    /// Bumped whenever the Memory projection changes in a way an APPEND
+    /// cannot describe: a wholesale rebuild, a blob swap, a restore, a
+    /// close. The cache extends itself only while this stands still.
+    pub(crate) applied_epoch: u64,
+    /// Pending `wiki_patch` proposals, parsed once (§4.2). A CACHE: a miss
+    /// costs a parse, never a wrong verdict — the walk's candidate list
+    /// always comes from `proposals`.
+    pub(crate) wiki_pending: HashMap<u64, PendingPatch>,
     /// Every known proposal — stored as the schema type
     /// ([`molt_core::ProposalRecord`]), so snapshots need no conversion.
     pub(crate) proposals: HashMap<u64, ProposalRecord>,
@@ -1133,6 +1171,9 @@ impl State {
             },
             ui_state: None,
             applied,
+            wiki_cache: None,
+            applied_epoch: 0,
+            wiki_pending: HashMap::new(),
             proposals: HashMap::new(),
             next_id: 1,
             next_seq: 1,
@@ -1505,6 +1546,11 @@ impl State {
                         return Err(MoltError::UnknownView(surface, v.clone()));
                     }
                 }
+                // the fold is the Memory read's whole cost: warm the cache
+                // here, where the borrow is mutable (§4.1)
+                if surface == Surface::Memory {
+                    self.refresh_wiki_cache();
+                }
                 let snap = self.snapshot(surface, channel, view.as_deref());
                 // retrieval IS the reading: the chat messages just handed
                 // out get the same honest receipts the GUI sends when it
@@ -1532,6 +1578,12 @@ impl State {
             Command::ReadUiState => Ok(Reply::UiState { snapshot: self.ui_state.clone() }),
             Command::UiAction { action } => self.cmd_ui_action(action),
             Command::ReadChain => self.cmd_read_chain(),
+            Command::WikiList {
+                prefix,
+                cursor,
+                limit,
+            } => self.cmd_wiki_list(prefix, cursor, limit),
+            Command::WikiGet { path } => self.cmd_wiki_get(path),
 
             // net/ (engine-internal, sent by the node's own supervisor)
             Command::NetDelivered {

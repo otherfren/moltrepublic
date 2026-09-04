@@ -61,7 +61,8 @@ pub struct NodeConfig {
     #[serde(default)]
     pub poke_enabled: bool,
     /// Command run via `sh -c` when this seat is poked or new work awaits
-    /// its vote (context in `MOLT_WAKE_*` env vars). Empty = off.
+    /// its vote (context in `MOLT_WAKE_*` env vars, `MOLT_WAKE_PENDING`
+    /// carrying the queue size). Empty = off.
     #[serde(default)]
     pub poke_wake_command: String,
 }
@@ -316,6 +317,12 @@ pub struct McpConfig {
     /// API key every MCP client must present in its `initialize` request.
     #[serde(default)]
     pub token: String,
+    /// A SECOND key admitting only the read tools
+    /// (`docs/memory/knowledge_base_scale.md` §4.7). Empty or absent = off,
+    /// never "unauthenticated". Written here only once one is issued, so a
+    /// config an older build still opens stays that way.
+    #[serde(default)]
+    pub read_token: String,
 }
 
 impl Default for McpConfig {
@@ -324,6 +331,7 @@ impl Default for McpConfig {
             port: default_mcp_port(),
             allow: default_mcp_allow(),
             token: String::new(),
+            read_token: String::new(),
         }
     }
 }
@@ -520,6 +528,8 @@ pub struct Settings {
     pub mcp_allow: String,
     /// MCP API token clients must present.
     pub mcp_token: String,
+    /// The read-only MCP token ("" = no read-only access).
+    pub mcp_read_token: String,
     /// GUI language: `"en" | "de"`.
     pub lang: String,
     /// GUI theme: `"classic" | "dark" | "brutalism"`.
@@ -568,6 +578,7 @@ impl Default for Settings {
             mcp_port: default_mcp_port(),
             mcp_allow: default_mcp_allow(),
             mcp_token: String::new(),
+            mcp_read_token: String::new(),
             lang: default_lang(),
             theme: default_theme(),
             font_app: default_font_app(),
@@ -635,6 +646,7 @@ impl From<&Config> for Settings {
             mcp_port: c.mcp.port,
             mcp_allow: c.mcp.allow.clone(),
             mcp_token: c.mcp.token.clone(),
+            mcp_read_token: c.mcp.read_token.clone(),
             lang: c.ui.lang.clone(),
             theme: c.ui.theme.clone(),
             font_app: c.ui.font_app,
@@ -662,10 +674,11 @@ headless = {headless}
 poke_enabled = {poke_enabled}
 # Command run via `sh -c` when this seat is poked or new work awaits its
 # vote - wakes a sleeping agent harness. "" = off. Context arrives as the
-# env vars MOLT_WAKE_REASON (poked|vote_pending), MOLT_WAKE_BY and
-# MOLT_WAKE_WORKSPACE; always QUOTE them ("$MOLT_WAKE_BY"). One wake runs
-# at a time. Only this file and the GUI set it: it is executed here, so no
-# MCP client may plant one.
+# env vars MOLT_WAKE_REASON (poked|vote_pending), MOLT_WAKE_BY,
+# MOLT_WAKE_WORKSPACE and MOLT_WAKE_PENDING (cards awaiting this seat);
+# always QUOTE them ("$MOLT_WAKE_BY"). One wake runs at a time and a burst
+# nudges once: loop list_proposals until nothing waits. Only this file and
+# the GUI set it: it is executed here, so no MCP client may plant one.
 poke_wake_command = {poke_wake_command}
 
 [storage]
@@ -723,6 +736,8 @@ allow = {mcp_allow}
 # API key every MCP client must send in its initialize request. Keep it secret;
 # rotate it from the GUI settings. A fresh token is written on --generate-config.
 token = {mcp_token}
+# A second key admitting only the READ tools can be issued in the GUI
+# (Settings > MCP); it is written here as read_token. Absent = off.
 
 [transport.anonymity]
 # network = "tor" | "none" (default "none" = clearnet). "tor" routes
@@ -996,6 +1011,9 @@ pub fn salvage(text: &str) -> Settings {
         if let Some(token) = mcp.get("token").and_then(toml::Value::as_str) {
             s.mcp_token = token.to_string();
         }
+        if let Some(token) = mcp.get("read_token").and_then(toml::Value::as_str) {
+            s.mcp_read_token = token.to_string();
+        }
     }
     if let Some(ui) = value.get("ui") {
         if let Some(lang) = ui.get("lang").and_then(toml::Value::as_str) {
@@ -1219,6 +1237,13 @@ pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
     set_int(mcp, "port", i64::from(settings.mcp_port));
     set_str(mcp, "allow", &settings.mcp_allow);
     set_str(mcp, "token", &settings.mcp_token);
+    // written only once one is issued: an absent key is the value (off),
+    // and a config without it still opens on a build that predates it
+    if settings.mcp_read_token.is_empty() {
+        mcp.remove("read_token");
+    } else {
+        set_str(mcp, "read_token", &settings.mcp_read_token);
+    }
 
     // Heal-once: configs written before the SMP transport was removed carry
     // a [transport.smp] section that the deny_unknown_fields strict parse
@@ -1488,9 +1513,44 @@ mod tests {
         // runtime edit and the file is later read back.
         let original = non_default_settings();
         let salvaged = salvage(&render(&original));
-        assert_eq!(original, salvaged);
+        // …with ONE deliberate exception: the read-only MCP key is not in
+        // the template, so a config generated by this build still opens on
+        // one that predates the key (`deny_unknown_fields`). It reaches the
+        // file only through `apply`, once the operator issues one.
+        assert_eq!(
+            salvaged.mcp_read_token, "",
+            "the template must not carry the read-only key"
+        );
+        assert_eq!(
+            Settings {
+                mcp_read_token: original.mcp_read_token.clone(),
+                ..salvaged
+            },
+            original
+        );
         // And the rendered text is accepted by the strict parser too.
         assert!(parse(&render(&original)).is_ok());
+    }
+
+    /// …but `apply` does carry it, and REMOVES it again on revoke, so an
+    /// emptied key cannot linger in the file as a live credential.
+    #[test]
+    fn the_read_only_key_is_written_on_issue_and_removed_on_revoke() {
+        let issued = non_default_settings();
+        let text = update(&render(&issued), &issued).expect("update");
+        assert!(text.contains("read_token = \"0ddba11feed1eaf5\""));
+        assert_eq!(salvage(&text).mcp_read_token, issued.mcp_read_token);
+
+        let revoked = Settings {
+            mcp_read_token: String::new(),
+            ..issued
+        };
+        let text = update(&text, &revoked).expect("update");
+        assert!(
+            !text.lines().any(|l| l.trim_start().starts_with("read_token")),
+            "a revoked key must not linger"
+        );
+        assert!(parse(&text).is_ok());
     }
 
     /// A settings value with every field off its default.
@@ -1525,6 +1585,7 @@ mod tests {
             mcp_port: 5151,
             mcp_allow: "127.0.0.1, 192.168.1.10".to_string(),
             mcp_token: "deadbeefcafef00d".to_string(),
+            mcp_read_token: "0ddba11feed1eaf5".to_string(),
             lang: "de".to_string(),
             theme: "brutalism".to_string(),
             font_app: 16,
