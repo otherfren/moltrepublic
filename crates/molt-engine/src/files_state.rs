@@ -24,9 +24,40 @@ pub(crate) struct ShareIdentity {
     pub(crate) size: u64,
     pub(crate) checksum: String,
     pub(crate) shared_ts: u64,
+    /// Series-v2 material (`docs/files/mirroring.md` §3.1); "" / 0 on a
+    /// legacy share.
+    pub(crate) key_b64: String,
+    pub(crate) pieces: u32,
+    pub(crate) root: String,
+}
+
+/// The share's content key, if the share carries a usable one (series
+/// v2) - the ONE predicate that tells v2 from a legacy share.
+pub(crate) fn decode_share_key(key_b64: &str) -> Option<[u8; 32]> {
+    use base64::Engine as _;
+    let raw = base64::engine::general_purpose::STANDARD.decode(key_b64).ok()?;
+    <[u8; 32]>::try_from(raw).ok()
 }
 
 impl ShareIdentity {
+    /// Whether `claimed` names this share: the six identity fields must
+    /// agree; the v2 material only when the claim carries it - an older
+    /// build proposes without it (mixed builds are a supported case), and
+    /// its block then pins the share without mirror material.
+    pub(crate) fn matches(&self, claimed: &ShareIdentity) -> bool {
+        let base = self.by == claimed.by
+            && self.name == claimed.name
+            && self.kind == claimed.kind
+            && self.size == claimed.size
+            && self.checksum == claimed.checksum
+            && self.shared_ts == claimed.shared_ts;
+        let material = claimed.key_b64.is_empty()
+            || (self.key_b64 == claimed.key_b64
+                && self.pieces == claimed.pieces
+                && self.root == claimed.root);
+        base && material
+    }
+
     fn from_payload(v: &Value) -> Option<ShareIdentity> {
         let s = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
         let me = ShareIdentity {
@@ -36,6 +67,13 @@ impl ShareIdentity {
             size: v.get("size").and_then(Value::as_u64)?,
             checksum: s("checksum").unwrap_or_default(),
             shared_ts: v.get("shared_ts").and_then(Value::as_u64).unwrap_or(0),
+            key_b64: s("key_b64").unwrap_or_default(),
+            pieces: v
+                .get("pieces")
+                .and_then(Value::as_u64)
+                .and_then(|n| u32::try_from(n).ok())
+                .unwrap_or(0),
+            root: s("root").unwrap_or_default(),
         };
         (!me.by.is_empty() && !me.name.is_empty()).then_some(me)
     }
@@ -47,6 +85,9 @@ impl ShareIdentity {
         v["size"] = Value::from(self.size);
         v["checksum"] = Value::from(self.checksum.as_str());
         v["shared_ts"] = Value::from(self.shared_ts);
+        v["key_b64"] = Value::from(self.key_b64.as_str());
+        v["pieces"] = Value::from(self.pieces);
+        v["root"] = Value::from(self.root.as_str());
     }
 }
 
@@ -92,6 +133,31 @@ pub(crate) fn validate_files_payload(v: &Value) -> Result<(), MoltError> {
     }
     if op == "unpersist" && v.get("at").and_then(Value::as_u64).is_none() {
         return Err(bad("unpersist needs its stamp `at`"));
+    }
+    validate_series_material(v)
+}
+
+/// The series-v2 material's SHAPE when a payload carries any of it: a
+/// 32-byte key, a sha256 root, a piece count that fits the size - an
+/// inconsistent identity must not reach a threshold signature.
+fn validate_series_material(v: &Value) -> Result<(), MoltError> {
+    let bad = |m: &str| MoltError::BadPayload(m.to_string());
+    let key = v.get("key_b64").and_then(Value::as_str).unwrap_or("");
+    let root = v.get("root").and_then(Value::as_str).unwrap_or("");
+    let pieces = v.get("pieces").and_then(Value::as_u64).unwrap_or(0);
+    if key.is_empty() && root.is_empty() && pieces == 0 {
+        return Ok(()); // a legacy share
+    }
+    if decode_share_key(key).is_none() {
+        return Err(bad("the share key must be 32 bytes, base64"));
+    }
+    if root.len() != 64 || !root.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(bad("the share root must be a sha256 hex"));
+    }
+    let size = v.get("size").and_then(Value::as_u64).unwrap_or(0);
+    let want = u64::from(molt_net::file_plane::Manifest::piece_count_for(size));
+    if pieces != want {
+        return Err(bad("the piece count does not fit the size"));
     }
     Ok(())
 }
@@ -163,6 +229,9 @@ impl State {
                         size: f.size,
                         checksum: f.checksum.clone(),
                         shared_ts: msg.ts,
+                        key_b64: f.key_b64.clone(),
+                        pieces: f.pieces,
+                        root: f.root.clone(),
                     },
                     f.available,
                 )
@@ -300,7 +369,7 @@ impl State {
                 if self.share_expired_in(&states, &id) {
                     return Err(MoltError::FileExpired(id));
                 }
-                if mine != claimed {
+                if !mine.matches(&claimed) {
                     return Err(bad("the proposal names a different file than this seat has"));
                 }
             }
@@ -308,7 +377,7 @@ impl State {
                 let Some(FileState::Persistent(meta)) = states.get(&id) else {
                     return Err(bad("not persistent"));
                 };
-                if *meta != claimed {
+                if !meta.matches(&claimed) {
                     return Err(bad("the proposal names a different file than this seat has"));
                 }
                 let at = payload.get("at").and_then(Value::as_u64).unwrap_or(0);

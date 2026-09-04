@@ -1,7 +1,8 @@
 # Mirroring: every consenting seat keeps the persistent files
 
 **Status: OPEN - design of 2026-09-03, decisions ratified by the user the
-same evening (§1), stages M1-M6 not built.** Follows
+same evening (§1); M1 (the piece format v2, the cap removal) is BUILT in
+the change that carries this line, M2-M6 open.** Follows
 `docs_archive/files/persistent_uploads.md` (the persist/unpersist votes,
 landed the same day).
 
@@ -69,32 +70,57 @@ veto this in review.
 
 ## 3. Design
 
-### 3.1 The piece format (series v2)
+### 3.1 The piece format (series v2) - as built in M1
 
-- At SHARE time the sharer's hashing task (already off the actor,
-  `spawn_share_hash`) also draws the 32-byte **content key** `K`, seals
-  the file into pieces and computes the manifest:
-  `piece_i = AEAD(K_i, nonce 0, plain_i)` with `K_i = HKDF(K, "molt-piece" ‖ le32(i))`
-  (one derived key per piece: deterministic, byte-identical re-publishes,
-  no nonce bookkeeping), `plain_i` = the i-th 44 000-byte slice, the last
-  one zero-padded to the full size (the relay sees uniform blocks);
-  `count: u32`.
-- **Manifest** = `count ‖ size ‖ sha256(piece_0) ‖ … ‖ sha256(piece_{n-1})`
-  over the CIPHERTEXT pieces; **root** = sha256 of the manifest. The chat
-  share (`FileMeta`) grows `key_b64`, `pieces: u32` and `root` (additive,
-  `#[serde(default)]`; a share without them is a legacy v1 share). The
-  persist block copies all three (sign-what-you-see: members ratify the
-  identity AND the key). The manifest itself is published as piece
-  `count` (the last index + 1), sealed with `K_manifest = HKDF(K, "molt-manifest")`.
-- A holder verifies each fetched piece by hash against the manifest and
-  the manifest by root; the assembled file by `checksum` (sha256 of the
-  plaintext) as today.
+- At SHARE time the sharer's hashing task (`spawn_share_hash`, off the
+  actor) draws the 32-byte **content key** `K` and, in the SAME streaming
+  pass as the checksum, the manifest: the sha256 of every UNPADDED
+  plaintext slice (44 000 bytes each, `PIECE_PAYLOAD_LEN`). The chat share
+  (`FileMeta`) grows `key_b64`, `pieces` and `root` (additive, skipped
+  when empty - a share without them is a legacy v1 share); the persist
+  block copies all three (sign-what-you-see: members ratify the identity
+  AND the key).
+- A piece is a kind-447 event exactly like a v1 chunk, with ONE outer AEAD
+  layer keyed by `outer_key(K) = HKDF-SHA256(K, "molt-piece-outer-v2")`
+  instead of the epoch exporter (the same `seal_outer`: a random 12-byte
+  nonce per publish, so re-publishes differ on the wire and holders dedup
+  by index after opening). Plaintext = `index u32le ‖ count u32le ‖ len
+  u32le ‖ payload`, zero-padded to the uniform block. The key IS the
+  series filter: another file's or group's piece fails the AEAD.
+- The manifest has TWO wire levels above the data: the slice-hash list,
+  chunked at indices `count..count+k` (1 375 hashes per chunk), and ONE
+  top record at `count+k` = `count u32le ‖ size u64le ‖ sha256(chunk_0) ‖
+  …`; **root** = sha256(top record). A holder verifies the record by
+  root, each chunk by the record, each slice by its chunk - a forged
+  piece of ANY level is dropped by hash, never a hard error (`Manifest`,
+  `TopRecord`, `SeriesLayout`). The record must fit one piece, which
+  bounds a series at `MAX_SERIES_PIECES` (~83 GB).
+- Relays replay stored events NEWEST first, so the manifest (published
+  first, hence oldest) tends to arrive LAST: a fetch lands every slice as
+  it arrives (AEAD-authenticated under the members' key), remembers its
+  hash, and verifies it once its chunk is known; a slice that then fails
+  is re-marked missing and the honest one overwrites it. Nothing waits
+  for the manifest, nothing is dropped for lack of it. The `.part` file
+  is never pre-sized (a hostile size claim allocates nothing); the
+  landed file must hash to the share checksum before the rename.
+- The fetch subscription carries a stored-event bound sized to the
+  series (`SeriesLayout::history_bound` = twice the pieces plus headroom)
+  - the relay runtime's default 5 000 would cut a large series short.
 - Tags stay the publish stamp's day window (privacy: a fixed per-file tag
   would let a relay group and count a file's pieces for its lifetime).
-  A fetcher subscribes the windows from the series' first stamp to now in
-  chunks of `MAX_CATCHUP_WINDOWS` (60) - `h_tags_for_catchup` exists.
-- v1 series stay fetchable for legacy shares (no key → the exporter path);
-  nothing new is published as v1.
+  The `FileServed` stamp is the series START; a fetcher subscribes every
+  window between that stamp and now in EITHER order plus the skew
+  neighbours (`file_catchup_tags`, newest `MAX_CATCHUP_WINDOWS` = 60
+  kept) - a sharer's clock ahead across a UTC day boundary stamps into
+  the fetcher's next window.
+- The sharer takes the hour's publish round BEFORE re-reading the file;
+  the re-read must still hash to the root (a changed file is refused).
+  A relay's "slow down" is waited out per piece (M2 paces instead).
+- v1 series stay fetchable for legacy shares (no key → the exporter path,
+  its in-memory claim bounded by the configured cap or 1 GiB); nothing
+  new is published as v1. The share cap is gone: `file_cap_bytes` absent
+  = no cap, 0 = sharing off, n = a deliberate cap (`FileCap`); the old
+  unconditional `4194304` in an existing config heals away at boot.
 
 ### 3.2 The trickle sender
 
@@ -219,3 +245,27 @@ tags kept for privacy; the lowest-name holder re-seeds; catch-up 60
 windows per subscription; one file per piece on disk; status debounce 32
 pieces / 5 min. Each is a named constant or config key, none a design
 commitment.
+
+M1 decisions (2026-09-03, worker): ONE outer layer keyed by the derived
+file key instead of a per-piece HKDF key with a fixed nonce - the existing
+`seal_outer` does it, the random nonce costs nothing, and holders dedup by
+index anyway; the manifest hashes the plaintext slices (a holder with the
+key verifies what it lands, and the plaintext hash also lets a re-publish
+under a fresh nonce verify); the manifest is chunked at indices `count..`
+(it outgrows one block past ~1 375 pieces); the whole-series M1 publish
+still costs one hourly round (M2 changes the pacing).
+
+M1 review round (2026-09-03): the manifest became two levels (chunks +
+top record) so a forged chunk is dropped by hash like a forged slice;
+slices land as they arrive and verify later (relays replay newest first);
+the `.part` file is never pre-sized; the fetch bound follows the series;
+a mixed-build republic works - an older build's persist carries no series
+material, a new build's approve matches the six identity fields and the
+material only when the claim carries it, and such a block pins the share
+WITHOUT mirror material (M4 skips it; an unpersist + persist on a new
+build restores it); the wire door and the propose door check the
+material's shape (`validate_files_payload`); a file that changes between
+the root check and a later slice aborts the publish with the round spent
+(accepted); the content key rides the chat message and therefore every
+read of that message - a member secret, visible to the seat's agent like
+the file itself; a relay's rate limit is waited out per piece.

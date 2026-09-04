@@ -19,14 +19,38 @@ type FilePlaneContext = (
 );
 
 
+/// What `file_cap_bytes` says (`docs/files/mirroring.md` §1): absent =
+/// no cap, 0 = sharing OFF (FP4 2026-08-16), n = a deliberate cap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FileCap {
+    Off,
+    Limit(u64),
+    Unlimited,
+}
+
+/// What a v1 (legacy, exporter-sealed) series may claim when no cap is
+/// set: the old cap was a raisable key, so "no cap" must not read stricter
+/// than any value an operator ever raised it to. A v1 fetch reassembles
+/// in memory, hence a bound at all.
+const LEGACY_V1_FETCH_BOUND: u64 = 1024 * 1024 * 1024;
+
+/// The in-memory bound a v1 fetch allows a series claim: the configured
+/// cap when there is one, else [`LEGACY_V1_FETCH_BOUND`] (sharing OFF
+/// still pulls a peer's legacy share).
+pub(crate) fn v1_fetch_bound(cap: FileCap) -> u64 {
+    match cap {
+        FileCap::Limit(cap) => cap,
+        FileCap::Off | FileCap::Unlimited => LEGACY_V1_FETCH_BOUND,
+    }
+}
+
 impl State {
-    /// The operative per-file cap (`file_transfer_nostr.md` §5.1):
-    /// `None` = file sharing is OFF (`file_cap_bytes = 0`, FP4 2026-08-16),
-    /// otherwise the configured value (an absent config key serde-defaults
-    /// to 4 MiB before it ever reaches here).
-    pub(crate) fn effective_file_cap(&self) -> Option<u64> {
-        let cap = self.session.settings.file_cap_bytes;
-        (cap != 0).then_some(cap)
+    pub(crate) fn effective_file_cap(&self) -> FileCap {
+        match self.session.settings.file_cap_bytes {
+            Some(0) => FileCap::Off,
+            Some(cap) => FileCap::Limit(cap),
+            None => FileCap::Unlimited,
+        }
     }
 
     /// The RELAY file plane's channel + exporter material, if this
@@ -138,20 +162,24 @@ impl State {
             );
             return;
         };
-        let fetch = crate::transfer::spawn_nostr_fetch(
-            channel,
-            ring,
-            id,
-            at,
-            target,
-            dest,
-            // sharing-off still allows PULLING a peer's share; the default
-            // bounds what a hostile series claim may allocate
-            self.effective_file_cap()
-                .unwrap_or_else(molt_core::default_file_cap_bytes),
-            self.net_scope,
-            cmd_tx,
-        );
+        // a v2 share (a usable content key - the ONE predicate the serve
+        // side uses too) fetches its piece series from the series start;
+        // a legacy one the exporter-sealed chunk series
+        let fetch = if crate::files_state::decode_share_key(&target.key_b64).is_some() {
+            crate::transfer::spawn_nostr_fetch_v2(channel, id, at, target, dest, self.net_scope, cmd_tx)
+        } else {
+            crate::transfer::spawn_nostr_fetch(
+                channel,
+                ring,
+                id,
+                at,
+                target,
+                dest,
+                v1_fetch_bound(self.effective_file_cap()),
+                self.net_scope,
+                cmd_tx,
+            )
+        };
         self.files.fetches.retain(|h| !h.is_finished());
         self.files.fetches.push(fetch);
     }
@@ -162,8 +190,13 @@ impl State {
     /// publish the series N times.
     pub(super) fn serve_file_wanted(&mut self, id: MessageId) {
         let me = self.member();
-        let (is_mine, size) = match self.share_identity(&id) {
-            Ok((ident, available)) => (ident.by == me && available, ident.size),
+        let (is_mine, size, key_b64, root) = match self.share_identity(&id) {
+            Ok((ident, available)) => (
+                ident.by == me && available,
+                ident.size,
+                ident.key_b64,
+                ident.root,
+            ),
             Err(_) => return,
         };
         if !is_mine || self.share_expired(&id) || self.files.serving.contains(&id) {
@@ -172,14 +205,18 @@ impl State {
         // the size is known here — an over-cap share must not cost a full
         // disk read per request only to be refused inside the publish
         // (review 2026-08-10; the share-time gate makes this an edge)
-        let Some(cap) = self.effective_file_cap() else {
-            tracing::warn!(%id, "not serving: file sharing off (file_cap_bytes=0)");
-            return;
+        let v1_cap = match self.effective_file_cap() {
+            FileCap::Off => {
+                tracing::warn!(%id, "not serving: file sharing off (file_cap_bytes=0)");
+                return;
+            }
+            FileCap::Limit(cap) if size > cap => {
+                tracing::warn!(%id, size, "not serving a share beyond the file cap");
+                return;
+            }
+            FileCap::Limit(cap) => Some(cap),
+            FileCap::Unlimited => None,
         };
-        if size > cap {
-            tracing::warn!(%id, size, "not serving a share beyond the file cap");
-            return;
-        }
         let now = crate::now_secs();
         if let Some(at) = self.files.series.get(&id).copied() {
             // a standing series re-announces instead of re-publishing (one
@@ -205,13 +242,6 @@ impl State {
         let Some((channel, _, current)) = self.nostr_file_context() else {
             return;
         };
-        // a fresh series seals under the CURRENT epoch only — publishing
-        // under a stale ring secret would hand out a series fresh seats
-        // and post-re-key members can never open
-        let Some(exporter) = current else {
-            tracing::warn!(%id, "no current exporter secret - not publishing the series");
-            return;
-        };
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return;
         };
@@ -225,13 +255,35 @@ impl State {
         else {
             return;
         };
+        // series v2 (a share with a content key) seals under the FILE's
+        // key; a legacy share under the CURRENT epoch only — publishing
+        // under a stale ring secret would hand out a series fresh seats
+        // and post-re-key members can never open
+        if let Some(key) = crate::files_state::decode_share_key(&key_b64) {
+            self.files.serving.insert(id);
+            crate::transfer::spawn_series_publish_v2(
+                channel,
+                key,
+                id,
+                path,
+                root,
+                store,
+                self.net_scope,
+                cmd_tx,
+            );
+            return;
+        }
+        let Some(exporter) = current else {
+            tracing::warn!(%id, "no current exporter secret - not publishing the series");
+            return;
+        };
         self.files.serving.insert(id);
         crate::transfer::spawn_series_publish(
             channel,
             exporter,
             id,
             path,
-            cap,
+            v1_cap,
             store,
             self.net_scope,
             cmd_tx,

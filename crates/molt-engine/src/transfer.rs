@@ -75,6 +75,12 @@ pub(crate) struct FetchTarget {
     /// The log-anchored sha256 ("" on legacy shares — then the manifest's
     /// recomputed hash is the only reference).
     pub checksum: String,
+    /// Series-v2 material (`docs/files/mirroring.md` §3.1): the content
+    /// key (base64), the piece count and the manifest root; "" / 0 on a
+    /// legacy share, which fetches the exporter-sealed chunk series.
+    pub key_b64: String,
+    pub pieces: u32,
+    pub root: String,
 }
 
 /// Where a fetched file lands: an explicit destination (file or existing
@@ -92,6 +98,7 @@ pub(crate) struct DestSpec {
 /// target overwrites — the GUI's save dialog already confirmed the replace,
 /// and an MCP caller passing a full path means that path. A directory or
 /// the default location dodges collisions instead ("name (1).ext").
+#[derive(Clone)]
 struct ResolvedDest {
     dir: PathBuf,
     name: String,
@@ -144,6 +151,7 @@ impl DestSpec {
 /// caller named one (overwrite), otherwise the first free collision variant.
 /// Where a fetch lands: the resolved destination with its directory
 /// created, and the `.part` path the bytes go into before the rename.
+#[derive(Clone)]
 struct Landing {
     resolved: ResolvedDest,
     part: PathBuf,
@@ -172,6 +180,30 @@ fn finish_landing(landing: &Landing) -> Result<PathBuf, String> {
         format!("moving into place: {e}")
     })?;
     Ok(final_path)
+}
+
+/// The last half of a landing that hashes what ACTUALLY landed: durable
+/// first, the bytes must match `expected` (lowercase hex; "" = a legacy
+/// share with no reference), the `.part` is removed on a mismatch, then
+/// the rename. Blocking - call it off the runtime.
+fn verify_and_finish(landing: &Landing, expected: &str) -> Result<PathBuf, String> {
+    if let Ok(f) = std::fs::File::open(&landing.part) {
+        let _ = f.sync_all();
+    }
+    let verdict = hash_file(&landing.part)
+        .map_err(|e| format!("reading the landed file failed: {e}"))
+        .and_then(|(landed, _)| {
+            if !expected.is_empty() && landed != expected.to_lowercase() {
+                Err("the landed bytes do not match the share checksum".to_string())
+            } else {
+                Ok(())
+            }
+        });
+    if let Err(e) = verdict {
+        let _ = std::fs::remove_file(&landing.part);
+        return Err(e);
+    }
+    finish_landing(landing)
 }
 
 fn final_path(resolved: &ResolvedDest) -> PathBuf {
@@ -716,6 +748,21 @@ async fn feed(cmd_tx: &mpsc::Sender<Envelope>, cmd: Command) {
     let _ = cmd_tx.send(Envelope { cmd, reply }).await;
 }
 
+/// What the share-hash pass learns about a file.
+struct SharedStat {
+    checksum: String,
+    size: u64,
+    modified: u64,
+    key_b64: String,
+    pieces: u32,
+    root: String,
+}
+
+fn encode_key(key: &[u8; 32]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(key)
+}
+
 /// Hash a file off the actor and report the share metadata back
 /// (`NetFileShared` / `NetFileShareFailed`).
 pub(crate) fn spawn_share_hash(
@@ -731,7 +778,7 @@ pub(crate) fn spawn_share_hash(
             .unwrap_or_default();
         let stat = tokio::task::spawn_blocking({
             let path = path.clone();
-            move || -> std::io::Result<(String, u64, u64)> {
+            move || -> std::io::Result<SharedStat> {
                 let meta = std::fs::metadata(&path)?;
                 let modified = meta
                     .modified()
@@ -739,21 +786,38 @@ pub(crate) fn spawn_share_hash(
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
-                let (checksum, size) = hash_file(&path)?;
-                Ok((checksum, size, modified))
+                // one streaming pass: the whole-file sha256 AND the piece
+                // manifest of series v2 (`docs/files/mirroring.md` §3.1),
+                // plus the file's content key - drawn here, carried by the
+                // share message, members-only through MLS
+                let (manifest, checksum) =
+                    molt_net::file_plane::manifest_of_reader(std::fs::File::open(&path)?)?;
+                let mut key = [0u8; 32];
+                getrandom::getrandom(&mut key).map_err(std::io::Error::other)?;
+                Ok(SharedStat {
+                    checksum,
+                    size: manifest.size,
+                    modified,
+                    key_b64: encode_key(&key),
+                    pieces: manifest.count,
+                    root: manifest.root(),
+                })
             }
         })
         .await;
         let cmd = match stat {
-            Ok(Ok((checksum, size, modified))) => Command::NetFileShared {
+            Ok(Ok(st)) => Command::NetFileShared {
                 kind: molt_core::file_kind_label(&name),
                 name,
-                size,
-                modified,
-                checksum,
+                size: st.size,
+                modified: st.modified,
+                checksum: st.checksum,
                 path: path.display().to_string(),
                 channel,
                 generation: Some(scope),
+                key_b64: st.key_b64,
+                pieces: st.pieces,
+                root: st.root,
             },
             Ok(Err(e)) => Command::NetFileShareFailed {
                 name,
@@ -1004,7 +1068,7 @@ pub(crate) fn spawn_series_publish(
     exporter: [u8; 32],
     id: MessageId,
     path: PathBuf,
-    cap: u64,
+    cap: Option<u64>,
     store: crate::net::FileStateStore,
     scope: u64,
     cmd_tx: mpsc::Sender<Envelope>,
@@ -1051,6 +1115,141 @@ pub(crate) fn spawn_series_publish(
     });
 }
 
+/// RELAY file plane, sharer side, series v2: take the hour's publish
+/// round FIRST (a spent budget costs no disk read), rebuild the manifest
+/// from the file (it must still hash to the share's root - a file that
+/// changed since the share is refused), then publish every piece under
+/// the file's key. A change between that check and a later slice aborts
+/// the publish with the round spent (accepted: the requester's watchdog
+/// fails it honestly). Reports the series START stamp back as
+/// `NetFileSeriesPublished` (0 = failed).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_series_publish_v2(
+    channel: molt_net::ritual_net::GroupChannel,
+    key: [u8; 32],
+    id: MessageId,
+    path: PathBuf,
+    root: String,
+    store: crate::net::FileStateStore,
+    scope: u64,
+    cmd_tx: mpsc::Sender<Envelope>,
+) {
+    tokio::spawn(async move {
+        if let Err(e) = molt_net::file_plane::take_publish_round(&store, crate::now_secs()).await {
+            tracing::warn!(%id, error = %e, "file series v2 publish held");
+            feed(&cmd_tx, Command::NetFileSeriesPublished { id, at: 0, generation: Some(scope) }).await;
+            return;
+        }
+        let manifest = tokio::task::spawn_blocking({
+            let path = path.clone();
+            move || std::fs::File::open(&path).and_then(molt_net::file_plane::manifest_of_reader)
+        })
+        .await;
+        let at = match manifest {
+            Ok(Ok((m, _))) if m.root() == root => {
+                match molt_net::file_plane::publish_series_v2(&channel, &key, &path, &m, None).await {
+                    Ok((stamp, pieces)) => {
+                        tracing::debug!(%id, pieces, "file series v2 published");
+                        stamp
+                    }
+                    Err(e) => {
+                        tracing::warn!(%id, error = %e, "file series v2 publish failed");
+                        0
+                    }
+                }
+            }
+            Ok(Ok(_)) => {
+                tracing::warn!(%id, "not serving: the file changed since it was shared");
+                0
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(%id, error = %e, "reading the shared file failed");
+                0
+            }
+            Err(e) => {
+                tracing::warn!(%id, error = %e, "the manifest task failed");
+                0
+            }
+        };
+        feed(
+            &cmd_tx,
+            Command::NetFileSeriesPublished { id, at, generation: Some(scope) },
+        )
+        .await;
+    });
+}
+
+/// The `.part` file every slice lands in at its offset as it arrives - a
+/// 1 GB fetch never sits in memory, and the file is never pre-sized: a
+/// hostile size claim allocates nothing until pieces actually land.
+struct FileSink {
+    file: std::fs::File,
+}
+
+impl molt_net::file_plane::PieceSink for FileSink {
+    fn put(&mut self, index: u32, payload: &[u8]) -> std::io::Result<()> {
+        use std::io::{Seek as _, Write as _};
+        let block = u64::try_from(molt_net::file_plane::PIECE_PAYLOAD_LEN)
+            .map_err(|_| std::io::Error::other("block size"))?;
+        self.file.seek(std::io::SeekFrom::Start(u64::from(index).saturating_mul(block)))?;
+        self.file.write_all(payload)
+    }
+}
+
+/// RELAY file plane, requester side, series v2: the pieces land in the
+/// `.part` file as they arrive and verify against the manifest, the
+/// landed file must hash to the log-anchored checksum, then the rename.
+/// `at` is the series START stamp the sharer announced.
+pub(crate) fn spawn_nostr_fetch_v2(
+    channel: molt_net::ritual_net::GroupChannel,
+    id: MessageId,
+    at: u64,
+    target: FetchTarget,
+    dest: DestSpec,
+    scope: u64,
+    cmd_tx: mpsc::Sender<Envelope>,
+) -> tokio::task::AbortHandle {
+    tokio::spawn(async move {
+        let result: Result<String, String> = async {
+            let key = crate::files_state::decode_share_key(&target.key_b64)
+                .ok_or_else(|| "the share carries no usable key".to_string())?;
+            let landing = prepare_landing(&dest, &target.name, &target.id_hex)?;
+            let outcome: Result<String, String> = async {
+                let file = std::fs::File::create(&landing.part)
+                    .map_err(|e| format!("creating the landing file: {e}"))?;
+                let mut sink = FileSink { file };
+                let expect = molt_net::file_plane::SeriesExpect {
+                    count: target.pieces,
+                    size: target.size,
+                    root: target.root.clone(),
+                };
+                molt_net::file_plane::fetch_series_v2(&channel, &key, at, &expect, &mut sink, None)
+                    .await
+                    .map_err(|e| format!("fetching the piece series: {e}"))?;
+                drop(sink);
+                let checksum = target.checksum.clone();
+                let landing_for_task = landing.clone();
+                tokio::task::spawn_blocking(move || verify_and_finish(&landing_for_task, &checksum))
+                    .await
+                    .map_err(|e| format!("landing task failed: {e}"))?
+                    .map(|p| p.display().to_string())
+            }
+            .await;
+            if outcome.is_err() {
+                let _ = std::fs::remove_file(&landing.part);
+            }
+            outcome
+        }
+        .await;
+        let cmd = match result {
+            Ok(path) => Command::NetFileDone { id, path, generation: Some(scope) },
+            Err(reason) => Command::NetFileFailed { id, reason, generation: Some(scope) },
+        };
+        feed(&cmd_tx, cmd).await;
+    })
+    .abort_handle()
+}
+
 pub(crate) fn spawn_local_copy(
     source: PathBuf,
     id: MessageId,
@@ -1066,22 +1265,11 @@ pub(crate) fn spawn_local_copy(
             // copy first, then verify the bytes that ACTUALLY landed (the
             // source may be rewritten between the hash and the copy) — the
             // .part is removed on any failure, like the network path
-            let copy_and_verify = || -> Result<(), String> {
-                std::fs::copy(&source, part).map_err(|e| format!("copying: {e}"))?;
-                let (landed, _) = hash_file(part)
-                    .map_err(|e| format!("reading the copied file failed: {e}"))?;
-                if !target.checksum.is_empty() && landed != target.checksum {
-                    return Err(
-                        "the file changed since it was shared (checksum mismatch)".to_string(),
-                    );
-                }
-                Ok(())
-            };
-            if let Err(e) = copy_and_verify() {
+            if let Err(e) = std::fs::copy(&source, part) {
                 let _ = std::fs::remove_file(part);
-                return Err(e);
+                return Err(format!("copying: {e}"));
             }
-            finish_landing(&landing)
+            verify_and_finish(&landing, &target.checksum)
         })
         .await
         .unwrap_or_else(|e| Err(format!("copy task failed: {e}")));
@@ -1105,6 +1293,20 @@ pub(crate) fn spawn_local_copy(
 mod tests {
     use super::*;
     use molt_net::{LoopbackHub, LoopbackTransport};
+
+    /// The landing file is never pre-sized: a size claim allocates nothing
+    /// until a piece lands, and a piece lands at its own offset.
+    #[test]
+    fn the_landing_file_is_never_pre_sized() {
+        use molt_net::file_plane::{PieceSink as _, PIECE_PAYLOAD_LEN};
+        let tmp = tempfile::tempdir().expect("tmp");
+        let part = tmp.path().join("claim.part");
+        let mut sink = FileSink { file: std::fs::File::create(&part).expect("create") };
+        assert_eq!(std::fs::metadata(&part).expect("meta").len(), 0, "nothing landed, nothing sized");
+        sink.put(2, b"abc").expect("put");
+        let want = u64::try_from(2 * PIECE_PAYLOAD_LEN + 3).expect("fits");
+        assert_eq!(std::fs::metadata(&part).expect("meta").len(), want);
+    }
 
     fn rt() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_multi_thread()
@@ -1229,6 +1431,9 @@ mod tests {
                     name: "doc.pdf".to_string(),
                     size,
                     checksum: sha,
+                    key_b64: String::new(),
+                    pieces: 0,
+                    root: String::new(),
                 },
                 DestSpec {
                     explicit: Some(dest.display().to_string()),
@@ -1333,6 +1538,9 @@ mod tests {
                     name: "doc.pdf".to_string(),
                     size: u64::try_from(bytes.len()).expect("len fits u64"),
                     checksum: sha_hex(&bytes),
+                    key_b64: String::new(),
+                    pieces: 0,
+                    root: String::new(),
                 },
                 dest.clone(),
                 FetchTimeouts::default(),
@@ -1378,6 +1586,9 @@ mod tests {
                     name: "big.bin".to_string(),
                     size,
                     checksum: sha_hex(&bytes),
+                    key_b64: String::new(),
+                    pieces: 0,
+                    root: String::new(),
                 },
                 DestSpec {
                     explicit: Some(dest.display().to_string()),
@@ -1438,6 +1649,9 @@ mod tests {
                     name: "empty.txt".to_string(),
                     size: 0,
                     checksum: sha_hex(b""),
+                    key_b64: String::new(),
+                    pieces: 0,
+                    root: String::new(),
                 },
                 dest.clone(),
                 FetchTimeouts::default(),
@@ -1476,6 +1690,9 @@ mod tests {
                     name: "doc.pdf".to_string(),
                     size: u64::try_from(bytes.len()).expect("len fits u64"),
                     checksum: sha_hex(&bytes),
+                    key_b64: String::new(),
+                    pieces: 0,
+                    root: String::new(),
                 },
                 dest.clone(),
                 FetchTimeouts::default(),
@@ -1519,6 +1736,9 @@ mod tests {
                     size: u64::try_from(bytes.len()).expect("len fits u64"),
                     // the log anchors the ORIGINAL bytes' hash
                     checksum: sha_hex(&bytes),
+                    key_b64: String::new(),
+                    pieces: 0,
+                    root: String::new(),
                 },
                 dest.clone(),
                 FetchTimeouts::default(),
@@ -1557,6 +1777,9 @@ mod tests {
                     name: "doc.pdf".to_string(),
                     size: 8,
                     checksum: String::new(),
+                    key_b64: String::new(),
+                    pieces: 0,
+                    root: String::new(),
                 },
                 dest.clone(),
                 FetchTimeouts {

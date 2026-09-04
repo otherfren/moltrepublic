@@ -411,6 +411,9 @@ fn the_share_card_carries_its_availability_word() {
         modified: 100,
         available: true,
         checksum: String::new(),
+        key_b64: String::new(),
+        pieces: 0,
+        root: String::new(),
     });
     let env = st.make_env("me".to_string(), molt_core::WorkspaceEvent::Chat(msg));
     st.apply(&env);
@@ -606,6 +609,9 @@ fn uploads_age_out_with_the_chat_retention_window() {
             modified: 1,
             available: true,
             checksum: String::new(),
+            key_b64: String::new(),
+            pieces: 0,
+            root: String::new(),
         });
         molt_core::EventEnvelope { prev_seq: 0,
             seq,
@@ -767,4 +773,33 @@ fn the_chat_view_is_the_whole_retention_window() {
         3,
         "unknown age stays visible"
     );
+}
+
+/// Series v2 (`docs/files/mirroring.md` §3.1): a share carries its content
+/// key, piece count and manifest root, drawn in the same pass as the
+/// checksum - and the tables never expose the key.
+#[test]
+fn a_share_carries_its_series_v2_material() {
+    rt().block_on(async {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let w = spawn(GroupConfig::demo(), SessionView::default());
+        let id = share_temp_file(&w, tmp.path(), "big.bin", &vec![7u8; 50_000]).await;
+        let snap = read_surface(&w, Surface::Chat).await;
+        let row = snap
+            .applied
+            .iter()
+            .find(|m| m["id"] == json!(id.to_string()))
+            .expect("the share message");
+        let file = &row["file"];
+        assert_eq!(file["pieces"], json!(2), "50 000 bytes are two 44 000-byte slices");
+        assert_eq!(file["root"].as_str().map(str::len), Some(64));
+        assert_eq!(file["key_b64"].as_str().map(str::len), Some(44), "a 32-byte key, base64");
+        match w.execute(Command::ReadUploads).await.expect("uploads") {
+            Reply::Uploads { uploads } => {
+                let v = serde_json::to_value(&uploads[0]).expect("json");
+                assert!(v.get("key_b64").is_none(), "the table does not carry the key");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    });
 }

@@ -324,6 +324,19 @@ fn bool_arg(args: &Value, key: &str) -> Result<bool, String> {
         .ok_or_else(|| format!("missing boolean argument `{key}`"))
 }
 
+/// A required key that may be `null`: `Ok(None)` for null, `Err` when
+/// absent - a caller must SAY "none" where absent would flip a setting.
+fn nullable_u64_arg(args: &Value, key: &str) -> Result<Option<u64>, String> {
+    match args.get(key) {
+        None => Err(format!("missing argument `{key}` (null = none)")),
+        Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| format!("`{key}` must be an integer or null")),
+    }
+}
+
 fn u64_arg(args: &Value, key: &str) -> Result<u64, String> {
     args.get(key)
         .and_then(Value::as_u64)
@@ -555,13 +568,12 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
         font_nav: d.font_nav,
         font_editor: d.font_editor,
         workspace_dir: d.workspace_dir,
-        // required like every other field since 0 became a VALUE (sharing
-        // off, FP4 2026-08-16): absent can no longer safely mean "keep" —
-        // partial changes go through patch_settings
-        file_cap_bytes: args
-            .get("file_cap_bytes")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| missing("file_cap_bytes"))?,
+        // REQUIRED, null = no cap (mirroring.md §1), 0 = sharing off
+        // (FP4): an absent key must not flip a human's "off" to unlimited
+        file_cap_bytes: match args.get("file_cap_bytes") {
+            None => return Err(missing("file_cap_bytes")),
+            Some(_) => nullable_u64_arg(args, "file_cap_bytes")?,
+        },
         download_dir: d.download_dir,
         s3_backup: flag("s3_backup")?,
         s3_endpoint: text("s3_endpoint")?,
@@ -1089,7 +1101,7 @@ pub fn tools() -> Vec<ToolDef> {
                     "sound_poke": { "type": "string", "enum": ["none", "bell", "chime", "pop"], "description": "optional; absent = \"none\"" },
                     "poke_enabled": { "type": "boolean", "description": "optional; absent = false (react to pokes and offer poking)" },
                     "read_receipts": { "type": "boolean", "description": "send/show per-message chat read receipts (local privacy switch)" },
-                    "file_cap_bytes": { "type": "integer", "description": "byte cap for shared files; 0 = sharing off" }
+                    "file_cap_bytes": { "type": ["integer", "null"], "description": "per-file byte cap for sharing: null = no cap, 0 = sharing off, n = a cap" }
                 },
                 "required": [
                     "s3_backup", "s3_endpoint", "s3_access_key", "s3_bucket",
@@ -1119,7 +1131,7 @@ pub fn tools() -> Vec<ToolDef> {
                     "s3_max_bytes": { "type": "integer", "description": "byte quota for the backup bucket; 0 = no limit. Over it the oldest copies go first, never a workspace's newest" },
                     "media_s3_bucket": { "type": "string", "description": "a second bucket at the same endpoint/credentials, for media; configured only, nothing writes media to S3 yet" },
                     "media_s3_max_bytes": { "type": "integer", "description": "byte quota for the media bucket; 0 = no limit" },
-                    "file_cap_bytes": { "type": "integer", "description": "per-file byte cap for sharing over relays; 0 = sharing off" },
+                    "file_cap_bytes": { "type": ["integer", "null"], "description": "per-file byte cap for sharing; null = no cap, 0 = sharing off" },
                     "sound_message": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
                     "sound_vote": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
                     "sound_poke": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
@@ -2043,22 +2055,60 @@ mod tests {
         let schema = (def.schema)();
         let props = schema["properties"].as_object().expect("properties");
         let required = schema["required"].as_array().expect("required");
+        let args = required_args(props, required);
+        build("save_settings", &Value::Object(args)).expect("every required field given builds");
+    }
+
+    /// One plausible value per required property (a `["integer","null"]`
+    /// type counts as integer).
+    fn required_args(props: &serde_json::Map<String, Value>, required: &[Value]) -> serde_json::Map<String, Value> {
         let mut args = serde_json::Map::new();
         for key in required {
             let k = key.as_str().expect("key");
             let p = props.get(k).unwrap_or_else(|| panic!("required `{k}` is not a property"));
-            let v = match p["type"].as_str() {
-                Some("boolean") => json!(false),
-                Some("integer") => json!(1),
-                _ => json!(p["enum"]
+            let is = |t: &str| {
+                p["type"].as_str() == Some(t)
+                    || p["type"].as_array().is_some_and(|a| a.iter().any(|x| x == t))
+            };
+            let v = if is("boolean") {
+                json!(false)
+            } else if is("integer") {
+                json!(1)
+            } else {
+                json!(p["enum"]
                     .as_array()
                     .and_then(|a| a.first())
                     .and_then(Value::as_str)
-                    .unwrap_or("x")),
+                    .unwrap_or("x"))
             };
             args.insert(k.to_string(), v);
         }
-        build("save_settings", &Value::Object(args)).expect("every required field given builds");
+        args
+    }
+
+    /// **`file_cap_bytes` is REQUIRED on the wholesale save** (null = no
+    /// cap): an omitted key would otherwise turn a human's "sharing off"
+    /// into unlimited sharing, silently.
+    #[test]
+    fn save_settings_requires_the_file_cap_key() {
+        let def = tool_named("save_settings");
+        let schema = (def.schema)();
+        let props = schema["properties"].as_object().expect("properties");
+        let required = schema["required"].as_array().expect("required");
+        assert!(required.iter().any(|k| k == "file_cap_bytes"));
+        let mut args = required_args(props, required);
+        args.remove("file_cap_bytes");
+        assert!(build("save_settings", &Value::Object(args.clone())).is_err(), "absent is refused");
+        args.insert("file_cap_bytes".into(), Value::Null);
+        match build("save_settings", &Value::Object(args.clone())).expect("null builds") {
+            Command::SaveSettings { settings } => assert_eq!(settings.file_cap_bytes, None),
+            other => panic!("unexpected: {other:?}"),
+        }
+        args.insert("file_cap_bytes".into(), json!(0));
+        match build("save_settings", &Value::Object(args)).expect("0 builds") {
+            Command::SaveSettings { settings } => assert_eq!(settings.file_cap_bytes, Some(0)),
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 
     #[test]

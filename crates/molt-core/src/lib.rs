@@ -400,12 +400,12 @@ pub struct SessionSettings {
     /// given (`~` expands).
     #[serde(default = "default_download_dir")]
     pub download_dir: String,
-    /// Per-file byte cap for the relay file plane
-    /// (`file_transfer_nostr.md` §5.1) — raise deliberately, chunk
-    /// publishes load the relay pool. 0 = file sharing OFF; an absent
-    /// key defaults to 4 MiB (FP4, 2026-08-16).
-    #[serde(default = "default_file_cap_bytes")]
-    pub file_cap_bytes: u64,
+    /// Per-file byte cap for sharing: `None` = no cap (the mirroring
+    /// decision, `docs/files/mirroring.md` §1), `Some(0)` = file sharing
+    /// OFF (FP4, 2026-08-16), `Some(n)` = a deliberate cap. Serialized as
+    /// `null` when absent: the settings patch door keys on the field.
+    #[serde(default)]
+    pub file_cap_bytes: Option<u64>,
     /// Alert sound for an incoming chat message:
     /// `"none" | "bell" | "chime" | "pop"`.
     #[serde(default = "default_sound")]
@@ -531,7 +531,7 @@ impl Default for SessionSettings {
             tor_mode: "local".to_string(),
             tor_port: 9050,
             download_dir: default_download_dir(),
-            file_cap_bytes: default_file_cap_bytes(),
+            file_cap_bytes: None,
             sound_message: default_sound(),
             sound_vote: default_sound(),
             sound_poke: default_sound(),
@@ -580,13 +580,6 @@ fn default_s3_bucket() -> String {
 /// The default download destination.
 fn default_download_dir() -> String {
     "~/Downloads".to_string()
-}
-
-/// Default per-file byte cap for the relay file plane (4 MiB — user
-/// decision 2026-08-09, `file_transfer_nostr.md` §5.1). Public: readers
-/// fall back here when the setting is 0/absent.
-pub fn default_file_cap_bytes() -> u64 {
-    4 * 1024 * 1024
 }
 
 /// Default automatic-backup interval (minutes).
@@ -1168,6 +1161,23 @@ pub struct FileMeta {
     /// skipped when empty so the legacy wire shape stays byte-identical.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub checksum: String,
+    /// Series-v2 material (`docs/files/mirroring.md` §3.1): the file's
+    /// content key (32 bytes, base64), its data piece count and the
+    /// manifest root (hex sha256). Absent on a legacy exporter-sealed
+    /// share - skipped when empty so the legacy wire shape stays
+    /// byte-identical.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key_b64: String,
+    /// Data pieces of the series (0 on a legacy share).
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub pieces: u32,
+    /// Hex sha256 of the manifest ("" on a legacy share).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub root: String,
+}
+
+fn u32_is_zero(v: &u32) -> bool {
+    *v == 0
 }
 
 fn file_available_default() -> bool {
@@ -4818,6 +4828,15 @@ pub enum Command {
         /// Workspace-net incarnation (stale task results are dropped).
         #[serde(default)]
         generation: Option<u64>,
+        /// Series-v2 material ([`FileMeta::key_b64`]).
+        #[serde(default)]
+        key_b64: String,
+        /// [`FileMeta::pieces`].
+        #[serde(default)]
+        pieces: u32,
+        /// [`FileMeta::root`].
+        #[serde(default)]
+        root: String,
     },
     /// The off-actor share hash failed (unreadable file) — surface the
     /// honest error (engine-internal). Never an MCP tool.

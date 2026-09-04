@@ -113,6 +113,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             available: true,
             // a dummy share has no real bytes — honestly unknown
             checksum: String::new(),
+            key_b64: String::new(),
+            pieces: 0,
+            root: String::new(),
         });
         EventEnvelope { prev_seq: 0,
             seq,

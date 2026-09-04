@@ -336,17 +336,21 @@ impl State {
                 "{path:?} has no file name component"
             )));
         }
-        // file_cap_bytes = 0 turns sharing off on every transport (FP4)
-        let Some(cap) = self.effective_file_cap() else {
-            return Err(MoltError::BadPayload(
-                "file sharing is off (file_cap_bytes = 0)".into(),
-            ));
+        // file_cap_bytes = 0 turns sharing off on every transport (FP4);
+        // a deliberate cap applies on the relay plane, where the human who
+        // picked the file can act - admitting an over-cap share would mint
+        // one nobody can download (review 2026-08-10). Absent = no cap
+        // (`docs/files/mirroring.md` §1). Metadata only, no read.
+        let cap = match self.effective_file_cap() {
+            crate::net::files::FileCap::Off => {
+                return Err(MoltError::BadPayload(
+                    "file sharing is off (file_cap_bytes = 0)".into(),
+                ))
+            }
+            crate::net::files::FileCap::Limit(cap) => Some(cap),
+            crate::net::files::FileCap::Unlimited => None,
         };
-        // relay plane: an over-cap file is refused where the human who
-        // picked it can act — admitting it would mint a share nobody can
-        // ever download (the lazy publish refuses on the cap, silently for
-        // the group; review 2026-08-10). Metadata only, no read.
-        if self.nostr.is_some() {
+        if let Some(cap) = cap.filter(|_| self.nostr.is_some()) {
             if let Ok(meta) = std::fs::metadata(&p) {
                 if meta.len() > cap {
                     return Err(MoltError::BadPayload(format!(
@@ -381,6 +385,7 @@ impl State {
         checksum: String,
         path: String,
         channel: ChannelRef,
+        (key_b64, pieces, root): (String, u32, String),
     ) -> Result<Reply, MoltError> {
         let from = self.member();
         let id = mint_message_id()?;
@@ -393,6 +398,9 @@ impl State {
             modified: if modified == 0 { now_secs() } else { modified },
             available: true,
             checksum,
+            key_b64,
+            pieces,
+            root,
         });
         let env = self.make_env(from.clone(), WorkspaceEvent::Chat(msg));
         self.record(env);
@@ -447,6 +455,9 @@ impl State {
                     name: ident.name.clone(),
                     size: ident.size,
                     checksum: ident.checksum.clone(),
+                    key_b64: ident.key_b64.clone(),
+                    pieces: ident.pieces,
+                    root: ident.root.clone(),
                 },
             )
         };

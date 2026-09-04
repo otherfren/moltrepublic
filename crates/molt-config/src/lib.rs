@@ -106,10 +106,10 @@ pub struct StorageConfig {
     /// given. `~` expands to $HOME.
     #[serde(default = "default_download_dir")]
     pub download_dir: String,
-    /// Per-file byte cap for the relay file plane. Raise deliberately —
-    /// chunk publishes load the relay pool.
-    #[serde(default = "default_file_cap_bytes")]
-    pub file_cap_bytes: u64,
+    /// Per-file byte cap for sharing: absent = no cap, 0 = sharing off,
+    /// n = a deliberate cap.
+    #[serde(default)]
+    pub file_cap_bytes: Option<u64>,
     /// Alert sound for an incoming chat message ("none"|"bell"|"chime"|"pop").
     #[serde(default = "default_sound")]
     pub sound_message: String,
@@ -128,12 +128,6 @@ pub struct StorageConfig {
 /// Default alert sound — silent. Mirrors `molt_core::SessionSettings`.
 pub fn default_sound() -> String {
     "none".to_string()
-}
-
-/// Default per-file byte cap for the relay file plane (4 MiB). Mirrors
-/// `molt_core::default_file_cap_bytes`.
-pub fn default_file_cap_bytes() -> u64 {
-    4 * 1024 * 1024
 }
 
 /// Default for an opt-out boolean — on unless the operator disables it (and
@@ -157,7 +151,7 @@ impl Default for StorageConfig {
             media_s3_bucket: String::new(),
             media_s3_max_bytes: 0,
             download_dir: default_download_dir(),
-            file_cap_bytes: default_file_cap_bytes(),
+            file_cap_bytes: None,
             sound_message: default_sound(),
             sound_vote: default_sound(),
             sound_poke: default_sound(),
@@ -462,8 +456,8 @@ pub struct Settings {
     pub media_s3_max_bytes: u64,
     /// Where downloaded chat files land when no explicit destination is given.
     pub download_dir: String,
-    /// Per-file byte cap for the relay file plane.
-    pub file_cap_bytes: u64,
+    /// Per-file byte cap for sharing: absent = no cap, 0 = off.
+    pub file_cap_bytes: Option<u64>,
     /// Alert sound for an incoming chat message.
     pub sound_message: String,
     /// Alert sound for a new incoming vote.
@@ -521,7 +515,7 @@ impl Default for Settings {
             media_s3_bucket: String::new(),
             media_s3_max_bytes: 0,
             download_dir: default_download_dir(),
-            file_cap_bytes: default_file_cap_bytes(),
+            file_cap_bytes: None,
             sound_message: default_sound(),
             sound_vote: default_sound(),
             sound_poke: default_sound(),
@@ -657,9 +651,8 @@ media_s3_bucket = {media_s3_bucket}
 media_s3_max_bytes = {media_s3_max_bytes}
 # Where downloaded chat files land ("~" = $HOME).
 download_dir = {download_dir}
-# Per-file byte cap for sharing over relays (chunk publishes load the pool).
-# 0 = file sharing off; removing the key restores the 4 MiB default.
-file_cap_bytes = {file_cap_bytes}
+# Per-file byte cap for sharing. 0 = file sharing off; absent = no cap.
+{file_cap_line}
 # Alert sounds: "none" | "bell" | "chime" | "pop".
 sound_message = {sound_message}
 sound_vote = {sound_vote}
@@ -727,7 +720,10 @@ font_editor = {font_editor}
         media_s3_bucket = toml_str(&settings.media_s3_bucket),
         media_s3_max_bytes = settings.media_s3_max_bytes,
         download_dir = toml_str(&settings.download_dir),
-        file_cap_bytes = settings.file_cap_bytes,
+        file_cap_line = match settings.file_cap_bytes {
+            Some(n) => format!("file_cap_bytes = {n}"),
+            None => "# file_cap_bytes = 4194304".to_string(),
+        },
         sound_message = toml_str(&settings.sound_message),
         sound_vote = toml_str(&settings.sound_vote),
         sound_poke = toml_str(&settings.sound_poke),
@@ -802,7 +798,7 @@ pub fn salvage(text: &str) -> Settings {
             s.download_dir = v.to_string();
         }
         if let Some(v) = storage.get("file_cap_bytes").and_then(toml::Value::as_integer) {
-            s.file_cap_bytes = u64::try_from(v).unwrap_or_else(|_| default_file_cap_bytes());
+            s.file_cap_bytes = u64::try_from(v).ok();
         }
         if let Some(v) = storage.get("s3_endpoint").and_then(toml::Value::as_str) {
             s.s3_endpoint = v.to_string();
@@ -1035,22 +1031,52 @@ pub fn backup_path(path: &Path) -> PathBuf {
 /// exactly the legacy-file class, never a general repair (that stays
 /// `--repair-config`'s job).
 pub fn heal_legacy(text: &str) -> Option<String> {
-    if parse(text).is_ok() {
-        return None;
-    }
+    heal_legacy_notes(text).map(|(healed, _)| healed)
+}
+
+/// The old unconditional default every pre-mirroring render wrote; read
+/// today it would mean a DELIBERATE 4 MiB cap (`docs/files/mirroring.md`
+/// §1: absent = no cap).
+const OLD_DEFAULT_FILE_CAP: i64 = 4_194_304;
+
+/// [`heal_legacy`] with one note per heal for the operator's terminal.
+/// Two classes: the `[transport.smp]` section (fails the strict parse)
+/// and `file_cap_bytes = 4194304`, the old default (parses, means the
+/// wrong thing). Any other cap value is the operator's and stays.
+pub fn heal_legacy_notes(text: &str) -> Option<(String, Vec<String>)> {
     let mut doc: toml_edit::DocumentMut = text.parse().ok()?;
-    let removed = doc
+    let mut notes = Vec::new();
+    let removed_smp = doc
         .as_table_mut()
         .get_mut("transport")
         .and_then(toml_edit::Item::as_table_like_mut)
         .map(|transport| transport.remove("smp").is_some())
         .unwrap_or(false);
-    if !removed {
+    if removed_smp {
+        notes.push("healed the legacy [transport.smp] section (the SMP transport was removed)".to_string());
+    }
+    let removed_cap = doc
+        .as_table_mut()
+        .get_mut("storage")
+        .and_then(toml_edit::Item::as_table_like_mut)
+        .map(|storage| {
+            let old = storage.get("file_cap_bytes").and_then(toml_edit::Item::as_integer)
+                == Some(OLD_DEFAULT_FILE_CAP);
+            if old {
+                storage.remove("file_cap_bytes");
+            }
+            old
+        })
+        .unwrap_or(false);
+    if removed_cap {
+        notes.push("file_cap_bytes 4194304 was the old default - removed (no cap)".to_string());
+    }
+    if notes.is_empty() {
         return None;
     }
     let healed = doc.to_string();
     parse(&healed).ok()?;
-    Some(healed)
+    Some((healed, notes))
 }
 
 /// Rewrite `text` so it carries exactly the values in `settings`, preserving
@@ -1107,11 +1133,13 @@ pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
         i64::try_from(settings.media_s3_max_bytes).unwrap_or(i64::MAX),
     );
     set_str(storage, "download_dir", &settings.download_dir);
-    set_int(
-        storage,
-        "file_cap_bytes",
-        i64::try_from(settings.file_cap_bytes).unwrap_or(i64::MAX),
-    );
+    match settings.file_cap_bytes {
+        Some(n) => set_int(storage, "file_cap_bytes", i64::try_from(n).unwrap_or(i64::MAX)),
+        // absent IS the value (no cap): the key must not linger
+        None => {
+            storage.remove("file_cap_bytes");
+        }
+    }
     set_str(storage, "sound_message", &settings.sound_message);
     set_str(storage, "sound_vote", &settings.sound_vote);
     set_str(storage, "sound_poke", &settings.sound_poke);
@@ -1421,7 +1449,7 @@ mod tests {
             tor_mode: "whonix".to_string(),
             tor_port: 9150,
             download_dir: "/srv/molt/downloads".to_string(),
-            file_cap_bytes: 8 * 1024 * 1024,
+            file_cap_bytes: Some(8 * 1024 * 1024),
             mcp_port: 5151,
             mcp_allow: "127.0.0.1, 192.168.1.10".to_string(),
             mcp_token: "deadbeefcafef00d".to_string(),
@@ -1674,6 +1702,22 @@ network = \"none\"
             "an unrelated strict-parse failure is not silently rewritten"
         );
         assert!(heal_legacy("not::: toml").is_none(), "broken TOML is untouched");
+    }
+
+    /// The old unconditional `file_cap_bytes = 4194304` heals away once
+    /// (it would read as a deliberate cap); an operator's own value stays.
+    #[test]
+    fn heal_legacy_removes_the_old_default_file_cap_only() {
+        let old = "[node]\nheadless = true\n\n[storage]\nfile_cap_bytes = 4194304\n";
+        assert!(parse(old).is_ok(), "the old default parses - the heal is about meaning");
+        let (healed, notes) = heal_legacy_notes(old).expect("healable");
+        assert!(!healed.contains("file_cap_bytes"), "{healed}");
+        assert!(healed.contains("headless = true"));
+        assert_eq!(notes, vec!["file_cap_bytes 4194304 was the old default - removed (no cap)"]);
+        assert_eq!(parse(&healed).expect("parses").storage.file_cap_bytes, None);
+        let raised = "[storage]\nfile_cap_bytes = 52428800\n";
+        assert!(heal_legacy_notes(raised).is_none(), "a raised cap is the operator's");
+        assert!(heal_legacy_notes("[storage]\nfile_cap_bytes = 0\n").is_none(), "sharing off stays off");
     }
 
     #[test]

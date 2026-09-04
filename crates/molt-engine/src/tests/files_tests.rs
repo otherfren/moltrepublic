@@ -143,6 +143,9 @@ fn a_persisted_share_outlives_the_chat_window() {
         modified: 100,
         available: true,
         checksum: "ab".repeat(32),
+        key_b64: String::new(),
+        pieces: 0,
+        root: String::new(),
     });
     let env = st.make_env("me".to_string(), molt_core::WorkspaceEvent::Chat(msg));
     st.apply(&env);
@@ -231,6 +234,9 @@ fn an_approve_refuses_a_files_vote_that_names_a_different_file() {
         modified: 100,
         available: true,
         checksum: "ab".repeat(32),
+        key_b64: String::new(),
+        pieces: 0,
+        root: String::new(),
     });
     let env = st.make_env("peer-1".to_string(), molt_core::WorkspaceEvent::Chat(msg));
     st.apply(&env);
@@ -271,4 +277,119 @@ fn a_persistent_share_cannot_be_removed_or_deleted_by_its_sharer() {
         ));
         assert!(uploads(&w).await[0].persistent, "still listed as persistent");
     });
+}
+
+/// The persist block copies the series-v2 material with the identity
+/// (members ratify the key and root along with the file), and a legacy
+/// payload without it still validates.
+#[test]
+fn the_persist_payload_carries_the_series_material() {
+    rt().block_on(async {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let w = spawn(one_of_three(), SessionView::default());
+        let id = share_temp_file(&w, tmp.path(), "v2.bin", b"pinned bytes").await;
+        propose(&w, json!({"op": "persist", "id": id.to_string()}))
+            .await
+            .expect("persist");
+        let pending = read_surface(&w, Surface::Files).await.pending;
+        let p = &pending[0].payload;
+        assert_eq!(p["pieces"], json!(1));
+        assert_eq!(p["root"].as_str().map(str::len), Some(64));
+        assert_eq!(p["key_b64"].as_str().map(str::len), Some(44));
+        let legacy = json!({"op": "persist", "id": "ab".repeat(16), "by": "me", "name": "old", "size": 3});
+        assert!(crate::files_state::validate_files_payload(&legacy).is_ok());
+    });
+}
+
+/// `file_cap_bytes`: absent = no cap, 0 = sharing off, n = a cap.
+#[test]
+fn the_file_cap_reads_absent_as_no_cap() {
+    use crate::net::files::FileCap;
+    let mut st = plain_state();
+    st.session.settings.file_cap_bytes = None;
+    assert_eq!(st.effective_file_cap(), FileCap::Unlimited);
+    st.session.settings.file_cap_bytes = Some(0);
+    assert_eq!(st.effective_file_cap(), FileCap::Off);
+    st.session.settings.file_cap_bytes = Some(9);
+    assert_eq!(st.effective_file_cap(), FileCap::Limit(9));
+}
+
+/// Mixed builds: a persist proposed by an older build carries no series
+/// material; a new-build approver still matches it against its v2 share.
+/// A claim that DOES carry material must match it exactly.
+#[test]
+fn an_older_builds_persist_still_matches_a_v2_share() {
+    let mut st = plain_state();
+    let id = molt_core::MessageId([8u8; 16]);
+    let mut msg = molt_core::ChatMessage::text(id, "peer-1", "a share", now_secs());
+    let key_b64 = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode([9u8; 32])
+    };
+    msg.file = Some(molt_core::FileMeta {
+        name: "v2.pdf".to_string(),
+        size: 9,
+        kind: "PDF".to_string(),
+        modified: 100,
+        available: true,
+        checksum: "ab".repeat(32),
+        key_b64: key_b64.clone(),
+        pieces: 1,
+        root: "cd".repeat(32),
+    });
+    let env = st.make_env("peer-1".to_string(), molt_core::WorkspaceEvent::Chat(msg));
+    st.apply(&env);
+    let old_build = json!({
+        "op": "persist", "id": id.to_string(), "by": "peer-1", "name": "v2.pdf",
+        "kind": "PDF", "size": 9, "checksum": "ab".repeat(32), "shared_ts": env.ts
+    });
+    assert!(st.check_files_vote(&old_build).is_ok(), "six matching fields are enough");
+    let wrong_root = json!({
+        "op": "persist", "id": id.to_string(), "by": "peer-1", "name": "v2.pdf",
+        "kind": "PDF", "size": 9, "checksum": "ab".repeat(32), "shared_ts": env.ts,
+        "key_b64": key_b64, "pieces": 1, "root": "ef".repeat(32)
+    });
+    assert!(
+        matches!(st.check_files_vote(&wrong_root), Err(MoltError::BadPayload(_))),
+        "material that disagrees is refused"
+    );
+}
+
+/// The wire door checks the series material's shape when a payload
+/// carries any of it: key length, root hex, the piece count vs the size.
+#[test]
+fn files_payloads_check_the_series_material_shape() {
+    use crate::files_state::validate_files_payload;
+    let id = "ef".repeat(16);
+    let key = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode([1u8; 32])
+    };
+    let base = |extra: serde_json::Value| {
+        let mut v = json!({"op": "persist", "id": id, "by": "me", "name": "a.bin", "size": 44_001});
+        for (k, val) in extra.as_object().expect("object") {
+            v[k] = val.clone();
+        }
+        v
+    };
+    assert!(validate_files_payload(&base(json!({}))).is_ok(), "legacy: no material");
+    assert!(validate_files_payload(&base(json!({"key_b64": key, "pieces": 2, "root": "ab".repeat(32)}))).is_ok());
+    for bad in [
+        json!({"key_b64": "c2hvcnQ=", "pieces": 2, "root": "ab".repeat(32)}),
+        json!({"key_b64": key, "pieces": 2, "root": "zz".repeat(32)}),
+        json!({"key_b64": key, "pieces": 1, "root": "ab".repeat(32)}),
+        json!({"root": "ab".repeat(32)}),
+    ] {
+        assert!(validate_files_payload(&base(bad.clone())).is_err(), "{bad}");
+    }
+}
+
+/// A legacy (v1) fetch is bounded by the configured cap, else by the
+/// 1 GiB floor - "no cap" is never stricter than a raised cap was.
+#[test]
+fn the_v1_fetch_bound_follows_the_cap() {
+    use crate::net::files::{v1_fetch_bound, FileCap};
+    assert_eq!(v1_fetch_bound(FileCap::Limit(50 * 1024 * 1024)), 50 * 1024 * 1024);
+    assert_eq!(v1_fetch_bound(FileCap::Unlimited), 1024 * 1024 * 1024);
+    assert_eq!(v1_fetch_bound(FileCap::Off), 1024 * 1024 * 1024);
 }

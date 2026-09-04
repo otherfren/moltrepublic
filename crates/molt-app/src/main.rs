@@ -276,7 +276,7 @@ fn main() -> anyhow::Result<()> {
             // 0 became "sharing off" on 2026-08-16 (FP4) — say so once at
             // boot, since an old hand-written 0 used to mean "default"
             file_cap_bytes: {
-                if config.storage.file_cap_bytes == 0 {
+                if config.storage.file_cap_bytes == Some(0) {
                     tracing::warn!(file_cap_bytes = 0, "file sharing off");
                 }
                 config.storage.file_cap_bytes
@@ -476,34 +476,29 @@ fn load_config(path: &Path) -> anyhow::Result<Config> {
             path.display()
         );
     }
-    match parse(&text) {
-        Ok(config) => Ok(config),
-        Err(err) => {
-            if let Some(healed) = molt_config::heal_legacy(&text) {
-                eprintln!(
-                    "config {}: healed the legacy [transport.smp] section \
-                     (the SMP transport was removed)",
-                    path.display()
-                );
-                if let Err(write_err) = std::fs::write(path, &healed) {
-                    eprintln!(
-                        "config {}: could not persist the heal ({write_err}); \
-                         booting from the healed copy in memory",
-                        path.display()
-                    );
-                }
-                return parse(&healed)
-                    .with_context(|| format!("parsing healed config {}", path.display()));
-            }
-            Err(err).with_context(|| {
-                format!(
-                    "parsing config {} (try: moltd --repair-config {})",
-                    path.display(),
-                    path.display()
-                )
-            })
+    // a file an older build wrote heals BEFORE the parse: one class fails
+    // the strict parse, the other parses and means the wrong thing
+    if let Some((healed, notes)) = molt_config::heal_legacy_notes(&text) {
+        for note in &notes {
+            eprintln!("config {}: {note}", path.display());
         }
+        if let Err(write_err) = std::fs::write(path, &healed) {
+            eprintln!(
+                "config {}: could not persist the heal ({write_err}); \
+                 booting from the healed copy in memory",
+                path.display()
+            );
+        }
+        return parse(&healed)
+            .with_context(|| format!("parsing healed config {}", path.display()));
     }
+    parse(&text).with_context(|| {
+        format!(
+            "parsing config {} (try: moltd --repair-config {})",
+            path.display(),
+            path.display()
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------

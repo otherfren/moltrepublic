@@ -463,6 +463,9 @@ fn upload_availability_follows_the_real_stamps() {
         modified: ts,
         available: true,
         checksum: String::new(),
+        key_b64: String::new(),
+        pieces: 0,
+        root: String::new(),
     });
     st.apply(&EventEnvelope { prev_seq: 0,
         seq: 1,

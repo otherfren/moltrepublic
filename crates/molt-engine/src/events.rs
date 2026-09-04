@@ -873,6 +873,9 @@ mod tests {
                     available: true,
                     // legacy fixture: pre-transfer shares carry no checksum
                     checksum: String::new(),
+                    key_b64: String::new(),
+                    pieces: 0,
+                    root: String::new(),
                 });
                 WorkspaceEvent::Chat(share)
             }),

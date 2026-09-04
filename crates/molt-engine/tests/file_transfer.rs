@@ -223,6 +223,9 @@ async fn a_shared_file_downloads_peer_to_peer_across_the_mesh() {
         modified: ts,
         available: true,
         checksum: member_sha.clone(),
+        key_b64: String::new(),
+        pieces: 0,
+        root: String::new(),
     });
     member_feed.push(EventEnvelope { prev_seq: 0,
         seq: 1,

@@ -470,6 +470,17 @@ impl GroupChannel {
             .await
     }
 
+    /// A kind-447 content sealed elsewhere (a holder's stored piece, series
+    /// v2): published as is, under `created_at`'s window tag.
+    pub async fn publish_file_content_at(
+        &self,
+        content: &str,
+        created_at: u64,
+    ) -> Result<(u64, PublishReport), NetError> {
+        self.publish_sealed_at(crate::kinds::KIND_FILE_CHUNK, content.to_string(), created_at)
+            .await
+    }
+
     async fn publish_kind_at(
         &self,
         kind: u16,
@@ -479,6 +490,15 @@ impl GroupChannel {
     ) -> Result<(u64, PublishReport), NetError> {
         let sealed = envelope::seal_outer(exporter, plaintext)
             .map_err(|e| NetError::Crypto(format!("sealing the {kind} frame: {e}")))?;
+        self.publish_sealed_at(kind, sealed, created_at).await
+    }
+
+    async fn publish_sealed_at(
+        &self,
+        kind: u16,
+        sealed: String,
+        created_at: u64,
+    ) -> Result<(u64, PublishReport), NetError> {
         // one value for tag and stamp — see the doc above
         let now = Timestamp::from_secs(created_at);
         let tag = envelope::h_tag(&self.rotation_seed, now.as_secs());
@@ -549,14 +569,33 @@ impl GroupChannel {
     pub async fn subscribe_files_at(&self, at_secs: u64) -> Result<CatchupSub, NetError> {
         let tags = window_tags(&self.rotation_seed, at_secs);
         let sub = self
-            .subscribe_tags_kind(crate::kinds::KIND_FILE_CHUNK, &tags)
+            .subscribe_tags_kind(crate::kinds::KIND_FILE_CHUNK, &tags, None)
+            .await?;
+        Ok(CatchupSub { sub, tags })
+    }
+
+    /// The file pieces of a series that STARTED at `start_secs` and may
+    /// still be going (series v2, `docs/files/mirroring.md` §3.1): every
+    /// window from the start's through the current one (newest
+    /// `max_windows` kept) plus the skew-adjacent ones - see
+    /// [`file_catchup_tags`]. `history_bound` sizes the relay's stored-event
+    /// replay to the series (the default bound cuts a large one short).
+    pub async fn subscribe_files_from(
+        &self,
+        start_secs: u64,
+        max_windows: usize,
+        history_bound: Option<usize>,
+    ) -> Result<CatchupSub, NetError> {
+        let tags = file_catchup_tags(&self.rotation_seed, start_secs, now_secs(), max_windows);
+        let sub = self
+            .subscribe_tags_kind(crate::kinds::KIND_FILE_CHUNK, &tags, history_bound)
             .await?;
         Ok(CatchupSub { sub, tags })
     }
 
     /// Place one pooled 445 subscription over exactly `tags`.
     async fn subscribe_tags(&self, tags: &[String]) -> Result<Subscription, NetError> {
-        self.subscribe_tags_kind(crate::kinds::KIND_GROUP, tags).await
+        self.subscribe_tags_kind(crate::kinds::KIND_GROUP, tags, None).await
     }
 
     /// [`Self::subscribe_tags`] for a caller-chosen kind (445 group frames,
@@ -565,6 +604,7 @@ impl GroupChannel {
         &self,
         kind: u16,
         tags: &[String],
+        history_bound: Option<usize>,
     ) -> Result<Subscription, NetError> {
         let filter = Filter::new()
             .kind(Kind::Custom(kind))
@@ -577,11 +617,37 @@ impl GroupChannel {
         // subscriptions. The cost is a relay that WHITELISTS known pubkeys
         // refusing us — which fails loudly and visibly, unlike a silent,
         // permanent deanonymization.
-        RelayRuntime::new(self.dialer.clone(), self.relays.clone())
-            .with_auth_keys(Some(Keys::generate()))
-            .subscribe(filter)
-            .await
+        let mut runtime = RelayRuntime::new(self.dialer.clone(), self.relays.clone())
+            .with_auth_keys(Some(Keys::generate()));
+        if let Some(bound) = history_bound {
+            runtime = runtime.with_history_bound(bound);
+        }
+        runtime.subscribe(filter).await
     }
+}
+
+/// The `h` tags a series fetch subscribes: every window between the
+/// series start and now, in EITHER order - a sharer's clock ahead across a
+/// UTC day boundary stamps into the fetcher's next window - plus the
+/// skew-adjacent window at both ends ([`window_tags`]), like v1's fetch.
+/// Newest `max_windows` of the range kept.
+pub fn file_catchup_tags(
+    rotation_seed: &[u8; 32],
+    start_secs: u64,
+    now_secs: u64,
+    max_windows: usize,
+) -> Vec<String> {
+    let (lo, hi) = (start_secs.min(now_secs), start_secs.max(now_secs));
+    let mut tags = envelope::h_tags_for_catchup(rotation_seed, lo, hi, max_windows);
+    for extra in window_tags(rotation_seed, start_secs)
+        .into_iter()
+        .chain(window_tags(rotation_seed, now_secs))
+    {
+        if !tags.contains(&extra) {
+            tags.push(extra);
+        }
+    }
+    tags
 }
 
 /// A catch-up subscription over a FIXED set of past `h` windows.
@@ -776,5 +842,29 @@ impl GroupSub {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A start stamp ahead of the fetcher's clock across a day boundary
+    /// still names the start's window (the pieces sit there), the current
+    /// one, and the skew neighbours - never the fetcher's window alone.
+    #[test]
+    fn the_file_catchup_tags_cover_a_start_ahead_of_the_clock() {
+        let seed = [7u8; 32];
+        let boundary = 1_800_000_000 / H_WINDOW * H_WINDOW;
+        let now = boundary - 20;
+        let start = now + 30; // the sharer's clock is 30 s ahead
+        let tags = file_catchup_tags(&seed, start, now, 60);
+        assert!(tags.contains(&envelope::h_tag(&seed, start)), "the start's window");
+        assert!(tags.contains(&envelope::h_tag(&seed, now)), "the fetcher's window");
+        assert_eq!(tags.len(), 2, "no duplicates: {tags:?}");
+        // the ordinary case: three days back through now
+        let three = file_catchup_tags(&seed, now - 3 * H_WINDOW, now, 60);
+        assert!(three.len() >= 4);
+        assert_eq!(three.first(), Some(&envelope::h_tag(&seed, now - 3 * H_WINDOW)));
     }
 }

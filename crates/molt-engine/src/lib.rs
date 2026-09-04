@@ -1312,11 +1312,23 @@ impl State {
                 path,
                 channel,
                 generation,
+                key_b64,
+                pieces,
+                root,
             } => {
                 if !self.net_scope_current(generation) {
                     return Ok(Reply::Ack);
                 }
-                self.cmd_net_file_shared(name, size, kind, modified, checksum, path, channel)
+                self.cmd_net_file_shared(
+                    name,
+                    size,
+                    kind,
+                    modified,
+                    checksum,
+                    path,
+                    channel,
+                    (key_b64, pieces, root),
+                )
             }
             Command::NetFileShareFailed {
                 name,

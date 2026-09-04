@@ -138,6 +138,9 @@ fn a_wire_chat_with_a_hostile_stamp_never_panics_the_uploads_view() {
         modified: u64::MAX,
         available: true,
         checksum: String::new(),
+        key_b64: String::new(),
+        pieces: 0,
+        root: String::new(),
     });
     st.cmd_net_delivered(
         "peer-1".to_string(),
@@ -249,6 +252,9 @@ fn a_file_served_counts_only_from_the_sharer() {
         modified: 100,
         available: true,
         checksum: "aa".repeat(32),
+        key_b64: String::new(),
+        pieces: 0,
+        root: String::new(),
     });
     st.cmd_net_delivered(
         "peer-1".to_string(),

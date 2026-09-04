@@ -36,7 +36,7 @@ mod delivery;
 pub(crate) use delivery::ORDERED_PARK_GIVEUP_SECS;
 use delivery::ACK_DEBOUNCE_SECS;
 mod demo_mesh;
-mod files;
+pub(crate) mod files;
 mod ingest;
 mod presence;
 pub(crate) use presence::pill_state;

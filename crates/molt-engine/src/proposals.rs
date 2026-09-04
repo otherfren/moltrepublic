@@ -2067,6 +2067,9 @@ impl State {
                         size: f.size,
                         checksum: f.checksum.clone(),
                         shared_ts: m.ts,
+                        key_b64: f.key_b64.clone(),
+                        pieces: f.pieces,
+                        root: f.root.clone(),
                     };
                     let expires = if m.ts == 0 { 0 } else { m.ts.saturating_add(retention_secs) };
                     row(m.id, ident, f.available, expires, false)

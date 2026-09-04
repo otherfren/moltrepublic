@@ -2662,7 +2662,7 @@ mod patch_tests {
         .expect("unrelated patch");
         assert_eq!(
             settings(&w).await.file_cap_bytes,
-            123_456,
+            Some(123_456),
             "a patch not naming the cap keeps it"
         );
         w.execute(Command::PatchSettings {
@@ -2672,7 +2672,7 @@ mod patch_tests {
         .expect("off");
         assert_eq!(
             settings(&w).await.file_cap_bytes,
-            0,
+            Some(0),
             "an explicit 0 lands as 0, not as keep-current"
         );
         let err = w

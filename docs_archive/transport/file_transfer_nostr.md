@@ -76,13 +76,15 @@ plane limit is 65535 chunks; the REAL cap must come from relay behaviour
 
 ## 5. Decisions (user-ratified 2026-08-09)
 
-1. **Size cap: 4 MiB** (≈70 chunks at ~60 KiB), as a config key so
-   operators can raise it deliberately. Bigger files are out of scope
-   until the plane has field mileage.
+1. **Size cap: 4 MiB** — SUPERSEDED 2026-09-03 by `docs/files/mirroring.md`
+   §1: per-file size is unlimited, `file_cap_bytes` absent = no cap, 0 =
+   sharing off, n = a deliberate cap.
 2. **Publish timing: LAZY.** The first `FileRequested` triggers the
-   sharer's chunk upload; nothing is published for a share nobody
-   downloads. The first downloader waits out the upload — the share card
-   says so (compact).
+   sharer's upload; nothing is published for a share nobody downloads.
+   The whole-series publish is SUPERSEDED by the mirroring plan's trickle
+   sender (`mirroring.md` §3.2, stage M2); since M1 a share with a content
+   key publishes as series v2 (§3.1 there), the exporter-sealed series
+   stays for legacy shares only.
 3. **Cache bounds (default, not user-asked):** 256 MiB per workspace,
    LRU eviction of fetched series; reassembled downloads land in the
    session download directory and leave the cache accounting.

@@ -10,7 +10,10 @@
 use std::time::Duration;
 
 use molt_net::dial::Dialer;
-use molt_net::file_plane::{fetch_series, publish_series, FILE_CAP_DEFAULT_BYTES};
+use molt_net::file_plane::{fetch_series, publish_series};
+
+/// The v1 (legacy) cap the old series were published under.
+const FILE_CAP_DEFAULT_BYTES: u64 = 4 * 1024 * 1024;
 use molt_net::ritual_net::GroupChannel;
 use nostr_relay_builder::MockRelay;
 use sha2::{Digest, Sha256};
@@ -41,7 +44,7 @@ async fn a_chunk_series_roundtrips_over_the_relay() {
     let bytes = pattern(150 * 1024);
 
     let (stamp, chunks) =
-        publish_series(&sharer, &EXPORTER, "aa01", &bytes, FILE_CAP_DEFAULT_BYTES)
+        publish_series(&sharer, &EXPORTER, "aa01", &bytes, Some(FILE_CAP_DEFAULT_BYTES))
             .await
             .expect("publishes");
     assert_eq!(usize::from(chunks), 4, "150 KiB at the relay chunk size");
@@ -71,10 +74,10 @@ async fn two_series_interleave_without_mixing() {
     let a = pattern(60 * 1024);
     let b: Vec<u8> = pattern(90 * 1024).into_iter().rev().collect();
 
-    let (stamp_a, _) = publish_series(&chan, &EXPORTER, "aa02", &a, FILE_CAP_DEFAULT_BYTES)
+    let (stamp_a, _) = publish_series(&chan, &EXPORTER, "aa02", &a, Some(FILE_CAP_DEFAULT_BYTES))
         .await
         .expect("a publishes");
-    let (stamp_b, _) = publish_series(&chan, &EXPORTER, "bb02", &b, FILE_CAP_DEFAULT_BYTES)
+    let (stamp_b, _) = publish_series(&chan, &EXPORTER, "bb02", &b, Some(FILE_CAP_DEFAULT_BYTES))
         .await
         .expect("b publishes");
 
@@ -117,13 +120,13 @@ async fn the_cap_and_the_checksum_refuse_honestly() {
     // over-cap: refused locally
     let big = vec![1u8; 1024];
     assert!(
-        publish_series(&chan, &EXPORTER, "cc03", &big, 1023).await.is_err(),
+        publish_series(&chan, &EXPORTER, "cc03", &big, Some(1023)).await.is_err(),
         "the cap refuses at publish time"
     );
 
     // published bytes that do not match the claimed checksum: refused
     let bytes = pattern(10 * 1024);
-    let (stamp, _) = publish_series(&chan, &EXPORTER, "dd04", &bytes, FILE_CAP_DEFAULT_BYTES)
+    let (stamp, _) = publish_series(&chan, &EXPORTER, "dd04", &bytes, Some(FILE_CAP_DEFAULT_BYTES))
         .await
         .expect("publishes");
     let err = fetch_series(
@@ -287,7 +290,7 @@ async fn a_spent_publish_budget_holds_the_upload() {
         });
     }
     let err = molt_net::file_plane::publish_series_metered(
-        &chan, &EXPORTER, "aa10", &bytes, FILE_CAP_DEFAULT_BYTES, &spent, now,
+        &chan, &EXPORTER, "aa10", &bytes, Some(FILE_CAP_DEFAULT_BYTES), &spent, now,
     )
     .await
     .expect_err("a spent budget holds the upload");
@@ -308,7 +311,7 @@ async fn a_spent_publish_budget_holds_the_upload() {
     // fresh: the publish goes through and consumes exactly one round
     let fresh = MemStore::default();
     let (stamp, chunks) = molt_net::file_plane::publish_series_metered(
-        &chan, &EXPORTER, "bb10", &bytes, FILE_CAP_DEFAULT_BYTES, &fresh, now,
+        &chan, &EXPORTER, "bb10", &bytes, Some(FILE_CAP_DEFAULT_BYTES), &fresh, now,
     )
     .await
     .expect("a fresh budget publishes");
@@ -327,4 +330,216 @@ async fn a_spent_publish_budget_holds_the_upload() {
     .await
     .expect("the granted series fetches");
     assert_eq!(got, bytes);
+}
+
+// ---------------------------------------------------------------------------
+// Series v2 (`docs/files/mirroring.md` §3.1): sealed under the FILE's key
+// ---------------------------------------------------------------------------
+
+use molt_net::file_plane::{
+    fetch_series_v2, manifest_of_reader, publish_series_v2, seal_piece, Manifest, SeriesExpect,
+    PIECE_PAYLOAD_LEN,
+};
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs()
+}
+
+const KEY: [u8; 32] = [42u8; 32];
+
+fn write_tmp(dir: &tempfile::TempDir, name: &str, bytes: &[u8]) -> std::path::PathBuf {
+    let path = dir.path().join(name);
+    std::fs::write(&path, bytes).expect("write");
+    path
+}
+
+fn expect_of(bytes: &[u8]) -> (Manifest, SeriesExpect, String) {
+    let (m, sha) = manifest_of_reader(bytes).expect("manifest");
+    let expect = SeriesExpect { count: m.count, size: m.size, root: m.root() };
+    (m, expect, sha)
+}
+
+/// A three-piece file (two full blocks, one short) round-trips: published
+/// from disk slice by slice, fetched by an independent channel under the
+/// file's key alone - no exporter secret involved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_v2_series_roundtrips_under_the_files_key() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let bytes = pattern(2 * PIECE_PAYLOAD_LEN + 1234);
+    let path = write_tmp(&tmp, "three.bin", &bytes);
+    let (manifest, expect, sha) = expect_of(&bytes);
+    assert_eq!(manifest.count, 3);
+    assert_eq!(sha, sha_hex(&bytes));
+
+    let sharer = GroupChannel::new(dialer(), vec![url.clone()], SEED);
+    let (start, count) = publish_series_v2(&sharer, &KEY, &path, &manifest, None)
+        .await
+        .expect("publishes");
+    assert_eq!(count, 3);
+    assert!(start > 0);
+
+    let fetcher = GroupChannel::new(dialer(), vec![url], SEED);
+    let mut got: Vec<u8> = Vec::new();
+    let m = fetch_series_v2(&fetcher, &KEY, start, &expect, &mut got, Some(Duration::from_secs(10)))
+        .await
+        .expect("fetches");
+    assert_eq!(m, manifest);
+    got.truncate(usize::try_from(m.size).expect("fits"));
+    assert_eq!(got, bytes);
+}
+
+/// A forged piece under the right key (wrong bytes at index 1) fails its
+/// manifest hash and is dropped - the honest piece still lands; a series
+/// published under another key never opens at all (the honest miss).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tampered_piece_is_refused_by_hash_and_a_foreign_key_never_opens() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let bytes = pattern(2 * PIECE_PAYLOAD_LEN + 7);
+    let path = write_tmp(&tmp, "tampered.bin", &bytes);
+    let (manifest, expect, _) = expect_of(&bytes);
+    let chan = GroupChannel::new(dialer(), vec![url.clone()], SEED);
+
+    // the forgery goes out FIRST, so a replay serves it before the truth
+    let forged = seal_piece(&KEY, 1, manifest.count, b"not the real slice").expect("seal");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    chan.publish_file_content_at(&forged, now).await.expect("forged publish");
+    let (start, _) = publish_series_v2(&chan, &KEY, &path, &manifest, None)
+        .await
+        .expect("publishes");
+
+    let fetcher = GroupChannel::new(dialer(), vec![url], SEED);
+    let mut got: Vec<u8> = Vec::new();
+    fetch_series_v2(&fetcher, &KEY, start.min(now), &expect, &mut got, Some(Duration::from_secs(10)))
+        .await
+        .expect("the honest pieces complete the series");
+    got.truncate(bytes.len());
+    assert_eq!(got, bytes, "the forged slice never landed");
+
+    // another key: nothing opens, no manifest - the honest miss
+    let mut nothing: Vec<u8> = Vec::new();
+    let err = fetch_series_v2(&fetcher, &[43u8; 32], start, &expect, &mut nothing, Some(Duration::from_secs(2)))
+        .await
+        .expect_err("a foreign key opens nothing");
+    assert!(err.to_string().contains("no manifest"), "{err}");
+    assert!(nothing.is_empty());
+}
+
+/// A series whose pieces sit in two day windows (the manifest a day
+/// earlier than the data - a trickle) fetches from its START stamp.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_v2_series_spanning_two_day_windows_fetches_from_its_start() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let bytes = pattern(PIECE_PAYLOAD_LEN + 99);
+    let path = write_tmp(&tmp, "two-days.bin", &bytes);
+    let (manifest, expect, _) = expect_of(&bytes);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    let yesterday = now - 86_400;
+    let count = manifest.count;
+    // manifest pieces (index >= count) yesterday, data pieces today
+    let stamp_for = move |index: u32| if index >= count { yesterday } else { now };
+
+    let chan = GroupChannel::new(dialer(), vec![url.clone()], SEED);
+    let (start, _) = publish_series_v2(&chan, &KEY, &path, &manifest, Some(&stamp_for))
+        .await
+        .expect("publishes");
+    assert_eq!(start, yesterday, "the start is the earliest stamp");
+
+    let fetcher = GroupChannel::new(dialer(), vec![url], SEED);
+    let mut got: Vec<u8> = Vec::new();
+    fetch_series_v2(&fetcher, &KEY, start, &expect, &mut got, Some(Duration::from_secs(10)))
+        .await
+        .expect("both windows are subscribed");
+    got.truncate(bytes.len());
+    assert_eq!(got, bytes);
+}
+
+/// Relays replay stored events NEWEST first: a series published manifest
+/// first (the oldest stamps) delivers every data slice BEFORE its manifest.
+/// Seventy pieces - more than any buffer - must still complete: slices
+/// land as they arrive and verify once the manifest lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn seventy_slices_replayed_before_their_manifest_still_complete() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let bytes = pattern(69 * PIECE_PAYLOAD_LEN + 17);
+    let path = write_tmp(&tmp, "seventy.bin", &bytes);
+    let (manifest, expect, _) = expect_of(&bytes);
+    assert_eq!(manifest.count, 70);
+    let now = unix_now();
+    let count = manifest.count;
+    // manifest pieces an hour earlier than the data: newest-first replay
+    // hands the fetcher all seventy slices before a single manifest piece
+    let stamp_for = move |index: u32| if index >= count { now - 3_600 } else { now };
+    let chan = GroupChannel::new(dialer(), vec![url.clone()], SEED);
+    let (start, _) = publish_series_v2(&chan, &KEY, &path, &manifest, Some(&stamp_for))
+        .await
+        .expect("publishes");
+
+    let fetcher = GroupChannel::new(dialer(), vec![url], SEED);
+    let mut got: Vec<u8> = Vec::new();
+    let m = fetch_series_v2(&fetcher, &KEY, start, &expect, &mut got, Some(Duration::from_secs(10)))
+        .await
+        .expect("every slice completes");
+    assert_eq!(m, manifest);
+    got.truncate(bytes.len());
+    assert_eq!(got, bytes);
+}
+
+/// A forged manifest chunk and a forged top record, both published
+/// NEWEST so a replay serves them first, are dropped by hash - the honest
+/// manifest wins and the series completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_forged_manifest_is_dropped_by_hash_and_the_series_completes() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let bytes = pattern(PIECE_PAYLOAD_LEN + 5);
+    let path = write_tmp(&tmp, "forged-manifest.bin", &bytes);
+    let (manifest, expect, _) = expect_of(&bytes);
+    let layout = Manifest::layout_for(manifest.count).expect("layout");
+    let chan = GroupChannel::new(dialer(), vec![url.clone()], SEED);
+    let now = unix_now();
+    // the honest series a minute ago…
+    let stamp_for = move |_: u32| now - 60;
+    let (start, _) = publish_series_v2(&chan, &KEY, &path, &manifest, Some(&stamp_for))
+        .await
+        .expect("publishes");
+    // …the forgeries now: a chunk naming wrong slice hashes, a record with a
+    // wrong chunk hash (its root cannot match), and a slice
+    let wrong_chunk = vec![0xEEu8; 32 * 2];
+    let forged_chunk = seal_piece(&KEY, manifest.count, manifest.count, &wrong_chunk).expect("seal");
+    chan.publish_file_content_at(&forged_chunk, now).await.expect("forged chunk");
+    let mut wrong_top = manifest.top_bytes();
+    if let Some(last) = wrong_top.last_mut() {
+        *last ^= 0xFF;
+    }
+    let forged_top = seal_piece(&KEY, layout.top, manifest.count, &wrong_top).expect("seal");
+    chan.publish_file_content_at(&forged_top, now).await.expect("forged top");
+    let forged_slice = seal_piece(&KEY, 0, manifest.count, b"not slice zero").expect("seal");
+    chan.publish_file_content_at(&forged_slice, now).await.expect("forged slice");
+
+    let fetcher = GroupChannel::new(dialer(), vec![url], SEED);
+    let mut got: Vec<u8> = Vec::new();
+    let m = fetch_series_v2(&fetcher, &KEY, start, &expect, &mut got, Some(Duration::from_secs(10)))
+        .await
+        .expect("the honest manifest and slices complete the series");
+    assert_eq!(m, manifest);
+    got.truncate(bytes.len());
+    assert_eq!(got, bytes, "no forgery landed in the end");
 }
