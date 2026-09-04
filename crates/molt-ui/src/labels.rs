@@ -249,6 +249,34 @@ pub(crate) fn strings_pick(de: bool, en: &str, de_s: &str) -> String {
 }
 
 /// Human size for a byte count, e.g. `"680 B"` / `"48 KiB"` / `"1.2 MiB"`.
+/// Bytes as a decimal-GB field value ("1", "1.5", "0.25"): integer math,
+/// two decimals at most, trailing zeros dropped.
+pub(crate) fn gb_label(bytes: u64) -> String {
+    let whole = bytes / 1_000_000_000;
+    let cents = (bytes % 1_000_000_000) / 10_000_000;
+    if cents == 0 {
+        whole.to_string()
+    } else {
+        format!("{whole}.{cents:02}").trim_end_matches('0').to_string()
+    }
+}
+
+/// The inverse of [`gb_label`]: a decimal-GB field value to bytes
+/// (`None` = not a number; up to two decimals count).
+pub(crate) fn gb_bytes(text: &str) -> Option<u64> {
+    let text = text.trim().replace(',', ".");
+    let (whole, frac) = text.split_once('.').unwrap_or((text.as_str(), ""));
+    let whole: u64 = if whole.is_empty() { 0 } else { whole.parse().ok()? };
+    let frac: String = frac.chars().take(2).collect();
+    if !frac.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let cents: u64 = if frac.is_empty() { 0 } else { format!("{frac:0<2}").parse().ok()? };
+    whole
+        .checked_mul(1_000_000_000)?
+        .checked_add(cents.checked_mul(10_000_000)?)
+}
+
 pub(crate) fn file_size_label(bytes: u64) -> String {
     if bytes < 1024 {
         format!("{bytes} B")
@@ -454,4 +482,24 @@ pub(crate) fn theme_name(i: i32) -> String {
         _ => "dark",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod gb_tests {
+    use super::*;
+
+    /// The GB field round-trips through integer math, two decimals, no
+    /// trailing zeros.
+    #[test]
+    fn the_gb_field_round_trips() {
+        assert_eq!(gb_label(1_000_000_000), "1");
+        assert_eq!(gb_label(1_073_741_824), "1.07");
+        assert_eq!(gb_label(2_500_000_000), "2.5");
+        assert_eq!(gb_label(250_000_000), "0.25");
+        assert_eq!(gb_bytes("2.5"), Some(2_500_000_000));
+        assert_eq!(gb_bytes("2,50"), Some(2_500_000_000));
+        assert_eq!(gb_bytes(".25"), Some(250_000_000));
+        assert_eq!(gb_bytes("3"), Some(3_000_000_000));
+        assert_eq!(gb_bytes("x"), None);
+    }
 }

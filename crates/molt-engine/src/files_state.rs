@@ -24,7 +24,7 @@ pub(crate) struct ShareIdentity {
     pub(crate) size: u64,
     pub(crate) checksum: String,
     pub(crate) shared_ts: u64,
-    /// Series-v2 material (`docs/files/mirroring.md` §3.1); "" / 0 on a
+    /// Series-v2 material (`docs_archive/files/mirroring.md` §3.1); "" / 0 on a
     /// legacy share.
     pub(crate) key_b64: String,
     pub(crate) pieces: u32,

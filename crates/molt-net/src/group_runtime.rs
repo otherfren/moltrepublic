@@ -1122,7 +1122,7 @@ pub(crate) fn consume_heal_round(cur: &mut molt_core::GroupCursor, now: u64) -> 
 }
 
 /// Rounds the hour still holds - what the file trickle keeps free for
-/// chat and governance (`docs/files/mirroring.md` §3.2). Pure: a rolled
+/// chat and governance (`docs_archive/files/mirroring.md` §3.2). Pure: a rolled
 /// window reads as the full allowance without being written.
 #[must_use]
 pub fn resend_headroom(cur: &molt_core::GroupCursor, now: u64) -> u32 {

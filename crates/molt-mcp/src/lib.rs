@@ -1816,10 +1816,12 @@ mod tests {
         // would let any MCP client execute code as the node's user, which is
         // a different thing entirely from acting inside the republic. The
         // wholesale settings paths refuse the key for the same reason.
-        const INTERNAL: [&str; 72] = [
+        const INTERNAL: [&str; 73] = [
             // the HOST POSTURE and the two secrets (MCP audit 2026-08-26 M1/H4):
             // an agent operates the seat, not the machine — GUI / config only
             "set_node_posture",
+            // the mirror folder is an any-path host setting (mirroring §3.5)
+            "set_mirror_dir",
             // any-path file access is the GUI's file dialog; an agent gets the
             // exchange folder (share_file_from_exchange, export_workspace_archive,
             // wiki_export_archive) — H1/H3/M3 of the same audit

@@ -579,7 +579,7 @@ impl GroupChannel {
     }
 
     /// The file pieces of a series that STARTED at `start_secs` and may
-    /// still be going (series v2, `docs/files/mirroring.md` §3.1): every
+    /// still be going (series v2, `docs_archive/files/mirroring.md` §3.1): every
     /// window from the start's through the current one (newest
     /// `max_windows` kept) plus the skew-adjacent ones - see
     /// [`file_catchup_tags`]. A file subscription has NO stored-event

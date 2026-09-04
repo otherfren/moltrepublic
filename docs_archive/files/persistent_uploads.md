@@ -3,7 +3,7 @@
 **Status: EXECUTED - D1-D4 and the two table fixes ship with the change
 that carries this file into the archive (2026-09-03). The MIRRORING
 addendum below was decided the same evening and is designed in
-`docs/files/mirroring.md` (open, stages M1-M6). The shipping behaviour is
+`docs_archive/files/mirroring.md` (executed 2026-09-04). The shipping behaviour is
 the code and its tests; D1-D3 below name the shipped identifiers.**
 Commissioned on 2026-09-03 right after the Shared Files nav surface landed
 (`Surface::Files`, core).
@@ -157,7 +157,7 @@ pending/accepted/declined`. No new `Command` (co-equality untouched).
    header/cell widths of the Type column agree (headless geometry).
 4. mcp: schema/description coverage via the derived enums.
 
-## Addendum (user, 2026-09-03 evening): mirroring - OPEN
+## Addendum (user, 2026-09-03 evening): mirroring - BUILT 2026-09-04 (`mirroring.md`)
 
 Persistent files are to be MIRRORED by every consenting member: an opt-out
 switch above the Persistent table (default on), a quota (default 1 GB), a

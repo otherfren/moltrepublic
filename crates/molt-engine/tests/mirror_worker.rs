@@ -2,7 +2,7 @@
 #![allow(missing_docs)]
 
 //! **M4 keystones - the mirror worker over a real 2-of-2 republic**
-//! (`docs/files/mirroring.md` §3.3): a persisted share is complete in the
+//! (`docs_archive/files/mirroring.md` §3.3): a persisted share is complete in the
 //! second seat's mirror folder without anyone downloading it, and the
 //! sharer reads that seat as a holder; a quota too small stops the worker
 //! with ONE notice and no fetch.

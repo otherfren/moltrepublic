@@ -1341,6 +1341,9 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
             persistent: u.persistent,
             checksum_full: u.checksum_full.as_str().into(),
             vote: u.vote.as_str().into(),
+            mirrors: u.mirrors,
+            mirror_held: u.mirror_held,
+            mirror_of: u.mirror_of,
         })
         .collect();
     // the two Shared Files tables: the vote decides the row set
@@ -1376,6 +1379,20 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     sync_strings(&ui.get_org_relays(), &b.org_stats.relays, |m| ui.set_org_relays(m));
     // the R6 pencil's draft prefill: the same pool, space-joined
     ui.set_org_relays_joined(b.org_stats.relays.join(" ").into());
+    // mirroring §3.6: the switch, the quota in GB, the usage line, the folder
+    ui.set_org_mirror_on(b.org_stats.mirror_on);
+    ui.set_org_mirror_quota(crate::labels::gb_label(b.org_stats.mirror_quota).into());
+    let of = if b.lang == 1 { "von" } else { "of" };
+    ui.set_org_mirror_used(
+        format!(
+            "{} {of} {}",
+            crate::labels::file_size_label(b.org_stats.mirror_used),
+            crate::labels::file_size_label(b.org_stats.mirror_quota)
+        )
+        .into(),
+    );
+    ui.set_org_mirror_over(b.org_stats.mirror_used >= b.org_stats.mirror_quota);
+    ui.set_org_mirror_dir(b.org_stats.mirror_dir.as_str().into());
 
     // the republic's image: (re)load the picture only when the file
     // reference changes. The bytes rode the applied set_image proposal, so

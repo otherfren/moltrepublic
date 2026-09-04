@@ -335,7 +335,7 @@ async fn a_spent_publish_budget_holds_the_upload() {
 }
 
 // ---------------------------------------------------------------------------
-// Series v2 (`docs/files/mirroring.md` §3.1): sealed under the FILE's key
+// Series v2 (`docs_archive/files/mirroring.md` §3.1): sealed under the FILE's key
 // ---------------------------------------------------------------------------
 
 use molt_net::file_plane::{

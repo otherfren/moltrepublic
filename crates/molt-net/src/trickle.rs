@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The trickle sender (`docs/files/mirroring.md` §3.2): ONE queue of
+//! The trickle sender (`docs_archive/files/mirroring.md` §3.2): ONE queue of
 //! publish jobs per runtime, persisted in `TransportState` so a restart
 //! resumes at the cursor, drained one kind-447 event per interval - and
 //! only while the group outbox is idle, the hour's resend budget keeps two

@@ -412,6 +412,9 @@ fn upload(user: &str, name: &str, checksum: &str, ts: u64, bytes: u64) -> Upload
     UploadRowData {
         persistent: false,
         vote: String::new(),
+        mirrors: 1,
+        mirror_held: 0,
+        mirror_of: 0,
         id: String::new(),
         user: user.to_string(),
         date: format!("{}", u64::MAX - ts),

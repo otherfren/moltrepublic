@@ -2,7 +2,7 @@
 #![allow(missing_docs)]
 
 //! **M3 keystone - the mirror gossip over a real 2-of-2 republic**
-//! (`docs/files/mirroring.md` §3.4): a seat's declaration reaches the
+//! (`docs_archive/files/mirroring.md` §3.4): a seat's declaration reaches the
 //! peer, a shared file shows its sharer as a whole holder on the peer,
 //! and both survive the peer's close and reopen.
 

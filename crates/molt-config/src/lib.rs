@@ -66,7 +66,7 @@ pub struct NodeConfig {
     pub poke_wake_command: String,
 }
 
-/// The file plane's pacing (`[files]`, `docs/files/mirroring.md` §3.2).
+/// The file plane's pacing (`[files]`, `docs_archive/files/mirroring.md` §3.2).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FilesConfig {

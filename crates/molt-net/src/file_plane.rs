@@ -205,7 +205,7 @@ pub async fn fetch_series(
 }
 
 // ---------------------------------------------------------------------------
-// Series v2 (`docs/files/mirroring.md` §3.1): sealed under the FILE's key
+// Series v2 (`docs_archive/files/mirroring.md` §3.1): sealed under the FILE's key
 // ---------------------------------------------------------------------------
 //
 // A v2 piece is a 447 event exactly like a v1 chunk, but its outer layer is

@@ -340,7 +340,7 @@ impl State {
         // a deliberate cap applies on the relay plane, where the human who
         // picked the file can act - admitting an over-cap share would mint
         // one nobody can download (review 2026-08-10). Absent = no cap
-        // (`docs/files/mirroring.md` §1). Metadata only, no read.
+        // (`docs_archive/files/mirroring.md` §1). Metadata only, no read.
         let cap = match self.effective_file_cap() {
             crate::net::files::FileCap::Off => {
                 return Err(MoltError::BadPayload(

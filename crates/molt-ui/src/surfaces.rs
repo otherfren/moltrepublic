@@ -74,6 +74,7 @@ pub(crate) fn sort_uploads(rows: &mut [UploadRowData], column: &str, ascending: 
         "checksum" => rows.sort_by_key(|r| r.checksum_full.to_lowercase()),
         "download" => rows.sort_by_key(|r| r.status.to_lowercase()),
         "expires" => rows.sort_by_key(|r| r.expires_ts),
+        "mirrors" => rows.sort_by_key(|r| r.mirrors),
         _ => return,
     }
     if !ascending {
@@ -203,6 +204,12 @@ pub(crate) struct OrgStats {
     /// Decoded picture bytes a member picture may still carry here (engine
     /// `StatusView.image_budget`) - what the fit before proposing aims at.
     pub(crate) image_budget: u64,
+    /// This seat's mirror consent, quota, usage and folder (engine
+    /// `ReadMirror`, mirroring §3.6).
+    pub(crate) mirror_on: bool,
+    pub(crate) mirror_quota: u64,
+    pub(crate) mirror_used: u64,
+    pub(crate) mirror_dir: String,
 }
 
 /// One rendered row of the Organization → Members table.
@@ -272,6 +279,11 @@ pub(crate) struct UploadRowData {
     /// An open persist/unpersist vote on this share, as its "n/m" ("" =
     /// none) — the row's button shows it and stays disabled meanwhile.
     pub(crate) vote: String,
+    /// Members holding the whole series, the sharer included (§3.4).
+    pub(crate) mirrors: i32,
+    /// This seat's verified pieces and the series' piece count.
+    pub(crate) mirror_held: i32,
+    pub(crate) mirror_of: i32,
 }
 
 /// One chat-channel sidebar row (plain, `Send` twin of the Slint
@@ -647,6 +659,10 @@ pub(crate) async fn gather_surfaces(
     wallet: &WalletHandle,
     chat_ui: &Arc<Mutex<ChatUiState>>,
 ) -> Option<(u64, SurfacesBundle)> {
+    let mirror = match wallet.execute(Command::ReadMirror).await {
+        Ok(Reply::Mirror(m)) => Some(m),
+        _ => None,
+    };
     let (member, threshold_badge, org_stats) = match wallet.execute(Command::Status).await {
         Ok(Reply::Status(s)) => (
             s.member,
@@ -665,6 +681,10 @@ pub(crate) async fn gather_surfaces(
                 relays: s.relays,
                 features: s.features,
                 image_budget: s.image_budget,
+                mirror_on: mirror.as_ref().map_or(true, |m| m.on),
+                mirror_quota: mirror.as_ref().map_or(molt_core::MIRROR_QUOTA_DEFAULT, |m| m.quota),
+                mirror_used: mirror.as_ref().map_or(0, |m| m.used),
+                mirror_dir: mirror.as_ref().map(|m| m.dir.clone()).unwrap_or_default(),
             },
         ),
         _ => return None,
@@ -744,6 +764,9 @@ pub(crate) async fn gather_surfaces(
             .map(|u| UploadRowData {
                 persistent: u.persistent,
                 vote: String::new(),
+                mirrors: i32::try_from(u.mirrors).unwrap_or(i32::MAX),
+                mirror_held: i32::try_from(u.mirror_held).unwrap_or(i32::MAX),
+                mirror_of: i32::try_from(u.mirror_of).unwrap_or(i32::MAX),
                 id: u.id.to_string(),
                 user: u.member,
                 date: file_date_label(u.ts),

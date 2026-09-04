@@ -350,7 +350,7 @@ const CONTROL_FRAMES: &[(&[u8], ControlParser)] = &[
             None
         }
     }),
-    // a piece want (`docs/files/mirroring.md` §3.2): a member names the
+    // a piece want (`docs_archive/files/mirroring.md` §3.2): a member names the
     // pieces of a v2 series it misses; the holders re-publish them
     (crate::piece_want::PIECE_WANT_TAG, |from, frame| {
         match crate::piece_want::PieceWanted::from_frame(frame) {

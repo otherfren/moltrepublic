@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The mirror gossip on the engine side (`docs/files/mirroring.md` §3.4):
+//! The mirror gossip on the engine side (`docs_archive/files/mirroring.md` §3.4):
 //! this seat's declaration and hold status go out as control frames -
 //! at runtime start, on change, periodically - and every member's come in
 //! and persist in `transport.state`, so "who mirrors what" reads locally.
@@ -192,7 +192,7 @@ impl State {
         Some((self.mirror_dir()?.join(id.to_string()), true))
     }
 
-    /// The worker's planning beat (`docs/files/mirroring.md` §3.3), every
+    /// The worker's planning beat (`docs_archive/files/mirroring.md` §3.3), every
     /// five seconds: drop what an unpersist freed, resume or start the
     /// least-mirrored persistent share this seat does not hold (one fetch
     /// at a time), stop at the quota with ONE notice.
@@ -428,9 +428,6 @@ impl State {
 
     /// The consent switch and the quota (`set_mirror`, both surfaces).
     pub(crate) fn cmd_set_mirror(&mut self, on: bool, quota_bytes: u64) -> Result<Reply, MoltError> {
-        if self.active.is_none() {
-            return Err(MoltError::Engine("no open workspace".into()));
-        }
         let now = crate::now_secs();
         let m = &mut self.files.mirror;
         m.on = on;
@@ -440,6 +437,37 @@ impl State {
         self.files.mirror_planned_at = 0;
         self.persist_mirror();
         self.send_mirror_decl(now);
+        Ok(Reply::Ack)
+    }
+
+    /// The mirror folder (GUI/config-only): the pieces move with it, a
+    /// running fetch restarts in the new folder, the worker re-plans.
+    pub(crate) fn cmd_set_mirror_dir(&mut self, path: String) -> Result<Reply, MoltError> {
+        let old = self.mirror_dir();
+        let Some(active) = self.active.as_mut() else {
+            return Err(MoltError::Engine("no open workspace".into()));
+        };
+        active.prefs.mirror_dir = path.trim().to_string();
+        active.handle.set_prefs(active.prefs.clone());
+        let new = self.mirror_dir();
+        if let (Some(old), Some(new)) = (old, new) {
+            if old != new {
+                for (_, fetch) in self.files.mirror_fetches.drain() {
+                    fetch.abort();
+                }
+                tokio::task::spawn_blocking(move || {
+                    if old.is_dir() {
+                        if let Some(parent) = new.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        if let Err(e) = std::fs::rename(&old, &new) {
+                            tracing::warn!(error = %e, "mirror: the folder did not move - the jobs start over there");
+                        }
+                    }
+                });
+            }
+        }
+        self.files.mirror_planned_at = 0;
         Ok(Reply::Ack)
     }
 
@@ -553,6 +581,7 @@ impl State {
             on: self.files.mirror.on,
             quota: self.files.mirror.quota,
             used: self.mirror_used(),
+            dir: self.mirror_dir().map(|d| d.display().to_string()).unwrap_or_default(),
             members,
             files,
         }

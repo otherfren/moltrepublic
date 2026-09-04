@@ -218,7 +218,7 @@ component SettingsTab inherits AppButton {
 // a narrow pane shows the SAME content.
 // One S3 bucket: its name, its byte cap, and its own live probe. Endpoint
 // and credentials are configured ONCE above and shared by every bucket
-// (docs/storage/s3_buckets.md).
+// (docs_archive/storage/s3_buckets.md).
 component S3BucketGroup inherits DetailGroup {
     in-out property <string> bucket;
     // byte cap as whole MiB, "0"/empty = no limit
@@ -964,6 +964,14 @@ component UploadsTable inherits Rectangle {
                     width: 90px * Theme.ui-scale;
                     clicked => { root.sort("expires"); }
                 }
+                if root.persistent: SortHeader {
+                    label: Strings.ou-col-mirrors;
+                    active: root.sort-column == "mirrors";
+                    desc: !root.sort-ascending;
+                    align: center;
+                    width: 90px * Theme.ui-scale;
+                    clicked => { root.sort("mirrors"); }
+                }
                 // the vote column: the button IS the header's meaning
                 SortHeader {
                     label: root.persistent ? Strings.ou-col-unpersist : Strings.ou-col-persist;
@@ -1117,6 +1125,33 @@ component UploadsTable inherits Rectangle {
                         width: 90px * Theme.ui-scale;
                         horizontal-alignment: right;
                     }
+                    // mirroring §3.6: who holds the whole series, and this
+                    // seat's own progress as a bar while incomplete
+                    if root.persistent: VerticalLayout {
+                        width: 90px * Theme.ui-scale;
+                        alignment: center;
+                        spacing: 3px;
+                        Text {
+                            text: u.mirrors;
+                            color: Theme.dim;
+                            font-size: Theme.fs-cap;
+                            horizontal-alignment: center;
+                        }
+                        if u.mirror-of > 0 && u.mirror-held > 0 && u.mirror-held < u.mirror-of: Rectangle {
+                            height: 4px;
+                            width: 64px * Theme.ui-scale;
+                            x: (parent.width - self.width) / 2;
+                            border-radius: 2px;
+                            background: Theme.line;
+                            Rectangle {
+                                x: 0;
+                                height: parent.height;
+                                width: parent.width * u.mirror-held / u.mirror-of;
+                                border-radius: 2px;
+                                background: Theme.accent;
+                            }
+                        }
+                    }
                     // the vote: one button per row, or the open vote's
                     // count while one is running (no double proposals)
                     HorizontalLayout {
@@ -1222,6 +1257,13 @@ export component AppWindow inherits Window {
     in property <[UploadRow]> org-uploads;
     // the vote-pinned shares (Shared Files → Persistent Uploads)
     in property <[UploadRow]> org-persistent;
+    // this seat's mirror consent, quota (GB, editable), usage line, folder
+    // (mirroring §3.6) - mirrored from the engine's read_mirror
+    in-out property <bool> org-mirror-on: true;
+    in-out property <string> org-mirror-quota: "1";
+    in property <string> org-mirror-used;
+    in property <bool> org-mirror-over: false;
+    in property <string> org-mirror-dir;
     // the tables' presentation state (sorting/filtering runs in Rust over
     // the mirrored rows and lives in the UI-local state there — these echo
     // it back so the headers render the ▲/▼ arrow and the filter box
@@ -1238,6 +1280,9 @@ export component AppWindow inherits Window {
     callback filter-uploads(string);
     // the two Shared Files votes, by the share's chat message id
     callback persist-upload(string);
+    // the mirror switch + quota (GB text) and the folder picker
+    callback set-mirror(bool, string);
+    callback pick-mirror-dir();
     callback unpersist-upload(string);
     // the checksum modal: the file name and its full sha256
     in-out property <bool> checksum-modal-open: false;
@@ -2088,7 +2133,7 @@ export component AppWindow inherits Window {
     }
     in-out property <bool> cfg-s3-backup: false;
     // ONE S3 account - endpoint and credentials - shared by every bucket
-    // below (docs/storage/s3_buckets.md).
+    // below (docs_archive/storage/s3_buckets.md).
     in-out property <string> cfg-s3-endpoint;
     in-out property <string> cfg-s3-access;
     in-out property <string> cfg-s3-secret;
@@ -6650,6 +6695,69 @@ export component AppWindow inherits Window {
                                 unpersist(id) => { root.unpersist-upload(id); }
                                 show-checksum(name, hash) => { root.open-checksum(name, hash); }
                             }
+                            // mirroring §3.6: consent, quota, folder and usage
+                            // above the Persistent table
+                            if root.selected-view == "persistent": Rectangle {
+                                background: Theme.panel;
+                                border-radius: Theme.win95 ? 0px : 8px;
+                                border-width: Theme.border-w;
+                                border-color: Theme.line;
+                                HorizontalLayout {
+                                    padding: 10px;
+                                    spacing: 14px;
+                                    alignment: start;
+                                    ou-mirror-check := AppCheck {
+                                        label: Strings.ou-mirror-switch;
+                                        checked: root.org-mirror-on;
+                                        toggled(on) => {
+                                            root.set-mirror(on, root.org-mirror-quota);
+                                        }
+                                    }
+                                    Text {
+                                        text: Strings.ou-mirror-quota;
+                                        color: Theme.text;
+                                        font-size: Theme.fs-body;
+                                        vertical-alignment: center;
+                                    }
+                                    AppField {
+                                        width: 80px * Theme.ui-scale;
+                                        numeric: true;
+                                        text <=> root.org-mirror-quota;
+                                        placeholder: "1";
+                                    }
+                                    AppButton {
+                                        height: 28px * Theme.ui-scale;
+                                        pad: 10px;
+                                        label: Strings.ou-mirror-apply;
+                                        clicked => {
+                                            root.set-mirror(root.org-mirror-on, root.org-mirror-quota);
+                                        }
+                                    }
+                                    Text {
+                                        text: root.org-mirror-used;
+                                        color: root.org-mirror-over ? Theme.warn : Theme.dim;
+                                        font-size: Theme.fs-cap;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: root.org-mirror-dir;
+                                        color: Theme.faint;
+                                        font-size: Theme.fs-cap;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                        preferred-width: 0px;
+                                        overflow: elide;
+                                    }
+                                    AppButton {
+                                        height: 28px * Theme.ui-scale;
+                                        pad: 10px;
+                                        label: Strings.ou-mirror-browse;
+                                        clicked => {
+                                            root.pick-mirror-dir();
+                                        }
+                                    }
+                                }
+                            }
                             if root.selected-view == "persistent": UploadsTable {
                                 vertical-stretch: 1;
                                 rows: root.org-persistent;
@@ -7941,7 +8049,7 @@ export component AppWindow inherits Window {
                         }
                         // S3 config: WHERE things go - two fully separate
                         // targets, each with its own endpoint, credentials,
-                        // bucket and byte cap (docs/storage/s3_buckets.md).
+                        // bucket and byte cap (docs_archive/storage/s3_buckets.md).
                         // WHEN and for WHICH workspace a backup is written is
                         // the Backup tab's errand, not this one's.
                         if root.set-tab == 3: VerticalLayout {

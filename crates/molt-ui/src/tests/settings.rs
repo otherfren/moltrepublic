@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The settings draft: MiB quotas, the two S3 targets, the folder browse.
 //!
-//! The two S3 targets (`docs/storage/s3_buckets.md`): the byte quotas
+//! The two S3 targets (`docs_archive/storage/s3_buckets.md`): the byte quotas
 //! are edited in MiB but stored in bytes, and the two targets share no
 //! field on the way through the settings draft.
 

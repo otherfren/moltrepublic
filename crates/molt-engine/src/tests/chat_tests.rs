@@ -775,7 +775,7 @@ fn the_chat_view_is_the_whole_retention_window() {
     );
 }
 
-/// Series v2 (`docs/files/mirroring.md` §3.1): a share carries its content
+/// Series v2 (`docs_archive/files/mirroring.md` §3.1): a share carries its content
 /// key, piece count and manifest root, drawn in the same pass as the
 /// checksum - and the tables never expose the key.
 #[test]

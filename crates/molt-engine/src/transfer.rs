@@ -75,7 +75,7 @@ pub(crate) struct FetchTarget {
     /// The log-anchored sha256 ("" on legacy shares — then the manifest's
     /// recomputed hash is the only reference).
     pub checksum: String,
-    /// Series-v2 material (`docs/files/mirroring.md` §3.1): the content
+    /// Series-v2 material (`docs_archive/files/mirroring.md` §3.1): the content
     /// key (base64), the piece count and the manifest root; "" / 0 on a
     /// legacy share, which fetches the exporter-sealed chunk series.
     pub key_b64: String,
@@ -837,7 +837,7 @@ pub(crate) fn spawn_share_hash(
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
                 // one streaming pass: the whole-file sha256 AND the piece
-                // manifest of series v2 (`docs/files/mirroring.md` §3.1),
+                // manifest of series v2 (`docs_archive/files/mirroring.md` §3.1),
                 // plus the file's content key - drawn here, carried by the
                 // share message, members-only through MLS
                 let (manifest, checksum) =
@@ -1166,7 +1166,7 @@ pub(crate) fn spawn_series_publish(
 }
 
 /// How long a resumable fetch waits after the relays went quiet before it
-/// asks the holders for the missing pieces (`docs/files/mirroring.md`
+/// asks the holders for the missing pieces (`docs_archive/files/mirroring.md`
 /// §3.2), in ms - a static so the integration tests can shorten it
 /// (`crate::__set_piece_want_after`).
 static PIECE_WANT_AFTER_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(600_000);
@@ -1199,7 +1199,7 @@ pub(crate) trait FetchJobStore: Clone + Send + Sync + 'static {
     fn save_job(&self, job: molt_core::FetchJob);
     /// The fetch of `series` ended.
     fn remove_job(&self, series: &str);
-    /// Upsert a mirrored series' job (`docs/files/mirroring.md` §3.3).
+    /// Upsert a mirrored series' job (`docs_archive/files/mirroring.md` §3.3).
     fn save_mirror_job(&self, series: &str, job: molt_core::MirrorJob);
     /// The mirror of `series` is gone.
     fn remove_job_mirror(&self, series: &str);
@@ -1289,7 +1289,7 @@ impl<S: FetchJobStore> molt_net::file_plane::PieceSink for MirrorSink<S> {
     }
 }
 
-/// The mirror worker's fetch (`docs/files/mirroring.md` §3.3): the
+/// The mirror worker's fetch (`docs_archive/files/mirroring.md` §3.3): the
 /// resumable job of §3.2 with the mirror folder as its sink. On
 /// completion the manifest pieces are sealed into the folder too (a
 /// re-seed publishes them like the data), the job is marked complete and

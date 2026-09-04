@@ -682,7 +682,7 @@ async fn decrypting_clears_the_sealed_skip_backup_status() {
     assert!(!entry(&sv, &id).encrypted, "decrypted");
 }
 
-/// `docs/storage/s3_buckets.md` §4: a bucket over its byte quota prunes the
+/// `docs_archive/storage/s3_buckets.md` §4: a bucket over its byte quota prunes the
 /// OLDEST objects across every workspace it holds - but never a workspace's
 /// newest copy, so no republic is left without a backup.
 #[tokio::test]

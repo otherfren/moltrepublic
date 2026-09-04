@@ -1,9 +1,9 @@
 # Two S3 buckets: workspace backups and media
 
-Status: **BUILT (2026-08-21)** except §7, which stays open BY DECISION: the
-media bucket is configuration only until a consumer is designed (a Shared
-Files mock surface named it their optional backup on 2026-08-28 and was
-removed again on 2026-09-03 — §7 is open as before). Keystones:
+Status: **BUILT (2026-08-21); §7 CLOSED 2026-09-04 as "not needed"**: the
+persistent files live on the members' machines through the mirroring
+(`docs_archive/files/mirroring.md`), so the media bucket stays
+configuration only, by decision, with no consumer planned. Keystones:
 `molt-engine/src/backup.rs` (`quota_candidates` unit tests),
 `molt-engine/tests/backup_ticker.rs` (the two quota tests),
 `molt-engine/tests/s3_test_button.rs` (per-bucket probe + verdict
@@ -165,11 +165,11 @@ same MiB is kept unrounded, so an unrelated save never re-quantizes a
 hand-written `s3_max_bytes`. The settings pane is already a Flickable, so
 the extra height scrolls.
 
-## 7. Open: what the media bucket is for
+## 7. Closed (2026-09-04): the media bucket has no consumer
 
-Deliberately unanswered. Wiring it up means picking a consumer, and the
-obvious one (shared files) reopens the recorded "445 chunking, NOT an
-external blob server" decision. That needs its own design pass covering at
-minimum: who encrypts the blob and with which key, how the key reaches a
-reader, what the object key reveals, and how the Tor posture survives a
-second host. Until then the fields are configuration, and the GUI says so.
+Not needed: the shared files that were the obvious consumer are kept by
+the members themselves (`docs_archive/files/mirroring.md` - every
+consenting seat mirrors the persistent files over the relays, ciphertext
+only, no second host). The "445 chunking, NOT an external blob server"
+decision stands; the media bucket fields stay configuration, and the GUI
+says so.

@@ -2,7 +2,7 @@
 #![allow(missing_docs)]
 
 //! **M2 keystones - the trickle sender and the resumable fetch over a
-//! real 2-of-2 republic** (`docs/files/mirroring.md` §3.2): a share
+//! real 2-of-2 republic** (`docs_archive/files/mirroring.md` §3.2): a share
 //! downloads end to end with the sharer publishing one piece per second;
 //! a requester closed and reopened mid-way resumes its job at the bitmap;
 //! a piece the relay lost is asked for (`PieceWanted`) and re-published.

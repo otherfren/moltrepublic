@@ -89,6 +89,47 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     }
 
     {
+        // the mirror switch and quota (mirroring §3.6): one command, the
+        // engine declares it to the members; a field that is not a number
+        // keeps the stored quota
+        let cx = ctx.clone();
+        ui.on_set_mirror(move |on, quota_text| {
+            let stored = cx
+                .weak
+                .upgrade()
+                .map(|ui| ui.get_org_mirror_quota().to_string())
+                .unwrap_or_default();
+            let quota_bytes = crate::labels::gb_bytes(quota_text.as_str())
+                .or_else(|| crate::labels::gb_bytes(&stored))
+                .unwrap_or(molt_core::MIRROR_QUOTA_DEFAULT);
+            cx.issue(Command::SetMirror { on, quota_bytes });
+        });
+        // the mirror folder: any-path, so the picker runs here and the
+        // engine gets the choice through its GUI-only door
+        let cx = ctx.clone();
+        ui.on_pick_mirror_dir(move || {
+            let cx2 = cx.clone();
+            let start = cx
+                .weak
+                .upgrade()
+                .map(|ui| ui.get_org_mirror_dir().to_string())
+                .unwrap_or_default();
+            cx.rt.spawn(async move {
+                let mut picker = rfd::AsyncFileDialog::new();
+                if !start.is_empty() {
+                    picker = picker.set_directory(start);
+                }
+                let Some(folder) = picker.pick_folder().await else {
+                    return; // cancelled
+                };
+                cx2.issue(Command::SetMirrorDir {
+                    path: folder.path().display().to_string(),
+                });
+            });
+        });
+    }
+
+    {
         // A member row's uploads count: jump to Shared Files → Uploads
         // pre-filtered to that member. The view switch is the same engine
         // command the nav issues; the filter itself stays single-writer in

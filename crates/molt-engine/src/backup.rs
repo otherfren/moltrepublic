@@ -642,7 +642,7 @@ struct QuotaObject {
     size: u64,
 }
 
-/// Hold the backup bucket under `max_bytes` (`docs/storage/s3_buckets.md`
+/// Hold the backup bucket under `max_bytes` (`docs_archive/storage/s3_buckets.md`
 /// §4), bucket-wide across every workspace this node backs up. `0` = no
 /// limit and no listing round-trip.
 ///
@@ -705,7 +705,7 @@ fn own_backups(
     objects.into_iter().filter(|o| own.contains(&o.id)).collect()
 }
 
-/// Pure byte-quota decision (`docs/storage/s3_buckets.md` §4): from every
+/// Pure byte-quota decision (`docs_archive/storage/s3_buckets.md` §4): from every
 /// backup object this node wrote, the oldest to delete so the total fits
 /// `max_bytes`, plus the byte total that remains afterwards.
 ///

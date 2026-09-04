@@ -877,6 +877,13 @@ lexicon! {
     ou_unpersist: "unpersist", "befristen";
     ou_empty_persistent: "No persistent uploads yet.", "Noch keine dauerhaften Uploads.";
     ou_note_persistent: "A vote pinned these shares: no expiry, listed for good - the bytes stay with the sharer. Unpersist restarts the clock.", "Eine Abstimmung hat diese Shares fixiert: kein Ablauf, dauerhaft gelistet - die Bytes bleiben beim Teilenden. Befristen startet die Frist neu.";
+    ou_col_mirrors: "Mirrored by", "Gespiegelt von";
+    ou_mirror_switch: "Mirror persistent files", "Dauerhafte Dateien spiegeln";
+    ou_mirror_quota: "Quota (GB)", "Quota (GB)";
+    ou_mirror_apply: "Apply", "Übernehmen";
+    ou_mirror_folder: "Folder", "Ordner";
+    ou_mirror_browse: "Folder...", "Ordner...";
+    ou_mirror_of: "of", "von";
     ou_copy: "Copy", "Kopieren";
     ou_gone: "gone", "weg";
     ou_download: "Download", "Download";
@@ -1083,7 +1090,7 @@ lexicon! {
     set_s3_keep: "save up to", "behalte bis zu";
     set_s3_unit_copies: "copies", "Kopien";
     s3_test_tip: "Sends a signed probe to the bucket over the configured transport - Tor when it is enabled.", "Sendet eine signierte Testanfrage an den Bucket über den konfigurierten Transport - via Tor, wenn aktiviert.";
-    // one S3 account, several buckets (docs/storage/s3_buckets.md)
+    // one S3 account, several buckets (docs_archive/storage/s3_buckets.md)
     set_s3_grp_account: "Endpoint & credentials", "Endpunkt & Zugangsdaten";
     set_s3_grp_backup: "Workspace backups", "Workspace-Backups";
     set_s3_grp_media: "Media", "Medien";

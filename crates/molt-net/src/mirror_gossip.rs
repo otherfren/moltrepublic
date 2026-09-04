@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The mirror gossip (`docs/files/mirroring.md` §3.4): a seat's mirror
+//! The mirror gossip (`docs_archive/files/mirroring.md` §3.4): a seat's mirror
 //! DECLARATION (on/off, quota), its hold STATUS per series, and the ask
 //! that makes every holder answer with its status. Three control frames
 //! in the reserved space, authenticated by the MLS credential like the

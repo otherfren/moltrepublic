@@ -1,10 +1,10 @@
 # Mirroring: every consenting seat keeps the persistent files
 
-**Status: OPEN - design of 2026-09-03, decisions ratified by the user the
-same evening (§1); M1 (the piece format v2, the cap removal), M2 (the
-trickle sender, the resumable fetch, `PieceWanted`), M3 (the declaration
-and status gossip, `set_mirror`/`read_mirror`) and M4 (the mirror
-worker) are BUILT, M5-M6 open.** Follows
+**Status: EXECUTED - design of 2026-09-03, decisions ratified by the user
+the same evening (§1); M1-M6 built 2026-09-04 (M1 in 52e36fc2/4e76ef80,
+M2 c9c79de3, M3 cba853df, M4 e1f3ff9b, M5-M6 the change that carries
+this line). §3 describes the shipping behaviour; §5 records the worker's
+decisions per stage.** Follows
 `docs_archive/files/persistent_uploads.md` (the persist/unpersist votes,
 landed the same day).
 
@@ -264,34 +264,38 @@ roster member's declaration (`known`, `on`, `quota`, `rev`) and per share
 its holders plus this seat's `held/of`; `read_uploads` rows carry
 `mirrors`, `mirror_held`, `mirror_of` as well.
 
-### 3.5 Storage and settings
+### 3.5 Storage and settings - as built
 
-- `WorkspacePrefs` (private, `prefs.toml`): `mirror_dir` (default
-  `<workspace_dir>/../mirror/<republic-id>/`). Node-private, any-path →
-  the setting is GUI/config-only (`mcp-security.md`: the agent operates
-  the seat, not the machine).
-- `TransportState`: `mirror_on: bool` (default true), `mirror_quota: u64`
-  (default 1 GiB), `mirror_state`, `mirror_decls`, the sender cursors.
-  On/quota are settable over MCP (`set_mirror {on, quota_bytes}`) and the
-  GUI - co-equal.
-- Cap removal: `file_cap_bytes` keeps only its 0 = off meaning; the
-  over-cap refusals in `cmd_share_file`, `publish_series` and
-  `serve_file_wanted` go, `FILE_CAP_DEFAULT_BYTES` with them.
+- `WorkspacePrefs.mirror_dir` (private, `prefs.toml`): the mirror folder,
+  "" = `<workspace root>/../mirror/<republic-id>/`. Any-path, so its one
+  door is the GUI's picker (`SetMirrorDir`, INTERNAL - never an MCP tool,
+  `mcp-security.md`); a change moves the folder (a rename; a failed move
+  starts the jobs over there) and restarts the running fetch.
+- `TransportState.mirror`: `on` (default true), `quota` (default 1 GiB),
+  `rev`, the members' `decls` and `status`, and this seat's `jobs`. On
+  and quota are settable over MCP (`set_mirror {on, quota_bytes}`) and
+  the GUI - co-equal.
+- The cap removal (M1): `file_cap_bytes` keeps its 0 = off meaning only.
 
-### 3.6 The GUI
+### 3.6 The GUI - as built in M5
 
-Above the Persistent table: the consent switch ("Mirror persistent
-files"), the quota (GB field), the folder (picker; private) and the usage
-line ("2.1 of 1.0 GB" turns the warning colour at the quota). Columns:
-"Mirrored by" (N) and, while this seat's copy is incomplete, a segmented
-bar (up to 64 segments, each the fill of its share of the bitmap). The
-Temporary table is untouched.
+Above the Persistent table one panel: the consent switch ("Mirror
+persistent files"), the quota as a decimal-GB field with an Apply button
+(the switch and the button issue the same `set_mirror`; a field that is
+not a number keeps the stored quota), the usage line ("2.1 GB of 1 GB",
+the warning colour at or over the quota), the folder (elided path) and
+its picker. The Persistent table gains a "Mirrored by" column (the
+holder count, sortable) and, while this seat's copy is incomplete, a
+thin bar filled to `held / of` under the count. The Temporary table is
+untouched. Keystone: `molt-ui/src/tests/gui/files.rs` - the own share
+counts as one whole holder, the switch, the GB field and the usage line
+follow `read_mirror`.
 
-### 3.7 MCP
+### 3.7 MCP - as built
 
-`read_uploads` rows gain `mirrors: u32`, `mirror_held/mirror_of` (this
-seat), `read_state files` unchanged; `set_mirror` as above; the
-declaration and status frames are INTERNAL (transport tasks speaking).
+`read_uploads` rows carry `mirrors`, `mirror_held`, `mirror_of`;
+`read_mirror` and `set_mirror` are tools; `read_state files` is
+unchanged; the gossip, progress and folder commands are INTERNAL.
 
 ## 4. Stages (each red-first, each green on master)
 
@@ -428,3 +432,11 @@ the ask). Keystones: `molt-engine/tests/mirror_worker.rs` - a persisted
 share is complete in the second seat's folder (every piece opens under
 the key) without any download, and the sharer reads it as a holder; a
 one-byte quota stops the worker with the one notice and no fetch.
+
+M5 decisions (2026-09-04, worker): the quota field is decimal GB (10^9,
+two decimals) through integer math - `float_arithmetic` is a lint here -
+so 1 GiB reads "1.07"; the field commits on Apply (or on the switch),
+never per keystroke, because every `set_mirror` is a declaration frame
+to the whole group; the folder path is shown elided beside its picker
+rather than in a Settings tab, because it is per republic; the usage
+line uses the existing size labels and "of"/"von".

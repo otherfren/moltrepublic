@@ -368,7 +368,7 @@ pub struct SessionSettings {
     /// Byte quota for the backup bucket, counting only the backups THIS
     /// node wrote (foreign objects are neither counted nor deleted).
     /// `0` = no limit. Over the limit the oldest copies are pruned - never
-    /// a workspace's newest one (`docs/storage/s3_buckets.md` §4). Note the
+    /// a workspace's newest one (`docs_archive/storage/s3_buckets.md` §4). Note the
     /// neighbouring `file_cap_bytes` reads 0 as "off"; here 0 is "no limit".
     #[serde(default)]
     pub s3_max_bytes: u64,
@@ -376,7 +376,7 @@ pub struct SessionSettings {
     /// bucket above - one S3 account, several buckets. No cover-name default
     /// like the backup bucket: empty means "not configured", not "some name
     /// nobody chose". Configuration only - nothing writes media to S3 yet
-    /// (`docs/storage/s3_buckets.md` §7), and the GUI says so.
+    /// (`docs_archive/storage/s3_buckets.md` §7), and the GUI says so.
     #[serde(default)]
     pub media_s3_bucket: String,
     /// Byte quota for the media bucket, `0` = no limit. Stored and shown;
@@ -406,14 +406,14 @@ pub struct SessionSettings {
     #[serde(default = "default_download_dir")]
     pub download_dir: String,
     /// Per-file byte cap for sharing: `None` = no cap (the mirroring
-    /// decision, `docs/files/mirroring.md` §1), `Some(0)` = file sharing
+    /// decision, `docs_archive/files/mirroring.md` §1), `Some(0)` = file sharing
     /// OFF (FP4, 2026-08-16), `Some(n)` = a deliberate cap - never
     /// [`LEGACY_FILE_CAP_BYTES`], which reads as no cap. Serialized as
     /// `null` when absent: the settings patch door keys on the field.
     #[serde(default)]
     pub file_cap_bytes: Option<u64>,
     /// Seconds between two piece publishes of the trickle sender
-    /// (`docs/files/mirroring.md` §3.2); node-local, at least 1.
+    /// (`docs_archive/files/mirroring.md` §3.2); node-local, at least 1.
     #[serde(default = "default_mirror_publish_interval_secs")]
     pub mirror_publish_interval_secs: u64,
     /// Piece bytes the trickle sender may publish per UTC day; node-local.
@@ -574,7 +574,7 @@ impl Default for SessionSettings {
 }
 
 /// Which of the node's two S3 buckets a command addresses
-/// (`docs/storage/s3_buckets.md`). They share one endpoint and one set of
+/// (`docs_archive/storage/s3_buckets.md`). They share one endpoint and one set of
 /// credentials; the bucket name and the byte quota are per target.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1186,7 +1186,7 @@ pub struct FileMeta {
     /// skipped when empty so the legacy wire shape stays byte-identical.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub checksum: String,
-    /// Series-v2 material (`docs/files/mirroring.md` §3.1): the file's
+    /// Series-v2 material (`docs_archive/files/mirroring.md` §3.1): the file's
     /// content key (32 bytes, base64), its data piece count and the
     /// manifest root (hex sha256). Absent on a legacy exporter-sealed
     /// share - skipped when empty so the legacy wire shape stays
@@ -1667,7 +1667,7 @@ pub struct WorkspacePrefs {
     /// RECEIPTS are a different thing and stay in the log.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub read_cursors: std::collections::BTreeMap<String, String>,
-    /// Where this seat keeps the mirrored pieces (`docs/files/mirroring.md`
+    /// Where this seat keeps the mirrored pieces (`docs_archive/files/mirroring.md`
     /// §3.5); empty = `<workspace root>/../mirror/<republic-id>/`. Private,
     /// any-path: GUI/config-only.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -2016,12 +2016,12 @@ pub struct TransportState {
     /// that would throw away `nostr_sk`, which nothing can re-derive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<GroupCursor>,
-    /// The file plane's resumable jobs (`docs/files/mirroring.md` §3.2):
+    /// The file plane's resumable jobs (`docs_archive/files/mirroring.md` §3.2):
     /// the trickle sender's publish queue and the running piece fetches.
     /// Additive like `group`.
     #[serde(default, skip_serializing_if = "FileJobs::is_empty")]
     pub file_jobs: FileJobs,
-    /// The mirror gossip (`docs/files/mirroring.md` §3.4): this seat's
+    /// The mirror gossip (`docs_archive/files/mirroring.md` §3.4): this seat's
     /// declaration and every member's declaration and hold status.
     #[serde(default, skip_serializing_if = "MirrorState::is_default")]
     pub mirror: MirrorState,
@@ -2223,7 +2223,7 @@ impl FetchJob {
     }
 }
 
-/// One series this seat mirrors (`docs/files/mirroring.md` §3.3): the
+/// One series this seat mirrors (`docs_archive/files/mirroring.md` §3.3): the
 /// pieces live sealed in the mirror folder, one file per index; the
 /// bitmap says which are verified.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3949,7 +3949,7 @@ pub enum Command {
     /// Read every file shared into the chat (Shared Files → Uploads): one
     /// [`UploadView`] per share, newest last (log order).
     ReadUploads,
-    /// Read who mirrors what (`docs/files/mirroring.md` §3.4): this seat's
+    /// Read who mirrors what (`docs_archive/files/mirroring.md` §3.4): this seat's
     /// switch and quota, every member's declaration, per share the holders.
     ReadMirror,
     /// Read the persistent chain as display data (the Chain-History view):
@@ -5363,13 +5363,20 @@ pub enum Command {
         member: MemberId,
     },
     /// This seat's mirror consent and budget for the open republic
-    /// (`docs/files/mirroring.md` §3.5): declared to the members at once.
+    /// (`docs_archive/files/mirroring.md` §3.5): declared to the members at once.
     /// A human decision on both surfaces.
     SetMirror {
         /// Mirror persistent files.
         on: bool,
         /// Total mirror budget for this republic, bytes.
         quota_bytes: u64,
+    },
+    /// Where this seat keeps the mirrored pieces of the open republic
+    /// (`prefs.mirror_dir`; "" = the default folder). Any-path on the
+    /// host, so GUI/config-only - never an MCP tool (`mcp-security.md`).
+    SetMirrorDir {
+        /// The folder, `~` allowed; "" restores the default.
+        path: String,
     },
     /// An authenticated poke arrived over the transport (engine-internal —
     /// the transport speaks to the engine; an MCP agent must not be able to
@@ -6051,7 +6058,7 @@ pub struct UploadView {
     #[serde(default)]
     pub persistent: bool,
     /// Members holding the whole series, the sharer included
-    /// (`docs/files/mirroring.md` §3.4).
+    /// (`docs_archive/files/mirroring.md` §3.4).
     #[serde(default)]
     pub mirrors: u32,
     /// Data pieces THIS seat holds verified.
@@ -6062,7 +6069,7 @@ pub struct UploadView {
     pub mirror_of: u32,
 }
 
-/// Who mirrors what ([`Command::ReadMirror`], `docs/files/mirroring.md`
+/// Who mirrors what ([`Command::ReadMirror`], `docs_archive/files/mirroring.md`
 /// §3.4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MirrorView {
@@ -6072,6 +6079,9 @@ pub struct MirrorView {
     pub quota: u64,
     /// Bytes this seat's mirror folder holds.
     pub used: u64,
+    /// The mirror folder in use (`prefs.mirror_dir`, else the default).
+    #[serde(default)]
+    pub dir: String,
     /// Every roster member's declaration.
     pub members: Vec<MirrorMemberView>,
     /// Every share and its holders.

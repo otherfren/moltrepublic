@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #![allow(missing_docs)]
 
-//! **M2 keystones - the trickle sender** (`docs/files/mirroring.md` §3.2):
+//! **M2 keystones - the trickle sender** (`docs_archive/files/mirroring.md` §3.2):
 //! one kind-447 event per tick, in the order top, manifest, data; a
 //! persisted cursor resumes instead of restarting; the sender waits while
 //! the group outbox has a frame pending or the hourly budget lacks

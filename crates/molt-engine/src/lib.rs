@@ -94,7 +94,7 @@ const EVENT_QUEUE: usize = 512;
 const PRESENCE_TICK_MS: u64 = 30_000;
 
 /// Shorten the resumable fetch's wait before it asks for missing pieces
-/// (`docs/files/mirroring.md` §3.2; 10 min in production). A test seam for
+/// (`docs_archive/files/mirroring.md` §3.2; 10 min in production). A test seam for
 /// the integration tests, like `__spawn_with_reopen_transport`.
 #[doc(hidden)]
 pub fn __set_piece_want_after(d: std::time::Duration) {
@@ -459,7 +459,7 @@ pub(crate) struct GroupNet {
     /// `session.net_health` on the presence beat (`apply_group_health`).
     pub(crate) health: tokio::sync::watch::Receiver<molt_net::group_runtime::GroupHealth>,
     /// The file trickle sender riding this runtime's channel
-    /// (`docs/files/mirroring.md` §3.2); stops with the handle.
+    /// (`docs_archive/files/mirroring.md` §3.2); stops with the handle.
     pub(crate) trickle: molt_net::trickle::TrickleHandle,
 }
 
@@ -615,7 +615,7 @@ pub(crate) struct FilePlane {
     /// `FileWanted` right after an announce means the requester cannot use
     /// that series (pruned/foreign epoch) and a fresh publish is due.
     pub(crate) announced: HashMap<molt_core::MessageId, u64>,
-    /// The mirror gossip (`docs/files/mirroring.md` §3.4): this seat's
+    /// The mirror gossip (`docs_archive/files/mirroring.md` §3.4): this seat's
     /// declaration and what the members told it - the runtime copy of
     /// `transport.state`'s, loaded at open.
     pub(crate) mirror: molt_core::MirrorState,
@@ -1355,6 +1355,7 @@ impl State {
             }
             Command::ReadMirror => Ok(Reply::Mirror(Box::new(self.mirror_view()))),
             Command::SetMirror { on, quota_bytes } => self.cmd_set_mirror(on, quota_bytes),
+            Command::SetMirrorDir { path } => self.cmd_set_mirror_dir(path),
             Command::NetMirrorDecl { from, on, quota, rev, generation } => {
                 if !self.net_generation_current(generation) {
                     return Ok(Reply::Ack);

@@ -294,3 +294,47 @@ fn the_type_column_header_lines_up_with_its_cells() {
         }
     }
 }
+
+/// Mirroring §3.6 on the Persistent table: the own share counts as one
+/// whole holder, and the switch, the quota field and the usage line
+/// mirror the engine's `read_mirror` (the switch's own `set_mirror` is the
+/// same command the test issues).
+#[test]
+fn the_persistent_table_carries_the_mirror_switch_quota_and_holder_count() {
+    i_slint_backend_testing::init_no_event_loop();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    let w = one_of_three();
+    let ui = AppWindow::new().expect("headless window");
+    let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+    let last: Arc<Mutex<Option<SessionSettings>>> = Arc::new(Mutex::new(None));
+    let shared = tmp.path().join("plan.pdf");
+    std::fs::write(&shared, b"a plan").expect("write the file to share");
+
+    rt.block_on(async {
+        w.execute(Command::ShareFile {
+            path: shared.display().to_string(),
+            channel: ChannelRef::Group,
+        })
+        .await
+        .expect("share");
+        let id = listed_share(&w).await;
+        let pid = propose_files(&w, serde_json::json!({"op": "persist", "id": id})).await;
+        w.execute(Command::Approve { proposal: pid }).await.expect("approve");
+        mirror(&w, &ui, &last, &chat_ui).await;
+        let row = ui.get_org_persistent().row_data(0).expect("the persistent row");
+        assert_eq!((row.mirrors, row.mirror_held, row.mirror_of), (1, 1, 1), "the sharer holds it whole");
+        assert!(ui.get_org_mirror_on(), "consent is on by default");
+        assert_eq!(ui.get_org_mirror_quota().as_str(), "1.07", "1 GiB as a GB field");
+
+        let quota_bytes = crate::labels::gb_bytes("2.5").expect("the field parses");
+        w.execute(Command::SetMirror { on: false, quota_bytes })
+            .await
+            .expect("set mirror");
+        mirror(&w, &ui, &last, &chat_ui).await;
+        assert!(!ui.get_org_mirror_on(), "the switch follows the engine");
+        assert_eq!(ui.get_org_mirror_quota().as_str(), "2.5");
+        assert!(ui.get_org_mirror_used().as_str().contains(" of "), "{}", ui.get_org_mirror_used());
+    });
+}

@@ -191,6 +191,9 @@ export struct UploadRow {
     persistent: bool, // a vote pinned it (Persistent Uploads)
     checksum-full: string, // the full sha256 for the modal ("" = legacy)
     vote: string, // an open persist/unpersist vote's "n/m", "" = none
+    mirrors: int, // members holding the whole series, the sharer included
+    mirror-held: int, // this seat's verified pieces
+    mirror-of: int, // the series' piece count (0 = legacy share)
 }
 
 // One row of the founding-ritual member list: the founder plus one per
@@ -876,6 +879,13 @@ export global Strings {
     in property <string> ou-unpersist;
     in property <string> ou-empty-persistent;
     in property <string> ou-note-persistent;
+    in property <string> ou-col-mirrors;
+    in property <string> ou-mirror-switch;
+    in property <string> ou-mirror-quota;
+    in property <string> ou-mirror-apply;
+    in property <string> ou-mirror-folder;
+    in property <string> ou-mirror-browse;
+    in property <string> ou-mirror-of;
     in property <string> ou-copy;
     in property <string> ou-download;
     in property <string> ou-offline;
@@ -1064,7 +1074,7 @@ export global Strings {
     in property <string> field-s3-bucket;
     in property <string> set-s3-test;
     in property <string> s3-test-tip;
-    // one account, several buckets (docs/storage/s3_buckets.md)
+    // one account, several buckets (docs_archive/storage/s3_buckets.md)
     in property <string> set-s3-grp-account;
     in property <string> set-s3-grp-backup;
     in property <string> set-s3-grp-media;

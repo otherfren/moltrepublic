@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The `PieceWanted` control frame (`docs/files/mirroring.md` §3.2): a
+//! The `PieceWanted` control frame (`docs_archive/files/mirroring.md` §3.2): a
 //! member names the pieces of a v2 series it still misses; the holders
 //! that have them re-publish exactly those. Rides the reserved
 //! control-frame space like the poke - no log event, fire-and-forget, an

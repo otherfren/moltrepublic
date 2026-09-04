@@ -2825,7 +2825,7 @@ impl StorageHandle {
         }
     }
 
-    /// Upsert one piece fetch's job (`docs/files/mirroring.md` §3.2) into
+    /// Upsert one piece fetch's job (`docs_archive/files/mirroring.md` §3.2) into
     /// `transport.state`, touching nothing else. Fire-and-forget and
     /// synchronous, so a fetch task can save from its sink; a lost save
     /// only re-lands pieces the relay replays anyway.
@@ -2850,7 +2850,7 @@ impl StorageHandle {
         }
     }
 
-    /// Upsert one mirrored series' job (`docs/files/mirroring.md` §3.3);
+    /// Upsert one mirrored series' job (`docs_archive/files/mirroring.md` §3.3);
     /// fire-and-forget like [`Self::save_fetch_job`].
     pub fn save_mirror_job(&self, series: &str, job: molt_core::MirrorJob) {
         match self.tx.try_send(WriterMsg::SaveMirrorJob(series.to_string(), Box::new(job))) {

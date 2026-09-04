@@ -20,7 +20,7 @@ type FilePlaneContext = (
 );
 
 
-/// What `file_cap_bytes` says (`docs/files/mirroring.md` §1): absent =
+/// What `file_cap_bytes` says (`docs_archive/files/mirroring.md` §1): absent =
 /// no cap, 0 = sharing OFF (FP4 2026-08-16), n = a deliberate cap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FileCap {
@@ -249,7 +249,7 @@ impl State {
         };
         let now = crate::now_secs();
         // series v2: the trickle sender publishes the pieces at its pace
-        // (`docs/files/mirroring.md` §3.2) - the announcement goes out NOW,
+        // (`docs_archive/files/mirroring.md` §3.2) - the announcement goes out NOW,
         // before the first piece, and every want is answered (a requester
         // that lost the stamp must hear it again). The whole series is
         // queued once, on the first want of a series this node has no
@@ -556,7 +556,7 @@ impl State {
 
     /// At open: seed the series stamps from the persisted publish jobs,
     /// wake the trickle, and resume every unfinished fetch job at its
-    /// bitmap (`docs/files/mirroring.md` §3.2 - a restart resumes, never
+    /// bitmap (`docs_archive/files/mirroring.md` §3.2 - a restart resumes, never
     /// restarts).
     pub(crate) fn resume_file_jobs(&mut self, state: &molt_core::TransportState) {
         self.load_mirror(state);
