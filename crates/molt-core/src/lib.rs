@@ -2034,6 +2034,10 @@ fn mirror_on_default() -> bool {
     true
 }
 
+fn one_page() -> u16 {
+    1
+}
+
 fn mirror_quota_default() -> u64 {
     MIRROR_QUOTA_DEFAULT
 }
@@ -5256,8 +5260,18 @@ pub enum Command {
     NetMirrorStatus {
         /// The MLS-authenticated holder.
         from: MemberId,
-        /// What it holds.
+        /// What it holds (this page of it).
         holds: Vec<MirrorHold>,
+        /// The send this page belongs to; pages of one generation replace
+        /// the stored status together.
+        #[serde(default)]
+        gen: u64,
+        /// This page's index within the generation.
+        #[serde(default)]
+        page: u16,
+        /// The generation's page count.
+        #[serde(default = "one_page")]
+        pages: u16,
         /// Transport incarnation (stale commands are dropped).
         #[serde(default)]
         generation: Option<u64>,
@@ -5291,6 +5305,9 @@ pub enum Command {
         ok: bool,
         /// Why it failed ("" on success).
         reason: String,
+        /// What the folder holds for it on success (sealed bytes).
+        #[serde(default)]
+        bytes: u64,
         /// Workspace-net incarnation (stale task results are dropped).
         #[serde(default)]
         generation: Option<u64>,

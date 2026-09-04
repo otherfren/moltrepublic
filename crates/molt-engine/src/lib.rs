@@ -629,12 +629,20 @@ pub(crate) struct FilePlane {
     /// The mirror worker (§3.3): the running fetch per series, the series
     /// waiting for the sharer's stamp, the planning beat, the one notice.
     pub(crate) mirror_fetches: HashMap<molt_core::MessageId, tokio::task::AbortHandle>,
-    pub(crate) mirror_pending: std::collections::HashSet<molt_core::MessageId>,
+    pub(crate) mirror_pending: HashMap<molt_core::MessageId, u64>,
     pub(crate) mirror_planned_at: u64,
     pub(crate) mirror_quota_noted: bool,
     /// Verified pieces of each running mirror fetch, as last reported.
     pub(crate) mirror_progress: HashMap<molt_core::MessageId, u32>,
+    /// A member's status pages still arriving ([`MirrorPages`]).
+    pub(crate) mirror_pages: HashMap<MemberId, MirrorPages>,
+    /// Series whose mirror fetch failed: no retry before this stamp.
+    pub(crate) mirror_failed: HashMap<molt_core::MessageId, u64>,
 }
+
+/// A status generation being collected: `(generation, page count, when
+/// its first page arrived, the pages so far)`.
+pub(crate) type MirrorPages = (u64, u16, u64, std::collections::BTreeMap<u16, Vec<molt_core::MirrorHold>>);
 
 /// The republic's persistent commit-block chain on this holder
 /// (`docs_archive/chain/persistent_chain.md`) and everything derived from
@@ -1116,10 +1124,12 @@ impl State {
                 mirror_who_answered: 0,
                 mirror_who_asked: false,
                 mirror_fetches: HashMap::new(),
-                mirror_pending: std::collections::HashSet::new(),
+                mirror_pending: HashMap::new(),
                 mirror_planned_at: 0,
                 mirror_quota_noted: false,
                 mirror_progress: HashMap::new(),
+                mirror_pages: HashMap::new(),
+                mirror_failed: HashMap::new(),
             },
             ui_state: None,
             applied,
@@ -1362,11 +1372,11 @@ impl State {
                 }
                 self.cmd_net_mirror_decl(&from, on, quota, rev)
             }
-            Command::NetMirrorStatus { from, holds, generation } => {
+            Command::NetMirrorStatus { from, holds, gen, page, pages, generation } => {
                 if !self.net_generation_current(generation) {
                     return Ok(Reply::Ack);
                 }
-                self.cmd_net_mirror_status(&from, holds)
+                self.cmd_net_mirror_status(&from, holds, gen, page, pages)
             }
             Command::NetMirrorWho { from, generation } => {
                 if !self.net_generation_current(generation) {
@@ -1380,11 +1390,11 @@ impl State {
                 }
                 self.cmd_net_mirror_progress(id, held, bytes)
             }
-            Command::NetMirrorDone { id, ok, reason, generation } => {
+            Command::NetMirrorDone { id, ok, reason, bytes, generation } => {
                 if !self.net_scope_current(generation) {
                     return Ok(Reply::Ack);
                 }
-                self.cmd_net_mirror_done(id, ok, reason)
+                self.cmd_net_mirror_done(id, ok, reason, bytes)
             }
             Command::SetWakeCommand { command } => self.cmd_set_wake_command(command),
             Command::SetNodePosture { posture } => self.cmd_set_node_posture(posture),

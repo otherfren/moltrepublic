@@ -22,6 +22,13 @@ const STATUS_MIN_SECS: u64 = 60;
 const STATUS_REPEAT_SECS: u64 = 5 * 60;
 /// A holder answers a `MirrorWho` at most this often.
 const WHO_ANSWER_SECS: u64 = 3_600;
+/// A half-collected status generation is dropped after this.
+const PAGES_STALE_SECS: u64 = 600;
+/// A `FileWanted` the worker sent for a series' stamp is asked again
+/// after this if no announcement came.
+const PENDING_RETRY_SECS: u64 = 600;
+/// A failed mirror fetch is not retried before this has passed.
+const FAIL_BACKOFF_SECS: u64 = 600;
 /// The worker plans this often (rides the 1 s delivery tick).
 const PLAN_EVERY_SECS: u64 = 5;
 /// Mirror fetches running at once: the relays, not the disk, are the
@@ -57,13 +64,9 @@ impl State {
     }
 
     fn publish_mirror_frame(&self, frame: Vec<u8>) -> bool {
-        match self.group_net.as_ref() {
-            Some(group) => {
-                group.handle.publish_control(frame);
-                true
-            }
-            None => false,
-        }
+        self.group_net
+            .as_ref()
+            .is_some_and(|group| group.handle.publish_control(frame))
     }
 
     /// This seat's declaration, as the members see it.
@@ -202,6 +205,11 @@ impl State {
         }
         self.files.mirror_planned_at = now;
         self.files.mirror_fetches.retain(|_, h| !h.is_finished());
+        // an unanswered ask is asked again; a failure's backoff expires
+        self.files
+            .mirror_pending
+            .retain(|_, asked| now.saturating_sub(*asked) < PENDING_RETRY_SECS);
+        self.files.mirror_failed.retain(|_, until| *until > now);
         let states = self.files_state();
         // an unpersisted share whose window ended, or one the fold no
         // longer knows: its pieces go (the sharer's own file is never
@@ -245,7 +253,8 @@ impl State {
                     && !ident.key_b64.is_empty()
                     && !self.files.mirror.jobs.get(&id.to_string()).is_some_and(|j| j.complete)
                     && !self.files.mirror_fetches.contains_key(id)
-                    && !self.files.mirror_pending.contains(id)
+                    && !self.files.mirror_pending.contains_key(id)
+                    && !self.files.mirror_failed.contains_key(id)
             })
             .map(|(id, ident)| {
                 let mirrors = holders.get(&id).map_or(0, Vec::len);
@@ -270,7 +279,7 @@ impl State {
             Some(at) => self.start_mirror(id, at),
             None => {
                 // the sharer's stamp is what the fetch subscribes from
-                self.files.mirror_pending.insert(id);
+                self.files.mirror_pending.insert(id, now);
                 let env = self.make_env(me, WorkspaceEvent::FileWanted { id });
                 self.record(env);
             }
@@ -356,12 +365,19 @@ impl State {
     }
 
     /// The fetch ended: complete (say so to the members) or failed (gone).
-    pub(crate) fn cmd_net_mirror_done(&mut self, id: MessageId, ok: bool, reason: String) -> Result<Reply, MoltError> {
+    pub(crate) fn cmd_net_mirror_done(
+        &mut self,
+        id: MessageId,
+        ok: bool,
+        reason: String,
+        bytes: u64,
+    ) -> Result<Reply, MoltError> {
         self.files.mirror_fetches.remove(&id);
         let series = id.to_string();
         if ok {
             if let Some(job) = self.files.mirror.jobs.get_mut(&series) {
                 job.complete = true;
+                job.bytes = bytes;
             }
             self.files.mirror_progress.remove(&id);
             let now = crate::now_secs();
@@ -371,21 +387,24 @@ impl State {
             tracing::warn!(%id, reason = %reason, "mirror: fetch failed");
             self.files.mirror.jobs.remove(&series);
             self.files.mirror_progress.remove(&id);
+            self.files
+                .mirror_failed
+                .insert(id, crate::now_secs().saturating_add(FAIL_BACKOFF_SECS));
         }
         Ok(Reply::Ack)
     }
 
     fn send_mirror_status(&mut self, now: u64) {
         let holds = self.own_mirror_holds();
-        let frame = MirrorStatusFrame {
-            v: molt_net::mirror_gossip::MIRROR_V,
-            by: self.member(),
-            holds: holds
-                .iter()
-                .map(|h| (h.id.to_string(), h.held, h.of))
-                .collect(),
-        };
-        if self.publish_mirror_frame(frame.to_frame()) {
+        let wire: Vec<(String, u32, u32)> = holds
+            .iter()
+            .map(|h| (h.id.to_string(), h.held, h.of))
+            .collect();
+        let mut sent = true;
+        for page in MirrorStatusFrame::pages(self.member(), &wire, now) {
+            sent &= self.publish_mirror_frame(page.to_frame());
+        }
+        if sent {
             self.files.mirror_status_sent = now;
             self.files.mirror_status_last = holds;
         }
@@ -411,6 +430,10 @@ impl State {
             let frame = MirrorWhoFrame { v: molt_net::mirror_gossip::MIRROR_V, by: self.member() };
             self.files.mirror_who_asked = self.publish_mirror_frame(frame.to_frame());
         }
+        // a generation whose pages stopped coming is forgotten
+        self.files
+            .mirror_pages
+            .retain(|_, (_, _, since, _)| now.saturating_sub(*since) < PAGES_STALE_SECS);
     }
 
     /// An own share changed (added, removed): say so at once when the
@@ -435,13 +458,23 @@ impl State {
         m.rev = now.max(m.rev.saturating_add(1));
         self.files.mirror_quota_noted = false;
         self.files.mirror_planned_at = 0;
+        // consent withdrawn: the running fetch stops now (what is stored
+        // stays; the switch back on resumes it at its bitmap)
+        if !on {
+            for (_, fetch) in self.files.mirror_fetches.drain() {
+                fetch.abort();
+            }
+            self.files.mirror_pending.clear();
+        }
         self.persist_mirror();
         self.send_mirror_decl(now);
         Ok(Reply::Ack)
     }
 
-    /// The mirror folder (GUI/config-only): the pieces move with it, a
-    /// running fetch restarts in the new folder, the worker re-plans.
+    /// The mirror folder (GUI/config-only): the series folders move with
+    /// it - one rename each, BEFORE the worker re-plans, so the new folder
+    /// is never half-built by a fetch while the move runs; a folder that
+    /// already exists at the target stays, the job re-checks its pieces.
     pub(crate) fn cmd_set_mirror_dir(&mut self, path: String) -> Result<Reply, MoltError> {
         let old = self.mirror_dir();
         let Some(active) = self.active.as_mut() else {
@@ -455,16 +488,20 @@ impl State {
                 for (_, fetch) in self.files.mirror_fetches.drain() {
                     fetch.abort();
                 }
-                tokio::task::spawn_blocking(move || {
-                    if old.is_dir() {
-                        if let Some(parent) = new.parent() {
-                            let _ = std::fs::create_dir_all(parent);
+                if old.is_dir() {
+                    let _ = std::fs::create_dir_all(&new);
+                    let entries = std::fs::read_dir(&old).map(|it| it.flatten().collect::<Vec<_>>()).unwrap_or_default();
+                    for entry in entries {
+                        let target = new.join(entry.file_name());
+                        if target.exists() {
+                            continue;
                         }
-                        if let Err(e) = std::fs::rename(&old, &new) {
-                            tracing::warn!(error = %e, "mirror: the folder did not move - the jobs start over there");
+                        if let Err(e) = std::fs::rename(entry.path(), &target) {
+                            tracing::warn!(error = %e, series = %entry.file_name().to_string_lossy(), "mirror: a series folder did not move - it starts over");
                         }
                     }
-                });
+                    let _ = std::fs::remove_dir(&old);
+                }
             }
         }
         self.files.mirror_planned_at = 0;
@@ -490,17 +527,48 @@ impl State {
         Ok(Reply::Ack)
     }
 
-    /// A member's hold status landed: replaces what it said before.
+    /// A member's hold status landed - one page of a generation: the
+    /// generation replaces what the member said before once every page
+    /// arrived; a newer generation drops a half-collected older one.
     pub(crate) fn cmd_net_mirror_status(
         &mut self,
         from: &MemberId,
         holds: Vec<MirrorHold>,
+        gen: u64,
+        page: u16,
+        pages: u16,
     ) -> Result<Reply, MoltError> {
-        if *from == self.member() || !self.roster().contains(from) {
+        if *from == self.member() || !self.roster().contains(from) || pages == 0 || page >= pages {
             return Ok(Reply::Ack);
         }
-        self.files.mirror.status.insert(from.clone(), holds);
-        self.persist_mirror();
+        let complete = if pages == 1 {
+            self.files.mirror_pages.remove(from);
+            Some(holds)
+        } else {
+            let now = crate::now_secs();
+            let entry = self
+                .files
+                .mirror_pages
+                .entry(from.clone())
+                .or_insert_with(|| (gen, pages, now, std::collections::BTreeMap::new()));
+            if entry.0 > gen {
+                return Ok(Reply::Ack); // a straggler of an older generation
+            }
+            if entry.0 < gen || entry.1 != pages {
+                *entry = (gen, pages, now, std::collections::BTreeMap::new());
+            }
+            entry.3.insert(page, holds);
+            if entry.3.len() == usize::from(pages) {
+                let (_, _, _, collected) = self.files.mirror_pages.remove(from).unwrap_or_default();
+                Some(collected.into_values().flatten().collect())
+            } else {
+                None
+            }
+        };
+        if let Some(holds) = complete {
+            self.files.mirror.status.insert(from.clone(), holds);
+            self.persist_mirror();
+        }
         Ok(Reply::Ack)
     }
 
@@ -524,8 +592,11 @@ impl State {
     /// of` for it, plus this seat for its own shares.
     pub(crate) fn mirror_holders(&self) -> HashMap<MessageId, Vec<MemberId>> {
         let mut out: HashMap<MessageId, Vec<MemberId>> = HashMap::new();
+        // own shares are whole; a running mirror job is not a holder yet
         for hold in self.own_mirror_holds() {
-            out.entry(hold.id).or_default().push(self.member());
+            if hold.held == hold.of && hold.of > 0 {
+                out.entry(hold.id).or_default().push(self.member());
+            }
         }
         for (member, holds) in &self.files.mirror.status {
             for hold in holds {

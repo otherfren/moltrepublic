@@ -567,7 +567,7 @@ impl State {
                         self.spawn_nostr_fetch(id, at, target, dest);
                     }
                     // the mirror worker waited for exactly this stamp
-                    if self.files.mirror_pending.remove(&id) {
+                    if self.files.mirror_pending.remove(&id).is_some() {
                         self.start_mirror(id, at);
                     }
                 } else if !from_sharer {

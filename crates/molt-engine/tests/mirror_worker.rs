@@ -252,7 +252,9 @@ async fn a_persisted_share_is_mirrored_by_the_second_seat() {
     let mine = read_mirror(&b).await;
     let row = mine.files.iter().find(|f| f.id == id).expect("walter's row");
     assert_eq!((row.held, row.of), (2, 2), "{row:?}");
-    assert_eq!(mine.used, u64::try_from(bytes.len()).expect("fits"), "{mine:?}");
+    // the quota counts the folder: four sealed blocks (two data, one
+    // manifest chunk, the top record)
+    assert_eq!(mine.used, 4 * molt_net::trickle::PIECE_WIRE_BYTES, "{mine:?}");
     // the folder holds every piece sealed: two data, one chunk, the top
     let ws_b = read_session(&b).await.active_workspace.clone();
     let dir = root.join("member").join("..").join("mirror").join(&ws_b).join(id.to_string());

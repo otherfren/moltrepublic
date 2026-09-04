@@ -49,6 +49,11 @@ const RESEND_MAX_BACKOFF_SECS: u64 = 600;
 /// resends keep going at the cap.
 const RESEND_GIVEUP_ROUNDS: u32 = 8;
 
+/// Control frames awaiting publication before further ones are dropped:
+/// a paged mirror status must fit whole (mirroring §3.4), a poke is worth
+/// one attempt anyway.
+const CONTROL_QUEUE: usize = 64;
+
 /// Resend rounds allowed per hour.
 ///
 /// A broadcast resend costs one publish per relay and every member re-reads
@@ -176,11 +181,14 @@ impl GroupHandle {
     }
 
     /// Queue one control-frame plaintext for publication (best-effort,
-    /// non-blocking, like a poke).
-    pub fn publish_control(&self, frame: Vec<u8>) {
-        if self.controls.try_send(frame).is_err() {
+    /// non-blocking, like a poke); `false` = dropped, the queue is full or
+    /// closed.
+    pub fn publish_control(&self, frame: Vec<u8>) -> bool {
+        let queued = self.controls.try_send(frame).is_ok();
+        if !queued {
             tracing::debug!("the control queue is full or closed - frame dropped");
         }
+        queued
     }
 
     /// The outbox's pending flag: `true` while a pass publishes own frames.
@@ -274,7 +282,7 @@ where
     // a FOURTH task, for the same reason the ack has its own: a nudge must
     // not queue behind the outbox's retry chain, and the outbox must not
     // wait for a nudge
-    let (controls, controls_rx) = mpsc::channel(crate::poke::POKE_QUEUE);
+    let (controls, controls_rx) = mpsc::channel(CONTROL_QUEUE);
     let poke = tokio::spawn(control_loop(
         channel.clone(),
         mls.clone(),

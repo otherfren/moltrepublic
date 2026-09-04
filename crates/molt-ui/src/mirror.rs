@@ -1381,8 +1381,12 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     ui.set_org_relays_joined(b.org_stats.relays.join(" ").into());
     // mirroring §3.6: the switch, the quota in GB, the usage line, the folder
     ui.set_org_mirror_on(b.org_stats.mirror_on);
-    ui.set_org_mirror_quota(crate::labels::gb_label(b.org_stats.mirror_quota).into());
-    let of = if b.lang == 1 { "von" } else { "of" };
+    let quota = crate::labels::gb_label(b.org_stats.mirror_quota);
+    if ui.get_org_mirror_quota_stored().as_str() != quota {
+        ui.set_org_mirror_quota_stored(quota.as_str().into());
+        ui.set_org_mirror_quota(quota.as_str().into());
+    }
+    let of = if b.lang == 1 { crate::i18n::Lexicon::de().ou_mirror_of } else { crate::i18n::Lexicon::en().ou_mirror_of };
     ui.set_org_mirror_used(
         format!(
             "{} {of} {}",

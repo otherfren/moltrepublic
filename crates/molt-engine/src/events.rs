@@ -754,6 +754,8 @@ impl State {
         self.files.mirror_planned_at = 0;
         self.files.mirror_quota_noted = false;
         self.files.mirror_progress.clear();
+        self.files.mirror_pages.clear();
+        self.files.mirror_failed.clear();
         self.chain.proposal_changes.clear();
         self.chain.pending_blocks.clear();
         self.chain.catchup_from = None;

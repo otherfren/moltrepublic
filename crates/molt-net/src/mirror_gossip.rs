@@ -20,12 +20,26 @@ pub const MIRROR_WHO_TAG: &[u8] = b"\x00molt-mwho-v1";
 /// The wire version this build writes and accepts, all three frames.
 pub const MIRROR_V: u32 = 1;
 
-/// Refused UNPARSED above this: a status names every series a seat
-/// holds, so it is the roomy one.
+/// Refused UNPARSED above this (the receive bound; what this build sends
+/// stays under [`MIRROR_PAGE_MAX_BYTES`]).
 pub const MIRROR_FRAME_MAX_BYTES: usize = 256 * 1024;
 
-/// Series per status frame.
-pub const MIRROR_STATUS_MAX_HOLDS: usize = 4_096;
+/// What one sent page may weigh: under the ~64 KiB the strictest common
+/// relays accept per event, with the MLS and base64 overhead left over.
+pub const MIRROR_PAGE_MAX_BYTES: usize = 48 * 1024;
+
+/// Series per status PAGE (~55 bytes each on the wire): a status with
+/// more series goes out as several pages of one generation, and the
+/// receiver replaces its copy once every page arrived.
+pub const MIRROR_STATUS_MAX_HOLDS: usize = 500;
+
+/// Series a single-page frame may carry - what a build before the pages
+/// sent; accepted so that such a peer keeps reading as a holder.
+pub const MIRROR_STATUS_LEGACY_MAX_HOLDS: usize = 4_096;
+
+/// Pages per generation (32 000 series): a bound before anything
+/// accumulates.
+pub const MIRROR_STATUS_MAX_PAGES: u16 = 64;
 
 /// Why a plaintext is not a usable mirror frame.
 #[derive(Debug, PartialEq, Eq)]
@@ -103,7 +117,7 @@ impl MirrorDeclFrame {
 }
 
 /// What `by` holds: per series (share id hex) the verified data pieces
-/// and the series' data piece count.
+/// and the series' data piece count - one page of a generation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MirrorStatusFrame {
     /// Wire version. REQUIRED.
@@ -112,15 +126,52 @@ pub struct MirrorStatusFrame {
     pub by: MemberId,
     /// `(share id hex, held, of)`.
     pub holds: Vec<(String, u32, u32)>,
+    /// The send this page belongs to (unix seconds); pages of one
+    /// generation replace the receiver's copy together.
+    #[serde(default)]
+    pub gen: u64,
+    /// This page's index within the generation (a frame without it is
+    /// the one page of its generation).
+    #[serde(default)]
+    pub page: u16,
+    /// The generation's page count.
+    #[serde(default = "one_page")]
+    pub pages: u16,
+}
+
+fn one_page() -> u16 {
+    1
 }
 
 impl MirrorStatusFrame {
-    /// TAG ‖ JSON (the first [`MIRROR_STATUS_MAX_HOLDS`] kept).
+    /// `holds` as the pages of generation `gen`, at most
+    /// [`MIRROR_STATUS_MAX_HOLDS`] each; an empty list is one empty page.
+    #[must_use]
+    pub fn pages(by: MemberId, holds: &[(String, u32, u32)], gen: u64) -> Vec<MirrorStatusFrame> {
+        let chunks: Vec<&[(String, u32, u32)]> = if holds.is_empty() {
+            vec![&[]]
+        } else {
+            holds.chunks(MIRROR_STATUS_MAX_HOLDS).collect()
+        };
+        let pages = u16::try_from(chunks.len()).unwrap_or(u16::MAX);
+        chunks
+            .into_iter()
+            .enumerate()
+            .map(|(page, chunk)| MirrorStatusFrame {
+                v: MIRROR_V,
+                by: by.clone(),
+                holds: chunk.to_vec(),
+                gen,
+                page: u16::try_from(page).unwrap_or(u16::MAX),
+                pages,
+            })
+            .collect()
+    }
+
+    /// TAG ‖ JSON.
     #[must_use]
     pub fn to_frame(&self) -> Vec<u8> {
-        let mut me = self.clone();
-        me.holds.truncate(MIRROR_STATUS_MAX_HOLDS);
-        framed(MIRROR_STATUS_TAG, &me)
+        framed(MIRROR_STATUS_TAG, self)
     }
 
     /// The ONLY consumer.
@@ -131,7 +182,13 @@ impl MirrorStatusFrame {
         if me.v != MIRROR_V {
             return Err(MirrorFrameError::UnknownVersion(me.v));
         }
-        if me.holds.len() > MIRROR_STATUS_MAX_HOLDS || me.holds.iter().any(|(_, held, of)| held > of) {
+        let most = if me.pages == 1 { MIRROR_STATUS_LEGACY_MAX_HOLDS } else { MIRROR_STATUS_MAX_HOLDS };
+        if me.holds.len() > most
+            || me.holds.iter().any(|(_, held, of)| held > of)
+            || me.pages == 0
+            || me.pages > MIRROR_STATUS_MAX_PAGES
+            || me.page >= me.pages
+        {
             return Err(MirrorFrameError::Malformed);
         }
         Ok(me)
@@ -179,6 +236,9 @@ mod tests {
             v: MIRROR_V,
             by: "petra".into(),
             holds: vec![("aa01".into(), 3, 3), ("aa02".into(), 1, 4)],
+            gen: 7,
+            page: 0,
+            pages: 1,
         };
         let who = MirrorWhoFrame { v: MIRROR_V, by: "petra".into() };
         assert_eq!(MirrorDeclFrame::from_frame(&decl.to_frame()).expect("decl"), decl);
@@ -196,5 +256,37 @@ mod tests {
         let mut future = MIRROR_WHO_TAG.to_vec();
         future.extend_from_slice(br#"{"v":2,"by":"p"}"#);
         assert_eq!(MirrorWhoFrame::from_frame(&future), Err(MirrorFrameError::UnknownVersion(2)));
+        // a frame from before the pages is the one page of its generation
+        let mut early = MIRROR_STATUS_TAG.to_vec();
+        early.extend_from_slice(br#"{"v":1,"by":"p","holds":[["aa",1,1]]}"#);
+        let early = MirrorStatusFrame::from_frame(&early).expect("reads");
+        assert_eq!((early.gen, early.page, early.pages), (0, 0, 1));
+        let bad_page = MirrorStatusFrame { page: 1, pages: 1, ..status.clone() };
+        assert_eq!(MirrorStatusFrame::from_frame(&bad_page.to_frame()), Err(MirrorFrameError::Malformed));
+    }
+
+    /// A long hold list pages under the relay's event budget; each page
+    /// names its place, and the pages together are the list.
+    #[test]
+    fn a_long_status_pages_under_the_event_budget() {
+        let holds: Vec<(String, u32, u32)> = (0..1_201u32)
+            .map(|i| (format!("{i:032x}"), i % 7, 6))
+            .collect();
+        let pages = MirrorStatusFrame::pages("petra".into(), &holds, 9);
+        assert_eq!(pages.len(), 3);
+        let mut joined = Vec::new();
+        for (i, p) in pages.iter().enumerate() {
+            assert_eq!((usize::from(p.page), p.pages, p.gen), (i, 3, 9));
+            let frame = p.to_frame();
+            assert!(frame.len() < MIRROR_PAGE_MAX_BYTES, "page {i} is {} bytes", frame.len());
+            joined.extend(MirrorStatusFrame::from_frame(&frame).expect("page reads").holds);
+        }
+        assert_eq!(joined, holds);
+        assert_eq!(MirrorStatusFrame::pages("p".into(), &[], 1).len(), 1, "an empty list is one page");
+        // a single frame of a build before the pages may carry 4 096 series
+        let legacy = MirrorStatusFrame { holds: holds[..1_201].to_vec(), gen: 0, page: 0, pages: 1, ..pages[0].clone() };
+        assert!(MirrorStatusFrame::from_frame(&legacy.to_frame()).is_ok());
+        let too_many_pages = MirrorStatusFrame { page: 0, pages: MIRROR_STATUS_MAX_PAGES + 1, ..pages[0].clone() };
+        assert_eq!(MirrorStatusFrame::from_frame(&too_many_pages.to_frame()), Err(MirrorFrameError::Malformed));
     }
 }

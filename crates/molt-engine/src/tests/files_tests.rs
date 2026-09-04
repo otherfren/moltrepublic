@@ -509,3 +509,56 @@ fn base64_key() -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.encode([3u8; 32])
 }
+
+/// A member's status arrives in pages: nothing replaces the stored copy
+/// until every page of the generation landed, a newer generation drops a
+/// half-collected one, and a single page replaces at once.
+#[test]
+fn a_paged_mirror_status_replaces_the_copy_only_when_complete() {
+    let mut st = plain_state();
+    let peer = st.roster().into_iter().find(|m| *m != st.member()).expect("a peer in the roster");
+    let hold = |n: u8| molt_core::MirrorHold { id: molt_core::MessageId([n; 16]), held: 2, of: 2 };
+    st.cmd_net_mirror_status(&peer, vec![hold(1)], 10, 0, 2).expect("page 0");
+    assert!(!st.files.mirror.status.contains_key(&peer), "half a generation is nothing");
+    // a newer generation restarts the collection
+    st.cmd_net_mirror_status(&peer, vec![hold(3)], 11, 1, 2).expect("page 1 of gen 11");
+    st.cmd_net_mirror_status(&peer, vec![hold(1)], 10, 1, 2).expect("a straggler of gen 10");
+    // a straggler with ANOTHER page count must not reset the newer generation
+    st.cmd_net_mirror_status(&peer, vec![hold(1)], 10, 2, 3).expect("a straggler of gen 10, 3 pages");
+    assert!(!st.files.mirror.status.contains_key(&peer), "the stragglers complete nothing");
+    assert_eq!(st.files.mirror_pages.get(&peer).map(|e| (e.0, e.1)), Some((11, 2)), "gen 11 kept");
+    st.cmd_net_mirror_status(&peer, vec![hold(2)], 11, 0, 2).expect("page 0 of gen 11");
+    let got: Vec<u8> = st.files.mirror.status.get(&peer).expect("complete").iter().map(|h| h.id.0[0]).collect();
+    assert_eq!(got, vec![2, 3], "the pages in page order");
+    st.cmd_net_mirror_status(&peer, vec![hold(9)], 12, 0, 1).expect("one page");
+    let got: Vec<u8> = st.files.mirror.status.get(&peer).expect("replaced").iter().map(|h| h.id.0[0]).collect();
+    assert_eq!(got, vec![9]);
+    assert!(st.files.mirror_pages.is_empty());
+}
+
+/// A mirror job still fetching is not a holder - not even in this seat's
+/// own view (the field showed a seat listing itself at 0 of 3).
+#[test]
+fn a_running_mirror_job_does_not_count_this_seat_as_a_holder() {
+    let mut st = plain_state();
+    let id = molt_core::MessageId([8u8; 16]);
+    st.files.mirror.jobs.insert(
+        id.to_string(),
+        molt_core::MirrorJob {
+            count: 3,
+            size: 100_000,
+            root: String::new(),
+            key: vec![0; 32],
+            started_at: 1,
+            held: Vec::new(),
+            complete: false,
+            bytes: 0,
+        },
+    );
+    st.files.mirror_progress.insert(id, 1);
+    assert!(!st.mirror_holders().contains_key(&id), "1 of 3 is no holder");
+    if let Some(job) = st.files.mirror.jobs.get_mut(&id.to_string()) {
+        job.complete = true;
+    }
+    assert_eq!(st.mirror_holders().get(&id).cloned(), Some(vec![st.member()]));
+}

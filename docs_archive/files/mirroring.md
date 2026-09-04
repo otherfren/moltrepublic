@@ -440,3 +440,35 @@ never per keystroke, because every `set_mirror` is a declaration frame
 to the whole group; the folder path is shown elided beside its picker
 rather than in a Settings tab, because it is per republic; the usage
 line uses the existing size labels and "of"/"von".
+
+Field verification and fixes (2026-09-04 afternoon, on the user's three
+live nodes over their real relays): the seat gossip was complete on all
+three within a minute of the restart; a fresh 120 KB share persisted by
+a 2-of-3 vote was complete in both other seats' mirror folders about two
+minutes after the vote, one piece per 15 s. What the field showed: the
+republic's earlier persistent file is a LEGACY share (no series material,
+shared before M1) and can never be mirrored - the table shows "-" instead
+of a count for it, and the way forward is to share it again (a v2 share)
+and persist that; a seat listed ITSELF as a whole holder while its mirror
+fetch was still at 0 of 3 (`mirror_holders` counted every own hold - now
+only a whole one).
+
+Review round after the field (same day): the status frame is PAGED (500
+series per page under 48 KiB, at most 64 pages, the control queue holds
+64 frames; a single frame of the earlier build may still carry 4 096
+series); a half-collected generation is dropped after 10 min and a
+straggler of an older generation never resets a newer one; a mirror
+job's own stamp seeds the series cache at open, so a restarted mirror
+resumes from the relays without the sharer online (a peer's `FileServed`
+never enters the local log, so replay cannot seed it); the worker asks
+again after 10 min when no announcement came, backs off 10 min after a
+failed fetch, and withdrawing consent aborts the running fetch (the
+stored pieces stay); the quota counts the SEALED bytes on disk (58 720
+per piece, the manifest pieces included); a folder change moves the
+series folders one by one before the worker re-plans; the trickle serves
+range jobs before whole-series jobs and whole jobs in turn; a peer's ask
+never writes the series cache; the cap's Limit applies at the piece door
+too; `publish_control` reports a dropped frame, so a partly sent status
+generation is re-sent. Status frames go out when the list changed (at
+most once a minute) and unchanged every five minutes - the "32 pieces"
+debounce of §5 is the bitmap persist, not the frame.

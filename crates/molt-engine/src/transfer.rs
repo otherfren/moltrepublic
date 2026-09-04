@@ -1266,12 +1266,9 @@ impl<S: FetchJobStore> molt_net::file_plane::PieceSink for MirrorSink<S> {
             return;
         }
         self.job.mark(index);
-        let block = u64::try_from(molt_net::file_plane::PIECE_PAYLOAD_LEN).unwrap_or(0);
-        let head = u64::from(index).saturating_mul(block);
-        self.job.bytes = self
-            .job
-            .bytes
-            .saturating_add(self.job.size.saturating_sub(head).min(block));
+        // what the folder holds: every stored piece is one sealed block,
+        // padded and base64'd (the quota is disk, not plaintext)
+        self.job.bytes = self.job.bytes.saturating_add(molt_net::trickle::PIECE_WIRE_BYTES);
         self.since_persist += 1;
         if self.since_persist >= HELD_PERSIST_EVERY || self.last_persist.elapsed() >= HELD_PERSIST_AFTER {
             self.persist();
@@ -1305,14 +1302,22 @@ pub(crate) fn spawn_mirror_fetch<S: FetchJobStore>(
 ) -> tokio::task::AbortHandle {
     tokio::spawn(async move {
         let series = id.to_string();
-        let result: Result<(), String> = async {
+        let result: Result<u64, String> = async {
             let key = <[u8; 32]>::try_from(job.key.as_slice())
                 .map_err(|_| "the share carries no usable key".to_string())?;
-            std::fs::create_dir_all(&dir).map_err(|e| format!("creating the mirror folder: {e}"))?;
+            // the folder check walks one stat per held piece: off the reactor
+            let checked = {
+                let (dir, held) = (dir.clone(), job.held_indices());
+                tokio::task::spawn_blocking(move || -> std::io::Result<bool> {
+                    std::fs::create_dir_all(&dir)?;
+                    Ok(held.iter().all(|i| dir.join(i.to_string()).is_file()))
+                })
+                .await
+                .map_err(|e| format!("folder task: {e}"))?
+                .map_err(|e| format!("creating the mirror folder: {e}"))?
+            };
             // a folder that lost its pieces starts over
-            if !job.held.is_empty()
-                && !job.held_indices().iter().all(|i| dir.join(i.to_string()).is_file())
-            {
+            if !checked {
                 job.held.clear();
                 job.bytes = 0;
             }
@@ -1374,17 +1379,22 @@ pub(crate) fn spawn_mirror_fetch<S: FetchJobStore>(
             }
             sink.store_piece(layout.top, &manifest.top_bytes())
                 .map_err(|e| format!("storing the top record: {e}"))?;
+            sink.job.bytes = sink
+                .job
+                .bytes
+                .saturating_add(u64::from(layout.chunks + 1).saturating_mul(molt_net::trickle::PIECE_WIRE_BYTES));
             sink.job.complete = true;
             sink.persist();
-            Ok(())
+            Ok(sink.job.bytes)
         }
         .await;
         let cmd = match result {
-            Ok(()) => Command::NetMirrorDone { id, ok: true, reason: String::new(), generation: Some(scope) },
+            Ok(bytes) => Command::NetMirrorDone { id, ok: true, reason: String::new(), bytes, generation: Some(scope) },
             Err(reason) => {
-                let _ = std::fs::remove_dir_all(&dir);
+                let gone = dir.clone();
+                let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(gone)).await;
                 store.remove_job_mirror(&series);
-                Command::NetMirrorDone { id, ok: false, reason, generation: Some(scope) }
+                Command::NetMirrorDone { id, ok: false, reason, bytes: 0, generation: Some(scope) }
             }
         };
         feed(&cmd_tx, cmd).await;

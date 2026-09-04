@@ -1131,8 +1131,10 @@ component UploadsTable inherits Rectangle {
                         width: 90px * Theme.ui-scale;
                         alignment: center;
                         spacing: 3px;
+                        // a legacy share (no series material) cannot be
+                        // mirrored: no count, not a zero
                         Text {
-                            text: u.mirrors;
+                            text: u.mirror-of > 0 ? u.mirrors : "-";
                             color: Theme.dim;
                             font-size: Theme.fs-cap;
                             horizontal-alignment: center;
@@ -1261,6 +1263,9 @@ export component AppWindow inherits Window {
     // (mirroring §3.6) - mirrored from the engine's read_mirror
     in-out property <bool> org-mirror-on: true;
     in-out property <string> org-mirror-quota: "1";
+    // the stored quota as last pushed: the draft above is only reset when
+    // this changes, so a push mid-edit never clobbers what is being typed
+    in property <string> org-mirror-quota-stored: "1";
     in property <string> org-mirror-used;
     in property <bool> org-mirror-over: false;
     in property <string> org-mirror-dir;

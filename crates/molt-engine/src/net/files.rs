@@ -518,8 +518,10 @@ impl State {
         let Some(key) = crate::files_state::decode_share_key(&ident.key_b64) else {
             return Ok(Reply::Ack);
         };
-        if self.effective_file_cap() == FileCap::Off {
-            return Ok(Reply::Ack);
+        match self.effective_file_cap() {
+            FileCap::Off => return Ok(Reply::Ack),
+            FileCap::Limit(cap) if ident.size > cap => return Ok(Reply::Ack),
+            _ => {}
         }
         let Some(source) = self.piece_source_if_elected(&id, &ident) else {
             return Ok(Reply::Ack);
@@ -535,7 +537,7 @@ impl State {
         if ranges.is_empty() {
             return Ok(Reply::Ack);
         }
-        let started = *self.files.series.entry(id).or_insert_with(crate::now_secs);
+        let started = self.files.series.get(&id).copied().unwrap_or_else(crate::now_secs);
         tracing::debug!(%from, %id, ranges = ranges.len(), stored = source.1, "file trickle: pieces wanted");
         self.enqueue_publish_from(id, key, ident.pieces, ident.size, ident.root, ranges, started, source.0, source.1);
         Ok(Reply::Ack)
@@ -562,6 +564,13 @@ impl State {
         self.load_mirror(state);
         for job in &state.file_jobs.publish {
             if let Ok(id) = job.series.parse::<MessageId>() {
+                self.files.series.entry(id).or_insert(job.started_at);
+            }
+        }
+        // a mirror job's stamp too: the worker resumes it from the relays
+        // without the sharer online
+        for (series, job) in &state.mirror.jobs {
+            if let Ok(id) = series.parse::<MessageId>() {
                 self.files.series.entry(id).or_insert(job.started_at);
             }
         }

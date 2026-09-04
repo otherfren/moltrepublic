@@ -881,7 +881,6 @@ lexicon! {
     ou_mirror_switch: "Mirror persistent files", "Dauerhafte Dateien spiegeln";
     ou_mirror_quota: "Quota (GB)", "Quota (GB)";
     ou_mirror_apply: "Apply", "Übernehmen";
-    ou_mirror_folder: "Folder", "Ordner";
     ou_mirror_browse: "Folder...", "Ordner...";
     ou_mirror_of: "of", "von";
     ou_copy: "Copy", "Kopieren";

@@ -202,6 +202,7 @@ async fn trickle_loop<S: StateStore>(
     let mut manifests: HashMap<String, Manifest> = HashMap::new();
     let mut idle = false;
     let mut backoff = 0u32;
+    let mut last: Option<String> = None;
     loop {
         let delay = cfg.interval.saturating_mul(1u32 << backoff.min(6));
         tokio::select! {
@@ -212,7 +213,7 @@ async fn trickle_loop<S: StateStore>(
         if *stop.borrow() {
             return;
         }
-        match tick(&chan, &store, &busy, &cfg, &mut manifests).await {
+        match tick(&chan, &store, &busy, &cfg, &mut manifests, &mut last).await {
             Ok(()) => {
                 idle = false;
                 backoff = 0;
@@ -227,25 +228,44 @@ async fn trickle_loop<S: StateStore>(
     }
 }
 
-/// One tick: publish the next piece of the first unfinished job, or say
-/// why not.
+/// Which unfinished job the tick serves: a range job (someone waits for
+/// exactly those pieces) before any whole-series job, and within a group
+/// the one after `last` - round-robin, so one large series never starves
+/// the rest.
+fn pick_job(jobs: &[PublishJob], last: Option<&str>) -> Option<PublishJob> {
+    let open: Vec<&PublishJob> = jobs
+        .iter()
+        .filter(|j| u64::from(j.next) < job_total(&j.ranges))
+        .collect();
+    let group: Vec<&PublishJob> = if open.iter().any(|j| !is_whole(j)) {
+        open.iter().copied().filter(|j| !is_whole(j)).collect()
+    } else {
+        open
+    };
+    if group.is_empty() {
+        return None;
+    }
+    let after = last
+        .and_then(|l| group.iter().position(|j| j.series == l))
+        .map_or(0, |p| (p + 1) % group.len());
+    group.get(after).map(|j| (*j).clone())
+}
+
+/// One tick: publish the next piece of the job the round-robin names, or
+/// say why not.
 async fn tick<S: StateStore>(
     chan: &GroupChannel,
     store: &S,
     busy: &watch::Receiver<bool>,
     cfg: &TrickleConfig,
     manifests: &mut HashMap<String, Manifest>,
+    last: &mut Option<String>,
 ) -> Result<(), Hold> {
     let state = store.load().await;
-    let Some(job) = state
-        .file_jobs
-        .publish
-        .iter()
-        .find(|j| u64::from(j.next) < job_total(&j.ranges))
-        .cloned()
-    else {
+    let Some(job) = pick_job(&state.file_jobs.publish, last.as_deref()) else {
         return Err(Hold::Idle);
     };
+    *last = Some(job.series.clone());
     if *busy.borrow() {
         tracing::debug!(series = %job.series, gate = "outbox", "file trickle: waiting");
         return Err(Hold::Gated);
@@ -444,6 +464,31 @@ use sha2::Digest as _;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A range job goes before a whole-series job; whole jobs take turns.
+    #[test]
+    fn the_pick_serves_ranges_first_and_whole_jobs_in_turn() {
+        let job = |series: &str, ranges: Vec<(u32, u32)>| PublishJob {
+            series: series.into(),
+            key: vec![0; 32],
+            path: String::new(),
+            count: 3,
+            size: 3,
+            root: String::new(),
+            ranges,
+            next: 0,
+            started_at: 0,
+            stored: false,
+        };
+        let whole = whole_series_ranges(Manifest::layout_for(3).expect("layout"));
+        let jobs = vec![job("a", whole.clone()), job("b", vec![(1, 1)]), job("c", whole)];
+        assert_eq!(pick_job(&jobs, None).map(|j| j.series), Some("b".into()), "the range job first");
+        let wholes = vec![jobs[0].clone(), jobs[2].clone()];
+        assert_eq!(pick_job(&wholes, None).map(|j| j.series), Some("a".into()));
+        assert_eq!(pick_job(&wholes, Some("a")).map(|j| j.series), Some("c".into()));
+        assert_eq!(pick_job(&wholes, Some("c")).map(|j| j.series), Some("a".into()), "round-robin");
+        assert!(pick_job(&[], None).is_none());
+    }
 
     /// The range walk: positions map onto indices in range order.
     #[test]

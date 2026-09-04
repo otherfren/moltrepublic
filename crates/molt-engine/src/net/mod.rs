@@ -159,6 +159,9 @@ impl EngineSink for CmdSink {
             .execute(Command::NetMirrorStatus {
                 from: member.clone(),
                 holds,
+                gen: status.gen,
+                page: status.page,
+                pages: status.pages,
                 generation: self.generation,
             })
             .await;
