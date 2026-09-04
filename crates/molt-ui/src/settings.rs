@@ -111,6 +111,8 @@ pub(crate) fn read_settings_draft(ui: &AppWindow, stored: &SessionSettings) -> S
         // not a config-tab field: the draft echoes the STORED cap so a
         // wholesale save keeps it (0 is a VALUE now — sharing off, FP4)
         file_cap_bytes: stored.file_cap_bytes,
+        mirror_publish_interval_secs: stored.mirror_publish_interval_secs,
+        mirror_daily_bytes: stored.mirror_daily_bytes,
         workspace_dir: ui.get_cfg_workspace_dir().to_string(),
         download_dir: ui.get_cfg_download_dir().to_string(),
         sound_message: sound_name(ui.get_cfg_sound_message_index()),

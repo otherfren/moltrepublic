@@ -45,6 +45,9 @@ fn engine(root: &std::path::Path, download_dir: &std::path::Path) -> WalletHandl
         settings: SessionSettings {
             workspace_dir: root.display().to_string(),
             download_dir: download_dir.display().to_string(),
+            // the trickle's production pace (15 s a piece) would outlast
+            // the deadline; one a second still trickles
+            mirror_publish_interval_secs: 1,
             ..SessionSettings::default()
         },
         ..SessionView::default()

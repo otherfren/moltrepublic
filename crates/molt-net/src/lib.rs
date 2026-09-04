@@ -44,6 +44,7 @@ pub mod envelope;
 pub(crate) mod epoch_hold;
 pub mod file_plane;
 pub mod group_ack;
+pub mod piece_want;
 pub mod poke;
 pub mod group_runtime;
 pub mod invite;
@@ -60,6 +61,7 @@ pub mod s3;
 pub mod supervisor;
 pub mod tor_probe;
 pub mod transfer;
+pub mod trickle;
 pub mod welcome;
 /// Embedded in-process Tor via arti — only built with `--features embedded-tor`
 /// (the default build never pulls arti). See the module docs and the

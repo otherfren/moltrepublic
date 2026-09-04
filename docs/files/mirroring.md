@@ -1,8 +1,9 @@
 # Mirroring: every consenting seat keeps the persistent files
 
 **Status: OPEN - design of 2026-09-03, decisions ratified by the user the
-same evening (§1); M1 (the piece format v2, the cap removal) is BUILT in
-the change that carries this line, M2-M6 open.** Follows
+same evening (§1); M1 (the piece format v2, the cap removal) and M2 (the
+trickle sender, the resumable fetch, `PieceWanted`) are BUILT, M3-M6
+open.** Follows
 `docs_archive/files/persistent_uploads.md` (the persist/unpersist votes,
 landed the same day).
 
@@ -133,26 +134,64 @@ veto this in review.
   - the file is never rewritten for it, so an older build still opens it
   - and can never be stored as a cap (the settings door refuses it).
 
-### 3.2 The trickle sender
+### 3.2 The trickle sender - as built in M2
 
-One queue per node and republic, fed by three sources, drained at a pace:
+ONE queue of publish jobs per runtime (`TransportState.file_jobs.publish`,
+additive, persisted through the storage writer like the cursors), one
+entry per series: `{series, key, path, count, size, root, ranges, next,
+started_at}` - the pieces to publish as inclusive index ranges in publish
+order, `next` the position within them (a restart RESUMES at `next`,
+never restarts). Fed by two sources:
 
-1. `FileWanted { id }` for an OWN share: enqueue the whole series (v2),
-   manifest first. Replaces the lazy whole-series publish.
-2. `PieceWanted { id, ranges }` (new control frame, authenticated): a
-   holder that has the pieces answers - the sharer if online, else the
-   mirrors; to keep N mirrors from re-publishing the same piece, the
-   holder with the lowest member name among the CURRENT holders (gossip
-   §3.4) answers, the next one after `PIECE_WANT_TIMEOUT` (10 min) if the
-   piece is still missing.
-3. The mirror worker's own re-seeding is the same path (it holds pieces).
+1. `FileWanted { id }` for an OWN v2 share: the sharer announces
+   `FileServed { at: started_at }` at once - BEFORE the first piece - and
+   queues the whole series, top record first, then the manifest chunks,
+   then the data (`whole_series_ranges`). Every want is answered with the
+   announcement (a requester that lost the stamp must hear it again); a
+   series already queued is not queued twice.
+2. `PieceWanted { id, ranges }` (`\x00molt-pwant-v1`, authenticated by
+   the MLS credential like the poke, ≤ 64 ranges): in M2 ONLY the sharer
+   answers, with exactly the ranges asked, bounded to the series' layout;
+   holder election is M4. A range job merges into a queued range job; a
+   whole-series job absorbs it.
 
-Pace: `mirror_publish_interval_secs` (default 15 → ≤ 240 pieces/h ≈ 10 MB/h
-≈ 250 MB/day per node), one event per tick, only while the group outbox
-is idle and the hourly resend budget has ≥ 2 rounds of headroom (chat and
-governance always come first). Persisted cursor per series (`TransportState`)
-so a restart resumes, not restarts. Config keys: the interval and a daily
-byte cap (`mirror_daily_bytes`, default 512 MiB); both node-local.
+Pace (`molt_net::trickle`): one kind-447 event per
+`mirror_publish_interval_secs` (default 15, at least 1), and only while
+the group outbox is idle (`GroupHandle::outbox_busy`, raised for a pass
+with own frames), the hour's resend budget keeps ≥ 2 rounds of headroom
+(`resend_headroom` - chat and governance first) and the UTC day's byte
+counter (`file_jobs.sent_day/sent_bytes`, `PIECE_WIRE_BYTES` = 58 720 per
+piece) stays under `mirror_daily_bytes` (default 512 MiB). Each piece is
+stamped at its own publish time. The manifest is rebuilt from the file
+ONCE per process and series and cached; every data slice is re-read at
+its offset and checked against it - a changed file drops the job. A
+transient refusal backs off (interval × 2^n, cap 64×); a permanent one
+too, so a relay's verdict repeats at most every 64 intervals. Both keys
+live in `[files]` of `config.toml`, in `SessionSettings`, and on the
+`save_settings`/`patch_settings` doors (optional, defaults); they are
+read when the runtime is built - a change applies at the next workspace
+open.
+
+The v1 whole-series publish and its hourly round stay for legacy shares
+only; nothing new spends a round.
+
+The requester's fetch is a persisted job too (`file_jobs.fetch`:
+identity, destination, `started_at`, the verified-piece bitmap). It runs
+`fetch_series_v2_with` with NO ceiling: the subscription stays open (the
+catch-up windows from `started_at` plus the live window, re-placed at the
+day roll), every verified data piece marks the bitmap, which persists at
+most a second behind (`save_fetch_job`, a synchronous storage message
+that stays FIFO with the clean-close merge - a close loses at most that
+second, and the relay replays it). At open the engine resumes every
+unfinished job at its bitmap (`resume_file_jobs`; the `.part` is kept
+and only the missing indices land) and seeds the series stamps from the
+publish jobs. After each quiet slice (10 s without a piece) the job
+computes its missing ranges; once `PIECE_WANT_AFTER` (10 min) has passed
+since the job started it sends `PieceWanted` for them, and again every
+30 min while incomplete. Progress rides `DownloadView` (percent =
+verified pieces). The job ends on completion, on a failure (both remove
+it) - the honest failures left are a landing that cannot be written and
+a relay pool that cannot be dialed at start.
 
 ### 3.3 The mirror worker
 
@@ -310,3 +349,27 @@ material-less vote does not block a current build's re-proposal
 (`open_files_vote`). The manifest spill file is `<part>.mspill` literally,
 removed on every fetch exit, on a retry's sink open, and swept by age
 (a day) when a landing is prepared in that directory.
+
+M2 decisions (2026-09-04, worker): the manifest is cached in memory per
+process and series instead of persisted (one disk pass per process, not
+per want; a restart pays one more); the job persists its source PATH in
+the encrypted `transport.state` (node-local like `prefs.shared_files`);
+the two pacing keys are written to `config.toml` only off their defaults,
+so a config an older build still opens stays that way; the storage
+writer's `SaveTransport` merge now carries `file_jobs` beside the cursors
+(it silently dropped every other field - the first keystone found it);
+the fetch bitmap persists through a synchronous storage message, because
+the clean-close path seals `transport.state` before the aborted fetch's
+drop could save (a post-merge save is ignored by design); the v2 fetch
+builds its channel WITHOUT the exporter ring (`nostr_file_channel`) - at
+reopen the ring-bearing context was refused before the group had settled;
+`PIECE_WANT_AFTER` is a static with a hidden test seam
+(`__set_piece_want_after`), like the reopen transport seam; there is no
+cancel command yet, so "the user cancels" ends a job only by a workspace
+close (the job resumes at the next open). Keystones:
+`molt-net/tests/trickle.rs` (order and pace, resume at the cursor, the
+outbox and budget gates, the daily cap over a clock seam, an exact range,
+queue dedup) and `molt-engine/tests/file_trickle.rs` (a five-piece
+download at one piece per second, a requester closed and reopened
+mid-way resuming at its bitmap, a piece the relay lost recovered through
+`PieceWanted` against a relay whose database the test prunes).

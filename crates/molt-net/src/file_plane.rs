@@ -34,7 +34,7 @@ pub const FILE_CHUNK_PLAIN_LEN: usize = 44_000;
 
 /// How long a fetch waits for the next chunk before giving up — relays
 /// replay history fast; a gap this long means the series is not there.
-const FETCH_QUIET: Duration = Duration::from_secs(10);
+pub const FETCH_QUIET: Duration = Duration::from_secs(10);
 
 /// The fetch's OVERALL deadline: a hostile relay trickling matching
 /// events must not reset the quiet window forever (review 2026-08-10) —
@@ -502,7 +502,7 @@ pub fn manifest_of_reader<R: Read>(mut reader: R) -> std::io::Result<(Manifest, 
 }
 
 /// Read until `buf` is full or the reader ends; the number of bytes read.
-fn read_full<R: Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
+pub(crate) fn read_full<R: Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
     let mut filled = 0;
     while filled < buf.len() {
         let n = reader.read(&mut buf[filled..])?;
@@ -539,6 +539,16 @@ pub trait PieceSink {
     /// missing; `None` keeps them in (bounded) memory.
     fn spill_path(&self) -> Option<std::path::PathBuf> {
         None
+    }
+    /// The data indices a resumed job already holds verified - skipped,
+    /// never re-landed.
+    fn held(&self) -> Vec<u32> {
+        Vec::new()
+    }
+    /// A data slice at `index` verified against its manifest chunk (the
+    /// resumable job's bookkeeping hook).
+    fn verified(&mut self, index: u32) {
+        let _ = index;
     }
 }
 
@@ -612,7 +622,7 @@ pub(crate) fn transient_publish_error(e: &NetError) -> bool {
 /// Publish one sealed piece, retrying every transient refusal on a
 /// backoff (`min(250 ms × 2^n, 10 s)`) within [`PUBLISH_PIECE_PATIENCE`];
 /// a permanent refusal ends the series on the spot.
-async fn publish_piece_paced(
+pub(crate) async fn publish_piece_paced(
     chan: &GroupChannel,
     outer: &[u8; 32],
     framed: &[u8],
@@ -827,7 +837,7 @@ impl Drop for CandidateStore {
 
 /// What a data slice at `index` must be long: a full block, the last one
 /// the file's remainder. `None` = no such data index.
-fn expected_slice_len(index: u32, count: u32, size: u64) -> Option<usize> {
+pub(crate) fn expected_slice_len(index: u32, count: u32, size: u64) -> Option<usize> {
     if index >= count {
         return None;
     }
@@ -898,6 +908,7 @@ impl Unverified {
             let landed = self.landed.remove(&index);
             if landed.is_some() && landed == want {
                 verified.insert(index);
+                sink.verified(index);
                 self.forget_side(index);
                 continue;
             }
@@ -910,12 +921,81 @@ impl Unverified {
                 sink.put(index, &payload)
                     .map_err(|e| NetError::Framing(format!("landing piece {index}: {e}")))?;
                 verified.insert(index);
+                sink.verified(index);
             } else if landed.is_some() {
                 tracing::debug!(index, "file plane: a landed slice fails its manifest hash - waiting for another");
             }
         }
         Ok(())
     }
+}
+
+/// How a v2 fetch runs: the one-shot (a quiet window ends it, a ceiling
+/// stops a hostile trickle) or the resumable job of §3.2 (`on_quiet`
+/// decides after every quiet slice, the subscription re-places itself at
+/// the day roll, no ceiling).
+pub struct FetchOpts<'a> {
+    /// The quiet slice.
+    pub quiet: Duration,
+    /// A total deadline; `None` = none.
+    pub ceiling: Option<Duration>,
+    /// Called with the missing ranges after every quiet slice: `true`
+    /// keeps waiting, `false` ends the fetch. `None` = the one-shot.
+    pub on_quiet: Option<&'a mut QuietHook>,
+}
+
+/// What a resumable fetch does after a quiet slice, given the missing
+/// ranges: `true` keeps waiting.
+pub type QuietHook = dyn FnMut(Vec<(u32, u32)>) -> bool + Send;
+
+/// The one-shot v2 fetch: [`fetch_series_v2_with`] where a quiet window
+/// is the honest miss and [`FETCH_CEILING`] the hostile-trickle stop.
+pub async fn fetch_series_v2(
+    chan: &GroupChannel,
+    key: &[u8; 32],
+    start_stamp: u64,
+    expect: &SeriesExpect,
+    sink: &mut (dyn PieceSink + Send),
+    quiet: Option<Duration>,
+) -> Result<Manifest, NetError> {
+    let opts = FetchOpts {
+        quiet: quiet.unwrap_or(FETCH_QUIET),
+        ceiling: Some(FETCH_CEILING),
+        on_quiet: None,
+    };
+    fetch_series_v2_with(chan, key, start_stamp, expect, sink, opts).await
+}
+
+/// The pieces of a series a fetch still misses, as inclusive ranges
+/// (data first, then the manifest chunks, then the top record; at most
+/// [`PIECE_WANT_MAX_RANGES`]).
+#[must_use]
+pub fn missing_ranges(
+    verified: &HashSet<u32>,
+    chunks_known: &[bool],
+    have_top: bool,
+    layout: SeriesLayout,
+) -> Vec<(u32, u32)> {
+    let mut missing: Vec<u32> = (0..layout.count).filter(|i| !verified.contains(i)).collect();
+    for (slot, known) in chunks_known.iter().enumerate() {
+        if !known {
+            if let Ok(slot) = u32::try_from(slot) {
+                missing.push(layout.count.saturating_add(slot));
+            }
+        }
+    }
+    if !have_top {
+        missing.push(layout.top);
+    }
+    let mut out: Vec<(u32, u32)> = Vec::new();
+    for index in missing {
+        match out.last_mut() {
+            Some((_, hi)) if *hi + 1 == index => *hi = index,
+            _ => out.push((index, index)),
+        }
+    }
+    out.truncate(crate::piece_want::PIECE_WANT_MAX_RANGES);
+    out
 }
 
 /// Fetch a v2 series that started at `start_stamp`: subscribe the windows
@@ -926,14 +1006,15 @@ impl Unverified {
 /// each slice by its chunk (relays replay newest first, so the manifest
 /// tends to come LAST - nothing waits for it, nothing is dropped for lack
 /// of it). A slice still missing after the relays went quiet is the
-/// honest miss - the caller re-requests (M2).
-pub async fn fetch_series_v2(
+/// honest miss - the one-shot ends there, the resumable job asks
+/// (`FetchOpts::on_quiet`).
+pub async fn fetch_series_v2_with(
     chan: &GroupChannel,
     key: &[u8; 32],
     start_stamp: u64,
     expect: &SeriesExpect,
     sink: &mut (dyn PieceSink + Send),
-    quiet: Option<Duration>,
+    mut opts: FetchOpts<'_>,
 ) -> Result<Manifest, NetError> {
     if expect.count != Manifest::piece_count_for(expect.size) {
         return Err(NetError::Framing(
@@ -943,7 +1024,6 @@ pub async fn fetch_series_v2(
     let layout = Manifest::layout_for(expect.count)
         .ok_or_else(|| NetError::Framing("the share exceeds the largest series".into()))?;
     let root = expect.root.to_lowercase();
-    let quiet = quiet.unwrap_or(FETCH_QUIET);
     let outer = outer_key(key);
     let count = layout.count;
     let chunk_slots = usize::try_from(layout.chunks).unwrap_or(usize::MAX);
@@ -952,9 +1032,9 @@ pub async fn fetch_series_v2(
     let mut chunks: Vec<Option<Vec<u8>>> = vec![None; chunk_slots];
     let mut candidates = CandidateStore::new(sink.spill_path());
     let mut pending = Unverified::default();
-    let mut verified: HashSet<u32> = HashSet::new();
-    // the quiet window ends an honest fetch; the ceiling a hostile trickle
-    let deadline = tokio::time::Instant::now() + FETCH_CEILING;
+    // a resumed job skips what it verified before
+    let mut verified: HashSet<u32> = sink.held().into_iter().filter(|i| *i < count).collect();
+    let deadline = opts.ceiling.map(|c| tokio::time::Instant::now() + c);
     let per = u32::try_from(HASHES_PER_CHUNK).unwrap_or(u32::MAX);
     loop {
         let done = top.is_some()
@@ -965,12 +1045,12 @@ pub async fn fetch_series_v2(
             let parts: Vec<Vec<u8>> = chunks.into_iter().flatten().collect();
             return Manifest::from_parts(&top, &parts);
         }
-        if tokio::time::Instant::now() >= deadline {
+        if deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
             return Err(NetError::Framing(
                 "the fetch budget is spent - the series did not complete".to_string(),
             ));
         }
-        match sub.recv(quiet).await {
+        match sub.recv(opts.quiet).await {
             GroupRecv::Frame { content, .. } => {
                 // another file's piece, or a foreign group's: not ours to read
                 let Ok(plain) = open_outer(&[outer], &content) else {
@@ -1047,6 +1127,7 @@ pub async fn fetch_series_v2(
                             sink.put(index, payload)
                                 .map_err(|e| NetError::Framing(format!("landing piece {index}: {e}")))?;
                             verified.insert(index);
+                            sink.verified(index);
                         } else {
                             tracing::debug!(index, "file plane: dropping a slice that fails its manifest hash");
                         }
@@ -1063,19 +1144,34 @@ pub async fn fetch_series_v2(
                     },
                 }
             }
-            GroupRecv::Idle => {
-                return Err(match &top {
-                    None => NetError::Framing(
-                        "no manifest of this series arrived - the relays do not hold it".to_string(),
-                    ),
-                    Some(_) => NetError::Framing(format!(
-                        "{} of {count} pieces missing after the relays went quiet",
-                        usize::try_from(count).unwrap_or(usize::MAX).saturating_sub(verified.len())
-                    )),
-                });
-            }
-            GroupRecv::Deaf(why) => {
-                return Err(NetError::Framing(format!("file subscription is deaf: {why}")));
+            quiet @ (GroupRecv::Idle | GroupRecv::Deaf(_)) => {
+                let Some(on_quiet) = opts.on_quiet.as_mut() else {
+                    return Err(match (quiet, &top) {
+                        (GroupRecv::Deaf(why), _) => {
+                            NetError::Framing(format!("file subscription is deaf: {why}"))
+                        }
+                        (_, None) => NetError::Framing(
+                            "no manifest of this series arrived - the relays do not hold it".to_string(),
+                        ),
+                        (_, Some(_)) => NetError::Framing(format!(
+                            "{} of {count} pieces missing after the relays went quiet",
+                            usize::try_from(count).unwrap_or(usize::MAX).saturating_sub(verified.len())
+                        )),
+                    });
+                };
+                // the resumable job: re-place the subscription once the day
+                // rolled past its windows, then let the caller ask
+                if !sub.covers(&chan.current_window_tags()) {
+                    match chan.subscribe_files_from(start_stamp, MAX_CATCHUP_WINDOWS).await {
+                        Ok(fresh) => sub = fresh,
+                        Err(e) => tracing::debug!(error = %e, "file plane: re-placing the fetch subscription failed"),
+                    }
+                }
+                let chunks_known: Vec<bool> = chunks.iter().map(Option::is_some).collect();
+                let missing = missing_ranges(&verified, &chunks_known, top.is_some(), layout);
+                if !on_quiet(missing) {
+                    return Err(NetError::Framing("the fetch was cancelled".to_string()));
+                }
             }
         }
     }
@@ -1199,6 +1295,20 @@ mod tests {
         assert_eq!(Manifest::layout_for(MAX_SERIES_PIECES).map(|l| l.chunks), Some(1_374));
         assert!(Manifest::layout_for(MAX_SERIES_PIECES + 1).is_none());
         assert_eq!(Manifest::layout_for(0).expect("empty file").pieces(), 1);
+    }
+
+    /// Missing pieces compress to inclusive ranges: data, chunks, then the
+    /// top record.
+    #[test]
+    fn missing_pieces_compress_to_ranges() {
+        let layout = Manifest::layout_for(6).expect("layout");
+        let verified: HashSet<u32> = [0, 1, 4].into_iter().collect();
+        assert_eq!(
+            missing_ranges(&verified, &[false], false, layout),
+            vec![(2, 3), (5, 7)]
+        );
+        let all: HashSet<u32> = (0..6).collect();
+        assert!(missing_ranges(&all, &[true], true, layout).is_empty());
     }
 
     /// The outer key is one HKDF step from K - pinned to its value so a

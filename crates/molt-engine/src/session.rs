@@ -1527,6 +1527,7 @@ impl State {
         // that replayed as mine and still available — this node keeps
         // serving downloads across restarts
         self.adopt_share_paths();
+        self.resume_file_jobs(&transport_state);
         Ok(transport_state)
     }
 

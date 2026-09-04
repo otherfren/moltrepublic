@@ -7,6 +7,7 @@
 //! off-actor tasks live in `crate::transfer`.
 
 use super::*;
+use molt_net::supervisor::StateStore as _;
 
 /// The relay file plane's working set: `(channel, secrets-to-OPEN,
 /// current-secret-to-SEAL)` — the seal half is `None` when the current
@@ -95,6 +96,19 @@ impl State {
         Some((channel, secrets, current))
     }
 
+    /// The relay file channel alone (no exporter material): what a v2
+    /// fetch needs - the pieces open under the FILE's key.
+    fn nostr_file_channel(&self) -> Option<molt_net::ritual_net::GroupChannel> {
+        let nostr = self.nostr.as_ref()?;
+        let relays = self.dialable_group_relays();
+        if relays.is_empty() {
+            tracing::debug!("file plane: no dialable relay");
+            return None;
+        }
+        let dialer = self.dialer_for().ok()?;
+        Some(molt_net::ritual_net::GroupChannel::new(dialer, relays, nostr.rotation_seed))
+    }
+
     /// Download a peer's share over the relay plane: fetch when the
     /// series' publish stamp is known, else park the download and ask the
     /// sharer to publish (lazy) — the `FileServed` announcement resumes it.
@@ -152,6 +166,26 @@ impl State {
         target: crate::transfer::FetchTarget,
         dest: crate::transfer::DestSpec,
     ) {
+        // a v2 share (a usable content key - the ONE predicate the serve
+        // side uses too) fetches its piece series from the series start as
+        // a resumable job; a legacy one the exporter-sealed chunk series
+        if let Some(key) = crate::files_state::decode_share_key(&target.key_b64) {
+            let job = molt_core::FetchJob {
+                series: target.id_hex.clone(),
+                key: key.to_vec(),
+                count: target.pieces,
+                size: target.size,
+                root: target.root.clone(),
+                checksum: target.checksum.clone(),
+                name: target.name.clone(),
+                dest: dest.explicit.clone(),
+                default_dir: dest.default_dir.clone(),
+                started_at: at,
+                held: Vec::new(),
+            };
+            self.spawn_fetch_job(id, job);
+            return;
+        }
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return;
         };
@@ -164,24 +198,17 @@ impl State {
             );
             return;
         };
-        // a v2 share (a usable content key - the ONE predicate the serve
-        // side uses too) fetches its piece series from the series start;
-        // a legacy one the exporter-sealed chunk series
-        let fetch = if crate::files_state::decode_share_key(&target.key_b64).is_some() {
-            crate::transfer::spawn_nostr_fetch_v2(channel, id, at, target, dest, self.net_scope, cmd_tx)
-        } else {
-            crate::transfer::spawn_nostr_fetch(
-                channel,
-                ring,
-                id,
-                at,
-                target,
-                dest,
-                v1_fetch_bound(self.effective_file_cap()),
-                self.net_scope,
-                cmd_tx,
-            )
-        };
+        let fetch = crate::transfer::spawn_nostr_fetch(
+            channel,
+            ring,
+            id,
+            at,
+            target,
+            dest,
+            v1_fetch_bound(self.effective_file_cap()),
+            self.net_scope,
+            cmd_tx,
+        );
         self.files.fetches.retain(|h| !h.is_finished());
         self.files.fetches.push(fetch);
     }
@@ -192,12 +219,13 @@ impl State {
     /// publish the series N times.
     pub(super) fn serve_file_wanted(&mut self, id: MessageId) {
         let me = self.member();
-        let (is_mine, size, key_b64, root) = match self.share_identity(&id) {
+        let (is_mine, size, key_b64, root, pieces) = match self.share_identity(&id) {
             Ok((ident, available)) => (
                 ident.by == me && available,
                 ident.size,
                 ident.key_b64,
                 ident.root,
+                ident.pieces,
             ),
             Err(_) => return,
         };
@@ -220,6 +248,35 @@ impl State {
             FileCap::Unlimited => None,
         };
         let now = crate::now_secs();
+        // series v2: the trickle sender publishes the pieces at its pace
+        // (`docs/files/mirroring.md` §3.2) - the announcement goes out NOW,
+        // before the first piece, and every want is answered (a requester
+        // that lost the stamp must hear it again). The whole series is
+        // queued once, on the first want of a series this node has no
+        // stamp for; later gaps are asked for piece by piece (PieceWanted)
+        if let Some(key) = crate::files_state::decode_share_key(&key_b64) {
+            let known = self.files.series.get(&id).copied();
+            let started = known.unwrap_or(now);
+            self.files.series.insert(id, started);
+            self.files.announced.insert(id, now);
+            let env = self.make_env(me, WorkspaceEvent::FileServed { id, at: started });
+            self.record(env);
+            let Some(layout) = molt_net::file_plane::Manifest::layout_for(pieces) else {
+                return;
+            };
+            if known.is_none() {
+                self.enqueue_publish_job(
+                    id,
+                    key,
+                    pieces,
+                    size,
+                    root,
+                    molt_net::trickle::whole_series_ranges(layout),
+                    started,
+                );
+            }
+            return;
+        }
         if let Some(at) = self.files.series.get(&id).copied() {
             // a standing series re-announces instead of re-publishing (one
             // stored copy serves everyone within relay retention) — UNLESS
@@ -257,24 +314,9 @@ impl State {
         else {
             return;
         };
-        // series v2 (a share with a content key) seals under the FILE's
-        // key; a legacy share under the CURRENT epoch only — publishing
+        // a legacy share seals under the CURRENT epoch only — publishing
         // under a stale ring secret would hand out a series fresh seats
         // and post-re-key members can never open
-        if let Some(key) = crate::files_state::decode_share_key(&key_b64) {
-            self.files.serving.insert(id);
-            crate::transfer::spawn_series_publish_v2(
-                channel,
-                key,
-                id,
-                path,
-                root,
-                store,
-                self.net_scope,
-                cmd_tx,
-            );
-            return;
-        }
         let Some(exporter) = current else {
             tracing::warn!(%id, "no current exporter secret - not publishing the series");
             return;
@@ -378,6 +420,160 @@ impl State {
             req.reply,
             self.files.serve_slots.clone(),
         );
+    }
+
+    /// The store the file jobs persist through (the workspace's
+    /// `transport.state`).
+    pub(crate) fn file_store(&self) -> Option<crate::net::FileStateStore> {
+        self.active
+            .as_ref()
+            .map(|a| crate::net::FileStateStore::new(a.handle.clone()))
+    }
+
+    /// Queue `ranges` of this node's own v2 share for the trickle sender
+    /// (off the actor: the store write awaits), then wake it.
+    #[allow(clippy::too_many_arguments)]
+    fn enqueue_publish_job(
+        &mut self,
+        id: MessageId,
+        key: [u8; 32],
+        pieces: u32,
+        size: u64,
+        root: String,
+        ranges: Vec<(u32, u32)>,
+        started_at: u64,
+    ) {
+        let Some(path) = self.files.share_paths.get(&id).cloned() else {
+            return;
+        };
+        let Some(store) = self.file_store() else {
+            return;
+        };
+        let waker = self.group_net.as_ref().map(|g| g.trickle.waker());
+        let job = molt_core::PublishJob {
+            series: id.to_string(),
+            key: key.to_vec(),
+            path: path.display().to_string(),
+            count: pieces,
+            size,
+            root,
+            ranges,
+            next: 0,
+            started_at,
+        };
+        tokio::spawn(async move {
+            let series = job.series.clone();
+            let mut queued = false;
+            store
+                .update(|s| {
+                    queued = molt_net::trickle::enqueue_publish(s, job);
+                    queued
+                })
+                .await;
+            tracing::debug!(series = %series, queued, "file trickle: job enqueued");
+            if let Some(w) = waker {
+                w.notify_one();
+            }
+        });
+    }
+
+    /// A `PieceWanted` landed: ONLY the sharer answers in M2 (holder
+    /// election is M4), with exactly the ranges asked, bounded to the
+    /// series' layout.
+    pub(crate) fn cmd_net_piece_wanted(
+        &mut self,
+        from: &MemberId,
+        id: MessageId,
+        ranges: Vec<(u32, u32)>,
+    ) -> Result<Reply, MoltError> {
+        let me = self.member();
+        if *from == me {
+            return Ok(Reply::Ack);
+        }
+        let Ok((ident, available)) = self.share_identity(&id) else {
+            return Ok(Reply::Ack);
+        };
+        if ident.by != me || !available || self.share_expired(&id) {
+            return Ok(Reply::Ack);
+        }
+        let Some(key) = crate::files_state::decode_share_key(&ident.key_b64) else {
+            return Ok(Reply::Ack);
+        };
+        if self.effective_file_cap() == FileCap::Off {
+            return Ok(Reply::Ack);
+        }
+        let Some(layout) = molt_net::file_plane::Manifest::layout_for(ident.pieces) else {
+            return Ok(Reply::Ack);
+        };
+        let ranges: Vec<(u32, u32)> = ranges
+            .into_iter()
+            .filter(|(lo, hi)| lo <= hi && *hi <= layout.top)
+            .take(molt_net::piece_want::PIECE_WANT_MAX_RANGES)
+            .collect();
+        if ranges.is_empty() {
+            return Ok(Reply::Ack);
+        }
+        let started = *self.files.series.entry(id).or_insert_with(crate::now_secs);
+        tracing::debug!(%from, %id, ranges = ranges.len(), "file trickle: pieces wanted");
+        self.enqueue_publish_job(id, key, ident.pieces, ident.size, ident.root, ranges, started);
+        Ok(Reply::Ack)
+    }
+
+    /// The running fetch asks: send a `PieceWanted` for what it misses.
+    pub(crate) fn cmd_net_piece_want_send(
+        &mut self,
+        id: MessageId,
+        ranges: Vec<(u32, u32)>,
+    ) -> Result<Reply, MoltError> {
+        if let Some(group) = self.group_net.as_ref() {
+            let want = molt_net::piece_want::PieceWanted::new(self.member(), id.to_string(), ranges);
+            group.handle.publish_control(want.to_frame());
+        }
+        Ok(Reply::Ack)
+    }
+
+    /// At open: seed the series stamps from the persisted publish jobs,
+    /// wake the trickle, and resume every unfinished fetch job at its
+    /// bitmap (`docs/files/mirroring.md` §3.2 - a restart resumes, never
+    /// restarts).
+    pub(crate) fn resume_file_jobs(&mut self, state: &molt_core::TransportState) {
+        for job in &state.file_jobs.publish {
+            if let Ok(id) = job.series.parse::<MessageId>() {
+                self.files.series.entry(id).or_insert(job.started_at);
+            }
+        }
+        if let Some(group) = self.group_net.as_ref() {
+            group.trickle.wake();
+        }
+        for job in state.file_jobs.fetch.clone() {
+            let Ok(id) = job.series.parse::<MessageId>() else {
+                continue;
+            };
+            self.files.series.insert(id, job.started_at);
+            let held = u64::try_from(job.held_indices().len()).unwrap_or(0);
+            let percent = u8::try_from((held * 100).checked_div(u64::from(job.count)).unwrap_or(0)).unwrap_or(100);
+            self.set_download_phase(id, molt_core::TransferPhase::Progress { percent });
+            self.spawn_fetch_job(id, job);
+        }
+    }
+
+    /// Run one v2 fetch job off the actor (fresh or resumed).
+    fn spawn_fetch_job(&mut self, id: MessageId, job: molt_core::FetchJob) {
+        let (Some(cmd_tx), Some(store)) = (self.cmd_tx.upgrade(), self.file_store()) else {
+            return;
+        };
+        let Some(channel) = self.nostr_file_channel() else {
+            crate::transfer::spawn_file_verdict(
+                id,
+                Err("no dialable relay for the file plane".to_string()),
+                self.net_scope,
+                cmd_tx,
+            );
+            return;
+        };
+        let fetch = crate::transfer::spawn_nostr_fetch_v2(channel, id, job, store, self.net_scope, cmd_tx);
+        self.files.fetches.retain(|h| !h.is_finished());
+        self.files.fetches.push(fetch);
     }
 
     /// The fetch task's request is ready: record the `FileRequested` event

@@ -607,6 +607,15 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
         // stored value, exactly like the clearnet decision above.
         poke_wake_command: d.poke_wake_command,
         read_receipts: flag("read_receipts")?,
+        // the trickle pace (mirroring §3.2): optional, absent = the defaults
+        mirror_publish_interval_secs: args
+            .get("mirror_publish_interval_secs")
+            .and_then(Value::as_u64)
+            .unwrap_or(d.mirror_publish_interval_secs),
+        mirror_daily_bytes: args
+            .get("mirror_daily_bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(d.mirror_daily_bytes),
         mcp_port: d.mcp_port,
         mcp_allow: d.mcp_allow,
         mcp_token: d.mcp_token,
@@ -1101,7 +1110,9 @@ pub fn tools() -> Vec<ToolDef> {
                     "sound_poke": { "type": "string", "enum": ["none", "bell", "chime", "pop"], "description": "optional; absent = \"none\"" },
                     "poke_enabled": { "type": "boolean", "description": "optional; absent = false (react to pokes and offer poking)" },
                     "read_receipts": { "type": "boolean", "description": "send/show per-message chat read receipts (local privacy switch)" },
-                    "file_cap_bytes": { "type": ["integer", "null"], "description": "per-file byte cap for sharing: null = no cap, 0 = sharing off, n = a cap" }
+                    "file_cap_bytes": { "type": ["integer", "null"], "description": "per-file byte cap for sharing: null = no cap, 0 = sharing off, n = a cap" },
+                    "mirror_publish_interval_secs": { "type": "integer", "description": "optional; seconds between two piece publishes of the file trickle (default 15, at least 1)" },
+                    "mirror_daily_bytes": { "type": "integer", "description": "optional; piece bytes the file trickle may publish per UTC day (default 536870912)" }
                 },
                 "required": [
                     "s3_backup", "s3_endpoint", "s3_access_key", "s3_bucket",
@@ -1132,6 +1143,8 @@ pub fn tools() -> Vec<ToolDef> {
                     "media_s3_bucket": { "type": "string", "description": "a second bucket at the same endpoint/credentials, for media; configured only, nothing writes media to S3 yet" },
                     "media_s3_max_bytes": { "type": "integer", "description": "byte quota for the media bucket; 0 = no limit" },
                     "file_cap_bytes": { "type": ["integer", "null"], "description": "per-file byte cap for sharing; null = no cap, 0 = sharing off" },
+                    "mirror_publish_interval_secs": { "type": "integer", "description": "seconds between two piece publishes of the file trickle (at least 1)" },
+                    "mirror_daily_bytes": { "type": "integer", "description": "piece bytes the file trickle may publish per UTC day" },
                     "sound_message": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
                     "sound_vote": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
                     "sound_poke": { "type": "string", "enum": ["none", "bell", "chime", "pop"] },
@@ -1779,7 +1792,7 @@ mod tests {
         // would let any MCP client execute code as the node's user, which is
         // a different thing entirely from acting inside the republic. The
         // wholesale settings paths refuse the key for the same reason.
-        const INTERNAL: [&str; 65] = [
+        const INTERNAL: [&str; 67] = [
             // the HOST POSTURE and the two secrets (MCP audit 2026-08-26 M1/H4):
             // an agent operates the seat, not the machine — GUI / config only
             "set_node_posture",
@@ -1831,6 +1844,10 @@ mod tests {
             "net_file_series_published",
             // the parked download's watchdog (relay file plane)
             "net_file_wanted_timeout",
+            // a PieceWanted control frame landing (the transport speaks), and
+            // the running fetch asking the actor to send one (mirroring §3.2)
+            "net_piece_wanted",
+            "net_piece_want_send",
             "net_delivered",
             "net_peer_seen",
             "net_peer_rekeyed",

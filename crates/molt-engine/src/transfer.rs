@@ -1165,95 +1165,118 @@ pub(crate) fn spawn_series_publish(
     });
 }
 
-/// RELAY file plane, sharer side, series v2: take the hour's publish
-/// round FIRST (a spent budget costs no disk read), rebuild the manifest
-/// from the file (it must still hash to the share's root - a file that
-/// changed since the share is refused), then publish every piece under
-/// the file's key. A change between that check and a later slice aborts
-/// the publish with the round spent (accepted: the requester's watchdog
-/// fails it honestly). Reports the series START stamp back as
-/// `NetFileSeriesPublished` (0 = failed).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn spawn_series_publish_v2(
-    channel: molt_net::ritual_net::GroupChannel,
-    key: [u8; 32],
-    id: MessageId,
-    path: PathBuf,
-    root: String,
-    store: crate::net::FileStateStore,
-    scope: u64,
-    cmd_tx: mpsc::Sender<Envelope>,
-) {
-    tokio::spawn(async move {
-        if let Err(e) = molt_net::file_plane::take_publish_round(&store, crate::now_secs()).await {
-            tracing::warn!(%id, error = %e, "file series v2 publish held");
-            feed(&cmd_tx, Command::NetFileSeriesPublished { id, at: 0, generation: Some(scope) }).await;
-            return;
-        }
-        let manifest = tokio::task::spawn_blocking({
-            let path = path.clone();
-            move || std::fs::File::open(&path).and_then(molt_net::file_plane::manifest_of_reader)
-        })
-        .await;
-        let at = match manifest {
-            Ok(Ok((m, _))) if m.root() == root => {
-                match molt_net::file_plane::publish_series_v2(&channel, &key, &path, &m, None).await {
-                    Ok((stamp, pieces)) => {
-                        tracing::debug!(%id, pieces, "file series v2 published");
-                        stamp
-                    }
-                    Err(e) => {
-                        tracing::warn!(%id, error = %e, "file series v2 publish failed");
-                        0
-                    }
-                }
-            }
-            Ok(Ok(_)) => {
-                tracing::warn!(%id, "not serving: the file changed since it was shared");
-                0
-            }
-            Ok(Err(e)) => {
-                tracing::warn!(%id, error = %e, "reading the shared file failed");
-                0
-            }
-            Err(e) => {
-                tracing::warn!(%id, error = %e, "the manifest task failed");
-                0
-            }
-        };
-        feed(
-            &cmd_tx,
-            Command::NetFileSeriesPublished { id, at, generation: Some(scope) },
-        )
-        .await;
-    });
+/// How long a resumable fetch waits after the relays went quiet before it
+/// asks the holders for the missing pieces (`docs/files/mirroring.md`
+/// §3.2), in ms - a static so the integration tests can shorten it
+/// (`crate::__set_piece_want_after`).
+static PIECE_WANT_AFTER_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(600_000);
+
+/// How often an incomplete fetch repeats its ask.
+const PIECE_WANT_REPEAT: Duration = Duration::from_secs(30 * 60);
+
+pub(crate) fn set_piece_want_after(d: Duration) {
+    PIECE_WANT_AFTER_MS.store(
+        u64::try_from(d.as_millis()).unwrap_or(u64::MAX),
+        std::sync::atomic::Ordering::SeqCst,
+    );
+}
+
+fn piece_want_after() -> Duration {
+    Duration::from_millis(PIECE_WANT_AFTER_MS.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+/// Verified pieces between two bitmap persists, and the longest a persist
+/// may lag: a close or crash re-lands at most this much (the relay
+/// replays it). Under the trickle's pace every piece persists.
+const HELD_PERSIST_EVERY: u32 = 32;
+const HELD_PERSIST_AFTER: Duration = Duration::from_secs(1);
+
+/// Where a piece fetch's job persists - synchronous and fire-and-forget,
+/// so the sink can save from inside the fetch (`transport.state` via the
+/// storage writer, whose queue is FIFO with the clean-close merge).
+pub(crate) trait FetchJobStore: Clone + Send + Sync + 'static {
+    /// Upsert the job by series.
+    fn save_job(&self, job: molt_core::FetchJob);
+    /// The fetch of `series` ended.
+    fn remove_job(&self, series: &str);
 }
 
 /// The `.part` file every slice lands in at its offset as it arrives - a
 /// 1 GB fetch never sits in memory, and the file is never pre-sized: a
-/// hostile size claim allocates nothing until pieces actually land.
-struct FileSink {
+/// hostile size claim allocates nothing until pieces actually land. Keeps
+/// the job's verified bitmap and persists it debounced (§3.2: a restart
+/// resumes at the bitmap), and reports progress.
+struct FileSink<S: FetchJobStore> {
     file: std::fs::File,
     /// Where manifest-chunk candidates spill while the top record is
     /// missing (`<part>.mspill`, [`spill_path_for`]; the fetch removes
     /// it on every exit, `prepare_landing` sweeps what a kill left).
     spill: PathBuf,
+    job: molt_core::FetchJob,
+    store: S,
+    cmd_tx: mpsc::Sender<Envelope>,
+    id: MessageId,
+    scope: u64,
+    held_count: u64,
+    since_persist: u32,
+    last_persist: tokio::time::Instant,
+    last_pct: u64,
 }
 
-impl FileSink {
-    fn at(part: &Path) -> std::io::Result<FileSink> {
+impl<S: FetchJobStore> FileSink<S> {
+    /// Fresh: a new `.part`. Resumed: the existing `.part` and the job's
+    /// bitmap - unless the `.part` is gone, then from scratch.
+    fn open(
+        part: &Path,
+        mut job: molt_core::FetchJob,
+        store: S,
+        cmd_tx: mpsc::Sender<Envelope>,
+        id: MessageId,
+        scope: u64,
+    ) -> std::io::Result<FileSink<S>> {
         let spill = spill_path_for(part);
         // a retry after a kill: the stale spill would otherwise keep its
         // size until the first push truncates it - if one ever comes
         let _ = std::fs::remove_file(&spill);
+        let resume = !job.held.is_empty() && part.is_file();
+        let file = if resume {
+            std::fs::OpenOptions::new().write(true).open(part)?
+        } else {
+            job.held.clear();
+            std::fs::File::create(part)?
+        };
+        let held_count = u64::try_from(job.held_indices().len()).unwrap_or(0);
         Ok(FileSink {
-            file: std::fs::File::create(part)?,
+            file,
             spill,
+            job,
+            store,
+            cmd_tx,
+            id,
+            scope,
+            held_count,
+            since_persist: 0,
+            last_persist: tokio::time::Instant::now(),
+            last_pct: 0,
         })
+    }
+
+    fn persist(&mut self) {
+        self.since_persist = 0;
+        self.last_persist = tokio::time::Instant::now();
+        self.store.save_job(self.job.clone());
     }
 }
 
-impl molt_net::file_plane::PieceSink for FileSink {
+impl<S: FetchJobStore> Drop for FileSink<S> {
+    fn drop(&mut self) {
+        if self.since_persist > 0 {
+            self.store.save_job(self.job.clone());
+        }
+    }
+}
+
+impl<S: FetchJobStore> molt_net::file_plane::PieceSink for FileSink<S> {
     fn put(&mut self, index: u32, payload: &[u8]) -> std::io::Result<()> {
         use std::io::{Seek as _, Write as _};
         let block = u64::try_from(molt_net::file_plane::PIECE_PAYLOAD_LEN)
@@ -1265,40 +1288,114 @@ impl molt_net::file_plane::PieceSink for FileSink {
     fn spill_path(&self) -> Option<PathBuf> {
         Some(self.spill.clone())
     }
+
+    fn held(&self) -> Vec<u32> {
+        self.job.held_indices()
+    }
+
+    fn verified(&mut self, index: u32) {
+        if self.job.holds(index) {
+            return;
+        }
+        self.job.mark(index);
+        self.held_count += 1;
+        self.since_persist += 1;
+        if self.since_persist >= HELD_PERSIST_EVERY || self.last_persist.elapsed() >= HELD_PERSIST_AFTER {
+            self.persist();
+        }
+        let pct = (self.held_count * 100).checked_div(u64::from(self.job.count)).unwrap_or(100);
+        if pct > self.last_pct {
+            self.last_pct = pct;
+            let block = u64::try_from(molt_net::file_plane::PIECE_PAYLOAD_LEN).unwrap_or(0);
+            let (reply, _rx) = tokio::sync::oneshot::channel();
+            // lossy and ordered, like the queue plane's progress
+            let _ = self.cmd_tx.try_send(Envelope {
+                cmd: Command::NetFileProgress {
+                    id: self.id,
+                    transferred: self.held_count.saturating_mul(block).min(self.job.size),
+                    total: self.job.size,
+                    generation: Some(self.scope),
+                },
+                reply,
+            });
+        }
+    }
 }
 
-/// RELAY file plane, requester side, series v2: the pieces land in the
-/// `.part` file as they arrive and verify against the manifest, the
-/// landed file must hash to the log-anchored checksum, then the rename.
-/// `at` is the series START stamp the sharer announced.
-pub(crate) fn spawn_nostr_fetch_v2(
+/// RELAY file plane, requester side, series v2: the resumable job of
+/// §3.2. The pieces land in the `.part` file as they arrive and verify
+/// against the manifest; the verified bitmap persists with the job, so a
+/// restart resumes it; the subscription stays open (day roll included)
+/// with no total deadline; after the relays go quiet the job asks the
+/// holders for what it misses (`PieceWanted`, once the wait passed, then
+/// every half hour); the landed file must hash to the log-anchored
+/// checksum, then the rename. The job ends on completion or on a failure
+/// - both remove it.
+pub(crate) fn spawn_nostr_fetch_v2<S: FetchJobStore>(
     channel: molt_net::ritual_net::GroupChannel,
     id: MessageId,
-    at: u64,
-    target: FetchTarget,
-    dest: DestSpec,
+    job: molt_core::FetchJob,
+    store: S,
     scope: u64,
     cmd_tx: mpsc::Sender<Envelope>,
 ) -> tokio::task::AbortHandle {
     tokio::spawn(async move {
+        let series = job.series.clone();
         let result: Result<String, String> = async {
-            let key = crate::files_state::decode_share_key(&target.key_b64)
-                .ok_or_else(|| "the share carries no usable key".to_string())?;
-            let landing = prepare_landing(&dest, &target.name, &target.id_hex)?;
+            let key = <[u8; 32]>::try_from(job.key.as_slice())
+                .map_err(|_| "the share carries no usable key".to_string())?;
+            let dest = DestSpec {
+                explicit: job.dest.clone(),
+                default_dir: job.default_dir.clone(),
+            };
+            let landing = prepare_landing(&dest, &job.name, &job.series)?;
+            store.save_job(job.clone());
             let outcome: Result<String, String> = async {
-                let mut sink = FileSink::at(&landing.part)
+                let mut sink = FileSink::open(&landing.part, job.clone(), store.clone(), cmd_tx.clone(), id, scope)
                     .map_err(|e| format!("creating the landing file: {e}"))?;
                 let expect = molt_net::file_plane::SeriesExpect {
-                    count: target.pieces,
-                    size: target.size,
-                    root: target.root.clone(),
+                    count: job.count,
+                    size: job.size,
+                    root: job.root.clone(),
                 };
-                let manifest =
-                    molt_net::file_plane::fetch_series_v2(&channel, &key, at, &expect, &mut sink, None)
-                        .await
-                        .map_err(|e| format!("fetching the piece series: {e}"))?;
+                let started = tokio::time::Instant::now();
+                let mut last_ask: Option<tokio::time::Instant> = None;
+                let ask_tx = cmd_tx.clone();
+                let mut on_quiet = move |missing: Vec<(u32, u32)>| -> bool {
+                    if missing.is_empty() {
+                        return true;
+                    }
+                    let due = match last_ask {
+                        None => started.elapsed() >= piece_want_after(),
+                        Some(at) => at.elapsed() >= PIECE_WANT_REPEAT,
+                    };
+                    if due {
+                        last_ask = Some(tokio::time::Instant::now());
+                        let (reply, _rx) = tokio::sync::oneshot::channel();
+                        let _ = ask_tx.try_send(Envelope {
+                            cmd: Command::NetPieceWantSend { id, ranges: missing, generation: Some(scope) },
+                            reply,
+                        });
+                    }
+                    true
+                };
+                let opts = molt_net::file_plane::FetchOpts {
+                    quiet: molt_net::file_plane::FETCH_QUIET,
+                    ceiling: None,
+                    on_quiet: Some(&mut on_quiet),
+                };
+                let manifest = molt_net::file_plane::fetch_series_v2_with(
+                    &channel,
+                    &key,
+                    job.started_at,
+                    &expect,
+                    &mut sink,
+                    opts,
+                )
+                .await
+                .map_err(|e| format!("fetching the piece series: {e}"))?;
                 drop(sink);
-                let checksum = target.checksum.clone();
+                let checksum = job.checksum.clone();
                 let landing_for_task = landing.clone();
                 // the size is the top record's, verified by root: whatever
                 // an impostor slice may have grown past it is cut off
@@ -1306,9 +1403,9 @@ pub(crate) fn spawn_nostr_fetch_v2(
                 tokio::task::spawn_blocking(move || {
                     verify_and_finish(&landing_for_task, &checksum, Some(size))
                 })
-                    .await
-                    .map_err(|e| format!("landing task failed: {e}"))?
-                    .map(|p| p.display().to_string())
+                .await
+                .map_err(|e| format!("landing task failed: {e}"))?
+                .map(|p| p.display().to_string())
             }
             .await;
             if outcome.is_err() {
@@ -1318,6 +1415,7 @@ pub(crate) fn spawn_nostr_fetch_v2(
             outcome
         }
         .await;
+        store.remove_job(&series);
         let cmd = match result {
             Ok(path) => Command::NetFileDone { id, path, generation: Some(scope) },
             Err(reason) => Command::NetFileFailed { id, reason, generation: Some(scope) },
@@ -1385,7 +1483,7 @@ mod tests {
         let spill = spill_path_for(&landing.part);
         assert!(spill.display().to_string().ends_with(".part.mspill"), "{}", spill.display());
         std::fs::write(&spill, b"stale candidates").expect("write spill");
-        let _sink = FileSink::at(&landing.part).expect("sink");
+        let _sink = test_sink(&landing.part);
         assert!(!spill.exists(), "a retry drops the stale spill");
 
         let orphan = tmp.path().join(".molt-download-bb.part.mspill");
@@ -1410,11 +1508,39 @@ mod tests {
         use molt_net::file_plane::{PieceSink as _, PIECE_PAYLOAD_LEN};
         let tmp = tempfile::tempdir().expect("tmp");
         let part = tmp.path().join("claim.part");
-        let mut sink = FileSink::at(&part).expect("create");
+        let mut sink = test_sink(&part);
         assert_eq!(std::fs::metadata(&part).expect("meta").len(), 0, "nothing landed, nothing sized");
         sink.put(2, b"abc").expect("put");
         let want = u64::try_from(2 * PIECE_PAYLOAD_LEN + 3).expect("fits");
         assert_eq!(std::fs::metadata(&part).expect("meta").len(), want);
+    }
+
+    /// A store that keeps nothing - the unit tests look at the `.part`.
+    #[derive(Clone)]
+    struct NoStore;
+
+    impl FetchJobStore for NoStore {
+        fn save_job(&self, _job: molt_core::FetchJob) {}
+        fn remove_job(&self, _series: &str) {}
+    }
+
+    /// A sink over a fresh `.part` with an empty job.
+    fn test_sink(part: &Path) -> FileSink<NoStore> {
+        let (cmd_tx, _rx) = mpsc::channel(4);
+        let job = molt_core::FetchJob {
+            series: "aa".into(),
+            key: vec![0; 32],
+            count: 3,
+            size: 3,
+            root: String::new(),
+            checksum: String::new(),
+            name: "x".into(),
+            dest: None,
+            default_dir: String::new(),
+            started_at: 0,
+            held: Vec::new(),
+        };
+        FileSink::open(part, job, NoStore, cmd_tx, MessageId([1; 16]), 0).expect("sink")
     }
 
     fn rt() -> tokio::runtime::Runtime {

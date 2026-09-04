@@ -2627,6 +2627,10 @@ enum WriterMsg {
     /// windows while the SUPERVISOR owns the cursors — each overlays only
     /// its own fields, so neither clobbers the other.
     SaveAccepted(std::collections::BTreeMap<molt_core::MemberId, molt_core::AcceptedWindow>),
+    /// A piece fetch's bookkeeping (mirroring §3.2): upsert by series.
+    SaveFetchJob(Box<molt_core::FetchJob>),
+    /// The fetch of this series ended.
+    RemoveFetchJob(String),
     /// Merge the runtime crypto (MLS snapshot + queue creds) into the CURRENT
     /// `transport.state` — read-modify-write on the writer thread, so it
     /// preserves the outbox/inbound cursors the supervisor left. Acks when
@@ -2812,6 +2816,31 @@ impl StorageHandle {
             Ok(()) => {}
             Err(mpsc::TrySendError::Full(_)) => {
                 tracing::warn!(dropped = "accept-window save", "writer queue full");
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {}
+        }
+    }
+
+    /// Upsert one piece fetch's job (`docs/files/mirroring.md` §3.2) into
+    /// `transport.state`, touching nothing else. Fire-and-forget and
+    /// synchronous, so a fetch task can save from its sink; a lost save
+    /// only re-lands pieces the relay replays anyway.
+    pub fn save_fetch_job(&self, job: molt_core::FetchJob) {
+        match self.tx.try_send(WriterMsg::SaveFetchJob(Box::new(job))) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_)) => {
+                tracing::warn!(dropped = "fetch job save", "writer queue full");
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {}
+        }
+    }
+
+    /// Forget the fetch job of `series` (it completed or failed).
+    pub fn remove_fetch_job(&self, series: &str) {
+        match self.tx.try_send(WriterMsg::RemoveFetchJob(series.to_string())) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_)) => {
+                tracing::warn!(dropped = "fetch job removal", "writer queue full");
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {}
         }
@@ -3138,6 +3167,9 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                             // open, which reads as "the runtime republishes
                             // the whole log after a restart".
                             ts.group = state.group;
+                            // …and the file plane's jobs (mirroring §3.2): the
+                            // same bookkeeping class as the cursors
+                            ts.file_jobs = state.file_jobs;
                             if let Err(e) = ws.write_transport_state(&ts) {
                                 fail(&failed_flag, "transport.state write", &e);
                             }
@@ -3155,6 +3187,32 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                             ts.accepted = accepted;
                             if let Err(e) = ws.write_transport_state(&ts) {
                                 fail(&failed_flag, "accept-window write", &e);
+                            }
+                        }
+                    }
+                    Ok(WriterMsg::SaveFetchJob(job)) => {
+                        if crypto_sealed {
+                            tracing::debug!("ignoring a post-merge fetch job save");
+                        } else {
+                            let mut ts = ws.read_transport_state();
+                            match ts.file_jobs.fetch.iter_mut().find(|j| j.series == job.series) {
+                                Some(slot) => *slot = *job,
+                                None => ts.file_jobs.fetch.push(*job),
+                            }
+                            if let Err(e) = ws.write_transport_state(&ts) {
+                                fail(&failed_flag, "fetch job write", &e);
+                            }
+                        }
+                    }
+                    Ok(WriterMsg::RemoveFetchJob(series)) => {
+                        if !crypto_sealed {
+                            let mut ts = ws.read_transport_state();
+                            let before = ts.file_jobs.fetch.len();
+                            ts.file_jobs.fetch.retain(|j| j.series != series);
+                            if before != ts.file_jobs.fetch.len() {
+                                if let Err(e) = ws.write_transport_state(&ts) {
+                                    fail(&failed_flag, "fetch job write", &e);
+                                }
                             }
                         }
                     }

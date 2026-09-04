@@ -93,6 +93,14 @@ const EVENT_QUEUE: usize = 512;
 /// `STALE_SECS`), so a slow beat is plenty and keeps the actor quiet.
 const PRESENCE_TICK_MS: u64 = 30_000;
 
+/// Shorten the resumable fetch's wait before it asks for missing pieces
+/// (`docs/files/mirroring.md` §3.2; 10 min in production). A test seam for
+/// the integration tests, like `__spawn_with_reopen_transport`.
+#[doc(hidden)]
+pub fn __set_piece_want_after(d: std::time::Duration) {
+    transfer::set_piece_want_after(d);
+}
+
 /// The delivery-guarantee beat (`Command::NetDeliveryTick`): due-ACK flush +
 /// debounced persists. 1 s keeps the real ack latency at debounce+1s ≈ 4 s,
 /// safely inside the sender's 30 s resend timer.
@@ -450,6 +458,9 @@ pub(crate) struct GroupNet {
     /// What the runtime reports about the channel — folded into
     /// `session.net_health` on the presence beat (`apply_group_health`).
     pub(crate) health: tokio::sync::watch::Receiver<molt_net::group_runtime::GroupHealth>,
+    /// The file trickle sender riding this runtime's channel
+    /// (`docs/files/mirroring.md` §3.2); stops with the handle.
+    pub(crate) trickle: molt_net::trickle::TrickleHandle,
 }
 
 /// This seat's live Nostr transport material for the open workspace.
@@ -1299,6 +1310,18 @@ impl State {
                 }
                 self.receive_poke(&from, &to);
                 Ok(Reply::Ack)
+            }
+            Command::NetPieceWanted { from, id, ranges, generation } => {
+                if !self.net_generation_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.cmd_net_piece_wanted(&from, id, ranges)
+            }
+            Command::NetPieceWantSend { id, ranges, generation } => {
+                if !self.net_scope_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.cmd_net_piece_want_send(id, ranges)
             }
             Command::SetWakeCommand { command } => self.cmd_set_wake_command(command),
             Command::SetNodePosture { posture } => self.cmd_set_node_posture(posture),

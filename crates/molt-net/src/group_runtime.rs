@@ -24,7 +24,7 @@
 
 use std::time::Duration;
 
-use molt_core::{MemberId, TransportState};
+use molt_core::{EventEnvelope, MemberId, TransportState};
 use tokio::sync::{mpsc, watch};
 
 use crate::ritual_net::{GroupChannel, GroupRecv};
@@ -119,11 +119,15 @@ pub struct GroupHandle {
     /// sheet supersedes an unsent one by construction — no queue to drain and
     /// no coalescing logic to get wrong.
     acks: watch::Sender<Option<crate::group_ack::GroupAck>>,
-    /// Pokes awaiting publication. An mpsc, NOT a watch: a poke is an event,
-    /// not state — two nudges at two members must both go out, so a newer
-    /// one may never supersede an unsent one. Bounded and dropped-when-full,
-    /// because a nudge is worth exactly one best-effort attempt.
-    pokes: mpsc::Sender<crate::poke::Poke>,
+    /// Control frames awaiting publication (pokes, piece wants). An mpsc,
+    /// NOT a watch: they are events, not state — two nudges at two members
+    /// must both go out, so a newer one may never supersede an unsent one.
+    /// Bounded and dropped-when-full, because each is worth exactly one
+    /// best-effort attempt.
+    controls: mpsc::Sender<Vec<u8>>,
+    /// Whether the outbox is mid-pass with own frames to publish - what
+    /// the file trickle yields to (mirroring §3.2).
+    busy: watch::Receiver<bool>,
     outbox: Option<tokio::task::JoinHandle<()>>,
     inbox: Option<tokio::task::JoinHandle<()>>,
     ack: Option<tokio::task::JoinHandle<()>>,
@@ -168,9 +172,21 @@ impl GroupHandle {
     /// the nudge instead of applying backpressure to the actor. Losing a
     /// poke is the designed failure mode: it is a nudge, not a message.
     pub fn publish_poke(&self, poke: crate::poke::Poke) {
-        if self.pokes.try_send(poke).is_err() {
-            tracing::debug!("the poke queue is full or closed - nudge dropped");
+        self.publish_control(poke.to_frame());
+    }
+
+    /// Queue one control-frame plaintext for publication (best-effort,
+    /// non-blocking, like a poke).
+    pub fn publish_control(&self, frame: Vec<u8>) {
+        if self.controls.try_send(frame).is_err() {
+            tracing::debug!("the control queue is full or closed - frame dropped");
         }
+    }
+
+    /// The outbox's pending flag: `true` while a pass publishes own frames.
+    #[must_use]
+    pub fn outbox_busy(&self) -> watch::Receiver<bool> {
+        self.busy.clone()
     }
 }
 
@@ -258,13 +274,14 @@ where
     // a FOURTH task, for the same reason the ack has its own: a nudge must
     // not queue behind the outbox's retry chain, and the outbox must not
     // wait for a nudge
-    let (pokes, pokes_rx) = mpsc::channel(crate::poke::POKE_QUEUE);
-    let poke = tokio::spawn(poke_loop(
+    let (controls, controls_rx) = mpsc::channel(crate::poke::POKE_QUEUE);
+    let poke = tokio::spawn(control_loop(
         channel.clone(),
         mls.clone(),
-        pokes_rx,
+        controls_rx,
         stop_rx.clone(),
     ));
+    let (busy_tx, busy) = watch::channel(false);
     let outbox = tokio::spawn(outbox_loop(
         channel.clone(),
         mls.clone(),
@@ -274,6 +291,7 @@ where
         sink.clone(),
         wakeup,
         ack_wake.clone(),
+        busy_tx,
         stop_rx.clone(),
     ));
     let inbox = tokio::spawn(inbox_loop(
@@ -290,7 +308,8 @@ where
     GroupHandle {
         stop,
         acks,
-        pokes,
+        controls,
+        busy,
         outbox: Some(outbox),
         inbox: Some(inbox),
         ack: Some(ack),
@@ -298,29 +317,30 @@ where
     }
 }
 
-/// Publish pokes as they are handed over. One attempt each, no retry chain:
-/// a nudge that could not go out now is stale by the time a retry would
-/// land, and the operator can always poke again.
-async fn poke_loop(
+/// Publish control frames (pokes, piece wants) as they are handed over.
+/// One attempt each, no retry chain: a nudge that could not go out now is
+/// stale by the time a retry would land, and the sender can always ask
+/// again.
+async fn control_loop(
     channel: GroupChannel,
     mls: MlsChannel,
-    mut rx: mpsc::Receiver<crate::poke::Poke>,
+    mut rx: mpsc::Receiver<Vec<u8>>,
     mut stop: watch::Receiver<bool>,
 ) {
     loop {
-        let poke = tokio::select! {
+        let plaintext = tokio::select! {
             got = rx.recv() => match got {
                 Some(p) => p,
                 None => return, // the handle is gone
             },
             _ = stop.changed() => return,
         };
-        let Some(frame) = mls.group_control_frame(&poke.to_frame()) else {
-            tracing::error!("framing a poke failed - skipped");
+        let Some(frame) = mls.group_control_frame(&plaintext) else {
+            tracing::error!("framing a control frame failed - skipped");
             continue;
         };
         if let Err(e) = channel.publish_frame(&frame.exporter, &frame.ciphertext).await {
-            tracing::warn!(error = %e, "publishing a poke failed");
+            tracing::warn!(error = %e, "publishing a control frame failed");
         }
     }
 }
@@ -758,6 +778,7 @@ async fn publish_pass<L, S, K>(
     store: &S,
     sink: &K,
     held: &mut HeldFrame,
+    busy: &watch::Sender<bool>,
     stop: &mut watch::Receiver<bool>,
 ) -> PassOutcome
 where
@@ -769,6 +790,32 @@ where
     let start = state.group.unwrap_or_default().log_seq;
     let batch = log.read_from(start + 1).await;
     let mut published_through = start;
+    // the pending flag the file trickle yields to: raised for the pass's
+    // own frames, lowered at every exit
+    let _ = busy.send_replace(batch.iter().any(|e| e.by == cfg.member));
+    let outcome = publish_batch(channel, mls, cfg, store, sink, held, stop, start, batch, &mut published_through).await;
+    let _ = busy.send_replace(false);
+    outcome
+}
+
+/// The body of [`publish_pass`]: every own envelope of `batch` in order.
+#[allow(clippy::too_many_arguments)]
+async fn publish_batch<S, K>(
+    channel: &GroupChannel,
+    mls: &MlsChannel,
+    cfg: &GroupNetConfig,
+    store: &S,
+    sink: &K,
+    held: &mut HeldFrame,
+    stop: &mut watch::Receiver<bool>,
+    start: u64,
+    batch: Vec<EventEnvelope>,
+    published_through: &mut u64,
+) -> PassOutcome
+where
+    S: StateStore,
+    K: EngineSink,
+{
     for env in batch {
         // AUTHOR, not `crosses_wire` — the same filter the queue outbox
         // uses. It matters more than it looks: the genesis `Founded` is
@@ -776,14 +823,14 @@ where
         // receiver never accepts it and every later own event parks on
         // `prev_seq = 1` until the give-up timer.
         if env.by != cfg.member {
-            published_through = env.seq;
+            *published_through = env.seq;
             continue;
         }
         let Some(frame) = mls.group_frame(&env) else {
             // a LOCAL framing error is not resendable — skipping it is the
             // only way forward, and it is loud
             tracing::error!(seq = env.seq, "MLS-framing a group frame failed — skipped");
-            published_through = env.seq;
+            *published_through = env.seq;
             continue;
         };
         match publish_with_backoff(channel, &frame, cfg, stop).await {
@@ -793,7 +840,7 @@ where
                     // the backoff exit — the channel publishes again
                     sink.send_ok(&cfg.member).await;
                 }
-                published_through = env.seq;
+                *published_through = env.seq;
             }
             // hold the cursor exactly here in EVERY failure case: nothing
             // recovers a skipped envelope, so advancing past an
@@ -806,7 +853,7 @@ where
                 if matches!(stall, PublishStall::Stopped) {
                     // drain, don't discard: the frames that went out
                     // before the stop stay published (review M9)
-                    persist_cursor(store, start, published_through).await;
+                    persist_cursor(store, start, *published_through).await;
                     return PassOutcome::Stopped;
                 }
                 let permanent = matches!(stall, PublishStall::Permanent(_));
@@ -828,12 +875,12 @@ where
                 };
                 sink.send_failed(&cfg.member, &reason).await;
                 held.failed(permanent);
-                persist_cursor(store, start, published_through).await;
+                persist_cursor(store, start, *published_through).await;
                 return PassOutcome::Held;
             }
         }
     }
-    persist_cursor(store, start, published_through).await;
+    persist_cursor(store, start, *published_through).await;
     PassOutcome::Done
 }
 
@@ -850,6 +897,7 @@ async fn outbox_loop<L, S, K>(
     sink: K,
     mut wakeup: watch::Receiver<u64>,
     ack_wake: std::sync::Arc<tokio::sync::Notify>,
+    busy: watch::Sender<bool>,
     mut stop: watch::Receiver<bool>,
 ) where
     L: OutboxLog,
@@ -859,7 +907,7 @@ async fn outbox_loop<L, S, K>(
     let mut stall = StallClock::new();
     let mut held = HeldFrame::new();
     loop {
-        match publish_pass(&channel, &mls, &cfg, &log, &store, &sink, &mut held, &mut stop).await {
+        match publish_pass(&channel, &mls, &cfg, &log, &store, &sink, &mut held, &busy, &mut stop).await {
             PassOutcome::Stopped => return,
             PassOutcome::Held => stall.disarm(),
             PassOutcome::Done => {}
@@ -1073,6 +1121,16 @@ pub(crate) fn consume_heal_round(cur: &mut molt_core::GroupCursor, now: u64) -> 
     true
 }
 
+/// Rounds the hour still holds - what the file trickle keeps free for
+/// chat and governance (`docs/files/mirroring.md` §3.2). Pure: a rolled
+/// window reads as the full allowance without being written.
+#[must_use]
+pub fn resend_headroom(cur: &molt_core::GroupCursor, now: u64) -> u32 {
+    let mut cur = *cur;
+    roll_resend_window(&mut cur, now);
+    RESEND_ROUNDS_PER_HOUR.saturating_sub(cur.resend_rounds)
+}
+
 fn roll_resend_window(cur: &mut molt_core::GroupCursor, now: u64) {
     if now.saturating_sub(cur.resend_window_start) >= 3_600 {
         cur.resend_window_start = now;
@@ -1203,6 +1261,7 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
             | MlsDecode::Ack(..)
             | MlsDecode::GroupAck(..)
             | MlsDecode::Poke(..)
+            | MlsDecode::PieceWanted(..)
             | MlsDecode::Discard
             | MlsDecode::Failed(_)
     ) {
@@ -1247,6 +1306,15 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
                 return Ingest::Nothing;
             }
             sink.poked(&from, &poke.to).await;
+            Ingest::Nothing
+        }
+        MlsDecode::PieceWanted(from, want) => {
+            sink.peer_seen(&from).await;
+            if want.by != from {
+                tracing::warn!(%from, claimed = %want.by, "a piece want disowns its sender - dropped");
+                return Ingest::Nothing;
+            }
+            sink.piece_wanted(&from, &want).await;
             Ingest::Nothing
         }
         // the two arms the mesh supervisor implements and this loop did not:

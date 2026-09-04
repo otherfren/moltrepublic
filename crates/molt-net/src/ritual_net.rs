@@ -562,6 +562,12 @@ impl GroupChannel {
         Ok(CatchupSub { sub, tags })
     }
 
+    /// The `h` tags of the current window ([`window_tags`] at now).
+    #[must_use]
+    pub fn current_window_tags(&self) -> Vec<String> {
+        window_tags(&self.rotation_seed, now_secs())
+    }
+
     /// The file chunks of a series published at `at_secs`: a fixed-tag
     /// catch-up subscription (kind 447) over that stamp's window tags —
     /// [`window_tags`] includes the skew-adjacent one, so a series
@@ -671,6 +677,13 @@ impl std::fmt::Debug for CatchupSub {
 }
 
 impl CatchupSub {
+    /// Whether every one of `tags` is among the windows this subscription
+    /// names - the resumable fetch's day-roll check.
+    #[must_use]
+    pub fn covers(&self, tags: &[String]) -> bool {
+        tags.iter().all(|t| self.tags.contains(t))
+    }
+
     /// Whether at least one relay has finished replaying (EOSE) — "the
     /// history we asked for has been served", as far as a relay can say it.
     pub async fn live(&mut self, timeout: Duration) -> bool {

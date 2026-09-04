@@ -417,6 +417,13 @@ impl State {
                 let _ = self.register_parked_declines(id.0);
                 let _ = self.register_parked_withdrawal(id.0);
             }
+            // this node's OWN announcement: the series stamp survives a
+            // restart through the replay, so a later want re-announces
+            // instead of re-queuing the whole series (mirroring §3.2)
+            WorkspaceEvent::FileServed { id, at } if env.by == self.member() => {
+                let stamp = self.files.series.entry(*id).or_insert(*at);
+                *stamp = (*stamp).max(*at);
+            }
             WorkspaceEvent::Committed(_)
             | WorkspaceEvent::ChainRequest { .. }
             | WorkspaceEvent::CheckpointProposed { .. }

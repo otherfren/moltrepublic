@@ -350,6 +350,17 @@ const CONTROL_FRAMES: &[(&[u8], ControlParser)] = &[
             None
         }
     }),
+    // a piece want (`docs/files/mirroring.md` §3.2): a member names the
+    // pieces of a v2 series it misses; the holders re-publish them
+    (crate::piece_want::PIECE_WANT_TAG, |from, frame| {
+        match crate::piece_want::PieceWanted::from_frame(frame) {
+            Ok(want) => Some(MlsDecode::PieceWanted(from, Box::new(want))),
+            Err(e) => {
+                tracing::debug!(error = %e, "dropping an unusable piece want");
+                None
+            }
+        }
+    }),
 ];
 
 /// What the recv loop should do with one inbound MLS message.
@@ -370,6 +381,10 @@ pub(crate) enum MlsDecode {
     /// it, only the named target reacts — and only behind that node's own
     /// opt-in. Carries no state, so it is deliberately NOT a log event.
     Poke(MemberId, Box<crate::poke::Poke>),
+    /// A piece want: the authenticated sender misses pieces of a v2
+    /// series; a holder answers by re-publishing them. No state, no log
+    /// event - like the poke.
+    PieceWanted(MemberId, Box<crate::piece_want::PieceWanted>),
     /// A commit merged (epoch advanced) — ack it and retry the epoch buffer.
     /// `readmitted` names the members the commit ADDED (a recovery re-key):
     /// the consumer forwards them to the engine BEFORE anything of the new
@@ -479,6 +494,16 @@ pub trait EngineSink: Send + Sync + Clone + 'static {
     /// whether it is for this seat and whether this node reacts at all.
     fn poked(&self, member: &MemberId, to: &MemberId) -> impl std::future::Future<Output = ()> + Send {
         let _ = (member, to);
+        async {}
+    }
+    /// An authenticated piece want from `member` (mirroring §3.2). Default
+    /// no-op (additive); the engine decides whether it holds the pieces.
+    fn piece_wanted(
+        &self,
+        member: &MemberId,
+        want: &crate::piece_want::PieceWanted,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        let _ = (member, want);
         async {}
     }
     /// Sends to `member` keep failing; the outbox is backing off.
@@ -1318,7 +1343,7 @@ impl<K: EngineSink> crate::epoch_hold::HeldIngest<HeldMessage> for MeshHeldInges
             MlsDecode::GroupAck(_, _) => Held::Consumed,
             // a nudge held across an epoch advance is stale by the time it
             // lands: stamp presence, drop the nudge (a late poke is noise)
-            MlsDecode::Poke(_, _) => {
+            MlsDecode::Poke(_, _) | MlsDecode::PieceWanted(_, _) => {
                 self.sink.peer_seen(&self.peer.member).await;
                 ack_all(std::mem::take(held));
                 Held::Progress
@@ -1621,6 +1646,15 @@ where
                         sink.poked(&from, &poke.to).await;
                     } else {
                         tracing::warn!(peer = %peer.member, claimed = %poke.by, "a poke disowns its link - dropped");
+                    }
+                    ack_all(acks);
+                }
+                MlsDecode::PieceWanted(from, want) => {
+                    sink.peer_seen(&peer.member).await;
+                    if from == peer.member && want.by == from {
+                        sink.piece_wanted(&from, &want).await;
+                    } else {
+                        tracing::warn!(peer = %peer.member, claimed = %want.by, "a piece want disowns its link - dropped");
                     }
                     ack_all(acks);
                 }

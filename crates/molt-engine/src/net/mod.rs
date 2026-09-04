@@ -120,6 +120,20 @@ impl EngineSink for CmdSink {
             .await;
     }
 
+    async fn piece_wanted(&self, member: &MemberId, want: &molt_net::piece_want::PieceWanted) {
+        let Ok(id) = want.id.parse::<molt_core::MessageId>() else {
+            return;
+        };
+        let _ = self
+            .execute(Command::NetPieceWanted {
+                from: member.clone(),
+                id,
+                ranges: want.ranges.clone(),
+                generation: self.generation,
+            })
+            .await;
+    }
+
     async fn rekeyed(&self, member: &MemberId) {
         let _ = self
             .execute(Command::NetPeerRekeyed {
@@ -201,6 +215,16 @@ impl FileStateStore {
     /// Wrap a workspace's writer handle.
     pub fn new(handle: molt_storage::StorageHandle) -> FileStateStore {
         FileStateStore { handle }
+    }
+}
+
+impl crate::transfer::FetchJobStore for FileStateStore {
+    fn save_job(&self, job: molt_core::FetchJob) {
+        self.handle.save_fetch_job(job);
+    }
+
+    fn remove_job(&self, series: &str) {
+        self.handle.remove_fetch_job(series);
     }
 }
 
@@ -599,6 +623,8 @@ impl State {
         let store = FileStateStore::new(active.handle.clone());
         let (wakeup, wakeup_rx) = watch::channel(0u64);
         let (health_tx, health) = watch::channel(molt_net::group_runtime::GroupHealth::default());
+        let file_channel = channel.clone();
+        let file_store = store.clone();
         let handle = molt_net::group_runtime::spawn_group(
             channel,
             molt_net::supervisor::MlsChannel::from_shared(mls_arc.clone()),
@@ -611,7 +637,18 @@ impl State {
             wakeup_rx,
             health_tx,
         );
-        Some(crate::GroupNet { handle, mls: mls_arc, wakeup, health })
+        // the file trickle yields to this outbox and draws on the same
+        // persisted budget; its pace is node-local (read at build time)
+        let trickle = molt_net::trickle::spawn_trickle(
+            file_channel,
+            file_store,
+            handle.outbox_busy(),
+            molt_net::trickle::TrickleConfig::new(
+                self.session.settings.mirror_publish_interval_secs,
+                self.session.settings.mirror_daily_bytes,
+            ),
+        );
+        Some(crate::GroupNet { handle, mls: mls_arc, wakeup, health, trickle })
     }
 
     /// [`Self::build_real_net`] over an **already-live** shared group — the

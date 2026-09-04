@@ -412,6 +412,13 @@ pub struct SessionSettings {
     /// `null` when absent: the settings patch door keys on the field.
     #[serde(default)]
     pub file_cap_bytes: Option<u64>,
+    /// Seconds between two piece publishes of the trickle sender
+    /// (`docs/files/mirroring.md` §3.2); node-local, at least 1.
+    #[serde(default = "default_mirror_publish_interval_secs")]
+    pub mirror_publish_interval_secs: u64,
+    /// Piece bytes the trickle sender may publish per UTC day; node-local.
+    #[serde(default = "default_mirror_daily_bytes")]
+    pub mirror_daily_bytes: u64,
     /// Alert sound for an incoming chat message:
     /// `"none" | "bell" | "chime" | "pop"`.
     #[serde(default = "default_sound")]
@@ -479,6 +486,16 @@ pub struct SessionSettings {
 }
 
 /// Default alert sound: silent until the operator opts in.
+/// The trickle sender's default pace: one piece per 15 s.
+fn default_mirror_publish_interval_secs() -> u64 {
+    15
+}
+
+/// The trickle sender's default daily budget: 512 MiB.
+fn default_mirror_daily_bytes() -> u64 {
+    512 * 1024 * 1024
+}
+
 fn default_sound() -> String {
     "none".to_string()
 }
@@ -538,6 +555,8 @@ impl Default for SessionSettings {
             tor_port: 9050,
             download_dir: default_download_dir(),
             file_cap_bytes: None,
+            mirror_publish_interval_secs: default_mirror_publish_interval_secs(),
+            mirror_daily_bytes: default_mirror_daily_bytes(),
             sound_message: default_sound(),
             sound_vote: default_sound(),
             sound_poke: default_sound(),
@@ -1991,6 +2010,115 @@ pub struct TransportState {
     /// that would throw away `nostr_sk`, which nothing can re-derive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<GroupCursor>,
+    /// The file plane's resumable jobs (`docs/files/mirroring.md` §3.2):
+    /// the trickle sender's publish queue and the running piece fetches.
+    /// Additive like `group`.
+    #[serde(default, skip_serializing_if = "FileJobs::is_empty")]
+    pub file_jobs: FileJobs,
+}
+
+/// The file plane's persisted jobs: a restart RESUMES each at its cursor.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileJobs {
+    /// The trickle sender's queue, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub publish: Vec<PublishJob>,
+    /// The piece fetches in progress.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fetch: Vec<FetchJob>,
+    /// The unix day (`secs / 86_400`) `sent_bytes` counts.
+    #[serde(default)]
+    pub sent_day: u64,
+    /// Piece bytes the trickle sent on `sent_day` (the daily cap's counter).
+    #[serde(default)]
+    pub sent_bytes: u64,
+}
+
+impl FileJobs {
+    /// Nothing queued and nothing counted.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.publish.is_empty() && self.fetch.is_empty() && self.sent_bytes == 0
+    }
+}
+
+/// One series (or a range of its pieces) the trickle sender publishes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishJob {
+    /// The share message id, lowercase hex.
+    pub series: String,
+    /// The share's content key (32 bytes).
+    pub key: Vec<u8>,
+    /// The local source path (node-local, like `prefs.shared_files`).
+    pub path: String,
+    /// The share's data piece count.
+    pub count: u32,
+    /// The share's byte length.
+    pub size: u64,
+    /// The share's manifest root, hex.
+    pub root: String,
+    /// The piece indices to publish, as inclusive ranges in publish order.
+    pub ranges: Vec<(u32, u32)>,
+    /// The position within `ranges` the next publish takes (the cursor).
+    #[serde(default)]
+    pub next: u32,
+    /// The stamp announced as the series start.
+    pub started_at: u64,
+}
+
+/// One piece fetch in progress on the requester side.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FetchJob {
+    /// The share message id, lowercase hex.
+    pub series: String,
+    /// The share's content key (32 bytes).
+    pub key: Vec<u8>,
+    /// The share's data piece count.
+    pub count: u32,
+    /// The share's byte length.
+    pub size: u64,
+    /// The share's manifest root, hex.
+    pub root: String,
+    /// The share's sha256, hex ("" on a share without one).
+    pub checksum: String,
+    /// The share's file name.
+    pub name: String,
+    /// The explicit destination the download named, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dest: Option<String>,
+    /// The session's download directory at the time of the request.
+    pub default_dir: String,
+    /// The series start stamp the sharer announced.
+    pub started_at: u64,
+    /// Verified data pieces, one bit per index (little-endian bit order).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held: Vec<u8>,
+}
+
+impl FetchJob {
+    /// Whether data piece `index` is verified on disk.
+    #[must_use]
+    pub fn holds(&self, index: u32) -> bool {
+        let byte = usize::try_from(index / 8).unwrap_or(usize::MAX);
+        self.held.get(byte).is_some_and(|b| b & (1 << (index % 8)) != 0)
+    }
+
+    /// Mark data piece `index` verified.
+    pub fn mark(&mut self, index: u32) {
+        let byte = usize::try_from(index / 8).unwrap_or(usize::MAX);
+        if self.held.len() <= byte {
+            self.held.resize(byte + 1, 0);
+        }
+        if let Some(b) = self.held.get_mut(byte) {
+            *b |= 1 << (index % 8);
+        }
+    }
+
+    /// Every verified data index below `count`.
+    #[must_use]
+    pub fn held_indices(&self) -> Vec<u32> {
+        (0..self.count).filter(|i| self.holds(*i)).collect()
+    }
 }
 
 /// The broadcast transport's send position and its resend budget.
@@ -4922,6 +5050,33 @@ pub enum Command {
         /// its honest miss).
         at: u64,
         /// Workspace-net incarnation (stale task results are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// An authenticated `PieceWanted` control frame landed (engine-internal:
+    /// the transport speaks to the engine). A member asks the holders of a
+    /// v2 series for the pieces in `ranges`. Never an MCP tool.
+    NetPieceWanted {
+        /// The MLS-authenticated requester.
+        from: MemberId,
+        /// The share message's stable id.
+        id: MessageId,
+        /// Inclusive piece index ranges.
+        ranges: Vec<(u32, u32)>,
+        /// Transport incarnation (stale commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// The running piece fetch asks the actor to send a `PieceWanted` for
+    /// the pieces still missing (engine-internal; the off-actor fetch job
+    /// speaks to the actor, which holds the group runtime). Never an MCP
+    /// tool.
+    NetPieceWantSend {
+        /// The share message's stable id.
+        id: MessageId,
+        /// Inclusive piece index ranges.
+        ranges: Vec<(u32, u32)>,
+        /// Workspace-net incarnation (a stale job's ask is dropped).
         #[serde(default)]
         generation: Option<u64>,
     },

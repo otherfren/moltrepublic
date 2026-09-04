@@ -44,6 +44,9 @@ pub struct Config {
     /// GUI settings.
     #[serde(default)]
     pub ui: UiConfig,
+    /// The file plane (`[files]`).
+    #[serde(default)]
+    pub files: FilesConfig,
 }
 
 /// Node-level runtime settings (`[node]`).
@@ -61,6 +64,37 @@ pub struct NodeConfig {
     /// its vote (context in `MOLT_WAKE_*` env vars). Empty = off.
     #[serde(default)]
     pub poke_wake_command: String,
+}
+
+/// The file plane's pacing (`[files]`, `docs/files/mirroring.md` §3.2).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FilesConfig {
+    /// Seconds between two piece publishes of the trickle sender (at least 1).
+    #[serde(default = "default_mirror_publish_interval_secs")]
+    pub mirror_publish_interval_secs: u64,
+    /// Piece bytes the trickle sender may publish per UTC day.
+    #[serde(default = "default_mirror_daily_bytes")]
+    pub mirror_daily_bytes: u64,
+}
+
+/// The trickle sender's default pace. Mirrors `molt_core::SessionSettings`.
+pub fn default_mirror_publish_interval_secs() -> u64 {
+    15
+}
+
+/// The trickle sender's default daily budget (512 MiB).
+pub fn default_mirror_daily_bytes() -> u64 {
+    512 * 1024 * 1024
+}
+
+impl Default for FilesConfig {
+    fn default() -> Self {
+        FilesConfig {
+            mirror_publish_interval_secs: default_mirror_publish_interval_secs(),
+            mirror_daily_bytes: default_mirror_daily_bytes(),
+        }
+    }
 }
 
 /// Local storage settings (`[storage]`).
@@ -458,6 +492,10 @@ pub struct Settings {
     pub download_dir: String,
     /// Per-file byte cap for sharing: absent = no cap, 0 = off.
     pub file_cap_bytes: Option<u64>,
+    /// Seconds between two piece publishes of the trickle sender.
+    pub mirror_publish_interval_secs: u64,
+    /// Piece bytes the trickle sender may publish per UTC day.
+    pub mirror_daily_bytes: u64,
     /// Alert sound for an incoming chat message.
     pub sound_message: String,
     /// Alert sound for a new incoming vote.
@@ -516,6 +554,8 @@ impl Default for Settings {
             media_s3_max_bytes: 0,
             download_dir: default_download_dir(),
             file_cap_bytes: None,
+            mirror_publish_interval_secs: default_mirror_publish_interval_secs(),
+            mirror_daily_bytes: default_mirror_daily_bytes(),
             sound_message: default_sound(),
             sound_vote: default_sound(),
             sound_poke: default_sound(),
@@ -579,6 +619,8 @@ impl From<&Config> for Settings {
             media_s3_max_bytes: c.storage.media_s3_max_bytes,
             download_dir: c.storage.download_dir.clone(),
             file_cap_bytes: c.storage.file_cap_bytes,
+            mirror_publish_interval_secs: c.files.mirror_publish_interval_secs,
+            mirror_daily_bytes: c.files.mirror_daily_bytes,
             sound_message: c.storage.sound_message.clone(),
             sound_vote: c.storage.sound_vote.clone(),
             sound_poke: c.storage.sound_poke.clone(),
@@ -663,6 +705,12 @@ sound_poke = {sound_poke}
 # read confirmations and hides others' from its chat view (symmetric).
 read_receipts = {read_receipts}
 
+[files]
+# The trickle sender: seconds between two piece publishes (at least 1) and
+# the piece bytes it may publish per UTC day.
+mirror_publish_interval_secs = {mirror_publish_interval_secs}
+mirror_daily_bytes = {mirror_daily_bytes}
+
 [mcp]
 # MCP server TCP port. Always served (UI + headless).
 port = {mcp_port}
@@ -730,6 +778,8 @@ font_editor = {font_editor}
         sound_vote = toml_str(&settings.sound_vote),
         sound_poke = toml_str(&settings.sound_poke),
         read_receipts = settings.read_receipts,
+        mirror_publish_interval_secs = settings.mirror_publish_interval_secs,
+        mirror_daily_bytes = settings.mirror_daily_bytes,
         mcp_port = settings.mcp_port,
         mcp_allow = toml_str(&settings.mcp_allow),
         mcp_token = toml_str(&settings.mcp_token),
@@ -787,6 +837,14 @@ pub fn salvage(text: &str) -> Settings {
         }
         if let Some(v) = node.get("poke_wake_command").and_then(toml::Value::as_str) {
             s.poke_wake_command = v.to_string();
+        }
+    }
+    if let Some(files) = value.get("files") {
+        if let Some(v) = files.get("mirror_publish_interval_secs").and_then(toml::Value::as_integer) {
+            s.mirror_publish_interval_secs = u64::try_from(v).unwrap_or(1).max(1);
+        }
+        if let Some(v) = files.get("mirror_daily_bytes").and_then(toml::Value::as_integer) {
+            s.mirror_daily_bytes = u64::try_from(v).unwrap_or(0);
         }
     }
     if let Some(storage) = value.get("storage") {
@@ -1131,6 +1189,32 @@ pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
     set_str(storage, "sound_poke", &settings.sound_poke);
     set_bool(storage, "read_receipts", settings.read_receipts);
 
+    // written only off their defaults: a config an older build (which
+    // denies unknown tables) still opens stays that way until the operator
+    // actually changes the pace
+    let files = table_at(doc.as_table_mut(), &["files"]);
+    if settings.mirror_publish_interval_secs == default_mirror_publish_interval_secs() {
+        files.remove("mirror_publish_interval_secs");
+    } else {
+        set_int(
+            files,
+            "mirror_publish_interval_secs",
+            i64::try_from(settings.mirror_publish_interval_secs).unwrap_or(i64::MAX),
+        );
+    }
+    if settings.mirror_daily_bytes == default_mirror_daily_bytes() {
+        files.remove("mirror_daily_bytes");
+    } else {
+        set_int(
+            files,
+            "mirror_daily_bytes",
+            i64::try_from(settings.mirror_daily_bytes).unwrap_or(i64::MAX),
+        );
+    }
+    if files.is_empty() {
+        doc.as_table_mut().remove("files");
+    }
+
     let mcp = table_at(doc.as_table_mut(), &["mcp"]);
     set_int(mcp, "port", i64::from(settings.mcp_port));
     set_str(mcp, "allow", &settings.mcp_allow);
@@ -1436,6 +1520,8 @@ mod tests {
             tor_port: 9150,
             download_dir: "/srv/molt/downloads".to_string(),
             file_cap_bytes: Some(8 * 1024 * 1024),
+            mirror_publish_interval_secs: 20,
+            mirror_daily_bytes: 1024,
             mcp_port: 5151,
             mcp_allow: "127.0.0.1, 192.168.1.10".to_string(),
             mcp_token: "deadbeefcafef00d".to_string(),

@@ -281,6 +281,8 @@ fn main() -> anyhow::Result<()> {
                 }
                 config.storage.file_cap_bytes
             },
+            mirror_publish_interval_secs: config.files.mirror_publish_interval_secs,
+            mirror_daily_bytes: config.files.mirror_daily_bytes,
             // the operator's PERSISTED clearnet decision (ADR-0004
             // amendment): a node that was told "yes, use non-onion relays"
             // starts that way instead of asking again after every restart.
