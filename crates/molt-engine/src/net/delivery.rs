@@ -332,6 +332,8 @@ impl State {
         self.flush_due_acks(now);
         // G7: release park entries whose predecessor pathologically never came
         self.release_stale_parked(now);
+        // the mirror worker's planning beat (mirroring §3.3; gated inside)
+        self.mirror_worker_tick(now);
         Ok(Reply::Ack)
     }
 

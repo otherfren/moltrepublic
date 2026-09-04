@@ -1816,7 +1816,7 @@ mod tests {
         // would let any MCP client execute code as the node's user, which is
         // a different thing entirely from acting inside the republic. The
         // wholesale settings paths refuse the key for the same reason.
-        const INTERNAL: [&str; 70] = [
+        const INTERNAL: [&str; 72] = [
             // the HOST POSTURE and the two secrets (MCP audit 2026-08-26 M1/H4):
             // an agent operates the seat, not the machine — GUI / config only
             "set_node_posture",
@@ -1877,6 +1877,9 @@ mod tests {
             "net_mirror_decl",
             "net_mirror_status",
             "net_mirror_who",
+            // the mirror worker's own fetch reporting (mirroring §3.3)
+            "net_mirror_progress",
+            "net_mirror_done",
             "net_delivered",
             "net_peer_seen",
             "net_peer_rekeyed",

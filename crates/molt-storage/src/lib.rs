@@ -2631,6 +2631,10 @@ enum WriterMsg {
     SaveFetchJob(Box<molt_core::FetchJob>),
     /// The fetch of this series ended.
     RemoveFetchJob(String),
+    /// A mirror's bookkeeping (mirroring §3.3): upsert by series.
+    SaveMirrorJob(String, Box<molt_core::MirrorJob>),
+    /// The mirror of this series is gone.
+    RemoveMirrorJob(String),
     /// Merge the runtime crypto (MLS snapshot + queue creds) into the CURRENT
     /// `transport.state` — read-modify-write on the writer thread, so it
     /// preserves the outbox/inbound cursors the supervisor left. Acks when
@@ -2841,6 +2845,29 @@ impl StorageHandle {
             Ok(()) => {}
             Err(mpsc::TrySendError::Full(_)) => {
                 tracing::warn!(dropped = "fetch job removal", "writer queue full");
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {}
+        }
+    }
+
+    /// Upsert one mirrored series' job (`docs/files/mirroring.md` §3.3);
+    /// fire-and-forget like [`Self::save_fetch_job`].
+    pub fn save_mirror_job(&self, series: &str, job: molt_core::MirrorJob) {
+        match self.tx.try_send(WriterMsg::SaveMirrorJob(series.to_string(), Box::new(job))) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_)) => {
+                tracing::warn!(dropped = "mirror job save", "writer queue full");
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {}
+        }
+    }
+
+    /// Forget the mirror job of `series`.
+    pub fn remove_mirror_job(&self, series: &str) {
+        match self.tx.try_send(WriterMsg::RemoveMirrorJob(series.to_string())) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_)) => {
+                tracing::warn!(dropped = "mirror job removal", "writer queue full");
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {}
         }
@@ -3167,10 +3194,19 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                             // open, which reads as "the runtime republishes
                             // the whole log after a restart".
                             ts.group = state.group;
-                            // …and the file plane's jobs (mirroring §3.2): the
-                            // same bookkeeping class as the cursors
-                            ts.file_jobs = state.file_jobs;
-                            ts.mirror = state.mirror;
+                            // …and the file plane (mirroring §3.2/§3.4): the
+                            // publish queue, the daily counter and the gossip
+                            // ride the cursor saves; the fetch and mirror jobs
+                            // have their own messages and stay untouched (a
+                            // load-modify-save around one would clobber it)
+                            ts.file_jobs.publish = state.file_jobs.publish;
+                            ts.file_jobs.sent_day = state.file_jobs.sent_day;
+                            ts.file_jobs.sent_bytes = state.file_jobs.sent_bytes;
+                            ts.mirror.on = state.mirror.on;
+                            ts.mirror.quota = state.mirror.quota;
+                            ts.mirror.rev = state.mirror.rev;
+                            ts.mirror.decls = state.mirror.decls;
+                            ts.mirror.status = state.mirror.status;
                             if let Err(e) = ws.write_transport_state(&ts) {
                                 fail(&failed_flag, "transport.state write", &e);
                             }
@@ -3202,6 +3238,25 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                             }
                             if let Err(e) = ws.write_transport_state(&ts) {
                                 fail(&failed_flag, "fetch job write", &e);
+                            }
+                        }
+                    }
+                    Ok(WriterMsg::SaveMirrorJob(series, job)) => {
+                        if !crypto_sealed {
+                            let mut ts = ws.read_transport_state();
+                            ts.mirror.jobs.insert(series, *job);
+                            if let Err(e) = ws.write_transport_state(&ts) {
+                                fail(&failed_flag, "mirror job write", &e);
+                            }
+                        }
+                    }
+                    Ok(WriterMsg::RemoveMirrorJob(series)) => {
+                        if !crypto_sealed {
+                            let mut ts = ws.read_transport_state();
+                            if ts.mirror.jobs.remove(&series).is_some() {
+                                if let Err(e) = ws.write_transport_state(&ts) {
+                                    fail(&failed_flag, "mirror job write", &e);
+                                }
                             }
                         }
                     }

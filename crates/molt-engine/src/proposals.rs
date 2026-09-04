@@ -2056,8 +2056,8 @@ impl State {
                 // mirroring §3.4: who holds the whole series (this seat's
                 // own shares count), and this seat's own copy
                 mirrors: u32::try_from(holders.get(&id).map_or(0, Vec::len)).unwrap_or(u32::MAX),
-                mirror_held: if mine { pieces } else { 0 },
-                mirror_of: pieces,
+                mirror_held: self.mirror_held_of(&id, mine, pieces).0,
+                mirror_of: self.mirror_held_of(&id, mine, pieces).1,
             }
         };
         // the plain shares: chat messages inside the window that no vote

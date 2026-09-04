@@ -265,6 +265,14 @@ impl crate::transfer::FetchJobStore for FileStateStore {
     fn remove_job(&self, series: &str) {
         self.handle.remove_fetch_job(series);
     }
+
+    fn save_mirror_job(&self, series: &str, job: molt_core::MirrorJob) {
+        self.handle.save_mirror_job(series, job);
+    }
+
+    fn remove_job_mirror(&self, series: &str) {
+        self.handle.remove_mirror_job(series);
+    }
 }
 
 impl supervisor::StateStore for FileStateStore {

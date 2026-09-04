@@ -626,6 +626,14 @@ pub(crate) struct FilePlane {
     pub(crate) mirror_status_last: Vec<molt_core::MirrorHold>,
     pub(crate) mirror_who_answered: u64,
     pub(crate) mirror_who_asked: bool,
+    /// The mirror worker (§3.3): the running fetch per series, the series
+    /// waiting for the sharer's stamp, the planning beat, the one notice.
+    pub(crate) mirror_fetches: HashMap<molt_core::MessageId, tokio::task::AbortHandle>,
+    pub(crate) mirror_pending: std::collections::HashSet<molt_core::MessageId>,
+    pub(crate) mirror_planned_at: u64,
+    pub(crate) mirror_quota_noted: bool,
+    /// Verified pieces of each running mirror fetch, as last reported.
+    pub(crate) mirror_progress: HashMap<molt_core::MessageId, u32>,
 }
 
 /// The republic's persistent commit-block chain on this holder
@@ -1107,6 +1115,11 @@ impl State {
                 mirror_status_last: Vec::new(),
                 mirror_who_answered: 0,
                 mirror_who_asked: false,
+                mirror_fetches: HashMap::new(),
+                mirror_pending: std::collections::HashSet::new(),
+                mirror_planned_at: 0,
+                mirror_quota_noted: false,
+                mirror_progress: HashMap::new(),
             },
             ui_state: None,
             applied,
@@ -1359,6 +1372,18 @@ impl State {
                     return Ok(Reply::Ack);
                 }
                 self.cmd_net_mirror_who(&from)
+            }
+            Command::NetMirrorProgress { id, held, bytes, generation } => {
+                if !self.net_scope_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.cmd_net_mirror_progress(id, held, bytes)
+            }
+            Command::NetMirrorDone { id, ok, reason, generation } => {
+                if !self.net_scope_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.cmd_net_mirror_done(id, ok, reason)
             }
             Command::SetWakeCommand { command } => self.cmd_set_wake_command(command),
             Command::SetNodePosture { posture } => self.cmd_set_node_posture(posture),

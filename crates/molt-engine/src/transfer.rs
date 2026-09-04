@@ -1199,6 +1199,197 @@ pub(crate) trait FetchJobStore: Clone + Send + Sync + 'static {
     fn save_job(&self, job: molt_core::FetchJob);
     /// The fetch of `series` ended.
     fn remove_job(&self, series: &str);
+    /// Upsert a mirrored series' job (`docs/files/mirroring.md` §3.3).
+    fn save_mirror_job(&self, series: &str, job: molt_core::MirrorJob);
+    /// The mirror of `series` is gone.
+    fn remove_job_mirror(&self, series: &str);
+}
+
+/// The mirror folder's series directory: one sealed piece per index, the
+/// manifest pieces included once the series is complete. The sink seals
+/// each verified slice under the file's key (a fresh nonce; the folder
+/// holds ciphertext only), keeps the job's bitmap and byte count, persists
+/// them debounced and reports progress.
+struct MirrorSink<S: FetchJobStore> {
+    dir: PathBuf,
+    key: [u8; 32],
+    series: String,
+    job: molt_core::MirrorJob,
+    store: S,
+    cmd_tx: mpsc::Sender<Envelope>,
+    id: MessageId,
+    scope: u64,
+    since_persist: u32,
+    last_persist: tokio::time::Instant,
+}
+
+impl<S: FetchJobStore> MirrorSink<S> {
+    fn persist(&mut self) {
+        self.since_persist = 0;
+        self.last_persist = tokio::time::Instant::now();
+        self.store.save_mirror_job(&self.series, self.job.clone());
+    }
+
+    /// Seal and store one piece (data, chunk or top record).
+    fn store_piece(&self, index: u32, payload: &[u8]) -> std::io::Result<()> {
+        let sealed = molt_net::file_plane::seal_piece(&self.key, index, self.job.count, payload)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let tmp = self.dir.join(format!("{index}.tmp"));
+        std::fs::write(&tmp, sealed)?;
+        std::fs::rename(&tmp, self.dir.join(index.to_string()))
+    }
+}
+
+impl<S: FetchJobStore> Drop for MirrorSink<S> {
+    fn drop(&mut self) {
+        if self.since_persist > 0 {
+            self.store.save_mirror_job(&self.series, self.job.clone());
+        }
+    }
+}
+
+impl<S: FetchJobStore> molt_net::file_plane::PieceSink for MirrorSink<S> {
+    fn put(&mut self, index: u32, payload: &[u8]) -> std::io::Result<()> {
+        self.store_piece(index, payload)
+    }
+
+    fn spill_path(&self) -> Option<PathBuf> {
+        Some(self.dir.join("manifest.mspill"))
+    }
+
+    fn held(&self) -> Vec<u32> {
+        self.job.held_indices()
+    }
+
+    fn verified(&mut self, index: u32) {
+        if self.job.holds(index) {
+            return;
+        }
+        self.job.mark(index);
+        let block = u64::try_from(molt_net::file_plane::PIECE_PAYLOAD_LEN).unwrap_or(0);
+        let head = u64::from(index).saturating_mul(block);
+        self.job.bytes = self
+            .job
+            .bytes
+            .saturating_add(self.job.size.saturating_sub(head).min(block));
+        self.since_persist += 1;
+        if self.since_persist >= HELD_PERSIST_EVERY || self.last_persist.elapsed() >= HELD_PERSIST_AFTER {
+            self.persist();
+        }
+        let (reply, _rx) = tokio::sync::oneshot::channel();
+        let _ = self.cmd_tx.try_send(Envelope {
+            cmd: Command::NetMirrorProgress {
+                id: self.id,
+                held: self.job.held_count(),
+                bytes: self.job.bytes,
+                generation: Some(self.scope),
+            },
+            reply,
+        });
+    }
+}
+
+/// The mirror worker's fetch (`docs/files/mirroring.md` §3.3): the
+/// resumable job of §3.2 with the mirror folder as its sink. On
+/// completion the manifest pieces are sealed into the folder too (a
+/// re-seed publishes them like the data), the job is marked complete and
+/// saved; a failure removes the folder and the job.
+pub(crate) fn spawn_mirror_fetch<S: FetchJobStore>(
+    channel: molt_net::ritual_net::GroupChannel,
+    id: MessageId,
+    dir: PathBuf,
+    mut job: molt_core::MirrorJob,
+    store: S,
+    scope: u64,
+    cmd_tx: mpsc::Sender<Envelope>,
+) -> tokio::task::AbortHandle {
+    tokio::spawn(async move {
+        let series = id.to_string();
+        let result: Result<(), String> = async {
+            let key = <[u8; 32]>::try_from(job.key.as_slice())
+                .map_err(|_| "the share carries no usable key".to_string())?;
+            std::fs::create_dir_all(&dir).map_err(|e| format!("creating the mirror folder: {e}"))?;
+            // a folder that lost its pieces starts over
+            if !job.held.is_empty()
+                && !job.held_indices().iter().all(|i| dir.join(i.to_string()).is_file())
+            {
+                job.held.clear();
+                job.bytes = 0;
+            }
+            store.save_mirror_job(&series, job.clone());
+            let expect = molt_net::file_plane::SeriesExpect {
+                count: job.count,
+                size: job.size,
+                root: job.root.clone(),
+            };
+            let (count, started_at) = (job.count, job.started_at);
+            let mut sink = MirrorSink {
+                dir: dir.clone(),
+                key,
+                series: series.clone(),
+                job,
+                store: store.clone(),
+                cmd_tx: cmd_tx.clone(),
+                id,
+                scope,
+                since_persist: 0,
+                last_persist: tokio::time::Instant::now(),
+            };
+            let started = tokio::time::Instant::now();
+            let mut last_ask: Option<tokio::time::Instant> = None;
+            let ask_tx = cmd_tx.clone();
+            let mut on_quiet = move |missing: Vec<(u32, u32)>| -> bool {
+                if missing.is_empty() {
+                    return true;
+                }
+                let due = match last_ask {
+                    None => started.elapsed() >= piece_want_after(),
+                    Some(at) => at.elapsed() >= PIECE_WANT_REPEAT,
+                };
+                if due {
+                    last_ask = Some(tokio::time::Instant::now());
+                    let (reply, _rx) = tokio::sync::oneshot::channel();
+                    let _ = ask_tx.try_send(Envelope {
+                        cmd: Command::NetPieceWantSend { id, ranges: missing, generation: Some(scope) },
+                        reply,
+                    });
+                }
+                true
+            };
+            let opts = molt_net::file_plane::FetchOpts {
+                quiet: molt_net::file_plane::FETCH_QUIET,
+                ceiling: None,
+                on_quiet: Some(&mut on_quiet),
+            };
+            let manifest =
+                molt_net::file_plane::fetch_series_v2_with(&channel, &key, started_at, &expect, &mut sink, opts)
+                    .await
+                    .map_err(|e| format!("fetching the piece series: {e}"))?;
+            // the manifest pieces, so a re-seed serves the whole series
+            let layout = molt_net::file_plane::Manifest::layout_for(count)
+                .ok_or_else(|| "the series exceeds the largest layout".to_string())?;
+            for slot in 0..layout.chunks {
+                sink.store_piece(count + slot, &manifest.chunk(slot))
+                    .map_err(|e| format!("storing a manifest chunk: {e}"))?;
+            }
+            sink.store_piece(layout.top, &manifest.top_bytes())
+                .map_err(|e| format!("storing the top record: {e}"))?;
+            sink.job.complete = true;
+            sink.persist();
+            Ok(())
+        }
+        .await;
+        let cmd = match result {
+            Ok(()) => Command::NetMirrorDone { id, ok: true, reason: String::new(), generation: Some(scope) },
+            Err(reason) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                store.remove_job_mirror(&series);
+                Command::NetMirrorDone { id, ok: false, reason, generation: Some(scope) }
+            }
+        };
+        feed(&cmd_tx, cmd).await;
+    })
+    .abort_handle()
 }
 
 /// The `.part` file every slice lands in at its offset as it arrives - a
@@ -1522,6 +1713,8 @@ mod tests {
     impl FetchJobStore for NoStore {
         fn save_job(&self, _job: molt_core::FetchJob) {}
         fn remove_job(&self, _series: &str) {}
+        fn save_mirror_job(&self, _series: &str, _job: molt_core::MirrorJob) {}
+        fn remove_job_mirror(&self, _series: &str) {}
     }
 
     /// A sink over a fresh `.part` with an empty job.

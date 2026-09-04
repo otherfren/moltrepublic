@@ -646,6 +646,30 @@ pub(crate) async fn publish_piece_paced(
     }
 }
 
+/// [`publish_piece_paced`] for a piece sealed elsewhere (a mirror's
+/// stored one): the same patience, the same verdicts.
+pub(crate) async fn publish_content_paced(
+    chan: &GroupChannel,
+    content: &str,
+    stamp: u64,
+) -> Result<u64, NetError> {
+    let started = tokio::time::Instant::now();
+    let mut attempt = 0u32;
+    loop {
+        let err = match chan.publish_file_content_at(content, stamp).await {
+            Ok((at, report)) if !report.accepted.is_empty() => return Ok(at),
+            Ok(_) => NetError::Unreachable("no relay accepted the piece".into()),
+            Err(e) => e,
+        };
+        if !transient_publish_error(&err) || started.elapsed() >= PUBLISH_PIECE_PATIENCE {
+            return Err(err);
+        }
+        let delay = Duration::from_millis(250u64 << attempt.min(6)).min(Duration::from_secs(10));
+        attempt = attempt.saturating_add(1);
+        tokio::time::sleep(delay).await;
+    }
+}
+
 /// Publish a v2 series from `source`: the top record, then the manifest
 /// chunks (so a replay serves them early), then every data slice in
 /// order, each verified against `manifest` as it is read - a slice that

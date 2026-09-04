@@ -747,6 +747,13 @@ impl State {
         self.files.mirror_status_last.clear();
         self.files.mirror_who_answered = 0;
         self.files.mirror_who_asked = false;
+        for (_, fetch) in self.files.mirror_fetches.drain() {
+            fetch.abort();
+        }
+        self.files.mirror_pending.clear();
+        self.files.mirror_planned_at = 0;
+        self.files.mirror_quota_noted = false;
+        self.files.mirror_progress.clear();
         self.chain.proposal_changes.clear();
         self.chain.pending_blocks.clear();
         self.chain.catchup_from = None;

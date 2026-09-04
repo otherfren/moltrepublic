@@ -17,8 +17,9 @@ use molt_core::{PublishJob, TransportState};
 use tokio::sync::{watch, Notify};
 
 use crate::file_plane::{
-    expected_slice_len, frame_piece, manifest_of_reader, outer_key, publish_piece_paced,
-    read_full, transient_publish_error, Manifest, SeriesLayout, PIECE_PAYLOAD_LEN,
+    expected_slice_len, frame_piece, manifest_of_reader, outer_key, publish_content_paced,
+    publish_piece_paced, read_full, transient_publish_error, Manifest, SeriesLayout,
+    PIECE_PAYLOAD_LEN,
 };
 use crate::ritual_net::GroupChannel;
 use crate::supervisor::StateStore;
@@ -265,6 +266,36 @@ async fn tick<S: StateStore>(
         return Err(Hold::Gated);
     }
     let series = job.series.clone();
+    // a mirror's stored piece: verified when it was stored, published as is
+    if job.stored {
+        let Some(index) = index_at(&job.ranges, job.next) else {
+            drop_job(store, series.clone(), "malformed job".into()).await;
+            return Err(Hold::Failed);
+        };
+        let path = std::path::Path::new(&job.path).join(index.to_string());
+        let content = match tokio::task::spawn_blocking(move || std::fs::read_to_string(&path)).await {
+            Ok(Ok(c)) => c,
+            Ok(Err(e)) => {
+                drop_job(store, series.clone(), format!("reading stored piece {index}: {e}")).await;
+                return Err(Hold::Failed);
+            }
+            Err(e) => {
+                drop_job(store, series.clone(), format!("piece task: {e}")).await;
+                return Err(Hold::Failed);
+            }
+        };
+        return match publish_content_paced(chan, &content, crate::ritual_net::now_secs()).await {
+            Ok(_) => {
+                advance(store, &job, day).await;
+                tracing::debug!(series = %job.series, index, "file trickle: stored piece published");
+                Ok(())
+            }
+            Err(e) => {
+                tracing::debug!(series = %job.series, index, error = %e, "file trickle: stored piece held");
+                Err(Hold::Failed)
+            }
+        };
+    }
     let manifest = match manifests.get(&job.series) {
         Some(m) => m.clone(),
         None => {
@@ -319,22 +350,7 @@ async fn tick<S: StateStore>(
     let stamp = crate::ritual_net::now_secs();
     match publish_piece_paced(chan, &outer_key(&key), &framed, stamp).await {
         Ok(_) => {
-            store
-                .update(|s| {
-                    if s.file_jobs.sent_day != day {
-                        s.file_jobs.sent_day = day;
-                        s.file_jobs.sent_bytes = 0;
-                    }
-                    s.file_jobs.sent_bytes = s.file_jobs.sent_bytes.saturating_add(PIECE_WIRE_BYTES);
-                    if let Some(j) = s.file_jobs.publish.iter_mut().find(|j| j.series == job.series) {
-                        j.next = j.next.saturating_add(1);
-                    }
-                    s.file_jobs
-                        .publish
-                        .retain(|j| u64::from(j.next) < job_total(&j.ranges));
-                    true
-                })
-                .await;
+            advance(store, &job, day).await;
             tracing::debug!(series = %job.series, index, "file trickle: piece published");
             Ok(())
         }
@@ -347,6 +363,27 @@ async fn tick<S: StateStore>(
             Err(Hold::Failed)
         }
     }
+}
+
+/// One piece went out: the day's counter and the job's cursor advance, a
+/// finished job leaves the queue.
+async fn advance<S: StateStore>(store: &S, job: &PublishJob, day: u64) {
+    store
+        .update(|s| {
+            if s.file_jobs.sent_day != day {
+                s.file_jobs.sent_day = day;
+                s.file_jobs.sent_bytes = 0;
+            }
+            s.file_jobs.sent_bytes = s.file_jobs.sent_bytes.saturating_add(PIECE_WIRE_BYTES);
+            if let Some(j) = s.file_jobs.publish.iter_mut().find(|j| j.series == job.series) {
+                j.next = j.next.saturating_add(1);
+            }
+            s.file_jobs
+                .publish
+                .retain(|j| u64::from(j.next) < job_total(&j.ranges));
+            true
+        })
+        .await;
 }
 
 /// Forget a job that can never complete (the file changed or is gone).

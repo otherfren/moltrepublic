@@ -2,9 +2,9 @@
 
 **Status: OPEN - design of 2026-09-03, decisions ratified by the user the
 same evening (§1); M1 (the piece format v2, the cap removal), M2 (the
-trickle sender, the resumable fetch, `PieceWanted`) and M3 (the
-declaration and status gossip, `set_mirror`/`read_mirror`) are BUILT,
-M4-M6 open.** Follows
+trickle sender, the resumable fetch, `PieceWanted`), M3 (the declaration
+and status gossip, `set_mirror`/`read_mirror`) and M4 (the mirror
+worker) are BUILT, M5-M6 open.** Follows
 `docs_archive/files/persistent_uploads.md` (the persist/unpersist votes,
 landed the same day).
 
@@ -194,31 +194,43 @@ verified pieces). The job ends on completion, on a failure (both remove
 it) - the honest failures left are a landing that cannot be written and
 a relay pool that cannot be dialed at start.
 
-### 3.3 The mirror worker
+### 3.3 The mirror worker - as built in M4
 
-Per republic, on the 1 s delivery tick (cheap checks) and a 60 s planning
-tick:
+Per open republic, a planning beat every 5 s on the 1 s delivery tick
+(`mirror_worker_tick`, `net/mirror.rs`):
 
-- **Eligibility**: consent on, and `stored + next_file_size ≤ quota`.
-- **Choice**: among persistent files (`files_state()`) this seat does not
-  fully hold, the one with the FEWEST known complete mirrors (§3.4), ties
-  by the older persist; the sharer counts as a holder.
-- **Fetch**: subscribe the series' windows (catch-up, 447), store each
-  verified piece as `<mirror_dir>/<republic-id>/<series-hex>/<index>` (one
-  file per piece - simple, resumable, no sparse-file semantics), keep a
-  bitmap in `TransportState` (`mirror_state[series] = held bitmap +
-  bytes`). Pull pacing: at most `mirror_fetch_interval_secs` (default 5)
-  between pieces - Tor and the relays, not the disk, are the bottleneck.
-- **Missing pieces** after the windows drained: `PieceWanted` for the
-  missing ranges, then wait; retry every 30 min while incomplete.
-- **Quota reached**: stop, ONE notice (`mirror: quota reached - X of Y GB`)
-  and a banner above the Persistent table with the same line; no per-file
-  repetition. Raising the quota or an unpersist resumes the worker.
-- **Unpersist**: when `share_expired(id)` of an unpersisted share becomes
-  true, delete its pieces and bitmap (the sharer's own file is never
-  touched - C4).
-- **Own shares** are never mirrored (the file IS on this disk); they count
-  as held for the status.
+- **Eligibility**: consent on (`TransportState.mirror.on`) and `used +
+  next_file_size ≤ quota`, `used` = the plaintext bytes of every job's
+  verified pieces.
+- **Choice**: among the persistent v2 shares of OTHER members this seat
+  does not hold complete and is not fetching, the one with the FEWEST
+  known whole holders (§3.4), ties by the older share, then by id. ONE
+  mirror fetch runs at a time - that is the pull pacing; the relays, not
+  the disk, are the bottleneck.
+- **Fetch**: the resumable job of §3.2 with the mirror folder as its sink
+  (`spawn_mirror_fetch`, `MirrorSink`): each verified slice is sealed
+  again under the file's key with a fresh nonce and stored as
+  `<mirror_dir>/<series-hex>/<index>` (ciphertext only); on completion
+  the manifest chunks and the top record are sealed in as well, so a
+  re-seed serves the whole series. The bitmap and byte count persist in
+  `TransportState.mirror.jobs[series]` (`MirrorJob`; its own storage
+  messages, at most a second behind); a folder that lost its pieces
+  starts the job over. When this seat has no stamp for the series it
+  records `FileWanted` and waits for the sharer's `FileServed`.
+- **Missing pieces** after the relays went quiet: `PieceWanted` from the
+  same job hook (10 min, then every 30 min). The answer is elected: the
+  lowest-named ONLINE holder among the whole holders (§3.4) answers -
+  the sharer from its file, a complete mirror from its piece directory
+  (a `PublishJob` with `stored: true`, published as stored). Two seats
+  with different presence views may both answer; the fetcher dedups.
+- **Quota reached**: the worker stops, ONE notice on the session channel
+  (`mirror-quota:<used>:<quota>`); a raised quota, a switch or a dropped
+  job re-arms it.
+- **Unpersist**: a job whose share is unpersisted and past its window, or
+  whose share the fold no longer knows, loses its fetch, its folder and
+  its job on the next beat; the sharer's own file is not in this folder.
+- **Own shares** are never mirrored; they count as held whole. The status
+  frame (§3.4) carries the mirrored series with their verified count.
 
 ### 3.4 Declaration and status - as built in M3
 
@@ -399,3 +411,20 @@ unchanged set never re-sends. Keystone: `molt-engine/tests/mirror_gossip.rs`
 - a declaration reaches the peer, a shared file shows its sharer as the
 whole holder in `read_mirror` and in both seats' upload rows, and both
 survive the peer's close and reopen.
+
+M4 decisions (2026-09-04, worker): one fetch at a time instead of a
+per-piece pull interval (`mirror_fetch_interval_secs` is not a key);
+stored pieces are re-sealed under the file's key with a fresh nonce
+(the sink sees the verified plaintext slice, and the folder must hold
+ciphertext) rather than kept as the relay delivered them; the transport
+merge of the storage writer carries only the publish queue, the daily
+counter and the gossip - the fetch and mirror jobs have their own
+messages, so a load-modify-save around a cursor write cannot clobber a
+bitmap; the mirror folder default is `<workspace root>/../mirror/<id>`
+and `prefs.mirror_dir` (private, any-path) overrides it - the picker is
+M5; the election uses each seat's own presence view (a stale view costs
+a duplicate answer, never a missing one, because the requester repeats
+the ask). Keystones: `molt-engine/tests/mirror_worker.rs` - a persisted
+share is complete in the second seat's folder (every piece opens under
+the key) without any download, and the sharer reads it as a holder; a
+one-byte quota stops the worker with the one notice and no fetch.

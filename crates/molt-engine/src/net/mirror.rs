@@ -6,8 +6,10 @@
 //! and persist in `transport.state`, so "who mirrors what" reads locally.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use super::*;
+use crate::files_state::FileState;
 use molt_core::{MirrorDecl, MirrorFileView, MirrorHold, MirrorMemberView, MirrorView};
 use molt_net::mirror_gossip::{MirrorDeclFrame, MirrorStatusFrame, MirrorWhoFrame};
 use molt_net::supervisor::StateStore as _;
@@ -20,6 +22,11 @@ const STATUS_MIN_SECS: u64 = 60;
 const STATUS_REPEAT_SECS: u64 = 5 * 60;
 /// A holder answers a `MirrorWho` at most this often.
 const WHO_ANSWER_SECS: u64 = 3_600;
+/// The worker plans this often (rides the 1 s delivery tick).
+const PLAN_EVERY_SECS: u64 = 5;
+/// Mirror fetches running at once: the relays, not the disk, are the
+/// bottleneck, and one at a time IS the pull pacing.
+const MIRROR_FETCHES_AT_ONCE: usize = 1;
 
 impl State {
     /// Adopt the persisted gossip at open.
@@ -28,7 +35,8 @@ impl State {
     }
 
     /// Write the gossip copy back (off the actor; the storage merge
-    /// carries `mirror` beside the cursors).
+    /// carries these fields beside the cursors - the jobs have their own
+    /// messages and are left alone).
     fn persist_mirror(&self) {
         let Some(store) = self.file_store() else {
             return;
@@ -37,7 +45,11 @@ impl State {
         tokio::spawn(async move {
             store
                 .update(|s| {
-                    s.mirror = mirror;
+                    s.mirror.on = mirror.on;
+                    s.mirror.quota = mirror.quota;
+                    s.mirror.rev = mirror.rev;
+                    s.mirror.decls = mirror.decls;
+                    s.mirror.status = mirror.status;
                     true
                 })
                 .await;
@@ -77,19 +89,290 @@ impl State {
         }
     }
 
-    /// What this seat holds: its own available v2 shares, whole (M4 adds
-    /// the mirrored series).
+    /// What this seat holds: its own available v2 shares, whole, and the
+    /// series it mirrors (verified pieces of the count).
     pub(crate) fn own_mirror_holds(&self) -> Vec<MirrorHold> {
         let me = self.member();
         let mut ids: Vec<MessageId> = self.files.share_paths.keys().copied().collect();
         ids.sort_unstable_by_key(|id| id.to_string());
-        ids.into_iter()
+        let mut out: Vec<MirrorHold> = ids
+            .into_iter()
             .filter_map(|id| {
                 let (ident, available) = self.share_identity(&id).ok()?;
                 (ident.by == me && available && !ident.key_b64.is_empty())
                     .then_some(MirrorHold { id, held: ident.pieces, of: ident.pieces })
             })
-            .collect()
+            .collect();
+        for (series, job) in &self.files.mirror.jobs {
+            let Ok(id) = series.parse::<MessageId>() else {
+                continue;
+            };
+            let held = if job.complete {
+                job.count
+            } else {
+                self.files.mirror_progress.get(&id).copied().unwrap_or_else(|| job.held_count())
+            };
+            out.push(MirrorHold { id, held, of: job.count });
+        }
+        out
+    }
+
+    /// This seat's copy of a share: `(held, of)` - whole for an own share,
+    /// the job's progress for a mirrored one, nothing otherwise.
+    pub(crate) fn mirror_held_of(&self, id: &MessageId, mine: bool, pieces: u32) -> (u32, u32) {
+        if mine {
+            return (pieces, pieces);
+        }
+        match self.files.mirror.jobs.get(&id.to_string()) {
+            Some(job) if job.complete => (job.count, job.count),
+            Some(job) => (
+                self.files.mirror_progress.get(id).copied().unwrap_or_else(|| job.held_count()),
+                job.count,
+            ),
+            None => (0, pieces),
+        }
+    }
+
+    /// Bytes the mirror folder holds (the quota's counter).
+    fn mirror_used(&self) -> u64 {
+        self.files.mirror.jobs.values().map(|j| j.bytes).sum()
+    }
+
+    /// The mirror folder of the open republic (`prefs.mirror_dir`, else
+    /// `<workspace root>/../mirror/<republic-id>/`).
+    pub(crate) fn mirror_dir(&self) -> Option<PathBuf> {
+        let active = self.active.as_ref()?;
+        if !active.prefs.mirror_dir.is_empty() {
+            return Some(molt_storage::expand_tilde(&active.prefs.mirror_dir));
+        }
+        let root = molt_storage::expand_tilde(&self.session.settings.workspace_dir);
+        Some(root.join("..").join("mirror").join(&active.id))
+    }
+
+    fn member_online(&self, member: &str) -> bool {
+        if *member == self.member() {
+            return true;
+        }
+        let now = self.presence_now();
+        let last_seen = self
+            .session
+            .workspaces
+            .iter()
+            .find(|w| w.id == self.session.active_workspace)
+            .and_then(|e| e.members.iter().find(|mi| mi.name == member))
+            .map(|mi| mi.last_seen)
+            .unwrap_or(molt_core::MemberInfo::NEVER);
+        self.presence_of(member, last_seen, now) != 2
+    }
+
+    /// Whether THIS seat answers a want for `id` (the lowest-named online
+    /// holder does), and from where: the shared file, or the mirror's
+    /// piece directory (`stored`).
+    pub(crate) fn piece_source_if_elected(
+        &self,
+        id: &MessageId,
+        ident: &crate::files_state::ShareIdentity,
+    ) -> Option<(PathBuf, bool)> {
+        let me = self.member();
+        let holders = self.mirror_holders();
+        let elected = holders
+            .get(id)?
+            .iter()
+            .find(|m| self.member_online(m))?;
+        if *elected != me {
+            return None;
+        }
+        if ident.by == me {
+            return self.files.share_paths.get(id).cloned().map(|p| (p, false));
+        }
+        let complete = self.files.mirror.jobs.get(&id.to_string()).is_some_and(|j| j.complete);
+        if !complete {
+            return None;
+        }
+        Some((self.mirror_dir()?.join(id.to_string()), true))
+    }
+
+    /// The worker's planning beat (`docs/files/mirroring.md` §3.3), every
+    /// five seconds: drop what an unpersist freed, resume or start the
+    /// least-mirrored persistent share this seat does not hold (one fetch
+    /// at a time), stop at the quota with ONE notice.
+    pub(crate) fn mirror_worker_tick(&mut self, now: u64) {
+        if self.group_net.is_none() || now.saturating_sub(self.files.mirror_planned_at) < PLAN_EVERY_SECS {
+            return;
+        }
+        self.files.mirror_planned_at = now;
+        self.files.mirror_fetches.retain(|_, h| !h.is_finished());
+        let states = self.files_state();
+        // an unpersisted share whose window ended, or one the fold no
+        // longer knows: its pieces go (the sharer's own file is never
+        // touched - it is not in this folder)
+        let gone: Vec<String> = self
+            .files
+            .mirror
+            .jobs
+            .keys()
+            .filter(|series| {
+                series.parse::<MessageId>().map_or(true, |id| match states.get(&id) {
+                    Some(FileState::Persistent(_)) => false,
+                    Some(FileState::Unpersisted(..)) => self.share_expired_in(&states, &id),
+                    None => true,
+                })
+            })
+            .cloned()
+            .collect();
+        for series in gone {
+            self.drop_mirror(&series);
+        }
+        if !self.files.mirror.on {
+            return;
+        }
+        if self.files.mirror_fetches.len() >= MIRROR_FETCHES_AT_ONCE {
+            return;
+        }
+        let me = self.member();
+        let holders = self.mirror_holders();
+        // candidates: persistent v2 shares of others this seat does not
+        // hold complete and is not fetching; the least mirrored first,
+        // the older share on a tie
+        let mut candidates: Vec<(usize, u64, MessageId, crate::files_state::ShareIdentity)> = states
+            .iter()
+            .filter_map(|(id, st)| match st {
+                FileState::Persistent(ident) => Some((*id, ident.clone())),
+                FileState::Unpersisted(..) => None,
+            })
+            .filter(|(id, ident)| {
+                ident.by != me
+                    && !ident.key_b64.is_empty()
+                    && !self.files.mirror.jobs.get(&id.to_string()).is_some_and(|j| j.complete)
+                    && !self.files.mirror_fetches.contains_key(id)
+                    && !self.files.mirror_pending.contains(id)
+            })
+            .map(|(id, ident)| {
+                let mirrors = holders.get(&id).map_or(0, Vec::len);
+                (mirrors, ident.shared_ts, id, ident)
+            })
+            .collect();
+        candidates.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.to_string().cmp(&b.2.to_string())));
+        let Some((_, _, id, ident)) = candidates.into_iter().next() else {
+            return;
+        };
+        let used = self.mirror_used();
+        let already = self.files.mirror.jobs.get(&id.to_string()).map_or(0, |j| j.bytes);
+        if used.saturating_sub(already).saturating_add(ident.size) > self.files.mirror.quota {
+            if !self.files.mirror_quota_noted {
+                self.files.mirror_quota_noted = true;
+                self.session.notice = format!("mirror-quota:{used}:{}", self.files.mirror.quota);
+                self.emit_session(SessionScope::Full);
+            }
+            return;
+        }
+        match self.files.series.get(&id).copied() {
+            Some(at) => self.start_mirror(id, at),
+            None => {
+                // the sharer's stamp is what the fetch subscribes from
+                self.files.mirror_pending.insert(id);
+                let env = self.make_env(me, WorkspaceEvent::FileWanted { id });
+                self.record(env);
+            }
+        }
+    }
+
+    /// Run (or resume) the mirror fetch of `id` from the series start `at`.
+    pub(crate) fn start_mirror(&mut self, id: MessageId, at: u64) {
+        if self.files.mirror_fetches.contains_key(&id) {
+            return;
+        }
+        let Ok((ident, _)) = self.share_identity(&id) else {
+            return;
+        };
+        let Some(key) = crate::files_state::decode_share_key(&ident.key_b64) else {
+            return;
+        };
+        let (Some(cmd_tx), Some(store), Some(dir)) = (self.cmd_tx.upgrade(), self.file_store(), self.mirror_dir())
+        else {
+            return;
+        };
+        let Some(channel) = self.nostr_file_channel() else {
+            return;
+        };
+        let series = id.to_string();
+        let job = self
+            .files
+            .mirror
+            .jobs
+            .get(&series)
+            .cloned()
+            .unwrap_or(molt_core::MirrorJob {
+                count: ident.pieces,
+                size: ident.size,
+                root: ident.root.clone(),
+                key: key.to_vec(),
+                started_at: at,
+                held: Vec::new(),
+                complete: false,
+                bytes: 0,
+            });
+        self.files.mirror.jobs.insert(series.clone(), job.clone());
+        let handle = crate::transfer::spawn_mirror_fetch(
+            channel,
+            id,
+            dir.join(&series),
+            job,
+            store,
+            self.net_scope,
+            cmd_tx,
+        );
+        self.files.mirror_fetches.insert(id, handle);
+    }
+
+    /// Forget a mirrored series: its fetch, its pieces, its job.
+    fn drop_mirror(&mut self, series: &str) {
+        if let Ok(id) = series.parse::<MessageId>() {
+            if let Some(h) = self.files.mirror_fetches.remove(&id) {
+                h.abort();
+            }
+            self.files.mirror_progress.remove(&id);
+        }
+        self.files.mirror.jobs.remove(series);
+        self.files.mirror_quota_noted = false;
+        if let Some(dir) = self.mirror_dir() {
+            let dir = dir.join(series);
+            tokio::task::spawn_blocking(move || {
+                let _ = std::fs::remove_dir_all(dir);
+            });
+        }
+        if let Some(active) = self.active.as_ref() {
+            active.handle.remove_mirror_job(series);
+        }
+    }
+
+    /// The running fetch verified more pieces.
+    pub(crate) fn cmd_net_mirror_progress(&mut self, id: MessageId, held: u32, bytes: u64) -> Result<Reply, MoltError> {
+        self.files.mirror_progress.insert(id, held);
+        if let Some(job) = self.files.mirror.jobs.get_mut(&id.to_string()) {
+            job.bytes = bytes;
+        }
+        Ok(Reply::Ack)
+    }
+
+    /// The fetch ended: complete (say so to the members) or failed (gone).
+    pub(crate) fn cmd_net_mirror_done(&mut self, id: MessageId, ok: bool, reason: String) -> Result<Reply, MoltError> {
+        self.files.mirror_fetches.remove(&id);
+        let series = id.to_string();
+        if ok {
+            if let Some(job) = self.files.mirror.jobs.get_mut(&series) {
+                job.complete = true;
+            }
+            self.files.mirror_progress.remove(&id);
+            let now = crate::now_secs();
+            self.files.mirror_status_sent = 0; // a completion is always news
+            self.note_mirror_holds_changed(now);
+        } else {
+            tracing::warn!(%id, reason = %reason, "mirror: fetch failed");
+            self.files.mirror.jobs.remove(&series);
+            self.files.mirror_progress.remove(&id);
+        }
+        Ok(Reply::Ack)
     }
 
     fn send_mirror_status(&mut self, now: u64) {
@@ -153,6 +436,8 @@ impl State {
         m.on = on;
         m.quota = quota_bytes;
         m.rev = now.max(m.rev.saturating_add(1));
+        self.files.mirror_quota_noted = false;
+        self.files.mirror_planned_at = 0;
         self.persist_mirror();
         self.send_mirror_decl(now);
         Ok(Reply::Ack)
@@ -267,7 +552,7 @@ impl State {
         MirrorView {
             on: self.files.mirror.on,
             quota: self.files.mirror.quota,
-            used: 0,
+            used: self.mirror_used(),
             members,
             files,
         }

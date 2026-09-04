@@ -1667,6 +1667,11 @@ pub struct WorkspacePrefs {
     /// RECEIPTS are a different thing and stay in the log.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub read_cursors: std::collections::BTreeMap<String, String>,
+    /// Where this seat keeps the mirrored pieces (`docs/files/mirroring.md`
+    /// §3.5); empty = `<workspace root>/../mirror/<republic-id>/`. Private,
+    /// any-path: GUI/config-only.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mirror_dir: String,
     /// This node's presence MEMORY: member name → unix seconds it was last
     /// observed (a real sighting, or the roster event that put it in the
     /// republic — the founding is one). Local convenience like the rest of
@@ -1690,6 +1695,7 @@ impl Default for WorkspacePrefs {
             shared_files: std::collections::BTreeMap::new(),
             read_cursors: std::collections::BTreeMap::new(),
             last_seen: std::collections::BTreeMap::new(),
+            mirror_dir: String::new(),
         }
     }
 }
@@ -2050,6 +2056,9 @@ pub struct MirrorState {
     /// The other members' hold status, as last reported.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub status: BTreeMap<MemberId, Vec<MirrorHold>>,
+    /// The series this seat mirrors, by share id hex.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub jobs: BTreeMap<String, MirrorJob>,
 }
 
 impl Default for MirrorState {
@@ -2060,6 +2069,7 @@ impl Default for MirrorState {
             rev: 0,
             decls: BTreeMap::new(),
             status: BTreeMap::new(),
+            jobs: BTreeMap::new(),
         }
     }
 }
@@ -2141,6 +2151,28 @@ pub struct PublishJob {
     pub next: u32,
     /// The stamp announced as the series start.
     pub started_at: u64,
+    /// `path` is a mirror's piece DIRECTORY of sealed pieces (one file per
+    /// index) instead of the shared file: published as stored.
+    #[serde(default)]
+    pub stored: bool,
+}
+
+/// Whether bit `index` of a little-endian bitmap is set.
+#[must_use]
+pub fn bitmap_holds(bits: &[u8], index: u32) -> bool {
+    let byte = usize::try_from(index / 8).unwrap_or(usize::MAX);
+    bits.get(byte).is_some_and(|b| b & (1 << (index % 8)) != 0)
+}
+
+/// Set bit `index` of a little-endian bitmap (grown as needed).
+pub fn bitmap_mark(bits: &mut Vec<u8>, index: u32) {
+    let byte = usize::try_from(index / 8).unwrap_or(usize::MAX);
+    if bits.len() <= byte {
+        bits.resize(byte + 1, 0);
+    }
+    if let Some(b) = bits.get_mut(byte) {
+        *b |= 1 << (index % 8);
+    }
 }
 
 /// One piece fetch in progress on the requester side.
@@ -2176,19 +2208,63 @@ impl FetchJob {
     /// Whether data piece `index` is verified on disk.
     #[must_use]
     pub fn holds(&self, index: u32) -> bool {
-        let byte = usize::try_from(index / 8).unwrap_or(usize::MAX);
-        self.held.get(byte).is_some_and(|b| b & (1 << (index % 8)) != 0)
+        bitmap_holds(&self.held, index)
     }
 
     /// Mark data piece `index` verified.
     pub fn mark(&mut self, index: u32) {
-        let byte = usize::try_from(index / 8).unwrap_or(usize::MAX);
-        if self.held.len() <= byte {
-            self.held.resize(byte + 1, 0);
-        }
-        if let Some(b) = self.held.get_mut(byte) {
-            *b |= 1 << (index % 8);
-        }
+        bitmap_mark(&mut self.held, index);
+    }
+
+    /// Every verified data index below `count`.
+    #[must_use]
+    pub fn held_indices(&self) -> Vec<u32> {
+        (0..self.count).filter(|i| self.holds(*i)).collect()
+    }
+}
+
+/// One series this seat mirrors (`docs/files/mirroring.md` §3.3): the
+/// pieces live sealed in the mirror folder, one file per index; the
+/// bitmap says which are verified.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MirrorJob {
+    /// The share's data piece count.
+    pub count: u32,
+    /// The share's byte length.
+    pub size: u64,
+    /// The share's manifest root, hex.
+    pub root: String,
+    /// The share's content key (32 bytes).
+    pub key: Vec<u8>,
+    /// The series start stamp the sharer announced.
+    pub started_at: u64,
+    /// Verified data pieces, one bit per index.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held: Vec<u8>,
+    /// Every piece verified and the manifest pieces stored.
+    #[serde(default)]
+    pub complete: bool,
+    /// Plaintext bytes held (the quota's counter).
+    #[serde(default)]
+    pub bytes: u64,
+}
+
+impl MirrorJob {
+    /// Whether data piece `index` is verified in the store.
+    #[must_use]
+    pub fn holds(&self, index: u32) -> bool {
+        bitmap_holds(&self.held, index)
+    }
+
+    /// Mark data piece `index` verified.
+    pub fn mark(&mut self, index: u32) {
+        bitmap_mark(&mut self.held, index);
+    }
+
+    /// Verified data pieces.
+    #[must_use]
+    pub fn held_count(&self) -> u32 {
+        u32::try_from((0..self.count).filter(|i| self.holds(*i)).count()).unwrap_or(u32::MAX)
     }
 
     /// Every verified data index below `count`.
@@ -5191,6 +5267,31 @@ pub enum Command {
         /// The MLS-authenticated asker.
         from: MemberId,
         /// Transport incarnation (stale commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// The mirror worker's fetch verified more pieces (engine-internal).
+    /// Never an MCP tool.
+    NetMirrorProgress {
+        /// The share message's stable id.
+        id: MessageId,
+        /// Verified data pieces.
+        held: u32,
+        /// Plaintext bytes held.
+        bytes: u64,
+        /// Workspace-net incarnation (stale task results are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// The mirror worker's fetch ended (engine-internal). Never an MCP tool.
+    NetMirrorDone {
+        /// The share message's stable id.
+        id: MessageId,
+        /// The series is complete and stored; `false` = the honest reason.
+        ok: bool,
+        /// Why it failed ("" on success).
+        reason: String,
+        /// Workspace-net incarnation (stale task results are dropped).
         #[serde(default)]
         generation: Option<u64>,
     },

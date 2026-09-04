@@ -98,7 +98,7 @@ impl State {
 
     /// The relay file channel alone (no exporter material): what a v2
     /// fetch needs - the pieces open under the FILE's key.
-    fn nostr_file_channel(&self) -> Option<molt_net::ritual_net::GroupChannel> {
+    pub(crate) fn nostr_file_channel(&self) -> Option<molt_net::ritual_net::GroupChannel> {
         let nostr = self.nostr.as_ref()?;
         let relays = self.dialable_group_relays();
         if relays.is_empty() {
@@ -446,6 +446,24 @@ impl State {
         let Some(path) = self.files.share_paths.get(&id).cloned() else {
             return;
         };
+        self.enqueue_publish_from(id, key, pieces, size, root, ranges, started_at, path, false);
+    }
+
+    /// [`Self::enqueue_publish_job`] from a source: the shared file, or a
+    /// mirror's piece directory (`stored`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn enqueue_publish_from(
+        &mut self,
+        id: MessageId,
+        key: [u8; 32],
+        pieces: u32,
+        size: u64,
+        root: String,
+        ranges: Vec<(u32, u32)>,
+        started_at: u64,
+        path: std::path::PathBuf,
+        stored: bool,
+    ) {
         let Some(store) = self.file_store() else {
             return;
         };
@@ -460,6 +478,7 @@ impl State {
             ranges,
             next: 0,
             started_at,
+            stored,
         };
         tokio::spawn(async move {
             let series = job.series.clone();
@@ -477,9 +496,9 @@ impl State {
         });
     }
 
-    /// A `PieceWanted` landed: ONLY the sharer answers in M2 (holder
-    /// election is M4), with exactly the ranges asked, bounded to the
-    /// series' layout.
+    /// A `PieceWanted` landed: the lowest-named ONLINE holder answers -
+    /// the sharer from its file, a complete mirror from its store - with
+    /// exactly the ranges asked, bounded to the series' layout.
     pub(crate) fn cmd_net_piece_wanted(
         &mut self,
         from: &MemberId,
@@ -490,10 +509,10 @@ impl State {
         if *from == me {
             return Ok(Reply::Ack);
         }
-        let Ok((ident, available)) = self.share_identity(&id) else {
+        let Ok((ident, _)) = self.share_identity(&id) else {
             return Ok(Reply::Ack);
         };
-        if ident.by != me || !available || self.share_expired(&id) {
+        if self.share_expired(&id) {
             return Ok(Reply::Ack);
         }
         let Some(key) = crate::files_state::decode_share_key(&ident.key_b64) else {
@@ -502,6 +521,9 @@ impl State {
         if self.effective_file_cap() == FileCap::Off {
             return Ok(Reply::Ack);
         }
+        let Some(source) = self.piece_source_if_elected(&id, &ident) else {
+            return Ok(Reply::Ack);
+        };
         let Some(layout) = molt_net::file_plane::Manifest::layout_for(ident.pieces) else {
             return Ok(Reply::Ack);
         };
@@ -514,8 +536,8 @@ impl State {
             return Ok(Reply::Ack);
         }
         let started = *self.files.series.entry(id).or_insert_with(crate::now_secs);
-        tracing::debug!(%from, %id, ranges = ranges.len(), "file trickle: pieces wanted");
-        self.enqueue_publish_job(id, key, ident.pieces, ident.size, ident.root, ranges, started);
+        tracing::debug!(%from, %id, ranges = ranges.len(), stored = source.1, "file trickle: pieces wanted");
+        self.enqueue_publish_from(id, key, ident.pieces, ident.size, ident.root, ranges, started, source.0, source.1);
         Ok(Reply::Ack)
     }
 
