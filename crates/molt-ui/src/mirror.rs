@@ -24,7 +24,7 @@ use crate::labels::{
     never_seen_label, orphan_remote_label, seat_state_label, seen_label, short_hex_id, size_label,
     strings_founder, sync_status_label, theme_index, unix_now, view_icon, view_label,
 };
-use crate::models::{sync_model, sync_rows, sync_strings};
+use crate::models::{sync_rows, sync_strings};
 use crate::net_tor::{net_health_pill, tor_test_detail, tor_test_tone, tor_verdict_copy_for};
 use crate::settings::{apply_settings_fields, settings_draft_differs};
 use crate::surfaces::{
@@ -37,7 +37,7 @@ use crate::wiki_bridge::{patch_view_sync, wiki_export_toast};
 use crate::{
     AppScreen, AppWindow, BackupRow, ChainRow, ChannelItem, LogLine, MemberRow, MemberSync,
     PatchView, Poke, ProposalRow, ReactionItem, ReceiptItem, RecoverSeatRow, RelayItem, RelayPick,
-    RitualSeat, Strings, SurfaceTab, Theme, UploadRow, ViewItem, WikiBase, WikiState,
+    RitualSeat, Strings, SurfaceTab, Theme, UploadRow, ViewItem, WikiState,
     WorkspaceItem,
 };
 
@@ -1210,22 +1210,19 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         .collect();
     sync_rows(&ui.get_surfaces(), tabs, |m| ui.set_surfaces(m));
 
-    // the Shared-Memory base: hand the folded tree to the wiki model over
-    // the WikiState bridge (this apply runs from a Send-bound closure that
-    // cannot hold the UI-thread Rc model; the base-arrived handler can)
+    // the Shared-Memory base MOVED: say so and let the bridge read it
+    // paged (§4.10). The tree no longer rides the snapshot, so this is a
+    // signal, not a payload - which is what keeps a 100 MiB wiki from
+    // being copied through here on every engine event.
     if let Some(mem) = b.surfaces.iter().find(|s| s.key == "memory") {
         let g = ui.global::<WikiState>();
-        let docs: Vec<WikiBase> = mem
-            .wiki_tree
-            .iter()
-            .map(|(p, c)| WikiBase {
-                path: p.as_str().into(),
-                content: c.as_str().into(),
-            })
-            .collect();
-        sync_model(&g.get_base_docs(), docs, PartialEq::eq, |m| g.set_base_docs(m));
-        g.set_base_rev(i32::try_from(mem.wiki_rev).unwrap_or(i32::MAX));
-        g.invoke_base_arrived();
+        let rev = i32::try_from(mem.wiki_rev).unwrap_or(i32::MAX);
+        let docs = i32::try_from(mem.wiki_docs).unwrap_or(i32::MAX);
+        if g.get_base_rev() != rev || g.get_base_count() != docs {
+            g.set_base_rev(rev);
+            g.set_base_count(docs);
+            g.invoke_base_changed();
+        }
     }
 
     // the chat sidebar's channel rows + the canonical selection echo (so

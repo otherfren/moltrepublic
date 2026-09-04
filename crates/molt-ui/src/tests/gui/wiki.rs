@@ -22,10 +22,12 @@ fn wiki_bridge_opens_edits_closes_and_deletes_headless() {
         WikiBase {
             path: "charter.md".into(),
             content: "# Charter\n\nWhat we agreed to.".into(),
+            loaded: true,
         },
         WikiBase {
             path: "glossary.md".into(),
             content: "# Glossary\n\nThe words we keep using.".into(),
+            loaded: true,
         },
     ])));
     g.set_base_rev(1);
@@ -156,6 +158,7 @@ fn the_wiki_export_button_follows_the_approved_base_tree() {
     g.set_base_docs(ModelRc::new(VecModel::from(vec![WikiBase {
         path: "charter.md".into(),
         content: "hello".into(),
+        loaded: true,
     }])));
     assert!(g.invoke_has_base(), "one approved doc arms the export");
 }
@@ -442,10 +445,12 @@ fn the_front_matter_reaches_slint_as_a_property_table() {
             path: "anna.md".into(),
             content: "---\ntype: person\nworks_at: \"[[Acme]]\"\n---\n# Anna\n\nShe builds things."
                 .into(),
+            loaded: true,
         },
         WikiBase {
             path: "Acme.md".into(),
             content: "# Acme".into(),
+            loaded: true,
         },
     ])));
     g.set_base_rev(1);
@@ -508,10 +513,12 @@ fn the_backlink_request_rides_the_document_change() {
         WikiBase {
             path: "a.md".into(),
             content: "# A".into(),
+            loaded: true,
         },
         WikiBase {
             path: "b.md".into(),
             content: "# B".into(),
+            loaded: true,
         },
     ])));
     g.set_base_rev(1);
@@ -559,6 +566,7 @@ fn the_changeset_panel_fits_its_header_and_its_rows() {
     g.set_base_docs(ModelRc::new(VecModel::from(vec![WikiBase {
         path: "a.md".into(),
         content: "# A".into(),
+        loaded: true,
     }])));
     g.set_base_rev(1);
     g.invoke_base_arrived();

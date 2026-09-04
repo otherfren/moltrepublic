@@ -422,7 +422,10 @@ export struct WikiHitRow {
 // One doc of the folded engine base (the shared wiki's truth).
 export struct WikiBase {
     path: string,
+    // "" while `loaded` is false - an empty document and one whose bytes
+    // have not been fetched are different things
     content: string,
+    loaded: bool,
 }
 
 export global WikiState {
@@ -432,7 +435,15 @@ export global WikiState {
     // Send-bound bundle closure cannot hold the model directly)
     in-out property <[WikiBase]> base-docs;
     in-out property <int> base-rev;
+    // how many documents the folded base holds (the tree is read paged)
+    in-out property <int> base-count;
     callback base-arrived();
+    // the base moved: fetch its metadata page by page
+    callback base-changed();
+    // one document's ratified bytes are wanted (lazy base, §4.10)
+    callback content-wanted(string);
+    // …and here they are
+    callback content-arrived(string, string);
     // the ACTIVE workspace id (drafts are per workspace): a change resets
     // the model and loads that workspace's stored draft (WP-D)
     in-out property <string> ws-id;
@@ -1341,6 +1352,7 @@ export global Strings {
     in property <string> mem-cs-confirm-body;
     in property <string> mem-toast-net-empty;
     in property <string> mem-toast-folder-only;
+    in property <string> mem-toast-loading;
     in property <string> mem-menu-revert;
     in property <string> mem-menu-copy-link;
     in property <string> mem-toast-link-md;

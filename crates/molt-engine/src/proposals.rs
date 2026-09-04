@@ -2503,19 +2503,13 @@ impl State {
             .unzip();
         // Memory serves the folded BASE with every read — the one
         // projection GUI and MCP share (shared_memory_real.md WP-B)
-        let (wiki_tree, wiki_rev) = if surface == Surface::Memory {
+        // the COUNT, not the tree (§4.10): the count is free off the
+        // cached fold, the tree was a full copy per read
+        let (wiki_docs, wiki_rev) = if surface == Surface::Memory {
             let (tree, rev) = self.wiki_base();
-            (
-                tree.iter()
-                    .map(|(path, content)| molt_core::WikiDoc {
-                        path: path.clone(),
-                        content: content.clone(),
-                    })
-                    .collect(),
-                rev,
-            )
+            (u64::try_from(tree.len()).unwrap_or(u64::MAX), rev)
         } else {
-            (Vec::new(), 0)
+            (0, 0)
         };
         SurfaceSnapshot {
             surface,
@@ -2531,7 +2525,7 @@ impl State {
             } else {
                 Vec::new()
             },
-            wiki_tree,
+            wiki_docs,
             wiki_rev,
             // the chat is one window now — nothing is filed away, so there
             // is no second view to offer or hide. Kept on the wire (always

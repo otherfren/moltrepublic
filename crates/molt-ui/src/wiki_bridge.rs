@@ -24,6 +24,7 @@ use crate::{
     Strings,
     WikiBlock,
     WikiChangeRow,
+    WikiBase,
     WikiHitRow,
     WikiNavRow,
     WikiProp,
@@ -178,6 +179,12 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
             })
             .collect();
         sync_model(&s.get_props(), props, PartialEq::eq, |m| s.set_props(m));
+        // …and the BYTES of the document being looked at, if this node
+        // does not hold them yet (§4.10). Idempotent: the reply fills the
+        // model and the next sync asks for nothing.
+        if let Some(want) = w.wants_content() {
+            s.invoke_content_wanted(want.into());
+        }
         // the in-edges come from the engine, so they are fetched only when
         // the open document actually changed
         if path_changed {
@@ -342,10 +349,15 @@ pub(crate) fn wire_wiki(
                 let mut w = m.borrow_mut();
                 let _ = w.restore_draft(&draft);
                 let gs = ui.global::<WikiState>();
-                let base: Vec<(String, String)> = gs
+                let base: Vec<(String, Option<String>)> = gs
                     .get_base_docs()
                     .iter()
-                    .map(|d| (d.path.to_string(), d.content.to_string()))
+                    .map(|d| {
+                        // `loaded` tells an empty document from one whose
+                        // bytes have not been fetched (§4.10)
+                        let content = d.loaded.then(|| d.content.to_string());
+                        (d.path.to_string(), content)
+                    })
                     .collect();
                 let rev = u64::try_from(gs.get_base_rev()).unwrap_or(0);
                 w.set_base(&base, rev);
@@ -372,6 +384,18 @@ pub(crate) fn wire_wiki(
         });
     }
 
+    // one document's ratified bytes arrived (the lazy base's other half)
+    {
+        let m = model.clone();
+        let la = last.clone();
+        let weak = ui.as_weak();
+        g.on_content_arrived(move |path, content| {
+            let Some(ui) = weak.upgrade() else { return };
+            m.borrow_mut().load_base(&path, &content);
+            sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+        });
+    }
+
     // the surfaces mirror just wrote the folded base to the bridge
     // properties — rebase the model on it (local work is kept). Hand-wired
     // (not act!): the handler must read the WikiState global through the
@@ -384,10 +408,15 @@ pub(crate) fn wire_wiki(
             let Some(ui) = weak.upgrade() else { return };
             {
                 let gs = ui.global::<WikiState>();
-                let base: Vec<(String, String)> = gs
+                let base: Vec<(String, Option<String>)> = gs
                     .get_base_docs()
                     .iter()
-                    .map(|d| (d.path.to_string(), d.content.to_string()))
+                    .map(|d| {
+                        // `loaded` tells an empty document from one whose
+                        // bytes have not been fetched (§4.10)
+                        let content = d.loaded.then(|| d.content.to_string());
+                        (d.path.to_string(), content)
+                    })
                     .collect();
                 let rev = u64::try_from(gs.get_base_rev()).unwrap_or(0);
                 m.borrow_mut().set_base(&base, rev);
@@ -868,6 +897,13 @@ pub(crate) fn wire_wiki_vote(
             // not noise either: reverting here threw the member's folder
             // away and said "changes cancel out", which was true of the
             // patch and false of their work
+            // bytes still on their way: the request is already in flight
+            // (sync_wiki asks for them), so this is "not yet", not "no"
+            if !m.borrow().unloaded_changes().is_empty() {
+                let msg = ui.global::<Strings>().get_mem_toast_loading();
+                ui.invoke_show_toast(msg);
+                return;
+            }
             let folders = m.borrow().empty_added_folders();
             if !folders.is_empty() {
                 let msg = ui.global::<Strings>().get_mem_toast_folder_only();
@@ -952,6 +988,82 @@ pub(crate) fn wire_wiki_vote(
 /// reply can never move a document under the user's hands.
 pub(crate) fn wire_wiki_index(ui: &AppWindow, ctx: &Ctx) {
     let g = ui.global::<WikiState>();
+    {
+        let cx = ctx.clone();
+        // the base moved: page the METADATA in. The tree itself never
+        // rides a read again (§4.10) - content follows per document.
+        g.on_base_changed(move || {
+            let wh = cx.wallet.clone();
+            let weak = cx.weak.clone();
+            cx.rt.spawn(async move {
+                let mut paths: Vec<String> = Vec::new();
+                let mut cursor: Option<String> = None;
+                loop {
+                    let reply = wh
+                        .execute(Command::WikiList {
+                            prefix: None,
+                            cursor: cursor.clone(),
+                            limit: 500,
+                        })
+                        .await;
+                    let Ok(Reply::WikiList {
+                        docs, next_cursor, ..
+                    }) = reply
+                    else {
+                        break;
+                    };
+                    paths.extend(docs.into_iter().map(|d| d.path));
+                    match next_cursor {
+                        Some(c) => cursor = Some(c),
+                        None => break,
+                    }
+                }
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    let g = ui.global::<WikiState>();
+                    // metadata only: `set_base` keeps the bytes this node
+                    // already holds while the revision stands still, and
+                    // drops them when it moved
+                    let docs: Vec<WikiBase> = paths
+                        .into_iter()
+                        .map(|path| WikiBase {
+                            path: path.into(),
+                            content: String::new().into(),
+                            loaded: false,
+                        })
+                        .collect();
+                    sync_model(&g.get_base_docs(), docs, PartialEq::eq, |m| {
+                        g.set_base_docs(m);
+                    });
+                    g.invoke_base_arrived();
+                });
+            });
+        });
+    }
+    {
+        let cx = ctx.clone();
+        g.on_content_wanted(move |path| {
+            let wh = cx.wallet.clone();
+            let weak = cx.weak.clone();
+            let wanted = path.to_string();
+            cx.rt.spawn(async move {
+                let Ok(Reply::WikiDocument { content, .. }) = wh
+                    .execute(Command::WikiGet {
+                        path: wanted.clone(),
+                    })
+                    .await
+                else {
+                    return; // an unknown path is a base that moved under us
+                };
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.global::<WikiState>()
+                            .invoke_content_arrived(wanted.into(), content.into());
+                    }
+                });
+            });
+        });
+    }
     {
         let cx = ctx.clone();
         g.on_backlinks_wanted(move |path| {

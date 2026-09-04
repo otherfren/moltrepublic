@@ -6043,12 +6043,16 @@ pub struct SurfaceSnapshot {
     /// deserializable. `false` on other surfaces.
     #[serde(default)]
     pub has_archive: bool,
-    /// Memory only: the shared wiki BASE — the deterministic fold of the
-    /// applied wiki patches in chain order (`shared_memory_real.md`). The
-    /// SAME projection the GUI renders and an MCP `read_state` serves
-    /// (co-equality). Empty on other surfaces; additive with a default.
+    /// Memory only: how many documents the folded base holds. The TREE
+    /// itself left this snapshot on 2026-09-05
+    /// (`docs/memory/knowledge_base_scale.md` §4.10): shipping every
+    /// page's content with every read is the copy that does not scale,
+    /// and `wiki_list` + `wiki_get` serve the same projection paged. Both
+    /// surfaces read it the same way, so co-equality is unchanged - what
+    /// changed is that neither has to hold the whole wiki to look at one
+    /// page of it.
     #[serde(default)]
-    pub wiki_tree: Vec<WikiDoc>,
+    pub wiki_docs: u64,
     /// Memory only: the base REVISION (count of patches that actually
     /// applied) — the display-only staleness currency a pending card's
     /// `base_rev` compares against. Additive with a default.

@@ -103,7 +103,13 @@ pub enum BlockStatus {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct BaseDoc {
     path: String,
-    raw: String,
+    /// The ratified bytes - `None` while this document's content has not
+    /// been fetched yet (`knowledge_base_scale.md` §4.10). `Some` vs
+    /// `None` is "I hold them" and must never be confused with the
+    /// document HAVING a ratified counterpart, which is `base.is_some()`:
+    /// reading a missing content as "no base" would paint every unloaded
+    /// page as a local addition and propose the whole wiki.
+    raw: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -127,8 +133,21 @@ impl Doc {
         }
         match &self.base {
             None => Status::Added,
-            Some(b) if b.raw != self.raw || b.path != self.path => Status::Modified,
+            Some(b) if b.path != self.path => Status::Modified,
+            // not loaded: the member cannot have edited what was never
+            // shown, so it is Unchanged by construction - not "unknown"
+            Some(BaseDoc { raw: None, .. }) => Status::Unchanged,
+            Some(b) if b.raw.as_deref() != Some(self.raw.as_str()) => Status::Modified,
             Some(_) => Status::Unchanged,
+        }
+    }
+
+    /// Does this document hold its ratified bytes? A local draft has no
+    /// base to hold, so it counts as loaded: there is nothing to fetch.
+    pub fn loaded(&self) -> bool {
+        match &self.base {
+            None => true,
+            Some(b) => b.raw.is_some(),
         }
     }
 
@@ -303,7 +322,7 @@ impl Wiki {
                 when: (*when).to_string(),
                 base: Some(BaseDoc {
                     path: (*path).to_string(),
-                    raw: (*raw).to_string(),
+                    raw: Some((*raw).to_string()),
                 }),
                 deleted: false,
             });
@@ -369,7 +388,10 @@ impl Wiki {
     /// are never dropped: an edited doc keeps its raw (recolored against
     /// the new base), an edited doc whose base vanished turns Added. Ids
     /// stay stable (nav marks, tabs and the undo stack hang off them).
-    pub fn set_base(&mut self, base: &[(String, String)], rev: u64) {
+    pub fn set_base(&mut self, base: &[(String, Option<String>)], rev: u64) {
+        // content is cached per REVISION: a base that moved may have moved
+        // this document too, so held bytes are dropped and re-fetched
+        let moved = self.base_rev != rev;
         self.base_rev = rev;
         for (path, content) in base {
             if let Some(d) = self
@@ -378,14 +400,23 @@ impl Wiki {
                 .find(|d| d.base.as_ref().is_some_and(|b| &b.path == path))
             {
                 let unedited = d.status() == Status::Unchanged;
+                let kept = if moved {
+                    content.clone()
+                } else {
+                    // the base stood still: whatever we already hold is
+                    // still what the members ratified
+                    content.clone().or_else(|| d.base.as_ref().and_then(|b| b.raw.clone()))
+                };
                 d.base = Some(BaseDoc {
                     path: path.clone(),
-                    raw: content.clone(),
+                    raw: kept.clone(),
                 });
                 if unedited {
                     // no local work — follow the base (path and content)
                     d.path = path.clone();
-                    d.raw = content.clone();
+                    if let Some(raw) = kept {
+                        d.raw = raw;
+                    }
                     d.deleted = false;
                 }
                 continue;
@@ -402,7 +433,7 @@ impl Wiki {
             self.docs.push(Doc {
                 id,
                 path: path.clone(),
-                raw: content.clone(),
+                raw: content.clone().unwrap_or_default(),
                 author: String::new(),
                 ver: String::new(),
                 when: String::new(),
@@ -1490,10 +1521,18 @@ impl Wiki {
             return Vec::new();
         };
         let work = parse_blocks(body_of(&d.raw));
-        let Some(base) = &d.base else {
-            return work.into_iter().map(|b| (b, BlockStatus::Added)).collect();
+        let Some(base_raw) = d.base.as_ref().and_then(|b| b.raw.as_deref()) else {
+            // no base at all is a local addition; a base whose bytes are
+            // not fetched yet has nothing to diff against, and painting
+            // the document green would claim it is new
+            let st = if d.base.is_none() {
+                BlockStatus::Added
+            } else {
+                BlockStatus::Same
+            };
+            return work.into_iter().map(|b| (b, st)).collect();
         };
-        let old = parse_blocks(body_of(&base.raw));
+        let old = parse_blocks(body_of(base_raw));
         let mut out = Vec::new();
         for op in capture_diff_slices(Algorithm::Myers, &old, &work) {
             match op {
@@ -1550,7 +1589,11 @@ impl Wiki {
             return Vec::new();
         };
         let work = info_props(&d.raw);
-        let base = d.base.as_ref().map(|b| info_props(&b.raw));
+        // unfetched: compare against ITSELF so nothing colours
+        let base = d.base.as_ref().map(|b| match &b.raw {
+            Some(raw) => info_props(raw),
+            None => work.clone(),
+        });
         let mut keys: Vec<String> = work.keys().cloned().collect();
         if let Some(b) = &base {
             keys.extend(b.keys().filter(|k| !work.contains_key(*k)).cloned());
@@ -1758,7 +1801,9 @@ impl Wiki {
         for d in &mut self.docs {
             if let Some(b) = &d.base {
                 d.path = b.path.clone();
-                d.raw = b.raw.clone();
+                if let Some(raw) = &b.raw {
+                    d.raw = raw.clone();
+                }
             }
             d.deleted = false;
         }
@@ -1793,7 +1838,10 @@ impl Wiki {
         }
         if let Some(d) = self.doc_mut(id) {
             d.path = base.path;
-            d.raw = base.raw;
+            let Some(raw) = base.raw else {
+                return Err("this document's ratified text is not loaded yet".to_string());
+            };
+            d.raw = raw;
             d.deleted = false;
         }
         self.stack.retain(|c| {
@@ -1823,13 +1871,58 @@ impl Wiki {
                     if b.path != d.path {
                         c.moved += 1;
                     }
-                    if b.raw != d.raw {
-                        c.lines += touched_lines(&b.raw, &d.raw);
+                    if b.raw.as_deref() != Some(d.raw.as_str()) {
+                        let before = b.raw.as_deref().unwrap_or_default();
+                        c.lines += touched_lines(before, &d.raw);
                     }
                 }
             }
         }
         c
+    }
+
+    /// One document's ratified bytes arrived (§4.10). An unedited doc
+    /// follows them; an edited one keeps its working copy and now has
+    /// something to diff against.
+    pub fn load_base(&mut self, path: &str, content: &str) {
+        let Some(d) = self
+            .docs
+            .iter_mut()
+            .find(|d| d.base.as_ref().is_some_and(|b| b.path == path))
+        else {
+            return;
+        };
+        let unedited = d.status() == Status::Unchanged;
+        if let Some(b) = d.base.as_mut() {
+            b.raw = Some(content.to_string());
+        }
+        if unedited {
+            d.raw = content.to_string();
+        }
+    }
+
+    /// The document whose bytes are wanted next: the ACTIVE one first (it
+    /// is what the human is looking at), then anything they changed
+    /// without ever opening - a delete from the navigator, say, which
+    /// needs the ratified text before it can become a patch.
+    pub fn wants_content(&self) -> Option<String> {
+        if let Some(d) = self.active() {
+            if !d.loaded() {
+                return Some(d.path.clone());
+            }
+        }
+        self.unloaded_changes().into_iter().next()
+    }
+
+    /// Changed documents whose ratified bytes are not fetched yet. A
+    /// patch cannot be built over them, and the vote has to say so rather
+    /// than look net-empty (§4.10).
+    pub fn unloaded_changes(&self) -> Vec<String> {
+        self.docs
+            .iter()
+            .filter(|d| d.status() != Status::Unchanged && !d.loaded())
+            .map(|d| d.path.clone())
+            .collect()
     }
 
     /// Locally added folders that hold no document. A git patch names
@@ -1857,6 +1950,11 @@ impl Wiki {
     /// rename/new/deleted headers), files sorted by display path.
     /// `None` when nothing net-changed.
     pub fn build_patch(&self) -> Option<String> {
+        // a patch over bytes this node does not hold would be a LIE about
+        // what the members ratified: refuse rather than guess (§4.10)
+        if !self.unloaded_changes().is_empty() {
+            return None;
+        }
         let mut changed: Vec<&Doc> = self
             .docs
             .iter()
@@ -1884,11 +1982,12 @@ impl Wiki {
                         "diff --git a/{p} b/{p}\ndeleted file mode 100644\n",
                         p = b.path
                     ));
-                    out.push_str(&unified(&b.raw, "", &format!("a/{}", b.path), "/dev/null"));
+                    let before = b.raw.as_deref().unwrap_or_default();
+                    out.push_str(&unified(before, "", &format!("a/{}", b.path), "/dev/null"));
                 }
                 (Some(b), false) => {
                     let renamed = b.path != d.path;
-                    let edited = b.raw != d.raw;
+                    let edited = b.raw.as_deref() != Some(d.raw.as_str());
                     if renamed {
                         out.push_str(&format!("diff --git a/{} b/{}\n", b.path, d.path));
                         if !edited {
@@ -1904,7 +2003,7 @@ impl Wiki {
                     }
                     if edited {
                         out.push_str(&unified(
-                            &b.raw,
+                            b.raw.as_deref().unwrap_or_default(),
                             &d.raw,
                             &format!("a/{}", b.path),
                             &format!("b/{}", d.path),
@@ -2541,8 +2640,8 @@ mod tests {
         let doc = "---\ntype: person\nworks_at: \"[[Acme]]\"\nknows: [\"[[Bea]]\", \"[[Cara]]\"]\nborn: 1975\n---\n# Anna\n\nShe builds things.\n";
         w.set_base(
             &[
-                ("anna.md".to_string(), doc.to_string()),
-                ("Acme.md".to_string(), "# Acme\n".to_string()),
+                ("anna.md".to_string(), Some(doc.to_string())),
+                ("Acme.md".to_string(), Some("# Acme\n".to_string())),
             ],
             1,
         );
@@ -2591,11 +2690,70 @@ mod tests {
         // a header outside the subset simply has no rows
         let mut w2 = Wiki::empty();
         w2.set_base(
-            &[("bad.md".to_string(), "---\n- a list\n---\n# B\n".to_string())],
+            &[("bad.md".to_string(), Some("---\n- a list\n---\n# B\n".to_string()))],
             1,
         );
         let bad = w2.docs.first().expect("bad.md").id;
         assert!(w2.infobox(bad).is_empty());
+    }
+
+    /// **A document whose ratified bytes are not fetched is UNCHANGED,
+    /// not new.** The lazy base (§4.10) holds metadata for every page and
+    /// content only for what the member looked at or touched; reading a
+    /// missing content as "no base" would paint the whole wiki green and
+    /// propose it back to the republic.
+    #[test]
+    fn an_unfetched_document_is_unchanged_and_never_proposed() {
+        let mut w = Wiki::empty();
+        // metadata only, as `wiki_list` delivers it
+        w.set_base(
+            &[
+                ("a.md".to_string(), None),
+                ("dir/b.md".to_string(), None),
+            ],
+            1,
+        );
+        assert_eq!(w.nav_rows().len(), 3, "two documents and their folder");
+        let a = w.docs.iter().find(|d| d.path == "a.md").expect("a.md");
+        assert_eq!(a.status(), Status::Unchanged, "unfetched is not Added");
+        assert!(!a.loaded());
+        assert_eq!(w.build_patch(), None, "nothing to propose");
+        assert!(w.unloaded_changes().is_empty(), "…and nothing is pending");
+
+        // opening it asks for the bytes…
+        let id = a.id;
+        w.open(id);
+        assert_eq!(w.wants_content().as_deref(), Some("a.md"));
+        assert!(
+            w.preview(id).iter().all(|(_, st)| *st == BlockStatus::Same),
+            "an unfetched document colours nothing"
+        );
+
+        // …and when they arrive the document follows them
+        w.load_base("a.md", "alpha\n");
+        assert_eq!(w.wants_content(), None, "nothing else is missing");
+        let a = w.docs.iter().find(|d| d.path == "a.md").expect("a.md");
+        assert_eq!(a.raw, "alpha\n");
+        assert_eq!(a.status(), Status::Unchanged);
+
+        // a DELETE from the navigator touches a document nobody opened:
+        // the patch needs its ratified text, so the model says so instead
+        // of building a patch over bytes it does not hold
+        let b_id = w.docs.iter().find(|d| d.path == "dir/b.md").expect("b").id;
+        w.delete(b_id);
+        assert_eq!(w.unloaded_changes(), vec!["dir/b.md".to_string()]);
+        assert_eq!(w.build_patch(), None, "no patch over unheld bytes");
+        assert_eq!(w.wants_content().as_deref(), Some("dir/b.md"));
+        w.load_base("dir/b.md", "beta\n");
+        assert!(w.unloaded_changes().is_empty());
+        let patch = w.build_patch().expect("now it can be built");
+        assert!(patch.contains("deleted file mode"), "{patch}");
+        assert!(patch.contains("-beta"), "the deletion carries its content");
+
+        // a base that MOVED drops what we held: the bytes may have moved too
+        w.set_base(&[("a.md".to_string(), None)], 2);
+        let a = w.docs.iter().find(|d| d.path == "a.md").expect("a.md");
+        assert!(!a.loaded(), "a new revision invalidates the cached content");
     }
 
     /// **A folder-only changeset has nothing to propose - and must keep
@@ -2605,7 +2763,7 @@ mod tests {
     #[test]
     fn a_folder_only_change_has_no_patch_and_keeps_the_folder() {
         let mut w = Wiki::empty();
-        w.set_base(&[("a.md".to_string(), "alpha\n".to_string())], 1);
+        w.set_base(&[("a.md".to_string(), Some("alpha\n".to_string()))], 1);
         let name = w.new_folder();
 
         // the panel shows work…
@@ -2630,7 +2788,7 @@ mod tests {
 
         // a document IN the folder makes it a real change
         let mut w = Wiki::empty();
-        w.set_base(&[("a.md".to_string(), "alpha\n".to_string())], 1);
+        w.set_base(&[("a.md".to_string(), Some("alpha\n".to_string()))], 1);
         let name = w.new_folder();
         let id = w.new_file();
         w.move_to(id, Some(&name)).expect("move into the folder");
@@ -2652,7 +2810,7 @@ mod tests {
         w.set_base(
             &[(
                 "a.md".to_string(),
-                "---\ntype: person\ntags: [one, two]\ncity: Berlin\n---\n# A\n".to_string(),
+                Some("---\ntype: person\ntags: [one, two]\ncity: Berlin\n---\n# A\n".to_string()),
             )],
             1,
         );
@@ -2698,9 +2856,9 @@ mod tests {
             &[
                 (
                     "start.md".to_string(),
-                    "See [[Anna]] and [[Anna|her page]], `[[not a link]]`.\n".to_string(),
+                    Some("See [[Anna]] and [[Anna|her page]], `[[not a link]]`.\n".to_string()),
                 ),
-                ("Anna.md".to_string(), "# Anna\n".to_string()),
+                ("Anna.md".to_string(), Some("# Anna\n".to_string())),
             ],
             1,
         );
@@ -2736,8 +2894,8 @@ mod tests {
         let mut w = Wiki::empty();
         assert!(w.nav_rows().is_empty(), "an empty wiki starts with nothing");
         let base = vec![
-            ("a.md".to_string(), "alpha\n".to_string()),
-            ("dir/b.md".to_string(), "beta\n".to_string()),
+            ("a.md".to_string(), Some("alpha\n".to_string())),
+            ("dir/b.md".to_string(), Some("beta\n".to_string())),
         ];
         w.set_base(&base, 1);
         assert_eq!(w.base_rev, 1);
@@ -2749,8 +2907,8 @@ mod tests {
         // local edit survives a base refresh of the OTHER file
         w.set_raw(a_id, "alpha local");
         let base2 = vec![
-            ("a.md".to_string(), "alpha\n".to_string()),
-            ("dir/b.md".to_string(), "beta v2\n".to_string()),
+            ("a.md".to_string(), Some("alpha\n".to_string())),
+            ("dir/b.md".to_string(), Some("beta v2\n".to_string())),
         ];
         w.set_base(&base2, 2);
         let a = w.docs.iter().find(|d| d.path == "a.md").expect("a.md");
@@ -2762,8 +2920,8 @@ mod tests {
 
         // the base moves UNDER the local edit: still kept, still Modified
         let base3 = vec![
-            ("a.md".to_string(), "alpha v3\n".to_string()),
-            ("dir/b.md".to_string(), "beta v2\n".to_string()),
+            ("a.md".to_string(), Some("alpha v3\n".to_string())),
+            ("dir/b.md".to_string(), Some("beta v2\n".to_string())),
         ];
         w.set_base(&base3, 3);
         let a = w.docs.iter().find(|d| d.path == "a.md").expect("a.md");
@@ -2773,12 +2931,12 @@ mod tests {
         // a doc leaving the base: unedited vanishes (tab closed too),
         // edited stays as ADDED (your content is new against this base)
         w.open(a.id);
-        let base4 = vec![("dir/b.md".to_string(), "beta v2\n".to_string())];
+        let base4 = vec![("dir/b.md".to_string(), Some("beta v2\n".to_string()))];
         w.set_base(&base4, 4);
         let a = w.docs.iter().find(|d| d.path == "a.md").expect("edited stays");
         assert_eq!(a.status(), Status::Added);
         assert!(w.docs.iter().all(|d| d.path != "x.md"));
-        let base5: Vec<(String, String)> = Vec::new();
+        let base5: Vec<(String, Option<String>)> = Vec::new();
         let b_id = w.docs.iter().find(|d| d.path == "dir/b.md").expect("b").id;
         w.open(b_id);
         w.set_base(&base5, 5);
@@ -2801,7 +2959,7 @@ mod tests {
     #[test]
     fn a_draft_round_trips_and_a_clean_tree_is_empty() {
         let mut w = Wiki::empty();
-        let base = vec![("a.md".to_string(), "alpha\n".to_string())];
+        let base = vec![("a.md".to_string(), Some("alpha\n".to_string()))];
         w.set_base(&base, 1);
         assert_eq!(w.to_draft(), "", "clean + no tabs = nothing to store");
         let a_id = w.docs.iter().find(|d| d.path == "a.md").expect("a").id;
@@ -2819,7 +2977,7 @@ mod tests {
         assert_eq!(w2.tab_rows().len(), 1, "the open tab survives");
         assert!(!w2.stack_rows().is_empty(), "the undo stack survives");
         // …and a base that moved while closed reconciles like a live move
-        let base2 = vec![("a.md".to_string(), "alpha v2\n".to_string())];
+        let base2 = vec![("a.md".to_string(), Some("alpha v2\n".to_string()))];
         let mut w3 = Wiki::empty();
         assert!(w3.restore_draft(&draft));
         w3.set_base(&base2, 2);
@@ -2839,7 +2997,7 @@ mod tests {
     fn rescue_restores_what_fits_and_reports_what_does_not() {
         let mut w = Wiki::empty();
         w.set_base(
-            &[("a.md".to_string(), "hello\nworld\n".to_string())],
+            &[("a.md".to_string(), Some("hello\nworld\n".to_string()))],
             1,
         );
         // the patch: edits a.md AND adds new.md AND edits a file that is
@@ -2893,7 +3051,7 @@ diff --git a/gone.md b/gone.md\n--- a/gone.md\n+++ b/gone.md\n@@ -1,1 +1,1 @@\n-
         let base_tree: std::collections::BTreeMap<String, String> = w
             .docs
             .iter()
-            .filter_map(|d| d.base.as_ref().map(|b| (b.path.clone(), b.raw.clone())))
+            .filter_map(|d| d.base.as_ref().and_then(|b| b.raw.clone().map(|r| (b.path.clone(), r))))
             .collect();
         let id_of = |w: &Wiki, name: &str| {
             w.docs
@@ -3554,7 +3712,7 @@ diff --git a/gone.md b/gone.md\n--- a/gone.md\n+++ b/gone.md\n@@ -1,1 +1,1 @@\n-
     #[test]
     fn set_base_creates_the_full_ancestor_chain() {
         let mut w = Wiki::empty();
-        w.set_base(&[("a/b/c.md".to_string(), "x\n".to_string())], 1);
+        w.set_base(&[("a/b/c.md".to_string(), Some("x\n".to_string()))], 1);
         assert!(w.folders_named().contains(&"a".to_string()));
         assert!(w.folders_named().contains(&"a/b".to_string()));
         let rows = w.nav_rows();

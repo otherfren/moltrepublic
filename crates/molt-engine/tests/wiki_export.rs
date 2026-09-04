@@ -102,9 +102,10 @@ async fn propose_wiki(w: &WalletHandle, patch: &str) -> molt_core::ProposalId {
     }
 }
 
-/// The wiki base as the engine serves it (co-equality: the same projection
-/// the GUI renders).
-async fn wiki_docs(w: &WalletHandle) -> Vec<molt_core::WikiDoc> {
+/// How many documents the wiki base holds, as the engine serves it. The
+/// snapshot carries the count since 2026-09-05 (§4.10); the tree itself
+/// is the paged read's.
+async fn wiki_docs(w: &WalletHandle) -> u64 {
     match w
         .execute(Command::ReadState {
             surface: Surface::Memory,
@@ -114,7 +115,7 @@ async fn wiki_docs(w: &WalletHandle) -> Vec<molt_core::WikiDoc> {
         .await
         .expect("read memory")
     {
-        Reply::State(s) => s.wiki_tree,
+        Reply::State(s) => s.wiki_docs,
         other => panic!("unexpected: {other:?}"),
     }
 }
@@ -126,7 +127,7 @@ async fn apply_wiki_patch(w: &WalletHandle, patch: &str) {
     w.execute(Command::Approve { proposal: id })
         .await
         .expect("approve");
-    assert!(!wiki_docs(w).await.is_empty(), "the patch applied");
+    assert!(wiki_docs(w).await > 0, "the patch applied");
 }
 
 fn engine(root: &std::path::Path) -> WalletHandle {
@@ -384,7 +385,7 @@ async fn a_chain_governed_export_verifies_against_what_it_wrote() {
     propose_wiki(&a, ADD_A).await;
     approve_op(&b, "wiki_patch").await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    while wiki_docs(&a).await.is_empty() {
+    while wiki_docs(&a).await == 0 {
         assert!(
             tokio::time::Instant::now() < deadline,
             "the patch never committed"

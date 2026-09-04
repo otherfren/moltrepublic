@@ -183,7 +183,7 @@ fn applied_log_lines_carry_their_patch_id() {
         }],
         channels: Vec::new(),
         has_archive: false,
-        wiki_tree: Vec::new(),
+        wiki_docs: 0,
         wiki_rev: 0,
     };
     let data = surface_data(0, Surface::Memory, &snap, "petra", None, &HashMap::new());

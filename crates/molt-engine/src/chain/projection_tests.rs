@@ -552,22 +552,30 @@ fn a_sealed_wiki_patch_supersedes_overlapping_pending_patches() {
     assert!(p14.superseded);
 
     // …and the READ serves the same base to GUI and MCP alike
-    // (co-equality: one projection, shared_memory_real.md WP-B)
+    // (co-equality: one projection, shared_memory_real.md WP-B). The
+    // snapshot carries the COUNT since 2026-09-05 (§4.10); the content is
+    // the paged read's, and it is the same projection.
     let snap = walter.snapshot(Surface::Memory, None, None);
     assert_eq!(snap.wiki_rev, 3, "ADD_A + EDIT_A_1 + ADD_B applied");
+    assert_eq!(snap.wiki_docs, 2);
+    let molt_core::Reply::WikiList { docs, total, .. } =
+        walter.cmd_wiki_list(None, None, 0).expect("list")
+    else {
+        panic!("wrong reply");
+    };
+    assert_eq!(total, 2);
     assert_eq!(
-        snap.wiki_tree,
-        vec![
-            molt_core::WikiDoc {
-                path: "a.md".to_string(),
-                content: "hallo\nworld\n".to_string()
-            },
-            molt_core::WikiDoc {
-                path: "b.md".to_string(),
-                content: "disjoint\n".to_string()
-            },
-        ]
+        docs.iter().map(|d| d.path.as_str()).collect::<Vec<_>>(),
+        ["a.md", "b.md"]
     );
+    for (path, want) in [("a.md", "hallo\nworld\n"), ("b.md", "disjoint\n")] {
+        let molt_core::Reply::WikiDocument { content, .. } =
+            walter.cmd_wiki_get(path.to_string()).expect("get")
+        else {
+            panic!("wrong reply");
+        };
+        assert_eq!(content, want, "{path}");
+    }
 }
 
 /// `knowledge_base_scale.md` §4.3: the wiki is read PAGED — a prefix

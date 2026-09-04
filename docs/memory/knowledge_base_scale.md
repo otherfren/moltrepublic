@@ -588,17 +588,28 @@ per-patch provenance).
   reads that fill only their own face, and a reply that outlived its tab
   is dropped rather than shown against the wrong document. The in-edge
   request rides the DOCUMENT change, not every model mutation.
-- **Lazy tree — NOT BUILT, deliberately deferred.** `Wiki.docs` still
-  holds every page's content, and `SurfaceSnapshot.wiki_tree` still ships
-  the folded tree with every Memory read. Why it was left: it is the one
-  piece of K7 that changes a WIRE CONTRACT (removing a snapshot field)
-  and rewrites the GUI's whole data path from "mirror a snapshot" to
-  "issue reads and reconcile replies" — a large, regression-prone change
-  whose benefit is invisible below the scale that has never existed yet.
-  The paged reads an AGENT uses (K1) do not depend on it; this is the
-  GUI's own memory, not the republic's. When it is built, it belongs with
-  the off-actor index builds deferred in §4.5/§4.6: the three together are
-  the "100 MiB is real now" change-set.
+- **Lazy tree — BUILT 2026-09-05.** `SurfaceSnapshot.wiki_tree` is gone
+  and `wiki_docs: u64` took its place, so a Memory read no longer ships
+  every page's content: it says how many there are, and the tree is read
+  through `wiki_list` (metadata, paged) and `wiki_get` (one document).
+  The mirror tick now carries a SIGNAL rather than a payload - the tree
+  used to be copied about seven times per engine event, twice of them on
+  the UI thread.
+
+  The load-bearing distinction is inside `Doc.base`: `Option<BaseDoc>` is
+  "has a ratified counterpart", and `BaseDoc.raw: Option<String>` is "I
+  hold its bytes". Conflating them would paint every unfetched page as a
+  local addition and propose the whole wiki back to the republic, so:
+  an unfetched document is `Unchanged` by construction (the member cannot
+  have edited what was never shown), it colours nothing in the preview or
+  the infobox, and `build_patch` REFUSES while any changed document is
+  unfetched rather than emitting a patch over bytes this node does not
+  hold. `wants_content()` asks for the open document first and then for
+  anything changed without being opened - a delete from the navigator,
+  which needs the ratified text before it can become a deletion hunk.
+  Content is cached per REVISION: a base that moved may have moved this
+  document too, so held bytes are dropped and re-fetched.
+
 - Validation: the headless GUI tests in `crates/molt-ui/src/tests/gui/`
   and ONE `cargo build -j 1 -p molt-ui-window -p molt-ui` per change-set.
 

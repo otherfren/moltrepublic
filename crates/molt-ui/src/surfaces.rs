@@ -533,9 +533,10 @@ pub(crate) struct SurfaceData {
     /// table — proposal-backed rows carry their sealed block's voters,
     /// legacy rows (id -1) only their title. Parallel to the gated `log`.
     pub(crate) accepted: Vec<ProposalRowData>,
-    /// Memory only: the engine-folded wiki base + its revision (the
-    /// shared truth the Wiki model rebases on — shared_memory_real.md).
-    pub(crate) wiki_tree: Vec<(String, String)>,
+    /// Memory only: how many documents the engine-folded base holds, and
+    /// its revision. The TREE itself is read paged now (§4.10) - this is
+    /// the signal that it MOVED, not the content.
+    pub(crate) wiki_docs: u64,
     pub(crate) wiki_rev: u64,
 }
 pub(crate) struct LogLineData {
@@ -1240,11 +1241,7 @@ pub(crate) fn surface_data(
         denied: snap.denied,
         declined,
         accepted,
-        wiki_tree: snap
-            .wiki_tree
-            .iter()
-            .map(|d| (d.path.clone(), d.content.clone()))
-            .collect(),
+        wiki_docs: snap.wiki_docs,
         wiki_rev: snap.wiki_rev,
     }
 }
