@@ -852,6 +852,7 @@ lexicon! {
     oc_body: "The charter was ratified by everyone at the founding - an edit is a gated change: the draft becomes a proposal the members approve by threshold. Once applied, every view shows the new charter; the founding charter stays immutable in block 0.", "Die Satzung wurde bei der Gründung von allen ratifiziert - eine Bearbeitung ist eine geschützte Änderung: der Entwurf wird ein Vorschlag, dem die Mitglieder per Schwelle zustimmen. Nach dem Anwenden zeigt jede Ansicht die neue Satzung; die Gründungssatzung bleibt unveränderlich in Block 0.";
     oc_propose: "Propose change", "Änderung vorschlagen";
     toast_proposed: "Proposed - awaiting approvals", "Vorgeschlagen - wartet auf Zustimmungen";
+    toast_proposed_bad_header: "Proposed - a header is unreadable, its properties will be missing", "Vorgeschlagen - ein Kopfblock ist unlesbar, seine Eigenschaften fehlen";
     om_col_id: "ID", "ID";
     om_col_pk: "Public key", "Public Key";
     om_col_last: "Last seen", "Zuletzt gesehen";
@@ -1289,6 +1290,9 @@ lexicon! {
     mem_menu_close_left: "Close all to the left", "Alle links schließen";
     mem_empty: "Nothing here yet - create a new file.", "Noch nichts hier - lege eine neue Datei an.";
     mem_linked: "Linked", "Verknüpft";
+    mem_backlinks: "Linked from", "Verlinkt von";
+    mem_search_ph: "Search the wiki", "Wiki durchsuchen";
+    mem_search_none: "No hit", "Kein Treffer";
     mem_title_archive: "Archived notes", "Archivierte Notizen";
     mem_hint_archive: "Retired from the wiki - still readable, no longer linked.", "Aus dem Wiki zurückgezogen - weiter lesbar, nicht mehr verknüpft.";
     mem_cs_title: "Changeset", "Changeset";

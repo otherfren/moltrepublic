@@ -12,7 +12,7 @@ pub(crate) const MAX_HEADER_BYTES: usize = 64 * 1024;
 /// Split a document into its front-matter block and its body. The block
 /// exists only when the FIRST line is exactly `---` and a later line is
 /// exactly `---` or `...`; anything else means the whole document is body.
-pub(crate) fn split(doc: &str) -> (Option<&str>, &str) {
+pub fn split(doc: &str) -> (Option<&str>, &str) {
     let Some(rest) = doc
         .strip_prefix("---\n")
         .or_else(|| doc.strip_prefix("---\r\n"))
@@ -34,7 +34,7 @@ pub(crate) fn split(doc: &str) -> (Option<&str>, &str) {
 }
 
 /// The document's first ATX heading, header skipped. Display metadata.
-pub(crate) fn first_heading(doc: &str) -> Option<String> {
+pub fn first_heading(doc: &str) -> Option<String> {
     let (_, body) = split(doc);
     body.lines()
         .find(|l| l.starts_with('#'))
@@ -82,7 +82,7 @@ fn scalar_value(text: &str, style: TScalarStyle) -> Value {
 
 /// A string value that IS a link: `[[Name]]`, `[[Name|display]]` (the
 /// display half stripped), or a path ending in `.md`.
-pub(crate) fn link_target(s: &str) -> Option<&str> {
+pub fn link_target(s: &str) -> Option<&str> {
     if let Some(inner) = s.strip_prefix("[[").and_then(|r| r.strip_suffix("]]")) {
         let name = inner.split('|').next().unwrap_or(inner).trim();
         return (!name.is_empty()).then_some(name);
@@ -205,7 +205,7 @@ fn parse_flat_map(p: &mut Events<'_>) -> Result<serde_json::Map<String, Value>, 
 
 /// A document's properties, and the reason there are none when a header
 /// stands outside the subset.
-pub(crate) fn properties(doc: &str) -> (Option<serde_json::Map<String, Value>>, Option<String>) {
+pub fn properties(doc: &str) -> (Option<serde_json::Map<String, Value>>, Option<String>) {
     let (Some(header), _) = split(doc) else {
         return (None, None);
     };

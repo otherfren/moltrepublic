@@ -417,10 +417,12 @@ both verified red-without/green-with).
     does — the override is scoped to this one crate, so every other crate
     keeps its fast incremental rebuilds.
   - **The workspace also pins `debug = 0` for that same crate.** Measured
-    2026-09-04: worth only ~1.1 % of peak RSS (13.53 → 13.38 GiB) — the older
-    "debuginfo reduction does not help (~2 %)" note was right about the size
-    and wrong only about the consequence, because at today's margin that 1 %
-    decided between a finished build and a SIGKILL. A tourniquet, not a fix.
+    2026-09-04: worth only ~1.1 % of peak RSS (13.53 → 13.38 GiB) — kept
+    because at a margin this thin every hundred MB counts, but do NOT read
+    it as the thing that decides: a full build WITH debuginfo finished here
+    the same day (11m15s, exit 0, before this pin existed). What decides is
+    how much memory the machine has free. Reach for swap, not for another
+    profile switch.
   - **Build the window with `-j 1`.** Plain `-j 2` puts the lib and test
     rustc side by side and died by SIGKILL here (2026-08-18, with a second
     session on the box). Never run two window-scale builds concurrently —

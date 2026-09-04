@@ -402,6 +402,21 @@ export global PatchView {
 // The wiki pane's shared state + action bus: properties are pushed by the
 // Rust bridge after every mutation, callbacks are implemented there. The
 // app root also drives it (Ctrl+W / Del / Enter routing).
+// One row of a document's front-matter infobox: a property value, and the
+// document it points at when the value is a link.
+export struct WikiProp {
+    key: string,
+    value: string,
+    link: string,
+}
+
+// One search hit over the wiki (the engine's ranked index).
+export struct WikiHitRow {
+    path: string,
+    title: string,
+    snippet: string,
+}
+
 // One doc of the folded engine base (the shared wiki's truth).
 export struct WikiBase {
     path: string,
@@ -428,7 +443,16 @@ export global WikiState {
     in-out property <string> doc-meta;
     in-out property <int> doc-status;
     in-out property <[WikiBlock]> blocks;
+    // the front matter as a property table (the viewer's infobox); the
+    // editor keeps showing the raw header
+    in-out property <[WikiProp]> props;
     in-out property <[string]> links;
+    // who points HERE — the engine's in-edges for the open document
+    in-out property <[string]> backlinks;
+    // the navigator's search over the engine's full-text index
+    in-out property <string> search-query;
+    in-out property <[WikiHitRow]> search-hits;
+    in-out property <bool> search-ran;
     in-out property <string> raw; // the raw editor's buffer (two-way)
     in-out property <bool> editing;
     in-out property <bool> can-reveal;
@@ -490,6 +514,10 @@ export global WikiState {
     callback copy-link(int); // context menu: link markup to the clipboard
     callback revert-active(); // editor header: discard the open file's changes
     callback open-link(string); // a preview link's .md target
+    // the open document changed: fetch its in-edges from the engine
+    callback backlinks-wanted(string);
+    // run the navigator's search ("" clears it)
+    callback search(string);
 }
 
 // A full theme palette. Three are defined in `Palettes`; `Theme.active` picks one.
@@ -852,6 +880,7 @@ export global Strings {
     in property <string> oc-body;
     in property <string> oc-propose;
     in property <string> toast-proposed;
+    in property <string> toast-proposed-bad-header;
     // Organization → Members table columns
     in property <string> om-col-id;
     in property <string> om-col-pk;
@@ -1289,6 +1318,9 @@ export global Strings {
     in property <string> mem-menu-close-left;
     in property <string> mem-empty;
     in property <string> mem-linked;
+    in property <string> mem-backlinks;
+    in property <string> mem-search-ph;
+    in property <string> mem-search-none;
     in property <string> mem-title-archive;
     in property <string> mem-hint-archive;
     // Memory: changeset panel + per-file revert + link markup + editor menu

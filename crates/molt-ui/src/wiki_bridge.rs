@@ -24,7 +24,9 @@ use crate::{
     Strings,
     WikiBlock,
     WikiChangeRow,
+    WikiHitRow,
     WikiNavRow,
+    WikiProp,
     WikiSpan,
     WikiState,
     WikiTabRow,
@@ -132,6 +134,7 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
     sync_model(&s.get_cs_rows(), cs_rows, PartialEq::eq, |m| s.set_cs_rows(m));
     if let Some(doc) = w.active() {
         let id = doc.id;
+        let path_changed = s.get_doc_path().as_str() != doc.path;
         s.set_doc_open(true);
         s.set_doc_path(doc.path.clone().into());
         s.set_doc_meta(format!("{} · {} · {}", doc.author, doc.ver, doc.when).into());
@@ -162,6 +165,22 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
         sync_model(&s.get_blocks(), blocks, wiki_block_eq, |m| s.set_blocks(m));
         let links: Vec<slint::SharedString> = w.links(id).into_iter().map(Into::into).collect();
         sync_model(&s.get_links(), links, PartialEq::eq, |m| s.set_links(m));
+        let props: Vec<WikiProp> = w
+            .infobox(id)
+            .into_iter()
+            .map(|r| WikiProp {
+                key: r.key.into(),
+                value: r.value.into(),
+                link: r.link.into(),
+            })
+            .collect();
+        sync_model(&s.get_props(), props, PartialEq::eq, |m| s.set_props(m));
+        // the in-edges come from the engine, so they are fetched only when
+        // the open document actually changed
+        if path_changed {
+            s.set_backlinks(ModelRc::new(VecModel::from(Vec::<slint::SharedString>::new())));
+            s.invoke_backlinks_wanted(doc.path.clone().into());
+        }
         if *last != Some((id, w.editing)) {
             s.set_raw(doc.raw.clone().into());
             *last = Some((id, w.editing));
@@ -173,6 +192,10 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
         s.set_doc_status(0);
         sync_model(&s.get_blocks(), Vec::new(), wiki_block_eq, |m| s.set_blocks(m));
         sync_model(&s.get_links(), Vec::new(), PartialEq::eq, |m| s.set_links(m));
+        sync_model(&s.get_props(), Vec::new(), PartialEq::eq, |m| s.set_props(m));
+        sync_model(&s.get_backlinks(), Vec::new(), PartialEq::eq, |m| {
+            s.set_backlinks(m);
+        });
         *last = None;
     }
 }
@@ -886,16 +909,126 @@ pub(crate) fn wire_wiki_vote(
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(ui) = weak2.upgrade() else { return };
                 match outcome {
-                    Ok(_) => {
+                    Ok(reply) => {
                         ui.global::<WikiState>().invoke_cs_revert();
-                        let msg = ui.global::<Strings>().get_toast_proposed();
-                        ui.invoke_show_toast(msg);
+                        // the patch is fine either way - the fold never reads
+                        // a header - but a voter should see it before signing
+                        let bad_header = matches!(
+                            &reply,
+                            molt_core::Reply::Proposed { warnings, .. } if !warnings.is_empty()
+                        );
+                        let s = ui.global::<Strings>();
+                        if bad_header {
+                            let msg = s.get_toast_proposed_bad_header();
+                            ui.invoke_show_toast_error(msg);
+                        } else {
+                            let msg = s.get_toast_proposed();
+                            ui.invoke_show_toast(msg);
+                        }
                     }
                     Err(e) => ui.invoke_show_toast_error(error_toast(&ui, &e)),
                 }
             });
         });
     });
+}
+
+/// The engine-backed wiki READS (`knowledge_base_scale.md` §4.10): the
+/// open document's in-edges and the navigator's full-text search. Neither
+/// touches the local model - they only fill their own face, so a stale
+/// reply can never move a document under the user's hands.
+pub(crate) fn wire_wiki_index(ui: &AppWindow, ctx: &Ctx) {
+    let g = ui.global::<WikiState>();
+    {
+        let cx = ctx.clone();
+        g.on_backlinks_wanted(move |path| {
+            let wh = cx.wallet.clone();
+            let weak = cx.weak.clone();
+            let wanted = path.to_string();
+            cx.rt.spawn(async move {
+                let edges = match wh
+                    .execute(Command::WikiLinks {
+                        path: wanted.clone(),
+                        direction: Some("in".to_string()),
+                        predicate: None,
+                        limit: 0,
+                        cursor: 0,
+                    })
+                    .await
+                {
+                    Ok(Reply::WikiLinks { edges, .. }) => edges,
+                    // a document the approved base does not carry (a local
+                    // draft) has no in-edges — an honest empty list
+                    _ => Vec::new(),
+                };
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    let g = ui.global::<WikiState>();
+                    // the reply may outlive the tab that asked for it
+                    if g.get_doc_path().as_str() != wanted {
+                        return;
+                    }
+                    let mut rows: Vec<slint::SharedString> =
+                        edges.into_iter().map(|e| e.path.into()).collect();
+                    rows.sort();
+                    rows.dedup();
+                    sync_model(&g.get_backlinks(), rows, PartialEq::eq, |m| {
+                        g.set_backlinks(m);
+                    });
+                });
+            });
+        });
+    }
+    {
+        let cx = ctx.clone();
+        g.on_search(move |query| {
+            let text = query.trim().to_string();
+            let weak = cx.weak.clone();
+            if text.is_empty() {
+                if let Some(ui) = weak.upgrade() {
+                    let g = ui.global::<WikiState>();
+                    g.set_search_ran(false);
+                    sync_model(&g.get_search_hits(), Vec::new(), PartialEq::eq, |m| {
+                        g.set_search_hits(m);
+                    });
+                }
+                return;
+            }
+            let wh = cx.wallet.clone();
+            cx.rt.spawn(async move {
+                let hits = match wh
+                    .execute(Command::WikiSearch {
+                        query: text,
+                        tags: Vec::new(),
+                        kind: None,
+                        folder: None,
+                        limit: 50,
+                        cursor: 0,
+                    })
+                    .await
+                {
+                    Ok(Reply::WikiSearch { hits, .. }) => hits,
+                    _ => Vec::new(),
+                };
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    let g = ui.global::<WikiState>();
+                    let rows: Vec<WikiHitRow> = hits
+                        .into_iter()
+                        .map(|h| WikiHitRow {
+                            path: h.path.into(),
+                            title: h.title.unwrap_or_default().into(),
+                            snippet: h.snippet.into(),
+                        })
+                        .collect();
+                    sync_model(&g.get_search_hits(), rows, PartialEq::eq, |m| {
+                        g.set_search_hits(m);
+                    });
+                    g.set_search_ran(true);
+                });
+            });
+        });
+    }
 }
 
 /// The debounced wiki-draft persist (WP-D) and its load on workspace

@@ -62,6 +62,12 @@ mod wiki_index;
 /// (`docs/memory/knowledge_base_scale.md` §4.5).
 pub use wiki_index::graph::body_links;
 
+/// The document header's boundaries, its properties and what counts as a
+/// link inside one (§4.4). ONE parser, like [`body_links`]: the infobox
+/// the GUI renders and the relations the index reads come from the same
+/// rules, so a document cannot look different in the two.
+pub use wiki_index::front_matter::{first_heading, link_target, properties, split as split_front_matter};
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 

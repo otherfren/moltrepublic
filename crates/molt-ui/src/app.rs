@@ -20,7 +20,8 @@ use crate::net_tor::tor_mode_enabled;
 use crate::settings::issue_draft;
 use crate::surfaces::ChatUiState;
 use crate::wiki_bridge::{
-    wire_patch_view, wire_wiki, wire_wiki_draft, wire_wiki_export, wire_wiki_vote,
+    wire_patch_view, wire_wiki, wire_wiki_draft, wire_wiki_export, wire_wiki_index,
+    wire_wiki_vote,
 };
 use crate::{actions, AppWindow};
 
@@ -160,6 +161,7 @@ pub fn run_app(
     let (wiki_model, wiki_last) = wire_wiki(&ui);
     wire_wiki_vote(&ui, &ctx, &wiki_model, &wiki_last);
     wire_patch_view(&ui);
+    wire_wiki_index(&ui, &ctx);
     wire_wiki_export(&ui, &ctx);
     wire_wiki_draft(&ui, &ctx);
 

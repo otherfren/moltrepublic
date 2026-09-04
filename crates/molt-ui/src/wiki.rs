@@ -37,6 +37,19 @@ pub struct Block {
     pub spans: Vec<Span>,
 }
 
+/// One row of the header INFOBOX (`knowledge_base_scale.md` §4.10): one
+/// value of one property. `key` is empty on the continuation rows of a
+/// list, so a multi-valued relation reads as one labelled group.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Default)]
+pub struct InfoRow {
+    /// The property key, shown once per group.
+    pub key: String,
+    /// The value as a human reads it (a wiki link without its brackets).
+    pub value: String,
+    /// The document it points at, "" when the value is not a link.
+    pub link: String,
+}
+
 /// One inline run of a block: `link` is empty for plain text, else the
 /// `.md` target the run points at.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -908,7 +921,11 @@ impl Wiki {
         let id = match self.docs.iter().find(|d| !d.deleted && d.path == t) {
             Some(d) => Some(d.id),
             None => {
-                let mut hits = self.docs.iter().filter(|d| !d.deleted && d.name() == t);
+                // …and the readable `[[Name]]` form, which carries no
+                // extension: a bare name matches the stem too
+                let mut hits = self.docs.iter().filter(|d| {
+                    !d.deleted && (d.name() == t || d.name().trim_end_matches(".md") == t)
+                });
                 match (hits.next(), hits.next()) {
                     (Some(d), None) => Some(d.id),
                     _ => None,
@@ -1467,11 +1484,11 @@ impl Wiki {
         let Some(d) = self.doc(id) else {
             return Vec::new();
         };
-        let work = parse_blocks(&d.raw);
+        let work = parse_blocks(body_of(&d.raw));
         let Some(base) = &d.base else {
             return work.into_iter().map(|b| (b, BlockStatus::Added)).collect();
         };
-        let old = parse_blocks(&base.raw);
+        let old = parse_blocks(body_of(&base.raw));
         let mut out = Vec::new();
         for op in capture_diff_slices(Algorithm::Myers, &old, &work) {
             match op {
@@ -1514,6 +1531,30 @@ impl Wiki {
                         }
                     }
                 }
+            }
+        }
+        out
+    }
+
+    /// The active doc's front matter as INFOBOX rows (§4.10): the viewer
+    /// shows the header as a property table, the editor keeps the raw
+    /// text. A header outside the subset yields no rows - the same
+    /// verdict the index reaches, from the same parser.
+    pub fn infobox(&self, id: DocId) -> Vec<InfoRow> {
+        let Some(d) = self.doc(id) else {
+            return Vec::new();
+        };
+        let Some(props) = molt_engine::properties(&d.raw).0 else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (key, value) in &props {
+            for (i, (shown, link)) in info_values(value).into_iter().enumerate() {
+                out.push(InfoRow {
+                    key: if i == 0 { key.clone() } else { String::new() },
+                    value: shown,
+                    link,
+                });
             }
         }
         out
@@ -1910,6 +1951,10 @@ pub fn parse_blocks(raw: &str) -> Vec<Block> {
                     continue;
                 }
                 if let Some(mut b) = cur.take() {
+                    // a fenced block is verbatim: no link scan there
+                    if b.kind != 4 {
+                        expand_wiki_links(&mut b);
+                    }
                     if b.kind == 4 {
                         b.text = b.text.trim_end_matches('\n').to_string();
                         b.spans = if b.text.is_empty() {
@@ -1924,9 +1969,17 @@ pub fn parse_blocks(raw: &str) -> Vec<Block> {
                     out.push(b);
                 }
             }
-            Event::Text(t) | Event::Code(t) => {
+            Event::Text(t) => {
                 if let Some(b) = &mut cur {
                     b.push_run(&t, &link);
+                }
+            }
+            // a code run is marked while the block is built, so the
+            // `[[Name]]` scan below can leave it alone: a link in an
+            // example is not navigation (the rule the index follows)
+            Event::Code(t) => {
+                if let Some(b) = &mut cur {
+                    b.push_run(&t, if link.is_empty() { CODE_RUN } else { &link });
                 }
             }
             Event::SoftBreak | Event::HardBreak => {
@@ -1943,6 +1996,115 @@ pub fn parse_blocks(raw: &str) -> Vec<Block> {
 /// `.md` link targets in order of first appearance, deduped.
 pub fn parse_links(raw: &str) -> Vec<String> {
     molt_engine::body_links(raw)
+}
+
+/// The document without its front matter: the header is rendered as an
+/// INFOBOX, never as prose (§4.10). Both sides of the preview diff go
+/// through this, or every document with a header would read as changed.
+pub fn body_of(raw: &str) -> &str {
+    molt_engine::split_front_matter(raw).1
+}
+
+/// The private marker an inline-code run carries while its block is being
+/// built. Cleared before the block leaves [`parse_blocks`]; no real link
+/// target can collide with it.
+const CODE_RUN: &str = "\u{1}";
+
+/// Turn the readable `[[Name]]` / `[[Name|shown]]` form into link runs,
+/// once the block's runs are WHOLE. It cannot be done per event: an
+/// unmatched `[` makes pulldown-cmark split a double bracket across
+/// several text events, so a per-event scan never sees the pair.
+fn expand_wiki_links(b: &mut Block) {
+    let mut out: Vec<Span> = Vec::new();
+    let push = |out: &mut Vec<Span>, text: &str, link: &str| {
+        if text.is_empty() {
+            return;
+        }
+        match out.last_mut() {
+            Some(s) if s.link == link => s.text.push_str(text),
+            _ => out.push(Span {
+                text: text.to_string(),
+                link: link.to_string(),
+            }),
+        }
+    };
+    for sp in std::mem::take(&mut b.spans) {
+        if sp.link == CODE_RUN {
+            push(&mut out, &sp.text, "");
+            continue;
+        }
+        if !sp.link.is_empty() {
+            push(&mut out, &sp.text, &sp.link);
+            continue;
+        }
+        let mut rest = sp.text.as_str();
+        while let Some(at) = rest.find("[[") {
+            let Some(end) = rest[at + 2..].find("]]") else {
+                break;
+            };
+            let inner = &rest[at + 2..at + 2 + end];
+            let (target, shown) = match inner.split_once('|') {
+                Some((t, d)) => (t.trim(), d.trim()),
+                None => (inner.trim(), inner.trim()),
+            };
+            if target.is_empty() || shown.is_empty() {
+                // not a link after all — the brackets stay the text they are
+                push(&mut out, &rest[..at + 2], "");
+                rest = &rest[at + 2..];
+                continue;
+            }
+            push(&mut out, &rest[..at], "");
+            push(&mut out, shown, target);
+            rest = &rest[at + 2 + end + 2..];
+        }
+        push(&mut out, rest, "");
+    }
+    b.text = out.iter().map(|s| s.text.as_str()).collect();
+    b.spans = out;
+}
+
+/// One header value as infobox rows: `(shown, link target)`. A mapping is
+/// the qualified relation's shape and reads as one row.
+fn info_values(value: &serde_json::Value) -> Vec<(String, String)> {
+    let scalar = |v: &serde_json::Value| -> Option<(String, String)> {
+        match v {
+            serde_json::Value::String(s) => Some((
+                molt_engine::link_target(s).unwrap_or(s).to_string(),
+                molt_engine::link_target(s).unwrap_or_default().to_string(),
+            )),
+            serde_json::Value::Number(n) => Some((n.to_string(), String::new())),
+            _ => None,
+        }
+    };
+    let flat = |map: &serde_json::Map<String, serde_json::Value>| -> (String, String) {
+        // the object key of a qualified relation is `to` by convention;
+        // any other link-valued member still carries the row
+        let link = map
+            .get("to")
+            .into_iter()
+            .chain(map.values())
+            .filter_map(|v| v.as_str())
+            .find_map(molt_engine::link_target)
+            .unwrap_or_default()
+            .to_string();
+        let shown = map
+            .iter()
+            .filter_map(|(k, v)| scalar(v).map(|(s, _)| format!("{k}: {s}")))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        (shown, link)
+    };
+    match value {
+        serde_json::Value::Array(items) => items
+            .iter()
+            .filter_map(|i| match i {
+                serde_json::Value::Object(map) => Some(flat(map)),
+                other => scalar(other),
+            })
+            .collect(),
+        serde_json::Value::Object(map) => vec![flat(map)],
+        other => scalar(other).into_iter().collect(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2308,6 +2470,115 @@ mod tests {
     /// engine read, a moved base recolors local work instead of dropping
     /// it, and ids stay stable across refreshes (the nav/tab state hangs
     /// off them).
+    /// `knowledge_base_scale.md` §4.10: the VIEWER shows the front matter
+    /// as an infobox and drops it from the prose; a link-valued property
+    /// carries its target, so the row is as clickable as a body link. The
+    /// editor is untouched - it keeps the raw header.
+    #[test]
+    fn the_header_becomes_an_infobox_and_leaves_the_prose() {
+        let mut w = Wiki::empty();
+        let doc = "---\ntype: person\nworks_at: \"[[Acme]]\"\nknows: [\"[[Bea]]\", \"[[Cara]]\"]\nborn: 1975\n---\n# Anna\n\nShe builds things.\n";
+        w.set_base(
+            &[
+                ("anna.md".to_string(), doc.to_string()),
+                ("Acme.md".to_string(), "# Acme\n".to_string()),
+            ],
+            1,
+        );
+        let id = w.docs.iter().find(|d| d.path == "anna.md").expect("anna").id;
+        w.open(id);
+
+        // the prose no longer carries the header
+        let blocks = w.preview(id);
+        assert!(
+            !blocks.iter().any(|(b, _)| b.text.contains("type:")
+                || b.text.contains("works_at")
+                || b.text.starts_with("---")),
+            "the header leaked into the prose: {:?}",
+            blocks.iter().map(|(b, _)| &b.text).collect::<Vec<_>>()
+        );
+        assert!(
+            blocks.iter().any(|(b, _)| b.text == "Anna"),
+            "…but the heading below it stays"
+        );
+
+        // …and it reads as a property table instead
+        let rows = w.infobox(id);
+        let by_key = |k: &str| -> Vec<&InfoRow> {
+            // a list shows its key once, on the first row
+            let start = rows.iter().position(|r| r.key == k).expect("key present");
+            rows[start..]
+                .iter()
+                .take_while(|r| r.key == k || r.key.is_empty())
+                .collect()
+        };
+        assert_eq!(by_key("type")[0].value, "person");
+        assert_eq!(by_key("type")[0].link, "", "a plain value is no link");
+        assert_eq!(by_key("born")[0].value, "1975");
+        let works = by_key("works_at");
+        assert_eq!(works[0].value, "Acme", "the brackets are markup, not text");
+        assert_eq!(works[0].link, "Acme", "…and the row points at the document");
+        let knows = by_key("knows");
+        assert_eq!(knows.len(), 2, "one row per value");
+        assert_eq!(knows[0].key, "knows");
+        assert_eq!(knows[1].key, "", "the key is shown once");
+        assert_eq!(knows[1].value, "Cara");
+
+        // the editor's buffer is the raw document, header included
+        assert!(w.doc(id).expect("doc").raw.starts_with("---\n"));
+
+        // a header outside the subset simply has no rows
+        let mut w2 = Wiki::empty();
+        w2.set_base(
+            &[("bad.md".to_string(), "---\n- a list\n---\n# B\n".to_string())],
+            1,
+        );
+        let bad = w2.docs.first().expect("bad.md").id;
+        assert!(w2.infobox(bad).is_empty());
+    }
+
+    /// The readable `[[Name]]` form is a link in the preview AND resolves
+    /// on click - the index already followed it, the pane did not.
+    #[test]
+    fn a_wiki_link_renders_and_opens() {
+        let mut w = Wiki::empty();
+        w.set_base(
+            &[
+                (
+                    "start.md".to_string(),
+                    "See [[Anna]] and [[Anna|her page]], `[[not a link]]`.\n".to_string(),
+                ),
+                ("Anna.md".to_string(), "# Anna\n".to_string()),
+            ],
+            1,
+        );
+        let start = w.docs.iter().find(|d| d.path == "start.md").expect("start").id;
+        w.open(start);
+        let blocks = w.preview(start);
+        let spans: Vec<(String, String)> = blocks
+            .iter()
+            .flat_map(|(b, _)| b.spans.iter())
+            .map(|s| (s.text.clone(), s.link.clone()))
+            .collect();
+        assert!(
+            spans.contains(&("Anna".to_string(), "Anna".to_string())),
+            "the bare form links: {spans:?}"
+        );
+        assert!(
+            spans.contains(&("her page".to_string(), "Anna".to_string())),
+            "the display half is shown, the target is the name: {spans:?}"
+        );
+        assert!(
+            spans.iter().any(|(t, l)| t.contains("not a link") && l.is_empty()),
+            "a code span is not navigation: {spans:?}"
+        );
+
+        // …and the click resolves a name that carries no extension
+        assert!(w.open_link("Anna"), "a bare name opens its document");
+        assert_eq!(w.active().expect("active").path, "Anna.md");
+        assert!(!w.open_link("Nobody"), "a dead link stays put");
+    }
+
     #[test]
     fn set_base_fills_updates_and_keeps_local_work() {
         let mut w = Wiki::empty();

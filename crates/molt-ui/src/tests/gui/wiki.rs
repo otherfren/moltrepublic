@@ -426,3 +426,113 @@ fn the_wiki_export_refusals_render_in_german() {
         assert!(!de.contains(phrase), "phrase without a German arm: {de}");
     }
 }
+
+/// **The viewer's infobox, headless** (`knowledge_base_scale.md` §4.10):
+/// the front matter reaches Slint as a property table, the raw header
+/// never reaches the prose, and a link-valued property carries the target
+/// the row is clickable with.
+#[test]
+fn the_front_matter_reaches_slint_as_a_property_table() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    let _wiki = wire_wiki(&ui);
+    let g = ui.global::<WikiState>();
+    g.set_base_docs(ModelRc::new(VecModel::from(vec![
+        WikiBase {
+            path: "anna.md".into(),
+            content: "---\ntype: person\nworks_at: \"[[Acme]]\"\n---\n# Anna\n\nShe builds things."
+                .into(),
+        },
+        WikiBase {
+            path: "Acme.md".into(),
+            content: "# Acme".into(),
+        },
+    ])));
+    g.set_base_rev(1);
+    g.invoke_base_arrived();
+    let rows = g.get_nav_rows();
+    let anna = (0..rows.row_count())
+        .filter_map(|i| rows.row_data(i))
+        .find(|r| r.label.as_str() == "anna.md")
+        .expect("anna row");
+    g.invoke_nav_open(anna.id);
+
+    let props = g.get_props();
+    let got: Vec<(String, String, String)> = (0..props.row_count())
+        .filter_map(|i| props.row_data(i))
+        .map(|p| {
+            (
+                p.key.to_string(),
+                p.value.to_string(),
+                p.link.to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ("type".to_string(), "person".to_string(), String::new()),
+            ("works_at".to_string(), "Acme".to_string(), "Acme".to_string()),
+        ],
+        "the header renders as a table, the link keeps its target"
+    );
+    let blocks = g.get_blocks();
+    assert!(
+        !(0..blocks.row_count())
+            .filter_map(|i| blocks.row_data(i))
+            .any(|b| b.text.as_str().contains("type:")),
+        "the raw header must not appear as prose"
+    );
+    // …and the editor still sees the document as written
+    assert!(g.get_raw().as_str().starts_with("---\n"));
+
+    // closing the document clears the table
+    g.invoke_close_active();
+    assert_eq!(g.get_props().row_count(), 0);
+}
+
+/// **The in-edge request rides the DOCUMENT change**, not every model
+/// mutation: an engine read per keystroke would be a new cost on every
+/// edit, and the reply would race the typing it belongs to.
+#[test]
+fn the_backlink_request_rides_the_document_change() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    let _wiki = wire_wiki(&ui);
+    let g = ui.global::<WikiState>();
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+    let seen = asked.clone();
+    g.on_backlinks_wanted(move |p| seen.borrow_mut().push(p.to_string()));
+
+    g.set_base_docs(ModelRc::new(VecModel::from(vec![
+        WikiBase {
+            path: "a.md".into(),
+            content: "# A".into(),
+        },
+        WikiBase {
+            path: "b.md".into(),
+            content: "# B".into(),
+        },
+    ])));
+    g.set_base_rev(1);
+    g.invoke_base_arrived();
+    let rows = g.get_nav_rows();
+    let id_of = |name: &str| {
+        (0..rows.row_count())
+            .filter_map(|i| rows.row_data(i))
+            .find(|r| r.label.as_str() == name)
+            .expect("row")
+            .id
+    };
+    g.invoke_nav_open(id_of("a.md"));
+    assert_eq!(asked.borrow().as_slice(), ["a.md"], "opening asks once");
+
+    // an edit is not a new document
+    g.invoke_edit_toggle();
+    g.invoke_edited(format!("{}\n\nmore", g.get_raw()).into());
+    assert_eq!(asked.borrow().len(), 1, "an edit must not ask again");
+
+    // …switching to another one is
+    g.invoke_nav_open(id_of("b.md"));
+    assert_eq!(asked.borrow().as_slice(), ["a.md", "b.md"]);
+}

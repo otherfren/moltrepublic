@@ -1,8 +1,9 @@
 # Knowledge base at scale: the shared wiki for tens of thousands of entries
 
 **Status: PARTLY BUILT - design of 2026-09-03, decisions ratified by the
-user the same evening (§1). K0-K3 landed on master 2026-09-04; K4, K5 and
-K7 are open; K6 is BLOCKED on one product decision (§4.9).** Extends the
+user the same evening (§1). K0-K5 and K7 landed on master 2026-09-04;
+K6 is BLOCKED on one product decision (§4.9), and K7's lazy tree is
+deliberately deferred (§4.10).** Extends the
 executed fold design `docs_archive/memory/shared_memory_real.md` and the
 export `docs_archive/memory/wiki_export_plan.md`; K6 changes what a
 checkpoint carries (`docs_archive/chain/log_compaction.md` §B.6a) and its
@@ -507,21 +508,38 @@ carries the FOLDED tree once, plus the non-wiki Memory entries.
 
 ### 4.10 The GUI (K7)
 
-- **Infobox:** the wiki viewer hides the header block and renders the
-  parsed properties as a key/value table above the body, links clickable,
-  unresolved links marked; the editor shows the raw text. `[[Name]]` in
-  the body renders as a link (§4.5).
-- **Lazy tree:** `Wiki.docs` holds metadata for every page and content
-  only for open tabs and drafts; the base arrives via `WikiList` (paged)
-  and `WikiGet` on open instead of the snapshot; `set_base` reconciles by
-  path through a `HashMap` (the quadratic scans at `wiki.rs:357-410` go);
-  `to_draft` serialises edited documents only. `SurfaceSnapshot.wiki_tree`
-  is removed and `wiki_docs: u64` added (`#[serde(default)]`).
-- **Search and backlinks:** a search field over the nav issues
-  `wiki_search`; an open page shows its in-edges from `wiki_links`.
+- **Infobox** — BUILT 2026-09-04. The viewer hides the header block and
+  renders the parsed properties as a key/value table above the body, a
+  link-valued property clickable exactly like a body link; the editor
+  keeps the raw text. The header is dropped from BOTH sides of the
+  preview diff, or every document carrying one would read as fully
+  changed.
+- **`[[Name]]` in the body** — BUILT. Two traps found in the building:
+  pulldown-cmark splits an unmatched `[[` across several text events, so
+  the scan has to run over a block's FINISHED runs (a per-event scan
+  never sees the pair); and `open_link` compared `d.name()`, which keeps
+  the `.md`, so a bare name resolved to nothing. Inline code is excluded,
+  the same rule the index follows.
+- **Search and backlinks** — BUILT. A field over the navigator issues
+  `wiki_search` and REPLACES the tree with its ranked hits (an empty
+  field brings the tree back); the open document shows its in-edges from
+  `wiki_links { direction: "in" }`, header relations included. Both are
+  reads that fill only their own face, and a reply that outlived its tab
+  is dropped rather than shown against the wrong document. The in-edge
+  request rides the DOCUMENT change, not every model mutation.
+- **Lazy tree — NOT BUILT, deliberately deferred.** `Wiki.docs` still
+  holds every page's content, and `SurfaceSnapshot.wiki_tree` still ships
+  the folded tree with every Memory read. Why it was left: it is the one
+  piece of K7 that changes a WIRE CONTRACT (removing a snapshot field)
+  and rewrites the GUI's whole data path from "mirror a snapshot" to
+  "issue reads and reconcile replies" — a large, regression-prone change
+  whose benefit is invisible below the scale that has never existed yet.
+  The paged reads an AGENT uses (K1) do not depend on it; this is the
+  GUI's own memory, not the republic's. When it is built, it belongs with
+  the off-actor index builds deferred in §4.5/§4.6: the three together are
+  the "100 MiB is real now" change-set.
 - Validation: the headless GUI tests in `crates/molt-ui/src/tests/gui/`
-  (infobox rows by element id, a search result click opens the page), and
-  ONE `cargo build -j 1 -p molt-ui-window -p molt-ui` per change-set.
+  and ONE `cargo build -j 1 -p molt-ui-window -p molt-ui` per change-set.
 
 ## 5. Work packages (build order, each red-first, each green on master)
 
@@ -549,8 +567,8 @@ carries the FOLDED tree once, plus the non-wiki Memory entries.
   §4.6). An empty query with no filter finds NOTHING, never everything.
 - **K6 A cut carries the tree** (core fold, engine verify/checkpoint,
   ChainChange variant). §4.9, AFTER the review gate.
-- **K7 GUI** (infobox, lazy tree, search, backlinks, snapshot diet).
-  §4.10.
+- **K7 GUI** — BUILT 2026-09-04 except the lazy tree / snapshot diet,
+  which is deferred with its reason in §4.10.
 
 K0-K3 are independent of K4-K7 and small; K5 depends on K4 (properties
 feed the facets); K7 depends on K1 and K4.

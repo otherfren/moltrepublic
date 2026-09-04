@@ -849,7 +849,59 @@ export component MemoryPane inherits VerticalLayout {
                             }
                         }
                     }
-                    ScrollBody {
+                    // the wiki's search: a query REPLACES the tree with its
+                    // ranked hits, an empty field brings the tree back. The
+                    // index is the engine's — the same one an agent reads.
+                    VerticalLayout {
+                        padding-left: 6px;
+                        padding-right: 6px;
+                        padding-bottom: 4px;
+                        AppField {
+                            placeholder: Strings.mem-search-ph;
+                            text <=> WikiState.search-query;
+                            edited => {
+                                WikiState.search(self.text);
+                            }
+                        }
+                    }
+                    if WikiState.search-query != "": ScrollBody {
+                        pad: 6px;
+                        gap: 4px;
+                        if WikiState.search-ran && WikiState.search-hits.length == 0: Text {
+                            text: Strings.mem-search-none;
+                            color: Theme.faint;
+                            font-size: Theme.fs-cap;
+                        }
+                        for h in WikiState.search-hits: Rectangle {
+                            background: hta.has-hover ? Theme.zebra : transparent;
+                            border-radius: Theme.win95 ? 0px : 5px;
+                            height: hbox.preferred-height;
+                            hbox := VerticalLayout {
+                                padding: 4px;
+                                spacing: 1px;
+                                Text {
+                                    text: h.title == "" ? h.path : h.title;
+                                    color: Theme.text;
+                                    font-size: Theme.fs-cap;
+                                    font-weight: 600;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: h.snippet;
+                                    color: Theme.dim;
+                                    font-size: Theme.fs-cap;
+                                    wrap: word-wrap;
+                                }
+                            }
+                            hta := TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => {
+                                    WikiState.open-link(h.path);
+                                }
+                            }
+                        }
+                    }
+                    if WikiState.search-query == "": ScrollBody {
                         pad: 6px;
                         gap: 2px;
                         for r[idx] in WikiState.nav-rows: Rectangle {
@@ -1488,6 +1540,45 @@ export component MemoryPane inherits VerticalLayout {
                             color: Theme.faint;
                             font-size: 11px;
                         }
+                        // the front matter as a PROPERTY TABLE: the viewer
+                        // shows what the header means, the editor shows the
+                        // header itself. A link-valued property is as
+                        // clickable as a link in the prose.
+                        if WikiState.props.length > 0: Rectangle {
+                            background: Theme.panel-2;
+                            border-radius: Theme.win95 ? 0px : 6px;
+                            border-width: Theme.border-w;
+                            border-color: Theme.line;
+                            height: pbox.preferred-height;
+                            pbox := VerticalLayout {
+                                padding: 8px;
+                                spacing: 3px;
+                                for p in WikiState.props: HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: start;
+                                    Text {
+                                        width: 120px;
+                                        text: p.key;
+                                        color: Theme.dim;
+                                        font-size: Theme.fs-cap;
+                                        font-weight: 600;
+                                        overflow: elide;
+                                        vertical-alignment: center;
+                                    }
+                                    if p.link != "": LinkRun {
+                                        label: p.value;
+                                        target: p.link;
+                                        fsize: Theme.fs-cap;
+                                    }
+                                    if p.link == "": Text {
+                                        text: p.value;
+                                        color: Theme.text;
+                                        font-size: Theme.fs-cap;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
                         // a click on the document body opens the markdown
                         // editor — the preview reads, one click writes.
                         // The edit TouchArea sits UNDER the block view so
@@ -1527,6 +1618,30 @@ export component MemoryPane inherits VerticalLayout {
                                 TagChip {
                                     glyph: "🔗";
                                     label: l;
+                                }
+                            }
+                        }
+                        // …and who points HERE. The other half of a wiki:
+                        // the engine's in-edges, header relations included.
+                        if WikiState.backlinks.length > 0: VerticalLayout {
+                            padding-top: 10px;
+                            spacing: 6px;
+                            Rectangle {
+                                height: Theme.border-w;
+                                background: Theme.line;
+                            }
+                            Text {
+                                text: Strings.mem-backlinks;
+                                color: Theme.dim;
+                                font-size: Theme.fs-cap;
+                                font-weight: 600;
+                            }
+                            for l in WikiState.backlinks: HorizontalLayout {
+                                alignment: start;
+                                LinkRun {
+                                    label: l;
+                                    target: l;
+                                    fsize: Theme.fs-cap;
                                 }
                             }
                         }
