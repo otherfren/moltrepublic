@@ -53,7 +53,7 @@ async fn propose(w: &WalletHandle, title: &str) -> ProposalId {
         .await
         .expect("propose")
     {
-        Reply::Proposed { id } => id,
+        Reply::Proposed { id, .. } => id,
         other => panic!("unexpected reply: {other:?}"),
     }
 }

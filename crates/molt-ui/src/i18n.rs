@@ -745,8 +745,12 @@ lexicon! {
     field_mcp_port: "MCP port", "MCP-Port";
     field_mcp_allow: "Allowed client IPs", "Erlaubte Client-IPs";
     field_mcp_token: "API token", "API-Token";
+    field_mcp_read_token: "Read-only token", "Nur-Lese-Token";
     set_rotate: "Rotate", "Rotieren";
-    set_token_note: "Sent by clients as the token in initialize. Rotate writes a fresh token to config.toml; it takes effect on restart.", "Von Clients als token im initialize gesendet. Rotieren schreibt ein frisches Token in die config.toml; es gilt ab dem Neustart.";
+    set_issue: "Issue", "Erzeugen";
+    set_revoke: "Revoke", "Entziehen";
+    set_token_note: "Sent by clients as the token in initialize. A rotation applies to the next connection.", "Von Clients als token im initialize gesendet. Eine Rotation gilt ab der nächsten Verbindung.";
+    set_read_token_note: "Reads only: state, chain, members, file list, wiki. Empty = off.", "Liest nur: Zustand, Chain, Mitglieder, Dateiliste, Wiki. Leer = aus.";
     peek_show: "Reveal", "Anzeigen";
     peek_hide: "Hide", "Verbergen";
     field_headless: "Headless (MCP only, no GUI)", "Headless (nur MCP, keine GUI)";

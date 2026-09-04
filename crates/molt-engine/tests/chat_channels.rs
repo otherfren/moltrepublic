@@ -205,7 +205,7 @@ async fn channels_govern_chat_and_filter_coequally_across_instances() {
         .await
         .expect("propose")
     {
-        Reply::Proposed { id } => id,
+        Reply::Proposed { id, .. } => id,
         other => panic!("unexpected: {other:?}"),
     };
     assert!(

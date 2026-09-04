@@ -87,6 +87,40 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     }
 
     {
+        // Issue or rotate the READ-ONLY key (`knowledge_base_scale.md`
+        // §4.7). Same mint, same failure posture as the seat key.
+        let cx = ctx.clone();
+        ui.on_rotate_read_token(move || {
+            let Some(ui) = cx.weak.upgrade() else {
+                return;
+            };
+            let Ok(token) = molt_config::random_token() else {
+                ui.invoke_show_toast_error(Strings::get(&ui).get_set_token_failed());
+                return;
+            };
+            ui.set_cfg_mcp_read_token(token.into());
+            let settings = read_settings_draft(&ui, &stored_settings(&cx.last_settings));
+            let wake = ui.get_cfg_poke_wake().to_string();
+            cx.issue_draft(wake, settings);
+        });
+    }
+
+    {
+        // Revoke the read-only key: empty IS the value (read access off),
+        // and the config writer drops the key rather than storing "".
+        let cx = ctx.clone();
+        ui.on_revoke_read_token(move || {
+            let Some(ui) = cx.weak.upgrade() else {
+                return;
+            };
+            ui.set_cfg_mcp_read_token(String::new().into());
+            let settings = read_settings_draft(&ui, &stored_settings(&cx.last_settings));
+            let wake = ui.get_cfg_poke_wake().to_string();
+            cx.issue_draft(wake, settings);
+        });
+    }
+
+    {
         // Probe the S3 backup target in the draft (not the saved settings),
         // so the user can validate endpoint + credentials before saving.
         // The engine runs a real SigV4-signed HEAD over the configured

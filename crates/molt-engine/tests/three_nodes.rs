@@ -197,7 +197,7 @@ async fn a_2_of_3_republic_founds_and_applies_a_rename_at_threshold() {
         .await
         .expect("propose rename")
     {
-        Reply::Proposed { id } => id,
+        Reply::Proposed { id, .. } => id,
         other => panic!("unexpected: {other:?}"),
     };
     assert!(

@@ -132,7 +132,10 @@ impl State {
         if self.config.self_cosign {
             self.chain_sign_and_gossip_approval(id);
         }
-        Ok(molt_core::Reply::Proposed { id: ProposalId(id) })
+        Ok(molt_core::Reply::Proposed {
+            id: ProposalId(id),
+            warnings: Vec::new(),
+        })
     }
 
     /// WP4b stage 3, receive side: verify BEFORE sign. Recompute the

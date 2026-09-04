@@ -1530,7 +1530,7 @@ async fn founding_governs_over_the_direct_mesh() {
         .await
         .expect("propose")
     {
-        Reply::Proposed { id } => id,
+        Reply::Proposed { id, .. } => id,
         other => panic!("unexpected: {other:?}"),
     };
     // one signature is not enough — a 2-of-2 change stays pending
@@ -1741,7 +1741,7 @@ async fn a_reopened_member_recovers_open_proposals_from_the_mesh() {
         .await
         .expect("propose")
     {
-        Reply::Proposed { id } => id,
+        Reply::Proposed { id, .. } => id,
         other => panic!("unexpected: {other:?}"),
     };
     assert!(
@@ -1998,7 +1998,7 @@ async fn a_set_image_proposal_carries_its_bytes_across_the_mesh() {
         .await
         .expect("propose")
     {
-        Reply::Proposed { id } => id,
+        Reply::Proposed { id, .. } => id,
         other => panic!("unexpected: {other:?}"),
     };
 

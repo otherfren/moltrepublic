@@ -95,7 +95,7 @@ fn workspace_state_survives_close_and_reopen() {
             .await
             .expect("propose")
         {
-            Reply::Proposed { id } => id,
+            Reply::Proposed { id, .. } => id,
             other => panic!("unexpected: {other:?}"),
         };
         w.execute(Command::Approve { proposal: pid })

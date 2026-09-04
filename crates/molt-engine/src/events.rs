@@ -372,6 +372,7 @@ impl State {
                         if surface == Surface::Memory {
                             // the base moved — the supersede walk runs in
                             // the legacy apply path too (§4 determinism)
+                            self.note_wiki_change(moved.as_ref());
                             self.supersede_stale_wiki(moved.as_ref());
                         }
                     }

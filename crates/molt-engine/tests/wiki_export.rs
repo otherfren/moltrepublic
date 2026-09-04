@@ -97,7 +97,7 @@ async fn propose_wiki(w: &WalletHandle, patch: &str) -> molt_core::ProposalId {
         .await
         .expect("propose the patch")
     {
-        Reply::Proposed { id } => id,
+        Reply::Proposed { id, .. } => id,
         other => panic!("unexpected: {other:?}"),
     }
 }

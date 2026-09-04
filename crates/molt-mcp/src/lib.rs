@@ -40,7 +40,7 @@ pub async fn serve_stdio(handle: WalletHandle) -> std::io::Result<()> {
     tracing::info!("MCP server on stdio");
     let reader = BufReader::new(tokio::io::stdin());
     let writer = tokio::io::stdout();
-    serve_conn(handle, reader, writer, None).await
+    serve_conn(handle, reader, writer, None).await // stdio IS the seat
 }
 
 /// Serve the MCP protocol over a TCP listener. A connection is refused unless the
@@ -53,6 +53,7 @@ pub async fn serve_tcp(
     allow_all: bool,
     allowlist: Vec<IpAddr>,
     token: String,
+    read_token: String,
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(%addr, allow_all, allowed = allowlist.len(), "MCP server on tcp");
@@ -85,27 +86,65 @@ pub async fn serve_tcp(
         // the new one. The running session is the one source of truth, so
         // rotating through either surface applies at once. A failed read
         // falls back to the boot token — never to none.
-        let tok = live_token(&handle).await.unwrap_or_else(|| token.clone());
+        let creds = live_tokens(&handle)
+            .await
+            .unwrap_or_else(|| Credentials {
+                seat: token.clone(),
+                read: read_token.clone(),
+            });
         tokio::spawn(async move {
             let _permit = permit; // released with the connection
             let (r, w) = sock.into_split();
-            if let Err(e) = serve_conn(h, BufReader::new(r), w, Some(tok)).await {
+            if let Err(e) = serve_conn(h, BufReader::new(r), w, Some(creds)).await {
                 tracing::warn!(%peer, error = %e, "MCP connection ended");
             }
         });
     }
 }
 
-/// The MCP token as the RUNNING session holds it.
+/// What a connection's credential admits
+/// (`docs/memory/knowledge_base_scale.md` §4.7). Host-local: the republic
+/// knows no roles — the human narrows their own tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// The read tools, nothing else.
+    Read,
+    /// The whole seat, as before.
+    Seat,
+}
+
+/// The two keys a TCP endpoint accepts.
+#[derive(Debug, Clone)]
+struct Credentials {
+    /// The seat key. Empty keeps today's meaning: everybody is the seat.
+    seat: String,
+    /// The read-only key. Empty matches NOBODY — never "unauthenticated".
+    read: String,
+}
+
+/// The MCP tokens as the RUNNING session holds them.
 ///
 /// `None` only when the engine cannot be reached; the caller then keeps the
-/// value it booted with, because the alternative (an empty token) would
-/// disable authentication exactly when something is already wrong.
-async fn live_token(handle: &WalletHandle) -> Option<String> {
+/// values it booted with, because the alternative (an empty seat token)
+/// would disable authentication exactly when something is already wrong.
+async fn live_tokens(handle: &WalletHandle) -> Option<Credentials> {
     match handle.execute(Command::ReadSession).await {
-        Ok(Reply::Session(s)) => Some(s.settings.mcp_token.clone()),
+        Ok(Reply::Session(s)) => Some(Credentials {
+            seat: s.settings.mcp_token.clone(),
+            read: s.settings.mcp_read_token.clone(),
+        }),
         _ => None,
     }
+}
+
+/// Constant-time equality (review F6): a byte-by-byte early exit is a
+/// timing oracle on an endpoint credential.
+fn secret_eq(given: &str, required: &str) -> bool {
+    given.len() == required.len()
+        && bool::from(subtle::ConstantTimeEq::ct_eq(
+            given.as_bytes(),
+            required.as_bytes(),
+        ))
 }
 
 /// The newline-delimited JSON-RPC loop, generic over any reader/writer. When
@@ -115,14 +154,14 @@ async fn serve_conn<R, W>(
     handle: WalletHandle,
     mut reader: R,
     mut writer: W,
-    auth: Option<String>,
+    auth: Option<Credentials>,
 ) -> std::io::Result<()>
 where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
     // stdio (auth == None) is trusted from the start; TCP starts unauthenticated.
-    let mut authed = auth.is_none();
+    let mut authed: Option<Scope> = auth.is_none().then_some(Scope::Seat);
     let mut line = String::new();
     loop {
         line.clear();
@@ -161,7 +200,7 @@ where
             continue;
         }
         let response = match serde_json::from_str::<Value>(trimmed) {
-            Ok(req) => handle_rpc(&handle, req, auth.as_deref(), &mut authed).await,
+            Ok(req) => handle_rpc(&handle, req, auth.as_ref(), &mut authed).await,
             Err(e) => Some(error_response(
                 Value::Null,
                 -32700,
@@ -189,8 +228,8 @@ const MAX_RPC_LINE: usize = 1024 * 1024;
 async fn handle_rpc(
     handle: &WalletHandle,
     req: Value,
-    auth: Option<&str>,
-    authed: &mut bool,
+    auth: Option<&Credentials>,
+    authed: &mut Option<Scope>,
 ) -> Option<Value> {
     let has_id = req.get("id").is_some();
     let id = req.get("id").cloned().unwrap_or(Value::Null);
@@ -199,20 +238,28 @@ async fn handle_rpc(
 
     // `initialize` carries the token; authenticate here.
     if method == "initialize" {
-        if let Some(required) = auth {
+        if let Some(cred) = auth {
             let given = params.get("token").and_then(Value::as_str).unwrap_or("");
-            // constant-time (review F6): a byte-by-byte early exit is a
-            // timing oracle on the one credential the endpoint has
-            let matches = given.len() == required.len()
-                && bool::from(subtle::ConstantTimeEq::ct_eq(given.as_bytes(), required.as_bytes()));
-            if !matches {
+            // BOTH compares always run: returning on the first match would
+            // tell a prober by timing WHICH key it guessed. An empty read
+            // key matches nobody — "off", never "unauthenticated".
+            let seat_ok = secret_eq(given, &cred.seat);
+            let read_ok = !cred.read.is_empty() && secret_eq(given, &cred.read);
+            let scope = if seat_ok {
+                Some(Scope::Seat)
+            } else if read_ok {
+                Some(Scope::Read)
+            } else {
+                None
+            };
+            let Some(scope) = scope else {
                 return Some(error_response(
                     id,
                     -32001,
                     "unauthorized: missing or invalid MCP token (send it as params.token)",
                 ));
-            }
-            *authed = true;
+            };
+            *authed = Some(scope);
         }
         return Some(ok(
             id,
@@ -248,7 +295,7 @@ move the human's GUI and are never required before other tools."
     }
 
     // Everything else requires an authenticated connection.
-    if !*authed {
+    let Some(scope) = *authed else {
         return has_id.then(|| {
             error_response(
                 id,
@@ -256,19 +303,29 @@ move the human's GUI and are never required before other tools."
                 "unauthorized: call initialize with a valid token first",
             )
         });
-    }
+    };
 
     match method {
         "notifications/initialized" => None,
         "ping" => Some(ok(id, json!({}))),
-        "tools/list" => Some(ok(id, json!({ "tools": tool_defs() }))),
+        "tools/list" => Some(ok(id, json!({ "tools": tool_defs(scope) }))),
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let args = params
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            match call_tool(handle, name, &args).await {
+            // the scope refusal is a PROTOCOL error, not a tool result: a
+            // read-only client must not have to parse prose to learn it
+            // asked for something its key does not carry
+            if scope == Scope::Read
+                && tools()
+                    .iter()
+                    .any(|t| t.name == name && t.scope == Scope::Seat)
+            {
+                return Some(error_response(id, -32001, "unauthorized: read-only token"));
+            }
+            match call_tool(handle, name, &args, scope).await {
                 Ok(text) => Some(ok(
                     id,
                     json!({ "content": [{ "type": "text", "text": text }], "isError": false }),
@@ -286,11 +343,19 @@ move the human's GUI and are never required before other tools."
 
 /// Look the tool up in the catalogue, build its command, execute it on the
 /// shared handle, and return the reply as pretty JSON text.
-async fn call_tool(handle: &WalletHandle, name: &str, args: &Value) -> Result<String, String> {
+async fn call_tool(
+    handle: &WalletHandle,
+    name: &str,
+    args: &Value,
+    scope: Scope,
+) -> Result<String, String> {
     let def = tools()
         .into_iter()
         .find(|t| t.name == name)
         .ok_or_else(|| format!("unknown tool: {name}"))?;
+    if def.scope == Scope::Seat && scope == Scope::Read {
+        return Err("unauthorized: read-only token".to_string());
+    }
     let cmd = (def.build)(args)?;
     let reply = handle.execute(cmd).await.map_err(|e| e.to_string())?;
     serde_json::to_string_pretty(&reply).map_err(|e| e.to_string())
@@ -298,9 +363,10 @@ async fn call_tool(handle: &WalletHandle, name: &str, args: &Value) -> Result<St
 
 /// The wire-visible tool list, rendered from the same catalogue the
 /// dispatcher uses.
-fn tool_defs() -> Vec<Value> {
+fn tool_defs(scope: Scope) -> Vec<Value> {
     tools()
         .iter()
+        .filter(|t| scope == Scope::Seat || t.scope == Scope::Read)
         .map(|t| {
             json!({
                 "name": t.name,
@@ -325,6 +391,22 @@ fn opt_str_arg(args: &Value, key: &str) -> Result<Option<String>, String> {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(s)) => Ok(Some(s.clone())),
         Some(_) => Err(format!("argument `{key}` must be a string")),
+    }
+}
+
+/// An optional list of strings: absent or null = empty.
+fn str_list_arg(args: &Value, key: &str) -> Result<Vec<String>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|i| {
+                i.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| format!("`{key}` holds strings"))
+            })
+            .collect(),
+        Some(_) => Err(format!("argument `{key}` must be an array of strings")),
     }
 }
 
@@ -685,6 +767,10 @@ fn feature_enum() -> Value {
 pub struct ToolDef {
     /// The MCP-visible tool name.
     pub name: &'static str,
+    /// What a connection must hold to call it (§4.7). REQUIRED and without
+    /// a default: a new tool has to decide, and the Read set is pinned by
+    /// a test — a forgotten one cannot silently land in the read scope.
+    pub scope: Scope,
     /// snake_case name of the [`Command`] variant this tool drives; only
     /// the `co_equality` test reads it — it is the audit trail.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -703,6 +789,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "chat_send",
             command: "chat",
+            scope: Scope::Seat,
             description: "Post a message to the ungated chat. Every message rides the republic's ONE broadcast stream and every member receives it; `channel` merely files it under a view of that stream - a tag, never a boundary or a room (it hides nothing and grants nothing). Kinds: {\"kind\":\"group\"} the all-hands default; {\"kind\":\"patch\",\"id\":N} discussion attached to proposal N; {\"kind\":\"topic\",\"name\":\"…\"} a free named topic, created by simply posting to it. Pass `quote` (the quoted message's 32-char hex id, from read_state) to reply - and quoting a message that lives in another channel is the cross-post idiom: the original stays where it is, the quote carries it across.",
             schema: || json!({
                 "type": "object",
@@ -722,6 +809,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "poke",
             command: "poke",
+            scope: Scope::Seat,
             description: "Poke a member - an ephemeral nudge with NO governance meaning (never a vote, never a block, never stored). It rides the group channel, so every member sees who poked whom; only the named target reacts, and only if it enabled poking: a toast naming you, its configured sound, and its wake command (how a sleeping agent harness gets woken). Fire-and-forget: a poke to an offline member is lost, not queued. Rate-limited on the receive side (one reaction per sender per minute). Needs poking enabled on THIS node too (settings poke_enabled).",
             schema: || json!({
                 "type": "object",
@@ -737,6 +825,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "set_mirror",
             command: "set_mirror",
+            scope: Scope::Seat,
             description: "This seat's mirror consent and budget for the open republic: whether it keeps copies of the persistent files, and how many bytes in total. Declared to every member at once; per republic, never global.",
             schema: || json!({
                 "type": "object",
@@ -754,6 +843,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "read_mirror",
             command: "read_mirror",
+            scope: Scope::Seat,
             description: "Who mirrors what in the open republic: this seat's switch and quota, every member's declaration (known or not), and per shared file the members holding the whole series (the sharer included) plus this seat's own held/of.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ReadMirror),
@@ -761,6 +851,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "mark_channel_read",
             command: "mark_channel_read",
+            scope: Scope::Seat,
             description: "Advance this seat's OWN read cursor for one channel (B2): what read_state's per-channel `unread` counts and the chat `view:\"unread\"` slice are measured against. Private to the seat (persisted locally, never on the wire) - the shared read receipts are a different mechanism. Omit `up_to` to mark the channel read through its newest visible message; pass a message id (32-char hex, from read_state) to stop at that message. The cursor only ever advances.",
             schema: || json!({
                 "type": "object",
@@ -781,6 +872,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "react_chat",
             command: "react_chat",
+            scope: Scope::Seat,
             description: "Toggle this member's emoji reaction on a chat message, addressed by its stable id (the 32-char lowercase hex `id` every message carries in read_state). Reacting with the emoji you already picked un-reacts; picking another switches - one reaction per member per message.",
             schema: || json!({
                 "type": "object",
@@ -798,6 +890,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "mark_read",
             command: "mark_read",
+            scope: Scope::Seat,
             description: "Confirm this member has read chat messages (read receipts), addressed by their stable ids (the 32-char lowercase hex `id`s from read_state). Records the local member's receipt and broadcasts it so peers can show a green dot; a message you authored, already-read, or unknown id is ignored, and while this node's read receipts are disabled it is a silent no-op. Honest: only call it for messages actually seen.",
             schema: || json!({
                 "type": "object",
@@ -817,6 +910,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "share_file",
             command: "share_file_from_exchange",
+            scope: Scope::Seat,
             description: "Share a file from the node's download directory (the EXCHANGE FOLDER - read_session.settings.download_dir) into the ungated chat: the engine derives the metadata and streams the real sha256 off the actor, then posts the share message (async - it appears in read_state once hashing completes). Only metadata enters the chat; the bytes move per-download over a dedicated encrypted queue. `name` is a bare file name inside that folder - an agent shares what was put there for it, never an arbitrary path on the operator's machine (that is the GUI's file dialog). A share is a chat message, so `channel` files it under a view of the one stream exactly like chat_send (omit for the all-hands group).",
             schema: || json!({
                 "type": "object",
@@ -834,6 +928,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "download_file",
             command: "download_file",
+            scope: Scope::Seat,
             description: "Download a shared file: fetches the BYTES peer-to-peer from the sharer's device over a dedicated encrypted queue (the sharer must be online), verifies size + sha256 against the share, and writes the file into the node's download directory (the EXCHANGE FOLDER) - as `dest`, a bare file name, or under the share's own name when omitted. Never an arbitrary path: peer-chosen bytes landing anywhere on the operator's machine would be a persistence primitive. Async kickoff - poll read_uploads for the download's phase/percent/path/error. Addressed by the share message's stable id (32-char lowercase hex, from read_state). Fails honestly once the sharer deleted the file or stays offline.",
             schema: || json!({
                 "type": "object",
@@ -854,6 +949,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "remove_file",
             command: "remove_file",
+            scope: Scope::Seat,
             description: "Sharer-only: mark a shared file as deleted from this disk, addressed by the share message's stable id (32-char lowercase hex, from read_state) - the share becomes permanently unavailable for every participant.",
             schema: || json!({
                 "type": "object",
@@ -867,6 +963,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "delete_chat",
             command: "delete_chat",
+            scope: Scope::Seat,
             description: "Delete one of YOUR OWN chat messages, addressed by its stable id (32-char lowercase hex, from read_state): the text is wiped for everyone and replaced by a deletion notice naming the deleter. Author-only - there is no moderation; the engine rejects the id of another member's message.",
             schema: || json!({
                 "type": "object",
@@ -880,6 +977,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "propose",
             command: "propose",
+            scope: Scope::Seat,
             description: "Put an object forward for threshold approval on a gated surface. An Organization set_image payload must embed the actual image as base64 `bytes_b64` and the bytes must DECODE as a picture (png/jpeg/webp/gif/bmp, ≤8192x8192; svg is refused) - sign-what-you-see: members vote on the image, so undecodable bytes are refused here and dropped by every peer. Payload size is capped at what one relay message can carry (about 64 KiB of image for a small roster); an over-size proposal is refused with the exact figure that fits. Organization op set_features enables charter features: value = space-separated keys among memory/quests/vault/wallet, the FULL target set - it must keep every enabled feature (enable-only, never off again) and add at least one. Proposing on a surface whose feature is not enabled is refused (status.features lists the enabled set). Memory op wiki_patch is a wiki changeset vote: `value` carries a raw git-format patch (unified diffs; rename/new/deleted headers), `summary` a short count string like \"+2 -1 →1 ~34\" - the GUI's changeset vote emits exactly this shape and renders the patch in its diff viewer.",
             schema: || json!({
                 "type": "object",
@@ -897,6 +995,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "approve",
             command: "approve",
+            scope: Scope::Seat,
             description: "Contribute THIS node's approval toward a pending proposal. On a chain-governed republic it is a real signature gossiped to the mesh (the block seals once m distinct members signed); elsewhere the node records at most its own single approval - it can never approve on behalf of other members.",
             schema: || json!({
                 "type": "object",
@@ -910,6 +1009,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "decline",
             command: "decline",
+            scope: Scope::Seat,
             description: "Cast this seat's vote AGAINST a pending proposal - ONE voice, not a veto: the proposal turns rejected for everyone only once approval can no longer reach the threshold (declines > n-m). One stance per member; declining after your own approve is allowed and is how a proposer signals retraction when withdraw is unavailable.",
             schema: || json!({
                 "type": "object",
@@ -923,6 +1023,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "withdraw",
             command: "withdraw",
+            scope: Scope::Seat,
             description: "Pull back a proposal THIS seat proposed (proposer only - anyone else is refused): it turns terminal on every node without forging any vote, and the card reads \"pulled back\". Only works while the vote is still pending.",
             schema: || json!({
                 "type": "object",
@@ -936,6 +1037,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "read_state",
             command: "read_state",
+            scope: Scope::Read,
             description: "Read the projected state of one surface. A CHAT read sends read receipts for the messages it returns (retrieval is the agent's way of seeing them - agents and humans light the same dots; silent while this node's receipts are off), so there is no need to call mark_read after reading. Chat messages each carry their stable 32-char hex `id` - the handle for react_chat, delete_chat, download_file, remove_file and chat_send's `quote` - plus the channel they file under, and the snapshot enumerates every channel seen in the log (`channels`). Each enumerated patch channel carries the vote's lifecycle in `state` (\"proposed\"/\"applied\"/\"rejected\"; absent for group/topic channels and unknown referents): a decided vote's discussion is READ-ONLY - chat_send/share_file into it are refused - but stays readable here. Pass `channel` to get only the messages of that view; channels are tags on the one shared stream, not boundaries, and the enumeration still lists all of them. Pass `view` (chat only) to narrow the read: \"unread\" keeps only the messages after this seat's read cursor; \"today\" and omitting it both give the whole retention window. The filters compose. On gated surfaces, `applied_ids` runs positionally parallel to `applied` and names the proposal each applied entry came from (null = origin unknown: legacy data) - the back-link from an accepted change to its `{\"kind\":\"patch\",\"id\":N}` discussion channel. On `files` the applied entries are the persist/unpersist votes; the tables themselves are read_uploads. On `memory` the whole folded wiki rides along - read a large base paged with wiki_list + wiki_get instead.",
             schema: || json!({
                 "type": "object",
@@ -955,6 +1057,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "propose_checkpoint",
             command: "propose_checkpoint",
+            scope: Scope::Seat,
             description: "Propose a chain CHECKPOINT: a threshold-signed compaction cut at the current head. The engine computes the canonical state hash; every member recomputes it from its own chain and co-signs only on an exact match (m confirm the compaction's correctness). Once the block seals, history below the cut may be dropped locally and newcomers bootstrap from checkpoint + suffix.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ProposeCheckpoint),
@@ -962,6 +1065,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "read_chain",
             command: "read_chain",
+            scope: Scope::Read,
             description: "The persistent chain as display data (Chain-History): every committed block of the open republic, newest first - genesis, applied changes, membership transitions, and checkpoint compaction cuts - each with its height, kind, target surface, display payload, consumed proposal id, and the m signers. On a pruned holder the history below the last checkpoint cut appears as summarized entries rebuilt from the checkpoint blob (height 0 - the per-block positions and signatures were dropped with the history).",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ReadChain),
@@ -969,6 +1073,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "wiki_list",
             command: "wiki_list",
+            scope: Scope::Read,
             description: "List the shared wiki's documents - path, size and title, no content - one page at a time. `prefix` narrows to a folder, `cursor` continues a page (pass the previous reply's `next_cursor`), `limit` is clamped to 1..=500 (default 100). `total` counts everything under the prefix. Fetch a document with wiki_get.",
             schema: || json!({
                 "type": "object",
@@ -985,8 +1090,78 @@ pub fn tools() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "wiki_search",
+            command: "wiki_search",
+            scope: Scope::Read,
+            description: "Search the wiki. `query` is tantivy syntax over title and body (`+must -not \"phrase\" title:term`); `tags`, `type` and `folder` narrow it by front matter and location. Hits carry a snippet. Page with `limit` and `cursor`. An empty query with no filter finds nothing, never everything.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "the query text" },
+                    "tags": { "type": "array", "items": { "type": "string" }, "description": "optional: every tag must be present" },
+                    "type": { "type": "string", "description": "optional: the front matter's type" },
+                    "folder": { "type": "string", "description": "optional: only documents in this folder" },
+                    "limit": { "type": "integer", "description": "optional: page size, 1..=500 (default 100)" },
+                    "cursor": { "type": "integer", "description": "optional: continue after this many hits" }
+                }
+            }),
+            build: |args| Ok(Command::WikiSearch {
+                query: opt_str_arg(args, "query")?.unwrap_or_default(),
+                tags: str_list_arg(args, "tags")?,
+                kind: opt_str_arg(args, "type")?,
+                folder: opt_str_arg(args, "folder")?,
+                limit: opt_u32_arg(args, "limit")?,
+                cursor: opt_u32_arg(args, "cursor")?,
+            }),
+        },
+        ToolDef {
+            name: "wiki_links",
+            command: "wiki_links",
+            scope: Scope::Read,
+            description: "One document's links. `direction` out|in|both (default both); `predicate` narrows to one front-matter key (a header value that is a link is a typed relation whose predicate is its key). Body links carry no predicate. Page with `limit` and `cursor`.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "the document's path" },
+                    "direction": { "type": "string", "enum": ["out", "in", "both"], "description": "optional: which way the edges point (default both)" },
+                    "predicate": { "type": "string", "description": "optional: only edges carried by this header key" },
+                    "limit": { "type": "integer", "description": "optional: page size, 1..=500 (default 100)" },
+                    "cursor": { "type": "integer", "description": "optional: continue after this many edges" }
+                },
+                "required": ["path"]
+            }),
+            build: |args| Ok(Command::WikiLinks {
+                path: str_arg(args, "path")?,
+                direction: opt_str_arg(args, "direction")?,
+                predicate: opt_str_arg(args, "predicate")?,
+                limit: opt_u32_arg(args, "limit")?,
+                cursor: opt_u32_arg(args, "cursor")?,
+            }),
+        },
+        ToolDef {
+            name: "wiki_neighbors",
+            command: "wiki_neighbors",
+            scope: Scope::Read,
+            description: "The documents within one or two hops of a document, nearest first, following links in either direction. Capped at 500.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "the document's path" },
+                    "depth": { "type": "integer", "description": "optional: 1 or 2 (default 1)" },
+                    "limit": { "type": "integer", "description": "optional: how many to return, capped at 500" }
+                },
+                "required": ["path"]
+            }),
+            build: |args| Ok(Command::WikiNeighbors {
+                path: str_arg(args, "path")?,
+                depth: opt_u32_arg(args, "depth")?,
+                limit: opt_u32_arg(args, "limit")?,
+            }),
+        },
+        ToolDef {
             name: "wiki_get",
             command: "wiki_get",
+            scope: Scope::Read,
             description: "One wiki document in full, front matter included. An unknown path is an error, never an empty document.",
             schema: || json!({
                 "type": "object",
@@ -1000,6 +1175,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "list_proposals",
             command: "list_proposals",
+            scope: Scope::Read,
             description: "List every proposal the engine currently knows about.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ListProposals),
@@ -1007,6 +1183,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "status",
             command: "status",
+            scope: Scope::Read,
             description: "Read a one-shot status summary of the group and surfaces.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::Status),
@@ -1014,6 +1191,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "read_members",
             command: "read_members",
+            scope: Scope::Read,
             description: "The Organization → Members table: one row per roster member with its anchored identity key (+ fingerprint; empty on demo workspaces), real presence (`last_seen` = unix seconds this node last observed that member - authenticated traffic, or the founding/join it signed with us; 0 = no local evidence at all; `presence` aged from it: 0 online ≤5 min, 1 stale ≤30 min, 2 offline/unreachable), how many pending proposals still await that member's vote, how many files it shared into the chat, and its vote-gated profile (`image` = local file path of the applied picture, `description`).",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ReadMembers),
@@ -1021,6 +1199,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "read_uploads",
             command: "read_uploads",
+            scope: Scope::Read,
             description: "The Shared Files tables: every file shared into the chat (metadata only - bytes move user-to-user via the share link), with sharer, timestamp, availability and the deadline `expires_ts`. `persistent: false` = Temporary Uploads: ephemeral like chat, gone from the read (and undownloadable) after the chat retention window. `persistent: true` = Persistent Uploads: a threshold vote pinned it (`propose` on `files`, op `persist`), `expires_ts` is 0 and it outlives its chat message; an `unpersist` vote moves it back with a fresh window. The `id` is the chat message id `download_file` and the two ops take.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ReadUploads),
@@ -1028,6 +1207,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "read_ui_state",
             command: "read_ui_state",
+            scope: Scope::Seat,
             description: "The GUI's last published rendering claim (gui_over_mcp.md): screen/surface/view, the chat pane's channel + row count + last bodies + whether the log is scrolled into view, the nav rows, pending-decision count, the active wizard step and the topmost toast. `snapshot` is null while no window runs. `generation` increases with every publish - poll it to await a `ui_action` landing.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ReadUiState),
@@ -1035,6 +1215,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "ui_action",
             command: "ui_action",
+            scope: Scope::Seat,
             description: "Request ONE GUI interaction, by domain verb (never a widget coordinate): select_channel {channel} · select_view {surface, view} · open_workspace {id} · close_workspace · chat_send {body}. Any other verb is refused. The window's live mirror performs it and publishes a fresh snapshot - read the effect back with read_ui_state. Refused while no window is running.",
             schema: || json!({
                 "type": "object",
@@ -1060,6 +1241,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "read_session",
             command: "read_session",
+            scope: Scope::Read,
             description: "Read the shared app/session state the GUI mirrors: current screen, surface + sub-view, language, workspaces, run lifecycles, and settings.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ReadSession),
@@ -1067,6 +1249,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "navigate",
             command: "navigate",
+            scope: Scope::Seat,
             description: "Move the node (and any attached GUI) to a top-level screen.",
             schema: || json!({
                 "type": "object",
@@ -1082,6 +1265,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "select_surface",
             command: "select_surface",
+            scope: Scope::Seat,
             description: "Select the surface shown in the main view (its sub-view resets to the default). The GUI switches live (shared session state, like navigate).",
             schema: || json!({
                 "type": "object",
@@ -1095,6 +1279,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "select_view",
             command: "select_view",
+            scope: Scope::Seat,
             description: "Select a surface and one of its sub-views (organization: status/members/pending/accepted/declined · chat: today · memory: brain/proposals/accepted/denied · quests: board/plan/create/proposals/my-quests/archive · vault: secrets/requests/proposals/unsealed · wallet: balance/history/send/receive/status/settings · files: uploads/persistent/pending/accepted/declined).",
             schema: || json!({
                 "type": "object",
@@ -1112,6 +1297,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "set_language",
             command: "set_language",
+            scope: Scope::Seat,
             description: "Set the active GUI language. The GUI re-renders in the new language.",
             schema: || json!({
                 "type": "object",
@@ -1125,6 +1311,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "set_theme",
             command: "set_theme",
+            scope: Scope::Seat,
             description: "Set the active GUI theme. The GUI restyles live.",
             schema: || json!({
                 "type": "object",
@@ -1138,6 +1325,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "set_fonts",
             command: "set_fonts",
+            scope: Scope::Seat,
             description: "Set the three GUI font sizes in px (app chrome / wiki navigator / editor+document), range 9-28. A local preference, persisted to config.toml.",
             schema: || json!({
                 "type": "object",
@@ -1157,6 +1345,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "set_read_receipts",
             command: "set_read_receipts",
+            scope: Scope::Seat,
             description: "Turn this node's chat read receipts on or off (a local privacy switch, persisted to config.toml - never a governance vote). While off, this node sends no read confirmations of its own AND hides other members' receipts from its chat view (symmetric).",
             schema: || json!({
                 "type": "object",
@@ -1170,6 +1359,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "save_settings",
             command: "save_settings",
+            scope: Scope::Seat,
             description: "Store the node settings and persist them to the node's config.toml (format-preserving, atomic; the write outcome lands in the session notice, restart-required keys in session.restart_required). Replaces the settings wholesale; read_session first, then pass back the changed fields. The host posture (headless, directories, MCP port/allowlist/token, anonymity, Tor) and the S3 secret are NOT part of it - they are set in the GUI or config.toml (the S3 secret also via patch_settings, write-only).",
             schema: || json!({
                 "type": "object",
@@ -1206,6 +1396,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "patch_settings",
             command: "patch_settings",
+            scope: Scope::Seat,
             description: "Change SOME settings, keeping every field you do not mention. This is the tool for adjusting one thing: save_settings REPLACES everything, and its defaults are not neutral - its defaults are not neutral, so a partial save_settings would silently reset them. Unknown keys are refused rather than ignored; the relay pool keeps its own door (the relay_* tools), and the host posture (headless, workspace_dir, download_dir, mcp_port, mcp_allow, mcp_token, anonymity, tor_mode, tor_port, poke_wake_command) is the GUI's / config.toml's - refused here. s3_secret_key is accepted write-only (it never reads back).",
             schema: || json!({
                 "type": "object",
@@ -1235,6 +1426,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "relay_probe",
             command: "relay_probe",
+            scope: Scope::Seat,
             description: "Vet a Nostr relay before trusting it (B4): does it accept kind 445, can its auth demand be satisfied, does it retain events, does its frame cap fit the group? One verdict with ONE reason, on the notice channel (relay-ok:/relay-refused:). relay_confirm runs the same probe implicitly - an unusable relay never becomes a confirmed one.",
             schema: || json!({
                 "type": "object",
@@ -1248,6 +1440,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "relay_add",
             command: "relay_add",
+            scope: Scope::Seat,
             description: "Add a Nostr relay to this node's pool. NOTHING SHIPS PRE-TRUSTED: the node connects to no relay until one is added AND confirmed, so adding is safe - the entry lands unconfirmed, at the lowest priority, and nothing is dialed. The URL is validated and normalized (wss://…; ws://… only for a .onion or local/private host - plaintext to the clearnet is refused). Read the pool back from read_session.relays, which carries each entry's derived kind (onion|clearnet|local) and why it is or is not dialed.",
             schema: || json!({
                 "type": "object",
@@ -1261,6 +1454,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "relay_remove",
             command: "relay_remove",
+            scope: Scope::Seat,
             description: "Remove a relay from the pool entirely (to merely stop using it while keeping it listed, use relay_revoke).",
             schema: || json!({
                 "type": "object",
@@ -1272,6 +1466,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "relay_move",
             command: "relay_move",
+            scope: Scope::Seat,
             description: "Move a relay one position in the pool. The pool ORDER is the dial priority (position 0 is tried first). Moving past either end is a no-op, not an error.",
             schema: || json!({
                 "type": "object",
@@ -1289,6 +1484,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "relay_confirm",
             command: "relay_confirm",
+            scope: Scope::Seat,
             description: "Confirm a relay - the operator's persisted \"yes, use this one\". The confirmation lands ASYNC on the probe's verdict: this call returns before the entry flips - poll read_session.relays until confirmed=true (create_start/join_start refuse while a confirmation is still verifying). An ONION relay needs nothing more and becomes dialable immediately. A CLEARNET or LOCAL relay is REFUSED unless accept_clearnet is true: a clearnet operator sees this node's subscriptions (and its IP address unless Tor is on); a local relay is reached directly on this machine or network, never over Tor. Confirming a non-onion relay WITH accept_clearnet also switches non-onion dialing on and remembers that (ADR-0004 amendment) - relay_clearnet_session stays as the deliberate off switch.",
             schema: || json!({
                 "type": "object",
@@ -1317,6 +1513,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "relay_revoke",
             command: "relay_revoke",
+            scope: Scope::Seat,
             description: "Withdraw a relay's confirmation: it stays in the pool (and keeps its priority) but is no longer dialed.",
             schema: || json!({
                 "type": "object",
@@ -1328,6 +1525,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "relay_clearnet_session",
             command: "relay_clearnet_session",
+            scope: Scope::Seat,
             description: "Switch dialing of non-Tor relays - CLEARNET and LOCAL - on or off. BOTH decisions are persisted and survive a restart (ADR-0004 amendment): confirming such a relay with accept_clearnet already switches it on, and switching it off stays off. Onion relays are unaffected and always connect on their own. While it is off, confirmed clearnet/local relays are blocked (read_session.relays shows \"clearnet_session_locked\") and a join over one is refused with that reason.",
             schema: || json!({
                 "type": "object",
@@ -1350,6 +1548,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "net_test_s3",
             command: "net_test_s3",
+            scope: Scope::Seat,
             description: "Test one of the node's S3 buckets (the settings panel's Test button): a real SigV4-signed HEAD /bucket probe over the configured transport (Tor when enabled, fail-closed). Endpoint and credentials are shared; only the bucket differs. The verdict lands in session.s3_test for target \"workspaces\" (the default) and session.s3_media_test for \"media\" - \"ok\" or \"error: …\" with the honest failure class (connect vs TLS vs 403 bad credentials vs 404 missing bucket). Omit fields to test the saved settings; pass them to test a draft.",
             schema: || json!({
                 "type": "object",
@@ -1384,6 +1583,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "net_test_tor",
             command: "net_test_tor",
+            scope: Scope::Seat,
             description: "Test whether Tor is actually there and working (the anonymity settings panel's Test button). Reports the RUNG of evidence it reached in session.tor_test.state - never a bare yes/no: \"off\" (Tor is not enabled; nothing was sent), \"misconfigured\" (the fail-closed dialer refused the config; nothing was probed), \"no_proxy\" (nothing is listening at the SOCKS address - no Tor daemon there), \"proxy_only\" (a socket answered there, but NO traffic was routed through it, so no circuit is proven), \"circuit_failed\" (no connection to the relay through Tor - this does NOT single out Tor: the relay itself may be down or firewalled, see detail), \"circuit_timeout\" (no answer within the deadline - a first embedded-Tor start bootstraps the directory and can take minutes, so this is not a failure verdict), \"circuit\" (a relay from the confirmed pool completed a WebSocket handshake end to end through Tor - the only state that means Tor works, and it proves the RELAY answered, not merely that a SOCKS server said ok), \"no_target\" (nothing could be tested at all). session.tor_test also carries detail/proxy/target/ms. The probe never invents a host: with no confirmed, Tor-routable relay it stops at \"proxy_only\" - which also happens when the relays ARE confirmed but non-onion dialing is switched off (relay_clearnet_session / [transport.nostr] clearnet_enabled). THE CALL RETURNS BEFORE THE PROBE FINISHES: poll read_session until tor_test.state leaves \"testing\". Omit fields to test the saved settings; pass them to test a draft.",
             schema: || json!({
                 "type": "object",
@@ -1410,6 +1610,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "net_list_backups",
             command: "net_list_backups",
+            scope: Scope::Seat,
             description: "List the configured S3 bucket's backup objects (the settings backup table's refresh): a real SigV4-signed ListObjectsV2 under the molt/ prefix over the configured transport (Tor when enabled, fail-closed), driven by the SAVED settings. Objects with no matching local workspace land as real orphans in session.backup_orphans (foreign keys as unknown entries); the honest status lands in session.s3_list (\"ok\" or \"error: …\" - including \"no endpoint configured\" when no backup target is set up). Read-only against the bucket.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::NetListBackups),
@@ -1417,6 +1618,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "open_workspace",
             command: "open_workspace",
+            scope: Scope::Seat,
             description: "Open a locally known workspace by its id (see read_session → workspaces[].id): its state loads from disk, it becomes active, and the node moves to the main screen.",
             schema: || json!({
                 "type": "object",
@@ -1430,6 +1632,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "clear_notice",
             command: "clear_notice",
+            scope: Scope::Seat,
             description: "Acknowledge the transient session notice (read_session.notice) - it has been seen. A one-shot notice such as a minted recovery link otherwise stays in the session and re-opens its dialog on the next window.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ClearNotice),
@@ -1437,6 +1640,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "close_workspace",
             command: "close_workspace",
+            scope: Scope::Seat,
             description: "Close the active workspace and return to the choice screen.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::CloseWorkspace),
@@ -1444,6 +1648,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "delete_workspace",
             command: "delete_workspace",
+            scope: Scope::Seat,
             description: "Forget a locally known workspace by its id: its directory moves to the recoverable .trash and the list entry disappears.",
             schema: || json!({
                 "type": "object",
@@ -1457,6 +1662,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "set_workspace_backup",
             command: "set_workspace_backup",
+            scope: Scope::Seat,
             description: "Switch automatic S3 backup on or off for one workspace by its id (persisted in the workspace's prefs.toml). Enabling only persists the pref - the backup ticker runs the real first upload on its next pass, and the last-backup stamp moves ONLY on a confirmed upload (never on enable). Failures land honestly in the workspace entry's backup_error.",
             schema: || json!({
                 "type": "object",
@@ -1474,6 +1680,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "backup_now",
             command: "backup_now",
+            scope: Scope::Seat,
             description: "Run one workspace's S3 backup NOW (same task as the automatic ticker, interval ignored): builds the crash-consistent encrypted molt-export-v1 blob in workspace key mode (restorable from the recovery phrase + workspace id - no passphrase involved) and uploads it to the configured bucket over the configured transport (Tor when enabled, fail-closed), then prunes copies beyond s3_keep_copies. Async kickoff - the honest outcome lands in the workspace entry (last_backup stamp only on a confirmed upload; backup_error otherwise). Refused for sealed-at-rest workspaces (no key material is accessible).",
             schema: || json!({
                 "type": "object",
@@ -1487,6 +1694,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "backup_fetch",
             command: "backup_fetch",
+            scope: Scope::Seat,
             description: "Fetch the NEWEST bucket backup of a workspace onto this device (S7): downloads the encrypted molt-export-v1 blob VERBATIM into a sealed stub the workspace list shows as 'restored' - no secret is asked and nothing is decrypted. Opening the stub later with decrypt_workspace + the recovery phrase runs the verified restore pipeline. Refused while a workspace with this id already exists locally. Async kickoff; the outcome arrives on the session notice ('backup-fetched:<id>' or 'backup-fetch-failed:<reason>').",
             schema: || json!({
                 "type": "object",
@@ -1500,6 +1708,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "encrypt_workspace",
             command: "encrypt_workspace",
+            scope: Scope::Seat,
             description: "Seal a closed workspace at rest under its recovery phrase: the phrase is verified against the workspace first, then the device-sealed key material is removed from disk - the phrase becomes the only way back in. The workspace becomes inactive and open_workspace refuses until decrypt_workspace; the state survives restarts. The active workspace cannot be encrypted.",
             schema: || json!({
                 "type": "object",
@@ -1517,6 +1726,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "decrypt_workspace",
             command: "decrypt_workspace",
+            scope: Scope::Seat,
             description: "Decrypt an at-rest-sealed workspace so it can be opened again. The recovery phrase is really verified (an authenticated decrypt of the workspace's genesis with the derived key); a wrong phrase is a hard error and changes nothing on disk.",
             schema: || json!({
                 "type": "object",
@@ -1534,6 +1744,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "export_workspace",
             command: "export_workspace_archive",
+            scope: Scope::Seat,
             description: "Export a workspace as ONE encrypted KNOWLEDGE ARCHIVE (*.molt.enc, format molt-export-v1) into the node's download directory (the EXCHANGE FOLDER): manifest, the encrypted history, the threshold-signed chain, the newest snapshot, the logo. NEVER the recovery seed: the blob is marked phrase-sealed, so an import needs the recovery phrase to open it - blob + passphrase reads the knowledge and nothing more (the seed-carrying export to any path is the GUI's). Live MLS/transport state is NEVER exported: the blob restores knowledge; rejoining the live republic goes through the recovery ritual. Protection: Argon2id-stretched passphrase (minimum 10 characters) + XChaCha20-Poly1305. Async kickoff - the honest outcome (ok with byte count and skipped files, or the real error) lands in read_session's `export` state; there is no fake success.",
             schema: || json!({
                 "type": "object",
@@ -1553,6 +1764,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "wiki_export",
             command: "wiki_export_archive",
+            scope: Scope::Seat,
             description: "Export the wiki (every applied page) as files into `name`, a directory inside the node's download directory (the EXCHANGE FOLDER), optionally with the verification bundle (the threshold-signed patches that prove every page). Never an arbitrary path: an agent-chosen destination would scatter the tree into the operator's directories and overwrite same-named files. Async kickoff - the outcome lands in read_session's `wiki_export` state.",
             schema: || json!({
                 "type": "object",
@@ -1570,6 +1782,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "restore_start",
             command: "restore_start",
+            scope: Scope::Seat,
             description: "Begin a REAL restore from an encrypted molt-export-v1 backup blob. way=file reads a *.molt.enc file; way=s3 downloads from the CONFIGURED bucket (saved settings, Tor-capable fail-closed transport) - target is then the workspace-id pseudonym from the backup table (the newest object is used) or a full molt/<id>/<ts>.molt.enc object key. The blob is decrypted and staged off the actor, then the engine HARD-VERIFIES the threshold-signed chain before anything materializes (an unverifiable chain restores nothing). Progress and log lines in read_session's restore state report only what actually happened. The restored workspace opens DETACHED: knowledge (history, verified chain, prefs) is restored, live membership (MLS group, mesh) is NOT - rejoining the live republic is the recovery ritual (recover_start). Same-id collision refuses unless replace=true (which moves the existing dir to the recoverable trash first). NOTE: way=file has no GUI panel - this tool is the only surface offering it (the GUI's Restore wizard carries the link and S3 ways).",
             schema: || json!({
                 "type": "object",
@@ -1591,6 +1804,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "restore_cancel",
             command: "restore_cancel",
+            scope: Scope::Seat,
             description: "Abandon the restore and return to the choice screen: the in-flight download/staging task is aborted and the staging removed - nothing partial stays behind.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::RestoreCancel),
@@ -1598,6 +1812,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "restore_finish",
             command: "restore_finish",
+            scope: Scope::Seat,
             description: "Finish a successful restore: open the restored workspace - DETACHED (knowledge restored, membership not; the session notice says so) - straight to the main screen.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::RestoreFinish),
@@ -1605,6 +1820,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "create_start",
             command: "create_start",
+            scope: Scope::Seat,
             description: "Begin founding a new republic: the engine derives the founder's identity, mints one-time invite links per member, and runs the real founding ritual with a live log; read_session shows the joinable links and each seat filling in (the recovery phrase is shown in the GUI wizard only - it leaves the process on no surface, so the backup confirmation and thereby a founding complete on a GUI node). Once every member has joined, propose the charter with create_propose. Needs a CONFIRMED relay first (relay_add, then confirm) - without one it refuses with \"cannot found: no relay configured\". The threshold must be at least 2.",
             schema: || json!({
                 "type": "object",
@@ -1627,6 +1843,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "create_cancel",
             command: "create_cancel",
+            scope: Scope::Seat,
             description: "Abandon the founding run and return to the choice screen.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::CreateCancel),
@@ -1634,6 +1851,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "recover_invite_start",
             command: "recover_invite_start",
+            scope: Scope::Seat,
             description: "As a surviving member, mint a single-use recovery link for a fellow member who lost their device (a manually-granted re-admission for an existing seat). The returning member does NOT need to be online. The engine listens for their request - on Nostr over the republic's relays, on the legacy shape over a fresh mesh queue - and the outcome arrives on the session notice (read_session): 'recovery-link:<link>' with the molt://recover/… link to share off-band, or 'recovery-link-failed:<reason>' naming what this node is missing. The returning member proves its seat with a re-derived-identity signature, then the group re-admits it by threshold.",
             schema: || json!({
                 "type": "object",
@@ -1649,6 +1867,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "recover_start",
             command: "recover_start",
+            scope: Scope::Seat,
             description: "As a member who lost their device, rejoin a republic from a coordinator-minted molt://recover/… link using your recovery phrase (a fresh device with only the phrase). The engine re-derives the seat identity, proves it to the coordinator, waits for the group's threshold re-admission, re-enters the encrypted group from the Welcome, verifies the served chain from its genesis, and materializes the recovered workspace locally. Runs over the republic's relays - the link carries them; adopt missing ones when refused.",
             schema: || json!({
                 "type": "object",
@@ -1666,6 +1885,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "create_propose",
             command: "create_propose",
+            scope: Scope::Seat,
             description: "Propose the deliberated charter - the final republic name, a free-text agenda, and the feature selection - once every member has joined (read_session shows create.can_propose). This seals the roster: every member ratifies the exact name+agenda+features with their signature, and only then does the workspace open.",
             schema: || json!({
                 "type": "object",
@@ -1702,6 +1922,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "create_finish",
             command: "create_finish",
+            scope: Scope::Seat,
             description: "Enter the republic a successful founding sealed (read_session shows create.run.outcome == 1). The phrase backup was already confirmed DURING the ritual (confirm_seed_backup, which needs the phrase the GUI wizard shows) - this just enters, the founder twin of join_finish.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::CreateFinish),
@@ -1709,6 +1930,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "wiki_draft_save",
             command: "wiki_draft_save",
+            scope: Scope::Seat,
             description: "Persist the LOCAL wiki draft (unvoted working copy) for the open workspace: an opaque blob that survives restarts, sealed at rest, never in backup exports. Empty removes it. The shared wiki base changes only through wiki_patch proposals - a draft is one member's scratch.",
             schema: || json!({
                 "type": "object",
@@ -1724,6 +1946,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "wiki_draft_load",
             command: "wiki_draft_load",
+            scope: Scope::Seat,
             description: "Read the open workspace's stored local wiki draft (\"\" = none).",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::WikiDraftLoad),
@@ -1731,6 +1954,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "confirm_seed_backup",
             command: "confirm_seed_backup",
+            scope: Scope::Seat,
             description: "Confirm the operator's recovery-phrase backup during a RUNNING founding or join ritual by re-typing the phrase (create.seed / join.seed). The engine matches it; the ritual seals - and touches disk - only once EVERY participant confirmed (founder included). Founder side: any time before the seal (the GUI prompts once every member ratified - seats at state 2 or 4). Joiner side: after ratifying (join.awaiting_backup).",
             schema: || json!({
                 "type": "object",
@@ -1746,6 +1970,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "join_start",
             command: "join_start",
+            scope: Scope::Seat,
             description: "Begin joining a republic from a real molt://invite/… link (must carry the transport handover - a bare preview link is rejected). The engine shows the joiner's own recovery phrase and runs the join off the actor; when the founder proposes the charter it is surfaced for join_confirm_charter. Runs over the invite's relays; a refusal names what is missing (adopt the invite's relays, then retry).",
             schema: || json!({
                 "type": "object",
@@ -1763,6 +1988,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "join_confirm_charter",
             command: "join_confirm_charter",
+            scope: Scope::Seat,
             description: "Ratify the founder's proposed charter, surfaced when the join reaches the ratification step (read_session shows join.awaiting_ratify with proposed_name / proposed_agenda). This is the joiner's confirmation - it releases the seal signature; once sealed, join_finish enters the republic.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::JoinConfirmCharter),
@@ -1770,6 +1996,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "join_decline_charter",
             command: "join_decline_charter",
+            scope: Scope::Seat,
             description: "Decline the founder's proposed charter at the ratification step (the other choice besides join_confirm_charter). Tells the founder the charter was declined (its seat shows declined so it can re-mint) and ends the join as failed.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::JoinDeclineCharter),
@@ -1777,6 +2004,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "join_finish",
             command: "join_finish",
+            scope: Scope::Seat,
             description: "Enter the republic a completed join sealed (read_session shows join.run.outcome == 1 with join.sealed_id). The phrase backup was already confirmed DURING the ritual (confirm_seed_backup, which needs the phrase the GUI wizard shows) - this just enters, the joiner twin of create_finish.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::JoinFinish),
@@ -1784,6 +2012,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef {
             name: "join_cancel",
             command: "join_cancel",
+            scope: Scope::Seat,
             description: "Abandon the join run and return to the choice screen.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::JoinCancel),
@@ -1806,6 +2035,14 @@ mod tests {
 
     fn wallet() -> WalletHandle {
         molt_engine::spawn(GroupConfig::demo(), SessionView::default())
+    }
+
+    /// The old one-key endpoint: a seat token and no read-only key.
+    fn seat_only(token: &str) -> Credentials {
+        Credentials {
+            seat: token.to_string(),
+            read: String::new(),
+        }
     }
 
     fn init_req(token: &str) -> Value {
@@ -2603,32 +2840,34 @@ mod tests {
     #[tokio::test]
     async fn tcp_requires_matching_token() {
         let h = wallet();
-        let mut authed = false;
+        let cred = seat_only("secret");
+        let mut authed = None;
         // Wrong token: rejected, connection stays unauthenticated.
-        let resp = handle_rpc(&h, init_req("nope"), Some("secret"), &mut authed)
+        let resp = handle_rpc(&h, init_req("nope"), Some(&cred), &mut authed)
             .await
             .expect("initialize always replies");
         assert_eq!(resp["error"]["code"], -32001);
-        assert!(!authed);
+        assert_eq!(authed, None);
         // Correct token: authenticated, handshake returns a result.
-        let resp = handle_rpc(&h, init_req("secret"), Some("secret"), &mut authed)
+        let resp = handle_rpc(&h, init_req("secret"), Some(&cred), &mut authed)
             .await
             .expect("initialize always replies");
         assert!(resp.get("result").is_some());
-        assert!(authed);
+        assert_eq!(authed, Some(Scope::Seat));
     }
 
     #[tokio::test]
     async fn methods_refused_until_authenticated() {
         let h = wallet();
-        let mut authed = false;
-        let resp = handle_rpc(&h, tools_list(), Some("secret"), &mut authed)
+        let cred = seat_only("secret");
+        let mut authed = None;
+        let resp = handle_rpc(&h, tools_list(), Some(&cred), &mut authed)
             .await
             .expect("tools/list replies");
         assert_eq!(resp["error"]["code"], -32001);
         // After a valid handshake, the same call succeeds.
-        let _ = handle_rpc(&h, init_req("secret"), Some("secret"), &mut authed).await;
-        let resp = handle_rpc(&h, tools_list(), Some("secret"), &mut authed)
+        let _ = handle_rpc(&h, init_req("secret"), Some(&cred), &mut authed).await;
+        let resp = handle_rpc(&h, tools_list(), Some(&cred), &mut authed)
             .await
             .expect("tools/list replies");
         assert!(resp["result"]["tools"].is_array());
@@ -2648,7 +2887,7 @@ mod tests {
         // no newline, comfortably past the bound
         let flood = vec![b'x'; MAX_RPC_LINE + 4096];
         let mut out: Vec<u8> = Vec::new();
-        serve_conn(h, BufReader::new(&flood[..]), &mut out, Some("secret".to_string()))
+        serve_conn(h, BufReader::new(&flood[..]), &mut out, Some(seat_only("secret")))
             .await
             .expect("the server ends the connection, it does not error out");
         let answer = String::from_utf8_lossy(&out);
@@ -2719,31 +2958,165 @@ mod tests {
         h.execute(Command::SetNodePosture { posture: posture("first") })
             .await
             .expect("posture");
-        assert_eq!(live_token(&h).await.as_deref(), Some("first"));
+        assert_eq!(live_tokens(&h).await.map(|c| c.seat).as_deref(), Some("first"));
         assert!(
             h.execute(Command::PatchSettings { patch: json!({ "mcp_token": "hijack" }) })
                 .await
                 .is_err(),
             "a rotation over MCP is refused"
         );
-        assert_eq!(live_token(&h).await.as_deref(), Some("first"));
+        assert_eq!(live_tokens(&h).await.map(|c| c.seat).as_deref(), Some("first"));
 
         // …rotate, exactly as the GUI button does
         h.execute(Command::SetNodePosture { posture: posture("second") })
             .await
             .expect("rotate");
         assert_eq!(
-            live_token(&h).await.as_deref(),
+            live_tokens(&h).await.map(|c| c.seat).as_deref(),
             Some("second"),
             "the next connection is gated on the NEW value"
+        );
+    }
+
+    /// §4.7: the read key admits the read tools and NOTHING else, and the
+    /// refusal is a protocol error rather than a tool result.
+    #[tokio::test]
+    async fn a_read_token_reads_but_cannot_propose() {
+        let h = wallet();
+        let cred = Credentials {
+            seat: "seat".to_string(),
+            read: "readonly".to_string(),
+        };
+        let mut authed = None;
+        let resp = handle_rpc(&h, init_req("readonly"), Some(&cred), &mut authed)
+            .await
+            .expect("initialize always replies");
+        assert!(resp.get("result").is_some());
+        assert_eq!(authed, Some(Scope::Read));
+
+        let call = |name: &str, args: Value| {
+            json!({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": { "name": name, "arguments": args }
+            })
+        };
+        let resp = handle_rpc(&h, call("list_proposals", json!({})), Some(&cred), &mut authed)
+            .await
+            .expect("tools/call replies");
+        assert_eq!(resp["result"]["isError"], json!(false), "a read goes through");
+
+        let resp = handle_rpc(
+            &h,
+            call("propose", json!({ "surface": "memory", "payload": {} })),
+            Some(&cred),
+            &mut authed,
+        )
+        .await
+        .expect("tools/call replies");
+        assert_eq!(resp["error"]["code"], -32001);
+        assert!(
+            resp["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("read-only"),
+            "the refusal has to name the reason"
+        );
+
+        // …and the SEAT key still carries everything
+        let mut seat = None;
+        let _ = handle_rpc(&h, init_req("seat"), Some(&cred), &mut seat).await;
+        assert_eq!(seat, Some(Scope::Seat));
+    }
+
+    /// An empty read key is OFF, never "anyone may read".
+    #[tokio::test]
+    async fn an_empty_read_token_admits_nobody() {
+        let h = wallet();
+        let cred = Credentials {
+            seat: "seat".to_string(),
+            read: String::new(),
+        };
+        let mut authed = None;
+        let resp = handle_rpc(&h, init_req(""), Some(&cred), &mut authed)
+            .await
+            .expect("initialize always replies");
+        assert_eq!(resp["error"]["code"], -32001);
+        assert_eq!(authed, None, "the empty string is not a credential");
+    }
+
+    /// A read-only client is not told about verbs it cannot call.
+    #[tokio::test]
+    async fn tools_list_shows_only_the_scope() {
+        let h = wallet();
+        let cred = Credentials {
+            seat: "seat".to_string(),
+            read: "readonly".to_string(),
+        };
+        let names = |resp: &Value| -> Vec<String> {
+            resp["result"]["tools"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|t| t["name"].as_str().map(str::to_string))
+                .collect()
+        };
+
+        let mut read = None;
+        let _ = handle_rpc(&h, init_req("readonly"), Some(&cred), &mut read).await;
+        let resp = handle_rpc(&h, tools_list(), Some(&cred), &mut read)
+            .await
+            .expect("tools/list replies");
+        let listed = names(&resp);
+        assert!(listed.contains(&"read_state".to_string()));
+        assert!(!listed.contains(&"propose".to_string()));
+        assert_eq!(
+            listed.len(),
+            tools().iter().filter(|t| t.scope == Scope::Read).count()
+        );
+
+        let mut seat = None;
+        let _ = handle_rpc(&h, init_req("seat"), Some(&cred), &mut seat).await;
+        let resp = handle_rpc(&h, tools_list(), Some(&cred), &mut seat)
+            .await
+            .expect("tools/list replies");
+        assert_eq!(names(&resp).len(), tools().len(), "the seat sees them all");
+    }
+
+    /// The read scope is a LIST, not a guess: a new tool lands in the seat
+    /// scope unless this test is changed with it.
+    #[test]
+    fn the_read_scope_is_exactly_this_set() {
+        let mut read: Vec<&str> = tools()
+            .iter()
+            .filter(|t| t.scope == Scope::Read)
+            .map(|t| t.name)
+            .collect();
+        read.sort_unstable();
+        assert_eq!(
+            read,
+            [
+                "list_proposals",
+                "read_chain",
+                "read_members",
+                "read_session",
+                "read_state",
+                "read_uploads",
+                "status",
+                "wiki_get",
+                "wiki_links",
+                "wiki_list",
+                "wiki_neighbors",
+                "wiki_search",
+            ]
         );
     }
 
     #[tokio::test]
     async fn stdio_needs_no_token() {
         let h = wallet();
-        // stdio: serve_conn seeds `authed = auth.is_none()`, i.e. already trusted.
-        let mut authed = true;
+        // stdio: serve_conn seeds the SEAT scope, i.e. already trusted.
+        let mut authed = Some(Scope::Seat);
         let resp = handle_rpc(&h, init_req(""), None, &mut authed)
             .await
             .expect("initialize always replies");

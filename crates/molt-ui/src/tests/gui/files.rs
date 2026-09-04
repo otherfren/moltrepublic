@@ -152,7 +152,7 @@ async fn propose_files(w: &WalletHandle, payload: serde_json::Value) -> Proposal
         .await
         .expect("the files proposal is accepted")
     {
-        Reply::Proposed { id } => id,
+        Reply::Proposed { id, .. } => id,
         other => panic!("unexpected: {other:?}"),
     }
 }

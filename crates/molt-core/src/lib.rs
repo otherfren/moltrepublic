@@ -3988,6 +3988,56 @@ pub enum Command {
         /// The document's path.
         path: String,
     },
+    /// One document's links (§4.5), in either direction.
+    WikiLinks {
+        /// The document's path.
+        path: String,
+        /// `"out"`, `"in"` or `"both"` (the default).
+        #[serde(default)]
+        direction: Option<String>,
+        /// Only edges carried by this header key.
+        #[serde(default)]
+        predicate: Option<String>,
+        /// Page size, clamped to 1..=500 (0 = the default 100).
+        #[serde(default)]
+        limit: u32,
+        /// Continue after this many edges.
+        #[serde(default)]
+        cursor: u32,
+    },
+    /// Full-text search over the wiki (§4.6). The text is tantivy's query
+    /// syntax (`+must -not "phrase" title:term`); the filters are facets.
+    WikiSearch {
+        /// The query text ("" = filters only).
+        #[serde(default)]
+        query: String,
+        /// Every tag must be present.
+        #[serde(default)]
+        tags: Vec<String>,
+        /// The header's `type`.
+        #[serde(default)]
+        kind: Option<String>,
+        /// A folder.
+        #[serde(default)]
+        folder: Option<String>,
+        /// Page size, clamped to 1..=500 (0 = the default 100).
+        #[serde(default)]
+        limit: u32,
+        /// Continue after this many hits.
+        #[serde(default)]
+        cursor: u32,
+    },
+    /// The documents within `depth` hops of one (§4.5), nearest first.
+    WikiNeighbors {
+        /// The document's path.
+        path: String,
+        /// 1 or 2 (0 = 1).
+        #[serde(default)]
+        depth: u32,
+        /// How many to return, capped at 500.
+        #[serde(default)]
+        limit: u32,
+    },
     /// The GUI publishes what its window currently shows
     /// (`docs_archive/ui/gui_over_mcp.md`) — the read half of driving the GUI
     /// from MCP. ENGINE-INTERNAL in spirit: only the window may speak it
@@ -5630,6 +5680,11 @@ pub enum Reply {
     Proposed {
         /// The new proposal's id.
         id: ProposalId,
+        /// What the proposal is fine to carry but worth seeing before a
+        /// vote - a wiki patch leaving a document with an unreadable
+        /// header, say. Never a refusal: the fold does not read headers.
+        #[serde(default)]
+        warnings: Vec<String>,
     },
     /// A surface snapshot.
     State(SurfaceSnapshot),
@@ -5654,6 +5709,37 @@ pub enum Reply {
         /// How many documents match the prefix in total.
         total: u64,
         /// The base revision this page was read at.
+        wiki_rev: u64,
+    },
+    /// One document's links ([`Command::WikiLinks`]).
+    WikiLinks {
+        /// The page of edges.
+        edges: Vec<WikiEdge>,
+        /// Pass back as `cursor`; `None` = last page.
+        next_cursor: Option<u32>,
+        /// The base revision the GRAPH reflects.
+        index_rev: u64,
+        /// The base revision of the fold itself.
+        wiki_rev: u64,
+    },
+    /// Search hits ([`Command::WikiSearch`]), best first.
+    WikiSearch {
+        /// The page of hits.
+        hits: Vec<WikiHit>,
+        /// Pass back as `cursor`; `None` = last page.
+        next_cursor: Option<u32>,
+        /// The base revision the INDEX reflects.
+        index_rev: u64,
+        /// The base revision of the fold itself.
+        wiki_rev: u64,
+    },
+    /// The documents near one ([`Command::WikiNeighbors`]).
+    WikiNeighbors {
+        /// Nearest first.
+        docs: Vec<WikiNeighbor>,
+        /// The base revision the GRAPH reflects.
+        index_rev: u64,
+        /// The base revision of the fold itself.
         wiki_rev: u64,
     },
     /// One wiki document with its content ([`Command::WikiGet`]).
@@ -6004,6 +6090,43 @@ pub struct WikiDocMeta {
     /// The front matter's `type`, when it declares one.
     #[serde(default)]
     pub kind: Option<String>,
+}
+
+/// One edge of the wiki's link graph ([`Reply::WikiLinks`], §4.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiEdge {
+    /// The other end: the target of an out-edge, the source of an in-edge.
+    pub path: String,
+    /// The header key that carried it; absent for a link in the body.
+    #[serde(default)]
+    pub predicate: Option<String>,
+    /// Did it come from the front matter rather than the prose?
+    pub header: bool,
+    /// `"out"` or `"in"`.
+    pub direction: String,
+}
+
+/// One search hit ([`Reply::WikiSearch`], §4.6).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WikiHit {
+    /// The document's path.
+    pub path: String,
+    /// Its first heading, when it has one.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// The index's relevance score - a ranking, never a percentage.
+    pub score: f32,
+    /// A fragment of the body around the match.
+    pub snippet: String,
+}
+
+/// One document within reach of another ([`Reply::WikiNeighbors`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiNeighbor {
+    /// The document's path.
+    pub path: String,
+    /// How many hops away, following links in either direction.
+    pub distance: u32,
 }
 
 /// One block of the persistent chain as display data — the row a
@@ -6889,7 +7012,10 @@ mod tests {
     fn every_reply_variant_serializes_to_json() {
         let replies = [
             Reply::Ack,
-            Reply::Proposed { id: ProposalId(1) },
+            Reply::Proposed {
+                id: ProposalId(1),
+                warnings: Vec::new(),
+            },
             Reply::Proposals { proposals: vec![] },
             Reply::Members { members: vec![] },
             Reply::Uploads { uploads: vec![] },

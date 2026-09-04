@@ -1942,16 +1942,7 @@ pub fn parse_blocks(raw: &str) -> Vec<Block> {
 
 /// `.md` link targets in order of first appearance, deduped.
 pub fn parse_links(raw: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for ev in Parser::new(raw) {
-        if let Event::Start(Tag::Link { dest_url, .. }) = ev {
-            let dest = dest_url.to_string();
-            if dest.ends_with(".md") && !out.contains(&dest) {
-                out.push(dest);
-            }
-        }
-    }
-    out
+    molt_engine::body_links(raw)
 }
 
 // ---------------------------------------------------------------------------

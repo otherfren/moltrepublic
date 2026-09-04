@@ -1,11 +1,12 @@
 # Knowledge base at scale: the shared wiki for tens of thousands of entries
 
-**Status: OPEN - design of 2026-09-03, decisions ratified by the user the
-same evening (§1), work packages K0-K7 not built.** Extends the executed
-fold design `docs_archive/memory/shared_memory_real.md` and the export
-`docs_archive/memory/wiki_export_plan.md`; K6 changes what a checkpoint
-carries (`docs_archive/chain/log_compaction.md` §B.6a) and is gated on a
-review of §4.9 before it is built.
+**Status: PARTLY BUILT - design of 2026-09-03, decisions ratified by the
+user the same evening (§1). K0-K3 landed on master 2026-09-04; K4, K5 and
+K7 are open; K6 is BLOCKED on one product decision (§4.9).** Extends the
+executed fold design `docs_archive/memory/shared_memory_real.md` and the
+export `docs_archive/memory/wiki_export_plan.md`; K6 changes what a
+checkpoint carries (`docs_archive/chain/log_compaction.md` §B.6a) and its
+review gate RAN - see §4.9.
 
 The goal: a republic's shared wiki becomes a general, decentralised
 knowledge base - tens of thousands of entries, dense cross-references, a
@@ -276,13 +277,31 @@ predicate.
   inn: HashMap<path, Vec<Edge>>, dangling: HashMap<target, Vec<(path, Edge)>>,
   aliases: HashMap<String, Vec<path>> }`,
   `Edge { to, predicate: Option<String>, header: bool }`.
-- Build: full from the folded tree off-actor at workspace open (the wiki
-  export pattern; the result comes back as an internal
-  `Command::NetWikiIndexReady { rev, graph }`); incremental on-actor per
-  applied patch for the touched paths (drop their out-edges and reverse
-  entries, re-parse, re-add, re-resolve dangling edges naming the new
-  document, turn a deleted document's in-edges dangling). A pure function
-  of the tree, so every node computes the same graph.
+- Build (BUILT 2026-09-04, two deviations, both deliberate):
+  - **Resolution runs as a whole pass, always.** The plan's incremental
+    edge surgery (drop out-edges, re-add, re-resolve dangling, turn a
+    deleted document's in-edges dangling) has four ways to be subtly
+    wrong. Instead the graph keeps each document's RAW edges as written,
+    and an update re-parses only the touched documents and then runs the
+    SAME resolution pass a full build runs. "Incremental == full" is then
+    true by construction rather than by care - the keystone still pins it,
+    over edit, add, delete and a name that becomes ambiguous. The pass is
+    O(edges), which is the cheap half; parsing the tree is the expensive
+    half and that stays incremental.
+  - **The first build is synchronous, not off-actor.** The off-actor build
+    the plan sketches (`NetWikiIndexReady { rev, graph }`) needs a
+    reconciliation path for the case where the tree moved while the task
+    ran, and that path is only exercised at a scale no republic has yet.
+    The graph is therefore built on the first graph read and updated per
+    applied patch. FOLLOW-UP, not forgotten: at §3's target the first read
+    after an open pays for parsing the whole tree on the actor.
+  - Name resolution is CASE-EXACT, like the path resolution it extends:
+    `[[Acme]]` does not find `people/acme.md`. Deterministic and consistent with
+    today's GUI rule; a case-folding rule would need its own ambiguity
+    story.
+  - `body_links` masks code spans and fenced blocks, so a link in an
+    example is not a claim about the graph. It is the ONE parser now:
+    `molt-ui`'s `parse_links` calls it.
 - Tools (Read): `wiki_links { path, direction: out|in|both, predicate:
   Option<String>, limit, cursor }` → edges; `wiki_neighbors { path, depth:
   1|2, limit }` → paths with distance (BFS, cap 500). Both carry
@@ -290,25 +309,35 @@ predicate.
 
 ### 4.6 Full-text search (K5)
 
-- `tantivy` with `default-features = false, features = ["stopwords",
-  "lz4-compression"]`: the DEFAULT feature set pulls `zstd` (C, via
-  `columnar-zstd-compression`, verified against the crate's manifest
-  2026-09-03) and would silently break the default build's pure-Rust
-  posture. `stemmer` only if `frostem` proves pure Rust under `cargo tree`.
+- `tantivy 0.26.1` with `default-features = false, features = ["stopwords",
+  "lz4-compression", "stemmer"]`: the DEFAULT feature set pulls `zstd` (C,
+  via `columnar-zstd-compression`) and would silently break the default
+  build's pure-Rust posture. **Corrected 2026-09-04, measured:** the spec
+  this section first named (`stopwords` + `lz4-compression` alone) does not
+  compile - `stop_word_filter` imports `Language`, which is gated behind
+  `stemmer` (E0432; still mis-gated on tantivy `main`). `stemmer` is
+  therefore mandatory with `stopwords`, and it is `rust-stemmers 1.2.0`,
+  not `frostem` - `frostem` appears in no tantivy release. Both are pure
+  Rust, no build.rs, and the resulting graph carries ZERO `-sys` crates
+  (100 deps, `cargo tree -i` empty for zstd-sys, libsqlite3-sys, ring, cc,
+  cmake, pkg-config). Two further API corrections for the implementation:
+  `TopDocs` is no longer a `Collector` (needs `.order_by_score()`), and
+  `stopwords` registers no filter by itself - a `TextAnalyzer` has to.
   Guard: `crates/molt-engine/tests/c_free_guard.rs` mirrors
   `crates/molt-net/tests/ring_free_guard.rs` with `-i zstd-sys` (and
   `-i libsqlite3-sys`) on `-p molt-engine -e no-dev`.
 - Schema: `path` STRING|STORED (the delete key), `title` TEXT|STORED,
   `body` TEXT, `folder` STRING, `facet` Facet (`/tag/<t>`, `/type/<t>`,
   `/prop/<key>/<value>` for scalar String properties ≤ 64 chars).
-- Ownership: an off-actor `WikiIndexer` task owns the RAM index
-  (`Index::create_in_ram`) and its `IndexWriter`; the actor sends it
-  `IndexDelta { rev, upserts, deletes }` per applied patch and the full
-  tree at open; the task does `delete_term` + `add_document` + `commit`.
-  The actor holds the `IndexReader` (`ReloadPolicy::Manual`, Send + Sync)
-  and runs the QUERY itself - milliseconds of CPU, no await, so the
-  handler stays synchronous. Before the first commit a search answers
-  `index building`, never an empty result dressed as "no hits".
+- Ownership (BUILT 2026-09-04, same deviation as the graph): the index is
+  owned by the actor, built on the FIRST search and updated per applied
+  patch (`delete_term` + `add_document` + `commit`, then an explicit
+  `reader.reload()` — `ReloadPolicy::Manual` shows nothing without it).
+  There is therefore no `index building` state and no `IndexDelta`
+  channel: a search always answers over a current index. FOLLOW-UP, same
+  as §4.5: at §3's target the first search after an open pays for indexing
+  the whole tree on the actor, and that is when the off-actor
+  `WikiIndexer` this section sketches earns its complexity.
 - Tool (Read): `wiki_search { query, tags: Vec<String>, type:
   Option<String>, folder: Option<String>, limit, cursor }` → hits
   `{ path, title, score, snippet }`, `next_cursor` (an offset),
@@ -415,10 +444,66 @@ carries the FOLDED tree once, plus the non-wiki Memory entries.
   (`molt-chain-change-v2` pin unchanged); `a_second_wiki_base_is_void`;
   the existing `a_checkpoint_cut_keeps_the_wiki_fold_identical` extended
   to the folded variant.
-- **Review gate:** this section is checked against
-  `docs_archive/chain/log_compaction.md` §B.6a and
-  `docs_archive/chain/persistent_chain.md` §10 with the user before K6
-  starts; the doc statuses of both move in the same change that lands it.
+- **Review gate: RAN 2026-09-04. Verdict: not implementable as written.**
+  K6 is NOT built and must not be started before the decision below.
+
+  **The decision that belongs to the user.** After K6 the checkpoint blob
+  — the trust root a rejoiner is handed once the genesis is gone — becomes
+  the size of the whole folded tree, i.e. §3's own target of 100 MiB.
+  `log_compaction.md` §B.6a measured that artefact against a 65408 B
+  gift-wrap cap and a 128 KiB relay budget, and already called it over
+  budget at 69628 B with ONE logo in it. "Never larger than today's
+  history blob" (the claim above) is true and beside the point: today the
+  blob grows with votes, after K6 it starts at the entire knowledge base
+  on day one. So K6 does not bound the blob, it re-bases it — recovery and
+  catch-up re-anchoring stop working at the scale this plan is FOR.
+  Either that trade is accepted explicitly, or K6 needs a companion first
+  (a blob carrying a tree HASH plus a separately fetched tree, or chunked
+  blob transport). Everything else below is fixable in code.
+
+  **The blocker that would have shipped.** `walk_suffix_chain`
+  (`chain/verify.rs:1005`) hard-rejects any anchor that is not
+  `ChainChange::Checkpoint`. Every node prunes at the cut, so after the
+  first `CheckpointFolded` the anchor IS `blocks[0]`, and the next open
+  fails with "this workspace's chain is unreadable" (`session.rs:1438`) —
+  on the UPGRADED nodes, not the old ones.
+
+  **Corrections to this section, from the same review.**
+  1. "The layout tag stays `molt-chain-checkpoint-v8`" is wrong: three
+     tags are live and content-selected (`chain.rs:509-514`); a typical
+     republic's cut emits v6 or v7. Tag and variant are orthogonal, and
+     §B.6a's versioning invariant asks for a bump when the same chain
+     hashes differently — which is exactly what this change does.
+  2. Summarising AT THE CUT re-opens the trap `verify.rs:583-585` and
+     `647-653` were written to close. The summary must reach all THREE
+     hash sites — `hash_walk_state`, `own_checkpoint_state`, and the blob
+     actually persisted at `governance.rs:597` — or the persisted blob's
+     hash misses the block's signed `state_hash`.
+  3. `CheckpointProposed` carries no variant, so
+     `receive_checkpoint_proposal` cannot know which hash to recompute.
+  4. Every `matches!(… ChainChange::Checkpoint …)` site has to learn the
+     variant (`checkpoint.rs:81`, `governance.rs:586`/`683`,
+     `verify.rs:132`/`354`/`440`/`628`/`1005`), plus a rule on whether a
+     legacy cut may follow a folded one.
+  5. `rev` in the signed payload contradicts `wiki_fold.rs:385-388`
+     ("never consensus input"). Drop it from the base, or pin the exact
+     arithmetic.
+  6. `fold_one` cannot express "the FIRST Memory entry" — it sees one
+     payload, no position. The rule belongs in `wiki_fold_with_rev`, and
+     `tree.is_empty()` is not a substitute (a leading void patch leaves
+     the tree empty).
+  7. The `(0, …)` proposal id is an unguarded sentinel: ids start at 1,
+     but `receive_proposed` accepts 0 from the wire, and
+     `settle_cards_against_chain` would materialise a phantom Accepted
+     card carrying the whole tree.
+  8. Nothing rejects a VOTED `wiki_base` payload today — as written, one
+     proposal could replace the wiki.
+  9. "The blob's patches were never individually signed" is false: they
+     are the verbatim payloads of m-of-n-signed blocks. The conclusion
+     (the export is unchanged) holds for a different reason —
+     `bundle_from_chain` already returns `None` for a pruned holder.
+  10. "Tell the human to upgrade" describes no code path: the wire
+      `tracing::warn`s and drops, the disk path REFUSES the open.
 
 ### 4.10 The GUI (K7)
 
@@ -440,26 +525,28 @@ carries the FOLDED tree once, plus the non-wiki Memory entries.
 
 ## 5. Work packages (build order, each red-first, each green on master)
 
-- **K0 Fold cache + cheap superseding** (engine, core helper). §4.1-4.2.
-  Gate: the two keystones plus the whole existing wiki suite.
-- **K1 Paged reads** (`WikiList`, `WikiGet`, tools). §4.3. Gate:
-  `crates/molt-mcp/tests/tool_reads.rs` extended (tool == engine-direct),
-  limit clamp and cursor round-trip tests.
+- **K0 Fold cache + cheap superseding** — BUILT 2026-09-04. §4.1-4.2.
+  Two deviations from the design: the cache carries `(tree, rev)` together
+  (the snapshot path needs the revision, so a tree-only cache could drift
+  from `wiki_tree`), and it tracks the two applied logs SEPARATELY, since
+  the fold order is legacy-then-chain and an append to the first half is
+  not at the end of that order.
+- **K1 Paged reads** (`WikiList`, `WikiGet`, tools) — BUILT 2026-09-04.
+  §4.3. `kind` and `props` stay `None`/null until K4 parses the header.
 - **K2 Read-only key** (config, core, engine, mcp, GUI, docs). §4.7. Gate:
   `a_read_token_reads_but_cannot_propose`,
   `an_empty_read_token_admits_nobody`, `tools_list_shows_only_the_scope`,
   scope completeness inside the co-equality test, `patch_settings` refuses
   `mcp_read_token`, one headless panel test modelled on
   `gui/layout.rs:730`, one window build.
-- **K3 Wake hook pinned** (engine test, env var, template comment). §4.8.
-- **K4 Front matter + link graph** (engine `wiki_index`, molt-ui reuse,
-  `wiki_links` / `wiki_neighbors`, propose warnings). §4.4-4.5. Gate: the
-  subset's accept/reject table as one test per rule, resolution order,
-  incremental == full graph after every fixture patch, dangling
-  re-resolution.
-- **K5 Search** (`tantivy`, indexer task, `wiki_search`, C-free guard).
-  §4.6. Gate: guard green, index-building answer, delete + re-add on edit,
-  facet filter, snippet.
+- **K3 Wake hook pinned** — BUILT 2026-09-04. §4.8.
+- **K4 Front matter + link graph** — BUILT 2026-09-04. §4.4-4.5. The YAML
+  subset is driven through `yaml-rust2`'s EVENT parser as designed (the
+  `no` → false class cannot happen); `Parser` is not an `Iterator` in
+  0.12, so the loop pulls `next_token()`.
+- **K5 Search** — BUILT 2026-09-04. §4.6. `crates/molt-engine/tests/c_free_guard.rs`
+  keeps the graph C-free; the index-building answer does not exist (see
+  §4.6). An empty query with no filter finds NOTHING, never everything.
 - **K6 A cut carries the tree** (core fold, engine verify/checkpoint,
   ChainChange variant). §4.9, AFTER the review gate.
 - **K7 GUI** (infobox, lazy tree, search, backlinks, snapshot diet).

@@ -269,6 +269,7 @@ fn main() -> anyhow::Result<()> {
             mcp_port: config.mcp.port,
             mcp_allow: config.mcp.allow.clone(),
             mcp_token: config.mcp.token.clone(),
+            mcp_read_token: config.mcp.read_token.clone(),
             anonymity: config.transport.anonymity.network.as_str().to_string(),
             tor_mode: config.transport.anonymity.tor.mode.as_str().to_string(),
             tor_port: config.transport.anonymity.tor.port,
@@ -334,14 +335,23 @@ fn main() -> anyhow::Result<()> {
         tracing::warn!(key = "[mcp].token", "MCP token is empty - the TCP endpoint is unauthenticated");
     }
     let mcp_token = config.mcp.token.clone();
+    let mcp_read_token = config.mcp.read_token.clone();
     {
         let mcp_wallet = wallet.clone();
         let listen_addr = mcp_addr.clone();
         let allowlist = allowlist.clone();
         let token = mcp_token.clone();
+        let read_token = mcp_read_token.clone();
         rt.spawn(async move {
-            if let Err(e) =
-                molt_mcp::serve_tcp(mcp_wallet, &listen_addr, allow_all, allowlist, token).await
+            if let Err(e) = molt_mcp::serve_tcp(
+                mcp_wallet,
+                &listen_addr,
+                allow_all,
+                allowlist,
+                token,
+                read_token,
+            )
+            .await
             {
                 tracing::warn!(error = %e, "MCP TCP server stopped");
             }
@@ -359,6 +369,7 @@ fn main() -> anyhow::Result<()> {
             allow_all,
             allowlist,
             mcp_token,
+            mcp_read_token,
         )
     } else {
         // UI mode (default): GUI on main thread; fall back to headless stdio
@@ -392,6 +403,7 @@ fn main() -> anyhow::Result<()> {
                     allow_all,
                     allowlist,
                     mcp_token,
+                    mcp_read_token,
                 )
             }
         }
@@ -701,12 +713,13 @@ fn run_headless(
     allow_all: bool,
     allowlist: Vec<IpAddr>,
     token: String,
+    read_token: String,
 ) -> anyhow::Result<()> {
     match mcp_tcp {
         Some(addr) => {
             tracing::info!(%addr, "MCP transport: tcp");
             rt.block_on(molt_mcp::serve_tcp(
-                wallet, addr, allow_all, allowlist, token,
+                wallet, addr, allow_all, allowlist, token, read_token,
             ))?;
         }
         None => {

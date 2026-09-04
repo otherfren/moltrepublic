@@ -30,6 +30,11 @@ base64.workspace = true
 # set_image decodability sniff (guess_format + header dimensions, never a
 # full decode) — same pure-Rust decoder set as the molt-ui preview
 image.workspace = true
+# the wiki index (knowledge_base_scale.md §4.4-4.5): the header's YAML subset
+# and the body's links. Both pure Rust, both parse-only.
+yaml-rust2.workspace = true
+pulldown-cmark.workspace = true
+tantivy.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

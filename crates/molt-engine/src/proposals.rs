@@ -21,6 +21,7 @@ use molt_core::{
 };
 use serde_json::Value;
 
+use crate::wiki_index;
 use crate::State;
 
 /// Parked declines: at most this many proposal ids wait for their proposal
@@ -196,6 +197,8 @@ fn image_headroom(
 const WIKI_PAGE_DEFAULT: u32 = 100;
 /// See [`WIKI_PAGE_DEFAULT`].
 const WIKI_PAGE_MAX: u32 = 500;
+/// The neighbourhood walk's hard cap (§4.5).
+const WIKI_NEIGHBOR_CAP: u32 = 500;
 
 /// Refuse a proposal the transport could never carry. Names the ONE thing
 /// the human can change — for an image proposal that is the image, for
@@ -612,6 +615,7 @@ impl State {
             self.prepare_files_proposal(&mut payload)?;
         }
         validate_payload_fits(surface, &payload, &self.roster())?;
+        let warnings = self.wiki_header_warnings(surface, &payload);
         // R6: a pool edit that would strand a DECLARED member — sharing no
         // relay with what that seat is on record as reaching (R3b) — is the
         // R4 split as a proposal. Refuse it naming the member and its relay.
@@ -715,7 +719,41 @@ impl State {
             // honest 1-of-1 governance (the solo boot group)
             self.try_apply(id);
         }
-        Ok(Reply::Proposed { id })
+        Ok(Reply::Proposed { id, warnings })
+    }
+
+    /// What a wiki patch leaves behind that a voter should SEE without it
+    /// being a refusal: a document whose header stands outside the subset
+    /// (§4.4). The fold never reads a header, so a bad one must not void a
+    /// patch - it is a warning on the card, and members may decline.
+    fn wiki_header_warnings(&self, surface: Surface, payload: &Value) -> Vec<String> {
+        if surface != Surface::Memory
+            || payload.get("op").and_then(Value::as_str) != Some("wiki_patch")
+        {
+            return Vec::new();
+        }
+        let Some(patch) = payload.get("value").and_then(Value::as_str) else {
+            return Vec::new();
+        };
+        let files = molt_core::wiki_fold::parse_patch(patch);
+        let paths = molt_core::wiki_fold::touched_paths(&files);
+        let (tree, _) = self.wiki_base();
+        let mut after: std::collections::BTreeMap<String, String> = paths
+            .iter()
+            .filter_map(|p| tree.get(p).map(|c| (p.clone(), c.clone())))
+            .collect();
+        if molt_core::wiki_fold::apply_patch(&mut after, &files).is_err() {
+            // a patch that does not apply is superseded, not warned about
+            return Vec::new();
+        }
+        after
+            .iter()
+            .filter_map(|(path, content)| {
+                wiki_index::front_matter::properties(content)
+                    .1
+                    .map(|err| format!("{path}: {err}"))
+            })
+            .collect()
     }
 
     /// The single-operator invariant, stated ONCE: without chain governance
@@ -1735,8 +1773,8 @@ impl State {
             docs.push(molt_core::WikiDocMeta {
                 path: path.clone(),
                 bytes: u64::try_from(content.len()).unwrap_or(u64::MAX),
-                title: crate::wiki_index::front_matter::first_heading(content),
-                kind: None,
+                title: wiki_index::front_matter::first_heading(content),
+                kind: wiki_index::front_matter::kind_of(content),
             });
         }
         Ok(Reply::WikiList {
@@ -1751,19 +1789,253 @@ impl State {
     /// is an error — an empty document would read like a real one.
     pub(crate) fn cmd_wiki_get(&mut self, path: String) -> Result<Reply, MoltError> {
         self.require_feature(Surface::Memory)?;
-        self.refresh_wiki_cache();
+        self.refresh_wiki_graph();
         let (tree, wiki_rev) = self.wiki_base();
         let Some(content) = tree.get(&path) else {
             return Err(MoltError::BadPayload(format!("no such document: {path}")));
+        };
+        let props = match wiki_index::front_matter::properties(content).0 {
+            Some(map) => Value::Object(map),
+            None => Value::Null,
+        };
+        let count = |list: Option<&Vec<wiki_index::graph::Edge>>| {
+            u32::try_from(list.map_or(0, Vec::len)).unwrap_or(u32::MAX)
+        };
+        let (links_out, links_in) = match self.wiki_graph.as_ref() {
+            Some(g) => (count(g.out.get(&path)), count(g.inn.get(&path))),
+            None => (0, 0),
         };
         Ok(Reply::WikiDocument {
             path: path.clone(),
             content: content.clone(),
             wiki_rev,
-            props: serde_json::Value::Null,
-            links_out: 0,
-            links_in: 0,
+            props,
+            links_out,
+            links_in,
         })
+    }
+
+    /// [`Command::WikiLinks`] (§4.5): one document's edges, in either
+    /// direction, optionally narrowed to one predicate.
+    pub(crate) fn cmd_wiki_links(
+        &mut self,
+        path: String,
+        direction: Option<String>,
+        predicate: Option<String>,
+        limit: u32,
+        cursor: u32,
+    ) -> Result<Reply, MoltError> {
+        self.require_feature(Surface::Memory)?;
+        let dir = direction.unwrap_or_else(|| "both".to_string());
+        if !matches!(dir.as_str(), "out" | "in" | "both") {
+            return Err(MoltError::BadPayload(format!(
+                "direction is out, in or both - not `{dir}`"
+            )));
+        }
+        self.refresh_wiki_graph();
+        let page = usize::try_from(match limit {
+            0 => WIKI_PAGE_DEFAULT,
+            n => n.clamp(1, WIKI_PAGE_MAX),
+        })
+        .unwrap_or(100);
+        let wiki_rev = self.wiki_base().1;
+        let graph = self
+            .wiki_graph
+            .as_ref()
+            .ok_or_else(|| MoltError::Engine("the wiki index is unavailable".to_string()))?;
+        if !graph.docs.contains_key(&path) {
+            return Err(MoltError::BadPayload(format!("no such document: {path}")));
+        }
+        let mut edges: Vec<molt_core::WikiEdge> = Vec::new();
+        let mut take = |side: &str, list: Option<&Vec<wiki_index::graph::Edge>>| {
+            for e in list.into_iter().flatten() {
+                if predicate
+                    .as_ref()
+                    .is_some_and(|p| e.predicate.as_deref() != Some(p.as_str()))
+                {
+                    continue;
+                }
+                edges.push(molt_core::WikiEdge {
+                    path: e.to.clone(),
+                    predicate: e.predicate.clone(),
+                    header: e.header,
+                    direction: side.to_string(),
+                });
+            }
+        };
+        if dir != "in" {
+            take("out", graph.out.get(&path));
+        }
+        if dir != "out" {
+            take("in", graph.inn.get(&path));
+        }
+        let start = usize::try_from(cursor).unwrap_or(0);
+        let rest = edges.len().saturating_sub(start);
+        let page = page.min(rest);
+        let next_cursor = (start + page < edges.len())
+            .then(|| u32::try_from(start + page).unwrap_or(u32::MAX));
+        let edges = edges.into_iter().skip(start).take(page).collect();
+        Ok(Reply::WikiLinks {
+            edges,
+            next_cursor,
+            index_rev: wiki_rev,
+            wiki_rev,
+        })
+    }
+
+    /// [`Command::WikiNeighbors`] (§4.5): what is one or two hops away.
+    pub(crate) fn cmd_wiki_neighbors(
+        &mut self,
+        path: String,
+        depth: u32,
+        limit: u32,
+    ) -> Result<Reply, MoltError> {
+        self.require_feature(Surface::Memory)?;
+        self.refresh_wiki_graph();
+        let depth = match depth {
+            0 => 1,
+            n => n.min(2),
+        };
+        let cap = usize::try_from(match limit {
+            0 => WIKI_NEIGHBOR_CAP,
+            n => n.min(WIKI_NEIGHBOR_CAP),
+        })
+        .unwrap_or(500);
+        let wiki_rev = self.wiki_base().1;
+        let graph = self
+            .wiki_graph
+            .as_ref()
+            .ok_or_else(|| MoltError::Engine("the wiki index is unavailable".to_string()))?;
+        if !graph.docs.contains_key(&path) {
+            return Err(MoltError::BadPayload(format!("no such document: {path}")));
+        }
+        let docs = graph
+            .neighbors(&path, depth, cap)
+            .into_iter()
+            .map(|(path, distance)| molt_core::WikiNeighbor { path, distance })
+            .collect();
+        Ok(Reply::WikiNeighbors {
+            docs,
+            index_rev: wiki_rev,
+            wiki_rev,
+        })
+    }
+
+    /// Note what an applied Memory entry changed, for the link graph:
+    /// named paths are re-parsed on the next graph read, an unnamed change
+    /// (a non-patch payload) drops the graph.
+    pub(crate) fn note_wiki_change(
+        &mut self,
+        moved: Option<&std::collections::BTreeSet<String>>,
+    ) {
+        match moved {
+            Some(paths) => {
+                self.wiki_graph_dirty.extend(paths.iter().cloned());
+                self.wiki_search_dirty.extend(paths.iter().cloned());
+            }
+            None => {
+                self.wiki_graph = None;
+                self.wiki_graph_dirty.clear();
+                self.wiki_search = None;
+                self.wiki_search_dirty.clear();
+            }
+        }
+    }
+
+    /// The full-text index, current for the folded base. Built on the
+    /// first search, like the graph - a republic that never searches never
+    /// pays for an index.
+    pub(crate) fn refresh_wiki_search(&mut self) -> Result<(), MoltError> {
+        self.refresh_wiki_cache();
+        let epoch = self.applied_epoch;
+        let stale = self.wiki_search.is_none() || self.wiki_search_epoch != epoch;
+        let dirty = std::mem::take(&mut self.wiki_search_dirty);
+        let failed = |e: tantivy::TantivyError| MoltError::Engine(format!("wiki index: {e}"));
+        if stale {
+            let tree = self.wiki_base().0.into_owned();
+            self.wiki_search = Some(wiki_index::search::WikiSearch::build(&tree).map_err(failed)?);
+            self.wiki_search_epoch = epoch;
+            return Ok(());
+        }
+        if dirty.is_empty() {
+            return Ok(());
+        }
+        let tree = self.wiki_base().0.into_owned();
+        if let Some(s) = self.wiki_search.as_mut() {
+            s.update(&tree, &dirty).map_err(failed)?;
+        }
+        Ok(())
+    }
+
+    /// [`Command::WikiSearch`] (§4.6).
+    pub(crate) fn cmd_wiki_search(
+        &mut self,
+        query: String,
+        tags: Vec<String>,
+        kind: Option<String>,
+        folder: Option<String>,
+        limit: u32,
+        cursor: u32,
+    ) -> Result<Reply, MoltError> {
+        self.require_feature(Surface::Memory)?;
+        self.refresh_wiki_search()?;
+        let page = usize::try_from(match limit {
+            0 => WIKI_PAGE_DEFAULT,
+            n => n.clamp(1, WIKI_PAGE_MAX),
+        })
+        .unwrap_or(100);
+        let start = usize::try_from(cursor).unwrap_or(0);
+        let wiki_rev = self.wiki_base().1;
+        let index = self
+            .wiki_search
+            .as_ref()
+            .ok_or_else(|| MoltError::Engine("the wiki index is unavailable".to_string()))?;
+        let filters = wiki_index::search::Filters {
+            tags,
+            kind,
+            folder,
+        };
+        let (hits, more) = index
+            .search(&query, &filters, page, start)
+            .map_err(|e| MoltError::BadPayload(format!("query: {e}")))?;
+        let next_cursor =
+            more.then(|| u32::try_from(start + hits.len()).unwrap_or(u32::MAX));
+        Ok(Reply::WikiSearch {
+            hits: hits
+                .into_iter()
+                .map(|h| molt_core::WikiHit {
+                    path: h.path,
+                    title: h.title,
+                    score: h.score,
+                    snippet: h.snippet,
+                })
+                .collect(),
+            next_cursor,
+            index_rev: wiki_rev,
+            wiki_rev,
+        })
+    }
+
+    /// The link graph, current for the folded base. Built on first use:
+    /// a republic that never asks for links never pays for one.
+    pub(crate) fn refresh_wiki_graph(&mut self) {
+        self.refresh_wiki_cache();
+        let epoch = self.applied_epoch;
+        let stale = self.wiki_graph.is_none() || self.wiki_graph_epoch != epoch;
+        let dirty = std::mem::take(&mut self.wiki_graph_dirty);
+        if stale {
+            let tree = self.wiki_base().0.into_owned();
+            self.wiki_graph = Some(wiki_index::graph::WikiGraph::build(&tree));
+            self.wiki_graph_epoch = epoch;
+            return;
+        }
+        if dirty.is_empty() {
+            return;
+        }
+        let tree = self.wiki_base().0.into_owned();
+        if let Some(g) = self.wiki_graph.as_mut() {
+            g.update(&tree, &dirty);
+        }
     }
 
     /// The Memory projection changed in a way an APPEND cannot describe (a
@@ -2825,7 +3097,7 @@ mod size_gate_tests {
     #[test]
     fn a_proposed_description_is_stored_trimmed() {
         let mut st = crate::tests::plain_state();
-        let Reply::Proposed { id } = st
+        let Reply::Proposed { id, .. } = st
             .cmd_propose(
                 Surface::Organization,
                 json!({ "op": "set_member_desc", "member": "me", "value": "  keeps the bees \n" }),

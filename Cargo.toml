@@ -152,6 +152,17 @@ image       = { version = "0.25", default-features = false, features = ["png", "
 # the wiki pane's markdown pseudo-render (molt-ui): same crate+version the
 # Slint text stack already compiles in; parser only, no html feature
 pulldown-cmark = { version = "0.13", default-features = false }
+# the wiki's front matter (knowledge_base_scale.md §4.4) — driven through its
+# EVENT parser, never YamlLoader, so a plain scalar keeps its raw text and the
+# subset decides the types. default-features off drops encoding_rs (we feed &str)
+yaml-rust2 = { version = "0.12", default-features = false }
+# full-text over the wiki (§4.6). default-features OFF: the default set pulls
+# zstd (C) via columnar-zstd-compression. `stopwords` needs `stemmer` — its
+# StopWordFilter imports `Language`, which only exists under that feature
+# (measured 2026-09-04: the pair alone is E0432). Both pure Rust; the
+# resulting graph carries no *-sys crate, which crates/molt-engine/tests/
+# c_free_guard.rs keeps true.
+tantivy = { version = "0.26", default-features = false, features = ["stopwords", "lz4-compression", "stemmer"] }
 # block-level diffs for the wiki's pending-change preview (molt-ui) — the
 # insta/cargo-insta diff engine, not a hand-rolled LCS
 similar     = "2"
@@ -190,6 +201,14 @@ overflow-checks = true
 # makes `cargo build -p molt-ui-window` die by SIGKILL again.
 [profile.dev.package.molt-ui-window]
 incremental = false
+# …and no debug info for the same crate. Measured 2026-09-04 on the 15.9 GiB
+# box: with debuginfo the single window rustc was OOM-killed twice at 14.1 GiB
+# anon-RSS (kernel log, sampled peak 13.5 GiB); without it the same build
+# finished in 8m23s at a sampled peak of 13.4 GiB. That is ~1.1 % — it is NOT
+# a fix, it bought one build at a margin that was already gone. Debug info on
+# a machine-written module buys nothing a backtrace through `AppWindow` cannot
+# give, so it stays off; the real headroom question is in CLAUDE.md.
+debug = 0
 
 [profile.release]
 overflow-checks = true       # mirror monero-oxide security posture

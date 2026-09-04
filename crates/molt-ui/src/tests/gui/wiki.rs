@@ -310,7 +310,7 @@ fn the_export_dialog_issues_the_command_with_the_picked_path_and_the_proof_flag(
             .await
             .expect("propose")
         {
-            Reply::Proposed { id } => id,
+            Reply::Proposed { id, .. } => id,
             other => panic!("unexpected: {other:?}"),
         };
         w.execute(Command::Approve { proposal: id })

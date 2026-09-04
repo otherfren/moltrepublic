@@ -27,7 +27,7 @@ fn propose_then_threshold_applies() {
             .await
             .expect("propose")
         {
-            Reply::Proposed { id } => id,
+            Reply::Proposed { id, .. } => id,
             other => panic!("unexpected: {other:?}"),
         };
         assert_eq!(
@@ -74,7 +74,7 @@ fn approve_never_counts_invented_peer_approvals() {
             .await
             .expect("propose")
         {
-            Reply::Proposed { id } => id,
+            Reply::Proposed { id, .. } => id,
             other => panic!("unexpected: {other:?}"),
         };
         for _ in 0..2 {
@@ -117,7 +117,7 @@ fn second_local_approval_is_refused_without_chain_governance() {
             .await
             .expect("propose")
         {
-            Reply::Proposed { id } => id,
+            Reply::Proposed { id, .. } => id,
             other => panic!("unexpected: {other:?}"),
         };
         w.execute(Command::Approve { proposal: id })
@@ -240,7 +240,7 @@ fn solo_boot_group_runs_real_one_of_one_governance() {
             .await
             .expect("propose")
         {
-            Reply::Proposed { id } => id,
+            Reply::Proposed { id, .. } => id,
             other => panic!("unexpected: {other:?}"),
         };
         let snap = read_surface(&w, Surface::Memory).await;
@@ -413,7 +413,7 @@ fn effective_identity_follows_the_applied_org_ops() {
                     .await
                     .expect("propose")
                 {
-                    Reply::Proposed { id } => id,
+                    Reply::Proposed { id, .. } => id,
                     other => panic!("unexpected: {other:?}"),
                 }
             }
@@ -590,7 +590,7 @@ fn current_image_follows_the_applied_org_ops() {
                     .await
                     .expect("propose")
                 {
-                    Reply::Proposed { id } => id,
+                    Reply::Proposed { id, .. } => id,
                     other => panic!("unexpected: {other:?}"),
                 }
             }
@@ -722,7 +722,7 @@ fn organization_changes_are_gated_proposals() {
             .await
             .expect("propose on organization")
         {
-            Reply::Proposed { id } => id,
+            Reply::Proposed { id, .. } => id,
             other => panic!("unexpected: {other:?}"),
         };
         // the pending view carries the Soll-Stand (the payload's value);
@@ -771,7 +771,7 @@ fn pending_views_carry_per_member_votes() {
             .await
             .expect("propose")
         {
-            Reply::Proposed { id } => id,
+            Reply::Proposed { id, .. } => id,
             other => panic!("unexpected: {other:?}"),
         };
         // fresh proposal, no self-cosign: the whole roster is open
@@ -824,7 +824,7 @@ fn pending_views_split_by_my_vote_and_count_denied() {
                     .await
                     .expect("propose")
                 {
-                    Reply::Proposed { id } => id,
+                    Reply::Proposed { id, .. } => id,
                     other => panic!("unexpected: {other:?}"),
                 }
             }
@@ -880,7 +880,7 @@ fn declined_proposals_surface_with_decliner_and_timestamp() {
             .await
             .expect("propose")
         {
-            Reply::Proposed { id } => id,
+            Reply::Proposed { id, .. } => id,
             other => panic!("unexpected: {other:?}"),
         };
         w.execute(Command::Decline { proposal: id })

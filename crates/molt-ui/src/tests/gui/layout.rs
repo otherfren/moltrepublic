@@ -893,3 +893,59 @@ fn the_members_table_header_lines_up_with_its_rows() {
         }
     }
 }
+
+/// **Settings → MCP: the read-only key sits under the seat key.**
+/// `knowledge_base_scale.md` §4.7 - one block, Issue while there is none,
+/// Rotate once there is, and Revoke that only bites on a live key. The
+/// two keys must never share a control: revoking the read key while the
+/// seat key is what got rotated is exactly the confusion this guards.
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_mcp_tab_carries_its_own_read_only_key() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    ui.set_screen(AppScreen::Settings);
+    apply_strings(&ui, 0);
+    ui.window().set_size(slint::PhysicalSize::new(1600, 900));
+    ui.set_set_tab(6);
+    ui.set_cfg_mcp_token("seatkey".into());
+    ui.set_cfg_mcp_read_token("".into());
+    ui.show().expect("show headless");
+
+    let shown = |label: &str| {
+        i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, label)
+            .next()
+            .is_some()
+    };
+    assert!(shown("API token"), "the seat key stays");
+    assert!(shown("Read-only token"), "…and the read key sits with it");
+
+    let revoke = || {
+        i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "AppWindow::read-revoke")
+            .next()
+            .expect("the revoke button renders")
+    };
+    let count = |label: &str| {
+        i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, label).count()
+    };
+    let revoked = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let seen = revoked.clone();
+    ui.on_revoke_read_token(move || seen.set(seen.get() + 1));
+    let rotated = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let seen = rotated.clone();
+    ui.on_rotate_token(move || seen.set(seen.get() + 1));
+
+    // no key yet: the block OFFERS one, and only the seat key can rotate
+    assert_eq!(count("Issue"), 1, "the read block offers a key");
+    assert_eq!(count("Rotate"), 1, "…and only the seat key rotates");
+    click(&ui, &revoke());
+    assert_eq!(revoked.get(), 0, "there is nothing to revoke yet");
+
+    // issued: the same button rotates it, and revoke bites
+    ui.set_cfg_mcp_read_token("0ddba11f".into());
+    assert_eq!(count("Issue"), 0);
+    assert_eq!(count("Rotate"), 2, "both keys rotate now");
+    click(&ui, &revoke());
+    assert_eq!(revoked.get(), 1, "the click revoked the read key");
+    assert_eq!(rotated.get(), 0, "…and left the seat key alone");
+}

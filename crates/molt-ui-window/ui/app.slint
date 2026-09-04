@@ -1332,6 +1332,8 @@ export component AppWindow inherits Window {
     callback save-and-leave();
     callback discard-and-leave();
     callback rotate-token();
+    callback rotate-read-token();
+    callback revoke-read-token();
     callback quit();
     // body + quoted message id ("" = plain message)
     callback send-chat(string, string);
@@ -2085,6 +2087,7 @@ export component AppWindow inherits Window {
     in-out property <int> cfg-mcp-port: 4040;
     in-out property <string> cfg-mcp-allow: "127.0.0.1";
     in-out property <string> cfg-mcp-token;
+    in-out property <string> cfg-mcp-read-token;
     in-out property <int> cfg-network-index: 0;
     in-out property <int> cfg-tor-mode-index: 0;
     // per-row enabled flags for the tor-mode dropdown (["local","embedded",
@@ -8314,6 +8317,60 @@ export component AppWindow inherits Window {
                                 }
                                 Text {
                                     text: Strings.set-token-note;
+                                    color: Theme.faint;
+                                    font-size: Theme.fs-cap;
+                                    wrap: word-wrap;
+                                }
+                            }
+                            FieldLabel {
+                                label: Strings.field-mcp-read-token;
+                                read-row := HorizontalLayout {
+                                    spacing: 10px;
+                                    property <bool> token-shown: false;
+                                    read-well := InsetWell {
+                                        horizontal-stretch: 1;
+                                        text: root.cfg-mcp-read-token;
+                                        revealed: read-row.token-shown;
+                                        char-wrap: true;
+                                    }
+                                    AppButton {
+                                        pad: 10px;
+                                        icon: @image-url("assets/eye.svg");
+                                        icon-set: true;
+                                        primary: read-row.token-shown;
+                                        enabled: root.cfg-mcp-read-token != "";
+                                        tooltip: read-row.token-shown ? Strings.peek-hide : Strings.peek-show;
+                                        clicked => {
+                                            read-row.token-shown = !read-row.token-shown;
+                                        }
+                                    }
+                                    AppButton {
+                                        pad: 10px;
+                                        icon: @image-url("assets/copy.svg");
+                                        icon-set: true;
+                                        label: Strings.ow-copy;
+                                        enabled: root.cfg-mcp-read-token != "";
+                                        clicked => {
+                                            root.copy-text(root.cfg-mcp-read-token);
+                                            root.show-toast(Strings.toast-copied);
+                                        }
+                                    }
+                                    read-mint := AppButton {
+                                        label: root.cfg-mcp-read-token == "" ? Strings.set-issue : Strings.set-rotate;
+                                        clicked => {
+                                            root.rotate-read-token();
+                                        }
+                                    }
+                                    read-revoke := AppButton {
+                                        label: Strings.set-revoke;
+                                        enabled: root.cfg-mcp-read-token != "";
+                                        clicked => {
+                                            root.revoke-read-token();
+                                        }
+                                    }
+                                }
+                                Text {
+                                    text: Strings.set-read-token-note;
                                     color: Theme.faint;
                                     font-size: Theme.fs-cap;
                                     wrap: word-wrap;

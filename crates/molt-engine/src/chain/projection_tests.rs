@@ -669,6 +669,220 @@ fn the_wiki_reads_page_by_prefix_and_cursor() {
     );
 }
 
+/// `knowledge_base_scale.md` §4.6 over the REAL applied base: the index
+/// follows the applied patches, the facets narrow, and an edit leaves no
+/// ghost of the old text behind.
+#[test]
+fn the_search_index_follows_the_applied_base() {
+    let add = |path: &str, body: &str| {
+        let lines: Vec<&str> = body.split('\n').collect();
+        let mut patch = format!(
+            "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
+            lines.len()
+        );
+        for l in lines {
+            patch.push('+');
+            patch.push_str(l);
+            patch.push('\n');
+        }
+        patch
+    };
+    let wp = |p: String| json!({"op": "wiki_patch", "summary": "x", "value": p});
+    let hits = |r: molt_core::Reply| -> Vec<String> {
+        match r {
+            molt_core::Reply::WikiSearch { hits, .. } => {
+                hits.into_iter().map(|h| h.path).collect()
+            }
+            other => panic!("wrong reply: {other:?}"),
+        }
+    };
+    let b = Builder::new(&["petra", "walter"], 2);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    seal_wiki(
+        &mut walter,
+        &b,
+        "petra",
+        40,
+        wp(add(
+            "people/anna.md",
+            "---\ntype: person\ntags: [gruender]\n---\n# Anna\nAnna baut die Zentrale.",
+        )),
+    );
+    seal_wiki(
+        &mut walter,
+        &b,
+        "petra",
+        41,
+        wp(add("orte/berlin.md", "---\ntype: place\n---\n# Berlin\nEine Zentrale.")),
+    );
+
+    let found = hits(
+        walter
+            .cmd_wiki_search("Zentrale".to_string(), vec![], None, None, 0, 0)
+            .expect("search"),
+    );
+    assert_eq!(found.len(), 2, "both documents carry the word: {found:?}");
+
+    // the facets narrow, and so does the folder
+    let found = hits(
+        walter
+            .cmd_wiki_search(
+                "Zentrale".to_string(),
+                vec!["gruender".to_string()],
+                Some("person".to_string()),
+                Some("people".to_string()),
+                0,
+                0,
+            )
+            .expect("search"),
+    );
+    assert_eq!(found, vec!["people/anna.md"]);
+
+    // an EDIT must not leave the old text findable
+    let edit = "diff --git a/orte/berlin.md b/orte/berlin.md\n--- a/orte/berlin.md\n+++ b/orte/berlin.md\n@@ -1,5 +1,5 @@\n ---\n type: place\n ---\n # Berlin\n-Eine Zentrale.\n+Eine Aussenstelle.\n";
+    seal_wiki(&mut walter, &b, "petra", 42, wp(edit.to_string()));
+    let found = hits(
+        walter
+            .cmd_wiki_search("Zentrale".to_string(), vec![], None, None, 0, 0)
+            .expect("search"),
+    );
+    assert_eq!(found, vec!["people/anna.md"], "the edited text is gone");
+    let found = hits(
+        walter
+            .cmd_wiki_search("Aussenstelle".to_string(), vec![], None, None, 0, 0)
+            .expect("search"),
+    );
+    assert_eq!(found, vec!["orte/berlin.md"], "…and the new text is there");
+
+    // an empty query with no filter finds nothing, never everything
+    assert!(hits(
+        walter
+            .cmd_wiki_search(String::new(), vec![], None, None, 0, 0)
+            .expect("search")
+    )
+    .is_empty());
+}
+
+/// `knowledge_base_scale.md` §4.4-4.5 over the REAL applied base: the
+/// header's typed relations and the body's links reach `wiki_links` and
+/// `wiki_neighbors`, the graph follows an applied patch, and a header
+/// outside the subset warns the proposer without voiding anything.
+#[test]
+fn the_link_graph_follows_the_applied_base() {
+    let add = |path: &str, body: &str| {
+        let lines: Vec<&str> = body.split('\n').collect();
+        let mut patch = format!(
+            "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
+            lines.len()
+        );
+        for l in lines {
+            patch.push('+');
+            patch.push_str(l);
+            patch.push('\n');
+        }
+        patch
+    };
+    let wp = |p: String| json!({"op": "wiki_patch", "summary": "x", "value": p});
+    let b = Builder::new(&["petra", "walter"], 2);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    seal_wiki(
+        &mut walter,
+        &b,
+        "petra",
+        30,
+        wp(add("anna.md", "---\nworks_at: \"[[acme]]\"\n---\n# Anna\nsee [acme](acme.md)")),
+    );
+    seal_wiki(&mut walter, &b, "petra", 31, wp(add("acme.md", "# Acme")));
+
+    let molt_core::Reply::WikiLinks { edges, index_rev, .. } = walter
+        .cmd_wiki_links("anna.md".to_string(), Some("out".to_string()), None, 0, 0)
+        .expect("links")
+    else {
+        panic!("wrong reply");
+    };
+    assert_eq!(index_rev, 2, "the graph reflects both applied patches");
+    let mut seen: Vec<(String, Option<String>)> = edges
+        .iter()
+        .map(|e| (e.path.clone(), e.predicate.clone()))
+        .collect();
+    seen.sort();
+    assert_eq!(
+        seen,
+        vec![
+            ("acme.md".to_string(), None),
+            ("acme.md".to_string(), Some("works_at".to_string())),
+        ],
+        "the header relation and the body link both land"
+    );
+
+    // the predicate filter, and the other side of the same edges
+    let molt_core::Reply::WikiLinks { edges, .. } = walter
+        .cmd_wiki_links(
+            "anna.md".to_string(),
+            Some("out".to_string()),
+            Some("works_at".to_string()),
+            0,
+            0,
+        )
+        .expect("filtered")
+    else {
+        panic!("wrong reply");
+    };
+    assert_eq!(edges.len(), 1);
+    let molt_core::Reply::WikiLinks { edges, .. } = walter
+        .cmd_wiki_links("acme.md".to_string(), Some("in".to_string()), None, 0, 0)
+        .expect("in-edges")
+    else {
+        panic!("wrong reply");
+    };
+    assert_eq!(edges.len(), 2);
+    assert!(edges.iter().all(|e| e.path == "anna.md" && e.direction == "in"));
+
+    let molt_core::Reply::WikiNeighbors { docs, .. } = walter
+        .cmd_wiki_neighbors("anna.md".to_string(), 1, 0)
+        .expect("neighbors")
+    else {
+        panic!("wrong reply");
+    };
+    assert_eq!(docs.len(), 1);
+    assert_eq!(docs[0].path, "acme.md");
+    assert_eq!(docs[0].distance, 1);
+
+    // an unknown document is an error on both, never an empty answer
+    assert!(walter
+        .cmd_wiki_links("nope.md".to_string(), None, None, 0, 0)
+        .is_err());
+    assert!(walter
+        .cmd_wiki_neighbors("nope.md".to_string(), 1, 0)
+        .is_err());
+
+    // …and wiki_get carries the parsed header plus both link counts
+    let molt_core::Reply::WikiDocument {
+        props,
+        links_out,
+        links_in,
+        ..
+    } = walter.cmd_wiki_get("anna.md".to_string()).expect("get")
+    else {
+        panic!("wrong reply");
+    };
+    assert_eq!(props["works_at"], json!("[[acme]]"));
+    assert_eq!((links_out, links_in), (2, 0));
+
+    // a header outside the subset WARNS the proposer and voids nothing
+    let molt_core::Reply::Proposed { warnings, .. } = walter
+        .cmd_propose(
+            Surface::Memory,
+            wp(add("broken.md", "---\n- not a mapping\n---\n# B")),
+        )
+        .expect("propose")
+    else {
+        panic!("wrong reply");
+    };
+    assert_eq!(warnings.len(), 1, "one document, one warning: {warnings:?}");
+    assert!(warnings[0].starts_with("broken.md: "), "{warnings:?}");
+}
+
 /// `knowledge_base_scale.md` §4.1: the fold cache is a pure DERIVATION.
 /// After every applied block — cache warm, cache dropped, and across a
 /// wholesale re-projection — the served base equals a fresh fold of the

@@ -56,6 +56,12 @@ mod transfer;
 mod wiki_export;
 mod wiki_index;
 
+/// The wiki's body links — markdown destinations ending in `.md` plus the
+/// readable `[[Name]]` form, code masked out. ONE parser: the GUI's link
+/// navigation reads the same edges the index does
+/// (`docs/memory/knowledge_base_scale.md` §4.5).
+pub use wiki_index::graph::body_links;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -915,6 +921,22 @@ pub(crate) struct State {
     /// costs a parse, never a wrong verdict — the walk's candidate list
     /// always comes from `proposals`.
     pub(crate) wiki_pending: HashMap<u64, PendingPatch>,
+    /// The link graph over the folded base (§4.5). Built on first use and
+    /// updated per applied patch; like every index here it is a pure
+    /// derivation, so dropping it costs a rebuild and nothing else.
+    pub(crate) wiki_graph: Option<wiki_index::graph::WikiGraph>,
+    /// The epoch [`State::wiki_graph`] was built under.
+    pub(crate) wiki_graph_epoch: u64,
+    /// Paths whose documents changed since the graph last resolved.
+    pub(crate) wiki_graph_dirty: std::collections::BTreeSet<String>,
+    /// The full-text index over the folded base (§4.6). RAM only: an index
+    /// of the wiki IS the wiki, so it never lies beside the sealed
+    /// workspace.
+    pub(crate) wiki_search: Option<wiki_index::search::WikiSearch>,
+    /// The epoch [`State::wiki_search`] was built under.
+    pub(crate) wiki_search_epoch: u64,
+    /// Paths whose documents changed since the index last committed.
+    pub(crate) wiki_search_dirty: std::collections::BTreeSet<String>,
     /// Every known proposal — stored as the schema type
     /// ([`molt_core::ProposalRecord`]), so snapshots need no conversion.
     pub(crate) proposals: HashMap<u64, ProposalRecord>,
@@ -1174,6 +1196,12 @@ impl State {
             wiki_cache: None,
             applied_epoch: 0,
             wiki_pending: HashMap::new(),
+            wiki_graph: None,
+            wiki_graph_epoch: 0,
+            wiki_graph_dirty: std::collections::BTreeSet::new(),
+            wiki_search: None,
+            wiki_search_epoch: 0,
+            wiki_search_dirty: std::collections::BTreeSet::new(),
             proposals: HashMap::new(),
             next_id: 1,
             next_seq: 1,
@@ -1584,6 +1612,24 @@ impl State {
                 limit,
             } => self.cmd_wiki_list(prefix, cursor, limit),
             Command::WikiGet { path } => self.cmd_wiki_get(path),
+            Command::WikiLinks {
+                path,
+                direction,
+                predicate,
+                limit,
+                cursor,
+            } => self.cmd_wiki_links(path, direction, predicate, limit, cursor),
+            Command::WikiNeighbors { path, depth, limit } => {
+                self.cmd_wiki_neighbors(path, depth, limit)
+            }
+            Command::WikiSearch {
+                query,
+                tags,
+                kind,
+                folder,
+                limit,
+                cursor,
+            } => self.cmd_wiki_search(query, tags, kind, folder, limit, cursor),
 
             // net/ (engine-internal, sent by the node's own supervisor)
             Command::NetDelivered {

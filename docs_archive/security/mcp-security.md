@@ -50,6 +50,7 @@ Auth failures come back as JSON-RPC error `-32001`:
 
 * wrong/missing token in `initialize` → `unauthorized: missing or invalid MCP token`.
 * any method before a successful `initialize` → `unauthorized: call initialize with a valid token first`.
+* a seat-scope tool called with the read-only key → `unauthorized: read-only token`.
 
 ## The token
 
@@ -64,10 +65,35 @@ Auth failures come back as JSON-RPC error `-32001`:
   After that it lives only in `config.toml`.
 * **Rotate it** anytime from the GUI: *Settings → MCP → Rotieren*. That mints a new
   token, writes it to the config, and takes effect immediately — existing sessions
-  keep working, but the next `initialize` must use the new value.
+  keep working, but the next `initialize` must use the new value. The accept loop
+  reads the running session's token per connection, so no restart is involved.
 * An **empty** `token = ""` disables token auth (the node logs a warning on start).
   The peer-IP allowlist still applies, so loopback-only + empty token is a common,
   reasonable local setup.
+
+## The read-only key
+
+A SECOND key, `[mcp].read_token`, admits the READ tools only
+(`docs/memory/knowledge_base_scale.md` §4.7). It is issued, rotated and revoked
+in the same panel as the seat key, and it is host posture like every other
+setting there — an agent can neither issue itself one nor read one back.
+
+* The read set: `read_state`, `read_chain`, `list_proposals`, `status`,
+  `read_members`, `read_uploads`, `read_session`, `wiki_list`, `wiki_get`.
+  A tool is seat-scope unless that list names it, and a test pins the list, so
+  a new tool cannot drift into the read scope by omission.
+* `tools/list` shows a read-only client only its own scope; a seat tool called
+  with the read key answers `-32001 unauthorized: read-only token`.
+* **Empty means OFF**, never "unauthenticated": an empty `read_token` matches
+  no credential at all. The seat key keeps its own meaning — an empty one still
+  admits everybody as the seat.
+* The key is absent from a generated config and is written only once one is
+  issued, so a config this build writes still opens on a build that predates it.
+* The scope is **host-local**. The republic knows no roles and no rights; the
+  human narrows their own tool (see the host boundary below).
+* Caveat, deliberate: `read_state` on chat sends this seat's read receipts, so
+  a read-only client can still light the republic's read dots for this seat.
+  Retrieval IS the reading — the same rule the GUI follows.
 
 ## A TCP handshake, end to end
 
@@ -157,15 +183,16 @@ stored values behind it:
 
 * **Host posture is the GUI's / `config.toml`'s door** (`SetNodePosture`,
   INTERNAL): `headless`, `workspace_dir`, `download_dir`, `mcp_port`,
-  `mcp_allow`, `mcp_token`, `anonymity`, `tor_mode`, `tor_port` and
+  `mcp_allow`, `mcp_token`, `mcp_read_token`, `anonymity`, `tor_mode`, `tor_port` and
   `poke_wake_command`. `patch_settings` refuses them, `save_settings`
   never carries them (the engine re-merges the stored values). An agent
   therefore cannot switch the operator's Tor off, bind the endpoint to
   `0.0.0.0`, rotate itself a token the human never learns, or repoint the
   workspace root.
-* **Secrets never read back.** `settings.s3_secret_key` and
-  `settings.mcp_token` are not serialized (like the recovery phrase); the
-  S3 secret is settable write-only through `patch_settings`.
+* **Secrets never read back.** `settings.s3_secret_key`,
+  `settings.mcp_token` and `settings.mcp_read_token` are not serialized
+  (like the recovery phrase); the S3 secret is settable write-only through
+  `patch_settings`.
 * **The exchange folder is the agent's whole filesystem.** `download_file`
   writes into `download_dir` only (a bare name), `share_file` shares a
   bare name FROM it (`share_file_from_exchange`), `export_workspace` and
@@ -194,9 +221,9 @@ The rule is: **every state-changing action the GUI offers maps to one MCP
 tool**, because both frontends build the same `molt_core::Command` on the same
 engine handle. As of this audit the mapping is complete — chat (send incl.
 quotes, react, delete), proposals (propose / approve / decline), navigation
-(screen, surface, sub-view), language, theme, settings (including rotating
-the MCP token via `save_settings.mcp_token`; the GUI's Rotate button does
-exactly that with a locally generated value), workspaces (open / close /
+(screen, surface, sub-view), language, theme, settings (the MCP tokens are
+NOT among them: they are host posture, minted by the GUI and refused by both
+settings verbs), workspaces (open / close /
 delete), and the three engine-run lifecycles (restore / create / join with
 their start / cancel / finish verbs). Reading is co-equal too: what the GUI
 live-mirrors, an agent reads via `read_session`, `read_state`,

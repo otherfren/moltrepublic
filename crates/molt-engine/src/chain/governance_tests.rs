@@ -227,7 +227,7 @@ fn a_withdraw_turns_the_card_terminal_without_forging_a_vote() {
         )
         .expect("propose")
     {
-        molt_core::Reply::Proposed { id } => id,
+        molt_core::Reply::Proposed { id, .. } => id,
         other => panic!("unexpected reply {other:?}"),
     };
     peer.cmd_withdraw(id).expect("withdraw");
@@ -347,7 +347,7 @@ fn open_governance_reserves_the_own_withdraw() {
         )
         .expect("propose")
     {
-        molt_core::Reply::Proposed { id } => id,
+        molt_core::Reply::Proposed { id, .. } => id,
         other => panic!("unexpected reply {other:?}"),
     };
     peer.cmd_withdraw(id).expect("withdraw");

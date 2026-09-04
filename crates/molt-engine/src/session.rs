@@ -2597,6 +2597,52 @@ mod patch_tests {
         assert_eq!(s.mcp_token, "s3cret", "…and the token stayed in place");
     }
 
+    /// The READ-ONLY MCP key is host posture too
+    /// (`knowledge_base_scale.md` §4.7): an agent must not be able to issue
+    /// itself one, nor to wipe the one the human issued through a
+    /// wholesale save.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_read_only_key_is_the_humans_door_only() {
+        let w = node();
+        let base = molt_core::SessionSettings {
+            mcp_token: "seat".to_string(),
+            mcp_read_token: "readonly".to_string(),
+            ..molt_core::SessionSettings::default()
+        };
+        w.execute(Command::SetNodePosture { posture: molt_core::NodePosture::of(&base) })
+            .await
+            .expect("posture");
+
+        assert!(
+            w.execute(Command::PatchSettings {
+                patch: serde_json::json!({ "mcp_read_token": "mine" }),
+            })
+            .await
+            .is_err(),
+            "an agent cannot issue itself a key"
+        );
+        // a wholesale save carrying the DEFAULT (empty) must not revoke it
+        w.execute(Command::SaveSettings {
+            settings: molt_core::SessionSettings::default(),
+        })
+        .await
+        .expect("save");
+        let s = settings(&w).await;
+        assert_eq!(s.mcp_read_token, "readonly", "the key survived the save");
+        assert_eq!(s.mcp_token, "seat");
+
+        // …and the human's own door revokes it
+        w.execute(Command::SetNodePosture {
+            posture: molt_core::NodePosture {
+                mcp_read_token: Some(String::new()),
+                ..molt_core::NodePosture::of(&s)
+            },
+        })
+        .await
+        .expect("revoke");
+        assert_eq!(settings(&w).await.mcp_read_token, "");
+    }
+
     /// `set_fonts` is the sizes' ONE door (item 11): it validates the
     /// range, and a wholesale save — whose payload carries only defaults —
     /// must not reset what the operator picked.

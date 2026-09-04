@@ -344,6 +344,7 @@ impl State {
                 // this runs on append, catch-up and rebuild alike)
                 if *surface == Surface::Memory {
                     let moved = Self::wiki_payload_paths(payload);
+                    self.note_wiki_change(moved.as_ref());
                     self.supersede_stale_wiki(moved.as_ref());
                 }
             }

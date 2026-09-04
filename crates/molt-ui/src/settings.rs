@@ -137,6 +137,7 @@ pub(crate) fn read_settings_draft(ui: &AppWindow, stored: &SessionSettings) -> S
         mcp_port: ui.get_cfg_mcp_port() as u16,
         mcp_allow: ui.get_cfg_mcp_allow().to_string(),
         mcp_token: ui.get_cfg_mcp_token().to_string(),
+        mcp_read_token: ui.get_cfg_mcp_read_token().to_string(),
         anonymity: net_name(ui.get_cfg_network_index()),
         tor_mode: mode_name(ui.get_cfg_tor_mode_index()),
         tor_port: ui.get_cfg_tor_port() as u16,
@@ -209,6 +210,7 @@ pub(crate) fn apply_settings_fields(ui: &AppWindow, s: &SessionSettings) {
     ui.set_cfg_mcp_port(s.mcp_port as i32);
     ui.set_cfg_mcp_allow(s.mcp_allow.clone().into());
     ui.set_cfg_mcp_token(s.mcp_token.clone().into());
+    ui.set_cfg_mcp_read_token(s.mcp_read_token.clone().into());
     ui.set_cfg_sound_message_index(sound_index(&s.sound_message));
     ui.set_cfg_sound_vote_index(sound_index(&s.sound_vote));
     ui.set_cfg_sound_poke_index(sound_index(&s.sound_poke));

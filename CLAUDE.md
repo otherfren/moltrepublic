@@ -389,15 +389,23 @@ both verified red-without/green-with).
   build). Headless vs GUI is a runtime choice, not a separate build.
 - **The Slint-generated window lives in its own crate, `molt-ui-window`, as a
   compile-time firewall** (2026-07-13): `ui/app.slint` compiles to a ~400k-line
-  Rust module whose single rustc **peaked at 8.66 GiB RSS / 12m50s — measured
-  2026-08-18 on the 15 GiB box, rustc 1.95.0 + Slint 1.17, `cargo build -j 1`,
-  dev profile, incremental state of that run not recorded** (the older ~6 GiB / ~4 min figure predates those versions;
+  Rust module whose single rustc **peaked at 13.4 GiB RSS / 8m23s — measured
+  2026-09-04 on the 15.9 GiB box, rustc 1.95.0 + Slint 1.17, `cargo build -j 1`,
+  dev profile, incremental and debuginfo both off per the pins below** (the
+  8.66 GiB / 12m50s figure is 2026-08-18, the ~6 GiB / ~4 min one older still;
   re-measure and re-date this line after a toolchain or Slint bump rather than
-  trusting it). That cost is paid ONLY when a `.slint` file changes; GUI-logic
-  edits (`molt-ui`) rebuild in ~2 s at <1 GiB. Debuginfo reduction does NOT
-  help (measured: ~2%), and a SIGKILL during the window compile is the kernel
-  OOM-killer. Two things keep it survivable, and only one of them is yours to
-  remember:
+  trusting it). **THE HEADROOM IS ESSENTIALLY GONE, and it is structural:** the
+  generated module grew 60.9 MB (2026-07-24) → 85.5 MB (08-18) → 102.0 MB
+  (09-04), +67 % since late July, while the `.slint` SOURCES grew only ~5 %
+  since 08-18 — the generator scales superlinearly, so trimming a few hundred
+  source lines buys almost nothing. Two OOM kills at 14.1 GiB anon-RSS on
+  2026-09-04 were separated from the successful run by ~1 GiB of machine
+  weather. If a build dies here, it is capacity, not your change; the cheap
+  lever is more SWAP (the peak is one process, and swap keeps the authoritative
+  build) — shrinking the module is the weakest one. That cost is paid ONLY when
+  a `.slint` file changes; GUI-logic edits (`molt-ui`) rebuild in ~2 s at <1 GiB.
+  A SIGKILL during the window compile is the kernel OOM-killer. Three things
+  keep it survivable, and only one of them is yours to remember:
   - **The workspace pins `[profile.dev.package.molt-ui-window] incremental =
     false`** (root `Cargo.toml`). Do NOT delete it and do NOT export
     `CARGO_INCREMENTAL=0` on top of it. What the kernel log shows
@@ -408,6 +416,11 @@ both verified red-without/green-with).
     unit's rustc line carries no `-C incremental=` while `molt-ui`'s still
     does — the override is scoped to this one crate, so every other crate
     keeps its fast incremental rebuilds.
+  - **The workspace also pins `debug = 0` for that same crate.** Measured
+    2026-09-04: worth only ~1.1 % of peak RSS (13.53 → 13.38 GiB) — the older
+    "debuginfo reduction does not help (~2 %)" note was right about the size
+    and wrong only about the consequence, because at today's margin that 1 %
+    decided between a finished build and a SIGKILL. A tourniquet, not a fix.
   - **Build the window with `-j 1`.** Plain `-j 2` puts the lib and test
     rustc side by side and died by SIGKILL here (2026-08-18, with a second
     session on the box). Never run two window-scale builds concurrently —

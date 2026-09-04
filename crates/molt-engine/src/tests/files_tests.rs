@@ -32,7 +32,7 @@ async fn propose(
         })
         .await?
     {
-        Reply::Proposed { id } => Ok(id),
+        Reply::Proposed { id, .. } => Ok(id),
         other => panic!("unexpected: {other:?}"),
     }
 }

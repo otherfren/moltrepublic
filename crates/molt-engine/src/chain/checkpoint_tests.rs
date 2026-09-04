@@ -223,7 +223,7 @@ fn a_checkpoint_proposal_seals_via_verify_before_sign() {
     let mut walter = chain_signer("walter", &b, b.blocks.clone());
 
     let id = match petra.cmd_propose_checkpoint().expect("propose") {
-        molt_core::Reply::Proposed { id } => id.0,
+        molt_core::Reply::Proposed { id, .. } => id.0,
         other => panic!("unexpected: {other:?}"),
     };
     assert_eq!(
@@ -608,7 +608,7 @@ fn a_stale_checkpoint_proposal_dies_on_rebase() {
     b.commit_applied(1, &["petra", "walter"]);
     let mut petra = chain_signer("petra", &b, b.blocks.clone());
     let id = match petra.cmd_propose_checkpoint().expect("propose") {
-        molt_core::Reply::Proposed { id } => id.0,
+        molt_core::Reply::Proposed { id, .. } => id.0,
         other => panic!("unexpected: {other:?}"),
     };
     // another applied block races the checkpoint to height 2

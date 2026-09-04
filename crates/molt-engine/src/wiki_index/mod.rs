@@ -8,3 +8,5 @@
 //! Pure functions only; the engine owns the state that holds their results.
 
 pub(crate) mod front_matter;
+pub(crate) mod graph;
+pub(crate) mod search;
