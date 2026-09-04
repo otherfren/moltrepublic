@@ -669,6 +669,80 @@ fn the_wiki_reads_page_by_prefix_and_cursor() {
     );
 }
 
+/// `knowledge_base_scale.md` §4.5: an OFF-ACTOR build is installed only
+/// if the base it describes is still the base, and the appends that
+/// arrived while it ran are folded on afterwards. While no index exists
+/// the index-backed reads REFUSE by name - an empty page would read as
+/// "nothing matched", which is a different claim.
+#[test]
+fn an_index_built_against_a_moved_base_is_discarded() {
+    let add = |path: &str, body: &str| {
+        format!("diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,1 @@\n+{body}\n")
+    };
+    let wp = |p: String| json!({"op": "wiki_patch", "summary": "x", "value": p});
+    let b = Builder::new(&["petra", "walter"], 2);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    seal_wiki(&mut walter, &b, "petra", 60, wp(add("a.md", "alpha")));
+
+    // no index yet: the read says so instead of answering empty
+    walter.wiki_index_building = Some(walter.applied_epoch);
+    let err = walter
+        .cmd_wiki_search("alpha".to_string(), vec![], None, None, 0, 0)
+        .expect_err("a search with no index must refuse");
+    assert!(
+        matches!(err, molt_core::MoltError::IndexBuilding { .. }),
+        "the refusal has to name the reason, got {err:?}"
+    );
+
+    // a build that finished against a base that has since moved wholesale
+    walter.build_wiki_indexes_now();
+    let built_at = walter.applied_epoch;
+    let staged = crate::WikiIndexes {
+        graph: walter.wiki_graph.take().expect("graph"),
+        search: walter.wiki_search.take().expect("search"),
+    };
+    *walter.wiki_index_staging.lock().expect("slot") = Some(staged);
+    walter.bump_applied_epoch();
+    walter
+        .cmd_net_wiki_index_ready(built_at)
+        .expect("the completion always answers");
+    assert!(
+        walter.wiki_graph.is_none() && walter.wiki_search.is_none(),
+        "an index for a base that no longer exists must not be installed"
+    );
+    assert_eq!(walter.wiki_index_building, None, "the guard is cleared");
+
+    // …and one that finished against the CURRENT base installs, then
+    // drains what arrived while it ran
+    walter.build_wiki_indexes_now();
+    let built_at = walter.applied_epoch;
+    let staged = crate::WikiIndexes {
+        graph: walter.wiki_graph.take().expect("graph"),
+        search: walter.wiki_search.take().expect("search"),
+    };
+    *walter.wiki_index_staging.lock().expect("slot") = Some(staged);
+    seal_wiki(&mut walter, &b, "petra", 61, wp(add("b.md", "beta")));
+    assert_eq!(
+        walter.applied_epoch, built_at,
+        "an append does not move the epoch - that is what makes the drain sound"
+    );
+    walter
+        .cmd_net_wiki_index_ready(built_at)
+        .expect("the completion always answers");
+    let hits = match walter
+        .cmd_wiki_search("beta".to_string(), vec![], None, None, 0, 0)
+        .expect("search")
+    {
+        molt_core::Reply::WikiSearch { hits, .. } => hits,
+        other => panic!("wrong reply: {other:?}"),
+    };
+    assert_eq!(
+        hits.len(),
+        1,
+        "the document that landed DURING the build is indexed"
+    );
+}
+
 /// `knowledge_base_scale.md` §4.6 over the REAL applied base: the index
 /// follows the applied patches, the facets narrow, and an edit leaves no
 /// ghost of the old text behind.
@@ -716,6 +790,7 @@ fn the_search_index_follows_the_applied_base() {
         wp(add("orte/berlin.md", "---\ntype: place\n---\n# Berlin\nEine Zentrale.")),
     );
 
+    walter.build_wiki_indexes_now();
     let found = hits(
         walter
             .cmd_wiki_search("Zentrale".to_string(), vec![], None, None, 0, 0)
@@ -794,6 +869,9 @@ fn the_link_graph_follows_the_applied_base() {
     );
     seal_wiki(&mut walter, &b, "petra", 31, wp(add("acme.md", "# Acme")));
 
+    // the index is built OFF the actor in production; this harness has no
+    // runtime to hand the task to, so it builds inline (§4.5)
+    walter.build_wiki_indexes_now();
     let molt_core::Reply::WikiLinks { edges, index_rev, .. } = walter
         .cmd_wiki_links("anna.md".to_string(), Some("out".to_string()), None, 0, 0)
         .expect("links")
@@ -867,7 +945,7 @@ fn the_link_graph_follows_the_applied_base() {
         panic!("wrong reply");
     };
     assert_eq!(props["works_at"], json!("[[acme]]"));
-    assert_eq!((links_out, links_in), (2, 0));
+    assert_eq!((links_out, links_in), (Some(2), Some(0)));
 
     // a header outside the subset WARNS the proposer and voids nothing
     let molt_core::Reply::Proposed { warnings, .. } = walter

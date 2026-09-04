@@ -2105,7 +2105,7 @@ mod tests {
         // would let any MCP client execute code as the node's user, which is
         // a different thing entirely from acting inside the republic. The
         // wholesale settings paths refuse the key for the same reason.
-        const INTERNAL: [&str; 73] = [
+        const INTERNAL: [&str; 74] = [
             // the HOST POSTURE and the two secrets (MCP audit 2026-08-26 M1/H4):
             // an agent operates the seat, not the machine — GUI / config only
             "set_node_posture",
@@ -2148,6 +2148,9 @@ mod tests {
             // bundle was written)
             "net_wiki_export_done",
             "net_wiki_export_failed",
+            // the off-actor wiki INDEX build reporting its own result: an
+            // agent must not be able to hand this node an index
+            "net_wiki_index_ready",
             "net_file_shared",
             "net_file_share_failed",
             "net_file_request_ready",

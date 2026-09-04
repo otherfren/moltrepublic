@@ -536,3 +536,55 @@ fn the_backlink_request_rides_the_document_change() {
     g.invoke_nav_open(id_of("b.md"));
     assert_eq!(asked.borrow().as_slice(), ["a.md", "b.md"]);
 }
+
+/// **The changeset panel shows the rows it claims to show, at every font
+/// size.** Its height used to be hand-summed with a fixed 28px for a
+/// header that is `28px * Theme.ui-scale` tall, so at a larger font the
+/// header ate the list and one truncated row was all that was left.
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_changeset_panel_fits_its_header_and_its_rows() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    ui.set_screen(AppScreen::Main);
+    ui.set_selected_surface("memory".into());
+    ui.set_selected_view("brain".into());
+    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: "memory".into(),
+        ..SurfaceTab::default()
+    }])));
+    let _wiki = wire_wiki(&ui);
+    let g = ui.global::<WikiState>();
+    g.set_base_docs(ModelRc::new(VecModel::from(vec![WikiBase {
+        path: "a.md".into(),
+        content: "# A".into(),
+    }])));
+    g.set_base_rev(1);
+    g.invoke_base_arrived();
+    ui.window().set_size(slint::PhysicalSize::new(1400, 900));
+    ui.show().expect("show headless");
+    // five actions: more than the four the list shows at once
+    for _ in 0..5 {
+        g.invoke_new_file();
+    }
+    assert!(g.get_cs_rows().row_count() >= 5, "the stack carries them");
+
+    let geom = |id: &str| {
+        i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, id)
+            .find(|e| e.size().height > 0.0)
+            .map(|e| (e.absolute_position().y, e.size().height))
+    };
+    for font in [14.0_f32, 20.0, 26.0] {
+        ui.global::<Theme>().set_fs_app(font);
+        let scale = (font / 14.0).max(1.0);
+        let (_, panel_h) = geom("MemoryPane::cs-panel").expect("the changeset panel renders");
+        // padding (2 x 9) + the header + spacing (6) + four rows
+        let header_h = 28.0 * scale;
+        let want = 18.0 + header_h + 6.0 + 4.0 * 24.0 * scale;
+        assert!(
+            panel_h + 0.5 >= want,
+            "font {font}: the panel is {panel_h} tall but needs {want} for its header and four rows"
+        );
+    }
+}

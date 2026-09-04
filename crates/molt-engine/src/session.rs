@@ -1482,6 +1482,10 @@ impl State {
             self.set_checkpoint_blob(checkpoint_blob);
             self.adopt_chain(chain);
         }
+        // the wiki indexes are built OFF the actor and EAGERLY: by the time
+        // a human searches, the answer is usually already there, and the
+        // first search does not pay for parsing the whole base (§4.5/§4.6)
+        self.spawn_wiki_index_build();
         self.identity_sk = transport_state
             .identity_sk
             .as_deref()

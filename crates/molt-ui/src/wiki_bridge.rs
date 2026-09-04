@@ -132,6 +132,8 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
         })
         .collect();
     sync_model(&s.get_cs_rows(), cs_rows, PartialEq::eq, |m| s.set_cs_rows(m));
+    // the details modal shows the WHOLE change; the panel list is capped
+    s.set_cs_patch(w.build_patch().unwrap_or_default().into());
     if let Some(doc) = w.active() {
         let id = doc.id;
         let path_changed = s.get_doc_path().as_str() != doc.path;
@@ -1008,7 +1010,7 @@ pub(crate) fn wire_wiki_index(ui: &AppWindow, ctx: &Ctx) {
             let wh = cx.wallet.clone();
             let asked = text.clone();
             cx.rt.spawn(async move {
-                let hits = match wh
+                let outcome = wh
                     .execute(Command::WikiSearch {
                         query: text,
                         tags: Vec::new(),
@@ -1017,8 +1019,16 @@ pub(crate) fn wire_wiki_index(ui: &AppWindow, ctx: &Ctx) {
                         limit: 50,
                         cursor: 0,
                     })
-                    .await
-                {
+                    .await;
+                // "the index is still building" is NOT "nothing matched" -
+                // rendering the second for the first is the lie §4.6 warns
+                // about, and the field would say "no hit" about a wiki it
+                // has not read yet
+                let building = matches!(
+                    outcome,
+                    Err(molt_core::MoltError::IndexBuilding { .. })
+                );
+                let hits = match outcome {
                     Ok(Reply::WikiSearch { hits, .. }) => hits,
                     _ => Vec::new(),
                 };
@@ -1041,7 +1051,8 @@ pub(crate) fn wire_wiki_index(ui: &AppWindow, ctx: &Ctx) {
                     sync_model(&g.get_search_hits(), rows, PartialEq::eq, |m| {
                         g.set_search_hits(m);
                     });
-                    g.set_search_ran(true);
+                    g.set_search_building(building);
+                    g.set_search_ran(!building);
                 });
             });
         });

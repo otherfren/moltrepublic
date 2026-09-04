@@ -2,8 +2,9 @@
 
 **Status: PARTLY BUILT - design of 2026-09-03, decisions ratified by the
 user the same evening (§1). K0-K5 and K7 landed on master 2026-09-04;
-K6 is BLOCKED on one product decision (§4.9), and K7's lazy tree is
-deliberately deferred (§4.10).** Extends the
+K6 is DESIGNED as option (b) after the user's decision of the same
+evening (§4.9) and is being built; K7's lazy tree and the off-actor index
+builds are being built with it.** Extends the
 executed fold design `docs_archive/memory/shared_memory_real.md` and the
 export `docs_archive/memory/wiki_export_plan.md`; K6 changes what a
 checkpoint carries (`docs_archive/chain/log_compaction.md` §B.6a) and its
@@ -289,13 +290,22 @@ predicate.
     over edit, add, delete and a name that becomes ambiguous. The pass is
     O(edges), which is the cheap half; parsing the tree is the expensive
     half and that stays incremental.
-  - **The first build is synchronous, not off-actor.** The off-actor build
-    the plan sketches (`NetWikiIndexReady { rev, graph }`) needs a
-    reconciliation path for the case where the tree moved while the task
-    ran, and that path is only exercised at a scale no republic has yet.
-    The graph is therefore built on the first graph read and updated per
-    applied patch. FOLLOW-UP, not forgotten: at §3's target the first read
-    after an open pays for parsing the whole tree on the actor.
+  - **The full build runs OFF the actor** (built 2026-09-04, second pass).
+    It is kicked off EAGERLY at workspace open, so a human who searches
+    usually finds it ready. The per-patch update stays ON the actor, where
+    it is a handful of documents. `Command::NetWikiIndexReady { epoch }`
+    carries only the epoch - neither index type is serializable, and an
+    agent must not be able to hand this node an index - while the built
+    artefacts ride a shared slot (the `restore_staging` idiom).
+    Reconciliation: the result is INSTALLED only when the epoch still
+    matches (a wholesale re-projection has no delta from the tree the task
+    read), and the dirty sets are taken at COMPLETION, never at kick-off -
+    taking them early and then discarding the result would lose the paths.
+    A read that arrives with no index answers `MoltError::IndexBuilding`,
+    which is a different claim from an empty page; `wiki_list` and
+    `wiki_get` never refuse for index reasons, because they need only the
+    fold, and `wiki_get`'s link counts became `Option<u32>` so "not known
+    yet" stops being spelled `0`.
   - Name resolution is CASE-EXACT, like the path resolution it extends:
     `[[Acme]]` does not find `people/acme.md`. Deterministic and consistent with
     today's GUI rule; a case-folding rule would need its own ambiguity
@@ -407,108 +417,155 @@ comment (`molt-config/src/lib.rs:626-632`): loop `list_proposals` until
 nothing waits, because the 300 s holdoff swallows a burst on purpose. The
 holdoff stays - a running agent drains the stream itself.
 
-### 4.9 A cut carries the tree (K6 - review before build)
+### 4.9 A cut FOLDS the wiki; the tree is fetched (K6)
 
-Today a cut summarises Organization and Files slots but archives every
-wiki patch (§2), so a pruned holder and every rejoiner re-fold the whole
-history, and the blob only grows. Target: the Memory group of a checkpoint
-carries the FOLDED tree once, plus the non-wiki Memory entries.
+**Decided by the user 2026-09-04: option (b).** The earlier design - the
+folded tree rides INSIDE the checkpoint blob - was reviewed and rejected:
+the blob is the trust root a rejoiner is handed once the genesis is gone,
+and §3's own target would have made it 100 MiB against a 65408 B
+gift-wrap cap. It would have bounded the blob against HISTORY and
+unbounded it against CONTENT, which is not what a bound is.
 
-- **Summarise at the cut, from the accumulated group:**
-  `summarize_memory(group) -> group'` folds the group's `wiki_patch` entries
-  (in order, over a `wiki_base` entry if the group starts with one) into
-  ONE synthetic entry `(0, {"op": "wiki_base", "rev": N, "tree": {path:
-  content, ...}})` placed first, keeps every non-wiki entry, and leaves
-  `consumed_ids` untouched (every patch id stays consumed, `verify.rs:595`).
-  `molt_core::wiki_fold::fold_one` learns `wiki_base`: the tree becomes the
-  base, `rev` becomes `base.rev`; honoured only as the FIRST Memory entry
-  of a projection - a later one is void.
-- **A new variant, not a new tag:** `ChainChange::CheckpointFolded { upto,
-  state_hash }`. The layout tag stays `molt-chain-checkpoint-v8` - the
-  bytes differ by content, the VARIANT tells a verifier which fold to run
-  (`hash_walk_state` summarises the running state's Memory group before
-  hashing at a `CheckpointFolded` block). A build that predates this plan
-  meets an unknown variant and STRANDS (additive-only rule: stop extending,
-  tell the human to upgrade) instead of hard-rejecting the chain as forged
-  - the reason for a variant over a field.
-- **Humans start the new mode:** `maybe_auto_checkpoint`
-  (`chain/checkpoint.rs:46`) keeps proposing legacy `Checkpoint` until the
-  first `CheckpointFolded` was sealed by a human's `propose_checkpoint
-  { folded: true }`; from then on auto cuts fold. Same stranding posture as
-  checkpoint-v8 (`charter_features.md` D1), but the moment is a decision,
-  not an accident.
-- **Unchanged:** genesis, the v8 byte layout and its pins, the legacy
-  `Checkpoint` variant, the wiki export's provenance statement (a pruned
-  holder already lacks per-patch blocks; the blob's patches were never
-  individually signed). Blob transport size is not this plan's problem:
-  the folded blob is never larger than today's history blob.
-- **Keystones:** `a_folded_cut_hashes_the_base_not_the_history` (byte pin);
-  `a_pruned_holder_folds_from_the_base_and_keeps_superseding`
-  (blob-seeded projection + a pending patch that collides with a post-cut
-  block); `adding_the_variant_keeps_every_existing_approval_byte`
-  (`molt-chain-change-v2` pin unchanged); `a_second_wiki_base_is_void`;
-  the existing `a_checkpoint_cut_keeps_the_wiki_fold_identical` extended
-  to the folded variant.
-- **Review gate: RAN 2026-09-04. Verdict: not implementable as written.**
-  K6 is NOT built and must not be started before the decision below.
+So the cut still FOLDS (history stops accumulating), but the blob carries
+a content COMMITMENT to the tree, and the tree itself rides the file
+plane that landed 2026-09-04 (`docs_archive/files/mirroring.md`).
 
-  **The decision that belongs to the user.** After K6 the checkpoint blob
-  — the trust root a rejoiner is handed once the genesis is gone — becomes
-  the size of the whole folded tree, i.e. §3's own target of 100 MiB.
-  `log_compaction.md` §B.6a measured that artefact against a 65408 B
-  gift-wrap cap and a 128 KiB relay budget, and already called it over
-  budget at 69628 B with ONE logo in it. "Never larger than today's
-  history blob" (the claim above) is true and beside the point: today the
-  blob grows with votes, after K6 it starts at the entire knowledge base
-  on day one. So K6 does not bound the blob, it re-bases it — recovery and
-  catch-up re-anchoring stop working at the scale this plan is FOR.
-  Either that trade is accepted explicitly, or K6 needs a companion first
-  (a blob carrying a tree HASH plus a separately fetched tree, or chunked
-  blob transport). Everything else below is fixable in code.
+#### 4.9.1 What the blob carries
 
-  **The blocker that would have shipped.** `walk_suffix_chain`
-  (`chain/verify.rs:1005`) hard-rejects any anchor that is not
-  `ChainChange::Checkpoint`. Every node prunes at the cut, so after the
-  first `CheckpointFolded` the anchor IS `blocks[0]`, and the next open
-  fails with "this workspace's chain is unreadable" (`session.rs:1438`) —
-  on the UPGRADED nodes, not the old ones.
+`summarize_memory(group) -> group'` folds the group's `wiki_patch`
+entries in order into ONE synthetic first entry and keeps every non-wiki
+entry; `consumed_ids` stays untouched (every patch id stays consumed):
 
-  **Corrections to this section, from the same review.**
-  1. "The layout tag stays `molt-chain-checkpoint-v8`" is wrong: three
-     tags are live and content-selected (`chain.rs:509-514`); a typical
-     republic's cut emits v6 or v7. Tag and variant are orthogonal, and
-     §B.6a's versioning invariant asks for a bump when the same chain
-     hashes differently — which is exactly what this change does.
-  2. Summarising AT THE CUT re-opens the trap `verify.rs:583-585` and
-     `647-653` were written to close. The summary must reach all THREE
-     hash sites — `hash_walk_state`, `own_checkpoint_state`, and the blob
-     actually persisted at `governance.rs:597` — or the persisted blob's
-     hash misses the block's signed `state_hash`.
-  3. `CheckpointProposed` carries no variant, so
-     `receive_checkpoint_proposal` cannot know which hash to recompute.
-  4. Every `matches!(… ChainChange::Checkpoint …)` site has to learn the
-     variant (`checkpoint.rs:81`, `governance.rs:586`/`683`,
-     `verify.rs:132`/`354`/`440`/`628`/`1005`), plus a rule on whether a
-     legacy cut may follow a folded one.
-  5. `rev` in the signed payload contradicts `wiki_fold.rs:385-388`
-     ("never consensus input"). Drop it from the base, or pin the exact
-     arithmetic.
-  6. `fold_one` cannot express "the FIRST Memory entry" — it sees one
-     payload, no position. The rule belongs in `wiki_fold_with_rev`, and
-     `tree.is_empty()` is not a substitute (a leading void patch leaves
-     the tree empty).
-  7. The `(0, …)` proposal id is an unguarded sentinel: ids start at 1,
-     but `receive_proposed` accepts 0 from the wire, and
-     `settle_cards_against_chain` would materialise a phantom Accepted
-     card carrying the whole tree.
-  8. Nothing rejects a VOTED `wiki_base` payload today — as written, one
-     proposal could replace the wiki.
-  9. "The blob's patches were never individually signed" is false: they
-     are the verbatim payloads of m-of-n-signed blocks. The conclusion
-     (the export is unchanged) holds for a different reason —
-     `bundle_from_chain` already returns `None` for a pruned holder.
-  10. "Tell the human to upgrade" describes no code path: the wire
-      `tracing::warn`s and drops, the disk path REFUSES the open.
+```json
+(0, {"op": "wiki_base", "hash": "<64 hex>", "size": 12345, "root": "<64 hex>"})
+```
+
+- `hash` is the CONSENSUS commitment: sha256 over the canonical tree
+  bytes (§4.9.2). Every signer recomputes it from its own fold, so a
+  proposer cannot name a tree it did not fold.
+- `root` + `size` are the TRANSPORT commitment: the file plane's
+  `Manifest::root()`, which gates every fetched piece against the top
+  record and every chunk against it. Carried BESIDE `hash` on purpose -
+  `root` depends on `PIECE_PAYLOAD_LEN`, and a transport constant must
+  never become a consensus input. `hash` is what the chain means; `root`
+  is only how the bytes travel.
+- **No `rev`.** `wiki_fold.rs` states that the revision is display-only
+  and never consensus input; the earlier draft would have broken that.
+
+#### 4.9.2 The canonical tree bytes
+
+Its own versioned, length-prefixed layout, NOT `serde_json` of the map:
+
+```
+"molt-wiki-base-v1\0" ‖ le64 entry-count ‖ ( put_bytes(path) put_bytes(content) )*
+```
+
+over the `BTreeMap` in path order, `put_bytes` = `le32 len ‖ bytes` (the
+`molt-republic-id-v2` rule: length-prefixed, never separators). A byte-pin
+test goes with it, like every other layout in this repo.
+
+#### 4.9.3 Versioning: a v9 tag AND a new variant, both
+
+- **`molt-chain-checkpoint-v9`**, content-selected on the presence of a
+  `wiki_base` entry in the Memory group - the same conditional discipline
+  v7 and v8 use, so every existing cut keeps its bytes and its recorded
+  signatures. Memory is inside `CHECKPOINT_V7_SURFACES`, so without this
+  the same republic would emit v6/v7 bytes for a materially different
+  state: exactly what §B.6a's versioning invariant forbids.
+- **`ChainChange::CheckpointFolded { upto, state_hash }`**, variant byte 4
+  in `approval_bytes` (byte 3 is the legacy `Checkpoint`). The variant is
+  what tells the verifier which fold to run, and it is what gives an older
+  build a STOP rather than a forgery verdict.
+- `CheckpointProposed` carries the variant too, or
+  `receive_checkpoint_proposal` cannot know which hash to recompute.
+- **Once folded, always folded**: a legacy `Checkpoint` block after a
+  `CheckpointFolded` anchor is refused. Otherwise the state a node hashes
+  would depend on whether it happened to prune.
+
+#### 4.9.4 The blocker that must be fixed in the same change
+
+`walk_suffix_chain` (`chain/verify.rs:~1005`) destructures the anchor as
+`ChainChange::Checkpoint` and errors otherwise. Every node prunes at the
+cut, so after the first folded cut `blocks[0]` IS the folded anchor and
+the next open fails with "this workspace's chain is unreadable" - on the
+UPGRADED nodes. Both `walk_suffix_chain` and `verify_suffix_chain` accept
+either variant.
+
+#### 4.9.5 The summary runs at THREE hash sites or the republic cannot cut
+
+`hash_walk_state` (the running walk), `own_checkpoint_state` (the propose
+hash AND the verify-before-sign hash) and the blob actually persisted at
+`governance.rs:~597` must reach identical bytes. `own_checkpoint_state`
+takes the variant. A keystone drives all three over one chain and asserts
+one hash.
+
+#### 4.9.6 Base-pending: adoption and readability decouple
+
+This is the structural change, and the dangerous one. Today
+`try_adopt_from_blob` -> `apply_chain_to_state` -> `wiki_base()` always
+produces a tree. With a commitment, a node can hold a VERIFIED chain and
+not yet hold the tree. It must then be honest, not empty:
+
+- `State` carries a base-pending state (the commitment, plus fetch
+  progress). `wiki_base()` returns it instead of a tree.
+- **`supersede_stale_wiki` is a NO-OP while base-pending.** Run against an
+  empty base every pending `wiki_patch` fails to apply and would be
+  retired as superseded - silent data loss on a rejoiner. This is the
+  single most important line in this section.
+- Every wiki read (`WikiList`, `WikiGet`, `WikiSearch`, `WikiLinks`,
+  `WikiNeighbors`, `wiki_export`, the Memory snapshot) answers a typed
+  refusal naming the state and the progress, never an empty page.
+- The GUI shows the Memory surface with a progress line, the way the
+  mirror row already does.
+
+#### 4.9.7 Transport
+
+The file plane's primitives are share-agnostic and take exactly what a
+tree can supply (`publish_series_v2`, `fetch_series_v2_with`,
+`enqueue_publish`, `spawn_trickle`, `SeriesExpect`, `impl PieceSink for
+Vec<u8>`). The engine WRAPPERS are not: they are keyed on
+`share_identity(&MessageId)` and land files in the human's download
+directory. So the tree gets its own job family beside the share family -
+a `kind` on the publish/fetch jobs so `resume_file_jobs` routes it, a
+second answer path for `PieceWanted` keyed by the tree hash, and a sink
+that writes beside `chain.state` rather than into `download_dir`.
+
+- **Holders.** A node that FOLDED the base itself is a primary holder and
+  answers from its own store; a node that FETCHED it answers once
+  complete. This is the sharer/complete-mirror split the mirror election
+  already makes.
+- **The key.** OPEN QUESTION for the user, see §8.4.
+- **Pace.** 100 MiB is ~2 387 pieces; at the shipped 15 s trickle
+  interval that is ~10 hours per fetching node, on a plane deliberately
+  paced behind chat and governance. See §8.5.
+
+#### 4.9.8 The wedge this also closes
+
+`CheckpointServed` is an ordinary logged `WorkspaceEvent` published over
+the 445 outbox. An over-budget frame is a `PublishStall::Permanent` and
+the node writes nothing more until it can go out - ACROSS RESTARTS. So a
+pruned holder whose blob crosses the frame budget bricks its own outbox
+the first time a peer asks for catch-up below the anchor. Option (b)
+removes the cause; this change also adds the guard, because nothing today
+measures a `WorkspaceEvent` against the transport budget (`payload_fits`
+covers proposals only).
+
+#### 4.9.9 Failure modes, and what the human sees
+
+| Case | Answer |
+|---|---|
+| Chain adopted, tree not fetched yet | base-pending, progress shown, no wiki reads answered empty |
+| Fetch never completes | never fails, never times out: a quiet persistent state, plus the one line that unblocks it - another member holding the tree must be online |
+| No dialable relay | a named republic-level condition, not silence |
+| Two treeless nodes fetching from each other | "no member online holds the shared memory base" - the holder gossip already carries what is needed |
+| Local tree fails its hash | delete the store, re-enter base-pending, notice. Deliberately NOT a refused workspace open: the chain is the trust root and a damaged one is evidence, the tree is a re-fetchable cache of threshold-signed content |
+
+#### 4.9.10 Unchanged
+
+Genesis; the legacy `Checkpoint` variant and every existing cut's bytes;
+`consumed_ids`; the wiki export's provenance (`bundle_from_chain` already
+returns `None` for a pruned holder - the base tree is not a substitute for
+per-patch provenance).
 
 ### 4.10 The GUI (K7)
 
@@ -629,7 +686,26 @@ feed the facets); K7 depends on K1 and K4.
 
 ## 8. Open points
 
-1. K6 review gate (§4.9) - a conversation, not a code task.
+1. K6's review gate RAN (2026-09-04) and the user chose option (b); §4.9
+   is now that design. Two forks inside it are still the user's:
+
+   **8.4 The tree's encryption key.** The file plane needs a key only
+   members can derive. The rotation seed is the one shared secret a
+   rejoiner holds before it holds any chain (it rides the Welcome gift
+   wrap), so `HKDF(rotation_seed, "molt-wiki-base-v1" ‖ hash)` is the
+   simple answer - but it gives the base tree the rotation seed's
+   lifetime, i.e. NO forward secrecy, unlike the chat plane's exporter
+   ring. The alternative is the MLS exporter at the cut's epoch, which a
+   later rejoiner cannot derive, so a holder would have to re-publish
+   under the current epoch. Simple-and-weaker vs correct-and-more-moving-
+   parts; against a relay, not against a member.
+
+   **8.5 The pace.** 100 MiB is ~2 387 pieces; at the shipped 15 s
+   trickle interval that is ~10 hours per fetching node, because the file
+   plane is deliberately paced behind chat and governance. For a
+   rejoiner's shared memory that may be the wrong pace: the base could
+   have its own faster interval, at the cost of competing with the
+   republic's live traffic while it runs.
 2. `frostem` (tantivy's stemmer) purity and the exact `yaml-rust2` event
    shape (`Event::Scalar` style + raw text) are locked against `cargo tree`
    and the compiler in K5 / K4, not assumed here.

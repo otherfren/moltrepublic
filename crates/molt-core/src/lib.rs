@@ -3947,6 +3947,14 @@ pub enum Command {
     /// newest first — checkpoint blocks included. A pruned holder appends
     /// summarized pre-cut entries rebuilt from its checkpoint blob.
     ReadChain,
+    /// An off-actor wiki index build finished (engine-internal, §4.5).
+    /// Carries only the epoch it ran under - the artefacts ride a shared
+    /// slot, because neither index type is serializable and an agent must
+    /// not be able to hand this node an index it did not build itself.
+    NetWikiIndexReady {
+        /// The `applied_epoch` the build started under.
+        epoch: u64,
+    },
     /// One page of the wiki's document list, metadata only
     /// (`docs/memory/knowledge_base_scale.md` §4.3) — the read a knowledge
     /// base of tens of thousands of entries is browsed with.
@@ -5731,10 +5739,15 @@ pub enum Reply {
         /// The parsed front matter (an object, or null when there is none
         /// or it is outside the accepted subset).
         props: serde_json::Value,
-        /// How many links leave this document.
-        links_out: u32,
-        /// How many links point at it.
-        links_in: u32,
+        /// How many links leave this document - `None` while the link
+        /// graph is still being built. Not `0`: a document with no links
+        /// and a document whose links are not known yet are different
+        /// answers, and only one of them is a fact.
+        #[serde(default)]
+        links_out: Option<u32>,
+        /// How many links point at it; `None` like [`Self::links_out`].
+        #[serde(default)]
+        links_in: Option<u32>,
     },
     /// The member table (Organization → Members). A struct variant on
     /// purpose: the internally-tagged `reply` repr cannot serialize a bare
@@ -6719,6 +6732,17 @@ pub enum MoltError {
     /// proof, or one already running).
     #[error("wiki export: {0}")]
     WikiExport(&'static str),
+    /// The wiki index is still being built off the actor
+    /// (`docs/memory/knowledge_base_scale.md` §4.5/§4.6). Distinct from
+    /// [`MoltError::Engine`] on purpose: this is "come back in a moment",
+    /// not a fault, and an empty result would be a lie.
+    #[error("the wiki index is still building ({done} of {total} documents)")]
+    IndexBuilding {
+        /// Documents indexed so far.
+        done: u64,
+        /// Documents in the base.
+        total: u64,
+    },
     /// The engine task is gone or did not answer.
     #[error("engine: {0}")]
     Engine(String),

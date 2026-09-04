@@ -455,6 +455,8 @@ export global WikiState {
     in-out property <string> search-query;
     in-out property <[WikiHitRow]> search-hits;
     in-out property <bool> search-ran;
+    // the engine is still building the index - not the same as "no hit"
+    in-out property <bool> search-building;
     in-out property <string> raw; // the raw editor's buffer (two-way)
     in-out property <bool> editing;
     in-out property <bool> can-reveal;
@@ -466,6 +468,8 @@ export global WikiState {
     in-out property <int> cs-moved;
     in-out property <int> cs-lines;
     in-out property <[WikiChangeRow]> cs-rows;
+    // the whole local changeset as a git patch ("" = nothing to show)
+    in-out property <string> cs-patch;
     // The export gate, in ONE place: an export writes the APPROVED base
     // tree, so an empty base means there is nothing to export - the local
     // stack is a separate question the dialog answers with draft-count().
@@ -1320,6 +1324,7 @@ export global Strings {
     in property <string> mem-backlinks;
     in property <string> mem-search-ph;
     in property <string> mem-search-none;
+    in property <string> mem-search-building;
     in property <string> mem-title-archive;
     in property <string> mem-hint-archive;
     // Memory: changeset panel + per-file revert + link markup + editor menu
@@ -1329,6 +1334,7 @@ export global Strings {
     in property <string> mem-cs-moved;
     in property <string> mem-cs-lines;
     in property <string> mem-cs-undo;
+    in property <string> mem-cs-details;
     in property <string> mem-cs-revert;
     in property <string> mem-cs-vote;
     in property <string> mem-cs-confirm-title;

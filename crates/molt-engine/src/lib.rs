@@ -859,6 +859,16 @@ pub(crate) struct WikiCache {
     pub(crate) epoch: u64,
 }
 
+/// Both derived indexes over one folded base, as an off-actor build
+/// hands them back (§4.5/§4.6). They are built together because they
+/// parse the same documents: two tasks would parse the tree twice.
+pub(crate) struct WikiIndexes {
+    /// The link graph.
+    pub(crate) graph: wiki_index::graph::WikiGraph,
+    /// The full-text index.
+    pub(crate) search: wiki_index::search::WikiSearch,
+}
+
 /// A pending `wiki_patch` proposal, parsed once (§4.2).
 pub(crate) struct PendingPatch {
     /// The parsed files.
@@ -943,6 +953,15 @@ pub(crate) struct State {
     pub(crate) wiki_search_epoch: u64,
     /// Paths whose documents changed since the index last committed.
     pub(crate) wiki_search_dirty: std::collections::BTreeSet<String>,
+    /// The epoch an OFF-ACTOR index build is running under, if any - the
+    /// in-flight guard, so N reads spawn one build and not N
+    /// (`docs/memory/knowledge_base_scale.md` §4.5/§4.6).
+    pub(crate) wiki_index_building: Option<u64>,
+    /// Where an off-actor build parks its result. Neither index type is
+    /// serializable, so the artefacts ride a shared slot and the internal
+    /// command carries only the epoch they were built under - the
+    /// `restore_staging` idiom.
+    pub(crate) wiki_index_staging: std::sync::Arc<std::sync::Mutex<Option<WikiIndexes>>>,
     /// Every known proposal — stored as the schema type
     /// ([`molt_core::ProposalRecord`]), so snapshots need no conversion.
     pub(crate) proposals: HashMap<u64, ProposalRecord>,
@@ -1208,6 +1227,8 @@ impl State {
             wiki_search: None,
             wiki_search_epoch: 0,
             wiki_search_dirty: std::collections::BTreeSet::new(),
+            wiki_index_building: None,
+            wiki_index_staging: std::sync::Arc::new(std::sync::Mutex::new(None)),
             proposals: HashMap::new(),
             next_id: 1,
             next_seq: 1,
@@ -1618,6 +1639,7 @@ impl State {
                 limit,
             } => self.cmd_wiki_list(prefix, cursor, limit),
             Command::WikiGet { path } => self.cmd_wiki_get(path),
+            Command::NetWikiIndexReady { epoch } => self.cmd_net_wiki_index_ready(epoch),
             Command::WikiLinks {
                 path,
                 direction,

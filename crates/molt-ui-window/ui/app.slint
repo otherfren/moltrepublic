@@ -7035,6 +7035,10 @@ export component AppWindow inherits Window {
                             confirm-revert => {
                                 root.mem-cs-confirm-open = true;
                             }
+                            show-changes(patch) => {
+                                root.patch-view-text = patch;
+                                root.patch-view-open = true;
+                            }
                             wiki-export => {
                                 root.mem-export-proof = true;
                                 root.mem-export-open = true;

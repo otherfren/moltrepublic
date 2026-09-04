@@ -61,6 +61,9 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
         E::UnknownProposal(id) => format!("Unbekannter Vorschlag #{}", id.0),
         E::NotGated(sf) => format!("{} ist ungated - nichts vorzuschlagen", sf.as_str()),
         E::BadPayload(t) => format!("Ungültige Payload: {t}"),
+        E::IndexBuilding { done, total } => {
+            format!("Der Wiki-Index wird gebaut ({done} von {total} Dokumenten)")
+        }
         E::FeatureDisabled(k) => format!("{k}: nicht aktiviert"),
         E::AlreadyTerminal(id, st) => format!("Vorschlag #{} ist bereits {st:?}", id.0),
         E::NotTheProposer(id) => format!("Vorschlag #{}: nur wer vorschlägt, zieht zurück", id.0),
@@ -1290,6 +1293,7 @@ lexicon! {
     mem_backlinks: "Linked from", "Verlinkt von";
     mem_search_ph: "Search the wiki", "Wiki durchsuchen";
     mem_search_none: "No hit", "Kein Treffer";
+    mem_search_building: "Reading the wiki - search answers in a moment", "Wiki wird gelesen - die Suche antwortet gleich";
     mem_title_archive: "Archived notes", "Archivierte Notizen";
     mem_hint_archive: "Retired from the wiki - still readable, no longer linked.", "Aus dem Wiki zurückgezogen - weiter lesbar, nicht mehr verknüpft.";
     mem_cs_title: "Changeset", "Changeset";
@@ -1298,6 +1302,7 @@ lexicon! {
     mem_cs_moved: "moved", "verschoben";
     mem_cs_lines: "lines", "Zeilen";
     mem_cs_undo: "Undo", "Rückgängig";
+    mem_cs_details: "Details", "Details";
     mem_cs_revert: "Discard all", "Alles verwerfen";
     mem_cs_vote: "Start vote", "Vote starten";
     mem_cs_confirm_title: "Discard all changes?", "Alle Änderungen verwerfen?";

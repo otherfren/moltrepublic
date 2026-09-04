@@ -1794,7 +1794,7 @@ impl State {
     /// is an error — an empty document would read like a real one.
     pub(crate) fn cmd_wiki_get(&mut self, path: String) -> Result<Reply, MoltError> {
         self.require_feature(Surface::Memory)?;
-        self.refresh_wiki_graph();
+        self.refresh_wiki_cache();
         let (tree, wiki_rev) = self.wiki_base();
         let Some(content) = tree.get(&path) else {
             return Err(MoltError::BadPayload(format!("no such document: {path}")));
@@ -1806,9 +1806,14 @@ impl State {
         let count = |list: Option<&Vec<wiki_index::graph::Edge>>| {
             u32::try_from(list.map_or(0, Vec::len)).unwrap_or(u32::MAX)
         };
+        // the DOCUMENT never waits on the index - only its link counts do,
+        // and `None` says so rather than claiming zero
         let (links_out, links_in) = match self.wiki_graph.as_ref() {
-            Some(g) => (count(g.out.get(&path)), count(g.inn.get(&path))),
-            None => (0, 0),
+            Some(g) => (
+                Some(count(g.out.get(&path))),
+                Some(count(g.inn.get(&path))),
+            ),
+            None => (None, None),
         };
         Ok(Reply::WikiDocument {
             path: path.clone(),
@@ -1838,6 +1843,10 @@ impl State {
             )));
         }
         self.refresh_wiki_graph();
+        if self.wiki_graph.is_none() {
+            self.spawn_wiki_index_build();
+            return Err(self.index_building());
+        }
         let page = usize::try_from(match limit {
             0 => WIKI_PAGE_DEFAULT,
             n => n.clamp(1, WIKI_PAGE_MAX),
@@ -1897,6 +1906,10 @@ impl State {
     ) -> Result<Reply, MoltError> {
         self.require_feature(Surface::Memory)?;
         self.refresh_wiki_graph();
+        if self.wiki_graph.is_none() {
+            self.spawn_wiki_index_build();
+            return Err(self.index_building());
+        }
         let depth = match depth {
             0 => 1,
             n => n.min(2),
@@ -1947,45 +1960,34 @@ impl State {
         }
     }
 
-    /// The full-text index, current for the folded base. Built on the
-    /// first search, like the graph - a republic that never searches never
-    /// pays for an index.
+    /// The search index's per-patch update, ON the actor - the full build
+    /// is off-actor, like the graph's.
     pub(crate) fn refresh_wiki_search(&mut self) -> Result<(), MoltError> {
         self.refresh_wiki_cache();
         let epoch = self.applied_epoch;
-        let stale = self.wiki_search.is_none() || self.wiki_search_epoch != epoch;
+        if self.wiki_search.is_some() && self.wiki_search_epoch != epoch {
+            self.wiki_search = None;
+        }
         let dirty = std::mem::take(&mut self.wiki_search_dirty);
-        let failed = |e: tantivy::TantivyError| MoltError::Engine(format!("wiki index: {e}"));
-        if !stale && dirty.is_empty() {
+        if self.wiki_search.is_none() || dirty.is_empty() {
             return Ok(());
         }
-        // the cache is TAKEN so the tree can be read by reference while the
-        // index is written - `into_owned()` here would copy the whole base
-        // on every refresh, which is the copy §4.2 exists to delete
         let cache = self.wiki_cache.take();
         let tree = match cache.as_ref() {
             Some(c) => &c.tree,
             None => &std::collections::BTreeMap::new(),
         };
-        let outcome = if stale {
-            wiki_index::search::WikiSearch::build(tree).map(|s| {
-                self.wiki_search = Some(s);
-                self.wiki_search_epoch = epoch;
-            })
-        } else {
-            match self.wiki_search.as_mut() {
-                Some(s) => s.update(tree, &dirty),
-                None => Ok(()),
-            }
+        let outcome = match self.wiki_search.as_mut() {
+            Some(s) => s.update(tree, &dirty),
+            None => Ok(()),
         };
         self.wiki_cache = cache;
         if outcome.is_err() {
-            // a half-written index must not keep answering: dropping it
-            // costs the next search a rebuild, keeping it costs every
-            // later search a stale answer
+            // a half-written index must not keep answering; the next read
+            // starts a fresh build
             self.wiki_search = None;
         }
-        outcome.map_err(failed)
+        outcome.map_err(|e| MoltError::Engine(format!("wiki index: {e}")))
     }
 
     /// [`Command::WikiSearch`] (§4.6).
@@ -2000,6 +2002,10 @@ impl State {
     ) -> Result<Reply, MoltError> {
         self.require_feature(Surface::Memory)?;
         self.refresh_wiki_search()?;
+        if self.wiki_search.is_none() {
+            self.spawn_wiki_index_build();
+            return Err(self.index_building());
+        }
         let page = usize::try_from(match limit {
             0 => WIKI_PAGE_DEFAULT,
             n => n.clamp(1, WIKI_PAGE_MAX),
@@ -2037,31 +2043,133 @@ impl State {
         })
     }
 
-    /// The link graph, current for the folded base. Built on first use:
-    /// a republic that never asks for links never pays for one.
+    /// Kick off an OFF-ACTOR build of both indexes over the current base
+    /// (§4.5/§4.6). One at a time: N reads arriving while a build runs
+    /// spawn nothing. The tree is snapshotted HERE, on the actor, so the
+    /// task works on bytes that cannot move under it.
+    pub(crate) fn spawn_wiki_index_build(&mut self) {
+        if self.wiki_index_building.is_some() {
+            return;
+        }
+        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+            // no actor to hand it to (shutting down, or a test harness):
+            // inline is then not a stall, there is nothing to stall
+            self.build_wiki_indexes_now();
+            return;
+        };
+        self.refresh_wiki_cache();
+        let epoch = self.applied_epoch;
+        let tree = self.wiki_base().0.into_owned();
+        let staging = self.wiki_index_staging.clone();
+        self.wiki_index_building = Some(epoch);
+        tokio::spawn(async move {
+            let built = tokio::task::spawn_blocking(move || {
+                let graph = wiki_index::graph::WikiGraph::build(&tree);
+                wiki_index::search::WikiSearch::build(&tree)
+                    .map(|search| crate::WikiIndexes { graph, search })
+            })
+            .await;
+            match built {
+                Ok(Ok(indexes)) => {
+                    if let Ok(mut slot) = staging.lock() {
+                        *slot = Some(indexes);
+                    }
+                }
+                Ok(Err(e)) => tracing::warn!(error = %e, "wiki index build failed"),
+                Err(e) => tracing::warn!(error = %e, "wiki index task failed"),
+            }
+            // the command runs either way: a failed build must clear the
+            // in-flight guard, or the next read waits forever
+            let (reply, _rx) = tokio::sync::oneshot::channel();
+            let _ = cmd_tx
+                .send(crate::Envelope {
+                    cmd: molt_core::Command::NetWikiIndexReady { epoch },
+                    reply,
+                })
+                .await;
+        });
+    }
+
+    /// Build both indexes INLINE and install them. Production goes off
+    /// the actor; this is the path with no actor to go off to.
+    pub(crate) fn build_wiki_indexes_now(&mut self) {
+        self.refresh_wiki_cache();
+        let epoch = self.applied_epoch;
+        let tree = self.wiki_base().0.into_owned();
+        self.wiki_graph = Some(wiki_index::graph::WikiGraph::build(&tree));
+        self.wiki_graph_epoch = epoch;
+        match wiki_index::search::WikiSearch::build(&tree) {
+            Ok(s) => {
+                self.wiki_search = Some(s);
+                self.wiki_search_epoch = epoch;
+            }
+            Err(e) => tracing::warn!(error = %e, "wiki index build failed"),
+        }
+        self.wiki_graph_dirty.clear();
+        self.wiki_search_dirty.clear();
+    }
+
+    /// An off-actor build finished (engine-internal). Install it only if
+    /// the base it describes is still the base; then drain whatever the
+    /// actor accumulated while it ran.
+    pub(crate) fn cmd_net_wiki_index_ready(&mut self, epoch: u64) -> Result<Reply, MoltError> {
+        self.wiki_index_building = None;
+        let built = self.wiki_index_staging.lock().ok().and_then(|mut s| s.take());
+        let Some(indexes) = built else {
+            return Ok(Reply::Ack); // it failed; the next read starts a new one
+        };
+        if epoch != self.applied_epoch {
+            // a wholesale re-projection landed while it ran: there is no
+            // delta from that tree to this one, so the work is discarded
+            // rather than half-trusted
+            return Ok(Reply::Ack);
+        }
+        self.wiki_graph = Some(indexes.graph);
+        self.wiki_graph_epoch = epoch;
+        self.wiki_search = Some(indexes.search);
+        self.wiki_search_epoch = epoch;
+        // …and the appends that arrived meanwhile are folded on now. The
+        // dirty sets are taken HERE, never at kick-off: taking them early
+        // and then discarding the result would lose the paths.
+        self.refresh_wiki_graph();
+        let _ = self.refresh_wiki_search();
+        Ok(Reply::Ack)
+    }
+
+    /// The honest refusal while a build runs: an empty page would read as
+    /// "nothing matched", which is a different claim.
+    fn index_building(&self) -> MoltError {
+        let total = u64::try_from(self.wiki_base().0.len()).unwrap_or(u64::MAX);
+        MoltError::IndexBuilding { done: 0, total }
+    }
+
+    /// The per-patch update, ON the actor: a handful of documents. The
+    /// FULL build is off-actor (`spawn_wiki_index_build`), so a missing or
+    /// wholesale-stale index is dropped here and REPORTED by the reads,
+    /// never built synchronously - that stall is what §4.5 deferred.
     pub(crate) fn refresh_wiki_graph(&mut self) {
         self.refresh_wiki_cache();
         let epoch = self.applied_epoch;
-        let stale = self.wiki_graph.is_none() || self.wiki_graph_epoch != epoch;
+        if self.wiki_graph.is_some() && self.wiki_graph_epoch != epoch {
+            // the base moved wholesale: this graph describes a tree that
+            // no longer exists, and there is no delta to it
+            self.wiki_graph = None;
+        }
         let dirty = std::mem::take(&mut self.wiki_graph_dirty);
-        if !stale && dirty.is_empty() {
+        if self.wiki_graph.is_none() || dirty.is_empty() {
             return;
         }
-        // taken, not cloned - see `refresh_wiki_search`
+        // taken, not cloned - `into_owned()` would copy the whole base
         let cache = self.wiki_cache.take();
         let tree = match cache.as_ref() {
             Some(c) => &c.tree,
             None => &std::collections::BTreeMap::new(),
         };
-        if stale {
-            self.wiki_graph = Some(wiki_index::graph::WikiGraph::build(tree));
-            self.wiki_graph_epoch = epoch;
-        } else if let Some(g) = self.wiki_graph.as_mut() {
+        if let Some(g) = self.wiki_graph.as_mut() {
             g.update(tree, &dirty);
         }
         self.wiki_cache = cache;
     }
-
     /// The Memory projection changed in a way an APPEND cannot describe (a
     /// wholesale rebuild, a blob swap, a restore, a close): the fold cache
     /// has to refold rather than extend (§4.1).
