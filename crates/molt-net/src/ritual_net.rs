@@ -568,9 +568,7 @@ impl GroupChannel {
     /// straddling a UTC boundary stays reachable.
     pub async fn subscribe_files_at(&self, at_secs: u64) -> Result<CatchupSub, NetError> {
         let tags = window_tags(&self.rotation_seed, at_secs);
-        let sub = self
-            .subscribe_tags_kind(crate::kinds::KIND_FILE_CHUNK, &tags, None)
-            .await?;
+        let sub = self.subscribe_tags_kind(crate::kinds::KIND_FILE_CHUNK, &tags, true).await?;
         Ok(CatchupSub { sub, tags })
     }
 
@@ -578,33 +576,32 @@ impl GroupChannel {
     /// still be going (series v2, `docs/files/mirroring.md` §3.1): every
     /// window from the start's through the current one (newest
     /// `max_windows` kept) plus the skew-adjacent ones - see
-    /// [`file_catchup_tags`]. `history_bound` sizes the relay's stored-event
-    /// replay to the series (the default bound cuts a large one short).
+    /// [`file_catchup_tags`]. A file subscription has NO stored-event
+    /// cut-off (the REQ replays every file's pieces under the day's tag)
+    /// and a small fan-in channel instead - see [`FILE_SUB_CAPACITY`].
     pub async fn subscribe_files_from(
         &self,
         start_secs: u64,
         max_windows: usize,
-        history_bound: Option<usize>,
     ) -> Result<CatchupSub, NetError> {
         let tags = file_catchup_tags(&self.rotation_seed, start_secs, now_secs(), max_windows);
-        let sub = self
-            .subscribe_tags_kind(crate::kinds::KIND_FILE_CHUNK, &tags, history_bound)
-            .await?;
+        let sub = self.subscribe_tags_kind(crate::kinds::KIND_FILE_CHUNK, &tags, true).await?;
         Ok(CatchupSub { sub, tags })
     }
 
     /// Place one pooled 445 subscription over exactly `tags`.
     async fn subscribe_tags(&self, tags: &[String]) -> Result<Subscription, NetError> {
-        self.subscribe_tags_kind(crate::kinds::KIND_GROUP, tags, None).await
+        self.subscribe_tags_kind(crate::kinds::KIND_GROUP, tags, false).await
     }
 
     /// [`Self::subscribe_tags`] for a caller-chosen kind (445 group frames,
-    /// 447 file chunks — same anonymous h-tag filter shape).
+    /// 447 file chunks — same anonymous h-tag filter shape). `files` = the
+    /// unbounded, backpressured file shape.
     async fn subscribe_tags_kind(
         &self,
         kind: u16,
         tags: &[String],
-        history_bound: Option<usize>,
+        files: bool,
     ) -> Result<Subscription, NetError> {
         let filter = Filter::new()
             .kind(Kind::Custom(kind))
@@ -619,8 +616,10 @@ impl GroupChannel {
         // permanent deanonymization.
         let mut runtime = RelayRuntime::new(self.dialer.clone(), self.relays.clone())
             .with_auth_keys(Some(Keys::generate()));
-        if let Some(bound) = history_bound {
-            runtime = runtime.with_history_bound(bound);
+        if files {
+            runtime = runtime
+                .without_history_bound()
+                .with_channel_capacity(crate::relay_runtime::FILE_SUB_CAPACITY);
         }
         runtime.subscribe(filter).await
     }

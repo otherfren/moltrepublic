@@ -164,8 +164,42 @@ fn prepare_landing(dest: &DestSpec, name: &str, id_hex: &str) -> Result<Landing,
     let resolved = dest.resolve(name);
     std::fs::create_dir_all(&resolved.dir)
         .map_err(|e| format!("creating {}: {e}", resolved.dir.display()))?;
+    sweep_stale_spills(&resolved.dir);
     let part = resolved.dir.join(format!(".molt-download-{id_hex}.part"));
     Ok(Landing { resolved, part })
+}
+
+/// Where a v2 fetch spills manifest-chunk candidates: beside its `.part`,
+/// literally `<part>.mspill`.
+fn spill_path_for(part: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.mspill", part.display()))
+}
+
+/// A spill a killed fetch left behind is garbage after a day (a live
+/// fetch touches its spill as candidates arrive); nothing else in the
+/// download dir is ours to touch.
+const STALE_SPILL_AGE: Duration = Duration::from_secs(86_400);
+
+fn sweep_stale_spills(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_spill = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(".mspill"));
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > STALE_SPILL_AGE);
+        if is_spill && old {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }
 
 /// Move a fully written `.part` into place - the last half of every
@@ -182,11 +216,27 @@ fn finish_landing(landing: &Landing) -> Result<PathBuf, String> {
     Ok(final_path)
 }
 
-/// The last half of a landing that hashes what ACTUALLY landed: durable
-/// first, the bytes must match `expected` (lowercase hex; "" = a legacy
-/// share with no reference), the `.part` is removed on a mismatch, then
-/// the rename. Blocking - call it off the runtime.
-fn verify_and_finish(landing: &Landing, expected: &str) -> Result<PathBuf, String> {
+/// The last half of a landing that hashes what ACTUALLY landed: cut to
+/// `truncate_to` when the series' verified size is known, durable, the
+/// bytes must match `expected` (lowercase hex; "" = a legacy share with
+/// no reference), the `.part` is removed on a mismatch, then the rename.
+/// Blocking - call it off the runtime.
+fn verify_and_finish(
+    landing: &Landing,
+    expected: &str,
+    truncate_to: Option<u64>,
+) -> Result<PathBuf, String> {
+    let _ = std::fs::remove_file(spill_path_for(&landing.part));
+    if let Some(size) = truncate_to {
+        let cut = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&landing.part)
+            .and_then(|f| f.set_len(size));
+        if let Err(e) = cut {
+            let _ = std::fs::remove_file(&landing.part);
+            return Err(format!("cutting the landed file to its size: {e}"));
+        }
+    }
     if let Ok(f) = std::fs::File::open(&landing.part) {
         let _ = f.sync_all();
     }
@@ -1184,6 +1234,23 @@ pub(crate) fn spawn_series_publish_v2(
 /// hostile size claim allocates nothing until pieces actually land.
 struct FileSink {
     file: std::fs::File,
+    /// Where manifest-chunk candidates spill while the top record is
+    /// missing (`<part>.mspill`, [`spill_path_for`]; the fetch removes
+    /// it on every exit, `prepare_landing` sweeps what a kill left).
+    spill: PathBuf,
+}
+
+impl FileSink {
+    fn at(part: &Path) -> std::io::Result<FileSink> {
+        let spill = spill_path_for(part);
+        // a retry after a kill: the stale spill would otherwise keep its
+        // size until the first push truncates it - if one ever comes
+        let _ = std::fs::remove_file(&spill);
+        Ok(FileSink {
+            file: std::fs::File::create(part)?,
+            spill,
+        })
+    }
 }
 
 impl molt_net::file_plane::PieceSink for FileSink {
@@ -1193,6 +1260,10 @@ impl molt_net::file_plane::PieceSink for FileSink {
             .map_err(|_| std::io::Error::other("block size"))?;
         self.file.seek(std::io::SeekFrom::Start(u64::from(index).saturating_mul(block)))?;
         self.file.write_all(payload)
+    }
+
+    fn spill_path(&self) -> Option<PathBuf> {
+        Some(self.spill.clone())
     }
 }
 
@@ -1215,21 +1286,26 @@ pub(crate) fn spawn_nostr_fetch_v2(
                 .ok_or_else(|| "the share carries no usable key".to_string())?;
             let landing = prepare_landing(&dest, &target.name, &target.id_hex)?;
             let outcome: Result<String, String> = async {
-                let file = std::fs::File::create(&landing.part)
+                let mut sink = FileSink::at(&landing.part)
                     .map_err(|e| format!("creating the landing file: {e}"))?;
-                let mut sink = FileSink { file };
                 let expect = molt_net::file_plane::SeriesExpect {
                     count: target.pieces,
                     size: target.size,
                     root: target.root.clone(),
                 };
-                molt_net::file_plane::fetch_series_v2(&channel, &key, at, &expect, &mut sink, None)
-                    .await
-                    .map_err(|e| format!("fetching the piece series: {e}"))?;
+                let manifest =
+                    molt_net::file_plane::fetch_series_v2(&channel, &key, at, &expect, &mut sink, None)
+                        .await
+                        .map_err(|e| format!("fetching the piece series: {e}"))?;
                 drop(sink);
                 let checksum = target.checksum.clone();
                 let landing_for_task = landing.clone();
-                tokio::task::spawn_blocking(move || verify_and_finish(&landing_for_task, &checksum))
+                // the size is the top record's, verified by root: whatever
+                // an impostor slice may have grown past it is cut off
+                let size = manifest.size;
+                tokio::task::spawn_blocking(move || {
+                    verify_and_finish(&landing_for_task, &checksum, Some(size))
+                })
                     .await
                     .map_err(|e| format!("landing task failed: {e}"))?
                     .map(|p| p.display().to_string())
@@ -1237,6 +1313,7 @@ pub(crate) fn spawn_nostr_fetch_v2(
             .await;
             if outcome.is_err() {
                 let _ = std::fs::remove_file(&landing.part);
+                let _ = std::fs::remove_file(spill_path_for(&landing.part));
             }
             outcome
         }
@@ -1269,7 +1346,7 @@ pub(crate) fn spawn_local_copy(
                 let _ = std::fs::remove_file(part);
                 return Err(format!("copying: {e}"));
             }
-            verify_and_finish(&landing, &target.checksum)
+            verify_and_finish(&landing, &target.checksum, None)
         })
         .await
         .unwrap_or_else(|e| Err(format!("copy task failed: {e}")));
@@ -1294,6 +1371,38 @@ mod tests {
     use super::*;
     use molt_net::{LoopbackHub, LoopbackTransport};
 
+    /// A spill a killed fetch left beside its `.part` is gone the moment a
+    /// retry opens the sink, and a day-old orphan is swept when any
+    /// landing is prepared in that directory.
+    #[test]
+    fn stale_manifest_spills_are_removed_on_retry_and_swept_by_age() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dest = DestSpec {
+            explicit: None,
+            default_dir: tmp.path().display().to_string(),
+        };
+        let landing = prepare_landing(&dest, "big.bin", "aa").expect("landing");
+        let spill = spill_path_for(&landing.part);
+        assert!(spill.display().to_string().ends_with(".part.mspill"), "{}", spill.display());
+        std::fs::write(&spill, b"stale candidates").expect("write spill");
+        let _sink = FileSink::at(&landing.part).expect("sink");
+        assert!(!spill.exists(), "a retry drops the stale spill");
+
+        let orphan = tmp.path().join(".molt-download-bb.part.mspill");
+        std::fs::write(&orphan, b"orphan").expect("write orphan");
+        let old = std::time::SystemTime::now() - Duration::from_secs(2 * 86_400);
+        std::fs::File::options()
+            .write(true)
+            .open(&orphan)
+            .and_then(|f| f.set_modified(old))
+            .expect("age the orphan");
+        let fresh = tmp.path().join(".molt-download-cc.part.mspill");
+        std::fs::write(&fresh, b"live").expect("write fresh");
+        let _ = prepare_landing(&dest, "other.bin", "dd").expect("landing");
+        assert!(!orphan.exists(), "a day-old spill is swept");
+        assert!(fresh.exists(), "a fresh spill belongs to a live fetch");
+    }
+
     /// The landing file is never pre-sized: a size claim allocates nothing
     /// until a piece lands, and a piece lands at its own offset.
     #[test]
@@ -1301,7 +1410,7 @@ mod tests {
         use molt_net::file_plane::{PieceSink as _, PIECE_PAYLOAD_LEN};
         let tmp = tempfile::tempdir().expect("tmp");
         let part = tmp.path().join("claim.part");
-        let mut sink = FileSink { file: std::fs::File::create(&part).expect("create") };
+        let mut sink = FileSink::at(&part).expect("create");
         assert_eq!(std::fs::metadata(&part).expect("meta").len(), 0, "nothing landed, nothing sized");
         sink.put(2, b"abc").expect("put");
         let want = u64::try_from(2 * PIECE_PAYLOAD_LEN + 3).expect("fits");

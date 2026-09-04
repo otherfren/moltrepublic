@@ -103,9 +103,13 @@ veto this in review.
   for the manifest, nothing is dropped for lack of it. The `.part` file
   is never pre-sized (a hostile size claim allocates nothing); the
   landed file must hash to the share checksum before the rename.
-- The fetch subscription carries a stored-event bound sized to the
-  series (`SeriesLayout::history_bound` = twice the pieces plus headroom)
-  - the relay runtime's default 5 000 would cut a large series short.
+- The fetch subscription has NO stored-event cut-off: its REQ replays
+  every file's pieces under the day's tags, so no per-series number is
+  right; a 32-event fan-in channel backpressures a fast relay instead.
+  The QUIET window (10 s without an event) ends an honest fetch; a
+  ceiling of an hour (`FETCH_CEILING`) stops a hostile trickle - and a
+  retry replays the foreign pieces again, which M2's resumable job makes
+  moot.
 - Tags stay the publish stamp's day window (privacy: a fixed per-file tag
   would let a relay group and count a file's pieces for its lifetime).
   The `FileServed` stamp is the series START; a fetcher subscribes every
@@ -115,12 +119,19 @@ veto this in review.
   the fetcher's next window.
 - The sharer takes the hour's publish round BEFORE re-reading the file;
   the re-read must still hash to the root (a changed file is refused).
-  A relay's "slow down" is waited out per piece (M2 paces instead).
+  A piece's publish retries every transient refusal (a relay's "slow
+  down", a timeout, the pool's own breaker) for two minutes
+  (`PUBLISH_PIECE_PATIENCE`, `min(250 ms × 2^n, 10 s)` between attempts)
+  and ends the series at once on a permanent one (a relay's verdict, an
+  empty or gated pool, a local Framing/Crypto refusal).
 - v1 series stay fetchable for legacy shares (no key → the exporter path,
-  its in-memory claim bounded by the configured cap or 1 GiB); nothing
-  new is published as v1. The share cap is gone: `file_cap_bytes` absent
-  = no cap, 0 = sharing off, n = a deliberate cap (`FileCap`); the old
-  unconditional `4194304` in an existing config heals away at boot.
+  its in-memory claim bounded by the configured cap, with sharing off by
+  the old 4 MiB default, else by 1 GiB); nothing new is published as v1.
+  The share cap is gone: `file_cap_bytes` absent = no cap, 0 = sharing
+  off, n = a deliberate cap (`FileCap`); the old unconditional `4194304`
+  (`LEGACY_FILE_CAP_BYTES`) in an existing config READS as no cap at load
+  - the file is never rewritten for it, so an older build still opens it
+  - and can never be stored as a cap (the settings door refuses it).
 
 ### 3.2 The trickle sender
 
@@ -258,14 +269,44 @@ still costs one hourly round (M2 changes the pacing).
 M1 review round (2026-09-03): the manifest became two levels (chunks +
 top record) so a forged chunk is dropped by hash like a forged slice;
 slices land as they arrive and verify later (relays replay newest first);
-the `.part` file is never pre-sized; the fetch bound follows the series;
-a mixed-build republic works - an older build's persist carries no series
-material, a new build's approve matches the six identity fields and the
-material only when the claim carries it, and such a block pins the share
-WITHOUT mirror material (M4 skips it; an unpersist + persist on a new
-build restores it); the wire door and the propose door check the
+the `.part` file is never pre-sized; the wire door and the propose door check the
 material's shape (`validate_files_payload`); a file that changes between
 the root check and a later slice aborts the publish with the round spent
 (accepted); the content key rides the chat message and therefore every
 read of that message - a member secret, visible to the seat's agent like
 the file itself; a relay's rate limit is waited out per piece.
+
+M1 second review round (2026-09-04): a FILE subscription has no
+stored-event cut-off at all - its REQ replays every file's pieces under
+the day's tag, so no per-series number is right - and a 32-event fan-in
+channel instead, so a fast relay's replay parks on `send` and the disk,
+not RAM, holds the series; a piece publish retries every transient
+refusal (20 attempts, 250 ms × attempt, cap 2 s) and only a local
+Framing/Crypto refusal ends the series; a data slice must have the length
+its index implies before it may land, a landed slice is never overwritten
+(a differing candidate waits in a side buffer, at most 4 per index and
+32 MiB, until its chunk decides), and the landed file is cut to the top
+record's size before it is hashed; manifest-chunk candidates spill to
+`<part>.mspill` (64 per slot, 512 MiB; 64 MiB in memory for a path-less
+sink) so a forger cannot evict the honest chunk by volume; the approve
+gate matches the WHOLE identity, series material included - an older
+build's persist for a v2 share is refused at every current approve door
+("the proposal lacks the series material - propose it from a current
+build"), a legacy share needs none and may not be given any; with sharing
+OFF a legacy v1 fetch keeps the old 4 MiB bound.
+
+M1 third review round (2026-09-04): no config marker and no boot-time
+rewrite (a rewrite would break rollback to an older build - `NodeConfig`
+denies unknown fields - and touched a file holding secrets without a
+backup): the old default reads as no cap at load, the file stays, the
+settings door refuses that exact value. The publish retry is time-bounded
+and tells a relay's verdict from a transient refusal
+(`transient_publish_error`). The fetch ceiling is an hour, the quiet
+window the honest end. Mixed builds, honestly: an old-build QUORUM can
+still seal a material-less persist for a v2 share (the approve check is
+per seat, the chain verifies signatures only); the fold therefore KEEPS
+the material of any earlier block for that share, and a stale
+material-less vote does not block a current build's re-proposal
+(`open_files_vote`). The manifest spill file is `<part>.mspill` literally,
+removed on every fetch exit, on a retry's sink open, and swept by age
+(a day) when a landing is prepared in that directory.

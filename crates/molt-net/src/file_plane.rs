@@ -41,6 +41,12 @@ const FETCH_QUIET: Duration = Duration::from_secs(10);
 /// past this budget the fetch ends honestly, whatever arrived.
 const FETCH_TOTAL: Duration = Duration::from_secs(300);
 
+/// The v2 fetch's ceiling: its subscription replays every file's pieces
+/// under the day's tags (no stored-event cut-off), so the QUIET window is
+/// what ends an honest fetch; the ceiling only stops a hostile trickle.
+/// M2's resumable job removes the ceiling altogether.
+const FETCH_CEILING: Duration = Duration::from_secs(3_600);
+
 /// The chunk-series message id for a share: derived from the share's
 /// STABLE chat message id (32-char hex), domain-tagged — deterministic, so
 /// a re-publish dedups and two shares never collide.
@@ -234,10 +240,18 @@ pub const MAX_SERIES_PIECES: u32 = 1_374 * 1_375;
 /// The catch-up horizon one fetch subscribes at once (§3.1): 60 day windows.
 pub const MAX_CATCHUP_WINDOWS: usize = 60;
 
-/// Manifest chunks kept per slot while the top record is still missing
-/// (they cannot be verified before it): an insider's forgery costs one
-/// event per slot, the truth arrives and wins by hash.
-const MANIFEST_CANDIDATES_PER_SLOT: usize = 8;
+/// Manifest-chunk candidates per slot while the top record is missing,
+/// and how much of them may wait - RAM for a path-less sink, a spill file
+/// beside a `.part` otherwise. A forger can publish chunks faster than
+/// the honest one replays; the honest one must never be the evicted one,
+/// so the bound is generous and the record decides.
+const MANIFEST_CANDIDATES_PER_SLOT: usize = 64;
+const SPILL_DISK_MAX: usize = 512 * 1024 * 1024;
+const SPILL_MEMORY_MAX: usize = 64 * 1024 * 1024;
+/// A landed-but-unverified slice is never overwritten: a differing
+/// candidate for the same index waits here until its chunk decides.
+const SLICE_CANDIDATES_PER_INDEX: usize = 4;
+const SLICE_SIDE_MAX: usize = 32 * 1024 * 1024;
 
 /// The per-file OUTER key: `HKDF-SHA256(ikm = K, info = "molt-piece-outer-v2")`.
 /// One derivation step away from K so the chat's key never seals bytes
@@ -457,14 +471,6 @@ impl SeriesLayout {
     pub fn pieces(self) -> u64 {
         u64::from(self.top) + 1
     }
-
-    /// The stored-event bound one fetch hands its subscription: twice the
-    /// series (a re-publish per piece) plus headroom for other files'
-    /// pieces under the same windows - the relay's default bound would
-    /// cut any series past ~5 000 pieces.
-    pub fn history_bound(self) -> usize {
-        usize::try_from(self.pieces().saturating_mul(2).saturating_add(100)).unwrap_or(usize::MAX)
-    }
 }
 
 /// Build the manifest by reading `reader` slice by slice (a 1 GB file
@@ -529,6 +535,11 @@ pub struct SeriesExpect {
 pub trait PieceSink {
     /// Land one slice at `index * PIECE_PAYLOAD_LEN`.
     fn put(&mut self, index: u32, payload: &[u8]) -> std::io::Result<()>;
+    /// Where manifest-chunk candidates may spill while the top record is
+    /// missing; `None` keeps them in (bounded) memory.
+    fn spill_path(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 impl PieceSink for Vec<u8> {
@@ -574,29 +585,54 @@ pub async fn take_publish_round<S: crate::supervisor::StateStore>(
     }
 }
 
-/// How often a rate-limited publish is retried before the series gives
-/// up (M1 publishes a series whole; M2's trickle paces it instead).
-const RATE_LIMIT_RETRIES: u32 = 20;
+/// How long one piece's publish keeps retrying transient refusals before
+/// the series gives up - longer than the pool's breaker window (up to
+/// 60 s), so a relay back within a minute still gets the series. (M1
+/// publishes a series whole; M2's trickle paces it instead.)
+const PUBLISH_PIECE_PATIENCE: Duration = Duration::from_secs(120);
 
-/// Publish one sealed piece, waiting out a relay's rate limit: a "slow
-/// down" refusal is the relay asking for pacing, not a dead pool - a
-/// burst of pieces earns it from any relay worth having.
+/// Whether a publish refusal is worth another attempt: a relay's "slow
+/// down", a timeout, a dropped socket, the pool's own breaker ("backing
+/// off") - yes; a local Framing/Crypto refusal, an empty or gated pool,
+/// a relay's verdict (auth-required, blocked, restricted, invalid) - the
+/// same answer in a second and in an hour - no.
+pub(crate) fn transient_publish_error(e: &NetError) -> bool {
+    match e {
+        NetError::Framing(_) | NetError::Crypto(_) => false,
+        NetError::Unreachable(text) => {
+            let text = text.to_ascii_lowercase();
+            !["no dialable relay", "auth-required", "requires auth", "blocked", "restricted", "invalid"]
+                .iter()
+                .any(|k| text.contains(k))
+        }
+        _ => true,
+    }
+}
+
+/// Publish one sealed piece, retrying every transient refusal on a
+/// backoff (`min(250 ms × 2^n, 10 s)`) within [`PUBLISH_PIECE_PATIENCE`];
+/// a permanent refusal ends the series on the spot.
 async fn publish_piece_paced(
     chan: &GroupChannel,
     outer: &[u8; 32],
     framed: &[u8],
     stamp: u64,
 ) -> Result<u64, NetError> {
+    let started = tokio::time::Instant::now();
     let mut attempt = 0u32;
     loop {
-        match chan.publish_file_chunk_at(outer, framed, stamp).await {
-            Ok((at, _)) => return Ok(at),
-            Err(e) if attempt < RATE_LIMIT_RETRIES && e.to_string().contains("rate-limited") => {
-                attempt += 1;
-                tokio::time::sleep(Duration::from_millis(u64::from(attempt.min(8)) * 250)).await;
-            }
-            Err(e) => return Err(e),
+        let err = match chan.publish_file_chunk_at(outer, framed, stamp).await {
+            Ok((at, report)) if !report.accepted.is_empty() => return Ok(at),
+            Ok(_) => NetError::Unreachable("no relay accepted the piece".into()),
+            Err(e) => e,
+        };
+        if !transient_publish_error(&err) || started.elapsed() >= PUBLISH_PIECE_PATIENCE {
+            return Err(err);
         }
+        tracing::debug!(error = %err, attempt, "file plane: piece publish failed - retrying");
+        let delay = Duration::from_millis(250u64 << attempt.min(6)).min(Duration::from_secs(10));
+        attempt = attempt.saturating_add(1);
+        tokio::time::sleep(delay).await;
     }
 }
 
@@ -666,14 +702,231 @@ pub async fn publish_series_v2_metered<S: crate::supervisor::StateStore>(
     publish_series_v2(chan, key, source, manifest, None).await
 }
 
+/// Where manifest-chunk candidates wait for the top record: an append-only
+/// spill file beside the `.part` when the sink has one, bounded memory
+/// otherwise. Dedups by hash, bounded per slot and in total; the spill
+/// file goes with the store.
+struct CandidateStore {
+    spill_path: Option<std::path::PathBuf>,
+    file: Option<std::fs::File>,
+    memory: Vec<Vec<u8>>,
+    /// slot → (hash, spill offset or memory index, len)
+    slots: BTreeMap<u32, Vec<([u8; 32], u64, usize)>>,
+    total: usize,
+}
+
+impl CandidateStore {
+    fn new(spill_path: Option<std::path::PathBuf>) -> Self {
+        CandidateStore {
+            spill_path,
+            file: None,
+            memory: Vec::new(),
+            slots: BTreeMap::new(),
+            total: 0,
+        }
+    }
+
+    fn capacity(&self) -> usize {
+        if self.spill_path.is_some() {
+            SPILL_DISK_MAX
+        } else {
+            SPILL_MEMORY_MAX
+        }
+    }
+
+    /// Remember a candidate; `false` = the bounds refused it.
+    fn push(&mut self, slot: u32, payload: &[u8]) -> bool {
+        use std::io::{Seek as _, Write as _};
+        let hash = sha(payload);
+        let known = self.slots.get(&slot).map_or(0, Vec::len);
+        if self
+            .slots
+            .get(&slot)
+            .is_some_and(|e| e.iter().any(|(h, _, _)| *h == hash))
+        {
+            return true;
+        }
+        if known >= MANIFEST_CANDIDATES_PER_SLOT
+            || self.total.saturating_add(payload.len()) > self.capacity()
+        {
+            return false;
+        }
+        if self.file.is_none() {
+            if let Some(path) = &self.spill_path {
+                match std::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(true)
+                    .read(true)
+                    .write(true)
+                    .open(path)
+                {
+                    Ok(f) => self.file = Some(f),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "file plane: no spill file - candidates stay in memory");
+                        self.spill_path = None;
+                    }
+                }
+            }
+        }
+        let at = match self.file.as_mut() {
+            Some(file) => {
+                let Ok(end) = file.seek(std::io::SeekFrom::End(0)) else {
+                    return false;
+                };
+                if file.write_all(payload).is_err() {
+                    return false;
+                }
+                end
+            }
+            None => {
+                self.memory.push(payload.to_vec());
+                u64::try_from(self.memory.len() - 1).unwrap_or(u64::MAX)
+            }
+        };
+        self.slots.entry(slot).or_default().push((hash, at, payload.len()));
+        self.total = self.total.saturating_add(payload.len());
+        true
+    }
+
+    /// Every candidate of `slot`, in arrival order (a slot settles at
+    /// most once, so the entries leave the store).
+    fn take(&mut self, slot: u32) -> Vec<Vec<u8>> {
+        use std::io::{Read as _, Seek as _};
+        let Some(entries) = self.slots.remove(&slot) else {
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(entries.len());
+        for (_, at, len) in entries {
+            match self.file.as_mut() {
+                Some(file) => {
+                    let mut buf = vec![0u8; len];
+                    if file.seek(std::io::SeekFrom::Start(at)).is_ok()
+                        && file.read_exact(&mut buf).is_ok()
+                    {
+                        out.push(buf);
+                    }
+                }
+                None => {
+                    if let Some(c) = usize::try_from(at).ok().and_then(|i| self.memory.get(i)) {
+                        out.push(c.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+impl Drop for CandidateStore {
+    fn drop(&mut self) {
+        if let (Some(path), Some(_)) = (&self.spill_path, self.file.take()) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// What a data slice at `index` must be long: a full block, the last one
+/// the file's remainder. `None` = no such data index.
+fn expected_slice_len(index: u32, count: u32, size: u64) -> Option<usize> {
+    if index >= count {
+        return None;
+    }
+    if index + 1 < count {
+        return Some(PIECE_PAYLOAD_LEN);
+    }
+    let block = u64::try_from(PIECE_PAYLOAD_LEN).ok()?;
+    let head = u64::from(count - 1).checked_mul(block)?;
+    usize::try_from(size.checked_sub(head)?).ok()
+}
+
+/// The hash a manifest chunk names for `index` (`per` hashes per chunk).
+fn hash_in(chunk: &[u8], index: u32, per: u32) -> Option<[u8; 32]> {
+    let at = usize::try_from(index % per).ok()?.checked_mul(32)?;
+    chunk.get(at..at + 32).map(|h| {
+        let mut a = [0u8; 32];
+        a.copy_from_slice(h);
+        a
+    })
+}
+
+/// The slices a fetch holds before their chunk is known: what sits in the
+/// sink (its hash) and the bounded alternatives that arrived for the same
+/// index - a landed slice is never overwritten, the chunk picks.
+#[derive(Default)]
+struct Unverified {
+    landed: HashMap<u32, [u8; 32]>,
+    side: HashMap<u32, Vec<Vec<u8>>>,
+    side_bytes: usize,
+}
+
+impl Unverified {
+    fn offer_side(&mut self, index: u32, payload: &[u8]) {
+        let cands = self.side.entry(index).or_default();
+        if cands.len() >= SLICE_CANDIDATES_PER_INDEX
+            || self.side_bytes.saturating_add(payload.len()) > SLICE_SIDE_MAX
+            || cands.iter().any(|c| c == payload)
+        {
+            return;
+        }
+        cands.push(payload.to_vec());
+        self.side_bytes = self.side_bytes.saturating_add(payload.len());
+    }
+
+    fn forget_side(&mut self, index: u32) {
+        if let Some(cands) = self.side.remove(&index) {
+            let bytes: usize = cands.iter().map(Vec::len).sum();
+            self.side_bytes = self.side_bytes.saturating_sub(bytes);
+        }
+    }
+
+    /// A chunk arrived and verified: every index it covers settles - the
+    /// landed slice if the chunk names it, else a side candidate it names
+    /// (written over the impostor), else nothing (missing again).
+    fn settle(
+        &mut self,
+        slot: u32,
+        chunk: &[u8],
+        count: u32,
+        per: u32,
+        verified: &mut HashSet<u32>,
+        sink: &mut (dyn PieceSink + Send),
+    ) -> Result<(), NetError> {
+        let from = slot.saturating_mul(per);
+        let to = from.saturating_add(per).min(count);
+        for index in from..to {
+            let want = hash_in(chunk, index, per);
+            let landed = self.landed.remove(&index);
+            if landed.is_some() && landed == want {
+                verified.insert(index);
+                self.forget_side(index);
+                continue;
+            }
+            let good = self
+                .side
+                .get(&index)
+                .and_then(|cands| cands.iter().find(|c| Some(sha(c)) == want).cloned());
+            self.forget_side(index);
+            if let Some(payload) = good {
+                sink.put(index, &payload)
+                    .map_err(|e| NetError::Framing(format!("landing piece {index}: {e}")))?;
+                verified.insert(index);
+            } else if landed.is_some() {
+                tracing::debug!(index, "file plane: a landed slice fails its manifest hash - waiting for another");
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Fetch a v2 series that started at `start_stamp`: subscribe the windows
-/// from there to now (at most [`MAX_CATCHUP_WINDOWS`]) with a stored-event
-/// bound sized to the series, open every piece under the file's key, land
-/// data slices as they arrive, verify the top record by root, each chunk
-/// by the record, each slice by its chunk (relays replay newest first, so
-/// the manifest tends to come LAST - nothing waits for it, nothing is
-/// dropped for lack of it). A slice still missing after the relays went
-/// quiet is the honest miss - the caller re-requests (M2).
+/// from there to now (at most [`MAX_CATCHUP_WINDOWS`]; no stored-event
+/// cut-off, a backpressured channel), open every piece under the file's
+/// key, land data slices as they arrive (geometry-checked, never
+/// overwritten), verify the top record by root, each chunk by the record,
+/// each slice by its chunk (relays replay newest first, so the manifest
+/// tends to come LAST - nothing waits for it, nothing is dropped for lack
+/// of it). A slice still missing after the relays went quiet is the
+/// honest miss - the caller re-requests (M2).
 pub async fn fetch_series_v2(
     chan: &GroupChannel,
     key: &[u8; 32],
@@ -694,43 +947,15 @@ pub async fn fetch_series_v2(
     let outer = outer_key(key);
     let count = layout.count;
     let chunk_slots = usize::try_from(layout.chunks).unwrap_or(usize::MAX);
-    let mut sub = chan
-        .subscribe_files_from(start_stamp, MAX_CATCHUP_WINDOWS, Some(layout.history_bound()))
-        .await?;
+    let mut sub = chan.subscribe_files_from(start_stamp, MAX_CATCHUP_WINDOWS).await?;
     let mut top: Option<TopRecord> = None;
     let mut chunks: Vec<Option<Vec<u8>>> = vec![None; chunk_slots];
-    let mut candidates: BTreeMap<u32, Vec<Vec<u8>>> = BTreeMap::new();
-    // data landed but not yet verifiable (its chunk is missing): the hash
-    // of what sits in the sink at that index
-    let mut landed: HashMap<u32, [u8; 32]> = HashMap::new();
+    let mut candidates = CandidateStore::new(sink.spill_path());
+    let mut pending = Unverified::default();
     let mut verified: HashSet<u32> = HashSet::new();
-    // a series of many pieces takes longer to replay than a small one
-    let deadline = tokio::time::Instant::now()
-        + FETCH_TOTAL
-        + Duration::from_secs(u64::from(count) / 10);
+    // the quiet window ends an honest fetch; the ceiling a hostile trickle
+    let deadline = tokio::time::Instant::now() + FETCH_CEILING;
     let per = u32::try_from(HASHES_PER_CHUNK).unwrap_or(u32::MAX);
-    let hash_in = |chunk: &[u8], index: u32| -> Option<[u8; 32]> {
-        let at = usize::try_from(index % per).ok()?.checked_mul(32)?;
-        chunk.get(at..at + 32).map(|h| {
-            let mut a = [0u8; 32];
-            a.copy_from_slice(h);
-            a
-        })
-    };
-    // a chunk arrived and verified: settle every landed slice it covers
-    let settle = |slot: u32, chunk: &[u8], landed: &mut HashMap<u32, [u8; 32]>, verified: &mut HashSet<u32>| {
-        let from = slot.saturating_mul(per);
-        let to = from.saturating_add(per).min(count);
-        for index in from..to {
-            if let Some(have) = landed.remove(&index) {
-                if hash_in(chunk, index) == Some(have) {
-                    verified.insert(index);
-                } else {
-                    tracing::debug!(index, "file plane: a landed slice fails its manifest hash - waiting for another");
-                }
-            }
-        }
-    };
     loop {
         let done = top.is_some()
             && chunks.iter().all(Option::is_some)
@@ -769,11 +994,13 @@ pub async fn fetch_series_v2(
                     }
                     // the chunks that waited for the record: the one whose
                     // hash it names wins, the rest were forgeries
-                    for (slot, cands) in std::mem::take(&mut candidates) {
-                        let want = record.chunk_hashes.get(usize::try_from(slot).unwrap_or(usize::MAX));
-                        if let Some(good) = cands.into_iter().find(|c| Some(&sha(c)) == want) {
-                            settle(slot, &good, &mut landed, &mut verified);
-                            if let Some(entry) = chunks.get_mut(usize::try_from(slot).unwrap_or(usize::MAX)) {
+                    for slot in 0..layout.chunks {
+                        let at = usize::try_from(slot).unwrap_or(usize::MAX);
+                        let want = record.chunk_hashes.get(at);
+                        let good = candidates.take(slot).into_iter().find(|c| Some(&sha(c)) == want);
+                        if let Some(good) = good {
+                            pending.settle(slot, &good, count, per, &mut verified, sink)?;
+                            if let Some(entry) = chunks.get_mut(at) {
                                 *entry = Some(good);
                             }
                         }
@@ -790,16 +1017,15 @@ pub async fn fetch_series_v2(
                     match &top {
                         Some(record) => {
                             if record.chunk_hashes.get(at) == Some(&sha(payload)) {
-                                settle(slot, payload, &mut landed, &mut verified);
+                                pending.settle(slot, payload, count, per, &mut verified, sink)?;
                                 if let Some(entry) = chunks.get_mut(at) {
                                     *entry = Some(payload.to_vec());
                                 }
                             }
                         }
                         None => {
-                            let cands = candidates.entry(slot).or_default();
-                            if cands.len() < MANIFEST_CANDIDATES_PER_SLOT && !cands.iter().any(|c| c == payload) {
-                                cands.push(payload.to_vec());
+                            if !candidates.push(slot, payload) {
+                                tracing::debug!(slot, "file plane: manifest candidates full - dropping one");
                             }
                         }
                     }
@@ -808,10 +1034,16 @@ pub async fn fetch_series_v2(
                 if verified.contains(&index) {
                     continue;
                 }
+                // geometry first: a slice of the wrong length can never be
+                // the honest one, and a full-length impostor at the tail
+                // would grow the file past its size
+                if expected_slice_len(index, count, expect.size) != Some(payload.len()) {
+                    continue;
+                }
                 let have = sha(payload);
                 match chunks.get(usize::try_from(index / per).unwrap_or(usize::MAX)).and_then(Option::as_ref) {
                     Some(chunk) => {
-                        if hash_in(chunk, index) == Some(have) {
+                        if hash_in(chunk, index, per) == Some(have) {
                             sink.put(index, payload)
                                 .map_err(|e| NetError::Framing(format!("landing piece {index}: {e}")))?;
                             verified.insert(index);
@@ -819,14 +1051,16 @@ pub async fn fetch_series_v2(
                             tracing::debug!(index, "file plane: dropping a slice that fails its manifest hash");
                         }
                     }
-                    None => {
-                        if landed.get(&index) == Some(&have) {
-                            continue;
+                    None => match pending.landed.get(&index) {
+                        Some(landed) if *landed == have => {}
+                        // never over the landed one: the chunk decides
+                        Some(_) => pending.offer_side(index, payload),
+                        None => {
+                            sink.put(index, payload)
+                                .map_err(|e| NetError::Framing(format!("landing piece {index}: {e}")))?;
+                            pending.landed.insert(index, have);
                         }
-                        sink.put(index, payload)
-                            .map_err(|e| NetError::Framing(format!("landing piece {index}: {e}")))?;
-                        landed.insert(index, have);
-                    }
+                    },
                 }
             }
             GroupRecv::Idle => {
@@ -850,6 +1084,23 @@ pub async fn fetch_series_v2(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A relay's verdict and an empty pool are the same answer in an
+    /// hour; a limit, a timeout or the pool's own breaker are not.
+    #[test]
+    fn publish_refusals_sort_into_transient_and_permanent() {
+        let u = |t: &str| NetError::Unreachable(t.to_string());
+        assert!(transient_publish_error(&u("relay refused: rate-limited: slow down")));
+        assert!(transient_publish_error(&u("publish timed out")));
+        assert!(transient_publish_error(&u("backing off")));
+        assert!(transient_publish_error(&u("no relay accepted the event (1 tried): connection reset")));
+        assert!(!transient_publish_error(&u("no dialable relay - the pool is empty or gated")));
+        assert!(!transient_publish_error(&u("relay refused: blocked: no files")));
+        assert!(!transient_publish_error(&u("relay requires AUTH to publish - refused to link the publish key: auth-required: x")));
+        assert!(!transient_publish_error(&u("relay refused: invalid: bad sig")));
+        assert!(!transient_publish_error(&NetError::Framing("x".into())));
+        assert!(!transient_publish_error(&NetError::Crypto("x".into())));
+    }
 
     /// The id is deterministic (a re-publish dedups) and share-distinct.
     #[test]
@@ -922,7 +1173,7 @@ mod tests {
 
     /// A manifest past one chunk (1 375 slices) splits into chunks the top
     /// record names by hash; the largest series is the one whose record
-    /// still fits a piece; the fetch bound follows the whole series.
+    /// still fits a piece.
     #[test]
     fn a_large_manifest_chunks_and_the_series_is_bounded() {
         let count = 3_000u32;
@@ -935,7 +1186,6 @@ mod tests {
         let layout = Manifest::layout_for(count).expect("layout");
         assert_eq!(layout.chunks, 3);
         assert_eq!(layout.top, 3_003);
-        assert_eq!(layout.history_bound(), 2 * 3_004 + 100);
         let top = TopRecord::parse(&m.top_bytes()).expect("top");
         assert_eq!(top.chunk_hashes.len(), 3);
         let chunks: Vec<Vec<u8>> = (0..3).map(|s| m.chunk(s)).collect();

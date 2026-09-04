@@ -652,6 +652,8 @@ media_s3_max_bytes = {media_s3_max_bytes}
 # Where downloaded chat files land ("~" = $HOME).
 download_dir = {download_dir}
 # Per-file byte cap for sharing. 0 = file sharing off; absent = no cap.
+# 4194304 is the old default and reads as no cap; a deliberate cap near
+# 4 MiB uses another value.
 {file_cap_line}
 # Alert sounds: "none" | "bell" | "chime" | "pop".
 sound_message = {sound_message}
@@ -798,7 +800,7 @@ pub fn salvage(text: &str) -> Settings {
             s.download_dir = v.to_string();
         }
         if let Some(v) = storage.get("file_cap_bytes").and_then(toml::Value::as_integer) {
-            s.file_cap_bytes = u64::try_from(v).ok();
+            s.file_cap_bytes = u64::try_from(v).ok().filter(|n| *n != molt_core::LEGACY_FILE_CAP_BYTES);
         }
         if let Some(v) = storage.get("s3_endpoint").and_then(toml::Value::as_str) {
             s.s3_endpoint = v.to_string();
@@ -966,7 +968,13 @@ pub fn salvage(text: &str) -> Settings {
 /// Strictly parse `config.toml` text into a [`Config`] (`deny_unknown_fields`).
 /// Callers wrap the error with their own file-path context.
 pub fn parse(text: &str) -> Result<Config, toml::de::Error> {
-    toml::from_str(text)
+    let mut c: Config = toml::from_str(text)?;
+    // the old unconditional default means "no cap" - read so, never
+    // rewritten for it (a rewrite would break rollback to an older build)
+    if c.storage.file_cap_bytes == Some(molt_core::LEGACY_FILE_CAP_BYTES) {
+        c.storage.file_cap_bytes = None;
+    }
+    Ok(c)
 }
 
 /// The retired `network = "nym"`, if this text still selects it.
@@ -1034,49 +1042,27 @@ pub fn heal_legacy(text: &str) -> Option<String> {
     heal_legacy_notes(text).map(|(healed, _)| healed)
 }
 
-/// The old unconditional default every pre-mirroring render wrote; read
-/// today it would mean a DELIBERATE 4 MiB cap (`docs/files/mirroring.md`
-/// §1: absent = no cap).
-const OLD_DEFAULT_FILE_CAP: i64 = 4_194_304;
-
-/// [`heal_legacy`] with one note per heal for the operator's terminal.
-/// Two classes: the `[transport.smp]` section (fails the strict parse)
-/// and `file_cap_bytes = 4194304`, the old default (parses, means the
-/// wrong thing). Any other cap value is the operator's and stays.
+/// [`heal_legacy`] with one note per heal for the operator's terminal -
+/// ONE class: the `[transport.smp]` section (fails the strict parse). The
+/// old `file_cap_bytes = 4194304` is not a heal: it parses and reads as
+/// "no cap" (`LEGACY_FILE_CAP_BYTES`), the file stays as it is.
 pub fn heal_legacy_notes(text: &str) -> Option<(String, Vec<String>)> {
     let mut doc: toml_edit::DocumentMut = text.parse().ok()?;
-    let mut notes = Vec::new();
     let removed_smp = doc
         .as_table_mut()
         .get_mut("transport")
         .and_then(toml_edit::Item::as_table_like_mut)
         .map(|transport| transport.remove("smp").is_some())
         .unwrap_or(false);
-    if removed_smp {
-        notes.push("healed the legacy [transport.smp] section (the SMP transport was removed)".to_string());
-    }
-    let removed_cap = doc
-        .as_table_mut()
-        .get_mut("storage")
-        .and_then(toml_edit::Item::as_table_like_mut)
-        .map(|storage| {
-            let old = storage.get("file_cap_bytes").and_then(toml_edit::Item::as_integer)
-                == Some(OLD_DEFAULT_FILE_CAP);
-            if old {
-                storage.remove("file_cap_bytes");
-            }
-            old
-        })
-        .unwrap_or(false);
-    if removed_cap {
-        notes.push("file_cap_bytes 4194304 was the old default - removed (no cap)".to_string());
-    }
-    if notes.is_empty() {
+    if !removed_smp {
         return None;
     }
     let healed = doc.to_string();
     parse(&healed).ok()?;
-    Some((healed, notes))
+    Some((
+        healed,
+        vec!["healed the legacy [transport.smp] section (the SMP transport was removed)".to_string()],
+    ))
 }
 
 /// Rewrite `text` so it carries exactly the values in `settings`, preserving
@@ -1692,10 +1678,10 @@ network = \"none\"
         let healed = heal_legacy(legacy).expect("healable");
         parse(&healed).expect("healed file parses strictly");
         assert!(healed.contains("headless = true"), "values survive");
-        // …and ONLY this file class:
+        // …and ONLY this file class - a current file is left alone
         assert!(
             heal_legacy("[node]\nheadless = true\n").is_none(),
-            "a file that already parses is not 'healed'"
+            "a current file is not 'healed'"
         );
         assert!(
             heal_legacy("[node]\nmystery = 1\n").is_none(),
@@ -1704,20 +1690,22 @@ network = \"none\"
         assert!(heal_legacy("not::: toml").is_none(), "broken TOML is untouched");
     }
 
-    /// The old unconditional `file_cap_bytes = 4194304` heals away once
-    /// (it would read as a deliberate cap); an operator's own value stays.
+    /// The old unconditional `file_cap_bytes = 4194304` reads as "no cap"
+    /// at parse and at salvage alike, and the file is never touched for
+    /// it: no heal, no rewrite, so an older build still opens the same file.
     #[test]
-    fn heal_legacy_removes_the_old_default_file_cap_only() {
+    fn the_old_default_cap_reads_as_no_cap_without_touching_the_file() {
         let old = "[node]\nheadless = true\n\n[storage]\nfile_cap_bytes = 4194304\n";
-        assert!(parse(old).is_ok(), "the old default parses - the heal is about meaning");
-        let (healed, notes) = heal_legacy_notes(old).expect("healable");
-        assert!(!healed.contains("file_cap_bytes"), "{healed}");
-        assert!(healed.contains("headless = true"));
-        assert_eq!(notes, vec!["file_cap_bytes 4194304 was the old default - removed (no cap)"]);
-        assert_eq!(parse(&healed).expect("parses").storage.file_cap_bytes, None);
+        assert_eq!(parse(old).expect("parses").storage.file_cap_bytes, None);
+        assert_eq!(salvage(old).file_cap_bytes, None);
+        assert!(heal_legacy_notes(old).is_none(), "nothing to heal, nothing rewritten");
+        let near = "[storage]\nfile_cap_bytes = 4194305\n";
+        assert_eq!(parse(near).expect("parses").storage.file_cap_bytes, Some(4_194_305));
+        assert_eq!(salvage(near).file_cap_bytes, Some(4_194_305));
+        let off = "[storage]\nfile_cap_bytes = 0\n";
+        assert_eq!(parse(off).expect("parses").storage.file_cap_bytes, Some(0), "sharing off stays off");
         let raised = "[storage]\nfile_cap_bytes = 52428800\n";
-        assert!(heal_legacy_notes(raised).is_none(), "a raised cap is the operator's");
-        assert!(heal_legacy_notes("[storage]\nfile_cap_bytes = 0\n").is_none(), "sharing off stays off");
+        assert_eq!(parse(raised).expect("parses").storage.file_cap_bytes, Some(52_428_800));
     }
 
     #[test]

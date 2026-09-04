@@ -56,7 +56,12 @@ number, silently. The convergence rule:
 - `tests/tor_probe.rs::forwarding_socks5` — a SOCKS5 proxy that negotiates
   userpass and really forwards, for anything that must prove a circuit rather
   than a lying proxy.
-- `tests/nostr_relay_runtime.rs` `mod proxy` — a cuttable TCP proxy, the only
-  way to take a `MockRelay` down and bring it back on the same port.
+- `tests/common/mod.rs` — `proxy::Cuttable`, a cuttable TCP proxy (the only
+  way to take a `MockRelay` down and bring it back on the same port; it can
+  also go half-dead), and `fast_relay()` without the notes-per-minute
+  limit. Three older near-copies of the proxy still live in
+  `tests/nostr_window_roll.rs`, `tests/publish_pool.rs` and
+  `molt-engine/tests/nostr_window_roll.rs` — fold them into `common` when
+  you touch them.
 - A "dead" port must be bound-then-dropped, never port 9: a host running the
   discard service would silently invert the test.

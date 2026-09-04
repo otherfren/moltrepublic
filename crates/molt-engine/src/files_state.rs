@@ -40,22 +40,23 @@ pub(crate) fn decode_share_key(key_b64: &str) -> Option<[u8; 32]> {
 }
 
 impl ShareIdentity {
-    /// Whether `claimed` names this share: the six identity fields must
-    /// agree; the v2 material only when the claim carries it - an older
-    /// build proposes without it (mixed builds are a supported case), and
-    /// its block then pins the share without mirror material.
+    /// Whether `claimed` names this share: every field, the series
+    /// material included - a claim that strips it would pin a v2 share
+    /// without its key, a claim that invents it a legacy share with one.
     pub(crate) fn matches(&self, claimed: &ShareIdentity) -> bool {
-        let base = self.by == claimed.by
-            && self.name == claimed.name
-            && self.kind == claimed.kind
-            && self.size == claimed.size
-            && self.checksum == claimed.checksum
-            && self.shared_ts == claimed.shared_ts;
-        let material = claimed.key_b64.is_empty()
-            || (self.key_b64 == claimed.key_b64
-                && self.pieces == claimed.pieces
-                && self.root == claimed.root);
-        base && material
+        self == claimed
+    }
+
+    /// Why `claimed` is not this share, for the refusal.
+    fn mismatch(&self, claimed: &ShareIdentity) -> MoltError {
+        MoltError::BadPayload(
+            if !self.key_b64.is_empty() && claimed.key_b64.is_empty() {
+                "the proposal lacks the series material - propose it from a current build"
+            } else {
+                "the proposal names a different file than this seat has"
+            }
+            .to_string(),
+        )
     }
 
     fn from_payload(v: &Value) -> Option<ShareIdentity> {
@@ -76,6 +77,17 @@ impl ShareIdentity {
             root: s("root").unwrap_or_default(),
         };
         (!me.by.is_empty() && !me.name.is_empty()).then_some(me)
+    }
+
+    /// Take the series material from `from` when this identity has none:
+    /// a block from a build that predates the material must never strip
+    /// what an earlier block pinned.
+    fn adopt_material(&mut self, from: &ShareIdentity) {
+        if self.key_b64.is_empty() && !from.key_b64.is_empty() {
+            self.key_b64 = from.key_b64.clone();
+            self.pieces = from.pieces;
+            self.root = from.root.clone();
+        }
     }
 
     fn write_into(&self, v: &mut Value) {
@@ -184,7 +196,10 @@ impl State {
             };
             match v.get("op").and_then(Value::as_str) {
                 Some("persist") => {
-                    if let Some(meta) = ShareIdentity::from_payload(v) {
+                    if let Some(mut meta) = ShareIdentity::from_payload(v) {
+                        if let Some(prev) = out.get(&id) {
+                            meta.adopt_material(prev.identity());
+                        }
                         out.insert(id, FileState::Persistent(meta));
                     }
                 }
@@ -197,7 +212,10 @@ impl State {
                     };
                     let meta = ShareIdentity::from_payload(v)
                         .or_else(|| out.get(&id).map(|prev| prev.identity().clone()));
-                    if let Some(meta) = meta {
+                    if let Some(mut meta) = meta {
+                        if let Some(prev) = out.get(&id) {
+                            meta.adopt_material(prev.identity());
+                        }
                         // the window never restarts before the share existed
                         let at = at.max(meta.shared_ts);
                         out.insert(id, FileState::Unpersisted(meta, at));
@@ -284,12 +302,23 @@ impl State {
         self.share_expired_in(&self.files_state(), id)
     }
 
-    fn open_files_vote(&self, op: &str, id_hex: &str) -> bool {
+    /// An open vote that would block a second one - unless it lacks the
+    /// series material this seat has (an older build's proposal, refused
+    /// at every current approve door): a current build may re-propose
+    /// past it; whichever applies later cannot strip the material
+    /// (`files_state` keeps it).
+    fn open_files_vote(&self, op: &str, id_hex: &str, local_material: bool) -> bool {
         self.proposals.values().any(|p| {
+            let claimed_material = p
+                .payload
+                .get("key_b64")
+                .and_then(Value::as_str)
+                .is_some_and(|k| !k.is_empty());
             p.surface == Surface::Files
                 && p.state == ProposalState::Proposed
                 && p.payload.get("op").and_then(Value::as_str) == Some(op)
                 && p.payload.get("id").and_then(Value::as_str) == Some(id_hex)
+                && (claimed_material || !local_material)
         })
     }
 
@@ -309,11 +338,11 @@ impl State {
                 if matches!(states.get(&id), Some(FileState::Persistent(_))) {
                     return Err(bad("already persistent"));
                 }
-                if self.open_files_vote("persist", &id_hex) {
-                    return Err(bad("a persist vote for this share is open"));
-                }
                 let (ident, available) =
                     self.share_identity(&id).map_err(|_| bad("not a shared file"))?;
+                if self.open_files_vote("persist", &id_hex, !ident.key_b64.is_empty()) {
+                    return Err(bad("a persist vote for this share is open"));
+                }
                 if !available {
                     return Err(MoltError::FileUnavailable(id));
                 }
@@ -326,7 +355,7 @@ impl State {
                 let Some(FileState::Persistent(meta)) = states.get(&id) else {
                     return Err(bad("not persistent"));
                 };
-                if self.open_files_vote("unpersist", &id_hex) {
+                if self.open_files_vote("unpersist", &id_hex, !meta.key_b64.is_empty()) {
                     return Err(bad("an unpersist vote for this share is open"));
                 }
                 let at = payload
@@ -370,7 +399,7 @@ impl State {
                     return Err(MoltError::FileExpired(id));
                 }
                 if !mine.matches(&claimed) {
-                    return Err(bad("the proposal names a different file than this seat has"));
+                    return Err(mine.mismatch(&claimed));
                 }
             }
             _ => {
@@ -378,7 +407,7 @@ impl State {
                     return Err(bad("not persistent"));
                 };
                 if !meta.matches(&claimed) {
-                    return Err(bad("the proposal names a different file than this seat has"));
+                    return Err(meta.mismatch(&claimed));
                 }
                 let at = payload.get("at").and_then(Value::as_u64).unwrap_or(0);
                 if at > crate::now_secs().saturating_add(UNPERSIST_SKEW) {

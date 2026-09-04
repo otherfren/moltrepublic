@@ -40,6 +40,11 @@ pub type MemberId = String;
 /// are presentation only and may repeat; the id never does.
 pub type WorkspaceId = String;
 
+/// The per-file cap every pre-mirroring config wrote unconditionally. A
+/// config carrying exactly it reads as "no cap" (the file is never
+/// rewritten for it), so a deliberate cap near 4 MiB uses another value.
+pub const LEGACY_FILE_CAP_BYTES: u64 = 4_194_304;
+
 /// The shared surfaces. [`Surface::Chat`] is ungated (a message changes no
 /// shared state); every other surface — Organization included — changes the
 /// shared state only through a threshold-approved proposal.
@@ -402,7 +407,8 @@ pub struct SessionSettings {
     pub download_dir: String,
     /// Per-file byte cap for sharing: `None` = no cap (the mirroring
     /// decision, `docs/files/mirroring.md` §1), `Some(0)` = file sharing
-    /// OFF (FP4, 2026-08-16), `Some(n)` = a deliberate cap. Serialized as
+    /// OFF (FP4, 2026-08-16), `Some(n)` = a deliberate cap - never
+    /// [`LEGACY_FILE_CAP_BYTES`], which reads as no cap. Serialized as
     /// `null` when absent: the settings patch door keys on the field.
     #[serde(default)]
     pub file_cap_bytes: Option<u64>,

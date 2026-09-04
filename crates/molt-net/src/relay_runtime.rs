@@ -139,8 +139,13 @@ pub struct RelayRuntime {
     size_budget: Option<u64>,
     /// Per-relay connection state, written by the subscription supervisors.
     health: Arc<Mutex<std::collections::HashMap<String, RelayHealth>>>,
-    /// Stored-event bound per REQ (see [`MAX_STORED_EVENTS_PER_REQ`]).
-    history_bound: usize,
+    /// Stored-event bound per REQ (see [`MAX_STORED_EVENTS_PER_REQ`]);
+    /// `None` = no cut-off (the file plane: its REQ replays every file's
+    /// pieces under the day's tag, no per-series number is right).
+    history_bound: Option<usize>,
+    /// The fan-in channel's capacity; `None` = sized to hold a whole
+    /// bounded replay (the 445 legs gate on EOSE before their first recv).
+    channel_capacity: Option<usize>,
     /// Reconnect backoff (initial, cap) — overridable for tests.
     backoff: (Duration, Duration),
     /// Subscription (keepalive interval, idle bound) — overridable for
@@ -190,6 +195,11 @@ pub enum RelayHealth {
 /// tuning knob.
 pub const MAX_STORED_EVENTS_PER_REQ: usize = 5_000;
 
+/// The fan-in capacity of a FILE subscription: small on purpose, so a
+/// fast relay's replay parks on `send` and never buffers a series in
+/// RAM - the fetcher, not the channel, holds the pieces (on disk).
+pub const FILE_SUB_CAPACITY: usize = 32;
+
 impl RelayRuntime {
     /// A runtime over the CURRENTLY dialable relays. An empty list is legal
     /// (a fresh install) — every operation then fails typed, and connects to
@@ -212,7 +222,8 @@ impl RelayRuntime {
             health: Arc::new(Mutex::new(std::collections::HashMap::new())),
             backoff: (Duration::from_secs(1), Duration::from_secs(60)),
             auth_keys: None,
-            history_bound: MAX_STORED_EVENTS_PER_REQ,
+            history_bound: Some(MAX_STORED_EVENTS_PER_REQ),
+            channel_capacity: None,
             sub_timing: (KEEPALIVE, SUB_IDLE_TIMEOUT),
         }
     }
@@ -243,7 +254,28 @@ impl RelayRuntime {
     /// would be measuring the relay, not the bound).
     #[must_use]
     pub fn with_history_bound(self, bound: usize) -> Self {
-        Self { history_bound: bound, ..self }
+        Self { history_bound: Some(bound), ..self }
+    }
+
+    /// No stored-event cut-off at all - for a REQ whose replay legitimately
+    /// spans thousands of events (the file plane). Pair it with a small
+    /// [`Self::with_channel_capacity`]: without the bound the channel is
+    /// the only thing that keeps a replay out of RAM.
+    #[must_use]
+    pub fn without_history_bound(self) -> Self {
+        Self { history_bound: None, ..self }
+    }
+
+    /// The fan-in channel's capacity (default: a whole bounded replay).
+    #[must_use]
+    pub fn with_channel_capacity(self, capacity: usize) -> Self {
+        Self { channel_capacity: Some(capacity), ..self }
+    }
+
+    /// What [`Self::subscribe`] sizes its fan-in channel to.
+    pub fn channel_capacity(&self) -> usize {
+        self.channel_capacity
+            .unwrap_or_else(|| self.history_bound.map_or(DEDUP_CAP, |b| b.saturating_add(64)))
     }
 
     /// The supervisors' per-relay connection state — the honest input for
@@ -480,7 +512,7 @@ struct SubShared {
     health: Arc<Mutex<std::collections::HashMap<String, RelayHealth>>>,
     backoff: (Duration, Duration),
     auth_keys: Option<nostr::Keys>,
-    history_bound: usize,
+    history_bound: Option<usize>,
     /// (keepalive interval, idle bound) — see [`KEEPALIVE`] / [`SUB_IDLE_TIMEOUT`].
     sub_timing: (Duration, Duration),
 }
@@ -509,14 +541,15 @@ impl RelayRuntime {
         // is honest: the reader drops a relay that replays past
         // `history_bound`, so this can never buffer more than that (+ some
         // live headroom).
-        let (tx, rx) = mpsc::channel(self.history_bound + 64);
+        let (tx, rx) = mpsc::channel(self.channel_capacity().max(1));
         let (eose_tx, eose_rx) = tokio::sync::watch::channel(0usize);
         let shared = Arc::new(SubShared {
             dialer: self.dialer.clone(),
             filter,
             tx,
             dedup: Arc::new(Mutex::new(DedupRing::with_capacity(
-                self.history_bound.saturating_add(64).max(DEDUP_CAP),
+                self.history_bound
+                    .map_or(DEDUP_CAP, |b| b.saturating_add(64).max(DEDUP_CAP)),
             ))),
             cursors: self.cursors.clone(),
             eose_tx: Arc::new(eose_tx),
@@ -819,10 +852,10 @@ async fn read_session(
                 // event forever (buzz B3)
                 if !*eose_counted {
                     stored_seen += 1;
-                    if stored_seen > shared.history_bound {
+                    if shared.history_bound.is_some_and(|bound| stored_seen > bound) {
                         tracing::warn!(
                             relay = %url,
-                            bound = shared.history_bound,
+                            bound = ?shared.history_bound,
                             got = stored_seen,
                             "relay replayed more stored events than the bound — dropped"
                         );
@@ -1499,6 +1532,18 @@ mod tests {
         assert!(second.failed.iter().any(|(u, e)| *u == hole && e.contains("backing off")));
     }
 
+    /// A file subscription runs without a stored-event cut-off and with a
+    /// channel that holds a handful of events, not a series: the reader
+    /// parks on a full channel instead of buffering a 1 GB replay.
+    #[test]
+    fn a_file_subscription_is_unbounded_but_backpressured() {
+        let rt = super::RelayRuntime::new(crate::dial::Dialer::Direct, vec![]);
+        assert_eq!(rt.channel_capacity(), super::MAX_STORED_EVENTS_PER_REQ + 64);
+        let files = rt.without_history_bound().with_channel_capacity(super::FILE_SUB_CAPACITY);
+        assert_eq!(files.history_bound, None);
+        assert_eq!(files.channel_capacity(), super::FILE_SUB_CAPACITY);
+    }
+
     /// The ring must cover a whole replay of the history bound, or a second
     /// relay's copies of the earliest events pass as fresh.
     #[test]
@@ -1506,7 +1551,7 @@ mod tests {
         // the production bound: a full replay of it must stay remembered
         let bound = super::MAX_STORED_EVENTS_PER_REQ;
         let rt = super::RelayRuntime::new(crate::dial::Dialer::Direct, vec![]);
-        let cap = rt.history_bound.saturating_add(64).max(super::DEDUP_CAP);
+        let cap = rt.history_bound.unwrap_or(0).saturating_add(64).max(super::DEDUP_CAP);
         let ids: Vec<nostr::EventId> = (0..bound)
             .map(|i| {
                 let mut b = [0u8; 32];

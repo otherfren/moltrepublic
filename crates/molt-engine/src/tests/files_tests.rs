@@ -314,44 +314,67 @@ fn the_file_cap_reads_absent_as_no_cap() {
     assert_eq!(st.effective_file_cap(), FileCap::Limit(9));
 }
 
-/// Mixed builds: a persist proposed by an older build carries no series
-/// material; a new-build approver still matches it against its v2 share.
-/// A claim that DOES carry material must match it exactly.
+/// The approve gate wants the series material THIS seat has: an older
+/// build's persist for a v2 share is refused (it would pin the share
+/// without its key), a legacy share needs none, and a claim inventing
+/// material for a legacy share is a different file.
 #[test]
-fn an_older_builds_persist_still_matches_a_v2_share() {
+fn the_approve_gate_requires_the_series_material_this_seat_has() {
     let mut st = plain_state();
-    let id = molt_core::MessageId([8u8; 16]);
-    let mut msg = molt_core::ChatMessage::text(id, "peer-1", "a share", now_secs());
     let key_b64 = {
         use base64::Engine as _;
         base64::engine::general_purpose::STANDARD.encode([9u8; 32])
     };
-    msg.file = Some(molt_core::FileMeta {
-        name: "v2.pdf".to_string(),
-        size: 9,
-        kind: "PDF".to_string(),
-        modified: 100,
-        available: true,
-        checksum: "ab".repeat(32),
-        key_b64: key_b64.clone(),
-        pieces: 1,
-        root: "cd".repeat(32),
-    });
-    let env = st.make_env("peer-1".to_string(), molt_core::WorkspaceEvent::Chat(msg));
+    let share = |id: molt_core::MessageId, name: &str, material: bool| {
+        let mut msg = molt_core::ChatMessage::text(id, "peer-1", "a share", now_secs());
+        msg.file = Some(molt_core::FileMeta {
+            name: name.to_string(),
+            size: 9,
+            kind: "PDF".to_string(),
+            modified: 100,
+            available: true,
+            checksum: "ab".repeat(32),
+            key_b64: if material { key_b64.clone() } else { String::new() },
+            pieces: u32::from(material),
+            root: if material { "cd".repeat(32) } else { String::new() },
+        });
+        msg
+    };
+    let v2 = molt_core::MessageId([8u8; 16]);
+    let env = st.make_env("peer-1".to_string(), molt_core::WorkspaceEvent::Chat(share(v2, "v2.pdf", true)));
     st.apply(&env);
+    let legacy = molt_core::MessageId([9u8; 16]);
+    let env_legacy =
+        st.make_env("peer-1".to_string(), molt_core::WorkspaceEvent::Chat(share(legacy, "v1.pdf", false)));
+    st.apply(&env_legacy);
+
     let old_build = json!({
-        "op": "persist", "id": id.to_string(), "by": "peer-1", "name": "v2.pdf",
+        "op": "persist", "id": v2.to_string(), "by": "peer-1", "name": "v2.pdf",
         "kind": "PDF", "size": 9, "checksum": "ab".repeat(32), "shared_ts": env.ts
     });
-    assert!(st.check_files_vote(&old_build).is_ok(), "six matching fields are enough");
-    let wrong_root = json!({
-        "op": "persist", "id": id.to_string(), "by": "peer-1", "name": "v2.pdf",
+    match st.check_files_vote(&old_build) {
+        Err(MoltError::BadPayload(m)) => assert!(m.contains("lacks the series material"), "{m}"),
+        other => panic!("an old build's persist for a v2 share must be refused: {other:?}"),
+    }
+    let current = json!({
+        "op": "persist", "id": v2.to_string(), "by": "peer-1", "name": "v2.pdf",
         "kind": "PDF", "size": 9, "checksum": "ab".repeat(32), "shared_ts": env.ts,
-        "key_b64": key_b64, "pieces": 1, "root": "ef".repeat(32)
+        "key_b64": key_b64, "pieces": 1, "root": "cd".repeat(32)
+    });
+    assert!(st.check_files_vote(&current).is_ok(), "the full identity passes");
+    let legacy_claim = json!({
+        "op": "persist", "id": legacy.to_string(), "by": "peer-1", "name": "v1.pdf",
+        "kind": "PDF", "size": 9, "checksum": "ab".repeat(32), "shared_ts": env_legacy.ts
+    });
+    assert!(st.check_files_vote(&legacy_claim).is_ok(), "a legacy share needs no material");
+    let invented = json!({
+        "op": "persist", "id": legacy.to_string(), "by": "peer-1", "name": "v1.pdf",
+        "kind": "PDF", "size": 9, "checksum": "ab".repeat(32), "shared_ts": env_legacy.ts,
+        "key_b64": key_b64, "pieces": 1, "root": "cd".repeat(32)
     });
     assert!(
-        matches!(st.check_files_vote(&wrong_root), Err(MoltError::BadPayload(_))),
-        "material that disagrees is refused"
+        matches!(st.check_files_vote(&invented), Err(MoltError::BadPayload(_))),
+        "material invented for a legacy share is a different file"
     );
 }
 
@@ -384,12 +407,105 @@ fn files_payloads_check_the_series_material_shape() {
     }
 }
 
-/// A legacy (v1) fetch is bounded by the configured cap, else by the
-/// 1 GiB floor - "no cap" is never stricter than a raised cap was.
+/// A legacy (v1) fetch is bounded by the configured cap, with sharing
+/// off by the old 4 MiB default, else by the 1 GiB floor - "no cap" is
+/// never stricter than a raised cap was.
 #[test]
 fn the_v1_fetch_bound_follows_the_cap() {
     use crate::net::files::{v1_fetch_bound, FileCap};
     assert_eq!(v1_fetch_bound(FileCap::Limit(50 * 1024 * 1024)), 50 * 1024 * 1024);
     assert_eq!(v1_fetch_bound(FileCap::Unlimited), 1024 * 1024 * 1024);
-    assert_eq!(v1_fetch_bound(FileCap::Off), 1024 * 1024 * 1024);
+    assert_eq!(v1_fetch_bound(FileCap::Off), 4 * 1024 * 1024, "off: the old default bound");
+}
+
+/// A block from a build that predates the series material never strips
+/// what an earlier block pinned: the fold keeps key, pieces and root
+/// through a material-less persist or unpersist.
+#[test]
+fn the_fold_keeps_the_series_material_through_a_material_less_block() {
+    use crate::files_state::FileState;
+    let mut st = plain_state();
+    let id = molt_core::MessageId([8u8; 16]);
+    let key = base64_key();
+    let with = json!({
+        "op": "persist", "id": id.to_string(), "by": "me", "name": "v2.bin", "kind": "BIN",
+        "size": 5, "checksum": "ab".repeat(32), "shared_ts": 1_700_000_000,
+        "key_b64": key, "pieces": 1, "root": "cd".repeat(32)
+    });
+    let mut without = with.clone();
+    for k in ["key_b64", "pieces", "root"] {
+        without.as_object_mut().expect("object").remove(k);
+    }
+    let mut unpersist = without.clone();
+    unpersist["op"] = json!("unpersist");
+    unpersist["at"] = json!(1_700_000_100u64);
+    let files = st.applied.entry(Surface::Files).or_default();
+    files.push((None, with));
+    files.push((None, unpersist));
+    files.push((None, without));
+    let states = st.files_state();
+    let Some(FileState::Persistent(meta)) = states.get(&id) else {
+        panic!("the last persist wins");
+    };
+    assert_eq!(meta.key_b64, key, "the material of the first block survives");
+    assert_eq!(meta.pieces, 1);
+    assert_eq!(meta.root, "cd".repeat(32));
+}
+
+/// A stale persist vote without the series material (an older build's,
+/// refused at every current approve door) does not block a current
+/// build from proposing the same share; a vote WITH material still does.
+#[test]
+fn a_material_less_open_vote_does_not_block_a_current_re_propose() {
+    let mut st = plain_state();
+    let id = molt_core::MessageId([9u8; 16]);
+    let mut msg = molt_core::ChatMessage::text(id, "peer-1", "a share", now_secs());
+    msg.file = Some(molt_core::FileMeta {
+        name: "v2.bin".to_string(),
+        size: 5,
+        kind: "BIN".to_string(),
+        modified: 100,
+        available: true,
+        checksum: "ab".repeat(32),
+        key_b64: base64_key(),
+        pieces: 1,
+        root: "cd".repeat(32),
+    });
+    let env = st.make_env("peer-1".to_string(), molt_core::WorkspaceEvent::Chat(msg));
+    st.apply(&env);
+    let stale = molt_core::ProposalRecord {
+        surface: Surface::Files,
+        payload: json!({
+            "op": "persist", "id": id.to_string(), "by": "peer-1", "name": "v2.bin",
+            "kind": "BIN", "size": 5, "checksum": "ab".repeat(32), "shared_ts": env.ts
+        }),
+        approvals: 0,
+        state: molt_core::ProposalState::Proposed,
+        declined_at: 0,
+        declined_by: String::new(),
+        decliners: Vec::new(),
+        voted: Vec::new(),
+        by: "peer-2".to_string(),
+        superseded: false,
+        withdrawn: false,
+    };
+    st.proposals.insert(1, stale);
+    let mut payload = json!({"op": "persist", "id": id.to_string()});
+    st.prepare_files_proposal(&mut payload)
+        .expect("a current build proposes past the stale vote");
+    assert_eq!(payload["key_b64"], json!(base64_key()));
+    // …but an open vote that carries the material blocks a second one
+    let mut current = st.proposals.get(&1).expect("stale").clone();
+    current.payload = payload.clone();
+    st.proposals.insert(2, current);
+    let mut again = json!({"op": "persist", "id": id.to_string()});
+    assert!(
+        matches!(st.prepare_files_proposal(&mut again), Err(MoltError::BadPayload(_))),
+        "a real open vote still blocks"
+    );
+}
+
+fn base64_key() -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode([3u8; 32])
 }

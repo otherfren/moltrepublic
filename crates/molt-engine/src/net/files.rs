@@ -34,13 +34,15 @@ pub(crate) enum FileCap {
 /// in memory, hence a bound at all.
 const LEGACY_V1_FETCH_BOUND: u64 = 1024 * 1024 * 1024;
 
-/// The in-memory bound a v1 fetch allows a series claim: the configured
-/// cap when there is one, else [`LEGACY_V1_FETCH_BOUND`] (sharing OFF
-/// still pulls a peer's legacy share).
+/// The in-memory bound a v1 fetch allows a series claim: Off → the old
+/// 4 MiB default (nothing new is admitted, an insider's claim gets the
+/// bound the old build gave it), Limit(n) → n, Unlimited →
+/// [`LEGACY_V1_FETCH_BOUND`].
 pub(crate) fn v1_fetch_bound(cap: FileCap) -> u64 {
     match cap {
         FileCap::Limit(cap) => cap,
-        FileCap::Off | FileCap::Unlimited => LEGACY_V1_FETCH_BOUND,
+        FileCap::Off => molt_core::LEGACY_FILE_CAP_BYTES,
+        FileCap::Unlimited => LEGACY_V1_FETCH_BOUND,
     }
 }
 

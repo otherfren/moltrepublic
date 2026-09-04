@@ -2491,6 +2491,13 @@ fn validate_settings(s: &SessionSettings) -> Result<(), MoltError> {
     if s.mcp_port == 0 {
         return Err(MoltError::Settings("mcp.port must not be 0".to_string()));
     }
+    // the old default is read as "no cap" everywhere - a cap of exactly
+    // that value could never be stored
+    if s.file_cap_bytes == Some(molt_core::LEGACY_FILE_CAP_BYTES) {
+        return Err(MoltError::Settings(
+            "file_cap_bytes 4194304 reads as no cap - use another value".to_string(),
+        ));
+    }
     if s.anonymity == "tor" && s.tor_mode == "local" && s.tor_port == 0 {
         return Err(MoltError::Settings(
             "tor.port must not be 0 when mode = \"local\"".to_string(),

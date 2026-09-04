@@ -13,6 +13,8 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+# the ONE literal for the old default cap (`LEGACY_FILE_CAP_BYTES`)
+molt-core.workspace = true
 serde.workspace = true
 # the OS CSPRNG for the MCP token — never a /dev/urandom path open, whose
 # failure mode is an EMPTY token that silently disables authentication

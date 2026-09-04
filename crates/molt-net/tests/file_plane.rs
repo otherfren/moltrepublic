@@ -7,6 +7,8 @@
 //! sharer but the group's rotation seed and exporter ring — and every
 //! refusal (cap, checksum, absent series) is honest, never silence.
 
+mod common;
+
 use std::time::Duration;
 
 use molt_net::dial::Dialer;
@@ -542,4 +544,221 @@ async fn a_forged_manifest_is_dropped_by_hash_and_the_series_completes() {
     assert_eq!(m, manifest);
     got.truncate(bytes.len());
     assert_eq!(got, bytes, "no forgery landed in the end");
+}
+
+/// A relay without the 60-notes-per-minute default, for series of a
+/// hundred-odd pieces: the tests below measure the fetcher, not the pacing.
+async fn fast_relay() -> (nostr_relay_builder::LocalRelay, String) {
+    use nostr_relay_builder::builder::{RateLimit, RelayBuilder};
+    use nostr_relay_builder::LocalRelay;
+    let relay = LocalRelay::new(RelayBuilder::default().rate_limit(RateLimit {
+        max_reqs: 500,
+        notes_per_minute: 1_000_000,
+    }));
+    relay.run().await.expect("fast relay runs");
+    let url = relay.url().await.to_string();
+    (relay, url)
+}
+
+/// The kind-447 REQ replays EVERY file's pieces under the day's tag: a
+/// one-piece fetch must complete beside a foreign series far larger than
+/// anything a per-series bound would size for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_small_series_fetches_beside_a_large_foreign_one() {
+    let (_relay, url) = fast_relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let chan = GroupChannel::new(dialer(), vec![url.clone()], SEED);
+    // the foreign series: 120 pieces under another key, published NEWEST
+    let foreign_key = [77u8; 32];
+    let now = unix_now();
+    for i in 0..120u32 {
+        let fill = u8::try_from(i).unwrap_or(0);
+        let piece = seal_piece(&foreign_key, i, 120, &[fill; 100]).expect("seal");
+        chan.publish_file_content_at(&piece, now).await.expect("foreign piece");
+    }
+    let bytes = pattern(1234);
+    let path = write_tmp(&tmp, "small.bin", &bytes);
+    let (manifest, expect, _) = expect_of(&bytes);
+    let stamp_for = move |_: u32| now - 60;
+    let (start, _) = publish_series_v2(&chan, &KEY, &path, &manifest, Some(&stamp_for))
+        .await
+        .expect("publishes");
+
+    let fetcher = GroupChannel::new(dialer(), vec![url], SEED);
+    let mut got: Vec<u8> = Vec::new();
+    let m = fetch_series_v2(&fetcher, &KEY, start, &expect, &mut got, Some(Duration::from_secs(10)))
+        .await
+        .expect("the small series completes beside the large one");
+    assert_eq!(m, manifest);
+    assert_eq!(got, bytes);
+}
+
+/// A forged LAST slice of the full block length (the honest one is short)
+/// is dropped by geometry before it can land - the sink ends at the
+/// file's size, no trailing garbage.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_forged_full_length_last_slice_is_dropped_by_geometry() {
+    let (_relay, url) = fast_relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let bytes = pattern(PIECE_PAYLOAD_LEN + 5);
+    let path = write_tmp(&tmp, "short-tail.bin", &bytes);
+    let (manifest, expect, _) = expect_of(&bytes);
+    let chan = GroupChannel::new(dialer(), vec![url.clone()], SEED);
+    let now = unix_now();
+    let stamp_for = move |_: u32| now - 60;
+    let (start, _) = publish_series_v2(&chan, &KEY, &path, &manifest, Some(&stamp_for))
+        .await
+        .expect("publishes");
+    // the forgery: index 1 (the last) at the full block length, NEWEST
+    let forged = seal_piece(&KEY, 1, manifest.count, &vec![0xAAu8; PIECE_PAYLOAD_LEN]).expect("seal");
+    chan.publish_file_content_at(&forged, now).await.expect("forged tail");
+
+    let fetcher = GroupChannel::new(dialer(), vec![url], SEED);
+    let mut got: Vec<u8> = Vec::new();
+    fetch_series_v2(&fetcher, &KEY, start, &expect, &mut got, Some(Duration::from_secs(10)))
+        .await
+        .expect("completes");
+    assert_eq!(got.len(), bytes.len(), "no full-length forgery grew the sink");
+    assert_eq!(got, bytes);
+}
+
+/// A slice that landed unverified (its chunk still missing) is never
+/// overwritten by a later forgery at the same index: the honest slice
+/// arrives NEWEST, the forgery next, the manifest last - the honest one
+/// must still be what verifies.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_forgery_never_evicts_a_landed_slice() {
+    let (_relay, url) = fast_relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let bytes = pattern(PIECE_PAYLOAD_LEN + 5);
+    let path = write_tmp(&tmp, "evict.bin", &bytes);
+    let (manifest, expect, _) = expect_of(&bytes);
+    let chan = GroupChannel::new(dialer(), vec![url.clone()], SEED);
+    let now = unix_now();
+    let count = manifest.count;
+    // manifest oldest, honest slices newest
+    let stamp_for = move |index: u32| if index >= count { now - 3_600 } else { now };
+    let (start, _) = publish_series_v2(&chan, &KEY, &path, &manifest, Some(&stamp_for))
+        .await
+        .expect("publishes");
+    // the forgery at index 0, full length, stamped BETWEEN honest data and manifest
+    let forged = seal_piece(&KEY, 0, count, &vec![0xBBu8; PIECE_PAYLOAD_LEN]).expect("seal");
+    chan.publish_file_content_at(&forged, now - 60).await.expect("forged slice");
+
+    let fetcher = GroupChannel::new(dialer(), vec![url], SEED);
+    let mut got: Vec<u8> = Vec::new();
+    let m = fetch_series_v2(&fetcher, &KEY, start, &expect, &mut got, Some(Duration::from_secs(10)))
+        .await
+        .expect("the honest slice is what verifies");
+    assert_eq!(m, manifest);
+    assert_eq!(got, bytes, "the forgery did not evict the landed slice");
+}
+
+/// Twelve forged manifest chunks for one slot, all published NEWEST so a
+/// replay serves them before the honest chunk: none may evict it - the
+/// candidates wait for the top record, and the one it names wins.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn twelve_forged_chunks_for_one_slot_do_not_evict_the_honest_one() {
+    let (_relay, url) = fast_relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let bytes = pattern(PIECE_PAYLOAD_LEN + 5);
+    let path = write_tmp(&tmp, "twelve.bin", &bytes);
+    let (manifest, expect, _) = expect_of(&bytes);
+    let chan = GroupChannel::new(dialer(), vec![url.clone()], SEED);
+    let now = unix_now();
+    // the honest series an hour ago (record oldest of all)
+    let count = manifest.count;
+    let layout = Manifest::layout_for(count).expect("layout");
+    let stamp_for = move |index: u32| if index == layout.top { now - 7_200 } else { now - 3_600 };
+    let (start, _) = publish_series_v2(&chan, &KEY, &path, &manifest, Some(&stamp_for))
+        .await
+        .expect("publishes");
+    for i in 0..12u8 {
+        let wrong_chunk = vec![i; 32 * 2];
+        let forged = seal_piece(&KEY, count, count, &wrong_chunk).expect("seal");
+        chan.publish_file_content_at(&forged, now - u64::from(i)).await.expect("forged chunk");
+    }
+
+    let fetcher = GroupChannel::new(dialer(), vec![url], SEED);
+    let mut got: Vec<u8> = Vec::new();
+    let m = fetch_series_v2(&fetcher, &KEY, start, &expect, &mut got, Some(Duration::from_secs(10)))
+        .await
+        .expect("the honest chunk survives twelve forgeries");
+    assert_eq!(m, manifest);
+    assert_eq!(got, bytes);
+}
+
+/// A relay's verdict is permanent: a `blocked:` answer ends the series
+/// on the first attempt instead of a hundred seconds of retries.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_blocked_verdict_ends_the_series_on_the_first_attempt() {
+    use nostr_relay_builder::builder::{PolicyResult, RelayBuilder, WritePolicy};
+    #[derive(Debug)]
+    struct NoFiles;
+    impl WritePolicy for NoFiles {
+        fn admit_event<'a>(
+            &'a self,
+            event: &'a nostr::Event,
+            _addr: &'a std::net::SocketAddr,
+        ) -> nostr::util::BoxedFuture<'a, PolicyResult> {
+            Box::pin(async move {
+                if event.kind.as_u16() == 447 {
+                    PolicyResult::Reject("blocked: no files here".to_string())
+                } else {
+                    PolicyResult::Accept
+                }
+            })
+        }
+    }
+    let relay = nostr_relay_builder::LocalRelay::new(RelayBuilder::default().write_policy(NoFiles));
+    relay.run().await.expect("relay runs");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let bytes = pattern(100);
+    let path = write_tmp(&tmp, "blocked.bin", &bytes);
+    let (manifest, _, _) = expect_of(&bytes);
+    let sharer = GroupChannel::new(dialer(), vec![url], SEED);
+    let started = std::time::Instant::now();
+    let err = publish_series_v2(&sharer, &KEY, &path, &manifest, None)
+        .await
+        .expect_err("the verdict ends the series");
+    assert!(err.to_string().contains("blocked"), "{err}");
+    assert!(started.elapsed() < Duration::from_secs(20), "no retry storm: {:?}", started.elapsed());
+}
+
+/// A transient publish failure - the relay unreachable for seconds, past
+/// the pool breaker's first trips - is retried on a backoff, never fatal
+/// for the series: the sharer's round is spent, so a dropped socket must
+/// not waste it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_transient_publish_failure_is_retried_not_fatal() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let direct = relay.url().await.to_string();
+    let target = direct.trim_start_matches("ws://").to_string();
+    let proxy = common::proxy::Cuttable::run(target).await;
+    let proxied = format!("ws://127.0.0.1:{}", proxy.port);
+    let tmp = tempfile::tempdir().expect("tmp");
+    let bytes = pattern(PIECE_PAYLOAD_LEN + 5);
+    let path = write_tmp(&tmp, "retried.bin", &bytes);
+    let (manifest, expect, _) = expect_of(&bytes);
+
+    let sharer = GroupChannel::new(dialer(), vec![proxied], SEED);
+    proxy.cut().await;
+    let proxy_ref = &proxy;
+    let restore = async move {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        proxy_ref.restore();
+    };
+    let (published, ()) = tokio::join!(
+        publish_series_v2(&sharer, &KEY, &path, &manifest, None),
+        restore
+    );
+    let (start, _) = published.expect("the series completes once the relay is back");
+
+    let fetcher = GroupChannel::new(dialer(), vec![direct], SEED);
+    let mut got: Vec<u8> = Vec::new();
+    fetch_series_v2(&fetcher, &KEY, start, &expect, &mut got, Some(Duration::from_secs(10)))
+        .await
+        .expect("every piece landed on the relay");
+    assert_eq!(got, bytes);
 }

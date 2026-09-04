@@ -476,8 +476,9 @@ fn load_config(path: &Path) -> anyhow::Result<Config> {
             path.display()
         );
     }
-    // a file an older build wrote heals BEFORE the parse: one class fails
-    // the strict parse, the other parses and means the wrong thing
+    // a file an older build wrote heals BEFORE the parse: the one class
+    // that fails the strict parse (the old cap value parses and reads as
+    // no cap - no rewrite for it)
     if let Some((healed, notes)) = molt_config::heal_legacy_notes(&text) {
         for note in &notes {
             eprintln!("config {}: {note}", path.display());

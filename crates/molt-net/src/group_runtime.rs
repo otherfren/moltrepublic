@@ -458,7 +458,7 @@ enum PublishStall {
 /// malformed `h` tag. [`NetError::Crypto`] (sealing, signing) is local for
 /// the same reason. Everything else describes the world outside this process
 /// and may well look different in a second.
-fn permanent_refusal(e: &crate::NetError) -> Option<String> {
+pub(crate) fn permanent_refusal(e: &crate::NetError) -> Option<String> {
     match e {
         crate::NetError::Framing(_) | crate::NetError::Crypto(_) => Some(e.to_string()),
         _ => None,
