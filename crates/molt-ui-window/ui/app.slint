@@ -6702,7 +6702,7 @@ export component AppWindow inherits Window {
                             }
                             // mirroring §3.6: consent, quota, folder and usage
                             // above the Persistent table
-                            if root.selected-view == "persistent": Rectangle {
+                            if root.selected-view == "persistent": ou-mirror-row := Rectangle {
                                 background: Theme.panel;
                                 border-radius: Theme.win95 ? 0px : 8px;
                                 border-width: Theme.border-w;
@@ -6711,11 +6711,16 @@ export component AppWindow inherits Window {
                                     padding: 10px;
                                     spacing: 14px;
                                     alignment: start;
-                                    ou-mirror-check := AppCheck {
-                                        label: Strings.ou-mirror-switch;
-                                        checked: root.org-mirror-on;
-                                        toggled(on) => {
-                                            root.set-mirror(on, root.org-mirror-quota);
+                                    // a fixed-height child of a HorizontalLayout hangs at
+                                    // the top edge: a centring column wraps each one
+                                    VerticalLayout {
+                                        alignment: center;
+                                        ou-mirror-check := AppCheck {
+                                            label: Strings.ou-mirror-switch;
+                                            checked: root.org-mirror-on;
+                                            toggled(on) => {
+                                                root.set-mirror(on, root.org-mirror-quota);
+                                            }
                                         }
                                     }
                                     Text {
@@ -6724,27 +6729,33 @@ export component AppWindow inherits Window {
                                         font-size: Theme.fs-body;
                                         vertical-alignment: center;
                                     }
-                                    AppField {
-                                        width: 80px * Theme.ui-scale;
-                                        numeric: true;
-                                        text <=> root.org-mirror-quota;
-                                        placeholder: "1";
-                                    }
-                                    AppButton {
-                                        height: 28px * Theme.ui-scale;
-                                        pad: 10px;
-                                        label: Strings.ou-mirror-apply;
-                                        clicked => {
-                                            root.set-mirror(root.org-mirror-on, root.org-mirror-quota);
+                                    VerticalLayout {
+                                        alignment: center;
+                                        ou-mirror-field := AppField {
+                                            width: 80px * Theme.ui-scale;
+                                            numeric: true;
+                                            text <=> root.org-mirror-quota;
+                                            placeholder: "1";
                                         }
                                     }
-                                    Text {
+                                    VerticalLayout {
+                                        alignment: center;
+                                        ou-mirror-apply := AppButton {
+                                            height: 28px * Theme.ui-scale;
+                                            pad: 10px;
+                                            label: Strings.ou-mirror-apply;
+                                            clicked => {
+                                                root.set-mirror(root.org-mirror-on, root.org-mirror-quota);
+                                            }
+                                        }
+                                    }
+                                    ou-mirror-used := Text {
                                         text: root.org-mirror-used;
                                         color: root.org-mirror-over ? Theme.warn : Theme.dim;
                                         font-size: Theme.fs-cap;
                                         vertical-alignment: center;
                                     }
-                                    Text {
+                                    ou-mirror-dir := Text {
                                         text: root.org-mirror-dir;
                                         color: Theme.faint;
                                         font-size: Theme.fs-cap;
@@ -6753,12 +6764,15 @@ export component AppWindow inherits Window {
                                         preferred-width: 0px;
                                         overflow: elide;
                                     }
-                                    AppButton {
-                                        height: 28px * Theme.ui-scale;
-                                        pad: 10px;
-                                        label: Strings.ou-mirror-browse;
-                                        clicked => {
-                                            root.pick-mirror-dir();
+                                    VerticalLayout {
+                                        alignment: center;
+                                        ou-mirror-browse := AppButton {
+                                            height: 28px * Theme.ui-scale;
+                                            pad: 10px;
+                                            label: Strings.ou-mirror-browse;
+                                            clicked => {
+                                                root.pick-mirror-dir();
+                                            }
                                         }
                                     }
                                 }

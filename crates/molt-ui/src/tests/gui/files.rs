@@ -295,6 +295,52 @@ fn the_type_column_header_lines_up_with_its_cells() {
     }
 }
 
+/// The mirror row above the Persistent table: switch, quota field, both
+/// buttons and the two texts sit on ONE centre line at every font size.
+/// A fixed-height child of a HorizontalLayout hangs at the top edge
+/// unless it centres itself (reported 2026-09-04: "some centred, some
+/// stuck to the top").
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_mirror_row_controls_share_one_centre_line() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = files_window(vec![UploadRow {
+        id: "cc".repeat(16).into(),
+        name: "plan.pdf".into(),
+        user: "walter".into(),
+        available: true,
+        persistent: true,
+        ..UploadRow::default()
+    }]);
+    ui.set_selected_view("persistent".into());
+    ui.set_org_mirror_used("0 B of 1.07 GB".into());
+    ui.set_org_mirror_dir("/home/walter/mirror".into());
+    let centre = |id: &str| -> f32 {
+        let e = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, id)
+            .find(|e| e.size().height > 0.0)
+            .unwrap_or_else(|| panic!("{id} is rendered"));
+        e.absolute_position().y + e.size().height / 2.0
+    };
+    for font in [14.0_f32, 20.0, 28.0] {
+        ui.global::<Theme>().set_fs_app(font);
+        let row = centre("AppWindow::ou-mirror-row");
+        for id in [
+            "AppWindow::ou-mirror-check",
+            "AppWindow::ou-mirror-field",
+            "AppWindow::ou-mirror-apply",
+            "AppWindow::ou-mirror-used",
+            "AppWindow::ou-mirror-dir",
+            "AppWindow::ou-mirror-browse",
+        ] {
+            let c = centre(id);
+            assert!(
+                (c - row).abs() < 1.0,
+                "font {font}: {id} centres at {c}, the row at {row}"
+            );
+        }
+    }
+}
+
 /// Mirroring §3.6 on the Persistent table: the own share counts as one
 /// whole holder, and the switch, the quota field and the usage line
 /// mirror the engine's `read_mirror` (the switch's own `set_mirror` is the
