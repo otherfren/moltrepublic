@@ -89,43 +89,46 @@ fn vote_jump_targets_the_hosting_surface_and_fate_view() {
         (5u64, known_of(Surface::Organization, KnownFate::Pending)),
         (6u64, known_of(Surface::Organization, KnownFate::Closed)),
         (7u64, known_of(Surface::Memory, KnownFate::Pending)),
+        (8u64, known_of(Surface::Organization, KnownFate::Applied)),
+        (9u64, known_of(Surface::Files, KnownFate::Pending)),
+        (10u64, known_of(Surface::Files, KnownFate::Closed)),
+        (11u64, known_of(Surface::Files, KnownFate::Applied)),
+        (12u64, known_of(Surface::Memory, KnownFate::Closed)),
+        (13u64, known_of(Surface::Memory, KnownFate::Applied)),
+        (14u64, known_of(Surface::Quests, KnownFate::Pending)),
+        (15u64, known_of(Surface::Quests, KnownFate::Closed)),
     ]);
+    let jump = |id: u64| vote_jump_command(&ChannelRef::Patch { id: ProposalId(id) }, &known);
+    let view_of = |id: u64| match jump(id) {
+        Some(Command::SelectView { surface, view }) => Some((surface, view)),
+        _ => None,
+    };
     // only a patch channel has a vote to jump back to
     assert!(vote_jump_command(&ChannelRef::Group, &known).is_none());
     let topic = ChannelRef::Topic { name: "zeta".to_string() };
     assert!(vote_jump_command(&topic, &known).is_none());
-    // an open Organization vote → its card sits in the pending view
-    assert!(matches!(
-        vote_jump_command(&ChannelRef::Patch { id: ProposalId(5) }, &known),
-        Some(Command::SelectView { surface: Surface::Organization, view }) if view == "pending"
-    ));
-    // a closed one moved to the declined view
-    assert!(matches!(
-        vote_jump_command(&ChannelRef::Patch { id: ProposalId(6) }, &known),
-        Some(Command::SelectView { surface: Surface::Organization, view }) if view == "declined"
-    ));
-    // a gated surface hosts its cards on its main view — plain surface
-    // selection, exactly like the sidebar row
-    assert!(matches!(
-        vote_jump_command(&ChannelRef::Patch { id: ProposalId(7) }, &known),
-        Some(Command::SelectSurface { surface: Surface::Memory })
-    ));
+    // Organization: pending / declined / accepted (WP1: an applied vote's
+    // row lives in the accepted view)
+    assert_eq!(view_of(5), Some((Surface::Organization, "pending".to_string())));
+    assert_eq!(view_of(6), Some((Surface::Organization, "declined".to_string())));
+    assert_eq!(view_of(8), Some((Surface::Organization, "accepted".to_string())));
+    // Shared Files hosts its cards in the SAME three outcome views —
+    // a plain surface selection would land on Temporary Uploads, where
+    // there is no ballot (reported 2026-09-04)
+    assert_eq!(view_of(9), Some((Surface::Files, "pending".to_string())));
+    assert_eq!(view_of(10), Some((Surface::Files, "declined".to_string())));
+    assert_eq!(view_of(11), Some((Surface::Files, "accepted".to_string())));
+    // Memory: its cards sit in "proposals", its outcomes in accepted/denied
+    // (the main view is the wiki, no ballot there either)
+    assert_eq!(view_of(7), Some((Surface::Memory, "proposals".to_string())));
+    assert_eq!(view_of(12), Some((Surface::Memory, "denied".to_string())));
+    assert_eq!(view_of(13), Some((Surface::Memory, "accepted".to_string())));
+    // a surface without split outcome views shows every fate in "proposals"
+    assert_eq!(view_of(14), Some((Surface::Quests, "proposals".to_string())));
+    assert_eq!(view_of(15), Some((Surface::Quests, "proposals".to_string())));
     // a cache miss (this UI never saw the proposal) falls back to the
     // Organization pending view — never a dead button
-    assert!(matches!(
-        vote_jump_command(&ChannelRef::Patch { id: ProposalId(99) }, &known),
-        Some(Command::SelectView { surface: Surface::Organization, view }) if view == "pending"
-    ));
-    // WP1: an APPLIED Organization vote's row lives in the accepted view
-    let known = HashMap::from([(8u64, {
-        let mut k = known_of(Surface::Organization, KnownFate::Applied);
-        k.approvals = 2;
-        k
-    })]);
-    assert!(matches!(
-        vote_jump_command(&ChannelRef::Patch { id: ProposalId(8) }, &known),
-        Some(Command::SelectView { surface: Surface::Organization, view }) if view == "accepted"
-    ));
+    assert_eq!(view_of(99), Some((Surface::Organization, "pending".to_string())));
 }
 
 /// Review finding: the read contract's `pending` is Proposed-only, so

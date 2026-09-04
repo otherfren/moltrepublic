@@ -110,12 +110,16 @@ pub(crate) fn derive_channels(
 
 /// The command the patch-channel banner's "back to the vote" button
 /// issues: a discussion is vote-bound (the channel key IS the proposal
-/// id), so the jump reuses the sidebar's own navigation verbs — an
-/// Organization ballot lives in the pending view (declined once closed;
-/// an applied one simply left the list), a gated surface hosts its cards
-/// on its main view (plain surface selection). A cache miss falls back to
-/// Organization → pending rather than a dead button. Non-patch channels
-/// have no vote.
+/// id), so the jump reuses the sidebar's own navigation verbs. The card
+/// sits in the hosting surface's view for the proposal's fate, named in
+/// that surface's own view vocabulary ([`Surface::views`]): Organization
+/// and Shared Files split pending/declined/accepted, Memory
+/// proposals/denied/accepted, a surface without split outcomes shows
+/// every fate under "proposals". A plain `SelectSurface` would land on
+/// the default view (Temporary Uploads, the wiki), where there is no
+/// ballot; it stays the fallback for a surface with none of these views.
+/// A cache miss falls back to Organization → pending rather than a dead
+/// button. Non-patch channels have no vote.
 pub(crate) fn vote_jump_command(ch: &ChannelRef, known: &HashMap<u64, KnownProposal>) -> Option<Command> {
     let ChannelRef::Patch { id } = ch else {
         return None;
@@ -124,17 +128,17 @@ pub(crate) fn vote_jump_command(ch: &ChannelRef, known: &HashMap<u64, KnownPropo
         .get(&id.0)
         .map(|k| (k.surface, k.fate))
         .unwrap_or((Surface::Organization, KnownFate::Pending));
-    Some(if matches!(surface, Surface::Organization) {
-        let view = match fate {
-            KnownFate::Closed => "declined",
-            // WP1: an applied Organization vote's row lives in the
-            // accepted (applied-log) view — the jump lands on it
-            KnownFate::Applied => "accepted",
-            KnownFate::Pending => "pending",
-        };
-        Command::SelectView { surface, view: view.to_string() }
-    } else {
-        Command::SelectSurface { surface }
+    let candidates: &[&str] = match fate {
+        KnownFate::Pending => &["pending", "proposals"],
+        KnownFate::Closed => &["declined", "denied", "proposals"],
+        KnownFate::Applied => &["accepted", "proposals"],
+    };
+    let view = candidates
+        .iter()
+        .find(|c| surface.views().iter().any(|(k, _)| k == *c));
+    Some(match view {
+        Some(view) => Command::SelectView { surface, view: (*view).to_string() },
+        None => Command::SelectSurface { surface },
     })
 }
 
