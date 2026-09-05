@@ -297,6 +297,14 @@ pub struct StackRow {
 /// disagree.
 pub use molt_core::wiki_patch::PatchCounts as ChangesetCounts;
 
+/// What the emitter takes: the ratified tree, the tree a vote would seal,
+/// and new path -> old path for every move.
+type Trees = (
+    std::collections::BTreeMap<String, String>,
+    std::collections::BTreeMap<String, String>,
+    std::collections::BTreeMap<String, String>,
+);
+
 pub struct Wiki {
     docs: Vec<Doc>,
     folders: Vec<Folder>,
@@ -2360,20 +2368,19 @@ impl Wiki {
     /// changed document's ratified bytes are not here: a patch over bytes
     /// this node does not hold would be a LIE about what the members
     /// ratified (§4.10).
-    fn trees(
-        &self,
-    ) -> Option<(
-        std::collections::BTreeMap<String, String>,
-        std::collections::BTreeMap<String, String>,
-        std::collections::BTreeMap<String, String>,
-    )> {
+    fn trees(&self) -> Option<Trees> {
         if !self.unloaded_changes().is_empty() {
             return None;
         }
         let mut base = std::collections::BTreeMap::new();
         let mut after = std::collections::BTreeMap::new();
         let mut renames = std::collections::BTreeMap::new();
-        for d in &self.docs {
+        // UNCHANGED documents contribute nothing - and that is not an
+        // optimisation: a document whose ratified bytes were dropped under
+        // an edit reads Unchanged (`Doc::status`), and diffing its working
+        // copy against the empty base would propose deleting everything the
+        // members ratified.
+        for d in self.docs.iter().filter(|d| d.status() != Status::Unchanged) {
             if let Some(b) = &d.base {
                 base.insert(b.path.clone(), b.raw.clone().unwrap_or_default());
             }
@@ -3863,6 +3870,20 @@ diff --git a/gone.md b/gone.md\n--- a/gone.md\n+++ b/gone.md\n@@ -1,1 +1,1 @@\n-
             .map(|d| (d.path.clone(), d.raw.clone()))
             .collect();
         assert_eq!(tree, want, "fold(base, build_patch) == working docs");
+    }
+
+    /// A document whose ratified bytes were dropped while it carried an
+    /// edit must not become a patch: the base is not here, so a diff
+    /// against nothing would propose deleting what the members ratified.
+    #[test]
+    fn an_edit_over_dropped_base_bytes_is_not_a_patch() {
+        let mut w = Wiki::empty();
+        w.set_base(&[("a.md".to_string(), Some("ratified\n".to_string()))], 1);
+        let id = w.docs.first().expect("a.md").id;
+        w.set_raw(id, "my own words\n");
+        // the base moved and this document's bytes came back unheld
+        w.set_base(&[("a.md".to_string(), None)], 2);
+        assert_eq!(w.build_patch(), None, "no patch over bytes we do not hold");
     }
 
     // ---- in-preview links --------------------------------------------------

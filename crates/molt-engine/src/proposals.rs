@@ -2285,6 +2285,21 @@ impl State {
         if edits.is_empty() {
             return Err(MoltError::BadPayload("no edits".to_string()));
         }
+        self.refresh_wiki_cache();
+        // the base RESTRICTED to the paths the edits name: `apply_patch`
+        // reads and writes no others, so the diff over these is the diff
+        // over the whole base (§4.2's argument), and a 100 MiB tree is
+        // never cloned to move one paragraph. It runs BEFORE the graph
+        // branch so a base-pending node says THAT and not "index building".
+        let touched: std::collections::BTreeSet<String> =
+            edits.iter().flat_map(edit_paths).collect();
+        let base: std::collections::BTreeMap<String, String> = {
+            let (tree, _) = self.wiki_base()?;
+            touched
+                .iter()
+                .filter_map(|p| tree.get(p).map(|c| (p.clone(), c.clone())))
+                .collect()
+        };
         // only `add_relation` needs the graph — it resolves its target
         if edits
             .iter()
@@ -2296,20 +2311,6 @@ impl State {
                 return Err(self.index_building());
             }
         }
-        self.refresh_wiki_cache();
-        // the base RESTRICTED to the paths the edits name: `apply_patch`
-        // reads and writes no others, so the diff over these is the diff
-        // over the whole base (§4.2's argument), and a 100 MiB tree is
-        // never cloned to move one paragraph
-        let touched: std::collections::BTreeSet<String> =
-            edits.iter().flat_map(edit_paths).collect();
-        let base: std::collections::BTreeMap<String, String> = {
-            let (tree, _) = self.wiki_base()?;
-            touched
-                .iter()
-                .filter_map(|p| tree.get(p).map(|c| (p.clone(), c.clone())))
-                .collect()
-        };
         let mut after = base.clone();
         let mut renames: std::collections::BTreeMap<String, String> =
             std::collections::BTreeMap::new();
