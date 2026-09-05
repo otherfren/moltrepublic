@@ -636,16 +636,25 @@ BUILT 2026-09-05 (`wiki_semantic_gaps.md` §7 step 6). Two Read tools for
 the agent that MAINTAINS the wiki, and deliberately not three.
 
 **`wiki_changes { since_rev, limit, cursor }`**: one entry per touched
-path, coalesced to the LATEST kind (`added` / `modified` / `deleted` /
-`renamed`) and the revision it last moved at, rev-ordered, with `total`
-and `next_cursor`. A rename re-keys the entry onto the new path and
-carries `from`; `from` is STICKY through later changes to that path, so an
-agent holding the old path still learns where it went. A path that was
-ADDED and then deleted inside the window is ELIDED - it never existed for
-the caller, so telling it to forget the path would be a wrong answer and a
-`wiki_get` on it fails; the window's FIRST kind travels through a rename
-the way `from` does, so an add that moved and was then deleted is elided
-too. `since_rev >= wiki_rev` is an empty page, never an error.
+path, rev-ordered, with `total` and `next_cursor`. `since_rev >= wiki_rev`
+is an empty page, never an error.
+
+The coalescing answers the question the CALLER asked - what its copy of
+the wiki is missing - rather than replaying the log. A path reads with its
+LATEST kind (`added` / `modified` / `deleted` / `renamed`) and the revision
+it last moved at, and a rename re-keys the entry onto the new path and
+carries `from`, sticky through later changes to that path, so an agent
+holding the old path still learns where it went. The window's FIRST kind
+travels the same way, and where it is `added` it DECIDES:
+
+- added, then anything but deleted, reads `added` at the final path with
+  no `from` - to a caller at `since_rev` the document is simply new,
+  whatever happened to it in between (`add -> modify`, `add -> rename`);
+- added, then deleted, is ELIDED - it never existed for the caller, so
+  telling it to forget the path would be a wrong answer and a `wiki_get`
+  on it fails;
+- a path that existed AT `since_rev` keeps its real story: its deletion
+  reads `deleted`, its move `renamed` with the path it came from.
 
 - **The per-revision history rides the FOLD CACHE (§4.1).** Nothing is
   stored beside the applied entries, and there is no second staleness
@@ -694,8 +703,9 @@ fold touched; both reads page and report their totals) plus
 and flags the rest and reaches the same answer as a fresh fold; the
 history is answered from the CACHE, proven by a rewrite of the applied
 payloads the cache cannot notice; a path added and deleted inside the
-window is elided; a rename chain reports where it started; a void patch is
-not a revision) and the two hygiene tests in `wiki_index/graph.rs`. The
+window is elided while one only added reads `added`; a rename chain
+reports where it started to a caller that held the old path and reads
+`added` to one that did not; a void patch is not a revision) and the two hygiene tests in `wiki_index/graph.rs`. The
 existing `the_fold_cache_equals_a_fresh_fold_after_every_block`
 (`chain/projection_tests.rs`) keeps the shared fold step honest against
 `molt_core::wiki_fold`.

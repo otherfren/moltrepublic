@@ -189,7 +189,8 @@ async fn a_rename_moves_a_path_out_of_the_orphan_list() {
         "notes/b.md is pointed at now, notes/old.md is gone"
     );
 
-    let list = change_list(&changes(&w, 0, 0, 0).await);
+    // from revision 2 the caller HELD notes/old.md, so the move is the news
+    let list = change_list(&changes(&w, 2, 0, 0).await);
     let moved = list
         .iter()
         .find(|c| c.path == "notes/b.md")
@@ -200,6 +201,15 @@ async fn a_rename_moves_a_path_out_of_the_orphan_list() {
         !list.iter().any(|c| c.path == "notes/old.md"),
         "one entry per path: the old path rides the rename's `from`"
     );
+
+    // …and to a caller that never held it, the document is simply NEW at
+    // the path it ended up on
+    let list = change_list(&changes(&w, 0, 0, 0).await);
+    let moved = list
+        .iter()
+        .find(|c| c.path == "notes/b.md")
+        .expect("still one entry");
+    assert_eq!((moved.kind.as_str(), moved.from.as_deref()), ("added", None));
 }
 
 /// **Keystone 3**: `since_rev` answers exactly the paths the FOLD touched
@@ -255,14 +265,22 @@ async fn since_rev_answers_exactly_the_paths_the_fold_touched() {
     }
 
     // coalesced: notes/a.md was added at 1 and edited at 3, and reads as ONE
-    // entry carrying the latest kind
+    // entry - `added`, because to a caller at revision 0 it is simply new
     let list = change_list(&changes(&w, 0, 0, 0).await);
     assert_eq!(
         list.iter()
             .map(|c| (c.path.as_str(), c.kind.as_str(), c.rev))
             .collect::<Vec<_>>(),
-        vec![("notes/b.md", "added", 2), ("notes/a.md", "modified", 3)],
+        vec![("notes/b.md", "added", 2), ("notes/a.md", "added", 3)],
         "rev-ordered, one entry per path"
+    );
+    // …while a caller that already HAD it is told it changed
+    let list = change_list(&changes(&w, 1, 0, 0).await);
+    assert_eq!(
+        list.iter()
+            .map(|c| (c.path.as_str(), c.kind.as_str(), c.rev))
+            .collect::<Vec<_>>(),
+        vec![("notes/b.md", "added", 2), ("notes/a.md", "modified", 3)]
     );
 
     // …and a revision at or above the current one is an empty PAGE

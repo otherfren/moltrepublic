@@ -3089,15 +3089,17 @@ fn wiki_touch_of(f: &molt_core::wiki_fold::PatchFile) -> crate::WikiTouch {
 }
 
 /// The read-time half of [`Command::WikiChanges`]: the history above
-/// `since_rev` coalesced to ONE entry per path, carrying the latest kind
-/// and the revision it last moved at.
+/// `since_rev` coalesced to ONE entry per path.
 ///
 /// A rename re-keys the entry onto the new path and carries two things
 /// with it: `from`, so an agent holding the old path learns where it went,
-/// and the window's FIRST kind. The first kind is what lets a path that
-/// was ADDED and then deleted inside the window be elided - telling a
-/// caller to forget a path it never saw is a wrong answer, and a
-/// `wiki_get` on it fails.
+/// and the window's FIRST kind. That first kind DECIDES the answer where
+/// it is `added`: to a caller at `since_rev` such a document is simply NEW
+/// at its final path, however it moved or was edited in between - and
+/// where it was deleted again the entry is dropped, because telling a
+/// caller to forget a path it never saw is a wrong answer and a
+/// `wiki_get` on it fails. Every other path reads with its LATEST kind and
+/// the revision it last moved at.
 fn coalesce_wiki_changes(
     history: &[crate::WikiRevChanges],
     since_rev: u64,
@@ -3135,8 +3137,17 @@ fn coalesce_wiki_changes(
         }
     }
     seen.into_values()
-        .filter(|(first, c)| !(*first == "added" && c.kind == "deleted"))
-        .map(|(_, c)| c)
+        .filter_map(|(first, mut c)| {
+            if first != "added" {
+                return Some(c);
+            }
+            if c.kind == "deleted" {
+                return None;
+            }
+            c.kind = "added".to_string();
+            c.from = None;
+            Some(c)
+        })
         .collect()
 }
 
@@ -3656,18 +3667,29 @@ mod wiki_maintenance_tests {
         ));
     }
 
-    /// A rename CHAIN keeps its origin: an agent holding `notes/a.md` learns
-    /// where it went even when the path moved twice inside one window.
+    /// A rename CHAIN keeps its origin: an agent holding `notes/a.md`
+    /// learns where it went even when the path moved twice inside one
+    /// window - and one that never held it is simply told it is new.
     #[test]
     fn a_rename_chain_reports_the_path_it_started_from() {
         let mut st = crate::tests::plain_state();
         apply(&mut st, &[ADD_A, MOVE_A_B, MOVE_B_C]);
-        let (list, wiki_rev, _, _) = changes(&mut st, 0);
+
+        // the window starts AFTER the add, so the caller holds notes/a.md
+        let (list, wiki_rev, _, _) = changes(&mut st, 1);
         assert_eq!(wiki_rev, 3);
         assert_eq!(list.len(), 1, "one entry per path, not one per hop");
         assert_eq!(
             (list[0].path.as_str(), list[0].kind.as_str(), list[0].from.as_deref()),
             ("notes/c.md", "renamed", Some("notes/a.md"))
+        );
+
+        // …and from the start of the window the document is simply NEW at
+        // the path it ended up on: there is no old path to forget
+        let (list, _, _, _) = changes(&mut st, 0);
+        assert_eq!(
+            (list[0].path.as_str(), list[0].kind.as_str(), list[0].from.as_deref()),
+            ("notes/c.md", "added", None)
         );
     }
 
@@ -3704,6 +3726,17 @@ mod wiki_maintenance_tests {
         let mut st = crate::tests::plain_state();
         apply(&mut st, &[ADD_A, MOVE_A_B, DEL_B]);
         assert!(changes(&mut st, 0).0.is_empty());
+        // …while without the delete the same window reads it as NEW
+        let mut fresh = crate::tests::plain_state();
+        apply(&mut fresh, &[ADD_A, MOVE_A_B]);
+        assert_eq!(
+            changes(&mut fresh, 0)
+                .0
+                .iter()
+                .map(|c| (c.path.as_str(), c.kind.as_str(), c.from.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![("notes/b.md", "added", None)]
+        );
         assert_eq!(
             changes(&mut st, 1)
                 .0
