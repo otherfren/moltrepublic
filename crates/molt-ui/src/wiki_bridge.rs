@@ -185,6 +185,15 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
     });
     // the details modal shows the WHOLE change; the panel list is capped
     s.set_cs_patch(w.build_patch().unwrap_or_default().into());
+    s.set_cs_vote_queued(w.vote_pending());
+    // …and the BYTES any changed document still lacks (§4.10), whether or
+    // not a tab is open: a delete or move made in the navigator needs the
+    // ratified text just as much, and asking only for the OPEN document
+    // left those waiting forever. Idempotent: the reply fills the model
+    // and the next sync asks for nothing.
+    if let Some(want) = w.wants_content() {
+        s.invoke_content_wanted(want.into());
+    }
     if let Some(doc) = w.active() {
         let id = doc.id;
         let path_changed = s.get_doc_path().as_str() != doc.path;
@@ -240,12 +249,6 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
         sync_model(&s.get_props(), props, PartialEq::eq, |m| s.set_props(m));
         sync_model(&s.get_tag_pills(), tags, PartialEq::eq, |m| s.set_tag_pills(m));
         s.set_can_add_tags(w.can_add_tags());
-        // …and the BYTES of the document being looked at, if this node
-        // does not hold them yet (§4.10). Idempotent: the reply fills the
-        // model and the next sync asks for nothing.
-        if let Some(want) = w.wants_content() {
-            s.invoke_content_wanted(want.into());
-        }
         // the in-edges come from the engine, so they are fetched only when
         // the open document actually changed
         if path_changed {
@@ -514,8 +517,39 @@ pub(crate) fn wire_wiki(
         let weak = ui.as_weak();
         g.on_content_arrived(move |path, content| {
             let Some(ui) = weak.upgrade() else { return };
-            m.borrow_mut().load_base(&path, &content);
+            // the flag is TAKEN here, before the vote runs: a second
+            // arrival must not propose the same patch again
+            let fire = {
+                let mut w = m.borrow_mut();
+                w.load_base(&path, &content);
+                let fire = w.vote_pending() && w.unloaded_changes().is_empty();
+                if fire {
+                    w.clear_vote();
+                }
+                fire
+            };
             sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            if fire {
+                ui.global::<WikiState>().invoke_cs_vote();
+            }
+        });
+    }
+
+    // the bytes could not be read at all: a queued vote must be released
+    // with a reason rather than wait forever
+    {
+        let m = model.clone();
+        let la = last.clone();
+        let weak = ui.as_weak();
+        g.on_content_failed(move |_path| {
+            let Some(ui) = weak.upgrade() else { return };
+            if !m.borrow().vote_pending() {
+                return;
+            }
+            m.borrow_mut().clear_vote();
+            sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            let msg = ui.global::<Strings>().get_mem_toast_content_failed();
+            ui.invoke_show_toast_error(msg);
         });
     }
 
@@ -1015,18 +1049,23 @@ pub(crate) fn wire_wiki_vote(
     let cx = cx.clone();
     ui.global::<WikiState>().on_cs_vote(move || {
         let Some(ui) = weak.upgrade() else { return };
+        // this click decides: whatever was queued is superseded by it
+        m.borrow_mut().clear_vote();
         let Some(patch) = m.borrow().build_patch() else {
+            // bytes still on their way: QUEUE the vote and ask again. It
+            // used to say "try again in a moment" over a request nobody
+            // had made - a refusal the member could hit forever.
+            if !m.borrow().unloaded_changes().is_empty() {
+                m.borrow_mut().queue_vote();
+                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+                let msg = ui.global::<Strings>().get_mem_toast_vote_queued();
+                ui.invoke_show_toast(msg);
+                return;
+            }
             // an EMPTY folder is not expressible in a git patch, and it is
             // not noise either: reverting here threw the member's folder
             // away and said "changes cancel out", which was true of the
             // patch and false of their work
-            // bytes still on their way: the request is already in flight
-            // (sync_wiki asks for them), so this is "not yet", not "no"
-            if !m.borrow().unloaded_changes().is_empty() {
-                let msg = ui.global::<Strings>().get_mem_toast_loading();
-                ui.invoke_show_toast(msg);
-                return;
-            }
             let folders = m.borrow().empty_added_folders();
             if !folders.is_empty() {
                 let msg = ui.global::<Strings>().get_mem_toast_folder_only();
@@ -1198,18 +1237,47 @@ pub(crate) fn wire_wiki_index(ui: &AppWindow, ctx: &Ctx) {
             let weak = cx.weak.clone();
             let wanted = path.to_string();
             cx.rt.spawn(async move {
-                let Ok(Reply::WikiDocument { content, .. }) = wh
-                    .execute(Command::WikiGet {
-                        path: wanted.clone(),
-                    })
-                    .await
-                else {
-                    return; // an unknown path is a base that moved under us
-                };
+                // BOUNDED, then loud. Dropping the failure silently left a
+                // queued vote waiting for bytes nobody was fetching any
+                // more; a retry loop instead of a bound would spin. Three
+                // tries cover the transient refusals (the index still
+                // building, the base still arriving), and the next sync
+                // asks again anyway - every model mutation syncs, and the
+                // Vote click re-requests.
+                let mut content = None;
+                let mut why = String::new();
+                for wait in [1u64, 3, 0] {
+                    match wh
+                        .execute(Command::WikiGet {
+                            path: wanted.clone(),
+                        })
+                        .await
+                    {
+                        Ok(Reply::WikiDocument { content: c, .. }) => {
+                            content = Some(c);
+                            break;
+                        }
+                        other => {
+                            why = format!("{other:?}");
+                            if wait == 0 {
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                        }
+                    }
+                }
+                if content.is_none() {
+                    tracing::warn!(path = %wanted, error = %why, "wiki content unreadable");
+                }
                 let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = weak.upgrade() {
-                        ui.global::<WikiState>()
-                            .invoke_content_arrived(wanted.into(), content.into());
+                    let Some(ui) = weak.upgrade() else { return };
+                    let g = ui.global::<WikiState>();
+                    match content {
+                        Some(c) => g.invoke_content_arrived(wanted.into(), c.into()),
+                        // a path the ratified base no longer carries is a
+                        // base that MOVED under us: `base_arrived` rebases
+                        // and re-asks under the new path
+                        None => g.invoke_content_failed(wanted.into()),
                     }
                 });
             });

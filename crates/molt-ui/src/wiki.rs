@@ -123,7 +123,7 @@ pub enum BlockStatus {
 
 /// The ratified counterpart of a working doc (mock sample data stands in
 /// for the chain-backed base until story 14 lands).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct BaseDoc {
     path: String,
     /// The ratified bytes - `None` while this document's content has not
@@ -135,7 +135,7 @@ struct BaseDoc {
     raw: Option<String>,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Doc {
     pub id: DocId,
     /// Current path, `folder/file.md` or `file.md` (single-level tree).
@@ -251,7 +251,7 @@ struct Draft {
     base_rev: u64,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum Change {
     Created { id: DocId, label: String },
     CreatedFolder { name: String },
@@ -336,6 +336,10 @@ pub struct Wiki {
     /// The raw editor's caret, bound to the document it was measured in -
     /// an offset carried over from another tab is stale by construction.
     cursor: Option<(DocId, usize)>,
+    /// A vote fired while a changed document's ratified bytes were still
+    /// on their way (`knowledge_base_scale.md` §4.10): the changeset it
+    /// was fired over. It fires itself when they land.
+    vote_pending: Option<Vec<Change>>,
 }
 
 /// The `+ Tag` and "semantic link" modals while they are open.
@@ -463,6 +467,7 @@ impl Wiki {
             ont: OntologyDraft::default(),
             relation_vocab: Vec::new(),
             cursor: None,
+            vote_pending: None,
         }
     }
 
@@ -487,6 +492,7 @@ impl Wiki {
             ont: OntologyDraft::default(),
             relation_vocab: Vec::new(),
             cursor: None,
+            vote_pending: None,
         }
     }
 
@@ -2534,14 +2540,36 @@ impl Wiki {
     /// The document whose bytes are wanted next: the ACTIVE one first (it
     /// is what the human is looking at), then anything they changed
     /// without ever opening - a delete from the navigator, say, which
-    /// needs the ratified text before it can become a patch.
+    /// needs the ratified text before it can become a patch. Always the
+    /// BASE path: a locally renamed document's working path is one the
+    /// ratified base does not carry, and `load_base` keys on the base
+    /// path, so the answer could not land under anything else.
     pub fn wants_content(&self) -> Option<String> {
         if let Some(d) = self.active() {
-            if !d.loaded() {
-                return Some(d.path.clone());
+            if let Some(b) = d.base.as_ref().filter(|_| !d.loaded()) {
+                return Some(b.path.clone());
             }
         }
         self.unloaded_changes().into_iter().next()
+    }
+
+    /// A vote was fired over bytes that are still on their way: it is
+    /// QUEUED, not refused (§4.10), and fires itself when they land.
+    pub fn queue_vote(&mut self) {
+        self.vote_pending = Some(self.stack.clone());
+    }
+
+    /// Is a queued vote still the changeset the member fired it over? Any
+    /// later action makes it a different thing to sign, so it lapses.
+    pub fn vote_pending(&self) -> bool {
+        self.vote_pending
+            .as_deref()
+            .is_some_and(|s| s == self.stack.as_slice())
+    }
+
+    /// Drop a queued vote - it fired, or the member superseded it.
+    pub fn clear_vote(&mut self) {
+        self.vote_pending = None;
     }
 
     /// Changed documents whose ratified bytes are not fetched yet. A
@@ -2551,7 +2579,7 @@ impl Wiki {
         self.docs
             .iter()
             .filter(|d| d.status() != Status::Unchanged && !d.loaded())
-            .map(|d| d.path.clone())
+            .filter_map(|d| d.base.as_ref().map(|b| b.path.clone()))
             .collect()
     }
 
@@ -3571,6 +3599,64 @@ mod tests {
         w.set_base(&[("a.md".to_string(), None)], 2);
         let a = w.docs.iter().find(|d| d.path == "a.md").expect("a.md");
         assert!(!a.loaded(), "a new revision invalidates the cached content");
+    }
+
+    /// **Bytes are fetched under the BASE path, never the working one.**
+    /// A rename made in the navigator moves `Doc.path` while the ratified
+    /// counterpart still sits at the old one; asking the engine for the
+    /// NEW path gets an unknown-path error, and `load_base` (keyed on the
+    /// base path) could not land the reply anyway - the vote then refused
+    /// forever.
+    #[test]
+    fn unfetched_bytes_are_wanted_under_the_base_path_not_the_working_one() {
+        let mut w = Wiki::empty();
+        w.set_base(&[("a.md".to_string(), None)], 1);
+        let id = w.docs.first().expect("a.md").id;
+
+        // renamed without ever being opened: still Modified, still unloaded
+        w.rename_commit(id, "b.md").expect("rename");
+        assert_eq!(w.unloaded_changes(), vec!["a.md".to_string()]);
+        assert_eq!(w.wants_content().as_deref(), Some("a.md"));
+
+        // the OPEN document asks under its base path too
+        w.open(id);
+        assert_eq!(w.wants_content().as_deref(), Some("a.md"));
+
+        w.load_base("a.md", "alpha\n");
+        assert!(w.unloaded_changes().is_empty(), "the reply landed");
+        let patch = w.build_patch().expect("a rename is a patch");
+        assert!(patch.contains("rename from a.md"), "{patch}");
+        assert!(patch.contains("rename to b.md"), "{patch}");
+    }
+
+    /// **A queued vote is the changeset it was fired over.** It survives
+    /// the wait for the bytes and dies the moment the member changes
+    /// something else - signing a changeset nobody looked at is the one
+    /// outcome worse than a refused click.
+    #[test]
+    fn a_queued_vote_survives_the_wait_and_dies_on_a_new_change() {
+        let mut w = Wiki::empty();
+        w.set_base(&[("a.md".to_string(), None)], 1);
+        let id = w.docs.first().expect("a.md").id;
+        w.delete(id);
+        assert!(!w.vote_pending(), "nothing is queued yet");
+
+        w.queue_vote();
+        assert!(w.vote_pending());
+        // the bytes arriving are not a change: the vote still stands
+        w.load_base("a.md", "alpha\n");
+        assert!(w.vote_pending());
+
+        // …but any further action is a different changeset
+        w.undo().expect("undo the deletion");
+        assert!(!w.vote_pending(), "a changed changeset cancels the vote");
+
+        // and it fires exactly once
+        w.delete(id);
+        w.queue_vote();
+        assert!(w.vote_pending());
+        w.clear_vote();
+        assert!(!w.vote_pending(), "a fired vote does not fire twice");
     }
 
     /// **A folder-only changeset has nothing to propose - and must keep

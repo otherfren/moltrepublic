@@ -750,6 +750,22 @@ per-patch provenance).
   Content is cached per REVISION: a base that moved may have moved this
   document too, so held bytes are dropped and re-fetched.
 
+  **The fetch and the vote - BUILT 2026-09-05.** Bytes are requested under
+  the BASE path, for every changed document, whether or not it is open,
+  and a vote fired while any of them is still in flight is QUEUED: the
+  click marks it pending (`Wiki::vote_pending`, mirrored as
+  `WikiState.cs-vote-queued`), re-requests, and the arrival fires the
+  proposal without a second click - cancelled only by a later change to
+  the changeset, which is a different thing to sign. The two failure modes
+  it replaced, so nobody rebuilds them: the request rode the OPEN document
+  only, so a delete or move made in the navigator left its bytes unfetched
+  forever; and it named the WORKING path, so a locally renamed document
+  asked for a path the ratified base does not carry and `load_base` (keyed
+  on the base path) could not have landed the answer anyway. A `wiki_get`
+  that fails is retried a bounded three times and then reported
+  (`content-failed`), which releases a queued vote with an honest error
+  rather than leaving it waiting forever.
+
 - Validation: the headless GUI tests in `crates/molt-ui/src/tests/gui/`
   and ONE `cargo build -j 1 -p molt-ui-window -p molt-ui` per change-set.
 
