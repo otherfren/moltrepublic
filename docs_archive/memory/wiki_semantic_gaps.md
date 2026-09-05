@@ -1,8 +1,12 @@
 # What the wiki still lacks to be a semantic knowledge base an agent can use
 
-Status: ANALYSIS + three decisions (user, 2026-09-05); the rest still
-open. Every "today" claim below was read out of the tree at that date
-(file:line given); the comparisons to other systems carry their sources.
+Status: EXECUTED 2026-09-05. All six steps of §7 are built and merged on
+master; the shipping spec of what they built is
+`docs_archive/memory/knowledge_base_scale.md` §4.4-§4.6 and §4.10-§4.12.
+The body stays as the historical record: every "today" claim below was
+read out of the tree on 2026-09-05 (file:line given) and describes the
+state BEFORE these steps; the comparisons to other systems carry their
+sources.
 
 **Decided 2026-09-05** (§7 is the build order that follows; §5 is empty -
 everything is either decided against or scheduled):

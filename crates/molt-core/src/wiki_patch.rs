@@ -2,7 +2,7 @@
 
 //! The unified-diff EMITTER — the exact inverse of
 //! [`crate::wiki_fold::apply_patch`], which is why it lives beside it
-//! (`docs/memory/wiki_semantic_gaps.md` §7 step 5). One emitter for both
+//! (`docs_archive/memory/wiki_semantic_gaps.md` §7 step 5). One emitter for both
 //! writers: the GUI's changeset vote and the engine's structured
 //! `wiki_edit` produce the same bytes, so members see one diff shape.
 //!

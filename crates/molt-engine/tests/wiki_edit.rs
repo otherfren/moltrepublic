@@ -2,7 +2,7 @@
 #![allow(missing_docs)]
 
 //! **What an agent can WRITE to the wiki**, over a real engine
-//! (`docs/memory/wiki_semantic_gaps.md` §7 step 5): structured edits
+//! (`docs_archive/memory/wiki_semantic_gaps.md` §7 step 5): structured edits
 //! against the current base instead of a hand-written positional diff,
 //! and a refusal AT THE CALL when one of them cannot land.
 
