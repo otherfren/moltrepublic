@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! **The folded wiki base on the file plane** (K6,
-//! `docs/memory/knowledge_base_scale.md` §4.9.7).
+//! `docs_archive/memory/knowledge_base_scale.md` §4.9.7).
 //!
 //! A folded cut names the ratified wiki by content hash and drops the
 //! patches that produced it. The bytes travel here: the same piece plane
@@ -60,7 +60,19 @@ impl crate::State {
     /// gives up" means here (§4.9.9).
     pub(crate) fn wiki_base_tick(&mut self) {
         if self.chain.wiki_base.is_some() {
+            self.files.wiki_base_fetching = None;
             return;
+        }
+        let want = self.wiki_base_committed().map(|(hash, _)| hash);
+        // a SECOND cut moved the commitment: the running fetch is after
+        // bytes no holder keeps any more (each keeps the current tree
+        // only), so it is abandoned rather than left to wait forever
+        if self.files.wiki_base_fetching != want {
+            if let Some(h) = self.files.wiki_base_fetch.take() {
+                h.abort();
+            }
+            self.files.wiki_base_fetching = None;
+            self.files.wiki_base_next_try = 0;
         }
         if self
             .files
@@ -78,6 +90,7 @@ impl crate::State {
         let Some(series) = self.wiki_base_series() else {
             return;
         };
+        self.files.wiki_base_fetching = Some(series.hash.clone());
         let (Some(cmd_tx), Some(channel)) = (self.cmd_tx.upgrade(), self.nostr_file_channel())
         else {
             return;
@@ -87,10 +100,15 @@ impl crate::State {
             size = series.size,
             "shared memory base: fetching"
         );
+        // a day back, not the epoch: a holder may have published these
+        // pieces for another fetcher minutes ago, and the catch-up window
+        // set is bounded either way
+        let from = crate::now_secs().saturating_sub(24 * 60 * 60);
         self.files.wiki_base_fetch = Some(crate::transfer::spawn_wiki_base_fetch(
             channel,
             series.id,
             series.key,
+            from,
             molt_net::file_plane::SeriesExpect {
                 count: series.count,
                 size: series.size,

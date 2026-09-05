@@ -1642,6 +1642,7 @@ pub(crate) fn spawn_wiki_base_fetch(
     channel: molt_net::ritual_net::GroupChannel,
     id: MessageId,
     key: [u8; 32],
+    from: u64,
     expect: molt_net::file_plane::SeriesExpect,
     scope: u64,
     cmd_tx: mpsc::Sender<Envelope>,
@@ -1681,7 +1682,7 @@ pub(crate) fn spawn_wiki_base_fetch(
         let outcome = molt_net::file_plane::fetch_series_v2_with(
             &channel,
             &key,
-            0,
+            from,
             &expect,
             &mut sink,
             opts,

@@ -74,7 +74,7 @@ Auth failures come back as JSON-RPC error `-32001`:
 ## The read-only key
 
 A SECOND key, `[mcp].read_token`, admits the READ tools only
-(`docs/memory/knowledge_base_scale.md` §4.7). It is issued, rotated and revoked
+(`docs_archive/memory/knowledge_base_scale.md` §4.7). It is issued, rotated and revoked
 in the same panel as the seat key, and it is host posture like every other
 setting there — an agent can neither issue itself one nor read one back.
 

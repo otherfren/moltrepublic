@@ -2,7 +2,7 @@
 #![allow(missing_docs)]
 
 //! **K6 keystone - a folded cut over a real 2-of-2 republic**
-//! (`docs/memory/knowledge_base_scale.md` §4.9): the cut collapses the
+//! (`docs_archive/memory/knowledge_base_scale.md` §4.9): the cut collapses the
 //! wiki's ratified patches into one commitment and drops them, the wiki
 //! stays readable on both seats, and a holder that LOSES its copy of the
 //! folded tree fetches it back over the file plane instead of reporting

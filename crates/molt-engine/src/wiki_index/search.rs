@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Full-text search over the folded base
-//! (`docs/memory/knowledge_base_scale.md` §4.6).
+//! (`docs_archive/memory/knowledge_base_scale.md` §4.6).
 //!
 //! A RAM index, rebuilt from the fold and never written to disk: like the
 //! link graph it is a pure derivation, so losing it costs a rebuild and

@@ -59,7 +59,7 @@ mod wiki_index;
 /// The wiki's body links — markdown destinations ending in `.md` plus the
 /// readable `[[Name]]` form, code masked out. ONE parser: the GUI's link
 /// navigation reads the same edges the index does
-/// (`docs/memory/knowledge_base_scale.md` §4.5).
+/// (`docs_archive/memory/knowledge_base_scale.md` §4.5).
 pub use wiki_index::graph::body_links;
 
 /// The document header's boundaries, its properties and what counts as a
@@ -651,6 +651,11 @@ pub(crate) struct FilePlane {
     /// would restart it every second for as long as the republic is
     /// quiet.
     pub(crate) wiki_base_next_try: u64,
+    /// Which commitment the running fetch is after. A second cut moves the
+    /// commitment, and holders keep only the CURRENT tree - so a fetch
+    /// left running for the old one would wait forever for bytes nobody
+    /// has any more.
+    pub(crate) wiki_base_fetching: Option<String>,
     pub(crate) mirror_quota_noted: bool,
     /// Verified pieces of each running mirror fetch, as last reported.
     pub(crate) mirror_progress: HashMap<molt_core::MessageId, u32>,
@@ -858,7 +863,7 @@ pub(crate) struct RecoveryState {
 }
 
 /// The folded Memory base, kept across reads
-/// (`docs/memory/knowledge_base_scale.md` §4.1). A pure DERIVATION of the
+/// (`docs_archive/memory/knowledge_base_scale.md` §4.1). A pure DERIVATION of the
 /// applied logs: dropping it costs a refold, never a different tree.
 pub(crate) struct WikiCache {
     /// The folded tree.
@@ -971,7 +976,7 @@ pub(crate) struct State {
     pub(crate) wiki_search_dirty: std::collections::BTreeSet<String>,
     /// The epoch an OFF-ACTOR index build is running under, if any - the
     /// in-flight guard, so N reads spawn one build and not N
-    /// (`docs/memory/knowledge_base_scale.md` §4.5/§4.6).
+    /// (`docs_archive/memory/knowledge_base_scale.md` §4.5/§4.6).
     pub(crate) wiki_index_building: Option<u64>,
     /// Where an off-actor build parks its result. Neither index type is
     /// serializable, so the artefacts ride a shared slot and the internal
@@ -1212,6 +1217,7 @@ impl State {
             files: FilePlane {
                 wiki_base_fetch: None,
                 wiki_base_next_try: 0,
+                wiki_base_fetching: None,
                 share_paths: HashMap::new(),
                 downloads: HashMap::new(),
                 serve_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),

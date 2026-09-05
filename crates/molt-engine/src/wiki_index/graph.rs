@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The link graph (`docs/memory/knowledge_base_scale.md` §4.5): who points
+//! The link graph (`docs_archive/memory/knowledge_base_scale.md` §4.5): who points
 //! at whom, and under which predicate.
 //!
 //! A pure function of the folded tree, so every node computes the same

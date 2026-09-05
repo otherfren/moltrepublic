@@ -143,7 +143,6 @@ fn org_titles_render_in_the_active_language_from_the_op_placeholder() {
 #[test]
 fn applied_log_lines_carry_their_patch_id() {
     let snap = molt_core::SurfaceSnapshot {
-        wiki_base_pending: None,
         surface: Surface::Memory,
         gated: true,
         applied: vec![
@@ -186,6 +185,7 @@ fn applied_log_lines_carry_their_patch_id() {
         has_archive: false,
         wiki_docs: 0,
         wiki_rev: 0,
+        wiki_base_pending: None,
     };
     let data = surface_data(0, Surface::Memory, &snap, "petra", None, &HashMap::new());
     assert_eq!(data.log.len(), 2);

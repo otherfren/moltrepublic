@@ -125,7 +125,7 @@ pub(crate) fn parse_retention_days(value: &str) -> Option<u64> {
 /// pool probing lands (`with_size_budget` has no production caller yet), a
 /// SMALLER probed budget belongs here as a second, node-local refusal — not
 /// as a replacement for this shared one.
-fn transport_plaintext_ceiling() -> usize {
+pub(crate) fn transport_plaintext_ceiling() -> usize {
     molt_net::envelope::max_plaintext_for(molt_net::relay_runtime::DEFAULT_SIZE_BUDGET)
 }
 
@@ -1715,7 +1715,7 @@ impl State {
     /// THE Shared-Memory base (shared_memory_real.md): the deterministic
     /// fold of the applied wiki_patch payloads in chain order over the
     /// empty founding tree. Served through the fold CACHE
-    /// (`docs/memory/knowledge_base_scale.md` §4.1): one code path still
+    /// (`docs_archive/memory/knowledge_base_scale.md` §4.1): one code path still
     /// decides the tree — the cache only decides how often it is recomputed.
     ///
     /// # Errors
@@ -1742,7 +1742,7 @@ impl State {
     }
 
     /// [`Command::WikiList`]: one page of the folded base, metadata only
-    /// (`docs/memory/knowledge_base_scale.md` §4.3). Paths are sorted, so
+    /// (`docs_archive/memory/knowledge_base_scale.md` §4.3). Paths are sorted, so
     /// a prefix selects a contiguous run and the cursor is just the last
     /// path handed out.
     pub(crate) fn cmd_wiki_list(

@@ -1,14 +1,14 @@
 # Knowledge base at scale: the shared wiki for tens of thousands of entries
 
-**Status: PARTLY BUILT - design of 2026-09-03, decisions ratified by the
-user the same evening (§1). K0-K5 and K7 landed on master 2026-09-04;
-K6 is DESIGNED as option (b) after the user's decision of the same
-evening (§4.9) and is being built; K7's lazy tree and the off-actor index
-builds are being built with it.** Extends the
-executed fold design `docs_archive/memory/shared_memory_real.md` and the
-export `docs_archive/memory/wiki_export_plan.md`; K6 changes what a
-checkpoint carries (`docs_archive/chain/log_compaction.md` §B.6a) and its
-review gate RAN - see §4.9.
+**Status: EXECUTED - designed 2026-09-03, decisions ratified by the user
+the same evening (§1), built 2026-09-04/05. K0-K5 and K7 landed on
+2026-09-04; K6 (the folded cut and the base's own file-plane series) on
+2026-09-05, after its review gate rejected the original design and the
+user chose option (b) - §4.9 is that design as built. The two forks it
+left, the tree's key and the fetch's pace, are decided in §8.** Extends
+the executed fold design `docs_archive/memory/shared_memory_real.md` and
+the export `docs_archive/memory/wiki_export_plan.md`; K6 changes what a
+checkpoint carries (`docs_archive/chain/log_compaction.md` §B.6a).
 
 The goal: a republic's shared wiki becomes a general, decentralised
 knowledge base - tens of thousands of entries, dense cross-references, a
@@ -653,16 +653,32 @@ per-patch provenance).
     §4.9.4), `own_checkpoint_state(upto, folded)`, the wire's `folded`
     flag, and the keystone that pins all four hash readings against each
     other. Accepting a folded cut works from here; proposing one does not.
-  - **K6b The base store** - `State.chain.wiki_base` persisted beside
-    `chain.state`, filled at the cut from the fold the holder just ran,
-    and base-pending (§4.9.6) where it is missing: `wiki_base()` answers
-    the pending state, `supersede_stale_wiki` is a NO-OP, every wiki read
-    refuses by name.
-  - **K6c The transport** (§4.9.7): the tree's own job family on the file
-    plane, the holder gossip carrying the manifest root, the key (§8.4)
-    and the pace (§8.5).
-  - **K6d Flip `FOLD_CUTS`** and the `CheckpointServed` size guard
-    (§4.9.8).
+  - **K6b The base store** - BUILT 2026-09-05. `wiki_base.bin` beside
+    `chain.state`, written BEFORE the prune and checked against the
+    commitment on open; base-pending (§4.9.6) where it is missing:
+    `wiki_base()` returns `MoltError::WikiBasePending`,
+    `supersede_stale_wiki` is a NO-OP (pinned by a keystone that goes
+    Rejected without it), every wiki read refuses by name, and the Memory
+    snapshot carries the progress instead of an empty tree.
+  - **K6c The transport** - BUILT 2026-09-05 (§4.9.7). The base is a
+    content-addressed series on the file plane: id and key both derived
+    from the commitment, so every holder publishes into ONE series and a
+    fetcher takes pieces from whoever is online. No holder gossip and no
+    election - a holder answers what it holds. `wiki_base.bin` is framed
+    in PIECE-sized frames, so the sender serves piece k with one seek and
+    one decrypt and the wiki is never written out in plaintext; the fetch
+    lands in memory for the same reason. `SeriesExpect.root` became
+    optional: the chain commits to CONTENT, so the assembled bytes are
+    checked against the threshold-signed hash rather than a root learned
+    from gossip.
+  - **K6d Flip `FOLD_CUTS`** - BUILT 2026-09-05, with the
+    `CheckpointServed` size guard (§4.9.8): a blob that does not fit one
+    transport frame is not served, because an over-budget WorkspaceEvent
+    is a permanent publish stall.
+  - Keystones: `chain/checkpoint_tests.rs` (the four hash readings, the
+    legacy-after-folded refusal, the missing base, the supersede no-op)
+    and `tests/wiki_base_plane.rs` (a real 2-of-2 republic over a relay:
+    ratify, cut, lose one seat's base, fetch it back).
 - **K7 GUI** — BUILT 2026-09-04 except the lazy tree / snapshot diet,
   which is deferred with its reason in §4.10.
 
@@ -721,26 +737,30 @@ feed the facets); K7 depends on K1 and K4.
 
 ## 8. Open points
 
-1. K6's review gate RAN (2026-09-04) and the user chose option (b); §4.9
-   is now that design. Two forks inside it are still the user's:
+1. K6's review gate RAN (2026-09-04), the user chose option (b), and §4.9
+   was BUILT on 2026-09-05. The two forks it left are decided:
 
-   **8.4 The tree's encryption key.** The file plane needs a key only
-   members can derive. The rotation seed is the one shared secret a
-   rejoiner holds before it holds any chain (it rides the Welcome gift
-   wrap), so `HKDF(rotation_seed, "molt-wiki-base-v1" ‖ hash)` is the
-   simple answer - but it gives the base tree the rotation seed's
-   lifetime, i.e. NO forward secrecy, unlike the chat plane's exporter
-   ring. The alternative is the MLS exporter at the cut's epoch, which a
-   later rejoiner cannot derive, so a holder would have to re-publish
-   under the current epoch. Simple-and-weaker vs correct-and-more-moving-
-   parts; against a relay, not against a member.
+   **8.4 The tree's encryption key - DECIDED while building (2026-09-05):
+   `HKDF(rotation seed, "molt-wiki-base-v1" ‖ commitment)`.** Not because
+   it is simpler: because the series is CONTENT-ADDRESSED, and that forces
+   it. Every holder must seal the same pieces or a fetcher could not take
+   them from whoever is online, and an MLS-exporter key is epoch-bound -
+   holders would become unusable to each other after any re-key, and each
+   rejoin would cost a full re-publish. The rotation seed is also the one
+   shared secret a rejoiner holds before it holds any chain. The cost is
+   stated in the code: the base has the rotation seed's lifetime, so no
+   forward secrecy against a relay that recorded the ciphertext and later
+   obtains the seed - a member-compromise scenario in which the wiki is
+   already in the attacker's hands. Reversible: any holder can re-publish
+   under a new derivation, and only in-flight fetches would notice.
 
-   **8.5 The pace.** 100 MiB is ~2 387 pieces; at the shipped 15 s
-   trickle interval that is ~10 hours per fetching node, because the file
-   plane is deliberately paced behind chat and governance. For a
-   rejoiner's shared memory that may be the wrong pace: the base could
-   have its own faster interval, at the cost of competing with the
-   republic's live traffic while it runs.
+   **8.5 The pace - DECIDED while building: the base asks on its own
+   clock.** A share's requester is missing one file; a base-pending node
+   has no wiki at all. So the base fetch asks after 5 s and repeats every
+   60 s (a share waits 10 minutes), and the beat retries a finished fetch
+   every 15 s. The SENDER keeps the file plane's ordinary pace and daily
+   budget - the ask is one small control frame, and it is the ask, not the
+   publish rate, that was the wrong knob to leave at ten minutes.
 2. `frostem` (tantivy's stemmer) purity and the exact `yaml-rust2` event
    shape (`Event::Scalar` style + raw text) are locked against `cargo tree`
    and the compiler in K5 / K4, not assumed here.

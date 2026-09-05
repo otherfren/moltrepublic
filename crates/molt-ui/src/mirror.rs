@@ -1216,6 +1216,20 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     // being copied through here on every engine event.
     if let Some(mem) = b.surfaces.iter().find(|s| s.key == "memory") {
         let g = ui.global::<WikiState>();
+        // K6: the base is not here yet. One line, with the progress - the
+        // pane must not read as an empty knowledge base (§4.9.6).
+        let pending = mem.wiki_base_pending.map_or(String::new(), |(have, size)| {
+            let kb = |n: u64| (n + 512) / 1024;
+            format!(
+                "{} ({} / {} KB)",
+                ui.global::<Strings>().get_mem_base_pending(),
+                kb(have),
+                kb(size)
+            )
+        });
+        if g.get_base_pending().as_str() != pending {
+            g.set_base_pending(pending.into());
+        }
         let rev = i32::try_from(mem.wiki_rev).unwrap_or(i32::MAX);
         let docs = i32::try_from(mem.wiki_docs).unwrap_or(i32::MAX);
         if g.get_base_rev() != rev || g.get_base_count() != docs {

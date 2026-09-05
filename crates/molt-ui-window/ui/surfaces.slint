@@ -747,6 +747,7 @@ export component MemoryPane inherits VerticalLayout {
                         label: Strings.mem-cs-vote;
                         emoji: "🗳️";
                         primary: true;
+                        enabled: WikiState.base-pending == "";
                         clicked => {
                             WikiState.cs-vote();
                         }
@@ -864,7 +865,9 @@ export component MemoryPane inherits VerticalLayout {
                         ToolBtn {
                             glyph: "📝";
                             name: Strings.mem-tb-new-file;
-                            enabled: true;
+                            // a document written over a base this node does
+                            // not hold would be a patch against nothing
+                            enabled: WikiState.base-pending == "";
                             clicked => {
                                 WikiState.new-file();
                             }
@@ -1787,7 +1790,11 @@ export component MemoryPane inherits VerticalLayout {
                         vertical-stretch: 1;
                         alignment: center;
                         Text {
-                            text: Strings.mem-empty;
+                            // "nothing here" and "not here YET" are
+                            // different claims (§4.9.6)
+                            text: WikiState.base-pending != ""
+                                ? WikiState.base-pending
+                                : Strings.mem-empty;
                             color: Theme.faint;
                             font-size: Theme.fs-body;
                             horizontal-alignment: center;

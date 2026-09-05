@@ -474,3 +474,31 @@ fn a_headless_rejoiner_bootstraps_from_a_served_genesis() {
     );
     assert!(rejoiner.chain.pending_blocks.is_empty());
 }
+
+/// **§4.9.8: a blob that does not fit a frame is not served.** An
+/// over-budget `WorkspaceEvent` is a permanent publish stall - the holder
+/// would write nothing more, across restarts - so the honest answer to a
+/// peer's request is silence, not a self-inflicted outbox freeze.
+#[test]
+fn an_oversized_checkpoint_blob_is_never_served() {
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    b.commit_applied(1, &["petra", "walter"]);
+    let blob = checkpoint_state(&b.blocks, 1).expect("state@1");
+    assert!(
+        crate::State::served_blob_fits(&blob),
+        "an ordinary blob is servable"
+    );
+
+    // a blob whose applied history alone outgrows one frame
+    let mut fat = blob.clone();
+    fat.applied = vec![(
+        Surface::Memory,
+        (0..2_000u64)
+            .map(|i| (i, serde_json::json!({ "op": "add_note", "text": "x".repeat(200) })))
+            .collect(),
+    )];
+    assert!(
+        !crate::State::served_blob_fits(&fat),
+        "a blob past the frame budget is refused before it can stall the outbox"
+    );
+}

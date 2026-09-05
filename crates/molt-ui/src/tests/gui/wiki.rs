@@ -673,3 +673,37 @@ fn a_document_without_a_header_offers_the_republics_own_keys() {
         "no offer, no chips"
     );
 }
+
+/// **K6 §4.9.6 in the window**: while the folded base is being fetched the
+/// pane must not read as an empty knowledge base. "Nothing here yet" and
+/// "not here YET" are different claims, and the second one is the true one.
+#[test]
+fn a_pending_base_replaces_the_empty_state() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    ui.set_screen(AppScreen::Main);
+    ui.set_selected_surface("memory".into());
+    ui.set_selected_view("brain".into());
+    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: "memory".into(),
+        ..SurfaceTab::default()
+    }])));
+    let _wiki = wire_wiki(&ui);
+    let g = ui.global::<WikiState>();
+    ui.window().set_size(slint::PhysicalSize::new(1400, 900));
+    ui.show().expect("show headless");
+
+    let empty = ui.global::<Strings>().get_mem_empty().to_string();
+    let seen = |label: &str| {
+        i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, label).count() > 0
+    };
+    assert!(seen(&empty), "an empty wiki says so");
+
+    g.set_base_pending("Shared memory arriving (0 / 42 KB)".into());
+    assert!(
+        seen("Shared memory arriving (0 / 42 KB)"),
+        "the pending line takes the empty state's place"
+    );
+    assert!(!seen(&empty), "…and the empty claim is gone");
+}

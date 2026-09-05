@@ -265,7 +265,7 @@ pub fn outer_key(key: &[u8; 32]) -> [u8; 32] {
 }
 
 /// **The folded wiki base's series key** (K6,
-/// `docs/memory/knowledge_base_scale.md` §8.4): `HKDF-SHA256(ikm = the
+/// `docs_archive/memory/knowledge_base_scale.md` §8.4): `HKDF-SHA256(ikm = the
 /// rotation seed, info = "molt-wiki-base-v1" ‖ commitment)`.
 ///
 /// DERIVED, never minted, and that is the whole argument: the series is

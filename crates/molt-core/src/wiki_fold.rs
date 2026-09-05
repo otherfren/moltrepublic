@@ -366,7 +366,7 @@ pub fn apply_patch(
 /// more of the tree than these: [`apply_patch`] reads and writes only the
 /// paths it names, so its verdict over a tree RESTRICTED to them equals
 /// its verdict over the whole tree
-/// (`docs/memory/knowledge_base_scale.md` §4.2).
+/// (`docs_archive/memory/knowledge_base_scale.md` §4.2).
 pub fn touched_paths(files: &[PatchFile]) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for f in files {

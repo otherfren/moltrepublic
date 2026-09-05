@@ -148,6 +148,36 @@ impl State {
         self.record(env);
     }
 
+    /// **Does a served blob fit one transport frame?** (K6 §4.9.8.)
+    ///
+    /// An over-budget `WorkspaceEvent` is a PERMANENT publish stall: the
+    /// node writes nothing more, across restarts. So a pruned holder whose
+    /// blob outgrew the frame budget would brick its own outbox the first
+    /// time a peer asked for catch-up below its anchor. Nothing else
+    /// measures a WorkspaceEvent against the transport budget
+    /// (`payload_fits` covers proposals), and this is the one event whose
+    /// size a PEER's request decides.
+    ///
+    /// Not serving costs that peer one bootstrap source; serving would
+    /// cost this node every future write.
+    pub(crate) fn served_blob_fits(blob: &molt_core::CheckpointState) -> bool {
+        // room for the envelope around the event; the number it guards is
+        // tens of kilobytes, so the reserve is deliberately generous
+        const ENVELOPE_RESERVE: usize = 2048;
+        let len = serde_json::to_vec(&WorkspaceEvent::CheckpointServed { blob: blob.clone() })
+            .map_or(usize::MAX, |b| b.len());
+        let cap = crate::proposals::transport_plaintext_ceiling().saturating_sub(ENVELOPE_RESERVE);
+        if len > cap {
+            tracing::warn!(
+                bytes = len,
+                cap,
+                upto = blob.upto,
+                "checkpoint blob does not fit one frame - not serving it"
+            );
+        }
+        len <= cap
+    }
+
     /// Serve a peer's catch-up request from our OWN chain: re-broadcast every
     /// block we hold from `from` onward (as `Committed`, re-authored so the
     /// outbox fans it out). A single survivor thus reconstitutes the chain for
@@ -171,11 +201,9 @@ impl State {
             // strictly below: a requester missing only the anchor block can
             // verify it against its own history — the full-state blob would
             // be pure fan-out amplification
-            if from < anchor.height {
-                let env = self.make_env(
-                    me.clone(),
-                    WorkspaceEvent::CheckpointServed { blob: blob.clone() },
-                );
+            if from < anchor.height && Self::served_blob_fits(blob) {
+                let blob = blob.clone();
+                let env = self.make_env(me.clone(), WorkspaceEvent::CheckpointServed { blob });
                 self.record(env);
             }
         }
@@ -204,7 +232,7 @@ impl State {
             return Vec::new();
         };
         let mut out = Vec::new();
-        if let Some(blob) = &self.chain.checkpoint_blob {
+        if let Some(blob) = self.chain.checkpoint_blob.as_ref().filter(|b| Self::served_blob_fits(b)) {
             out.push(WorkspaceEvent::CheckpointServed { blob: blob.clone() });
         }
         out.push(WorkspaceEvent::Committed(anchor.clone()));

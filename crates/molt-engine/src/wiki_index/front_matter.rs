@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The document header (`docs/memory/knowledge_base_scale.md` §4.4): the
+//! The document header (`docs_archive/memory/knowledge_base_scale.md` §4.4): the
 //! block's boundaries here, its YAML subset alongside.
 //!
 //! The FOLD never reads a header — a malformed one costs the document its

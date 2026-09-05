@@ -538,6 +538,8 @@ pub(crate) struct SurfaceData {
     /// the signal that it MOVED, not the content.
     pub(crate) wiki_docs: u64,
     pub(crate) wiki_rev: u64,
+    /// K6: bytes held / bytes committed while the folded base is fetched.
+    pub(crate) wiki_base_pending: Option<(u64, u64)>,
 }
 pub(crate) struct LogLineData {
     /// Stable message id, 32-char hex ("" on legacy entries without one —
@@ -1243,6 +1245,7 @@ pub(crate) fn surface_data(
         accepted,
         wiki_docs: snap.wiki_docs,
         wiki_rev: snap.wiki_rev,
+        wiki_base_pending: snap.wiki_base_pending.map(|p| (p.have, p.size)),
     }
 }
 

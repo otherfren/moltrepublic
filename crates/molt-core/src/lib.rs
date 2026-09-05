@@ -384,7 +384,7 @@ pub struct SessionSettings {
     #[serde(skip_serializing, default)]
     pub mcp_token: String,
     /// A SECOND key admitting only the read tools
-    /// (`docs/memory/knowledge_base_scale.md` §4.7). Empty = OFF, never
+    /// (`docs_archive/memory/knowledge_base_scale.md` §4.7). Empty = OFF, never
     /// "unauthenticated". Never serialized, for the same reason as
     /// [`SessionSettings::mcp_token`]: a credential no surface reads back.
     #[serde(skip_serializing, default)]
@@ -3968,7 +3968,7 @@ pub enum Command {
         epoch: u64,
     },
     /// One page of the wiki's document list, metadata only
-    /// (`docs/memory/knowledge_base_scale.md` §4.3) — the read a knowledge
+    /// (`docs_archive/memory/knowledge_base_scale.md` §4.3) — the read a knowledge
     /// base of tens of thousands of entries is browsed with.
     WikiList {
         /// Only paths under this folder prefix.
@@ -6086,7 +6086,7 @@ pub struct SurfaceSnapshot {
     pub has_archive: bool,
     /// Memory only: how many documents the folded base holds. The TREE
     /// itself left this snapshot on 2026-09-05
-    /// (`docs/memory/knowledge_base_scale.md` §4.10): shipping every
+    /// (`docs_archive/memory/knowledge_base_scale.md` §4.10): shipping every
     /// page's content with every read is the copy that does not scale,
     /// and `wiki_list` + `wiki_get` serve the same projection paged. Both
     /// surfaces read it the same way, so co-equality is unchanged - what
@@ -6100,7 +6100,7 @@ pub struct SurfaceSnapshot {
     #[serde(default)]
     pub wiki_rev: u64,
     /// Memory only, K6: the folded base this holder is still fetching
-    /// (`docs/memory/knowledge_base_scale.md` §4.9.6). `Some` means the
+    /// (`docs_archive/memory/knowledge_base_scale.md` §4.9.6). `Some` means the
     /// wiki answers NOTHING yet - the surface shows the progress instead
     /// of an empty tree, because an empty tree would read as "the republic
     /// deleted its knowledge base".
@@ -6129,7 +6129,7 @@ pub struct WikiDoc {
 /// One document's METADATA in a paged wiki listing ([`Reply::WikiList`]).
 /// Carries no content: a knowledge base of tens of thousands of entries
 /// is read page by page and fetched document by document
-/// (`docs/memory/knowledge_base_scale.md` §4.3).
+/// (`docs_archive/memory/knowledge_base_scale.md` §4.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WikiDocMeta {
     /// Normalized relative path (`file.md` or `folder/file.md`).
@@ -6813,11 +6813,11 @@ pub enum MoltError {
     #[error("wiki export: {0}")]
     WikiExport(&'static str),
     /// The wiki index is still being built off the actor
-    /// (`docs/memory/knowledge_base_scale.md` §4.5/§4.6). Distinct from
+    /// (`docs_archive/memory/knowledge_base_scale.md` §4.5/§4.6). Distinct from
     /// [`MoltError::Engine`] on purpose: this is "come back in a moment",
     /// not a fault, and an empty result would be a lie.
     /// The republic cut its history and committed to a shared-memory base
-    /// this node does not hold yet (`docs/memory/knowledge_base_scale.md`
+    /// this node does not hold yet (`docs_archive/memory/knowledge_base_scale.md`
     /// §4.9.6). Distinct from an empty wiki on purpose: "nothing here"
     /// would read as if the republic had deleted its knowledge base.
     #[error("the shared memory base is still arriving ({have} of {size} bytes)")]
@@ -6830,7 +6830,7 @@ pub enum MoltError {
         want: String,
     },
     /// The wiki index is still being built off the actor
-    /// (`docs/memory/knowledge_base_scale.md` §4.5/§4.6): "come back in a
+    /// (`docs_archive/memory/knowledge_base_scale.md` §4.5/§4.6): "come back in a
     /// moment", not a fault - an empty result would be a lie.
     #[error("the wiki index is still building ({done} of {total} documents)")]
     IndexBuilding {

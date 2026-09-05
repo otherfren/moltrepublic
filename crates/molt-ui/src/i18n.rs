@@ -1298,6 +1298,7 @@ lexicon! {
     mem_linked: "Linked", "Verknüpft";
     mem_backlinks: "Linked from", "Verlinkt von";
     mem_prop_add: "Property", "Eigenschaft";
+    mem_base_pending: "Shared memory arriving", "Wissensstand wird geholt";
     mem_prop_hint: "Header line 'key: value' - what the wiki can index", "Kopfzeile 'Schlüssel: Wert' - was das Wiki auswerten kann";
     mem_search_ph: "Search the wiki", "Wiki durchsuchen";
     mem_search_none: "No hit", "Kein Treffer";

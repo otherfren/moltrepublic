@@ -2,7 +2,7 @@
 #![allow(missing_docs)]
 
 //! The pure-Rust guard for the wiki INDEX dependencies
-//! (`docs/memory/knowledge_base_scale.md` §4.6), the sibling of
+//! (`docs_archive/memory/knowledge_base_scale.md` §4.6), the sibling of
 //! `molt-net/tests/ring_free_guard.rs`.
 //!
 //! `tantivy`'s DEFAULT feature set pulls C `zstd` through

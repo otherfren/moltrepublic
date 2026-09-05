@@ -320,7 +320,7 @@ pub struct McpConfig {
     #[serde(default)]
     pub token: String,
     /// A SECOND key admitting only the read tools
-    /// (`docs/memory/knowledge_base_scale.md` §4.7). Empty or absent = off,
+    /// (`docs_archive/memory/knowledge_base_scale.md` §4.7). Empty or absent = off,
     /// never "unauthenticated". Written here only once one is issued, so a
     /// config an older build still opens stays that way.
     #[serde(default)]

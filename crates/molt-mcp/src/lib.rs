@@ -103,7 +103,7 @@ pub async fn serve_tcp(
 }
 
 /// What a connection's credential admits
-/// (`docs/memory/knowledge_base_scale.md` §4.7). Host-local: the republic
+/// (`docs_archive/memory/knowledge_base_scale.md` §4.7). Host-local: the republic
 /// knows no roles — the human narrows their own tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
