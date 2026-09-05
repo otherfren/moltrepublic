@@ -1836,3 +1836,30 @@ fn a_vote_over_unfetched_bytes_is_queued_and_fires_on_arrival() {
     rt.block_on(async { tokio::time::sleep(std::time::Duration::from_millis(200)).await });
     assert_eq!(pending(&w), 1, "a queued vote fires exactly once");
 }
+
+/// The author/version/age line still renders where a document HAS one -
+/// at the foot of the preview, under the prose it belongs to.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_drafted_document_carries_its_meta_line_at_the_foot() {
+    let ui = tagged_doc_window("# A\n\nprose.\n");
+    let g = ui.global::<WikiState>();
+    g.invoke_new_file();
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
+    let meta = g.get_doc_meta().to_string();
+    assert!(!meta.is_empty(), "a draft has an author, a version and an age");
+    let line = i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, &meta)
+        .next()
+        .expect("the meta line renders");
+    let lowest_block = i_slint_backend_testing::ElementHandle::find_by_element_type_name(
+        &ui,
+        "BrainBlockView",
+    )
+    .map(|e| e.absolute_position().y)
+    .fold(f32::MIN, f32::max);
+    assert!(lowest_block > f32::MIN, "the prose renders");
+    assert!(
+        line.absolute_position().y > lowest_block,
+        "the meta line sits under the prose, not over the tags"
+    );
+}

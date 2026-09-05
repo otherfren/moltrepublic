@@ -3516,7 +3516,7 @@ mod tests {
             "…but the heading below it stays"
         );
 
-        // …and it reads as a property table instead
+        // …and it reads as the header band's rows instead
         let rows = w.infobox(id);
         let by_key = |k: &str| -> Vec<&InfoRow> {
             rows.iter().filter(|r| r.key == k).collect()
