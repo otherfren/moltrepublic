@@ -997,3 +997,161 @@ fn the_settings_tabs_keep_a_gap_to_the_panel_when_they_wrap() {
         );
     }
 }
+
+/// The chat pane's compose row: the box the user types in is exactly the
+/// box its neighbours are. It used to be a hardcoded 38px while every
+/// button beside it scaled with the app font — so at any font above the
+/// default the box hung at the TOP of the row, glued to the banner above
+/// it (reported 2026-09-05).
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_chat_compose_box_is_as_tall_as_the_buttons_beside_it() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = chat_pane_window(true);
+    for font in [14.0_f32, 18.0, 26.0] {
+        ui.global::<Theme>().set_fs_app(font);
+        let box_ = geometry(&ui, "AppWindow::ch-compose");
+        for id in ["AppWindow::ch-btn-file", "AppWindow::ch-btn-emoji"] {
+            let b = geometry(&ui, id);
+            assert!(
+                (b.3 - box_.3).abs() < 0.5 && (b.1 - box_.1).abs() < 0.5,
+                "font {font}: {id} is {}x at y={} while the box is {}x at y={}",
+                b.3,
+                b.1,
+                box_.3,
+                box_.1
+            );
+        }
+    }
+}
+
+/// Both the draft and its placeholder sit centred in the compose box —
+/// they used to be pinned 9px/10px below its top edge, which drifted
+/// apart the moment the app font grew.
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_chat_draft_and_its_placeholder_are_centred_in_the_box() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = chat_pane_window(true);
+    for font in [14.0_f32, 18.0, 26.0] {
+        ui.global::<Theme>().set_fs_app(font);
+        let (_, y, _, h) = geometry(&ui, "AppWindow::ch-compose");
+        let mid = y + h / 2.0;
+        for id in ["AppWindow::ch-ph", "AppWindow::chat-in"] {
+            let (_, ty, _, th) = geometry(&ui, id);
+            assert!(
+                (ty + th / 2.0 - mid).abs() < 1.0,
+                "font {font}: {id} centres at {}, the box at {mid}",
+                ty + th / 2.0
+            );
+        }
+    }
+}
+
+/// Every seam between two panels of the chat pane is ONE `Theme.pane-gap`
+/// — including the diff/chat splitter, whose grab handle IS that gap
+/// rather than an extra layout row on top of it.
+#[cfg(feature = "live-preview")]
+#[test]
+fn every_chat_panel_gap_is_one_pane_gap() {
+    i_slint_backend_testing::init_no_event_loop();
+    for patch in [true, false] {
+        let ui = chat_pane_window(patch);
+        for font in [14.0_f32, 22.0] {
+            ui.global::<Theme>().set_fs_app(font);
+            let gap = ui.global::<Theme>().get_pane_gap();
+            let mut stack: Vec<(&str, Geometry)> = Vec::new();
+            if patch {
+                let card = i_slint_backend_testing::ElementHandle::find_by_element_type_name(
+                    &ui,
+                    "ProposalCard",
+                )
+                .next()
+                .expect("the decision card renders");
+                stack.push((
+                    "card",
+                    (
+                        card.absolute_position().x,
+                        card.absolute_position().y,
+                        card.size().width,
+                        card.size().height,
+                    ),
+                ));
+                let diff = i_slint_backend_testing::ElementHandle::find_by_element_type_name(
+                    &ui,
+                    "DiffViewer",
+                )
+                .next()
+                .expect("the diff renders");
+                stack.push((
+                    "diff",
+                    (
+                        diff.absolute_position().x,
+                        diff.absolute_position().y,
+                        diff.size().width,
+                        diff.size().height,
+                    ),
+                ));
+            }
+            stack.push(("list", geometry(&ui, "AppWindow::ch-list")));
+            if patch {
+                stack.push(("banner", geometry(&ui, "AppWindow::ch-banner")));
+            }
+            stack.push(("compose", geometry(&ui, "AppWindow::ch-compose")));
+            for pair in stack.windows(2) {
+                let (a, ga) = pair[0];
+                let (b, gb) = pair[1];
+                let seam = gb.1 - (ga.1 + ga.3);
+                assert!(
+                    (seam - gap).abs() < 0.6,
+                    "patch={patch} font={font}: {a}→{b} is {seam}px, not the {gap}px every other panel keeps"
+                );
+            }
+        }
+    }
+}
+
+/// The chat pane with a wiki-patch decision selected (`patch`) or the
+/// plain group chat, rendered headless.
+#[cfg(feature = "live-preview")]
+fn chat_pane_window(patch: bool) -> AppWindow {
+    let ui = AppWindow::new().expect("headless window");
+    ui.window().set_size(slint::PhysicalSize::new(1400, 900));
+    ui.set_screen(AppScreen::Main);
+    ui.set_selected_surface("chat".into());
+    ui.set_selected_view("today".into());
+    ui.set_selected_channel(if patch { "patch:3" } else { "group" }.into());
+    ui.set_selected_channel_label("Wiki patch (~3)".into());
+    ui.set_selected_channel_votable(patch);
+    if patch {
+        ui.set_selected_decision(ProposalRow {
+            id: 3,
+            text: "Wiki patch (~3)".into(),
+            approvals: 1,
+            threshold: 2,
+            patch_op: true,
+            proposed: "diff --git a/a b/a\n@@ -1 +1 @@\n-a\n+b\n".into(),
+            ..ProposalRow::default()
+        });
+    }
+    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: "chat".into(),
+        ..SurfaceTab::default()
+    }])));
+    apply_strings(&ui, 0);
+    ui.show().expect("show headless");
+    ui
+}
+
+/// `(x, y, width, height)` of one element.
+#[cfg(feature = "live-preview")]
+type Geometry = (f32, f32, f32, f32);
+
+/// The [`Geometry`] of the single element with `id`.
+#[cfg(feature = "live-preview")]
+fn geometry(ui: &AppWindow, id: &str) -> Geometry {
+    let e = i_slint_backend_testing::ElementHandle::find_by_element_id(ui, id)
+        .next()
+        .unwrap_or_else(|| panic!("{id} renders"));
+    (e.absolute_position().x, e.absolute_position().y, e.size().width, e.size().height)
+}

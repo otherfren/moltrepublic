@@ -1311,7 +1311,8 @@ lexicon! {
     mem_cs_moved: "moved", "verschoben";
     mem_cs_lines: "lines", "Zeilen";
     mem_cs_undo: "Undo", "Rückgängig";
-    mem_cs_details: "Details", "Details";
+    mem_cs_changes: "Changes", "Änderungen";
+    mem_cs_details: "Patch details", "Patch-Details";
     mem_cs_revert: "Discard all", "Alles verwerfen";
     mem_cs_vote: "Start vote", "Vote starten";
     mem_cs_confirm_title: "Discard all changes?", "Alle Änderungen verwerfen?";

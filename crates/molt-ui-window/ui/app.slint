@@ -1533,6 +1533,7 @@ export component AppWindow inherits Window {
         || root.decrypt-modal-open
         || root.charter-view-open
         || root.mem-cs-confirm-open
+        || root.mem-cs-stack-open
         || root.mem-export-open
         || root.patch-view-open
         || root.relay-clearnet-modal-open
@@ -1603,6 +1604,9 @@ export component AppWindow inherits Window {
     // session re-pushes unchanged, and a toast per push would repeat the
     // same result forever
     in-out property <string> wiki-export-seen;
+    // the changeset panel's action stack, read in a modal (the panel
+    // itself stays one row)
+    property <bool> mem-cs-stack-open: false;
     // the raw-patch modal of a wiki_patch proposal (read-only + copy)
     property <bool> patch-view-open: false;
     property <string> patch-view-text;
@@ -2408,6 +2412,8 @@ export component AppWindow inherits Window {
             root.charter-view-open = false;
         } else if (root.mem-cs-confirm-open) {
             root.mem-cs-confirm-open = false;
+        } else if (root.mem-cs-stack-open) {
+            root.mem-cs-stack-open = false;
         } else if (root.mem-export-open) {
             root.mem-export-open = false;
         } else if (root.patch-view-open) {
@@ -5087,8 +5093,8 @@ export component AppWindow inherits Window {
                     visible: s.key == root.selected-surface;
                     VerticalLayout {
                         // tight to the edges — chat real estate over chrome
-                        padding: 8px;
-                        spacing: 8px;
+                        padding: Theme.pane-gap;
+                        spacing: Theme.pane-gap;
 
                         // chat — konkinwallet-style: the members strip (who
                         // is online right now), zebra-striped messages with
@@ -5099,7 +5105,7 @@ export component AppWindow inherits Window {
                         // retention window, Archive = the older half); the
                         // compose row collapses in the read-only Archive.
                         if s.key == "chat": VerticalLayout {
-                            spacing: 8px;
+                            spacing: Theme.pane-gap;
 
                             // presence strip: pills wrapping into as many rows
                             // as needed (index-computed grid — Slint has no
@@ -5208,54 +5214,6 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            // a wiki-patch decision is voted on its CONTENT:
-                            // the diff viewer sits between the card and the
-                            // discussion, so browsing the changes and talking
-                            // about them share one screen (any surface — the
-                            // org gate had kept memory patches viewerless).
-                            // RESIZABLE against the chat below: the stored
-                            // FRACTION keeps the proportion on window resize
-                            // (the wiki splitter idiom), the chat keeps the
-                            // larger share by default, both sides keep a
-                            // floor. Same pane = same splitter for a DECIDED
-                            // vote's archived discussion (Accepted/Denied).
-                            if root.selected-decision.id > 0
-                                && root.selected-decision.patch-op: dv-wrap := VerticalLayout {
-                                spacing: 2px;
-                                // the SURFACE rect's height (parent-fixed) —
-                                // reading the chat layout's own height here
-                                // is a binding loop
-                                property <length> avail: surf-rect.height;
-                                pure function clamp-dv(h: length) -> length {
-                                    return max(140px, min(self.avail * 0.6, h));
-                                }
-                                cdv := DiffViewer {
-                                    height: dv-wrap.clamp-dv(root.patch-split * dv-wrap.avail);
-                                }
-                                // the grab handle between diff and chat
-                                Rectangle {
-                                    height: 8px;
-                                    Rectangle {
-                                        x: (parent.width - self.width) / 2;
-                                        y: (parent.height - self.height) / 2;
-                                        width: 120px;
-                                        height: 4px;
-                                        border-radius: Theme.win95 ? 0px : 2px;
-                                        background: dvta.pressed || dvta.has-hover ? Theme.accent : Theme.line;
-                                    }
-                                    dvta := TouchArea {
-                                        mouse-cursor: MouseCursor.row-resize;
-                                        moved => {
-                                            // current height + pointer drift —
-                                            // a size frozen at press time
-                                            // oscillates (the wiki splitter's
-                                            // lesson)
-                                            root.patch-split = dv-wrap.clamp-dv(cdv.height + (self.mouse-y - self.pressed-y)) / max(dv-wrap.avail, 1px);
-                                        }
-                                    }
-                                }
-                            }
-
                             // A free topic names itself HERE, under the member
                             // pills — the user must see which channel they are
                             // in BEFORE reading a message, not after. This
@@ -5266,7 +5224,7 @@ export component AppWindow inherits Window {
                             // detail panel in this slot instead, and the group
                             // chat needs no heading at all.
                             if root.selected-channel != "group" && !root.selected-channel-votable: Rectangle {
-                                height: 36px;
+                                height: 36px * Theme.ui-scale;
                                 background: Theme.panel;
                                 border-radius: Theme.win95 ? 0px : 8px;
                                 border-width: Theme.border-w;
@@ -5294,143 +5252,198 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            // the message list sits on a real panel — writing
-                            // straight onto the desktop background read badly,
-                            // especially in the brutalism theme
-                            Rectangle {
-                                vertical-stretch: 1;
-                                background: Theme.panel;
-                                border-radius: Theme.win95 ? 0px : 8px;
-                                border-width: Theme.border-w;
-                                border-color: Theme.line;
-                                clip: true;
-                                chfl := Flickable {
-                                    width: 100%;
-                                    height: 100%;
-                                    viewport-width: self.width;
-                                    viewport-height: chlist.preferred-height + 8px;
-                                    // Pinned to the newest message. The binding
-                                    // alone dies on the first manual drag, so
-                                    // every content growth re-pins imperatively:
-                                    // a new message (own or incoming) always
-                                    // scrolls the box to the bottom.
-                                    viewport-y: min(0px, self.height - self.viewport-height);
-                                    changed viewport-y => {
-                                        root.chat-log-in-view = self.height > 0
-                                            && self.viewport-y <= 0px
-                                            && self.viewport-y >= self.height - self.viewport-height - 8px;
+                            // The diff and the chat below it are ONE
+                            // column: the grab handle IS the gap between
+                            // them (Theme.pane-gap), so this seam is not
+                            // wider than every other panel gap in the pane.
+                            chat-body := VerticalLayout {
+                                spacing: 0px;
+                                // a wiki-patch decision is voted on its CONTENT:
+                                // the diff viewer sits between the card and the
+                                // discussion, so browsing the changes and talking
+                                // about them share one screen (any surface — the
+                                // org gate had kept memory patches viewerless).
+                                // RESIZABLE against the chat below: the stored
+                                // FRACTION keeps the proportion on window resize
+                                // (the wiki splitter idiom), the chat keeps the
+                                // larger share by default, both sides keep a
+                                // floor. Same pane = same splitter for a DECIDED
+                                // vote's archived discussion (Accepted/Denied).
+                                if root.selected-decision.id > 0
+                                    && root.selected-decision.patch-op: dv-wrap := VerticalLayout {
+                                    spacing: 0px;
+                                    // the SURFACE rect's height (parent-fixed) —
+                                    // reading the chat layout's own height here
+                                    // is a binding loop
+                                    property <length> avail: surf-rect.height;
+                                    pure function clamp-dv(h: length) -> length {
+                                        return max(140px, min(self.avail * 0.6, h));
                                     }
-                                    changed viewport-height => {
-                                        self.viewport-y = min(0px, self.height - self.viewport-height);
+                                    cdv := DiffViewer {
+                                        height: dv-wrap.clamp-dv(root.patch-split * dv-wrap.avail);
                                     }
-                                    // …and on the BOX's height too, which is
-                                    // what made a freshly opened workspace
-                                    // show an empty chat: the content arrives
-                                    // while this Flickable is still 0 high, the
-                                    // re-pin above computes 0 - content and
-                                    // scrolls the whole log out of sight — and
-                                    // an imperative write has by then replaced
-                                    // the binding, so nothing corrects it when
-                                    // the real height arrives. Leaving the
-                                    // surface and coming back rebuilt the box
-                                    // with its height already known, which is
-                                    // why it looked like the data was missing.
-                                    changed height => {
-                                        self.viewport-y = min(0px, self.height - self.viewport-height);
-                                    }
-                                    chlist := VerticalLayout {
-                                        // indented message cards with a small
-                                        // gap between them
-                                        padding: 8px;
-                                        padding-left: 16px;
-                                        spacing: 4px;
-                                        alignment: start;
-                                        if s.applied-count == 0: Text {
-                                            text: Strings.mv-empty-chat;
-                                            color: Theme.faint;
-                                            font-size: Theme.fs-cap;
+                                    // the grab handle between diff and chat
+                                    Rectangle {
+                                        height: Theme.pane-gap;
+                                        Rectangle {
+                                            x: (parent.width - self.width) / 2;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 120px;
+                                            height: 4px;
+                                            border-radius: Theme.win95 ? 0px : 2px;
+                                            background: dvta.pressed || dvta.has-hover ? Theme.accent : Theme.line;
                                         }
-                                        for l[i] in s.log: ChatRow {
-                                                line: l;
-                                                index: i;
-                                                // the local read-receipts switch gates the
-                                                // per-member dot row (symmetric hide)
-                                                receipts-on: root.cfg-read-receipts;
-                                                // replies indent behind their quote;
-                                                // neighboring reply groups of
-                                                // different targets alternate depth
-                                                // (Rust-side annotate_chat_log)
-                                                indent-level: l.quote-indent;
-                                                scroll-request: root.chat-scroll-to;
-                                                // feedback honesty: rows without a
-                                                // real id (legacy entries, system
-                                                // lines) must never trigger
-                                                // success-shaped UI — the buttons
-                                                // are hidden in ChatRow, and these
-                                                // guards keep the handlers honest
-                                                toggle-reaction(emoji) => {
-                                                    if (l.id != "") {
-                                                        root.toggle-reaction(l.id, emoji);
-                                                    }
-                                                }
-                                                copy-requested => {
-                                                    root.copy-text(l.text);
-                                                    root.show-toast(Strings.toast-copied);
-                                                }
-                                                delete-requested => {
-                                                    // own rows only: the engine
-                                                    // rejects a foreign delete,
-                                                    // so the modal must never
-                                                    // open for one (the icon is
-                                                    // gated the same way)
-                                                    if (l.id != "" && l.own) {
-                                                        root.delmsg-id = l.id;
-                                                        root.confirm-delmsg-open = true;
-                                                    }
-                                                }
-                                                quote-requested => {
-                                                    if (l.id != "") {
-                                                        root.mv-quote-id = l.id;
-                                                        root.mv-quote-label = l.lead + ": " + l.text;
-                                                        chat-in.focus();
-                                                    }
-                                                }
-                                                quote-jump => {
-                                                    root.chat-scroll-to = l.quote;
-                                                }
-                                                file-clicked => {
-                                                    if (!l.file-available) {
-                                                        root.show-toast-error(Strings.mv-file-gone);
-                                                    } else if (l.id != "") {
-                                                        // opens the save dialog;
-                                                        // the outcome toasts via
-                                                        // the transfer events
-                                                        root.download-file(l.id);
-                                                    }
-                                                }
-                                                file-remove-requested => {
-                                                    if (l.id != "") {
-                                                        // the confirmation
-                                                        // rides the OUTCOME
-                                                        // (molt-ui), never
-                                                        // the click
-                                                        root.remove-file(l.id);
-                                                    }
-                                                }
-                                                bring-into-view => {
-                                                    chfl.viewport-y = clamp(
-                                                        chfl.viewport-y - (self.absolute-position.y - chfl.absolute-position.y) + 8px,
-                                                        min(0px, chfl.height - chfl.viewport-height), 0px);
-                                                    root.chat-scroll-to = -1;
-                                                }
+                                        dvta := TouchArea {
+                                            mouse-cursor: MouseCursor.row-resize;
+                                            moved => {
+                                                // current height + pointer drift —
+                                                // a size frozen at press time
+                                                // oscillates (the wiki splitter's
+                                                // lesson)
+                                                root.patch-split = dv-wrap.clamp-dv(cdv.height + (self.mouse-y - self.pressed-y)) / max(dv-wrap.avail, 1px);
+                                            }
                                         }
                                     }
                                 }
-                                ScrollHint {
-                                    x: parent.width - 7px;
-                                    view-h: chfl.height;
-                                    content-h: chfl.viewport-height;
-                                    scroll-y: chfl.viewport-y;
+
+                                // the message list sits on a real panel — writing
+                                // straight onto the desktop background read badly,
+                                // especially in the brutalism theme
+                                ch-list := Rectangle {
+                                    vertical-stretch: 1;
+                                    background: Theme.panel;
+                                    border-radius: Theme.win95 ? 0px : 8px;
+                                    border-width: Theme.border-w;
+                                    border-color: Theme.line;
+                                    clip: true;
+                                    chfl := Flickable {
+                                        width: 100%;
+                                        height: 100%;
+                                        viewport-width: self.width;
+                                        viewport-height: chlist.preferred-height + 8px;
+                                        // Pinned to the newest message. The binding
+                                        // alone dies on the first manual drag, so
+                                        // every content growth re-pins imperatively:
+                                        // a new message (own or incoming) always
+                                        // scrolls the box to the bottom.
+                                        viewport-y: min(0px, self.height - self.viewport-height);
+                                        changed viewport-y => {
+                                            root.chat-log-in-view = self.height > 0
+                                                && self.viewport-y <= 0px
+                                                && self.viewport-y >= self.height - self.viewport-height - 8px;
+                                        }
+                                        changed viewport-height => {
+                                            self.viewport-y = min(0px, self.height - self.viewport-height);
+                                        }
+                                        // …and on the BOX's height too, which is
+                                        // what made a freshly opened workspace
+                                        // show an empty chat: the content arrives
+                                        // while this Flickable is still 0 high, the
+                                        // re-pin above computes 0 - content and
+                                        // scrolls the whole log out of sight — and
+                                        // an imperative write has by then replaced
+                                        // the binding, so nothing corrects it when
+                                        // the real height arrives. Leaving the
+                                        // surface and coming back rebuilt the box
+                                        // with its height already known, which is
+                                        // why it looked like the data was missing.
+                                        changed height => {
+                                            self.viewport-y = min(0px, self.height - self.viewport-height);
+                                        }
+                                        chlist := VerticalLayout {
+                                            // indented message cards with a small
+                                            // gap between them
+                                            padding: 8px;
+                                            padding-left: 16px;
+                                            spacing: 4px;
+                                            alignment: start;
+                                            if s.applied-count == 0: Text {
+                                                text: Strings.mv-empty-chat;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                            }
+                                            for l[i] in s.log: ChatRow {
+                                                    line: l;
+                                                    index: i;
+                                                    // the local read-receipts switch gates the
+                                                    // per-member dot row (symmetric hide)
+                                                    receipts-on: root.cfg-read-receipts;
+                                                    // replies indent behind their quote;
+                                                    // neighboring reply groups of
+                                                    // different targets alternate depth
+                                                    // (Rust-side annotate_chat_log)
+                                                    indent-level: l.quote-indent;
+                                                    scroll-request: root.chat-scroll-to;
+                                                    // feedback honesty: rows without a
+                                                    // real id (legacy entries, system
+                                                    // lines) must never trigger
+                                                    // success-shaped UI — the buttons
+                                                    // are hidden in ChatRow, and these
+                                                    // guards keep the handlers honest
+                                                    toggle-reaction(emoji) => {
+                                                        if (l.id != "") {
+                                                            root.toggle-reaction(l.id, emoji);
+                                                        }
+                                                    }
+                                                    copy-requested => {
+                                                        root.copy-text(l.text);
+                                                        root.show-toast(Strings.toast-copied);
+                                                    }
+                                                    delete-requested => {
+                                                        // own rows only: the engine
+                                                        // rejects a foreign delete,
+                                                        // so the modal must never
+                                                        // open for one (the icon is
+                                                        // gated the same way)
+                                                        if (l.id != "" && l.own) {
+                                                            root.delmsg-id = l.id;
+                                                            root.confirm-delmsg-open = true;
+                                                        }
+                                                    }
+                                                    quote-requested => {
+                                                        if (l.id != "") {
+                                                            root.mv-quote-id = l.id;
+                                                            root.mv-quote-label = l.lead + ": " + l.text;
+                                                            chat-in.focus();
+                                                        }
+                                                    }
+                                                    quote-jump => {
+                                                        root.chat-scroll-to = l.quote;
+                                                    }
+                                                    file-clicked => {
+                                                        if (!l.file-available) {
+                                                            root.show-toast-error(Strings.mv-file-gone);
+                                                        } else if (l.id != "") {
+                                                            // opens the save dialog;
+                                                            // the outcome toasts via
+                                                            // the transfer events
+                                                            root.download-file(l.id);
+                                                        }
+                                                    }
+                                                    file-remove-requested => {
+                                                        if (l.id != "") {
+                                                            // the confirmation
+                                                            // rides the OUTCOME
+                                                            // (molt-ui), never
+                                                            // the click
+                                                            root.remove-file(l.id);
+                                                        }
+                                                    }
+                                                    bring-into-view => {
+                                                        chfl.viewport-y = clamp(
+                                                            chfl.viewport-y - (self.absolute-position.y - chfl.absolute-position.y) + 8px,
+                                                            min(0px, chfl.height - chfl.viewport-height), 0px);
+                                                        root.chat-scroll-to = -1;
+                                                    }
+                                            }
+                                        }
+                                    }
+                                    ScrollHint {
+                                        x: parent.width - 7px;
+                                        view-h: chfl.height;
+                                        content-h: chfl.viewport-height;
+                                        scroll-y: chfl.viewport-y;
+                                    }
                                 }
                             }
 
@@ -5440,8 +5453,8 @@ export component AppWindow inherits Window {
                             // not: its name is a heading at the top of the pane
                             // now, and repeating it here was the second label
                             // for the same fact.
-                            if root.selected-channel-votable: Rectangle {
-                                height: 26px;
+                            if root.selected-channel-votable: ch-banner := Rectangle {
+                                height: 26px * Theme.ui-scale;
                                 background: Theme.panel;
                                 border-radius: Theme.win95 ? 0px : 6px;
                                 border-width: 1px;
@@ -5506,7 +5519,7 @@ export component AppWindow inherits Window {
                             // replying? a quiet banner names the quoted
                             // message; × drops the quote again
                             if root.mv-quote-id != "": Rectangle {
-                                height: 26px;
+                                height: 26px * Theme.ui-scale;
                                 background: Theme.panel;
                                 border-radius: Theme.win95 ? 0px : 6px;
                                 border-width: 1px;
@@ -5567,26 +5580,42 @@ export component AppWindow inherits Window {
                                 visible: !root.selected-channel-closed;
                                 height: self.visible ? self.preferred-height : 0px;
                                 spacing: 8px;
-                                Rectangle {
+                                ch-compose := Rectangle {
                                     horizontal-stretch: 1;
-                                    height: min(122px, max(38px, chat-in.preferred-height + 16px));
+                                    // the SAME box as the buttons beside it —
+                                    // a fixed 38px left the box hanging at the
+                                    // top of the row as soon as the app font
+                                    // scaled the buttons past it
+                                    height: min(122px * Theme.ui-scale,
+                                        max(38px * Theme.ui-scale, chat-in.preferred-height + 16px));
                                     background: Theme.panel;
                                     border-radius: Theme.radius;
                                     border-width: Theme.border-w;
                                     border-color: chat-in.has-focus ? Theme.accent : Theme.line;
                                     clip: true;
-                                    if root.mv-draft == "": Text {
+                                    // placeholder and text share one baseline:
+                                    // both centred in the box, so they cannot
+                                    // drift apart at a bigger app font
+                                    if root.mv-draft == "": ch-ph := Text {
                                         x: 12px;
-                                        y: 10px;
+                                        width: parent.width - 24px;
+                                        height: parent.height;
+                                        vertical-alignment: center;
                                         text: Strings.mv-chat-ph;
                                         color: Theme.faint;
                                         font-size: Theme.fs-body;
                                     }
                                     chat-in := TextInput {
                                         x: 12px;
-                                        y: 9px;
+                                        y: 8px;
                                         width: parent.width - 24px;
-                                        height: parent.height - 18px;
+                                        height: parent.height - 16px;
+                                        // centred while it fits; a draft taller
+                                        // than the capped box keeps its top, or
+                                        // its first line would scroll away too
+                                        vertical-alignment: self.preferred-height <= self.height
+                                            ? TextVerticalAlignment.center
+                                            : TextVerticalAlignment.top;
                                         text <=> root.mv-draft;
                                         color: Theme.text;
                                         font-size: Theme.fs-body;
@@ -5623,7 +5652,7 @@ export component AppWindow inherits Window {
                                 // topic
                                 if root.selected-channel == "group": VerticalLayout {
                                     alignment: end;
-                                    Rectangle {
+                                    ch-btn-topic := Rectangle {
                                         width: 38px * Theme.ui-scale;
                                         height: 38px * Theme.ui-scale;
                                         background: root.nt-open ? Theme.accent-soft : (nt-ta.has-hover ? Theme.raised : Theme.panel);
@@ -5655,7 +5684,7 @@ export component AppWindow inherits Window {
                                 // only the metadata will enter the chat
                                 VerticalLayout {
                                     alignment: end;
-                                    Rectangle {
+                                    ch-btn-file := Rectangle {
                                         width: 38px * Theme.ui-scale;
                                         height: 38px * Theme.ui-scale;
                                         background: at-ta.has-hover ? Theme.raised : Theme.panel;
@@ -5682,7 +5711,7 @@ export component AppWindow inherits Window {
                                 // emoji palette appends to the draft
                                 VerticalLayout {
                                     alignment: end;
-                                    Rectangle {
+                                    ch-btn-emoji := Rectangle {
                                         width: 38px * Theme.ui-scale;
                                         height: 38px * Theme.ui-scale;
                                         background: em-ta.has-hover ? Theme.raised : Theme.panel;
@@ -5742,8 +5771,8 @@ export component AppWindow inherits Window {
                             viewport-height: os-col.preferred-height;
                             os-col := VerticalLayout {
                                 width: 100%;
-                                padding: 8px;
-                                spacing: 10px;
+                                padding: Theme.pane-gap;
+                                spacing: Theme.pane-gap;
                                 alignment: start;
                                 Rectangle {
                                     background: Theme.panel;
@@ -6149,8 +6178,8 @@ export component AppWindow inherits Window {
 
                         // Organization → Members: the live roster with presence
                         if s.key == "organization" && root.selected-view == "members": VerticalLayout {
-                            padding: 8px;
-                            spacing: 8px;
+                            padding: Theme.pane-gap;
+                            spacing: Theme.pane-gap;
                             HorizontalLayout {
                                 spacing: 8px;
                                 alignment: start;
@@ -6617,8 +6646,8 @@ export component AppWindow inherits Window {
                         // table share one filter and one sort (view state),
                         // over two row sets the mirror splits by the vote
                         if s.key == "files" && (root.selected-view == "uploads" || root.selected-view == "persistent"): VerticalLayout {
-                            padding: 8px;
-                            spacing: 8px;
+                            padding: Theme.pane-gap;
+                            spacing: Theme.pane-gap;
                             // one filter needle across user, filename and
                             // checksum — the matching runs in Rust (empty =
                             // all rows); the members table's uploads-jump
@@ -6801,8 +6830,8 @@ export component AppWindow inherits Window {
                         // (and the same approve/decline commands) as every
                         // other gated surface
                         if (s.key == "organization" || s.key == "files") && root.selected-view == "pending": VerticalLayout {
-                            padding: 8px;
-                            spacing: 12px;
+                            padding: Theme.pane-gap;
+                            spacing: Theme.pane-gap;
                             // a heading that owns the pane, not a shy caption
                             Text {
                                 text: Strings.mv-pending;
@@ -6882,8 +6911,8 @@ export component AppWindow inherits Window {
                         // only declines inside the retention window, so the
                         // pane empties on the same rhythm as the group chat
                         if (s.key == "organization" || s.key == "files") && root.selected-view == "declined": VerticalLayout {
-                            padding: 8px;
-                            spacing: 12px;
+                            padding: Theme.pane-gap;
+                            spacing: Theme.pane-gap;
                             Text {
                                 text: Strings.mv-declined;
                                 color: Theme.text;
@@ -7038,6 +7067,9 @@ export component AppWindow inherits Window {
                             show-changes(patch) => {
                                 root.patch-view-text = patch;
                                 root.patch-view-open = true;
+                            }
+                            show-stack => {
+                                root.mem-cs-stack-open = true;
                             }
                             wiki-export => {
                                 root.mem-export-proof = true;
@@ -9490,6 +9522,82 @@ export component AppWindow inherits Window {
                 view-h: cv-fl.height;
                 content-h: cv-fl.viewport-height;
                 scroll-y: cv-fl.viewport-y;
+            }
+        }
+    }
+
+    // Modal: the local changeset's action stack, oldest first. The
+    // panel on Shared Memory carries the net summary only — listed there,
+    // the stack grew until it owned the pane.
+    if root.mem-cs-stack-open: ConfirmModal {
+        dialog-width: 620px;
+        title: Strings.mem-cs-changes;
+        body: "";
+        cancel-label: "";
+        confirm-label: Strings.set-close;
+        dismissed => {
+            root.mem-cs-stack-open = false;
+        }
+        confirmed => {
+            root.mem-cs-stack-open = false;
+        }
+        Rectangle {
+            height: 360px;
+            background: Theme.panel-2;
+            border-radius: Theme.win95 ? 0px : 8px;
+            border-width: Theme.border-w;
+            border-color: Theme.line;
+            clip: true;
+            csm := Flickable {
+                width: 100%;
+                height: 100%;
+                viewport-width: self.width;
+                viewport-height: cs-stack.preferred-height;
+                cs-stack := VerticalLayout {
+                    padding: 8px;
+                    alignment: start;
+                    // kind → glyph / tone
+                    // (0 created · 1 folder · 2 renamed · 3 moved ·
+                    //  4 deleted · 5 edited)
+                    for r in WikiState.cs-rows: HorizontalLayout {
+                        height: 24px * Theme.ui-scale;
+                        spacing: 6px;
+                        Rectangle {
+                            width: 16px;
+                            clip: true;
+                            Text {
+                                text: r.kind == 0 ? "➕"
+                                    : r.kind == 1 ? "📁"
+                                    : r.kind == 2 ? "🏷️"
+                                    : r.kind == 3 ? "➡️"
+                                    : r.kind == 4 ? "🗑️"
+                                    : "✏️";
+                                font-family: "Twemoji Mozilla";
+                                font-size: 11px;
+                                width: 100%;
+                                height: 100%;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                        csm-row := Text {
+                            text: r.label;
+                            color: r.kind == 4 ? Theme.bad
+                                : (r.kind == 0 || r.kind == 1) ? Theme.good
+                                : Theme.warn;
+                            font-size: Theme.fs-cap;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+                    }
+                }
+            }
+            ScrollHint {
+                x: parent.width - 7px;
+                view-h: csm.height;
+                content-h: csm.viewport-height;
+                scroll-y: csm.viewport-y;
             }
         }
     }

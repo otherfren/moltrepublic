@@ -726,6 +726,10 @@ export global Theme {
     out property <length> radius: theme-index == 0 ? 4px : (win95 ? 0px : 8px);
     out property <length> border-w: win95 ? 2px : 1px;
     out property <length> pad: 18px;
+    // the ONE gap between panels — every surface pane insets by it and
+    // separates its panels by it, so no two panes read as differently
+    // spaced (the chat splitter grip is exactly one such gap wide)
+    out property <length> pane-gap: 8px;
     // the chat presence strip: the pill lays itself out from these, and the
     // strip measures its column width from the same numbers (MemberPill and
     // `pmeas` in app.slint) - drifting them apart cuts names off
@@ -1358,6 +1362,7 @@ export global Strings {
     in property <string> mem-cs-moved;
     in property <string> mem-cs-lines;
     in property <string> mem-cs-undo;
+    in property <string> mem-cs-changes;
     in property <string> mem-cs-details;
     in property <string> mem-cs-revert;
     in property <string> mem-cs-vote;
