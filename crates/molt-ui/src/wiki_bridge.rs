@@ -426,8 +426,16 @@ pub(crate) fn wire_wiki(
     act!(on_set_link_header, |w, on: bool| w.set_link_header(on));
     act!(on_set_link_qualifiers, |w, v: slint::SharedString| w
         .set_link_qualifiers(&v));
-    act!(on_set_cursor, |w, at: i32| w
-        .set_cursor(usize::try_from(at).unwrap_or(0)));
+    // NOT through `act!`: the caret fires on every keystroke, arrow key
+    // and click, and a whole-face sync per caret move would rebuild the
+    // nav model, the blocks and the patch twice per keystroke. Nothing on
+    // the face reads it - the next commit does.
+    {
+        let m = model.clone();
+        g.on_set_cursor(move |at| {
+            m.borrow_mut().set_cursor(usize::try_from(at).unwrap_or(0));
+        });
+    }
     act!(on_link_add_custom, |w| {
         w.link_add_custom();
     });

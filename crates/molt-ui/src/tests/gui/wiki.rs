@@ -824,6 +824,48 @@ fn a_semantic_link_is_written_from_the_toolbar_the_editor_and_the_navigator() {
     g.set_link_modal_open(false);
 }
 
+/// The caret rides every keystroke, arrow key and click, so it must NOT
+/// drag a whole-face sync along - the face does not read it, the next
+/// commit does. Pinned by a sentinel a sync would overwrite.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_caret_move_does_not_resync_the_whole_face() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    let _wiki = wire_wiki(&ui);
+    let g = ui.global::<WikiState>();
+    g.set_base_docs(ModelRc::new(VecModel::from(vec![WikiBase {
+        path: "a.md".into(),
+        content: "# A\n".into(),
+        loaded: true,
+    }])));
+    g.set_base_rev(1);
+    g.invoke_base_arrived();
+    let rows = g.get_nav_rows();
+    let id = (0..rows.row_count())
+        .filter_map(|i| rows.row_data(i))
+        .find(|r| r.label.as_str() == "a.md")
+        .expect("nav row")
+        .id;
+    g.invoke_nav_open(id);
+
+    // a sync rewrites doc-meta from the model, so a surviving sentinel
+    // means no sync ran
+    g.set_doc_meta("sentinel".into());
+    g.invoke_set_cursor(2);
+    assert_eq!(
+        g.get_doc_meta().as_str(),
+        "sentinel",
+        "a caret move must not push the face"
+    );
+    assert_eq!(g.get_raw().as_str(), "# A\n", "…and it writes nothing");
+
+    // …while a real action does, or the sentinel would prove nothing
+    g.invoke_nav_mark(id);
+    assert_ne!(g.get_doc_meta().as_str(), "sentinel");
+}
+
 /// The header stays reachable, as a DELIBERATE second option: the
 /// qualified relation `{to, since, role}` has no inline shape, and a
 /// refusal keeps the modal up with its reason rather than writing.
