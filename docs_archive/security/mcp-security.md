@@ -80,9 +80,9 @@ setting there — an agent can neither issue itself one nor read one back.
 
 * The read set is the WIKI and the SHARED FILES, nothing else (product
   decision 2026-09-04): `wiki_list`, `wiki_get`, `wiki_search`, `wiki_links`,
-  `wiki_neighbors`, `read_uploads`. A tool is seat-scope unless that list
-  names it, and a test pins the list, so a new tool cannot drift into the
-  read scope by omission.
+  `wiki_neighbors`, `wiki_props`, `wiki_changes`, `wiki_health`,
+  `read_uploads`. A tool is seat-scope unless that list names it, and a test
+  pins the list, so a new tool cannot drift into the read scope by omission.
 * **`read_state` is deliberately NOT in it.** A chat read sends this seat's
   read receipts to the republic (retrieval is the reading), so admitting it
   would have made the seat-scoping of `mark_read` decoration - the boundary

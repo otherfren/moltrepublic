@@ -881,6 +881,37 @@ pub(crate) struct WikiCache {
     pub(crate) chain: usize,
     /// The epoch the fold was taken under.
     pub(crate) epoch: u64,
+    /// What each applied revision TOUCHED, in revision order (§4.11).
+    /// It rides the cache so it is invalidated exactly when the tree is -
+    /// one staleness story, not two - and `wiki_changes` then answers in
+    /// O(entries since its `since_rev`) instead of a refold per call. It
+    /// holds paths, never content, and a folded cut clears it.
+    pub(crate) history: Vec<WikiRevChanges>,
+    /// The folded base underneath (K6), if the republic has cut. A cut
+    /// RE-BASES the revision counter, and the extension loop refolds
+    /// whenever one appears, so this only ever changes with the whole
+    /// cache.
+    pub(crate) base: Option<String>,
+}
+
+/// What ONE applied revision touched (§4.11), as the fold derives it.
+pub(crate) struct WikiRevChanges {
+    /// The revision this patch produced.
+    pub(crate) rev: u64,
+    /// One entry per file the patch named.
+    pub(crate) items: Vec<WikiTouch>,
+}
+
+/// One file of one applied patch: the path as the patch LEFT it, what it
+/// did, and - on a rename - where it came from. Coalescing across
+/// revisions happens at read time, not here.
+pub(crate) struct WikiTouch {
+    /// The path the change left behind (the old path for a deletion).
+    pub(crate) path: String,
+    /// `"added"`, `"modified"`, `"deleted"` or `"renamed"`.
+    pub(crate) kind: &'static str,
+    /// The path a rename moved away from.
+    pub(crate) from: Option<String>,
 }
 
 /// Both derived indexes over one folded base, as an off-actor build
@@ -1681,6 +1712,12 @@ impl State {
             } => self.cmd_wiki_list(prefix, cursor, limit),
             Command::WikiGet { path } => self.cmd_wiki_get(path),
             Command::NetWikiIndexReady { epoch } => self.cmd_net_wiki_index_ready(epoch),
+            Command::WikiChanges {
+                since_rev,
+                limit,
+                cursor,
+            } => self.cmd_wiki_changes(since_rev, limit, cursor),
+            Command::WikiHealth { limit } => self.cmd_wiki_health(limit),
             Command::WikiProps => self.cmd_wiki_props(),
             Command::WikiLinks {
                 path,
