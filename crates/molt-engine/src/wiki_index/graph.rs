@@ -244,8 +244,10 @@ impl WikiGraph {
 }
 
 /// Every scalar a header value carries, as the human reads it - one for a
-/// scalar, N for a list, the members of a qualified relation.
-fn scalar_strings(value: &Value) -> Vec<String> {
+/// scalar, N for a list, the members of a qualified relation. The SEARCH
+/// renders values with it too, so the vocabulary `wiki_props` reports is
+/// exactly the one a `props` filter narrows on.
+pub(crate) fn scalar_strings(value: &Value) -> Vec<String> {
     let one = |v: &Value| -> Option<String> {
         match v {
             Value::String(s) => Some(

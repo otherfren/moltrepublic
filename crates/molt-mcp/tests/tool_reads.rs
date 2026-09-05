@@ -187,3 +187,38 @@ async fn the_wiki_tools_build_the_reads_the_engine_serves() {
         format!("{:?}", direct.map(|_| ())),
     );
 }
+
+/// The two query parameters an agent writes as JSON rather than as the
+/// command's own shape: `wiki_search`'s `props` object, and the traversal
+/// options `wiki_neighbors` takes. A wrong type is a typo the caller
+/// hears about, never a silent default.
+#[test]
+fn the_wiki_query_tools_map_their_arguments() {
+    let wiki_search = tool("wiki_search");
+    let cmd = (wiki_search.build)(&json!({
+        "query": "x",
+        "props": { "status": "draft", "born": 1975 }
+    }))
+    .expect("wiki_search builds");
+    match cmd {
+        Command::WikiSearch { mut props, .. } => {
+            props.sort();
+            assert_eq!(
+                props,
+                vec![
+                    ("born".to_string(), "1975".to_string()),
+                    ("status".to_string(), "draft".to_string()),
+                ],
+                "the object becomes the command's pairs, a number as its text"
+            );
+        }
+        other => panic!("wiki_search built {other:?}"),
+    }
+    let cmd = (wiki_search.build)(&json!({ "query": "x" })).expect("bare wiki_search builds");
+    assert!(
+        matches!(&cmd, Command::WikiSearch { props, .. } if props.is_empty()),
+        "an absent props is no filter at all: {cmd:?}"
+    );
+    assert!((wiki_search.build)(&json!({ "props": ["status", "draft"] })).is_err());
+    assert!((wiki_search.build)(&json!({ "props": { "status": ["draft"] } })).is_err());
+}

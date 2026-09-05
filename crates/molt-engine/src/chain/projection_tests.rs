@@ -767,7 +767,7 @@ fn an_index_built_against_a_moved_base_is_discarded() {
     // no index yet: the read says so instead of answering empty
     walter.wiki_index_building = Some(walter.applied_epoch);
     let err = walter
-        .cmd_wiki_search("alpha".to_string(), vec![], None, None, 0, 0)
+        .cmd_wiki_search("alpha".to_string(), vec![], None, None, vec![], 0, 0)
         .expect_err("a search with no index must refuse");
     assert!(
         matches!(err, molt_core::MoltError::IndexBuilding { .. }),
@@ -810,7 +810,7 @@ fn an_index_built_against_a_moved_base_is_discarded() {
         .cmd_net_wiki_index_ready(built_at)
         .expect("the completion always answers");
     let hits = match walter
-        .cmd_wiki_search("beta".to_string(), vec![], None, None, 0, 0)
+        .cmd_wiki_search("beta".to_string(), vec![], None, None, vec![], 0, 0)
         .expect("search")
     {
         molt_core::Reply::WikiSearch { hits, .. } => hits,
@@ -873,7 +873,7 @@ fn the_search_index_follows_the_applied_base() {
     walter.build_wiki_indexes_now();
     let found = hits(
         walter
-            .cmd_wiki_search("Zentrale".to_string(), vec![], None, None, 0, 0)
+            .cmd_wiki_search("Zentrale".to_string(), vec![], None, None, vec![], 0, 0)
             .expect("search"),
     );
     assert_eq!(found.len(), 2, "both documents carry the word: {found:?}");
@@ -886,6 +886,7 @@ fn the_search_index_follows_the_applied_base() {
                 vec!["gruender".to_string()],
                 Some("person".to_string()),
                 Some("people".to_string()),
+                vec![],
                 0,
                 0,
             )
@@ -898,13 +899,13 @@ fn the_search_index_follows_the_applied_base() {
     seal_wiki(&mut walter, &b, "petra", 42, wp(edit.to_string()));
     let found = hits(
         walter
-            .cmd_wiki_search("Zentrale".to_string(), vec![], None, None, 0, 0)
+            .cmd_wiki_search("Zentrale".to_string(), vec![], None, None, vec![], 0, 0)
             .expect("search"),
     );
     assert_eq!(found, vec!["people/anna.md"], "the edited text is gone");
     let found = hits(
         walter
-            .cmd_wiki_search("Aussenstelle".to_string(), vec![], None, None, 0, 0)
+            .cmd_wiki_search("Aussenstelle".to_string(), vec![], None, None, vec![], 0, 0)
             .expect("search"),
     );
     assert_eq!(found, vec!["orte/berlin.md"], "…and the new text is there");
@@ -912,7 +913,7 @@ fn the_search_index_follows_the_applied_base() {
     // an empty query with no filter finds nothing, never everything
     assert!(hits(
         walter
-            .cmd_wiki_search(String::new(), vec![], None, None, 0, 0)
+            .cmd_wiki_search(String::new(), vec![], None, None, vec![], 0, 0)
             .expect("search")
     )
     .is_empty());

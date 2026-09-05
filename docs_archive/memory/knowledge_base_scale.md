@@ -338,8 +338,18 @@ predicate.
   `crates/molt-net/tests/ring_free_guard.rs` with `-i zstd-sys` (and
   `-i libsqlite3-sys`) on `-p molt-engine -e no-dev`.
 - Schema: `path` STRING|STORED (the delete key), `title` TEXT|STORED,
-  `body` TEXT, `folder` STRING, `facet` Facet (`/tag/<t>`, `/type/<t>`,
-  `/prop/<key>/<value>` for scalar String properties ≤ 64 chars).
+  `body` TEXT, `header` TEXT, `alias` TEXT, `folder` STRING, `facet` Facet
+  (`/tag/<t>`, `/type/<t>`, `/prop/<key>/<value>`).
+- **Recall over the header (BUILT 2026-09-05).** `header` carries every
+  scalar the front matter says, `alias` the names the page declares, both
+  rendered by the SAME rule as the inventory (`graph::scalar_strings`:
+  link braces stripped, a number as its decimal text). Aliases keep their
+  own field rather than joining `title`, because `title` is STORED and IS
+  the title a hit displays; a short field ranks a name match high by
+  itself. The facets follow the same rendering, one per `(key, value)`
+  pair the inventory reports (≤ 64 chars, or it is not faceted), so every
+  pair `wiki_props` shows is queryable - the two reserved keys under their
+  own roots, everything else under `/prop/`.
 - Ownership (BUILT 2026-09-04, same deviation as the graph): the index is
   owned by the actor, built on the FIRST search and updated per applied
   patch (`delete_term` + `add_document` + `commit`, then an explicit
@@ -350,11 +360,14 @@ predicate.
   the whole tree on the actor, and that is when the off-actor
   `WikiIndexer` this section sketches earns its complexity.
 - Tool (Read): `wiki_search { query, tags: Vec<String>, type:
-  Option<String>, folder: Option<String>, limit, cursor }` → hits
-  `{ path, title, score, snippet }`, `next_cursor` (an offset),
-  `index_rev`, `wiki_rev`. Query syntax is tantivy's
-  (`+must -not "phrase" title:term`); facets become `TermQuery` clauses in
-  a `BooleanQuery`; snippets from `SnippetGenerator` over `body`.
+  Option<String>, folder: Option<String>, props: Vec<(String, String)>,
+  limit, cursor }` → hits `{ path, title, score, snippet }`, `next_cursor`
+  (an offset), `index_rev`, `wiki_rev`. Query syntax is tantivy's
+  (`+must -not "phrase" title:term`) over `title`, `body`, `header` and
+  `alias`; `props` (an OBJECT on the MCP surface, pairs in the command)
+  becomes facet clauses like `tags`/`type`, all of them `Must`, so an
+  unknown key narrows to nothing rather than to everything; snippets from
+  `SnippetGenerator` over `body`.
 - Memory: the index is roughly the size of the text; it lives only while
   the workspace is open and is rebuilt from the fold at every open. Nothing
   touches disk.

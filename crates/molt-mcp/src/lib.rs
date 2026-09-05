@@ -415,6 +415,24 @@ fn str_list_arg(args: &Value, key: &str) -> Result<Vec<String>, String> {
     }
 }
 
+/// An optional object of scalar values, as `(key, value)` pairs: absent or
+/// null = empty. A number is taken as the text the header writes
+/// (`born: 1975`); anything else is a typo the caller has to hear about.
+fn str_map_arg(args: &Value, key: &str) -> Result<Vec<(String, String)>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Object(map)) => map
+            .iter()
+            .map(|(k, v)| match v {
+                Value::String(s) => Ok((k.clone(), s.clone())),
+                Value::Number(n) => Ok((k.clone(), n.to_string())),
+                _ => Err(format!("`{key}.{k}` must be a string")),
+            })
+            .collect(),
+        Some(_) => Err(format!("argument `{key}` must be an object of key/value pairs")),
+    }
+}
+
 /// An optional count: absent or null = 0, which every handler reads as
 /// "the default".
 fn opt_u32_arg(args: &Value, key: &str) -> Result<u32, String> {
@@ -1104,7 +1122,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wiki_search",
             command: "wiki_search",
             scope: Scope::Read,
-            description: "Search the wiki. `query` is tantivy syntax over title and body (`+must -not \"phrase\" title:term`); `tags`, `type` and `folder` narrow it by front matter and location. Hits carry a snippet. Page with `limit` and `cursor`. An empty query with no filter finds nothing, never everything.",
+            description: "Search the wiki. `query` is tantivy syntax (`+must -not \"phrase\" title:term`) over title, body, the header's own values and the aliases a page declares - so a page is found under its name, not only under its prose. `tags`, `type`, `folder` and `props` narrow it. `props` is an object of front-matter pairs (`{\"status\": \"draft\"}`) that must ALL match, with the value written exactly as wiki_props reports it; a value over 64 characters is not faceted and matches nothing. Hits carry a snippet. Page with `limit` and `cursor`. An empty query with no filter finds nothing, never everything.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1112,6 +1130,7 @@ pub fn tools() -> Vec<ToolDef> {
                     "tags": { "type": "array", "items": { "type": "string" }, "description": "optional: every tag must be present" },
                     "type": { "type": "string", "description": "optional: the front matter's type" },
                     "folder": { "type": "string", "description": "optional: only documents in this folder" },
+                    "props": { "type": "object", "additionalProperties": { "type": "string" }, "description": "optional: front-matter pairs that must all match, e.g. {\"status\": \"draft\"}" },
                     "limit": { "type": "integer", "description": "optional: page size, 1..=500 (default 100)" },
                     "cursor": { "type": "integer", "description": "optional: continue after this many hits" }
                 }
@@ -1121,6 +1140,7 @@ pub fn tools() -> Vec<ToolDef> {
                 tags: str_list_arg(args, "tags")?,
                 kind: opt_str_arg(args, "type")?,
                 folder: opt_str_arg(args, "folder")?,
+                props: str_map_arg(args, "props")?,
                 limit: opt_u32_arg(args, "limit")?,
                 cursor: opt_u32_arg(args, "cursor")?,
             }),

@@ -19,7 +19,7 @@ use tantivy::schema::{
 use tantivy::snippet::SnippetGenerator;
 use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
 
-use super::front_matter;
+use super::{front_matter, graph};
 
 /// The longest property value that becomes a facet.
 const MAX_FACET_VALUE: usize = 64;
@@ -46,12 +46,17 @@ pub(crate) struct Filters {
     pub(crate) kind: Option<String>,
     /// A folder prefix.
     pub(crate) folder: Option<String>,
+    /// Header `(key, value)` pairs; every one must match, and the value
+    /// reads exactly as the inventory reports it.
+    pub(crate) props: Vec<(String, String)>,
 }
 
 struct Fields {
     path: Field,
     title: Field,
     body: Field,
+    header: Field,
+    alias: Field,
     folder: Field,
     facet: Field,
 }
@@ -71,6 +76,13 @@ impl WikiSearch {
         let path = sb.add_text_field("path", STRING | STORED);
         let title = sb.add_text_field("title", TEXT | STORED);
         let body = sb.add_text_field("body", TEXT | STORED);
+        // the header's own text, so a page is findable under what it
+        // DECLARES and not only under its prose
+        let header = sb.add_text_field("header", TEXT);
+        // aliases keep their own field instead of joining `title`: `title`
+        // is STORED and is the title a hit displays, and a short field
+        // ranks a name match high by itself (BM25 normalises by length)
+        let alias = sb.add_text_field("alias", TEXT);
         let folder = sb.add_text_field("folder", STRING);
         let facet = sb.add_facet_field("facet", FacetOptions::default());
         let index = Index::create_in_ram(sb.build());
@@ -89,6 +101,8 @@ impl WikiSearch {
                 path,
                 title,
                 body,
+                header,
+                alias,
                 folder,
                 facet,
             },
@@ -127,10 +141,20 @@ impl WikiSearch {
         let (props, _) = front_matter::properties(content);
         let props = props.unwrap_or_default();
         let (_, body) = front_matter::split(content);
+        let mut header = Vec::new();
+        for (key, value) in &props {
+            // aliases have their own field: one fact, one place
+            if key != "aliases" {
+                header.extend(graph::scalar_strings(value));
+            }
+        }
+        let aliases = props.get("aliases").map(graph::scalar_strings).unwrap_or_default();
         let mut d = doc!(
             self.f.path => path,
             self.f.title => front_matter::first_heading(content).unwrap_or_default(),
             self.f.body => body,
+            self.f.header => header.join(" "),
+            self.f.alias => aliases.join(" "),
             self.f.folder => folder_of(path),
         );
         for facet in facets_of(&props) {
@@ -160,14 +184,20 @@ impl WikiSearch {
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
         let text = text.trim();
         if !text.is_empty() {
-            let parser = QueryParser::for_index(&self.index, vec![self.f.title, self.f.body]);
+            let parser = QueryParser::for_index(
+                &self.index,
+                vec![self.f.title, self.f.body, self.f.header, self.f.alias],
+            );
             clauses.push((Occur::Must, parser.parse_query(text)?));
         }
         for tag in &filters.tags {
-            clauses.push((Occur::Must, facet_clause(self.f.facet, &format!("/tag/{}", facet_seg(tag)))));
+            clauses.push((Occur::Must, facet_clause(self.f.facet, &facet_path("tags", tag))));
         }
         if let Some(kind) = &filters.kind {
-            clauses.push((Occur::Must, facet_clause(self.f.facet, &format!("/type/{}", facet_seg(kind)))));
+            clauses.push((Occur::Must, facet_clause(self.f.facet, &facet_path("type", kind))));
+        }
+        for (key, value) in &filters.props {
+            clauses.push((Occur::Must, facet_clause(self.f.facet, &facet_path(key, value))));
         }
         if let Some(folder) = &filters.folder {
             clauses.push((
@@ -235,24 +265,29 @@ fn folder_of(path: &str) -> &str {
     }
 }
 
-/// `/tag/<t>`, `/type/<t>` and `/prop/<key>/<value>` for short string
-/// properties - the facets a filter narrows on.
+/// Where one header pair is faceted. ONE rule, used by the index and by
+/// the filter - the two reserved keys keep their own roots, so `wiki_props`
+/// vocabulary stays queryable under the names it reports.
+fn facet_path(key: &str, value: &str) -> String {
+    match key {
+        "tags" => format!("/tag/{}", facet_seg(value)),
+        "type" => format!("/type/{}", facet_seg(value)),
+        _ => format!("/prop/{}/{}", facet_seg(key), facet_seg(value)),
+    }
+}
+
+/// The facets a filter narrows on, one per `(key, value)` pair the header
+/// says - rendered exactly as the inventory renders it (link braces
+/// stripped, a number as its decimal text). A value over
+/// [`MAX_FACET_VALUE`] is not faceted and therefore not filterable.
 fn facets_of(props: &serde_json::Map<String, Value>) -> Vec<Facet> {
     let mut out = Vec::new();
-    let mut push = |path: String| out.push(Facet::from(path.as_str()));
     for (key, value) in props {
-        match (key.as_str(), value) {
-            ("tags", Value::Array(items)) => {
-                for t in items.iter().filter_map(Value::as_str) {
-                    push(format!("/tag/{}", facet_seg(t)));
-                }
+        for shown in graph::scalar_strings(value) {
+            if shown.is_empty() || shown.len() > MAX_FACET_VALUE {
+                continue;
             }
-            ("tags", Value::String(t)) => push(format!("/tag/{}", facet_seg(t))),
-            ("type", Value::String(t)) => push(format!("/type/{}", facet_seg(t))),
-            (_, Value::String(v)) if v.len() <= MAX_FACET_VALUE => {
-                push(format!("/prop/{}/{}", facet_seg(key), facet_seg(v)));
-            }
-            _ => {}
+            out.push(Facet::from(facet_path(key, &shown).as_str()));
         }
     }
     out
@@ -370,6 +405,73 @@ mod tests {
         let (hits, more) = s.search("gemeinsam", &Filters::default(), 2, 4).expect("q");
         assert_eq!(hits.len(), 1);
         assert!(!more, "the last page says so");
+    }
+
+    /// §4.6 recall: a page is findable under what its HEADER declares -
+    /// its aliases and its scalar values - not only under its prose.
+    #[test]
+    fn the_header_is_searchable_by_alias_and_by_value() {
+        let t = tree(&[
+            (
+                "people/mueller.md",
+                "---\ntype: person\naliases: [P. Müller, Müller]\nworks_at: \"[[Acme]]\"\nborn: 1975\n---\n# P.\nSchreibt Berichte.\n",
+            ),
+            (
+                "people/bob.md",
+                "---\ntype: person\n---\n# Bob\nSchreibt nichts.\n",
+            ),
+        ]);
+        let s = WikiSearch::build(&t).expect("index");
+        for needle in ["Müller", "Acme", "1975"] {
+            let (hits, _) = s
+                .search(needle, &Filters::default(), 10, 0)
+                .expect("search");
+            assert_eq!(
+                paths(&hits),
+                vec!["people/mueller.md"],
+                "the header's own text is not findable by {needle}"
+            );
+        }
+        // …and a field prefix still means that ONE field
+        let (hits, _) = s
+            .search("title:Müller", &Filters::default(), 10, 0)
+            .expect("search");
+        assert!(hits.is_empty(), "an alias is not the title");
+    }
+
+    /// §4.6: the facets the index already writes become a query path, and
+    /// an unknown key narrows to nothing rather than to everything.
+    #[test]
+    fn a_props_filter_narrows_to_a_header_value() {
+        let t = tree(&[
+            ("a.md", "---\nstatus: draft\n---\n# A\ngemeinsam\n"),
+            ("b.md", "---\nstatus: final\n---\n# B\ngemeinsam\n"),
+            ("c.md", "---\nworks_at: \"[[Acme]]\"\n---\n# C\ngemeinsam\n"),
+        ]);
+        let s = WikiSearch::build(&t).expect("index");
+        let props = |pairs: &[(&str, &str)]| Filters {
+            props: pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+            ..Filters::default()
+        };
+        let (hits, _) = s
+            .search("gemeinsam", &props(&[("status", "draft")]), 10, 0)
+            .expect("q");
+        assert_eq!(paths(&hits), vec!["a.md"], "exactly the drafts");
+        // the value reads as the INVENTORY reports it: link braces stripped
+        let (hits, _) = s
+            .search("gemeinsam", &props(&[("works_at", "Acme")]), 10, 0)
+            .expect("q");
+        assert_eq!(paths(&hits), vec!["c.md"]);
+        for pairs in [[("nope", "draft")], [("status", "nope")]] {
+            let (hits, _) = s.search("gemeinsam", &props(&pairs), 10, 0).expect("q");
+            assert!(hits.is_empty(), "{pairs:?} must narrow to nothing");
+        }
+        // a filter alone is a query - it needs no text
+        let (hits, _) = s.search("", &props(&[("status", "final")]), 10, 0).expect("q");
+        assert_eq!(paths(&hits), vec!["b.md"]);
     }
 
     /// An empty query with no filter is not "everything".

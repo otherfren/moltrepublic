@@ -1696,9 +1696,10 @@ impl State {
                 tags,
                 kind,
                 folder,
+                props,
                 limit,
                 cursor,
-            } => self.cmd_wiki_search(query, tags, kind, folder, limit, cursor),
+            } => self.cmd_wiki_search(query, tags, kind, folder, props, limit, cursor),
 
             // net/ (engine-internal, sent by the node's own supervisor)
             Command::NetDelivered {

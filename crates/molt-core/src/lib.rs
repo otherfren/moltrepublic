@@ -4041,6 +4041,10 @@ pub enum Command {
         /// A folder.
         #[serde(default)]
         folder: Option<String>,
+        /// Header `(key, value)` pairs; every one must match, and the
+        /// value reads as [`Reply::WikiProps`] reports it.
+        #[serde(default)]
+        props: Vec<(String, String)>,
         /// Page size, clamped to 1..=500 (0 = the default 100).
         #[serde(default)]
         limit: u32,

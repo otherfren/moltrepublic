@@ -2039,12 +2039,14 @@ impl State {
     }
 
     /// [`Command::WikiSearch`] (§4.6).
+    #[allow(clippy::too_many_arguments)] // mirrors the Command's own field set
     pub(crate) fn cmd_wiki_search(
         &mut self,
         query: String,
         tags: Vec<String>,
         kind: Option<String>,
         folder: Option<String>,
+        props: Vec<(String, String)>,
         limit: u32,
         cursor: u32,
     ) -> Result<Reply, MoltError> {
@@ -2069,6 +2071,7 @@ impl State {
             tags,
             kind,
             folder,
+            props,
         };
         let (hits, more) = index
             .search(&query, &filters, page, start)

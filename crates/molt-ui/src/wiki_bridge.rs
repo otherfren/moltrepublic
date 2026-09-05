@@ -1241,6 +1241,7 @@ pub(crate) fn wire_wiki_index(ui: &AppWindow, ctx: &Ctx) {
                         tags: Vec::new(),
                         kind: None,
                         folder: None,
+                        props: Vec::new(),
                         limit: 50,
                         cursor: 0,
                     })
