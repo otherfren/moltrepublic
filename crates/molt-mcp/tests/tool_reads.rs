@@ -221,4 +221,40 @@ fn the_wiki_query_tools_map_their_arguments() {
     );
     assert!((wiki_search.build)(&json!({ "props": ["status", "draft"] })).is_err());
     assert!((wiki_search.build)(&json!({ "props": { "status": ["draft"] } })).is_err());
+
+    let wiki_neighbors = tool("wiki_neighbors");
+    let cmd = (wiki_neighbors.build)(&json!({
+        "path": "a.md",
+        "predicate": "part_of",
+        "direction": "out",
+        "transitive": true
+    }))
+    .expect("wiki_neighbors builds");
+    match cmd {
+        Command::WikiNeighbors {
+            predicate,
+            direction,
+            transitive,
+            ..
+        } => {
+            assert_eq!(predicate.as_deref(), Some("part_of"));
+            assert_eq!(direction.as_deref(), Some("out"));
+            assert!(transitive);
+        }
+        other => panic!("wiki_neighbors built {other:?}"),
+    }
+    let cmd = (wiki_neighbors.build)(&json!({ "path": "a.md" })).expect("bare builds");
+    assert!(
+        matches!(
+            &cmd,
+            Command::WikiNeighbors {
+                predicate: None,
+                direction: None,
+                transitive: false,
+                ..
+            }
+        ),
+        "an absent option narrows nothing: {cmd:?}"
+    );
+    assert!((wiki_neighbors.build)(&json!({ "path": "a.md", "transitive": "yes" })).is_err());
 }

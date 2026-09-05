@@ -1907,14 +1907,31 @@ impl State {
         })
     }
 
-    /// [`Command::WikiNeighbors`] (§4.5): what is one or two hops away.
+    /// [`Command::WikiNeighbors`] (§4.5): what is one or two hops away -
+    /// or, under one predicate, everything it reaches.
     pub(crate) fn cmd_wiki_neighbors(
         &mut self,
         path: String,
         depth: u32,
         limit: u32,
+        predicate: Option<String>,
+        direction: Option<String>,
+        transitive: bool,
     ) -> Result<Reply, MoltError> {
         self.require_feature(Surface::Memory)?;
+        let dir = direction.unwrap_or_else(|| "both".to_string());
+        if !matches!(dir.as_str(), "out" | "in" | "both") {
+            return Err(MoltError::BadPayload(format!(
+                "direction is out, in or both - not `{dir}`"
+            )));
+        }
+        // a closure over "some relation" is not a question: the republic
+        // declares no vocabulary, so the caller has to name the one
+        if transitive && predicate.is_none() {
+            return Err(MoltError::BadPayload(
+                "transitive needs a predicate - name the relation to close".to_string(),
+            ));
+        }
         self.refresh_wiki_graph();
         if self.wiki_graph.is_none() {
             self.spawn_wiki_index_build();
@@ -1937,13 +1954,28 @@ impl State {
         if !graph.docs.contains_key(&path) {
             return Err(MoltError::BadPayload(format!("no such document: {path}")));
         }
-        let docs = graph
-            .neighbors(&path, depth, cap)
+        let walk = wiki_index::graph::Walk {
+            depth,
+            out: dir != "in",
+            inn: dir != "out",
+            predicate: predicate.as_deref(),
+            transitive,
+            cap,
+        };
+        let (reached, capped) = graph.neighbors(&path, &walk);
+        let docs = reached
             .into_iter()
-            .map(|(path, distance)| molt_core::WikiNeighbor { path, distance })
+            .map(|r| molt_core::WikiNeighbor {
+                path: r.path,
+                distance: r.distance,
+                predicate: r.predicate,
+                direction: r.direction.to_string(),
+                via: r.via,
+            })
             .collect();
         Ok(Reply::WikiNeighbors {
             docs,
+            capped,
             index_rev: wiki_rev,
             wiki_rev,
         })

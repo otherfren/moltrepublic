@@ -149,3 +149,76 @@ async fn a_page_is_found_by_what_its_header_declares() {
     assert!(hits(read(&w, search("", &[("nope", "draft")])).await).is_empty());
     assert!(hits(read(&w, search("", &[("status", "draft"), ("type", "note")])).await).is_empty());
 }
+
+fn neighbors(path: &str, predicate: Option<&str>, direction: Option<&str>, transitive: bool) -> Command {
+    Command::WikiNeighbors {
+        path: path.to_string(),
+        depth: 2,
+        limit: 0,
+        predicate: predicate.map(str::to_string),
+        direction: direction.map(str::to_string),
+        transitive,
+    }
+}
+
+fn near(reply: Reply) -> (Vec<molt_core::WikiNeighbor>, bool) {
+    match reply {
+        Reply::WikiNeighbors { docs, capped, .. } => (docs, capped),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// Step 2 (traversal that says WHY): a chain of four under one predicate.
+/// The bounded walk stops at the depth, the closure runs to the end, and
+/// every hit names the edge that reached it.
+#[tokio::test]
+async fn a_traversal_says_under_which_relation_it_reached_a_document() {
+    let w = spawn_solo();
+    for (path, content) in [
+        ("a.md", "---\npart_of: \"[[b.md]]\"\nknows: \"[[far.md]]\"\n---\n# A\n"),
+        ("b.md", "---\npart_of: \"[[c.md]]\"\n---\n# B\n"),
+        ("c.md", "---\npart_of: \"[[d.md]]\"\n---\n# C\n"),
+        ("d.md", "# D\n"),
+        ("far.md", "# Far\n"),
+    ] {
+        write_doc(&w, path, content).await;
+    }
+
+    // the depth bound holds, and the other relation is not this walk
+    let (docs, capped) = near(read(&w, neighbors("a.md", Some("part_of"), Some("out"), false)).await);
+    assert_eq!(
+        docs.iter().map(|d| d.path.as_str()).collect::<Vec<_>>(),
+        vec!["b.md", "c.md"]
+    );
+    assert!(!capped);
+    assert_eq!(docs[1].predicate.as_deref(), Some("part_of"));
+    assert_eq!(docs[1].direction, "out");
+    assert_eq!(docs[1].via, vec!["b.md".to_string()], "the route it came through");
+
+    // …and the closure walks that ONE predicate to the end
+    let (docs, _) = near(read(&w, neighbors("a.md", Some("part_of"), Some("out"), true)).await);
+    assert_eq!(
+        docs.iter().map(|d| (d.path.as_str(), d.distance)).collect::<Vec<_>>(),
+        vec![("b.md", 1), ("c.md", 2), ("d.md", 3)]
+    );
+    // the other way round is the other question: what belongs to d
+    let (docs, _) = near(read(&w, neighbors("d.md", Some("part_of"), Some("in"), true)).await);
+    assert_eq!(
+        docs.iter().map(|d| (d.path.as_str(), d.direction.as_str())).collect::<Vec<_>>(),
+        vec![("c.md", "in"), ("b.md", "in"), ("a.md", "in")]
+    );
+
+    // a closure over "some relation" is refused, not guessed
+    let err = w
+        .execute(neighbors("a.md", None, None, true))
+        .await
+        .expect_err("transitive without a predicate is refused");
+    assert!(
+        matches!(&err, MoltError::BadPayload(m) if m.contains("predicate")),
+        "the refusal names the missing half: {err:?}"
+    );
+    assert!(w
+        .execute(neighbors("a.md", None, Some("sideways"), false))
+        .await
+        .is_err());
+}

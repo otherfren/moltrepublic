@@ -315,8 +315,22 @@ predicate.
     `molt-ui`'s `parse_links` calls it.
 - Tools (Read): `wiki_links { path, direction: out|in|both, predicate:
   Option<String>, limit, cursor }` → edges; `wiki_neighbors { path, depth:
-  1|2, limit }` → paths with distance (BFS, cap 500). Both carry
+  1|2, limit, predicate: Option<String>, direction: out|in|both,
+  transitive }` → documents with distance (BFS, cap 500). Both carry
   `index_rev` (the fold revision the graph reflects) and `wiki_rev`.
+- **Traversal that says WHY (BUILT 2026-09-05).** Every neighbour carries
+  the edge that FIRST reached it - `predicate`, `direction` (out|in, as
+  seen from the document it was reached from) and `via` (the documents in
+  between, empty at distance 1; the route, which is why it is not called
+  `path`). BFS, so that edge lies on a shortest route. `transitive` drops
+  the depth bound and closes ONE predicate to a fixpoint - the CALLER's
+  assumption about that predicate, since §1.2 leaves the vocabulary
+  descriptive, so it is refused without one. The 500 cap stays the bound
+  and the walk reports `capped` when it hit it (one document past the cap
+  is fetched, so a full last page is not reported as a cut). A cycle
+  terminates on the `seen` set the walk already keeps. The predicate
+  filter matches the EDGE's predicate, never `header`, so an inline typed
+  link (§6) walks with the same call.
 
 ### 4.6 Full-text search (K5)
 

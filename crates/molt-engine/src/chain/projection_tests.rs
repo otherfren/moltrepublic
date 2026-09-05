@@ -998,7 +998,7 @@ fn the_link_graph_follows_the_applied_base() {
     assert!(edges.iter().all(|e| e.path == "anna.md" && e.direction == "in"));
 
     let molt_core::Reply::WikiNeighbors { docs, .. } = walter
-        .cmd_wiki_neighbors("anna.md".to_string(), 1, 0)
+        .cmd_wiki_neighbors("anna.md".to_string(), 1, 0, None, None, false)
         .expect("neighbors")
     else {
         panic!("wrong reply");
@@ -1012,7 +1012,7 @@ fn the_link_graph_follows_the_applied_base() {
         .cmd_wiki_links("nope.md".to_string(), None, None, 0, 0)
         .is_err());
     assert!(walter
-        .cmd_wiki_neighbors("nope.md".to_string(), 1, 0)
+        .cmd_wiki_neighbors("nope.md".to_string(), 1, 0, None, None, false)
         .is_err());
 
     // …and wiki_get carries the parsed header plus both link counts

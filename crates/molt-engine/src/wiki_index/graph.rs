@@ -202,45 +202,109 @@ impl WikiGraph {
         self.inventory = inventory;
     }
 
-    /// Documents within `depth` hops of `path`, nearest first, capped.
-    pub(crate) fn neighbors(&self, path: &str, depth: u32, cap: usize) -> Vec<(String, u32)> {
+    /// Documents reachable from `path`, nearest first, plus whether the cap
+    /// cut the walk short. Breadth first, so the edge REPORTED for a
+    /// document is the one on a shortest route to it.
+    pub(crate) fn neighbors(&self, path: &str, walk: &Walk<'_>) -> (Vec<Reached>, bool) {
         let mut seen: BTreeSet<&str> = BTreeSet::new();
         seen.insert(path);
-        let mut frontier: Vec<String> = vec![path.to_string()];
-        let mut found: Vec<(String, u32)> = Vec::new();
-        for hop in 1..=depth {
-            let mut next: Vec<String> = Vec::new();
-            for node in &frontier {
-                let both = self
-                    .out
-                    .get(node)
-                    .into_iter()
-                    .flatten()
-                    .chain(self.inn.get(node).into_iter().flatten());
-                for e in both {
-                    if seen.contains(e.to.as_str()) {
-                        continue;
-                    }
-                    // `seen` borrows self.docs' keys, so insert the OWNED
-                    // key the graph already holds
-                    let Some((owned, _)) = self.docs.get_key_value(&e.to) else {
-                        continue;
-                    };
-                    seen.insert(owned.as_str());
-                    found.push((owned.clone(), hop));
-                    next.push(owned.clone());
-                    if found.len() >= cap {
-                        return found;
+        // each entry carries the route to it, so a hit can say what it came
+        // through without a second walk
+        let mut frontier: Vec<(&str, Vec<&str>)> = vec![(path, Vec::new())];
+        let mut found: Vec<Reached> = Vec::new();
+        let mut hop = 0u32;
+        while !frontier.is_empty() {
+            hop += 1;
+            if !walk.transitive && hop > walk.depth {
+                break;
+            }
+            let mut next: Vec<(&str, Vec<&str>)> = Vec::new();
+            for (node, route) in &frontier {
+                let sides = [
+                    ("out", walk.out.then(|| self.out.get(*node)).flatten()),
+                    ("in", walk.inn.then(|| self.inn.get(*node)).flatten()),
+                ];
+                for (side, edges) in sides {
+                    for e in edges.into_iter().flatten() {
+                        // matched on the PREDICATE, never on `header`: a
+                        // typed link in the prose carries one too
+                        if walk
+                            .predicate
+                            .is_some_and(|p| e.predicate.as_deref() != Some(p))
+                        {
+                            continue;
+                        }
+                        if seen.contains(e.to.as_str()) {
+                            continue;
+                        }
+                        // `seen` borrows self.docs' keys, so insert the OWNED
+                        // key the graph already holds
+                        let Some((owned, _)) = self.docs.get_key_value(&e.to) else {
+                            continue;
+                        };
+                        seen.insert(owned.as_str());
+                        // `via` names what lies BETWEEN start and the hit,
+                        // so the first hop has none
+                        let via: Vec<&str> = if hop == 1 {
+                            Vec::new()
+                        } else {
+                            let mut v = route.clone();
+                            v.push(*node);
+                            v
+                        };
+                        found.push(Reached {
+                            path: owned.clone(),
+                            distance: hop,
+                            predicate: e.predicate.clone(),
+                            direction: side,
+                            via: via.iter().map(|p| (*p).to_string()).collect(),
+                        });
+                        next.push((owned.as_str(), via));
+                        // one past the cap, so "was it cut" is a fact and
+                        // not a guess about a full last page
+                        if found.len() > walk.cap {
+                            found.truncate(walk.cap);
+                            return (found, true);
+                        }
                     }
                 }
             }
             frontier = next;
-            if frontier.is_empty() {
-                break;
-            }
         }
-        found
+        (found, false)
     }
+}
+
+/// What a neighbour walk follows.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Walk<'a> {
+    /// How many hops; ignored when `transitive`.
+    pub(crate) depth: u32,
+    /// Follow out-edges.
+    pub(crate) out: bool,
+    /// Follow in-edges.
+    pub(crate) inn: bool,
+    /// Only edges under this predicate.
+    pub(crate) predicate: Option<&'a str>,
+    /// Walk that ONE predicate to a fixpoint instead of `depth` hops.
+    pub(crate) transitive: bool,
+    /// At most this many documents.
+    pub(crate) cap: usize,
+}
+
+/// One document a walk reached, with the edge that reached it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Reached {
+    /// The document's path.
+    pub(crate) path: String,
+    /// How many hops from the start.
+    pub(crate) distance: u32,
+    /// The predicate of that edge, if it carries one.
+    pub(crate) predicate: Option<String>,
+    /// `"out"` or `"in"`, as seen from the document it was reached FROM.
+    pub(crate) direction: &'static str,
+    /// The documents BETWEEN the start and this one, in walk order.
+    pub(crate) via: Vec<String>,
 }
 
 /// Every scalar a header value carries, as the human reads it - one for a
@@ -504,6 +568,26 @@ mod tests {
         assert_eq!(links, vec!["Anna".to_string()]);
     }
 
+    /// Both directions, `depth` hops, cap 500 - the walk `wiki_neighbors`
+    /// runs when the caller narrows nothing.
+    fn walk(depth: u32) -> Walk<'static> {
+        Walk {
+            depth,
+            out: true,
+            inn: true,
+            predicate: None,
+            transitive: false,
+            cap: 500,
+        }
+    }
+
+    fn hops(found: &[Reached]) -> Vec<(&str, u32)> {
+        found
+            .iter()
+            .map(|r| (r.path.as_str(), r.distance))
+            .collect()
+    }
+
     /// Two hops, both directions, and the start is never its own neighbour.
     #[test]
     fn neighbors_walk_both_directions() {
@@ -513,19 +597,113 @@ mod tests {
             ("c.md", "# C\n"),
             ("far.md", "# Far\n"),
         ]));
+        assert_eq!(hops(&g.neighbors("a.md", &walk(1)).0), vec![("b.md", 1)]);
         assert_eq!(
-            g.neighbors("a.md", 1, 500),
-            vec![("b.md".to_string(), 1)]
-        );
-        assert_eq!(
-            g.neighbors("a.md", 2, 500),
-            vec![("b.md".to_string(), 1), ("c.md".to_string(), 2)]
+            hops(&g.neighbors("a.md", &walk(2)).0),
+            vec![("b.md", 1), ("c.md", 2)]
         );
         // …from the far end the walk runs backwards just the same
         assert_eq!(
-            g.neighbors("c.md", 2, 500),
-            vec![("b.md".to_string(), 1), ("a.md".to_string(), 2)]
+            hops(&g.neighbors("c.md", &walk(2)).0),
+            vec![("b.md", 1), ("a.md", 2)]
         );
-        assert!(g.neighbors("far.md", 2, 500).is_empty());
+        assert!(g.neighbors("far.md", &walk(2)).0.is_empty());
+    }
+
+    /// §7 step 2: a hit says HOW it was reached - under which predicate,
+    /// which way that edge points, and what lies between.
+    #[test]
+    fn a_neighbour_carries_the_edge_that_reached_it() {
+        let g = WikiGraph::build(&tree(&[
+            ("a.md", "---\npart_of: \"[[b]]\"\n---\n"),
+            ("b.md", "---\npart_of: \"[[c]]\"\n---\n"),
+            ("c.md", "# C\n"),
+        ]));
+        let (found, capped) = g.neighbors("c.md", &walk(2));
+        assert!(!capped);
+        assert_eq!(hops(&found), vec![("b.md", 1), ("a.md", 2)]);
+        assert_eq!(found[0].predicate.as_deref(), Some("part_of"));
+        assert_eq!(
+            found[0].direction, "in",
+            "c is reached FROM b, so that edge points at it"
+        );
+        assert!(found[0].via.is_empty(), "the first hop has nothing between");
+        assert_eq!(
+            found[1].via,
+            vec!["b.md".to_string()],
+            "the route names what lies between"
+        );
+    }
+
+    /// The predicate filter follows ONE relation, and `transitive` closes
+    /// it instead of stopping at the depth bound. A cycle terminates on
+    /// the `seen` set the walk already keeps.
+    #[test]
+    fn a_predicate_walk_closes_transitively_and_a_cycle_terminates() {
+        let g = WikiGraph::build(&tree(&[
+            ("a.md", "---\npart_of: \"[[b]]\"\nknows: \"[[far]]\"\n---\n"),
+            ("b.md", "---\npart_of: \"[[c]]\"\n---\n"),
+            ("c.md", "---\npart_of: \"[[d]]\"\n---\n"),
+            ("d.md", "# D\n"),
+            ("far.md", "# Far\n"),
+        ]));
+        let bounded = Walk {
+            predicate: Some("part_of"),
+            ..walk(2)
+        };
+        assert_eq!(
+            hops(&g.neighbors("a.md", &bounded).0),
+            vec![("b.md", 1), ("c.md", 2)],
+            "the depth bound holds, and `knows` is not this walk"
+        );
+        let closed = Walk {
+            transitive: true,
+            ..bounded
+        };
+        assert_eq!(
+            hops(&g.neighbors("a.md", &closed).0),
+            vec![("b.md", 1), ("c.md", 2), ("d.md", 3)],
+            "…and the closure runs past it"
+        );
+        // one direction is a different question: what belongs to d, rather
+        // than what d is part of
+        let inward = Walk {
+            out: false,
+            ..closed
+        };
+        assert_eq!(
+            hops(&g.neighbors("d.md", &inward).0),
+            vec![("c.md", 1), ("b.md", 2), ("a.md", 3)]
+        );
+        assert!(g.neighbors("a.md", &Walk { inn: false, ..inward }).0.is_empty());
+
+        let cycle = WikiGraph::build(&tree(&[
+            ("a.md", "---\npart_of: \"[[b]]\"\n---\n"),
+            ("b.md", "---\npart_of: \"[[c]]\"\n---\n"),
+            ("c.md", "---\npart_of: \"[[a]]\"\n---\n"),
+        ]));
+        assert_eq!(
+            hops(&cycle.neighbors("a.md", &Walk { inn: false, ..closed }).0),
+            vec![("b.md", 1), ("c.md", 2)],
+            "a cycle terminates and the start is not its own neighbour"
+        );
+    }
+
+    /// The cap bounds the walk, and the caller is TOLD when it was hit -
+    /// a short answer and a cut answer are different claims.
+    #[test]
+    fn the_cap_bounds_the_walk_and_says_so() {
+        let g = WikiGraph::build(&tree(&[
+            ("hub.md", "---\nsee: [\"[[a]]\", \"[[b]]\", \"[[c]]\"]\n---\n"),
+            ("a.md", "# A\n"),
+            ("b.md", "# B\n"),
+            ("c.md", "# C\n"),
+        ]));
+        let (found, capped) = g.neighbors("hub.md", &Walk { cap: 2, ..walk(1) });
+        assert_eq!(found.len(), 2);
+        assert!(capped, "the walk was cut short and says so");
+        let (found, capped) = g.neighbors("hub.md", &Walk { cap: 3, ..walk(1) });
+        assert_eq!(found.len(), 3);
+        assert!(!capped, "exactly the cap with nothing left is not a cut");
     }
 }

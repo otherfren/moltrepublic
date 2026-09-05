@@ -1688,9 +1688,14 @@ impl State {
                 limit,
                 cursor,
             } => self.cmd_wiki_links(path, direction, predicate, limit, cursor),
-            Command::WikiNeighbors { path, depth, limit } => {
-                self.cmd_wiki_neighbors(path, depth, limit)
-            }
+            Command::WikiNeighbors {
+                path,
+                depth,
+                limit,
+                predicate,
+                direction,
+                transitive,
+            } => self.cmd_wiki_neighbors(path, depth, limit, predicate, direction, transitive),
             Command::WikiSearch {
                 query,
                 tags,

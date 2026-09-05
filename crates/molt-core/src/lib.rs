@@ -4052,16 +4052,28 @@ pub enum Command {
         #[serde(default)]
         cursor: u32,
     },
-    /// The documents within `depth` hops of one (§4.5), nearest first.
+    /// The documents within `depth` hops of one (§4.5), nearest first,
+    /// each with the edge that reached it.
     WikiNeighbors {
         /// The document's path.
         path: String,
-        /// 1 or 2 (0 = 1).
+        /// 1 or 2 (0 = 1); ignored when `transitive`.
         #[serde(default)]
         depth: u32,
         /// How many to return, capped at 500.
         #[serde(default)]
         limit: u32,
+        /// Only follow edges under this predicate.
+        #[serde(default)]
+        predicate: Option<String>,
+        /// `"out"`, `"in"` or `"both"` (the default).
+        #[serde(default)]
+        direction: Option<String>,
+        /// Walk that one `predicate` to a fixpoint instead of `depth`
+        /// hops - the CALLER's assumption about it, since the republic
+        /// declares no vocabulary. Refused without a `predicate`.
+        #[serde(default)]
+        transitive: bool,
     },
     /// The GUI publishes what its window currently shows
     /// (`docs_archive/ui/gui_over_mcp.md`) — the read half of driving the GUI
@@ -5768,6 +5780,9 @@ pub enum Reply {
     WikiNeighbors {
         /// Nearest first.
         docs: Vec<WikiNeighbor>,
+        /// The walk stopped at the cap, so there may be more.
+        #[serde(default)]
+        capped: bool,
         /// The base revision the GRAPH reflects.
         index_rev: u64,
         /// The base revision of the fold itself.
@@ -6202,6 +6217,18 @@ pub struct WikiNeighbor {
     pub path: String,
     /// How many hops away, following links in either direction.
     pub distance: u32,
+    /// The predicate of the edge that first reached it; absent for a link
+    /// that carries none.
+    #[serde(default)]
+    pub predicate: Option<String>,
+    /// How that edge points, seen from the document it was reached FROM:
+    /// `"out"` or `"in"`.
+    #[serde(default)]
+    pub direction: String,
+    /// The documents between the start and this one, in walk order; empty
+    /// at distance 1. The ROUTE, not a document path.
+    #[serde(default)]
+    pub via: Vec<String>,
 }
 
 /// One block of the persistent chain as display data — the row a

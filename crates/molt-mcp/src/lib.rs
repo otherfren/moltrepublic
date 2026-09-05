@@ -445,6 +445,16 @@ fn opt_u32_arg(args: &Value, key: &str) -> Result<u32, String> {
     }
 }
 
+/// An optional flag: absent or null = false, a non-boolean is a typo the
+/// caller has to hear about.
+fn opt_bool_arg(args: &Value, key: &str) -> Result<bool, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(_) => Err(format!("argument `{key}` must be true or false")),
+    }
+}
+
 fn bool_arg(args: &Value, key: &str) -> Result<bool, String> {
     args.get(key)
         .and_then(Value::as_bool)
@@ -1173,13 +1183,16 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wiki_neighbors",
             command: "wiki_neighbors",
             scope: Scope::Read,
-            description: "The documents within one or two hops of a document, nearest first, following links in either direction. Capped at 500.",
+            description: "The documents within one or two hops of a document, nearest first. Each hit says HOW it was reached: `predicate` (the relation of the edge that reached it, null for a plain link), `direction` (out|in, seen from the document it was reached from) and `via` (the documents in between, empty at distance 1). `predicate` narrows the walk to one relation, `direction` picks which way it runs (default both). `transitive` walks that ONE predicate to a fixpoint (cap 500) instead of `depth` hops - it is the caller's assumption about the predicate, the republic declares no vocabulary - and needs a `predicate`. `capped` says the cap cut the walk short.",
             schema: || json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "the document's path" },
-                    "depth": { "type": "integer", "description": "optional: 1 or 2 (default 1)" },
-                    "limit": { "type": "integer", "description": "optional: how many to return, capped at 500" }
+                    "depth": { "type": "integer", "description": "optional: 1 or 2 (default 1); ignored when transitive" },
+                    "limit": { "type": "integer", "description": "optional: how many to return, capped at 500" },
+                    "predicate": { "type": "string", "description": "optional: only follow edges under this relation" },
+                    "direction": { "type": "string", "enum": ["out", "in", "both"], "description": "optional: which way the edges point (default both)" },
+                    "transitive": { "type": "boolean", "description": "optional: close this predicate to a fixpoint instead of walking depth hops" }
                 },
                 "required": ["path"]
             }),
@@ -1187,6 +1200,9 @@ pub fn tools() -> Vec<ToolDef> {
                 path: str_arg(args, "path")?,
                 depth: opt_u32_arg(args, "depth")?,
                 limit: opt_u32_arg(args, "limit")?,
+                predicate: opt_str_arg(args, "predicate")?,
+                direction: opt_str_arg(args, "direction")?,
+                transitive: opt_bool_arg(args, "transitive")?,
             }),
         },
         ToolDef {
