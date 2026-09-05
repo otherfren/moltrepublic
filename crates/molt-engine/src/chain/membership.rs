@@ -127,8 +127,7 @@ impl State {
         relays: Vec<String>,
         consent: Option<String>,
     ) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.mint_proposal_id();
         self.chain.proposal_changes.insert(
             id,
             ChainChange::Membership {

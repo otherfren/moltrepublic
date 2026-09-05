@@ -5,8 +5,8 @@
 
 use super::test_support::*;
 use super::*;
-use super::governance::OPEN_CARDS_PER_PROPOSER_MAX;
-use molt_core::{ChainChange, MembershipOp, Surface};
+use super::governance::{OPEN_CARDS_PER_PROPOSER_MAX, SEAL_PACE_SECS};
+use molt_core::{ChainChange, MembershipOp, Reply, Surface};
 use molt_storage::identity_sign;
 use serde_json::json;
 
@@ -1807,19 +1807,23 @@ fn a_terminal_decline_appends_its_summary_to_the_discussion() {
     let pool = vec!["wss://relay.one".to_string()];
     let b = Builder::new_on_relays(&["petra", "walter"], 2, pool);
     let mut walter = chain_signer("walter", &b, b.blocks.clone());
-    walter
+    let id = match walter
         .cmd_propose(
             Surface::Organization,
             serde_json::json!({ "op": "set_name", "value": "NewName" }),
         )
-        .expect("proposes");
+        .expect("proposes")
+    {
+        Reply::Proposed { id, .. } => id,
+        other => panic!("unexpected reply {other:?}"),
+    };
     // n = 2, m = 2: one decline makes the threshold unreachable
-    walter.cmd_decline(ProposalId(1)).expect("declines");
+    walter.cmd_decline(id).expect("declines");
     let sum = walter
         .chat_visible()
         .find(|m| {
             m.kind == molt_core::ChatKind::System
-                && matches!(&m.channel, molt_core::ChannelRef::Patch { id: p } if p.0 == 1)
+                && matches!(&m.channel, molt_core::ChannelRef::Patch { id: p } if *p == id)
         })
         .expect("the terminal decline posts its summary")
         .clone();
@@ -1830,4 +1834,175 @@ fn a_terminal_decline_appends_its_summary_to_the_discussion() {
         "the summary names the outcome, the decliner and the content: {}",
         sum.body
     );
+}
+
+/// A1 (mcp_agent_friction_fixes.md): the id space is interleaved by roster
+/// position - seat k of n mints only ids ≡ k+1 (mod n) - so seats minting
+/// inside one propagation window can never collide, and a foreign id only
+/// ever moves the mint counter UP.
+#[test]
+fn seats_mint_disjoint_proposal_ids() {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let seat = |name: &str| {
+        let mut s = chain_peer_3(name, &b);
+        s.identity_sk = Some(b.key(name).clone());
+        s
+    };
+    let (mut dora, mut petra, mut walter) = (seat("dora"), seat("petra"), seat("walter"));
+    let mint = |st: &mut crate::State, title: &str| match st
+        .cmd_propose(Surface::Memory, json!({ "op": "add_note", "title": title }))
+        .expect("proposes")
+    {
+        Reply::Proposed { id, .. } => id.0,
+        other => panic!("unexpected reply {other:?}"),
+    };
+    // sorted roster: dora, petra, walter - two rounds without any gossip
+    assert_eq!((mint(&mut dora, "d1"), mint(&mut petra, "p1"), mint(&mut walter, "w1")), (1, 2, 3));
+    assert_eq!((mint(&mut dora, "d2"), mint(&mut petra, "p2"), mint(&mut walter, "w2")), (4, 5, 6));
+    // the gossip lands late: walter learns of 1, 2, 4 and 5 after minting 6
+    for (seq, (from, id, title)) in [("dora", 1, "d1"), ("petra", 2, "p1"), ("dora", 4, "d2"), ("petra", 5, "p2")]
+        .into_iter()
+        .enumerate()
+    {
+        wire(
+            &mut walter,
+            from,
+            u64::try_from(seq + 1).expect("small"),
+            WorkspaceEvent::Proposed {
+                id: ProposalId(id),
+                surface: Surface::Memory,
+                payload: json!({ "op": "add_note", "title": title }),
+            },
+        );
+    }
+    assert_eq!(walter.proposals.len(), 6, "six distinct cards, nothing absorbed");
+    assert_eq!(mint(&mut walter, "w3"), 9, "the next mint stays in walter's class, above everything seen");
+}
+
+/// A1 guard: a foreign `Proposed` whose id this node already holds with
+/// ANOTHER payload is a collision - refused and remembered, never absorbed
+/// as a duplicate. The same payload under another name is the WP2 re-serve
+/// and stays a silent dedup.
+#[test]
+fn a_taken_id_with_another_payload_is_a_refused_collision() {
+    let b = Builder::new(&["petra", "walter"], 2);
+    let mut walter = chain_peer("walter", &b, b.blocks.clone());
+    let a = json!({ "op": "add_note", "title": "a" });
+    assert!(walter.receive_proposed(7, Surface::Memory, a.clone(), "petra"));
+    assert!(!walter.receive_proposed(7, Surface::Memory, a.clone(), "walter"), "re-serve dedups");
+    assert!(walter.chain.id_collisions.is_empty(), "a dedup is not a collision");
+    assert!(!walter.receive_proposed(7, Surface::Memory, json!({ "op": "add_note", "title": "b" }), "dora"));
+    assert_eq!(walter.proposals[&7].payload, a, "the first card stands");
+    assert_eq!(walter.chain.id_collisions.get(&7).map(String::as_str), Some("dora"));
+}
+
+/// A1 guard: a sealed block names an id, and the id names THIS node's own
+/// open card with a different payload (the pre-A1 collision). The block is
+/// chain truth and applies; the local card is not that decision and stays
+/// open instead of reading as a false success.
+#[test]
+fn a_block_for_a_colliding_id_leaves_the_local_card_open() {
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    let id = match walter
+        .cmd_propose(Surface::Memory, json!({ "op": "add_note", "title": "mine" }))
+        .expect("proposes")
+    {
+        Reply::Proposed { id, .. } => id.0,
+        other => panic!("unexpected reply {other:?}"),
+    };
+    b.commit_applied(id, &["petra", "walter"]);
+    walter.adopt_committed_block(b.blocks[1].clone(), 1);
+    assert_eq!(walter.chain.blocks.len(), 2, "the block is chain truth");
+    let card = &walter.proposals[&id];
+    assert_eq!(card.state, ProposalState::Proposed, "the own card is not that decision");
+    assert_eq!(card.payload["title"], "mine");
+}
+
+/// Petra's real position-bound signature on `id` at `height`, over the wire.
+fn petra_signs(walter: &mut crate::State, b: &Builder, seq: u64, id: u64, height: u64) {
+    let change = walter.proposal_change(id).expect("a registered change");
+    let sig = identity_sign(b.key("petra"), &approval_bytes(&b.republic_id, height, &change));
+    wire(
+        walter,
+        "petra",
+        seq,
+        WorkspaceEvent::Approved { id: ProposalId(id), by: "petra".to_string(), height, sig },
+    );
+}
+
+/// A2.2 (mcp_agent_friction_fixes.md): over a real transport a LOCAL seal
+/// waits one propagation round after the head last moved, so a contender
+/// for the fresh block can still win the tip tie-break before anything is
+/// built on it. The held seal lands on the delivery tick once the round
+/// has passed; without a transport there is no round to wait for.
+#[test]
+fn a_local_seal_waits_one_round_after_the_head_moved() {
+    let b = Builder::new(&["petra", "walter"], 2);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    let propose = |st: &mut crate::State, title: &str| match st
+        .cmd_propose(Surface::Memory, json!({ "op": "add_note", "title": title }))
+        .expect("proposes")
+    {
+        Reply::Proposed { id, .. } => id.0,
+        other => panic!("unexpected reply {other:?}"),
+    };
+    // no transport: two seals back to back, nothing held
+    let (one, two) = (propose(&mut walter, "one"), propose(&mut walter, "two"));
+    petra_signs(&mut walter, &b, 1, one, 1);
+    petra_signs(&mut walter, &b, 2, two, 2);
+    assert_eq!(walter.chain.blocks.len(), 3, "loopback seals instantly");
+
+    // a Nostr transport: the head just moved, the next seal is held
+    walter.nostr = Some(crate::NostrTransport {
+        sk: zeroize::Zeroizing::new(vec![7u8; 32]),
+        relays: vec!["ws://relay.example".to_string()],
+        rotation_seed: [0u8; 32],
+    });
+    walter.presence.clock_override = Some(1_000);
+    walter.chain.head_moved_at = 1_000;
+    let three = propose(&mut walter, "three");
+    petra_signs(&mut walter, &b, 3, three, 3);
+    assert_eq!(walter.chain.blocks.len(), 3, "held for one round");
+    assert!(walter.chain.seal_held.contains(&three));
+    walter.cmd_net_delivery_tick().expect("tick");
+    assert_eq!(walter.chain.blocks.len(), 3, "still inside the round");
+    walter.presence.clock_override = Some(1_000 + SEAL_PACE_SECS);
+    walter.cmd_net_delivery_tick().expect("tick");
+    assert_eq!(walter.chain.blocks.len(), 4, "the round passed, the seal lands");
+    assert!(walter.chain.seal_held.is_empty());
+}
+
+/// A block a PEER sealed is never held - it extends the chain at once, and
+/// a seal this node was holding for the same proposal is simply done.
+#[test]
+fn a_foreign_block_is_not_paced_and_settles_the_held_seal() {
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    walter.nostr = Some(crate::NostrTransport {
+        sk: zeroize::Zeroizing::new(vec![7u8; 32]),
+        relays: vec!["ws://relay.example".to_string()],
+        rotation_seed: [0u8; 32],
+    });
+    walter.presence.clock_override = Some(1_000);
+    walter.chain.head_moved_at = 1_000;
+    let id = match walter
+        .cmd_propose(Surface::Memory, json!({ "op": "add_note", "title": "one" }))
+        .expect("proposes")
+    {
+        Reply::Proposed { id, .. } => id.0,
+        other => panic!("unexpected reply {other:?}"),
+    };
+    petra_signs(&mut walter, &b, 1, id, 1);
+    assert_eq!(walter.chain.blocks.len(), 1, "held");
+    // petra sealed it herself and broadcast the block
+    let change = walter.proposal_change(id).expect("change");
+    let block = b.seal(1, change, &["petra", "walter"]);
+    b.push(block.clone());
+    walter.receive_block_from("petra", block);
+    assert_eq!(walter.chain.blocks.len(), 2, "a foreign block applies at once");
+    walter.presence.clock_override = Some(1_000 + SEAL_PACE_SECS);
+    walter.cmd_net_delivery_tick().expect("tick");
+    assert_eq!(walter.chain.blocks.len(), 2, "nothing sealed twice");
+    assert!(walter.chain.seal_held.is_empty(), "the hold is settled, not leaked");
 }

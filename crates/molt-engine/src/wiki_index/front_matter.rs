@@ -44,6 +44,22 @@ fn header_block(doc: &str) -> Result<Option<(&str, &str)>, ()> {
     Ok(None)
 }
 
+/// The document's display title: the header's `title` when it is a
+/// non-empty string, else the first heading. The reserved key is what an
+/// author means by "title"; a whole wiki once listed every page under its
+/// first `##` (F2, mcp_agent_friction_2026-09-05.md).
+pub fn title(doc: &str) -> Option<String> {
+    let (props, _) = properties(doc);
+    props
+        .as_ref()
+        .and_then(|p| p.get("title"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .or_else(|| first_heading(doc))
+}
+
 /// The document's first ATX heading, header skipped. Display metadata.
 pub fn first_heading(doc: &str) -> Option<String> {
     let (_, body) = split(doc);
@@ -144,7 +160,8 @@ pub(crate) fn parse(header: &str) -> Result<serde_json::Map<String, Value>, Stri
         if out.contains_key(&key) {
             return Err(format!("`{key}` appears twice"));
         }
-        let value = parse_value(&mut p)?;
+        // the key is the one thing the author can search for in a header
+        let value = parse_value(&mut p).map_err(|e| format!("`{key}`: {e}"))?;
         out.insert(key, value);
     }
     if !matches!(next_event(&mut p)?, Event::DocumentEnd) {
@@ -804,6 +821,17 @@ mod tests {
         assert_eq!(link_target("Anna Schmidt"), None);
         assert_eq!(link_target("[[]]"), None);
         assert_eq!(link_target("[[|x]]"), None);
+    }
+
+    #[test]
+    fn the_header_title_beats_the_first_heading() {
+        assert_eq!(
+            title("---\ntitle: Ontologie der Robo Republic\ntype: meta\n---\n\n## 1. Sprache\n"),
+            Some("Ontologie der Robo Republic".to_string())
+        );
+        assert_eq!(title("---\ntype: meta\n---\n\n## Abgrenzung\n"), Some("Abgrenzung".to_string()));
+        assert_eq!(title("---\ntitle: \"\"\n---\n# Anna\n"), Some("Anna".to_string()), "an empty title falls back");
+        assert_eq!(title("---\ntitle: [a, b]\n---\ntext\n"), None, "a non-string title is no title");
     }
 
     #[test]

@@ -250,14 +250,15 @@ fn solo_boot_group_runs_real_one_of_one_governance() {
             "the sole member's own approval meets threshold 1"
         );
         assert!(snap.pending.is_empty());
-        // a late vote on the decided proposal names the terminal state
-        let err = w
+        // a late vote on the decided proposal answers the record, not an
+        // error (B6: with three reviewers it is the normal race)
+        let late = w
             .execute(Command::Approve { proposal: id })
             .await
-            .expect_err("the vote is decided");
+            .expect("a late approval is not an error");
         assert!(
-            matches!(err, MoltError::AlreadyTerminal(got, _) if got == id),
-            "unexpected: {err:?}"
+            matches!(late, Reply::Vote { id: got, state: molt_core::ProposalState::Applied, .. } if got == id),
+            "unexpected: {late:?}"
         );
     });
 }

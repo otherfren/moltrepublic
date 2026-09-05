@@ -16,6 +16,14 @@ use super::*;
 /// only crowd itself (the shed card is re-earned by the WP2 re-serve).
 pub(super) const OPEN_CARDS_PER_PROPOSER_MAX: usize = 64;
 
+/// A2.2 seal pacing (mcp_agent_friction_fixes.md): over a real transport a
+/// local seal waits this long after the head last moved - one propagation
+/// round, so a contender for the fresh block can still win the tip
+/// tie-break before anything is built on it. The tie-break only settles
+/// the TIP; a burst of seals buried a contended slot and forked a live
+/// republic three ways (F00). Loopback has no round to wait for.
+pub(super) const SEAL_PACE_SECS: u64 = 5;
+
 /// The **ephemeral** signature collection for one pending proposal on a
 /// chain-governed republic (never persisted; rebuilt from gossip). The
 /// committer bundles these into a block once `sigs` reaches the threshold. A
@@ -383,6 +391,13 @@ impl State {
         } else if valid.len() + consented < need {
             return;
         }
+        // A2.2: one round after the head moved, a local seal may build on it
+        let pace = self.seal_pace_secs();
+        if pace > 0 && self.presence_now().saturating_sub(self.chain.head_moved_at) < pace {
+            self.chain.seal_held.insert(id);
+            return;
+        }
+        self.chain.seal_held.remove(&id);
         let block = ChainBlock {
             height: target,
             prev: head.hash.clone(),
@@ -390,6 +405,39 @@ impl State {
             sigs: valid,
         };
         self.adopt_committed_block(block, id);
+    }
+
+    /// The pacing round: [`SEAL_PACE_SECS`] over a Nostr transport, none
+    /// without one (the loopback twin delivers inside the same call).
+    fn seal_pace_secs(&self) -> u64 {
+        if self.nostr.is_some() {
+            SEAL_PACE_SECS
+        } else {
+            0
+        }
+    }
+
+    /// The delivery tick's half of the pacing: retry every held seal, which
+    /// lands once the round has passed and is dropped once its proposal is
+    /// no longer open (a peer sealed it, or it was withdrawn).
+    pub(crate) fn drain_held_seals(&mut self) {
+        let open: Vec<u64> = self
+            .chain
+            .seal_held
+            .iter()
+            .copied()
+            // a checkpoint or membership change has no surface card; its
+            // registered change is the only thing to check
+            .filter(|id| {
+                self.proposals
+                    .get(id)
+                    .map_or(true, |p| p.state == ProposalState::Proposed)
+            })
+            .collect();
+        self.chain.seal_held.clear();
+        for id in open {
+            self.try_commit(id);
+        }
     }
 
     /// Append a block we sealed ourselves: adopt it, then broadcast it to the
@@ -502,6 +550,7 @@ impl State {
         match self.extend_own(&block) {
             Ok(head) => {
                 self.chain.head = Some(head);
+                self.chain.head_moved_at = self.presence_now();
                 // an append only ADDS to the projection — no whole-chain refold
                 self.project_one(&block);
                 self.chain.blocks.push(block);
@@ -531,7 +580,14 @@ impl State {
                 // gossip, late join) still yields a full accepted card
                 self.ensure_applied_record(*proposal_id, *surface, payload.clone());
                 if let Some(p) = self.proposals.get_mut(proposal_id) {
-                    p.state = ProposalState::Applied;
+                    // A1 guard: the card is that decision only if it carries
+                    // that change - an own card under a colliding id must
+                    // not read as a success it never had
+                    if p.payload == *payload || p.by.is_empty() {
+                        p.state = ProposalState::Applied;
+                    } else {
+                        tracing::warn!(id = proposal_id, "a block names an id whose local card is another change");
+                    }
                 }
                 self.stash_voted(*proposal_id);
                 self.chain.pending_sigs.remove(proposal_id);
@@ -873,6 +929,21 @@ impl State {
         if self.chain.walk.as_ref().is_some_and(|w| w.seen.contains(&id)) {
             tracing::debug!(%id, "refusing a proposal the chain already consumed");
             return false;
+        }
+        // A1 guard: the id is taken by ANOTHER change - a collision, not a
+        // re-serve. The first card stands; the newcomer is refused and
+        // remembered so the surfaces can say so (silently absorbing it is
+        // how a seat once saw "applied 2/2" for a page that never landed).
+        if let Some(existing) = self.proposals.get(&id) {
+            if existing.surface != surface || existing.payload != payload {
+                tracing::warn!(%id, %by, "refusing a proposal whose id names another change");
+                if self.chain.id_collisions.len() < crate::proposals::ID_COLLISIONS_MAX
+                    || self.chain.id_collisions.contains_key(&id)
+                {
+                    self.chain.id_collisions.insert(id, by.to_string());
+                }
+                return false;
+            }
         }
         let mut inserted = false;
         self.proposals.entry(id).or_insert_with(|| {

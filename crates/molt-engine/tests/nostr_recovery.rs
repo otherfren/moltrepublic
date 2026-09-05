@@ -1067,7 +1067,7 @@ async fn a_request_wrapped_by_another_key_is_refused_and_leaves_the_ticket_unspe
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     while tokio::time::Instant::now() < deadline {
         match a.execute(Command::ReadChain).await.expect("read chain") {
-            Reply::Chain { blocks } => assert_eq!(
+            Reply::Chain { blocks, .. } => assert_eq!(
                 blocks.len(),
                 1,
                 "a request the claimed anchor did not sign must not re-admit a seat: {blocks:?}"

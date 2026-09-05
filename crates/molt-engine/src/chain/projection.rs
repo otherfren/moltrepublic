@@ -58,6 +58,7 @@ impl State {
             Ok(walk) => {
                 self.chain.blocks = chain;
                 self.chain.head = Some(walk.head.clone());
+                self.chain.head_moved_at = self.presence_now();
                 self.chain.walk = Some(walk);
                 self.bump_next_id_past_chain();
                 self.apply_chain_to_state();
@@ -644,6 +645,9 @@ impl State {
                     .collect(),
             });
         }
-        Ok(molt_core::Reply::Chain { blocks })
+        Ok(molt_core::Reply::Chain {
+            blocks,
+            diverged: self.chain.diverged.values().cloned().collect(),
+        })
     }
 }

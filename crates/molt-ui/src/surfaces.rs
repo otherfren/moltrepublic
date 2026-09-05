@@ -937,7 +937,7 @@ pub(crate) async fn gather_surfaces(
     // first (co-equal read — the MCP read_chain tool serves the same)
     let chain_rows: Vec<molt_core::ChainBlockView> = match wallet.execute(Command::ReadChain).await
     {
-        Ok(Reply::Chain { blocks }) => blocks,
+        Ok(Reply::Chain { blocks, .. }) => blocks,
         _ => Vec::new(),
     };
     let chain_len = chain_rows.len();

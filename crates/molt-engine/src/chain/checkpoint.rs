@@ -118,8 +118,7 @@ impl State {
                 .map_err(molt_core::MoltError::BadPayload)?;
         }
         let state_hash = checkpoint_state_hash(&state);
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.mint_proposal_id();
         self.chain.proposal_changes.insert(
             id,
             if folded {
@@ -151,6 +150,7 @@ impl State {
         Ok(molt_core::Reply::Proposed {
             id: ProposalId(id),
             warnings: Vec::new(),
+            channel: molt_core::ChannelRef::Patch { id: ProposalId(id) },
         })
     }
 

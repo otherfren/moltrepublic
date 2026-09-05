@@ -365,7 +365,98 @@ async fn call_tool(
     }
     let cmd = (def.build)(args)?;
     let reply = handle.execute(cmd).await.map_err(|e| e.to_string())?;
-    serde_json::to_string_pretty(&reply).map_err(|e| e.to_string())
+    let value = serde_json::to_value(&reply).map_err(|e| e.to_string())?;
+    let value = present(name, args, value)?;
+    serde_json::to_string_pretty(&value).map_err(|e| e.to_string())
+}
+
+/// The agent-facing shape of a reply, where it differs from the engine's
+/// (`docs/reviews/mcp_agent_friction_fixes.md` B1/B2): `withdrawn` reads
+/// as a state of its own, `list_proposals` answers headers unless asked
+/// for the patch, and `read_proposal` is that list narrowed to one id.
+fn present(name: &str, args: &Value, mut value: Value) -> Result<Value, String> {
+    withdrawn_is_a_state(&mut value);
+    match name {
+        "list_proposals" => {
+            let with_patch = flag_arg(args, "with_patch");
+            if let Some(list) = value.get_mut("proposals").and_then(Value::as_array_mut) {
+                for p in list.iter_mut() {
+                    compact_proposal(p, with_patch);
+                }
+            }
+            Ok(value)
+        }
+        "read_proposal" => {
+            let id = u64_arg(args, "id")?;
+            let found = value
+                .get("proposals")
+                .and_then(Value::as_array)
+                .and_then(|list| {
+                    list.iter()
+                        .find(|p| p.get("id").and_then(Value::as_u64) == Some(id))
+                        .cloned()
+                });
+            match found {
+                Some(mut p) => {
+                    if let Some(o) = p.as_object_mut() {
+                        o.insert("reply".to_string(), Value::String("proposal".to_string()));
+                    }
+                    Ok(p)
+                }
+                None => Err(format!("unknown proposal {id}")),
+            }
+        }
+        _ => Ok(value),
+    }
+}
+
+/// A proposer pulled it back: `state` says so, instead of the engine's
+/// terminal `rejected` beside a `withdrawn` flag (F4).
+fn withdrawn_is_a_state(v: &mut Value) {
+    match v {
+        Value::Object(o) => {
+            if o.get("withdrawn") == Some(&Value::Bool(true)) && o.contains_key("state") {
+                o.insert("state".to_string(), Value::String("withdrawn".to_string()));
+            }
+            for child in o.values_mut() {
+                withdrawn_is_a_state(child);
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(withdrawn_is_a_state),
+        _ => {}
+    }
+}
+
+/// One proposal as a list header: the patch, its summary and the paths it
+/// touches stay; the before/after texts and the patch body go unless asked.
+fn compact_proposal(p: &mut Value, with_patch: bool) {
+    let Some(o) = p.as_object_mut() else { return };
+    let patch = o
+        .get("payload")
+        .and_then(|pl| pl.get("value"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if let Some(patch) = &patch {
+        let paths: Vec<Value> = patch
+            .lines()
+            .filter_map(|l| l.strip_prefix("diff --git a/"))
+            .filter_map(|rest| rest.split(" b/").next())
+            .map(|p| Value::String(p.to_string()))
+            .collect();
+        o.insert("paths".to_string(), Value::Array(paths));
+    }
+    if let Some(id) = o.get("id").and_then(Value::as_u64) {
+        o.insert("channel".to_string(), json!({ "kind": "patch", "id": id }));
+    }
+    if !with_patch {
+        o.remove("current");
+        o.remove("proposed");
+        if patch.is_some() {
+            if let Some(pl) = o.get_mut("payload").and_then(Value::as_object_mut) {
+                pl.remove("value");
+            }
+        }
+    }
 }
 
 /// The wire-visible tool list, rendered from the same catalogue the
@@ -465,6 +556,11 @@ fn opt_u64_arg(args: &Value, key: &str) -> Result<u64, String> {
             .as_u64()
             .ok_or_else(|| format!("argument `{key}` must be a non-negative integer")),
     }
+}
+
+/// An optional flag: absent or null reads as `false`.
+fn flag_arg(args: &Value, key: &str) -> bool {
+    args.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
 fn bool_arg(args: &Value, key: &str) -> Result<bool, String> {
@@ -833,7 +929,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "chat_send",
             command: "chat",
             scope: Scope::Seat,
-            description: "Post a message to the ungated chat. Every message rides the republic's ONE broadcast stream and every member receives it; `channel` merely files it under a view of that stream - a tag, never a boundary or a room (it hides nothing and grants nothing). Kinds: {\"kind\":\"group\"} the all-hands default; {\"kind\":\"patch\",\"id\":N} discussion attached to proposal N; {\"kind\":\"topic\",\"name\":\"…\"} a free named topic, created by simply posting to it. Pass `quote` (the quoted message's 32-char hex id, from read_state) to reply - and quoting a message that lives in another channel is the cross-post idiom: the original stays where it is, the quote carries it across.",
+            description: "Post a message to the ungated chat. Every message rides the republic's ONE broadcast stream and every member receives it; `channel` merely files it under a view of that stream - a tag, never a boundary or a room (it hides nothing and grants nothing). Kinds: {\"kind\":\"group\"} the all-hands default; {\"kind\":\"patch\",\"id\":N} discussion attached to proposal N; {\"kind\":\"topic\",\"name\":\"…\"} a free named topic, created by simply posting to it. Pass `quote` (the quoted message's 32-char hex id, from read_state) to reply - and quoting a message that lives in another channel is the cross-post idiom: the original stays where it is, the quote carries it across. A review remark on a proposal belongs in ITS patch channel (the `channel` every propose/approve reply names), not in the group.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1021,7 +1117,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "propose",
             command: "propose",
             scope: Scope::Seat,
-            description: "Put an object forward for threshold approval on a gated surface. An Organization set_image payload must embed the actual image as base64 `bytes_b64` and the bytes must DECODE as a picture (png/jpeg/webp/gif/bmp, ≤8192x8192; svg is refused) - sign-what-you-see: members vote on the image, so undecodable bytes are refused here and dropped by every peer. Payload size is capped at what one relay message can carry (about 64 KiB of image for a small roster); an over-size proposal is refused with the exact figure that fits. Organization op set_features enables charter features: value = space-separated keys among memory/quests/vault/wallet, the FULL target set - it must keep every enabled feature (enable-only, never off again) and add at least one. Proposing on a surface whose feature is not enabled is refused (status.features lists the enabled set). Memory op wiki_patch is a wiki changeset vote: `value` carries a raw git-format patch (unified diffs; rename/new/deleted headers), `summary` a short count string like \"+2 -1 →1 ~34\" - the GUI's changeset vote emits exactly this shape and renders the patch in its diff viewer. It is the RAW form, for a caller that already holds a patch, and it is refused when the patch does not apply to the current base; wiki_edit writes the wiki without one.",
+            description: "Put an object forward for threshold approval on a gated surface. An Organization set_image payload must embed the actual image as base64 `bytes_b64` and the bytes must DECODE as a picture (png/jpeg/webp/gif/bmp, ≤8192x8192; svg is refused) - sign-what-you-see: members vote on the image, so undecodable bytes are refused here and dropped by every peer. Payload size is capped at what one relay message can carry (about 64 KiB of image for a small roster); an over-size proposal is refused with the exact figure that fits. Organization op set_features enables charter features: value = space-separated keys among memory/quests/vault/wallet, the FULL target set - it must keep every enabled feature (enable-only, never off again) and add at least one. Proposing on a surface whose feature is not enabled is refused (status.features lists the enabled set). Memory op wiki_patch is a wiki changeset vote: `value` carries a raw git-format patch (unified diffs; rename/new/deleted headers), `summary` a short count string like \"+2 -1 →1 ~34\" - the GUI's changeset vote emits exactly this shape and renders the patch in its diff viewer. It is the RAW form, for a caller that already holds a patch, and it is refused when the patch does not apply to the current base; wiki_edit writes the wiki without one. The proposer's own signature is the first of m; the reply names the proposal's `channel`.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1039,7 +1135,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "approve",
             command: "approve",
             scope: Scope::Seat,
-            description: "Contribute THIS node's approval toward a pending proposal. On a chain-governed republic it is a real signature gossiped to the mesh (the block seals once m distinct members signed); elsewhere the node records at most its own single approval - it can never approve on behalf of other members.",
+            description: "Contribute THIS node's approval toward a pending proposal. On a chain-governed republic it is a real signature gossiped to the mesh (the block seals once m distinct members signed); elsewhere the node records at most its own single approval - it can never approve on behalf of other members. The reply is the record after the vote (state, approvals/threshold, `channel`); approving an already-applied proposal answers the same shape - a late approval is not an error.",
             schema: || json!({
                 "type": "object",
                 "properties": { "proposal_id": { "type": "integer" } },
@@ -1117,7 +1213,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wiki_list",
             command: "wiki_list",
             scope: Scope::Read,
-            description: "List the shared wiki's documents - path, size and title, no content - one page at a time. `prefix` narrows to a folder, `cursor` continues a page (pass the previous reply's `next_cursor`), `limit` is clamped to 1..=500 (default 100). `total` counts everything under the prefix. Fetch a document with wiki_get.",
+            description: "List the shared wiki's documents - path, `bytes` and title (the header's `title`, else the first heading), no content - one page at a time. `prefix` narrows to a folder, `cursor` continues a page (pass the previous reply's `next_cursor`), `limit` is clamped to 1..=500 (default 100). `total` counts everything under the prefix. Fetch a document with wiki_get.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1269,7 +1365,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wiki_resolve",
             command: "wiki_resolve",
             scope: Scope::Read,
-            description: "What a `[[name]]` binds to, and what else it could mean. `exact` is the document the name resolves to today (exact path, else a unique basename or stem, else a unique alias), null when nothing does. `candidates` lists every document it could mean, `via` saying how: path, basename, alias, or `case` - a case-insensitive match resolution does NOT bind, offered so you can write the real spelling. Check a target here before writing a link; an unresolved one is a dangling edge, not an error.",
+            description: "What a `[[name]]` binds to, and what else it could mean. `exact` is the document the name resolves to today (exact path, else a unique basename or stem, else a unique alias, else a unique header `title`), null when nothing does. `candidates` lists every document it could mean, `via` saying how: path, basename, alias, title, or `case` - a case-insensitive match resolution does NOT bind, offered so you can write the real spelling. Check a target here before writing a link; an unresolved one is a dangling edge, not an error.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1285,7 +1381,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wiki_edit",
             command: "wiki_edit",
             scope: Scope::Seat,
-            description: "Write the wiki. `edits` apply IN ORDER to a working copy of the current base; the engine diffs the result and puts THAT patch to the members as a normal changeset vote - propose, not save, and the reply is the proposal id. Ops (fields in the schema): content, replace, set_props, add_relation, rename, delete - content also CREATES a document when the path is free. An edit that cannot land refuses the whole call with the reason and proposes nothing: a path that does not exist, an `old` that is absent or occurs more than once, a header the parser would not read back, a relation target that does not resolve uniquely, a rename onto an existing path. A relation reads better in the sentence that asserts it - write `[[predicate::Name]]` inside a content or replace edit; add_relation is for when there is no such sentence. Check a target with wiki_resolve, and wiki_props for the relation names this republic already uses.",
+            description: "Write the wiki. `edits` apply IN ORDER to a working copy of the current base; the engine diffs the result and puts THAT patch to the members as a normal changeset vote - propose, not save, and the reply is the proposal id. Ops (fields in the schema): content, replace, set_props, add_relation, rename, delete - content also CREATES a document when the path is free. An edit that cannot land refuses the whole call with the reason and proposes nothing: a path that does not exist, an `old` that is absent or occurs more than once, a header the parser would not read back, a relation target that does not resolve uniquely, a rename onto an existing path. A relation reads better in the sentence that asserts it - write `[[predicate::Name]]` inside a content or replace edit; add_relation is for when there is no such sentence. Check a target with wiki_resolve, and wiki_props for the relation names this republic already uses. The proposer's own signature is the first of m. `dry_run: true` returns the patch, its summary and the header warnings without proposing. A result whose header the parser reads differently than written (an unquoted `[[link]]` value is a nested list) is REFUSED with the key named; `allow_warnings: true` proposes it anyway. `supersedes: <id>` withdraws that own, still-open proposal in the same step - the way to correct one already on the table. The header dialect is the YAML 1.2 core schema in a flat subset: `no`, `yes`, `on` stay strings. The reply names the proposal's `channel`, where review remarks belong.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1353,7 +1449,10 @@ pub fn tools() -> Vec<ToolDef> {
                                 }
                             ]
                         }
-                    }
+                    },
+                    "dry_run": { "type": "boolean", "description": "optional: return the patch and its warnings, propose nothing" },
+                    "allow_warnings": { "type": "boolean", "description": "optional: propose even with header warnings (default: such a result is refused)" },
+                    "supersedes": { "type": "integer", "description": "optional: withdraw this own open proposal in the same step" }
                 },
                 "required": ["edits"]
             }),
@@ -1363,16 +1462,45 @@ pub fn tools() -> Vec<ToolDef> {
                     Some(v) => serde_json::from_value(v.clone())
                         .map_err(|e| format!("`edits`: {e}"))?,
                 };
-                Ok(Command::WikiEdit { edits })
+                let supersedes = match args.get("supersedes") {
+                    None | Some(Value::Null) => None,
+                    Some(_) => Some(ProposalId(u64_arg(args, "supersedes")?)),
+                };
+                Ok(Command::WikiEdit {
+                    edits,
+                    dry_run: flag_arg(args, "dry_run"),
+                    allow_warnings: flag_arg(args, "allow_warnings"),
+                    supersedes,
+                })
             },
         },
         ToolDef {
             name: "list_proposals",
             command: "list_proposals",
             scope: Scope::Seat,
-            description: "List every proposal the engine currently knows about.",
-            schema: || json!({ "type": "object", "properties": {} }),
+            description: "List every proposal the engine currently knows about - HEADERS: id, surface, by, state (`withdrawn` when the proposer pulled it back), approvals/threshold, the votes, `summary`, the `paths` a wiki patch touches, `channel`. The patch and the before/after texts are left out (a 9 KB patch was answered three times over); `with_patch: true` includes them, read_proposal {id} fetches ONE in full.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "with_patch": { "type": "boolean", "description": "optional: include payload.value, current and proposed (default false)" }
+                }
+            }),
             build: |_| Ok(Command::ListProposals),
+        },
+        ToolDef {
+            name: "read_proposal",
+            command: "list_proposals",
+            scope: Scope::Seat,
+            description: "ONE proposal in full: the payload (a wiki patch under `payload.value`), the before/after texts `current` and `proposed`, the votes and the state. An unknown id is an error.",
+            schema: || json!({
+                "type": "object",
+                "properties": { "id": { "type": "integer", "description": "the proposal id" } },
+                "required": ["id"]
+            }),
+            build: |args| {
+                u64_arg(args, "id")?;
+                Ok(Command::ListProposals)
+            },
         },
         ToolDef {
             name: "status",
@@ -2465,6 +2593,42 @@ mod tests {
 
     /// Every tool builds a command from its own minimal example arguments —
     /// catches schema/builder drift inside a single ToolDef.
+    /// B1/B2: `list_proposals` answers headers (paths + channel added, the
+    /// patch body and the before/after texts dropped unless asked), a
+    /// withdrawn card reads `withdrawn`, and `read_proposal` is the one
+    /// full record - or an error for an unknown id.
+    #[test]
+    fn proposals_present_as_headers_and_one_full_record() {
+        let patch = "diff --git a/a.md b/a.md\nnew file mode 100644\n--- /dev/null\n+++ b/a.md\n@@ -0,0 +1 @@\n+x\ndiff --git a/b/c.md b/b/c.md\n--- a/b/c.md\n+++ b/b/c.md\n@@ -1 +1 @@\n-y\n+z\n";
+        let reply = json!({
+            "reply": "proposals",
+            "proposals": [
+                { "id": 4, "state": "rejected", "withdrawn": true,
+                  "payload": { "op": "wiki_patch", "summary": "+1 ~1", "value": patch },
+                  "current": "y", "proposed": "z" },
+                { "id": 5, "state": "proposed", "withdrawn": false,
+                  "payload": { "op": "wiki_patch", "summary": "+1", "value": patch },
+                  "current": "", "proposed": "x" }
+            ]
+        });
+        let list = present("list_proposals", &json!({}), reply.clone()).expect("presents");
+        let p4 = &list["proposals"][0];
+        assert_eq!(p4["state"], "withdrawn", "a pulled-back card says so");
+        assert_eq!(p4["paths"], json!(["a.md", "b/c.md"]));
+        assert_eq!(p4["channel"], json!({ "kind": "patch", "id": 4 }));
+        assert!(p4.get("current").is_none() && p4.get("proposed").is_none());
+        assert!(p4["payload"].get("value").is_none(), "the patch body is out");
+        assert_eq!(p4["payload"]["summary"], "+1 ~1", "the summary stays");
+        let full = present("list_proposals", &json!({ "with_patch": true }), reply.clone()).expect("presents");
+        assert_eq!(full["proposals"][1]["payload"]["value"], patch);
+        assert_eq!(full["proposals"][1]["proposed"], "x");
+        let one = present("read_proposal", &json!({ "id": 5 }), reply.clone()).expect("presents");
+        assert_eq!((one["reply"].as_str(), one["id"].as_u64()), (Some("proposal"), Some(5)));
+        assert_eq!(one["payload"]["value"], patch, "read_proposal is the full record");
+        assert_eq!(one["state"], "proposed");
+        assert!(present("read_proposal", &json!({ "id": 9 }), reply).is_err(), "an unknown id is an error");
+    }
+
     #[test]
     fn tool_names_are_unique() {
         let mut names: Vec<&str> = tools().iter().map(|t| t.name).collect();

@@ -20,7 +20,7 @@ use crate::i18n::{
 };
 use crate::images::{image_from_bytes, logo_needs_reload, AVATARS, LOGO_KEY};
 use crate::labels::{
-    backup_when_label, charter_columns, file_size_label, genesis_undelivered_copy, from_screen,
+    backup_when_label, charter_columns, file_size_label, chain_diverged_copy, genesis_undelivered_copy, from_screen,
     never_seen_label, orphan_remote_label, seat_state_label, seen_label, short_hex_id, size_label,
     strings_founder, sync_status_label, theme_index, unix_now, view_icon, view_label,
 };
@@ -685,6 +685,9 @@ pub(crate) fn apply_session(
             // …and the honest middle class: confirmed on the operator's
             // consent, but the relay could not be judged right now
             ui.invoke_show_toast(format!("{} {rest}", s.get_toast_relay_unverified()).into());
+        } else if let Some(rest) = sv.notice.strip_prefix("chain-diverged:") {
+            // A2.1: Rust-side copy like genesis-undelivered - no window rebuild
+            ui.invoke_show_toast_error(chain_diverged_copy(lang, rest).into());
         } else if let Some(err) = sv.notice.strip_prefix("genesis-undelivered:") {
             // The republic EXISTS here but its members were never told: the
             // genesis 445 reached no relay. Copy lives Rust-side (the

@@ -229,7 +229,7 @@ async fn a_folded_cut_survives_a_lost_base_over_the_relay() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let folded = match a.execute(Command::ReadChain).await.expect("read chain") {
-            Reply::Chain { blocks } => blocks.iter().any(|v| v.kind == "checkpoint"),
+            Reply::Chain { blocks, .. } => blocks.iter().any(|v| v.kind == "checkpoint"),
             other => panic!("unexpected: {other:?}"),
         };
         if folded {

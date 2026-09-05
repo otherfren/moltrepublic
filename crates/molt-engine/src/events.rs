@@ -290,6 +290,11 @@ impl State {
                 // Proposed envelopes) must not clobber the live record —
                 // an unconditional insert wiped the collected decliners on
                 // every answered ChainRequest (review 2026-08-09)
+                if let Some(p) = self.proposals.get(&id.0) {
+                    if p.surface != *surface || p.payload != *payload {
+                        tracing::warn!(id = id.0, "replaying a Proposed whose id names another change");
+                    }
+                }
                 self.proposals.entry(id.0).or_insert_with(|| ProposalRecord {
                     surface: *surface,
                     payload: payload.clone(),

@@ -151,7 +151,7 @@ impl WikiSearch {
         let aliases = props.get("aliases").map(graph::scalar_strings).unwrap_or_default();
         let mut d = doc!(
             self.f.path => path,
-            self.f.title => front_matter::first_heading(content).unwrap_or_default(),
+            self.f.title => front_matter::title(content).unwrap_or_default(),
             self.f.body => body,
             self.f.header => header.join(" "),
             self.f.alias => aliases.join(" "),

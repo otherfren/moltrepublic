@@ -164,6 +164,17 @@ pub(crate) fn genesis_undelivered_copy(lang: i32) -> &'static str {
     }
 }
 
+/// A2.1: a peer's chain parted from ours - the one fact a partitioned seat
+/// cannot see from its own vote table. `rest` is `<peer>:<height>`.
+pub(crate) fn chain_diverged_copy(lang: i32, rest: &str) -> String {
+    let (peer, height) = rest.split_once(':').unwrap_or((rest, "?"));
+    if lang == 1 {
+        format!("Chain von {peer} weicht ab Hoehe {height} ab - Votes werden gegenseitig nicht mehr gezaehlt.")
+    } else {
+        format!("Chain of {peer} parts from ours at height {height} - votes no longer count across.")
+    }
+}
+
 /// Render a chat timestamp as `2026-06-02 13:37 (~20 minutes ago)` in the
 /// local timezone. The relative part refreshes with every surfaces push.
 pub(crate) fn when_label(lang: i32, ts: u64) -> String {

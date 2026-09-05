@@ -42,7 +42,7 @@ fn envelope() -> EventEnvelope {
         seq: 7,
         ts: 1_700_000_000,
         by: "walter".to_string(),
-        body: WorkspaceEvent::ChainRequest { from_height: 3 },
+        body: WorkspaceEvent::ChainRequest { from_height: 3, known: vec![] },
         prev_seq: 6,
     }
 }

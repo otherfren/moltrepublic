@@ -43,7 +43,7 @@ async fn settle(w: &WalletHandle, cmd: Command) -> Result<Reply, MoltError> {
 
 /// Edit and approve: the proposal is a real threshold vote, m = 1 here.
 async fn edit(w: &WalletHandle, edits: Vec<WikiEdit>) -> Result<(), MoltError> {
-    let reply = settle(w, Command::WikiEdit { edits }).await?;
+    let reply = settle(w, Command::WikiEdit { edits, dry_run: false, allow_warnings: false, supersedes: None }).await?;
     let Reply::Proposed { id, .. } = reply else {
         panic!("unexpected: {reply:?}");
     };
@@ -53,7 +53,7 @@ async fn edit(w: &WalletHandle, edits: Vec<WikiEdit>) -> Result<(), MoltError> {
 
 /// The refusal text of a rejected edit set.
 async fn refusal(w: &WalletHandle, edits: Vec<WikiEdit>) -> String {
-    match settle(w, Command::WikiEdit { edits }).await {
+    match settle(w, Command::WikiEdit { edits, dry_run: false, allow_warnings: false, supersedes: None }).await {
         Err(e) => e.to_string(),
         Ok(other) => panic!("expected a refusal, got {other:?}"),
     }
@@ -330,9 +330,22 @@ async fn set_props_changes_one_line_of_a_written_header() {
 #[tokio::test]
 async fn a_header_the_parser_cannot_read_refuses_the_edit() {
     let w = spawn_solo();
-    edit(&w, vec![content("a.md", "---\n- not a mapping\n---\n# A\n")])
-        .await
-        .expect("a document with a broken header");
+    // B5 refuses such a header by default; the fixture asks for it
+    let reply = settle(
+        &w,
+        Command::WikiEdit {
+            edits: vec![content("a.md", "---\n- not a mapping\n---\n# A\n")],
+            dry_run: false,
+            allow_warnings: true,
+            supersedes: None,
+        },
+    )
+    .await
+    .expect("a document with a broken header");
+    let Reply::Proposed { id, .. } = reply else {
+        panic!("unexpected: {reply:?}");
+    };
+    w.execute(Command::Approve { proposal: id }).await.expect("applies");
     let got = refusal(
         &w,
         vec![WikiEdit::SetProps {
@@ -446,4 +459,148 @@ async fn a_raw_patch_that_does_not_apply_is_refused_at_propose() {
     })
     .await
     .expect("a patch that applies still proposes");
+}
+
+/// B4 (`docs/reviews/mcp_agent_friction_fixes.md`): a dry run answers the
+/// patch, its summary and the warnings, and proposes nothing.
+#[tokio::test]
+async fn a_dry_run_shows_the_patch_and_proposes_nothing() {
+    let w = spawn_solo();
+    let edits = vec![content("a.md", "---\ntitle: A\n---\ntext\n")];
+    let reply = settle(
+        &w,
+        Command::WikiEdit { edits, dry_run: true, allow_warnings: false, supersedes: None },
+    )
+    .await
+    .expect("a dry run is fine");
+    let Reply::WikiPreview { patch, summary, warnings } = reply else {
+        panic!("unexpected: {reply:?}");
+    };
+    assert!(patch.contains("+++ b/a.md") && patch.contains("+title: A"), "the patch: {patch}");
+    assert_eq!(summary, "+1");
+    assert!(warnings.is_empty());
+    assert_eq!(open_proposals(&w).await, 0, "nothing was proposed");
+}
+
+/// B5: a header the parser reads differently than written (an unquoted
+/// `[[link]]` value is a nested list) REFUSES the call, naming the key;
+/// `allow_warnings` proposes it anyway, with the warning on the reply.
+#[tokio::test]
+async fn a_header_warning_refuses_unless_allowed() {
+    let w = spawn_solo();
+    let body = "---\ntitle: A\nsuccessor_of: [[b.md]]\n---\ntext\n";
+    let text = refusal(&w, vec![content("a.md", body)]).await;
+    assert!(text.contains("successor_of") && text.contains("allow_warnings"), "names the key and the way out: {text}");
+    assert_eq!(open_proposals(&w).await, 0);
+    let reply = settle(
+        &w,
+        Command::WikiEdit {
+            edits: vec![content("a.md", body)],
+            dry_run: false,
+            allow_warnings: true,
+            supersedes: None,
+        },
+    )
+    .await
+    .expect("allowed");
+    let Reply::Proposed { warnings, channel, .. } = reply else {
+        panic!("unexpected: {reply:?}");
+    };
+    assert!(warnings.iter().any(|w| w.contains("successor_of")), "the warning rides the reply: {warnings:?}");
+    assert!(matches!(channel, molt_core::ChannelRef::Patch { .. }), "the reply names the discussion channel");
+    assert_eq!(open_proposals(&w).await, 1);
+}
+
+/// B4: `supersedes` withdraws the own open proposal it corrects in the same
+/// step; a foreign or decided one refuses the whole call.
+#[tokio::test]
+async fn a_superseding_edit_withdraws_the_old_proposal() {
+    let w = spawn_solo();
+    let first = settle(
+        &w,
+        Command::WikiEdit {
+            edits: vec![content("a.md", "---\ntitle: A\nprice_eur: 1500\n---\n")],
+            dry_run: false,
+            allow_warnings: false,
+            supersedes: None,
+        },
+    )
+    .await
+    .expect("proposes");
+    let Reply::Proposed { id: old, .. } = first else {
+        panic!("unexpected: {first:?}");
+    };
+    let second = settle(
+        &w,
+        Command::WikiEdit {
+            edits: vec![content("a.md", "---\ntitle: A\nprice_eur: 1499\n---\n")],
+            dry_run: false,
+            allow_warnings: false,
+            supersedes: Some(old),
+        },
+    )
+    .await
+    .expect("supersedes");
+    let Reply::Proposed { id: new, .. } = second else {
+        panic!("unexpected: {second:?}");
+    };
+    assert_ne!(old, new);
+    let Reply::Proposals { proposals } = w.execute(Command::ListProposals).await.expect("list") else {
+        panic!("list");
+    };
+    let state = |id| proposals.iter().find(|p| p.id == id).map(|p| (p.state, p.withdrawn));
+    assert_eq!(state(old), Some((molt_core::ProposalState::Rejected, true)), "the old one is withdrawn");
+    assert_eq!(state(new), Some((molt_core::ProposalState::Proposed, false)));
+    // superseding a decided proposal refuses before anything moves
+    let text = match settle(
+        &w,
+        Command::WikiEdit {
+            edits: vec![content("b.md", "text\n")],
+            dry_run: false,
+            allow_warnings: false,
+            supersedes: Some(old),
+        },
+    )
+    .await
+    {
+        Err(e) => e.to_string(),
+        Ok(other) => panic!("expected a refusal, got {other:?}"),
+    };
+    assert!(text.contains(&format!("proposal {} is already withdrawn", old.0)) || text.contains("is already rejected"), "{text}");
+    assert_eq!(open_proposals(&w).await, 2, "nothing new was proposed");
+}
+
+/// B6: a vote answers with the record after it; approving an already
+/// applied proposal is the same reply, not an error; an unknown id reads
+/// as a number, not a Rust type.
+#[tokio::test]
+async fn a_vote_answers_with_the_record_and_late_approvals_are_fine() {
+    let w = spawn_solo();
+    let reply = settle(
+        &w,
+        Command::WikiEdit {
+            edits: vec![content("a.md", "text\n")],
+            dry_run: false,
+            allow_warnings: false,
+            supersedes: None,
+        },
+    )
+    .await
+    .expect("proposes");
+    let Reply::Proposed { id, .. } = reply else {
+        panic!("unexpected: {reply:?}");
+    };
+    let vote = w.execute(Command::Approve { proposal: id }).await.expect("approves");
+    let Reply::Vote { id: vid, state, approvals, threshold, channel } = vote else {
+        panic!("unexpected: {vote:?}");
+    };
+    assert_eq!((vid, state, approvals, threshold), (id, molt_core::ProposalState::Applied, 1, 1));
+    assert_eq!(channel, molt_core::ChannelRef::Patch { id });
+    let again = w.execute(Command::Approve { proposal: id }).await.expect("a late approval is not an error");
+    assert!(matches!(again, Reply::Vote { state: molt_core::ProposalState::Applied, .. }));
+    let err = w
+        .execute(Command::Approve { proposal: molt_core::ProposalId(99_999) })
+        .await
+        .expect_err("unknown");
+    assert_eq!(err.to_string(), "unknown proposal 99999");
 }

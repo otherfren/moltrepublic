@@ -1727,7 +1727,7 @@ fn read_chain_lists_blocks_newest_first_and_survives_the_prune() {
     let mut walter = chain_signer("walter", &b, b.blocks.clone());
 
     // full holder: genesis + the two applied blocks, newest first
-    let molt_core::Reply::Chain { blocks } = walter.cmd_read_chain().expect("read") else {
+    let molt_core::Reply::Chain { blocks, .. } = walter.cmd_read_chain().expect("read") else {
         panic!("read_chain answers Reply::Chain");
     };
     assert_eq!(
@@ -1760,7 +1760,7 @@ fn read_chain_lists_blocks_newest_first_and_survives_the_prune() {
 
     // pruned holder: the real anchor keeps its height, then the synthetic
     // pre-cut applied views (newest first, signers gone), genesis last
-    let molt_core::Reply::Chain { blocks } = walter.cmd_read_chain().expect("read") else {
+    let molt_core::Reply::Chain { blocks, .. } = walter.cmd_read_chain().expect("read") else {
         panic!("read_chain answers Reply::Chain");
     };
     assert_eq!(

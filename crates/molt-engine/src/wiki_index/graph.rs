@@ -22,6 +22,7 @@ struct NameIndex<'a> {
     docs: &'a BTreeMap<String, DocMeta>,
     by_name: BTreeMap<&'a str, Vec<&'a str>>,
     by_alias: BTreeMap<&'a str, Vec<&'a str>>,
+    by_title: BTreeMap<&'a str, Vec<&'a str>>,
 }
 
 impl<'a> NameIndex<'a> {
@@ -35,20 +36,25 @@ impl<'a> NameIndex<'a> {
             }
         }
         let mut by_alias: BTreeMap<&'a str, Vec<&'a str>> = BTreeMap::new();
+        let mut by_title: BTreeMap<&'a str, Vec<&'a str>> = BTreeMap::new();
         for (path, meta) in docs {
             for alias in &meta.aliases {
                 by_alias.entry(alias.as_str()).or_default().push(path);
+            }
+            if let Some(t) = &meta.header_title {
+                by_title.entry(t.as_str()).or_default().push(path);
             }
         }
         NameIndex {
             docs,
             by_name,
             by_alias,
+            by_title,
         }
     }
 
-    /// Exact path, then unique basename or stem, then unique alias. Case
-    /// EXACT, like the path resolution it extends.
+    /// Exact path, then unique basename or stem, then unique alias, then
+    /// unique header title. Case EXACT, like the path resolution it extends.
     fn bind(&self, name: &str) -> Option<String> {
         if self.docs.contains_key(name) {
             return Some(name.to_string());
@@ -59,7 +65,9 @@ impl<'a> NameIndex<'a> {
                 _ => None,
             }
         };
-        unique(&self.by_name).or_else(|| unique(&self.by_alias))
+        unique(&self.by_name)
+            .or_else(|| unique(&self.by_alias))
+            .or_else(|| unique(&self.by_title))
     }
 
     /// Every document the name could mean, strongest route first and the
@@ -80,13 +88,16 @@ impl<'a> NameIndex<'a> {
         for path in self.by_alias.get(name).into_iter().flatten() {
             note(path, "alias");
         }
+        for path in self.by_title.get(name).into_iter().flatten() {
+            note(path, "title");
+        }
         let folded = name.to_lowercase();
         for path in self.docs.keys() {
             if path.to_lowercase() == folded {
                 note(path, "case");
             }
         }
-        for (key, paths) in self.by_name.iter().chain(self.by_alias.iter()) {
+        for (key, paths) in self.by_name.iter().chain(self.by_alias.iter()).chain(self.by_title.iter()) {
             if key.to_lowercase() != folded {
                 continue;
             }
@@ -129,8 +140,12 @@ struct RawEdge {
 /// What a listing needs about one document, without its content.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct DocMeta {
-    /// The first heading.
+    /// The display title: the header's `title`, else the first heading.
     pub(crate) title: Option<String>,
+    /// The header's `title` alone - a resolution key like an alias (F13:
+    /// `[[Unitree Robotics]]` dangled although a page carried exactly that
+    /// title). A heading never binds: "Quellen" is on every page.
+    pub(crate) header_title: Option<String>,
     /// The header's `type`.
     pub(crate) kind: Option<String>,
     /// The header's `aliases`.
@@ -194,7 +209,13 @@ impl WikiGraph {
         self.docs.insert(
             path.to_string(),
             DocMeta {
-                title: front_matter::first_heading(content),
+                title: front_matter::title(content),
+                header_title: props
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .map(str::to_string),
                 kind: props
                     .get("type")
                     .and_then(Value::as_str)
@@ -550,7 +571,13 @@ pub struct LinkParts<'a> {
 /// link (`std` → `vector`). In a code span it is masked and therefore no
 /// link at all, which is where an example belongs.
 pub fn link_parts(inner: &str) -> LinkParts<'_> {
-    let (left, display) = match inner.split_once('|') {
+    // `\|` is how a link with display text survives a table cell (a bare
+    // `|` would split the cell) - the escape IS the separator, never part
+    // of the target (F14: 49 of 107 dangling names ended in a backslash)
+    let split = inner
+        .split_once("\\|")
+        .or_else(|| inner.split_once('|'));
+    let (left, display) = match split {
         Some((l, d)) => (l.trim(), Some(d.trim()).filter(|d| !d.is_empty())),
         None => (inner.trim(), None),
     };
@@ -675,6 +702,48 @@ mod tests {
             Some(1),
             "…and stays dangling instead"
         );
+    }
+
+    /// F13: the header's `title` binds like an alias - a unique one, the
+    /// exact spelling; a heading never does, and an ambiguous title
+    /// resolves to nothing. `wiki_resolve` names the route `title`.
+    #[test]
+    fn a_header_title_binds_like_an_alias() {
+        let g = WikiGraph::build(&tree(&[
+            (
+                "src.md",
+                "by title [[Unitree Robotics]], by heading [[Modelle]], twins [[Roomba]]\n",
+            ),
+            ("hersteller/unitree.md", "---\ntitle: Unitree Robotics\n---\n## Modelle\n"),
+            ("hersteller/tesla.md", "---\ntitle: Tesla\n---\n## Modelle\n"),
+            ("a.md", "---\ntitle: Roomba\n---\n"),
+            ("b.md", "---\ntitle: Roomba\n---\n"),
+        ]));
+        let out = targets(g.out.get("src.md"));
+        assert_eq!(out, vec!["hersteller/unitree.md".to_string()], "the unique title binds, nothing else");
+        assert!(g.dangling.contains_key("Modelle"), "a heading is prose, not a name");
+        assert!(g.dangling.contains_key("Roomba"), "an ambiguous title resolves to nothing");
+        let (exact, candidates) = g.resolve_name("Unitree Robotics");
+        assert_eq!(exact.as_deref(), Some("hersteller/unitree.md"));
+        assert_eq!(candidates[0].1, "title");
+    }
+
+    /// F14: inside a table cell the display separator is written `\|`;
+    /// the backslash is the escape, never the target's last character.
+    #[test]
+    fn a_table_cell_escape_is_the_display_separator() {
+        let p = link_parts("roboter/humanoide/1x-neo.md\\|NEO");
+        assert_eq!((p.name, p.display, p.predicate), ("roboter/humanoide/1x-neo.md", Some("NEO"), None));
+        let p = link_parts("made_by::hersteller/1x.md\\|1X");
+        assert_eq!((p.predicate, p.name, p.display), (Some("made_by"), "hersteller/1x.md", Some("1X")));
+        let plain = link_parts("a.md|A");
+        assert_eq!((plain.name, plain.display), ("a.md", Some("A")), "the bare form is unchanged");
+        let g = WikiGraph::build(&tree(&[
+            ("t.md", "| [[n.md\\|NEO]] | 2025 |\n"),
+            ("n.md", "# N\n"),
+        ]));
+        assert_eq!(targets(g.out.get("t.md")), vec!["n.md".to_string()]);
+        assert!(g.dangling.is_empty());
     }
 
     /// The header key IS the predicate, including inside a qualified

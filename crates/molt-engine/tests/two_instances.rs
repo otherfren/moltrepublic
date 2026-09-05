@@ -1755,7 +1755,7 @@ async fn a_reopened_member_recovers_open_proposals_from_the_mesh() {
         seq: 2,
         ts: 1_751_000_100,
         by: "member-b".to_string(),
-        body: WorkspaceEvent::ChainRequest { from_height: 1 },
+        body: WorkspaceEvent::ChainRequest { from_height: 1, known: vec![] },
     });
     let _ = member_wake.send(2);
 

@@ -419,10 +419,13 @@ impl State {
                 }
             }
             WorkspaceEvent::Committed(block) if self.is_chain_governed() => {
-                self.receive_block(block);
+                self.receive_block_from(&from, block);
             }
-            WorkspaceEvent::ChainRequest { from_height } if self.is_chain_governed() => {
+            WorkspaceEvent::ChainRequest { from_height, known } if self.is_chain_governed() => {
                 tracing::debug!(me = %self.member(), %from, from_height, "chain catch-up request arrived");
+                // R5: a requester on another branch names what it holds; serve
+                // from the fork point it lets us find, not from its estimate
+                let from_height = self.serve_from_for(from_height, &known);
                 // an AMPLIFIER (review C3): one frame makes every member record
                 // the whole chain + blob + open cards. Nothing above the head
                 // to serve, and one requester at most once per debounce

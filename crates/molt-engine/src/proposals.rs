@@ -40,6 +40,9 @@ pub(crate) const PARKED_DECLINES_PER_MEMBER_MAX: usize = 64;
 /// gossiped, so anything far past `next_id` is garbage — and bounding it
 /// keeps a hostile id (u64::MAX) from poisoning the mint counter.
 pub(crate) const PARKED_DECLINE_ID_WINDOW: u64 = 1024;
+/// How many refused id collisions a holder remembers (A1 guard) - a
+/// display list, bounded like every other ephemeral register.
+pub(crate) const ID_COLLISIONS_MAX: usize = 64;
 
 /// What registering a decline did. The wire ingest emits from this; the log
 /// applier ignores it (replay must not ring frontends).
@@ -526,6 +529,39 @@ fn validate_org_payload(surface: Surface, payload: &Value) -> Result<(), MoltErr
 }
 
 impl State {
+    /// Mint the next proposal id for THIS seat. The id space is interleaved
+    /// by roster position - seat k of n mints only ids ≡ k+1 (mod n) - so
+    /// two seats minting inside one propagation window can never collide
+    /// (A1, mcp_agent_friction_fixes.md: a local counter alone lost two
+    /// proposals in one evening). `next_id` stays the lower bound every
+    /// ingest bumps; the mint rounds it up into the seat's class. Outside a
+    /// replica (the demo/solo path) the class is everything, as before.
+    pub(crate) fn mint_proposal_id(&mut self) -> u64 {
+        let (n, k) = self.seat_stride();
+        let floor = self.next_id.max(1);
+        let want = (k + 1) % n;
+        let id = floor + (want + n - floor % n) % n;
+        self.next_id = id.saturating_add(1);
+        id
+    }
+
+    /// `(n, k)`: roster size and this seat's position in the SORTED roster -
+    /// deterministic on every node whatever order the Vec arrived in.
+    fn seat_stride(&self) -> (u64, u64) {
+        let Some(r) = self.replica.as_ref() else {
+            return (1, 0);
+        };
+        let mut roster = r.roster.clone();
+        roster.sort();
+        let n = u64::try_from(roster.len()).unwrap_or(1).max(1);
+        let k = roster
+            .iter()
+            .position(|m| *m == r.member)
+            .and_then(|k| u64::try_from(k).ok())
+            .unwrap_or(0);
+        (n, k)
+    }
+
     pub(crate) fn cmd_propose(
         &mut self,
         surface: Surface,
@@ -682,7 +718,7 @@ impl State {
             }
         }
         let me = self.member();
-        let id = ProposalId(self.next_id);
+        let id = ProposalId(self.mint_proposal_id());
         let env = self.make_env(
             me.clone(),
             WorkspaceEvent::Proposed {
@@ -719,7 +755,7 @@ impl State {
             // honest 1-of-1 governance (the solo boot group)
             self.try_apply(id);
         }
-        Ok(Reply::Proposed { id, warnings })
+        Ok(Reply::Proposed { id, warnings, channel: molt_core::ChannelRef::Patch { id } })
     }
 
     /// A wiki patch, checked against the base it claims to apply to.
@@ -788,6 +824,11 @@ impl State {
                 .proposals
                 .get(&proposal.0)
                 .ok_or(MoltError::UnknownProposal(proposal))?;
+            if p.state == ProposalState::Applied {
+                // B6: a late approval changes nothing - with three
+                // reviewers it is the normal race, not an error
+                return Ok(self.vote_reply(proposal));
+            }
             if p.state != ProposalState::Proposed {
                 return Err(MoltError::AlreadyTerminal(proposal, p.state));
             }
@@ -853,7 +894,24 @@ impl State {
             });
             self.try_apply(proposal);
         }
-        Ok(Reply::Ack)
+        Ok(self.vote_reply(proposal))
+    }
+
+    /// B6: what a vote answers with - the record as it stands now.
+    fn vote_reply(&self, id: ProposalId) -> Reply {
+        match self.proposals.get(&id.0) {
+            Some(p) => {
+                let v = self.view(id.0, p);
+                Reply::Vote {
+                    id,
+                    state: v.state,
+                    approvals: v.approvals,
+                    threshold: v.threshold,
+                    channel: molt_core::ChannelRef::Patch { id },
+                }
+            }
+            None => Reply::Ack,
+        }
     }
 
     // WITHDRAW ("pull back", not built yet — the ProposalCard shows the
@@ -1035,7 +1093,7 @@ impl State {
                 by: me,
             });
         }
-        Ok(Reply::Ack)
+        Ok(self.vote_reply(proposal))
     }
 
     /// The content anchor a decline carries (D1, `WorkspaceEvent::Declined`):
@@ -1797,7 +1855,7 @@ impl State {
             docs.push(molt_core::WikiDocMeta {
                 path: path.clone(),
                 bytes: u64::try_from(content.len()).unwrap_or(u64::MAX),
-                title: wiki_index::front_matter::first_heading(content),
+                title: wiki_index::front_matter::title(content),
                 kind: wiki_index::front_matter::kind_of(content),
             });
         }
@@ -2280,10 +2338,27 @@ impl State {
     pub(crate) fn cmd_wiki_edit(
         &mut self,
         edits: Vec<molt_core::WikiEdit>,
+        dry_run: bool,
+        allow_warnings: bool,
+        supersedes: Option<ProposalId>,
     ) -> Result<Reply, MoltError> {
         self.require_feature(Surface::Memory)?;
         if edits.is_empty() {
             return Err(MoltError::BadPayload("no edits".to_string()));
+        }
+        // B4: the proposal this one replaces must be OURS and still open -
+        // checked before any work, refused with the reason, nothing moves
+        if let Some(old) = supersedes {
+            let p = self
+                .proposals
+                .get(&old.0)
+                .ok_or(MoltError::UnknownProposal(old))?;
+            if p.state != ProposalState::Proposed {
+                return Err(MoltError::AlreadyTerminal(old, p.state));
+            }
+            if p.by != self.member() {
+                return Err(MoltError::NotTheProposer(old));
+            }
         }
         self.refresh_wiki_cache();
         // the base RESTRICTED to the paths the edits name: `apply_patch`
@@ -2330,10 +2405,24 @@ impl State {
         let patch = molt_core::wiki_patch::build_patch(&base, &after, &renames)
             .ok_or_else(|| MoltError::BadPayload("nothing to change".to_string()))?;
         let summary = molt_core::wiki_patch::count_changes(&base, &after, &renames).summary();
-        self.cmd_propose(
-            Surface::Memory,
-            serde_json::json!({ "op": "wiki_patch", "summary": summary, "value": patch }),
-        )
+        let payload = serde_json::json!({ "op": "wiki_patch", "summary": summary, "value": patch });
+        let warnings = self.wiki_patch_check(Surface::Memory, &payload)?;
+        if dry_run {
+            return Ok(Reply::WikiPreview { patch, summary, warnings });
+        }
+        // B5: a header the parser reads differently than written is a
+        // refusal by default - the warning used to arrive once the patch
+        // was already in the vote, and the only way out was withdraw + refile
+        if !warnings.is_empty() && !allow_warnings {
+            return Err(MoltError::BadPayload(format!(
+                "header warnings (allow_warnings: true proposes anyway): {}",
+                warnings.join("; ")
+            )));
+        }
+        if let Some(old) = supersedes {
+            self.cmd_withdraw(old)?;
+        }
+        self.cmd_propose(Surface::Memory, payload)
     }
 
     /// One edit onto the working copy. Every refusal names the fault and,
@@ -3332,6 +3421,7 @@ impl State {
             // "recovery link" action on this (never on the member's presence:
             // a recovery link is FOR an unreachable member)
             chain_governed: self.is_chain_governed(),
+            chain_diverged: self.chain.diverged.values().cloned().collect(),
             features: self.effective_features(),
             // the honest downscale target a frontend fits a picture to
             // before proposing — this republic's own derived headroom

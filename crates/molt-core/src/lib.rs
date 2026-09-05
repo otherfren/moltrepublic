@@ -2764,8 +2764,16 @@ pub enum WorkspaceEvent {
     /// its own `chain.state`, so a single survivor with the full chain suffices.
     /// Transport-only, like `Committed` (`apply` is a no-op).
     ChainRequest {
-        /// The first height the requester is missing (its `head + 1`).
+        /// The first height the requester is missing (its `head + 1`) - or,
+        /// on a fork, its estimate of the fork point.
         from_height: u64,
+        /// The requester's own `(height, hash)` samples, head first, going
+        /// back geometrically (`docs/chain/chain_reorg.md` R5): a server
+        /// that holds another branch serves from the highest matching
+        /// sample instead of `from_height`. Empty on a plain catch-up; an
+        /// older server ignores it.
+        #[serde(default)]
+        known: Vec<HeightHash>,
     },
     /// A membership change (a re-admission or an added seat) was put forward for
     /// threshold approval — the gossip that lets every member sign the SAME
@@ -3697,6 +3705,12 @@ impl Default for SessionView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProposalId(pub u64);
 
+impl std::fmt::Display for ProposalId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// The one command set. This is the single source of truth for "what the
 /// software can do"; the MCP tools and the GUI buttons are both thin shells
 /// that construct these.
@@ -4106,6 +4120,17 @@ pub enum Command {
     WikiEdit {
         /// The edits, in order.
         edits: Vec<WikiEdit>,
+        /// Return the patch instead of proposing it (B4).
+        #[serde(default)]
+        dry_run: bool,
+        /// Propose even when the result leaves a header the parser reads
+        /// differently than written; without it such a result refuses (B5).
+        #[serde(default)]
+        allow_warnings: bool,
+        /// Withdraw this own, still-open proposal in the same step - the
+        /// correction path for a proposal already on the table (B4).
+        #[serde(default)]
+        supersedes: Option<ProposalId>,
     },
     /// What a `[[Name]]` would bind to, and what else it could mean
     /// (§4.5). Name resolution is case-exact, so an agent needs a way to
@@ -5760,6 +5785,35 @@ pub enum Reply {
         /// header, say. Never a refusal: the fold does not read headers.
         #[serde(default)]
         warnings: Vec<String>,
+        /// The proposal's own discussion channel - where review remarks
+        /// belong (B10, `docs/reviews/mcp_agent_friction_fixes.md`).
+        #[serde(default)]
+        channel: ChannelRef,
+    },
+    /// This node's vote landed (approve or decline): the record as it
+    /// stands afterwards, so a voter sees what its voice did without a
+    /// second read. A vote on an already-applied proposal answers the same
+    /// shape - a late approval changes nothing and is not an error.
+    Vote {
+        /// The proposal.
+        id: ProposalId,
+        /// Its state after the vote.
+        state: ProposalState,
+        /// Approvals collected here (the proposer's own included).
+        approvals: usize,
+        /// Approvals needed (m).
+        threshold: usize,
+        /// The proposal's discussion channel.
+        channel: ChannelRef,
+    },
+    /// A `wiki_edit` dry run: the patch it WOULD propose, nothing proposed.
+    WikiPreview {
+        /// The git-format patch against the current base.
+        patch: String,
+        /// The count string a vote card shows (`+2 -1 →1 ~34`).
+        summary: String,
+        /// Header warnings the patch would leave behind.
+        warnings: Vec<String>,
     },
     /// A surface snapshot.
     State(SurfaceSnapshot),
@@ -5932,6 +5986,9 @@ pub enum Reply {
         /// One view per committed block — plus, on a pruned holder, the
         /// synthetic pre-cut entries from the checkpoint blob — newest first.
         blocks: Vec<ChainBlockView>,
+        /// Peers on another branch (A2.1); empty when the chain is whole.
+        #[serde(default)]
+        diverged: Vec<ChainDivergence>,
     },
 }
 
@@ -5946,6 +6003,16 @@ pub enum ProposalState {
     Applied,
     /// Declined / can no longer reach the threshold.
     Rejected,
+}
+
+impl std::fmt::Display for ProposalState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ProposalState::Proposed => "proposed",
+            ProposalState::Applied => "applied",
+            ProposalState::Rejected => "rejected",
+        })
+    }
 }
 
 /// One member's stance on a pending proposal — what the pending cards'
@@ -6451,6 +6518,31 @@ pub struct ChainBlockView {
     pub signers: Vec<String>,
 }
 
+/// One `(height, hash)` sample of a chain - what a fork-aware catch-up
+/// request carries (`WorkspaceEvent::ChainRequest::known`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeightHash {
+    /// The block's height.
+    pub height: u64,
+    /// Lowercase hex SHA-256 of the block's link bytes (what `prev` holds).
+    pub hash: String,
+}
+
+/// A peer whose chain parted from this node's (A2.1,
+/// `docs/reviews/mcp_agent_friction_fixes.md`): a block it sent links to a
+/// history this node does not hold, or contends a slot below the tip.
+/// `since_height` is the lowest height the two chains can still share;
+/// the flag clears when a block from that peer extends this chain again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainDivergence {
+    /// The wire sender of the foreign block.
+    pub peer: MemberId,
+    /// The lowest height at which the two chains may still agree.
+    pub since_height: u64,
+    /// Unix seconds of the latest foreign block seen from that peer.
+    pub seen_ts: u64,
+}
+
 /// Per-surface counters for the status summary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SurfaceStat {
@@ -6698,6 +6790,11 @@ pub struct StatusView {
     /// and pre-chain workspaces have no chain for a rejoiner to verify).
     #[serde(default)]
     pub chain_governed: bool,
+    /// Peers whose chain parted from this node's (A2.1). Empty is the
+    /// healthy state; an entry means this node and that peer will refuse
+    /// each other's blocks until one re-bases.
+    #[serde(default)]
+    pub chain_diverged: Vec<ChainDivergence>,
     /// The EFFECTIVE feature set (`charter_features.md`): the ratified
     /// founding selection unioned with every applied `set_features` edit,
     /// sorted. Drives which optional surfaces the nav shows — and the
@@ -6947,7 +7044,7 @@ pub enum SessionScope {
 #[derive(Debug, thiserror::Error)]
 pub enum MoltError {
     /// The named proposal does not exist.
-    #[error("unknown proposal {0:?}")]
+    #[error("unknown proposal {0}")]
     UnknownProposal(ProposalId),
     /// A proposal was attempted on an ungated surface (chat, files).
     #[error("{} is ungated - nothing to propose", .0.as_str())]
@@ -6961,21 +7058,21 @@ pub enum MoltError {
     #[error("{0}: not enabled")]
     FeatureDisabled(&'static str),
     /// The proposal is already in a terminal state.
-    #[error("proposal {0:?} is already {1:?}")]
+    #[error("proposal {0} is already {1}")]
     AlreadyTerminal(ProposalId, ProposalState),
     /// A withdraw by someone other than the recorded proposer.
-    #[error("proposal {0:?}: only the proposer pulls back")]
+    #[error("proposal {0}: only the proposer pulls back")]
     NotTheProposer(ProposalId),
     /// A repeated `Approve` in a context without chain governance. This
     /// node contributes exactly ONE real approval — its own; it never
     /// counts invented approvals on behalf of other members. The missing
     /// approvals must come from the members themselves, which takes a
     /// chain-governed republic (real signed m-of-n over the mesh).
-    #[error("proposal {0:?} already carries this node's approval - the others must approve themselves")]
+    #[error("proposal {0} already carries this node's approval - the others must approve themselves")]
     AlreadyApproved(ProposalId),
     /// A repeated `Decline` by the same member — one voice per member; the
     /// proposal rejects only when enough DISTINCT members decline.
-    #[error("proposal {0:?} already carries this member's decline")]
+    #[error("proposal {0} already carries this member's decline")]
     AlreadyDeclined(ProposalId),
     /// A write into the discussion channel of a decided vote (the
     /// discussion stays readable, linked from the vote's card — but the
@@ -7340,12 +7437,13 @@ mod tests {
             Reply::Proposed {
                 id: ProposalId(1),
                 warnings: Vec::new(),
+                channel: ChannelRef::Patch { id: ProposalId(1) },
             },
             Reply::Proposals { proposals: vec![] },
             Reply::Members { members: vec![] },
             Reply::Uploads { uploads: vec![] },
             Reply::Session(Box::default()),
-            Reply::Chain { blocks: vec![] },
+            Reply::Chain { blocks: vec![], diverged: vec![] },
         ];
         for r in replies {
             let json = serde_json::to_string(&r);

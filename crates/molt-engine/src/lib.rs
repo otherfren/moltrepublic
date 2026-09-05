@@ -80,7 +80,7 @@ pub use wiki_index::front_matter::{
     value_list as header_value_list, with_props, yaml_quote,
 };
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 pub use configstore::ConfigStoreHandle;
@@ -781,6 +781,25 @@ pub(crate) struct ChainProjection {
     /// a withdraw has exactly one legitimate author), the decline park's
     /// sibling. Drained by `receive_proposed`.
     pub(crate) pending_withdrawals: HashMap<u64, (MemberId, u64)>,
+    /// Proposal ids a peer re-used for ANOTHER change (A1 guard): the first
+    /// card stands, the collision is refused and remembered here, keyed by
+    /// id → the colliding proposer, so the surfaces can say so. Ephemeral,
+    /// bounded by [`ID_COLLISIONS_MAX`].
+    pub(crate) id_collisions: BTreeMap<u64, MemberId>,
+    /// Peers whose blocks link to a history this node does not hold (A2.1
+    /// divergence detector), keyed by wire sender. Ephemeral; an entry
+    /// clears when a block from that peer extends the chain again.
+    pub(crate) diverged: BTreeMap<MemberId, molt_core::ChainDivergence>,
+    /// When the head last advanced (presence clock, seconds) - the A2.2
+    /// seal pacing measures its propagation round from here.
+    pub(crate) head_moved_at: u64,
+    /// Proposals that reached m while the head was younger than one round:
+    /// sealed on the delivery tick once the round has passed.
+    pub(crate) seal_held: std::collections::BTreeSet<u64>,
+    /// Blocks of ANOTHER branch, by height (`docs/chain/chain_reorg.md`
+    /// R5): kept until they link into our chain below the fork point and
+    /// the deep tie-break decides. Bounded like the catch-up buffer.
+    pub(crate) fork_candidates: BTreeMap<u64, molt_core::ChainBlock>,
     /// The exact [`molt_core::ChainChange`] each open proposal is voting on
     /// (keyed by proposal id) — so approvers sign, and the committer seals, the
     /// SAME bytes for any change kind (a gated `Applied` or a `Membership`
@@ -1350,6 +1369,11 @@ impl State {
                 own_approvals: std::collections::BTreeSet::new(),
                 served_at: HashMap::new(),
                 pending_declines: HashMap::new(),
+                id_collisions: BTreeMap::new(),
+                diverged: BTreeMap::new(),
+                head_moved_at: 0,
+                seal_held: std::collections::BTreeSet::new(),
+                fork_candidates: BTreeMap::new(),
                 pending_withdrawals: HashMap::new(),
                 proposal_changes: HashMap::new(),
                 pending_blocks: std::collections::BTreeMap::new(),
@@ -1727,7 +1751,12 @@ impl State {
                 cursor,
             } => self.cmd_wiki_changes(since_rev, limit, cursor),
             Command::WikiHealth { limit } => self.cmd_wiki_health(limit),
-            Command::WikiEdit { edits } => self.cmd_wiki_edit(edits),
+            Command::WikiEdit {
+                edits,
+                dry_run,
+                allow_warnings,
+                supersedes,
+            } => self.cmd_wiki_edit(edits, dry_run, allow_warnings, supersedes),
             Command::WikiResolve { name } => self.cmd_wiki_resolve(name),
             Command::WikiProps => self.cmd_wiki_props(),
             Command::WikiLinks {

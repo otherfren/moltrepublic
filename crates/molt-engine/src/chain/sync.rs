@@ -14,12 +14,24 @@ use super::*;
 /// enough that ~96 KiB frames cannot pin unbounded RAM.
 const CATCHUP_BUFFER_WINDOW: u64 = 4096;
 
+/// How many `(height, hash)` samples a fork-aware catch-up request carries.
+const KNOWN_HEADS_MAX: usize = 16;
+
 impl State {
     /// Inbound: a peer broadcast (or re-served) a committed block. Extend the
     /// single branch when it is the next height, tie-break a contended slot we
     /// already filled, or — when it is ahead of us — buffer it and request the
     /// missing suffix (catch-up).
+    #[cfg(test)]
     pub(crate) fn receive_block(&mut self, block: ChainBlock) {
+        self.receive_block_from("", block);
+    }
+
+    /// [`Self::receive_block`] with the wire sender, so a block from another
+    /// branch can flag ITS sender (A2.1): a `prev` this node does not hold at
+    /// head+1, a tip contender on a foreign `prev`, or any contender below
+    /// the tip. A block from that peer that extends the chain clears it.
+    pub(crate) fn receive_block_from(&mut self, from: &str, block: ChainBlock) {
         let Some(head) = self.chain.head.clone() else {
             // a headless rejoiner (total device loss) bootstraps its chain from
             // the genesis a survivor serves, then drains whatever else arrived
@@ -60,14 +72,22 @@ impl State {
             return;
         };
         if block.height == head.height + 1 {
+            if block.prev != head.hash {
+                // the sender built on a block we do not hold: another branch
+                self.note_divergence(from, head.height, &block);
+                self.stash_fork_candidate(block);
+                self.try_reorg(from);
+                return;
+            }
             if self.apply_next_block(block) {
+                self.clear_divergence(from);
                 // the buffered suffix drains behind it — ONE write for the
                 // whole batch, at the end
                 self.drain_buffered_blocks();
                 self.persist_chain_now();
             }
         } else if block.height <= head.height {
-            self.tie_break(block);
+            self.tie_break(from, block);
         } else {
             // a gap: we are behind. Buffer this block and ask the mesh for the
             // blocks we are missing (any survivor re-serves them). L3: only
@@ -137,6 +157,8 @@ impl State {
 
     /// Broadcast a catch-up request for every block from `from` onward (deduped
     /// while the same gap is outstanding). No-op if we cannot be behind.
+    /// The request carries our `known` heads, so a server on another branch
+    /// can serve from the fork point (`chain_reorg.md` R5).
     pub(crate) fn request_catchup(&mut self, from: u64) {
         if self.chain.head.is_none() || self.chain.catchup_from == Some(from) {
             return;
@@ -144,8 +166,184 @@ impl State {
         self.chain.catchup_from = Some(from);
         let me = self.member();
         tracing::debug!(me = %me, from, "chain catch-up requested");
-        let env = self.make_env(me, WorkspaceEvent::ChainRequest { from_height: from });
+        let known = self.known_heads();
+        let env = self.make_env(me, WorkspaceEvent::ChainRequest { from_height: from, known });
         self.record(env);
+    }
+
+    /// Our `(height, hash)` samples, head first, going back geometrically
+    /// (head, head-1, head-2, head-4, ...) down to the anchor - at most
+    /// [`KNOWN_HEADS_MAX`] entries.
+    pub(crate) fn known_heads(&self) -> Vec<molt_core::HeightHash> {
+        let rid = self.republic_id();
+        let Some(head) = self.chain.blocks.last().map(|b| b.height) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut back: u64 = 0;
+        while out.len() < KNOWN_HEADS_MAX {
+            let Some(h) = head.checked_sub(back) else { break };
+            if let Some(b) = self.chain.blocks.iter().find(|b| b.height == h) {
+                out.push(molt_core::HeightHash { height: h, hash: block_hash(&rid, b) });
+            } else {
+                break;
+            }
+            back = if back == 0 { 1 } else { back.saturating_mul(2) };
+        }
+        out
+    }
+
+    /// Where a fork-aware request wants serving from: one above the highest
+    /// `known` sample that names a block we hold, else `from_height`.
+    pub(crate) fn serve_from_for(&self, from_height: u64, known: &[molt_core::HeightHash]) -> u64 {
+        let rid = self.republic_id();
+        known
+            .iter()
+            .filter(|k| {
+                self.chain
+                    .blocks
+                    .iter()
+                    .any(|b| b.height == k.height && block_hash(&rid, b) == k.hash)
+            })
+            .map(|k| k.height.saturating_add(1))
+            .max()
+            .unwrap_or(from_height)
+    }
+
+    /// Keep a block of another branch for the deep tie-break (R5); bounded
+    /// like the catch-up buffer, shedding the highest when full.
+    fn stash_fork_candidate(&mut self, block: ChainBlock) {
+        self.chain.fork_candidates.insert(block.height, block);
+        while self.chain.fork_candidates.len() > usize::try_from(CATCHUP_BUFFER_WINDOW).unwrap_or(usize::MAX) {
+            if let Some(top) = self.chain.fork_candidates.keys().next_back().copied() {
+                self.chain.fork_candidates.remove(&top);
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// The deep tie-break (`docs/chain/chain_reorg.md`): once the fork
+    /// candidates link into our chain at some height f, compare the two
+    /// blocks at f (R1); if theirs is smaller, verify our prefix + their
+    /// suffix as a whole (R3) and adopt it, returning the displaced
+    /// proposals to the vote (R4). A run that does not link yet asks the
+    /// peer for the heights below it (R5). Never below the anchor (R2).
+    fn try_reorg(&mut self, from: &str) {
+        let rid = self.republic_id();
+        let Some(anchor) = self.chain.blocks.first().map(|b| b.height) else {
+            return;
+        };
+        let ours_at = |st: &Self, h: u64| st.chain.blocks.iter().find(|b| b.height == h).cloned();
+        // the lowest candidate that links into OUR chain
+        let mut fork = None;
+        for (h, cand) in &self.chain.fork_candidates {
+            if *h <= anchor {
+                continue;
+            }
+            if let Some(below) = ours_at(self, h - 1) {
+                if block_hash(&rid, &below) == cand.prev {
+                    fork = Some(*h);
+                    break;
+                }
+            }
+        }
+        let Some(f) = fork else {
+            // nothing links yet: ask for the run below the lowest candidate
+            if let Some(lowest) = self.chain.fork_candidates.keys().next().copied() {
+                if lowest > anchor.saturating_add(1) {
+                    self.request_catchup(lowest.saturating_sub(1).max(anchor.saturating_add(1)));
+                }
+            }
+            return;
+        };
+        // the contiguous run of candidates from f upward
+        let mut suffix: Vec<ChainBlock> = Vec::new();
+        let mut h = f;
+        while let Some(c) = self.chain.fork_candidates.get(&h) {
+            if let Some(prev) = suffix.last() {
+                if c.prev != block_hash(&rid, prev) {
+                    break;
+                }
+            }
+            suffix.push(c.clone());
+            h = h.saturating_add(1);
+        }
+        let Some(ours_f) = ours_at(self, f) else {
+            return;
+        };
+        let (mine, theirs) = (block_hash(&rid, &ours_f), block_hash(&rid, &suffix[0]));
+        if mine <= theirs {
+            // ours wins at the fork (R1): the peer re-bases, not this node
+            tracing::info!(%from, fork = f, "keeping this branch at the fork - the peer re-bases");
+            self.chain.fork_candidates.clear();
+            return;
+        }
+        let mut candidate: Vec<ChainBlock> =
+            self.chain.blocks.iter().filter(|b| b.height < f).cloned().collect();
+        candidate.extend(suffix.iter().cloned());
+        if let Err(e) = self.walk_own(&candidate) {
+            tracing::warn!(%from, fork = f, error = %e, "the other branch does not verify - dropped");
+            self.chain.fork_candidates.clear();
+            return;
+        }
+        let dropped: Vec<ChainBlock> =
+            self.chain.blocks.iter().filter(|b| b.height >= f).cloned().collect();
+        let kept: BTreeSet<u64> = suffix
+            .iter()
+            .filter_map(|b| match &b.change {
+                ChainChange::Applied { proposal_id, .. } => Some(*proposal_id),
+                _ => None,
+            })
+            .collect();
+        tracing::warn!(%from, fork = f, dropped = dropped.len(), adopted = suffix.len(), "re-basing onto the other branch");
+        self.adopt_chain(candidate);
+        // R4: what our dropped suffix decided and theirs does not is a vote again
+        for b in &dropped {
+            if let ChainChange::Applied { proposal_id, .. } = &b.change {
+                if kept.contains(proposal_id) {
+                    continue;
+                }
+                let materialized = self.proposals.get(proposal_id).is_some_and(|p| p.by.is_empty());
+                if materialized {
+                    self.proposals.remove(proposal_id);
+                } else if let Some(p) = self.proposals.get_mut(proposal_id) {
+                    p.state = ProposalState::Proposed;
+                }
+            }
+        }
+        // the adopted suffix's bookkeeping (emits, cleared sigs, the re-base
+        // of every open card onto the new head)
+        for b in &suffix {
+            self.after_block_applied(b);
+        }
+        // every signature collected on the old branch is position-bound to
+        // heights that no longer exist here; this node's own decisions
+        // re-sign at the new heights
+        self.chain.pending_sigs.clear();
+        let mine: Vec<u64> = self
+            .chain
+            .own_approvals
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.proposals
+                    .get(id)
+                    .is_some_and(|p| p.state == ProposalState::Proposed)
+            })
+            .collect();
+        for id in mine {
+            self.chain_sign_and_gossip_approval(id);
+        }
+        self.chain.fork_candidates.clear();
+        self.chain.diverged.clear();
+        self.persist_chain_now();
+        self.emit_session(crate::SessionScope::Full);
+        // whatever the peer holds above what we adopted
+        if let Some(head) = self.chain.head.as_ref().map(|h| h.height) {
+            self.chain.catchup_from = None;
+            self.request_catchup(head.saturating_add(1));
+        }
     }
 
     /// **Does a served blob fit one transport frame?** (K6 §4.9.8.)
@@ -256,17 +454,36 @@ impl State {
     /// a duplicate broadcast, ignore; a different block at the tip with a
     /// smaller hash wins the single branch, so adopt it and re-base the
     /// displaced proposal. A deeper conflict is logged (deep reorg is Phase 3).
-    fn tie_break(&mut self, block: ChainBlock) {
+    fn tie_break(&mut self, from: &str, block: ChainBlock) {
         let Some(existing) = self.chain.blocks.iter().find(|b| b.height == block.height) else {
             return;
         };
         if existing == &block {
-            return; // duplicate broadcast of the block we already hold
+            // duplicate broadcast of the block we already hold: the sender
+            // holds our history at this height
+            self.clear_divergence(from);
+            return;
         }
         let rid = self.republic_id();
         let incoming = molt_storage::content_hash(&block_link_bytes(&rid, &block));
         let current = molt_storage::content_hash(&block_link_bytes(&rid, existing));
         let is_tip = self.chain.blocks.last().is_some_and(|b| b.height == block.height);
+        // A2.1: a contender on a foreign `prev`, or one below the tip, is
+        // not a race the tip rule can settle - the sender is on another
+        // branch (a deep re-base is what would reconcile it)
+        let shared_prev = self
+            .chain
+            .blocks
+            .iter()
+            .find(|b| b.height.saturating_add(1) == block.height)
+            .map_or(true, |below| block_hash(&rid, below) == block.prev);
+        if !shared_prev || !is_tip {
+            let since = if shared_prev { block.height } else { block.height.saturating_sub(1) };
+            self.note_divergence(from, since, &block);
+            self.stash_fork_candidate(block);
+            self.try_reorg(from);
+            return;
+        }
         // CHEAP FIRST (review C5): a ground low-hash block costs a full
         // re-walk per frame; the signatures are what any contender must
         // carry, so they are checked against the roster before anything
@@ -285,6 +502,7 @@ impl State {
             self.chain.blocks.push(block.clone());
             if let Ok(head) = self.verify_own(&self.chain.blocks) {
                 self.chain.head = Some(head);
+                self.chain.head_moved_at = self.presence_now();
                 self.apply_chain_to_state();
                 // the displaced proposal returns to pending and re-bases —
                 // but ONLY a card with a deliberation behind it (a proposer
@@ -317,6 +535,44 @@ impl State {
                     self.chain.blocks.push(b);
                 }
             }
+        }
+    }
+
+    /// Remember that `from` is on another branch since `since_height` (the
+    /// lowest height the two chains may still share; an earlier sighting
+    /// keeps its lower value). A NEW entry goes loud: warn + session notice
+    /// `chain-diverged:<peer>:<height>` - the one fact a partitioned seat
+    /// could not see for itself (F00).
+    fn note_divergence(&mut self, from: &str, since_height: u64, block: &ChainBlock) {
+        tracing::warn!(%from, height = block.height, since_height, "a block from another branch");
+        if from.is_empty() {
+            return;
+        }
+        let now = self.presence_now();
+        let fresh = !self.chain.diverged.contains_key(from);
+        let entry = self
+            .chain
+            .diverged
+            .entry(from.to_string())
+            .or_insert_with(|| molt_core::ChainDivergence {
+                peer: from.to_string(),
+                since_height,
+                seen_ts: now,
+            });
+        entry.since_height = entry.since_height.min(since_height);
+        entry.seen_ts = now;
+        if fresh {
+            self.session.notice = format!("chain-diverged:{from}:{since_height}");
+            self.emit_session(crate::SessionScope::Full);
+        }
+    }
+
+    /// A block from `from` that fits our chain: whatever it was on, it is
+    /// on our branch now.
+    fn clear_divergence(&mut self, from: &str) {
+        if self.chain.diverged.remove(from).is_some() {
+            tracing::info!(%from, "peer is back on this branch");
+            self.emit_session(crate::SessionScope::Full);
         }
     }
 }

@@ -22,15 +22,15 @@ fn a_catch_up_request_is_served_once_per_debounce() {
     let mut walter = chain_peer("walter", &b, b.blocks.clone());
     walter.presence.clock_override = Some(1_000);
     let before = walter.next_seq;
-    wire(&mut walter, "petra", 1, WorkspaceEvent::ChainRequest { from_height: 0 });
+    wire(&mut walter, "petra", 1, WorkspaceEvent::ChainRequest { from_height: 0, known: vec![] });
     let served = walter.next_seq;
     assert!(served > before, "the first request is served");
-    wire(&mut walter, "petra", 2, WorkspaceEvent::ChainRequest { from_height: 0 });
+    wire(&mut walter, "petra", 2, WorkspaceEvent::ChainRequest { from_height: 0, known: vec![] });
     assert_eq!(walter.next_seq, served, "a repeat inside the debounce serves nothing");
-    wire(&mut walter, "petra", 3, WorkspaceEvent::ChainRequest { from_height: 99 });
+    wire(&mut walter, "petra", 3, WorkspaceEvent::ChainRequest { from_height: 99, known: vec![] });
     assert_eq!(walter.next_seq, served, "nothing above the head is served");
     walter.presence.clock_override = Some(1_000 + crate::net::CHAIN_SERVE_DEBOUNCE_SECS);
-    wire(&mut walter, "petra", 4, WorkspaceEvent::ChainRequest { from_height: 0 });
+    wire(&mut walter, "petra", 4, WorkspaceEvent::ChainRequest { from_height: 0, known: vec![] });
     assert!(walter.next_seq > served, "after the debounce it is served again");
 }
 
@@ -501,4 +501,233 @@ fn an_oversized_checkpoint_blob_is_never_served() {
         !crate::State::served_blob_fits(&fat),
         "a blob past the frame budget is refused before it can stall the outbox"
     );
+}
+
+/// A2.1 (mcp_agent_friction_fixes.md): a block from another branch - one
+/// whose `prev` is not our block below it, or a contender below the tip -
+/// flags its SENDER as diverged since the lowest height the two chains can
+/// still share, on every surface (chain state, read_chain, status, the
+/// session notice). A block from that peer that extends our chain clears
+/// the flag again.
+#[test]
+fn a_block_from_another_branch_flags_its_sender() {
+    let base = Builder::new(&["petra", "walter"], 2);
+    let mut a = base.clone();
+    a.commit_applied(1, &["petra", "walter"]);
+    a.commit_applied(2, &["petra", "walter"]);
+    let mut b = base.clone();
+    b.commit_applied(9, &["petra", "walter"]);
+    b.commit_applied(10, &["petra", "walter"]);
+    let mut walter = chain_peer("walter", &a, a.blocks.clone());
+
+    // b's block at OUR tip height links to b's height 1, not ours
+    walter.receive_block_from("petra", b.blocks[2].clone());
+    let since = |st: &crate::State| st.chain.diverged.get("petra").map(|d| d.since_height);
+    assert_eq!(since(&walter), Some(1), "the branches part at height 1");
+    assert_eq!(walter.chain.blocks.len(), 3, "nothing foreign was adopted");
+    let molt_core::Reply::Chain { diverged, .. } = walter.cmd_read_chain().expect("read") else {
+        panic!("read_chain answers Reply::Chain");
+    };
+    assert_eq!((diverged[0].peer.as_str(), diverged[0].since_height), ("petra", 1));
+    assert_eq!(walter.status().chain_diverged.len(), 1);
+    assert_eq!(walter.session.notice, "chain-diverged:petra:1");
+
+    // b's height-1 block, below our tip: the same signal, the height stays
+    walter.receive_block_from("petra", b.blocks[1].clone());
+    assert_eq!(since(&walter), Some(1));
+    assert_eq!(walter.chain.blocks.len(), 3);
+
+    // a block that EXTENDS our chain from petra clears the flag
+    a.commit_applied(3, &["petra", "walter"]);
+    walter.receive_block_from("petra", a.blocks[3].clone());
+    assert_eq!(walter.chain.blocks.len(), 4);
+    assert!(walter.chain.diverged.is_empty(), "petra is back on our branch");
+    assert!(walter.status().chain_diverged.is_empty());
+}
+
+/// The ordinary race - two seals at the tip on the SAME prev - is what the
+/// tie-break resolves; it never reads as divergence.
+#[test]
+fn a_tip_tie_on_a_shared_prev_is_not_divergence() {
+    let base = Builder::new(&["petra", "walter"], 2);
+    let mut a = base.clone();
+    a.commit_applied(1, &["petra", "walter"]);
+    let mut b = base.clone();
+    b.commit_applied(9, &["petra", "walter"]);
+    let mut walter = chain_peer("walter", &a, a.blocks.clone());
+    walter.receive_block_from("petra", b.blocks[1].clone());
+    assert!(walter.chain.diverged.is_empty());
+    assert_eq!(walter.chain.blocks.len(), 2, "one of the two tip blocks stands");
+}
+
+/// A2.3 (`docs/chain/chain_reorg.md` R1-R4): two branches fork at height 1
+/// and both grow to 3. The holder of the LARGER-hash branch receives the
+/// other branch block by block, in any order, and re-bases onto it: the
+/// smaller hash at the first divergent height wins, displaced proposals
+/// return to the vote, the flag clears. The holder of the smaller branch
+/// keeps its chain when the larger one arrives.
+#[test]
+fn a_deeper_fork_reorgs_onto_the_smaller_branch() {
+    let base = Builder::new(&["petra", "walter"], 2);
+    let mut a = base.clone();
+    for id in [1, 2, 3] {
+        a.commit_applied(id, &["petra", "walter"]);
+    }
+    let mut b = base.clone();
+    for id in [11, 12, 13] {
+        b.commit_applied(id, &["petra", "walter"]);
+    }
+    let rid = &base.republic_id;
+    // which branch wins at the fork height 1 (R1)
+    let (win, lose) = if block_hash(rid, &a.blocks[1]) < block_hash(rid, &b.blocks[1]) {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    let applied_ids = |st: &crate::State| -> Vec<u64> {
+        st.chain
+            .blocks
+            .iter()
+            .filter_map(|blk| match &blk.change {
+                ChainChange::Applied { proposal_id, .. } => Some(*proposal_id),
+                _ => None,
+            })
+            .collect()
+    };
+
+    // the loser holds its own branch (3 blocks + genesis); the winner's
+    // blocks arrive newest first - the order a live broadcast produces
+    let mut loser = chain_peer("walter", &lose, lose.blocks.clone());
+    let lost_ids = applied_ids(&loser);
+    // two of the displaced cards had a deliberation here, one is a record
+    // materialized from the block alone (`by` empty)
+    for id in &lost_ids[..2] {
+        loser.proposals.get_mut(id).expect("card").by = "walter".to_string();
+    }
+    for blk in [&win.blocks[3], &win.blocks[2], &win.blocks[1]] {
+        loser.receive_block_from("petra", blk.clone());
+    }
+    assert_eq!(loser.chain.blocks, win.blocks, "re-based onto the smaller branch");
+    assert_eq!(applied_ids(&loser), applied_ids(&chain_peer("walter", &win, win.blocks.clone())));
+    for id in &lost_ids[..2] {
+        assert_eq!(
+            loser.proposals.get(id).map(|p| p.state),
+            Some(ProposalState::Proposed),
+            "displaced proposal {id} returns to the vote"
+        );
+    }
+    assert!(!loser.proposals.contains_key(&lost_ids[2]), "a materialized record has no vote to return to");
+    assert!(loser.chain.diverged.is_empty(), "the peer is on our branch now");
+    assert!(loser.chain.fork_candidates.is_empty());
+
+    // the winner sees the loser's branch and does not move
+    let mut winner = chain_peer("petra", &win, win.blocks.clone());
+    for blk in [&lose.blocks[1], &lose.blocks[2], &lose.blocks[3]] {
+        winner.receive_block_from("walter", blk.clone());
+    }
+    assert_eq!(winner.chain.blocks, win.blocks, "the smaller branch stands");
+}
+
+/// R2: a pruned holder cannot verify below its anchor, so a fork below the
+/// cut is left alone - flagged, never adopted.
+#[test]
+fn a_reorg_never_crosses_the_cut() {
+    let base = Builder::new(&["petra", "walter"], 2);
+    let mut b = base.clone();
+    b.commit_applied(1, &["petra", "walter"]);
+    b.commit_applied(2, &["petra", "walter"]);
+    let blob_at_2 = checkpoint_state(&b.blocks, 2).expect("state@2");
+    let anchor = b.seal(
+        3,
+        ChainChange::Checkpoint { upto: 2, state_hash: checkpoint_state_hash(&blob_at_2) },
+        &["petra", "walter"],
+    );
+    b.push(anchor.clone());
+    let mut pruned = chain_peer("walter", &b, b.blocks[..3].to_vec());
+    pruned.receive_block(anchor);
+    assert!(pruned.chain.checkpoint_blob.is_some(), "the holder pruned");
+    let before = pruned.chain.blocks.clone();
+
+    // another branch that forked at height 2, below the cut
+    let mut c = base.clone();
+    c.commit_applied(1, &["petra", "walter"]);
+    c.commit_applied(22, &["petra", "walter"]);
+    c.commit_applied(23, &["petra", "walter"]);
+    c.commit_applied(24, &["petra", "walter"]);
+    for blk in [&c.blocks[4], &c.blocks[3], &c.blocks[2]] {
+        pruned.receive_block_from("petra", blk.clone());
+    }
+    assert_eq!(pruned.chain.blocks, before, "nothing below the cut is re-based");
+    assert!(pruned.chain.checkpoint_blob.is_some());
+}
+
+/// R3: a winning branch with one block below the threshold is not a branch
+/// at all - the candidate is verified as a whole before anything moves.
+#[test]
+fn an_unverifiable_candidate_is_dropped() {
+    let base = Builder::new(&["petra", "walter"], 2);
+    let rid = &base.republic_id;
+    let mut a = base.clone();
+    for id in [1, 2, 3] {
+        a.commit_applied(id, &["petra", "walter"]);
+    }
+    // a branch whose block 1 wins the fork by hash - found by trying ids
+    let mut w = None;
+    for id in [11u64, 21, 31, 41, 51, 61, 71, 81] {
+        let mut cand = base.clone();
+        cand.commit_applied(id, &["petra", "walter"]);
+        if block_hash(rid, &cand.blocks[1]) < block_hash(rid, &a.blocks[1]) {
+            w = Some(cand);
+            break;
+        }
+    }
+    let mut w = w.expect("one of eight ids hashes below the other branch");
+    // …with a forged block 2 (one signature, m = 2) that block 3 links to
+    let forged = w.seal(
+        2,
+        ChainChange::Applied {
+            proposal_id: 12,
+            surface: Surface::Memory,
+            payload: json!({ "op": "add_note", "id": 12 }),
+        },
+        &["petra"],
+    );
+    w.push(forged);
+    w.commit_applied(13, &["petra", "walter"]);
+    let mut loser = chain_peer("walter", &a, a.blocks.clone());
+    for blk in [&w.blocks[3], &w.blocks[2], &w.blocks[1]] {
+        loser.receive_block_from("petra", blk.clone());
+    }
+    assert_eq!(loser.chain.blocks, a.blocks, "an unverifiable branch never adopts");
+    assert!(loser.chain.fork_candidates.is_empty(), "and is dropped, not kept");
+}
+
+/// R5: a fork-aware request names what the requester holds; the server
+/// serves from one above the highest sample it shares, not from the
+/// requester's estimate - and a plain request still serves from
+/// `from_height`.
+#[test]
+fn a_chain_request_names_the_fork_point() {
+    let base = Builder::new(&["petra", "walter"], 2);
+    let rid = base.republic_id.clone();
+    let mut a = base.clone();
+    for id in [1, 2, 3, 4] {
+        a.commit_applied(id, &["petra", "walter"]);
+    }
+    let mut b = base.clone();
+    b.commit_applied(1, &["petra", "walter"]);
+    b.commit_applied(2, &["petra", "walter"]);
+    b.commit_applied(33, &["petra", "walter"]);
+    b.commit_applied(34, &["petra", "walter"]);
+    let server = chain_peer("walter", &a, a.blocks.clone());
+    let requester = chain_peer("petra", &b, b.blocks.clone());
+    let known = requester.known_heads();
+    assert_eq!(
+        known.iter().map(|k| k.height).collect::<Vec<_>>(),
+        vec![4, 3, 2, 0],
+        "head, then back geometrically"
+    );
+    assert_eq!(known[2].hash, block_hash(&rid, &a.blocks[2]), "the shared prefix matches");
+    assert_eq!(server.serve_from_for(5, &known), 3, "serve from the block above the last shared one");
+    assert_eq!(server.serve_from_for(5, &[]), 5, "a plain request keeps its estimate");
 }
