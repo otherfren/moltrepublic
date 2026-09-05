@@ -59,3 +59,14 @@ still OPEN there, by id (each carries its fix direction in the review):
 - Frontends: F7 residual (token read per accepted connection).
 - MCP privileges (section 9): P8 ritual abandon on context switch
   (product) · P10 send-side rate limits.
+
+## Flaky: `a_broadcast_ack_moves_the_senders_proven_floor` (2026-09-05)
+
+Failed once on `cursor.ack_seen` during a fully parallel `cargo test
+--workspace`, and passed 6/6 alone plus once under two concurrent test
+binaries. Load-dependent: the debounced `MESH_ACK_TAG` frame has to land
+and be consumed before the close seals the sheet, and a starved runtime
+misses that window. Fix direction: the test should wait on the sheet
+(poll `read_transport_state` until `ack_seen`, with a deadline) instead of
+on the close - the guarantee is eventual, so a one-shot read of it is the
+test's bug, not the engine's.

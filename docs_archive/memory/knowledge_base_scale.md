@@ -579,7 +579,19 @@ per-patch provenance).
   link-valued property clickable exactly like a body link; the editor
   keeps the raw text. The header is dropped from BOTH sides of the
   preview diff, or every document carrying one would read as fully
-  changed.
+  changed. `tags` is split off the table since 2026-09-05 and renders as
+  coloured pills, the hue derived from the LOWERCASED tag, and a
+  `[[path|Name]]` value shows the name half rather than the path.
+- **Authoring the header** — BUILT 2026-09-05
+  (`wiki_tags_and_semantic_links.md`). A document without a header offers
+  `+ Tag` and nothing else: a modal takes several free-text tags and
+  writes `tags: [...]`, leaving the pane in the viewer. Typed relations
+  are authored by "Create semantic link" (toolbar, editor context menu,
+  navigator file menu - the navigator opens the file first, because the
+  relation is written into ITS header): name, target out of the folded
+  base, and any number of relations switched on, each becoming one header
+  key with a quoted `"[[path|Name]]"` value. Existing keys grow into a
+  list; the header is edited LINE-WISE, never re-emitted.
 - **`[[Name]]` in the body** — BUILT. Two traps found in the building:
   pulldown-cmark splits an unmatched `[[` across several text events, so
   the scan has to run over a block's FINISHED runs (a per-event scan

@@ -28,6 +28,7 @@ use crate::{
     WikiHitRow,
     WikiNavRow,
     WikiProp,
+    WikiRelation,
     WikiSpan,
     WikiState,
     WikiTabRow,
@@ -133,6 +134,38 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
         })
         .collect();
     sync_model(&s.get_cs_rows(), cs_rows, PartialEq::eq, |m| s.set_cs_rows(m));
+    // the two authoring modals' drafts
+    let tag_rows: Vec<slint::SharedString> =
+        w.tag_rows().iter().map(|t| t.as_str().into()).collect();
+    if tag_rows.len() == s.get_tag_rows().row_count() {
+        // same rows, possibly new text: patch in place, or the field the
+        // member is typing in loses its focus on every keystroke
+        sync_model(&s.get_tag_rows(), tag_rows, PartialEq::eq, |m| s.set_tag_rows(m));
+    } else {
+        // a row came or went: the surviving inputs must be REBUILT, or a
+        // removed row leaves its neighbour showing the text it no longer
+        // holds (a one-way binding an input has already written to is
+        // dead)
+        s.set_tag_rows(ModelRc::new(VecModel::from(tag_rows)));
+    }
+    s.set_tag_ready(w.tag_ready());
+    s.set_link_name(w.link_name().into());
+    s.set_link_target(w.link_target().into());
+    s.set_link_filter(w.link_filter().into());
+    s.set_link_custom(w.link_custom().into());
+    s.set_link_ready(w.link_ready());
+    s.set_can_write_header(w.can_write_header());
+    let targets: Vec<slint::SharedString> =
+        w.link_targets().into_iter().map(Into::into).collect();
+    sync_model(&s.get_link_targets(), targets, PartialEq::eq, |m| s.set_link_targets(m));
+    let rels: Vec<WikiRelation> = w
+        .link_relations()
+        .into_iter()
+        .map(|(key, on)| WikiRelation { key: key.into(), on })
+        .collect();
+    sync_model(&s.get_link_relations(), rels, PartialEq::eq, |m| {
+        s.set_link_relations(m);
+    });
     // the details modal shows the WHOLE change; the panel list is capped
     s.set_cs_patch(w.build_patch().unwrap_or_default().into());
     if let Some(doc) = w.active() {
@@ -168,7 +201,7 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
         sync_model(&s.get_blocks(), blocks, wiki_block_eq, |m| s.set_blocks(m));
         let links: Vec<slint::SharedString> = w.links(id).into_iter().map(Into::into).collect();
         sync_model(&s.get_links(), links, PartialEq::eq, |m| s.set_links(m));
-        let props: Vec<WikiProp> = w
+        let rows: Vec<WikiProp> = w
             .infobox(id)
             .into_iter()
             .map(|r| WikiProp {
@@ -176,10 +209,16 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
                 value: r.value.into(),
                 link: r.link.into(),
                 status: i32::from(r.status),
+                hue: i32::from(r.hue),
             })
             .collect();
+        // tags read as pills, every other key as a labelled row - two
+        // models, so each band knows whether it has anything to show
+        let (tags, props): (Vec<WikiProp>, Vec<WikiProp>) =
+            rows.into_iter().partition(|r| r.hue >= 0);
         sync_model(&s.get_props(), props, PartialEq::eq, |m| s.set_props(m));
-        s.set_can_add_property(w.can_add_property());
+        sync_model(&s.get_tag_pills(), tags, PartialEq::eq, |m| s.set_tag_pills(m));
+        s.set_can_add_tags(w.can_add_tags());
         // …and the BYTES of the document being looked at, if this node
         // does not hold them yet (§4.10). Idempotent: the reply fills the
         // model and the next sync asks for nothing.
@@ -204,7 +243,8 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
         sync_model(&s.get_blocks(), Vec::new(), wiki_block_eq, |m| s.set_blocks(m));
         sync_model(&s.get_links(), Vec::new(), PartialEq::eq, |m| s.set_links(m));
         sync_model(&s.get_props(), Vec::new(), PartialEq::eq, |m| s.set_props(m));
-        s.set_can_add_property(false);
+        sync_model(&s.get_tag_pills(), Vec::new(), PartialEq::eq, |m| s.set_tag_pills(m));
+        s.set_can_add_tags(false);
         sync_model(&s.get_backlinks(), Vec::new(), PartialEq::eq, |m| {
             s.set_backlinks(m);
         });
@@ -320,10 +360,30 @@ pub(crate) fn wire_wiki(
             w.set_raw(id, &text);
         }
     });
-    act!(on_add_property, |w, key: slint::SharedString| {
-        if let Some(id) = w.active_id() {
-            w.start_header(id, key.as_str());
-        }
+    // ---- the two authoring modals ------------------------------------------
+    act!(on_tag_open, |w| w.tag_open());
+    act!(on_tag_add, |w, value: slint::SharedString| w.tag_add(&value));
+    act!(on_tag_set, |w, i: i32, value: slint::SharedString| {
+        w.tag_set(usize::try_from(i).unwrap_or(0), &value);
+    });
+    act!(on_tag_remove, |w, i: i32| {
+        w.tag_remove(usize::try_from(i).unwrap_or(0));
+    });
+    act!(on_tag_commit, |w| {
+        w.tag_commit();
+    });
+    act!(on_link_open, |w, target: slint::SharedString| w.link_open(&target));
+    act!(on_link_close, |w| w.link_close());
+    act!(on_set_link_name, |w, v: slint::SharedString| w.set_link_name(&v));
+    act!(on_set_link_target, |w, v: slint::SharedString| w.set_link_target(&v));
+    act!(on_set_link_filter, |w, v: slint::SharedString| w.set_link_filter(&v));
+    act!(on_set_link_custom, |w, v: slint::SharedString| w.set_link_custom(&v));
+    act!(on_link_add_custom, |w| {
+        w.link_add_custom();
+    });
+    act!(on_link_toggle, |w, key: slint::SharedString| w.link_toggle(&key));
+    act!(on_link_commit, |w| {
+        w.link_commit();
     });
     act!(on_open_link, |w, target: slint::SharedString| {
         // a dead link is a no-op — the preview stays put
@@ -1025,14 +1085,18 @@ pub(crate) fn wire_wiki_index(ui: &AppWindow, ctx: &Ctx) {
                         None => break,
                     }
                 }
-                // …and the republic's own header vocabulary, which is
-                // what a member is shown instead of a schema
-                let keys: Vec<String> = match wh.execute(Command::WikiProps).await {
-                    Ok(Reply::WikiProps { keys, .. }) => {
-                        // a hint, not a catalogue: the row sits above the
-                        // prose and must not push it off the pane
-                        keys.into_iter().take(6).map(|k| k.key).collect()
-                    }
+                // …and the tags this republic already uses, which is
+                // what the + Tag modal offers instead of a schema
+                let vocab: Vec<String> = match wh.execute(Command::WikiProps).await {
+                    Ok(Reply::WikiProps { keys, .. }) => keys
+                        .into_iter()
+                        .find(|k| k.key == wiki::TAG_KEY)
+                        .map(|k| {
+                            // a hint, not a catalogue: the chips sit above
+                            // the inputs and must not push OK off the modal
+                            k.values.into_iter().take(12).map(|v| v.value).collect()
+                        })
+                        .unwrap_or_default(),
                     _ => Vec::new(),
                 };
                 let _ = slint::invoke_from_event_loop(move || {
@@ -1052,10 +1116,10 @@ pub(crate) fn wire_wiki_index(ui: &AppWindow, ctx: &Ctx) {
                     sync_model(&g.get_base_docs(), docs, PartialEq::eq, |m| {
                         g.set_base_docs(m);
                     });
-                    let keys: Vec<slint::SharedString> =
-                        keys.into_iter().map(Into::into).collect();
-                    sync_model(&g.get_prop_keys(), keys, PartialEq::eq, |m| {
-                        g.set_prop_keys(m);
+                    let vocab: Vec<slint::SharedString> =
+                        vocab.into_iter().map(Into::into).collect();
+                    sync_model(&g.get_tag_vocab(), vocab, PartialEq::eq, |m| {
+                        g.set_tag_vocab(m);
                     });
                     g.invoke_base_arrived();
                 });

@@ -1534,6 +1534,8 @@ export component AppWindow inherits Window {
         || root.charter-view-open
         || root.mem-cs-confirm-open
         || root.mem-cs-stack-open
+        || WikiState.tag-modal-open
+        || WikiState.link-modal-open
         || root.mem-export-open
         || root.patch-view-open
         || root.relay-clearnet-modal-open
@@ -2414,6 +2416,11 @@ export component AppWindow inherits Window {
             root.mem-cs-confirm-open = false;
         } else if (root.mem-cs-stack-open) {
             root.mem-cs-stack-open = false;
+        } else if (WikiState.tag-modal-open) {
+            WikiState.tag-modal-open = false;
+        } else if (WikiState.link-modal-open) {
+            WikiState.link-close();
+            WikiState.link-modal-open = false;
         } else if (root.mem-export-open) {
             root.mem-export-open = false;
         } else if (root.patch-view-open) {
@@ -9522,6 +9529,290 @@ export component AppWindow inherits Window {
                 view-h: cv-fl.height;
                 content-h: cv-fl.viewport-height;
                 scroll-y: cv-fl.viewport-y;
+            }
+        }
+    }
+
+    // Modal: the tags a headerless document gets. Several free-text rows,
+    // the republic's own tags one click away - the ontology is content,
+    // never a schema this program prescribes.
+    if WikiState.tag-modal-open: ConfirmModal {
+        dialog-width: 460px;
+        title: Strings.mem-tag-title;
+        body: WikiState.doc-path;
+        cancel-label: Strings.close-ws-cancel;
+        confirm-label: Strings.mem-save;
+        confirm-enabled: WikiState.tag-ready;
+        dismissed => {
+            WikiState.tag-modal-open = false;
+        }
+        confirmed => {
+            WikiState.tag-commit();
+            WikiState.tag-modal-open = false;
+        }
+        VerticalLayout {
+            spacing: Theme.pane-gap;
+            for t[i] in WikiState.tag-rows: HorizontalLayout {
+                spacing: Theme.pane-gap;
+                AppField {
+                    horizontal-stretch: 1;
+                    placeholder: Strings.mem-tag-ph;
+                    text: t;
+                    edited => {
+                        WikiState.tag-set(i, self.text);
+                    }
+                }
+                AppButton {
+                    label: "";
+                    emoji: "🗑️";
+                    pad: 10px;
+                    height: 38px * Theme.ui-scale;
+                    enabled: WikiState.tag-rows.length > 1;
+                    clicked => {
+                        WikiState.tag-remove(i);
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: Theme.pane-gap;
+                AppButton {
+                    label: Strings.mem-tag-more;
+                    emoji: "➕";
+                    pad: 10px;
+                    clicked => {
+                        WikiState.tag-add("");
+                    }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+            // what the republic already says: one click fills a new row
+            if WikiState.tag-vocab.length > 0: Text {
+                text: Strings.mem-tag-used;
+                color: Theme.dim;
+                font-size: Theme.fs-cap;
+                font-weight: 600;
+            }
+            if WikiState.tag-vocab.length > 0: HorizontalLayout {
+                spacing: 6px;
+                alignment: start;
+                for v in WikiState.tag-vocab: Rectangle {
+                    width: tvt.preferred-width + 14px;
+                    height: 22px * Theme.ui-scale;
+                    border-radius: Theme.win95 ? 0px : 4px;
+                    border-width: Theme.border-w;
+                    border-color: tva.has-hover ? Theme.accent : Theme.line;
+                    background: tva.has-hover ? Theme.accent-soft : transparent;
+                    tvt := Text {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        text: v;
+                        color: tva.has-hover ? Theme.accent : Theme.dim;
+                        font-size: Theme.fs-cap;
+                    }
+                    tva := TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            WikiState.tag-add(v);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Modal: a SEMANTIC link. An agent reading this wiki has no
+    // real-world experience - what a document is to another one has to be
+    // written down, and the header is where the index reads it.
+    if WikiState.link-modal-open: ConfirmModal {
+        dialog-width: 620px;
+        title: Strings.mem-tb-relate;
+        body: WikiState.doc-path;
+        cancel-label: Strings.close-ws-cancel;
+        confirm-label: Strings.mem-link-save;
+        confirm-enabled: WikiState.link-ready;
+        dismissed => {
+            WikiState.link-close();
+            WikiState.link-modal-open = false;
+        }
+        confirmed => {
+            WikiState.link-commit();
+            WikiState.link-modal-open = false;
+        }
+        VerticalLayout {
+            spacing: Theme.pane-gap;
+            Text {
+                text: Strings.mem-link-name;
+                color: Theme.dim;
+                font-size: Theme.fs-cap;
+                font-weight: 600;
+            }
+            AppField {
+                placeholder: Strings.mem-link-ph-name;
+                // two-way like the wiki search field: a one-way binding
+                // onto an in-out property dies the moment the input
+                // writes to it, and the name the target pick recomputed
+                // would never reach the field again
+                text <=> WikiState.link-name;
+                edited => {
+                    WikiState.set-link-name(self.text);
+                }
+            }
+            Text {
+                text: Strings.mem-link-target;
+                color: Theme.dim;
+                font-size: Theme.fs-cap;
+                font-weight: 600;
+            }
+            AppField {
+                placeholder: Strings.mem-link-ph-filter;
+                text <=> WikiState.link-filter;
+                edited => {
+                    WikiState.set-link-filter(self.text);
+                }
+            }
+            Rectangle {
+                // the two lists give way on a short window: at a large app
+                // font the dialog would otherwise push its own buttons past
+                // the bottom edge, where they cannot be pressed
+                height: clamp(root.height * 0.18, 80px, 150px);
+                background: Theme.panel-2;
+                border-radius: Theme.win95 ? 0px : 8px;
+                border-width: Theme.border-w;
+                border-color: Theme.line;
+                clip: true;
+                ltfl := Flickable {
+                    width: 100%;
+                    height: 100%;
+                    viewport-width: self.width;
+                    viewport-height: ltcol.preferred-height;
+                    ltcol := VerticalLayout {
+                        padding: 4px;
+                        alignment: start;
+                        for t in WikiState.link-targets: Rectangle {
+                            height: 24px * Theme.ui-scale;
+                            border-radius: Theme.win95 ? 0px : 4px;
+                            background: WikiState.link-target == t ? Theme.accent-soft
+                                : (lta.has-hover ? Theme.raised : transparent);
+                            lt-row := Text {
+                                x: 8px;
+                                width: parent.width - 16px;
+                                height: 100%;
+                                text: t;
+                                color: WikiState.link-target == t ? Theme.accent : Theme.text;
+                                font-size: Theme.fs-cap;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            lta := TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => {
+                                    WikiState.set-link-target(t);
+                                }
+                            }
+                        }
+                    }
+                }
+                ScrollHint {
+                    x: parent.width - 7px;
+                    view-h: ltfl.height;
+                    content-h: ltfl.viewport-height;
+                    scroll-y: ltfl.viewport-y;
+                }
+            }
+            Text {
+                text: Strings.mem-link-rel;
+                color: Theme.dim;
+                font-size: Theme.fs-cap;
+                font-weight: 600;
+            }
+            // the relations, switched on one by one: several per link is
+            // the point - one document can BE a thing and be PART of
+            // another at the same time
+            Rectangle {
+                height: clamp(root.height * 0.11, 56px, 96px);
+                background: Theme.panel-2;
+                border-radius: Theme.win95 ? 0px : 8px;
+                border-width: Theme.border-w;
+                border-color: Theme.line;
+                clip: true;
+                rlfl := Flickable {
+                    width: 100%;
+                    height: 100%;
+                    viewport-width: self.width;
+                    viewport-height: rlgrid.height + 8px;
+                    rlgrid := Rectangle {
+                        x: 4px;
+                        y: 4px;
+                        width: parent.width - 8px;
+                        property <length> cell-w: 150px * Theme.ui-scale;
+                        property <length> cell-h: 24px * Theme.ui-scale;
+                        property <length> gap: 4px;
+                        property <int> cols: max(1, Math.floor(self.width / (self.cell-w + self.gap)));
+                        property <int> rows: Math.ceil(WikiState.link-relations.length / self.cols);
+                        height: self.rows * self.cell-h + max(0, self.rows - 1) * self.gap;
+                        for r[i] in WikiState.link-relations: Rectangle {
+                            x: Math.mod(i, rlgrid.cols) * (rlgrid.cell-w + rlgrid.gap);
+                            y: Math.floor(i / rlgrid.cols) * (rlgrid.cell-h + rlgrid.gap);
+                            width: rlgrid.cell-w;
+                            height: rlgrid.cell-h;
+                            border-radius: Theme.win95 ? 0px : 4px;
+                            border-width: Theme.border-w;
+                            border-color: r.on ? Theme.accent : Theme.line;
+                            background: r.on ? Theme.accent-soft
+                                : (rla.has-hover ? Theme.raised : transparent);
+                            rl-chip := Text {
+                                width: 100%;
+                                height: 100%;
+                                text: r.key;
+                                color: r.on ? Theme.accent : Theme.dim;
+                                font-size: Theme.fs-cap;
+                                font-weight: r.on ? 600 : 400;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            rla := TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => {
+                                    WikiState.link-toggle(r.key);
+                                }
+                            }
+                        }
+                    }
+                }
+                ScrollHint {
+                    x: parent.width - 7px;
+                    view-h: rlfl.height;
+                    content-h: rlfl.viewport-height;
+                    scroll-y: rlfl.viewport-y;
+                }
+            }
+            // …and a relation this republic has not used yet
+            HorizontalLayout {
+                spacing: Theme.pane-gap;
+                AppField {
+                    horizontal-stretch: 1;
+                    placeholder: Strings.mem-link-ph-own;
+                    text <=> WikiState.link-custom;
+                    edited => {
+                        WikiState.set-link-custom(self.text);
+                    }
+                    accepted => {
+                        WikiState.link-add-custom();
+                    }
+                }
+                AppButton {
+                    label: Strings.mem-link-own;
+                    emoji: "➕";
+                    pad: 10px;
+                    height: 38px * Theme.ui-scale;
+                    enabled: WikiState.link-custom != "";
+                    clicked => {
+                        WikiState.link-add-custom();
+                    }
+                }
             }
         }
     }

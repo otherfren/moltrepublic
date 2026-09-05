@@ -1297,9 +1297,26 @@ lexicon! {
     mem_empty: "Nothing here yet - create a new file.", "Noch nichts hier - lege eine neue Datei an.";
     mem_linked: "Linked", "Verknüpft";
     mem_backlinks: "Linked from", "Verlinkt von";
-    mem_prop_add: "Property", "Eigenschaft";
+    mem_tag_add: "Tag", "Tag";
     mem_base_pending: "Shared memory arriving", "Wissensstand wird geholt";
-    mem_prop_hint: "Header line 'key: value' - what the wiki can index", "Kopfzeile 'Schlüssel: Wert' - was das Wiki auswerten kann";
+    mem_prop_hint: "What this document is about - the wiki indexes it", "Worum es in diesem Dokument geht - das Wiki wertet es aus";
+    // the + Tag modal
+    mem_tag_title: "Tags", "Tags";
+    mem_tag_ph: "one tag", "ein Tag";
+    mem_tag_more: "Tag", "Tag";
+    mem_save: "Save", "Speichern";
+    mem_tag_used: "Already in use", "Schon in Gebrauch";
+    // the semantic-link modal
+    mem_tb_relate: "Semantic link", "Semantischer Link";
+    mem_menu_relate: "Create semantic link", "Semantischen Link anlegen";
+    mem_link_name: "Name", "Name";
+    mem_link_ph_name: "Display name", "Anzeigename";
+    mem_link_target: "Target", "Ziel";
+    mem_link_ph_filter: "Filter", "Filtern";
+    mem_link_rel: "Relations", "Beziehungen";
+    mem_link_own: "Own relation", "Eigene Beziehung";
+    mem_link_ph_own: "lives_in", "lives_in";
+    mem_link_save: "Link", "Verknüpfen";
     mem_search_ph: "Search the wiki", "Wiki durchsuchen";
     mem_search_none: "No hit", "Kein Treffer";
     mem_search_building: "Reading the wiki - search answers in a moment", "Wiki wird gelesen - die Suche antwortet gleich";

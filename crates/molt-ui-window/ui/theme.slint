@@ -410,6 +410,15 @@ export struct WikiProp {
     link: string,
     // 0 unchanged · 1 added · 2 changed · 3 removed - the block encoding
     status: int,
+    // a `tags` value renders as a coloured pill; this is its hue
+    // (0..359, derived from the lowercased tag). -1 on every other key.
+    hue: int,
+}
+
+// One relation the semantic-link modal offers, and whether it is on.
+export struct WikiRelation {
+    key: string,
+    on: bool,
 }
 
 // One search hit over the wiki (the engine's ranked index).
@@ -444,8 +453,42 @@ export global WikiState {
     callback content-wanted(string);
     // …and here they are
     callback content-arrived(string, string);
-    // give the open document a front-matter block and edit it
-    callback add-property(string);
+    // both authoring modals render at the APP ROOT - a layout child of
+    // the pane could not overlay it
+    in-out property <bool> tag-modal-open;
+    in-out property <bool> link-modal-open;
+    // ---- the + Tag modal (a headerless document's only offer) ----
+    // one row per tag input, pushed from Rust
+    in-out property <[string]> tag-rows;
+    // the tags this republic already uses, offered as chips
+    in-out property <[string]> tag-vocab;
+    callback tag-open();
+    callback tag-add(string);
+    callback tag-set(int, string);
+    callback tag-remove(int);
+    callback tag-commit();
+    // at least one row would survive the write
+    in-out property <bool> tag-ready;
+    // ---- the semantic-link modal (three entry points, one modal) ----
+    in-out property <string> link-name;
+    in-out property <string> link-target;
+    in-out property <string> link-filter;
+    in-out property <string> link-custom;
+    in-out property <[string]> link-targets;
+    in-out property <[WikiRelation]> link-relations;
+    // target picked and at least one relation on
+    in-out property <bool> link-ready;
+    // the open document's bytes are here, so a header can be written
+    in-out property <bool> can-write-header;
+    callback link-open(string);
+    callback link-close();
+    callback set-link-name(string);
+    callback set-link-target(string);
+    callback set-link-filter(string);
+    callback set-link-custom(string);
+    callback link-add-custom();
+    callback link-toggle(string);
+    callback link-commit();
     // the ACTIVE workspace id (drafts are per workspace): a change resets
     // the model and loads that workspace's stored draft (WP-D)
     in-out property <string> ws-id;
@@ -459,12 +502,12 @@ export global WikiState {
     in-out property <int> doc-status;
     in-out property <[WikiBlock]> blocks;
     // the front matter as a property table (the viewer's infobox); the
-    // editor keeps showing the raw header
+    // editor keeps showing the raw header. `tags` is split off: it renders
+    // as coloured pills, every other key as a labelled row.
     in-out property <[WikiProp]> props;
-    // the header keys this republic already uses (the derived ontology)
-    in-out property <[string]> prop-keys;
+    in-out property <[WikiProp]> tag-pills;
     // the open document takes a header: it is here, and has none yet
-    in-out property <bool> can-add-property;
+    in-out property <bool> can-add-tags;
     // K6: the republic folded its history and this seat is still fetching
     // the shared memory base. Non-empty = the wiki answers NOTHING yet, and
     // the pane says so instead of reading as an empty knowledge base.
@@ -1314,7 +1357,22 @@ export global Strings {
     in property <string> tip-theme;
     in property <string> tip-language;
     in property <string> mem-base-pending;
-    in property <string> mem-prop-add;
+    in property <string> mem-tag-add;
+    in property <string> mem-tag-title;
+    in property <string> mem-tag-ph;
+    in property <string> mem-tag-more;
+    in property <string> mem-save;
+    in property <string> mem-tag-used;
+    in property <string> mem-tb-relate;
+    in property <string> mem-menu-relate;
+    in property <string> mem-link-name;
+    in property <string> mem-link-ph-name;
+    in property <string> mem-link-target;
+    in property <string> mem-link-ph-filter;
+    in property <string> mem-link-rel;
+    in property <string> mem-link-own;
+    in property <string> mem-link-ph-own;
+    in property <string> mem-link-save;
     in property <string> mem-prop-hint;
     in property <string> tip-settings;
     in property <string> quit-title;

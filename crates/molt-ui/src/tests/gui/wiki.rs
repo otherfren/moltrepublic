@@ -643,11 +643,13 @@ fn the_changes_modal_holds_the_whole_stack() {
     assert_eq!(rows(&ui), stack, "the modal lists every action the stack holds");
 }
 
-/// The ontology is content, not code: nothing in the UI prescribes a
-/// header, so a document without one has to OFFER it - with the keys the
-/// republic already uses. The offer disappears once a header exists.
+/// The ontology is content, not code: a document without a header offers
+/// TAGS - the one reserved key the index turns into facets - and wears
+/// them as coloured pills once they are written. The offer disappears the
+/// moment a header exists.
+#[cfg(feature = "live-preview")]
 #[test]
-fn a_document_without_a_header_offers_the_republics_own_keys() {
+fn a_document_without_a_header_offers_tags_and_then_wears_them() {
     i_slint_backend_testing::init_no_event_loop();
     let ui = AppWindow::new().expect("headless window");
     apply_strings(&ui, 0);
@@ -673,11 +675,6 @@ fn a_document_without_a_header_offers_the_republics_own_keys() {
         },
     ])));
     g.set_base_rev(1);
-    // the vocabulary the engine derived from the ratified tree
-    g.set_prop_keys(ModelRc::new(VecModel::from(vec![
-        slint::SharedString::from("tags"),
-        slint::SharedString::from("type"),
-    ])));
     g.invoke_base_arrived();
     let open = |path: &str| {
         let rows = g.get_nav_rows();
@@ -687,37 +684,137 @@ fn a_document_without_a_header_offers_the_republics_own_keys() {
             .expect("nav row");
         g.invoke_nav_open(row.id);
     };
+    let pills = |ui: &AppWindow| {
+        i_slint_backend_testing::ElementHandle::find_by_element_id(ui, "MemoryPane::tag-pill")
+            .count()
+    };
 
     ui.window().set_size(slint::PhysicalSize::new(1400, 900));
     ui.show().expect("show headless");
 
     open("bare.md");
-    assert!(g.get_can_add_property(), "a header-less document offers one");
-    // the chips render what the engine offered, plus the generic starter
+    assert!(g.get_can_add_tags(), "a header-less document offers tags");
     let chips: Vec<String> =
         i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "PropChip")
             .filter_map(|e| e.accessible_label().map(|l| l.to_string()))
             .collect();
-    assert_eq!(
-        chips,
-        vec!["+ Property".to_string(), "tags".to_string(), "type".to_string()],
-        "the offer leads with the generic starter, then the republic's keys"
-    );
+    assert_eq!(chips, vec!["+ Tag".to_string()], "one offer, and it says what it does");
+    assert_eq!(pills(&ui), 0, "nothing tagged yet");
 
-    // one click writes the syntax and hands over to the editor
-    g.invoke_add_property("type".into());
-    assert!(g.get_editing(), "the header is typed, not read");
-    assert_eq!(g.get_raw().as_str(), "---\ntype: \n---\n# Bare\n\nNo header here.");
+    // the chip raises the modal; the modal writes the header
+    let chip = i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "PropChip")
+        .next()
+        .expect("the offer renders");
+    click(&ui, &chip);
+    assert!(g.get_tag_modal_open(), "the chip opens the modal");
+    assert_eq!(g.get_tag_rows().row_count(), 1, "one empty row to type into");
+    g.invoke_tag_set(0, "Berlin".into());
+    g.invoke_tag_add("gruender".into());
+    g.invoke_tag_commit();
+    g.set_tag_modal_open(false);
 
-    // a document that HAS a header makes no offer
-    open("anna.md");
-    assert!(!g.get_can_add_property());
+    assert!(!g.get_can_add_tags(), "the document has a header now");
     assert_eq!(
-        i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "PropChip")
-            .count(),
+        i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "PropChip").count(),
         0,
-        "no offer, no chips"
+        "no offer once a header exists"
     );
+    assert_eq!(pills(&ui), 2, "one pill per tag");
+    let tags = g.get_tag_pills();
+    let hues: Vec<i32> = (0..tags.row_count())
+        .filter_map(|i| tags.row_data(i))
+        .map(|p| p.hue)
+        .collect();
+    assert_eq!(hues.len(), 2);
+    assert_ne!(hues[0], hues[1], "two tags, two colours");
+
+    // a document that HAS a header makes no offer at all
+    open("anna.md");
+    assert!(!g.get_can_add_tags());
+    assert_eq!(pills(&ui), 0, "type: person is a row, not a tag");
+}
+
+/// The semantic link is reachable from all three places it was asked for,
+/// and it writes the relation into the OPEN document's header.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_semantic_link_is_written_from_the_toolbar_the_editor_and_the_navigator() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    ui.set_screen(AppScreen::Main);
+    ui.set_selected_surface("memory".into());
+    ui.set_selected_view("brain".into());
+    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: "memory".into(),
+        ..SurfaceTab::default()
+    }])));
+    let _wiki = wire_wiki(&ui);
+    let g = ui.global::<WikiState>();
+    g.set_base_docs(ModelRc::new(VecModel::from(vec![
+        WikiBase { path: "a.md".into(), content: "# A\n".into(), loaded: true },
+        WikiBase { path: "anna.md".into(), content: "# Anna\n".into(), loaded: true },
+    ])));
+    g.set_base_rev(1);
+    g.invoke_base_arrived();
+    let row_id = |path: &str| {
+        let rows = g.get_nav_rows();
+        (0..rows.row_count())
+            .filter_map(|i| rows.row_data(i))
+            .find(|r| r.label.as_str() == path)
+            .expect("nav row")
+            .id
+    };
+    ui.window().set_size(slint::PhysicalSize::new(1400, 900));
+    ui.show().expect("show headless");
+    g.invoke_nav_open(row_id("a.md"));
+
+    // 1) the toolbar button
+    let button = i_slint_backend_testing::ElementHandle::find_by_accessible_label(
+        &ui,
+        "Semantic link",
+    )
+    .next()
+    .expect("the toolbar offers it");
+    click(&ui, &button);
+    assert!(g.get_link_modal_open(), "the toolbar raises the modal");
+    assert!(!g.get_link_ready(), "no target, no relation, no link");
+
+    g.invoke_set_link_target("anna.md".into());
+    assert_eq!(g.get_link_name().as_str(), "Anna", "the name follows the target");
+    g.invoke_link_toggle("is_a".into());
+    assert!(g.get_link_ready());
+    g.invoke_link_commit();
+    g.set_link_modal_open(false);
+
+    let props = g.get_props();
+    let rows: Vec<(String, String)> = (0..props.row_count())
+        .filter_map(|i| props.row_data(i))
+        .map(|p| (p.key.to_string(), p.value.to_string()))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![("is_a".to_string(), "Anna".to_string())],
+        "the relation is a header row, and it points at the target"
+    );
+    assert_eq!(
+        props.row_data(0).expect("one row").link.as_str(),
+        "anna.md",
+        "…as a real link, not as text"
+    );
+
+    // 2) the navigator's own menu opens the file and raises the same modal
+    g.invoke_link_open("".into());
+    g.set_link_modal_open(false);
+    g.invoke_nav_open(row_id("anna.md"));
+    g.invoke_link_open("".into());
+    g.set_link_modal_open(true);
+    assert!(g.get_can_write_header(), "the subject is the OPEN document");
+    assert!(
+        !g.get_link_targets().iter().any(|t| t == "anna.md"),
+        "a document cannot be its own target"
+    );
+    g.set_link_modal_open(false);
 }
 
 /// **K6 §4.9.6 in the window**: while the folded base is being fetched the
@@ -752,4 +849,142 @@ fn a_pending_base_replaces_the_empty_state() {
         "the pending line takes the empty state's place"
     );
     assert!(!seen(&empty), "…and the empty claim is gone");
+}
+
+/// Polish: both authoring modals have to FIT - a dialog whose buttons sit
+/// below the window edge cannot be confirmed at all, and the app font is
+/// a setting (9..28px).
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_authoring_modals_fit_the_window_at_every_font_size() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    ui.set_screen(AppScreen::Main);
+    ui.set_selected_surface("memory".into());
+    ui.set_selected_view("brain".into());
+    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: "memory".into(),
+        ..SurfaceTab::default()
+    }])));
+    let _wiki = wire_wiki(&ui);
+    let g = ui.global::<WikiState>();
+    g.set_base_docs(ModelRc::new(VecModel::from(vec![
+        WikiBase { path: "a.md".into(), content: "# A\n".into(), loaded: true },
+        WikiBase { path: "anna.md".into(), content: "# Anna\n".into(), loaded: true },
+    ])));
+    g.set_base_rev(1);
+    g.invoke_base_arrived();
+    let rows = g.get_nav_rows();
+    let id = (0..rows.row_count())
+        .filter_map(|i| rows.row_data(i))
+        .find(|r| r.label.as_str() == "a.md")
+        .expect("nav row")
+        .id;
+    ui.window().set_size(slint::PhysicalSize::new(1100, 760));
+    ui.show().expect("show headless");
+    g.invoke_nav_open(id);
+
+    let fits = |ui: &AppWindow, what: &str, font: f32| {
+        let bottoms: Vec<f32> = i_slint_backend_testing::ElementHandle::find_by_element_type_name(
+            ui,
+            "ConfirmModal",
+        )
+        .map(|m| m.absolute_position().y + m.size().height)
+        .collect();
+        assert_eq!(bottoms.len(), 1, "{what}: exactly one modal is up");
+        let low = i_slint_backend_testing::ElementHandle::find_by_element_id(
+            ui,
+            "AppButton::abtn-label",
+        )
+        .map(|e| e.absolute_position().y + e.size().height)
+        .fold(f32::MIN, f32::max);
+        assert!(
+            low <= 760.0,
+            "{what} at font {font}: its lowest button ends at {low}, past the window"
+        );
+    };
+
+    for font in [14.0_f32, 20.0, 26.0] {
+        ui.global::<Theme>().set_fs_app(font);
+        g.invoke_tag_open();
+        g.set_tag_modal_open(true);
+        g.invoke_tag_add("".into());
+        g.invoke_tag_add("".into());
+        fits(&ui, "the tag modal", font);
+        g.set_tag_modal_open(false);
+
+        g.invoke_link_open("".into());
+        g.set_link_modal_open(true);
+        fits(&ui, "the link modal", font);
+        g.set_link_modal_open(false);
+        g.invoke_link_close();
+    }
+}
+
+/// Removing a tag row must not leave its neighbour showing the text it no
+/// longer holds. A one-way binding onto an input the member has already
+/// typed into is dead, so the surviving rows have to be rebuilt.
+#[cfg(feature = "live-preview")]
+#[test]
+fn dropping_a_tag_row_redraws_the_rows_that_stay() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    ui.set_screen(AppScreen::Main);
+    ui.set_selected_surface("memory".into());
+    ui.set_selected_view("brain".into());
+    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: "memory".into(),
+        ..SurfaceTab::default()
+    }])));
+    let _wiki = wire_wiki(&ui);
+    let g = ui.global::<WikiState>();
+    g.set_base_docs(ModelRc::new(VecModel::from(vec![WikiBase {
+        path: "a.md".into(),
+        content: "# A\n".into(),
+        loaded: true,
+    }])));
+    g.set_base_rev(1);
+    g.invoke_base_arrived();
+    let rows = g.get_nav_rows();
+    let id = rows.row_data(0).expect("nav row").id;
+    ui.window().set_size(slint::PhysicalSize::new(1100, 800));
+    ui.show().expect("show headless");
+    g.invoke_nav_open(id);
+
+    let shown = |ui: &AppWindow| -> Vec<String> {
+        i_slint_backend_testing::ElementHandle::find_by_element_id(ui, "AppField::input")
+            .filter_map(|e| e.accessible_value().map(|v| v.to_string()))
+            .filter(|v| !v.is_empty())
+            .collect()
+    };
+
+    g.invoke_tag_open();
+    g.set_tag_modal_open(true);
+    g.invoke_tag_set(0, "berlin".into());
+    g.invoke_tag_add("gruender".into());
+    assert_eq!(shown(&ui), vec!["berlin".to_string(), "gruender".to_string()]);
+
+    // REAL typing into the first row: that is what kills the one-way
+    // binding, and without it this test would pass either way
+    let field = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "AppField::input")
+        .find(|e| e.accessible_value().is_some_and(|v| v == "berlin"))
+        .expect("the first row renders");
+    click(&ui, &field);
+    ui.window().dispatch_event(slint::platform::WindowEvent::KeyPressed { text: 'x'.into() });
+    ui.window().dispatch_event(slint::platform::WindowEvent::KeyReleased { text: 'x'.into() });
+    assert!(
+        shown(&ui).iter().any(|v| v.contains('x')),
+        "the keystroke reached the field: {:?}",
+        shown(&ui)
+    );
+
+    g.invoke_tag_remove(0);
+    assert_eq!(
+        shown(&ui),
+        vec!["gruender".to_string()],
+        "the dropped row's text must go with it"
+    );
+    g.set_tag_modal_open(false);
 }

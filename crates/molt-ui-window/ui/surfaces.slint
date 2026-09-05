@@ -156,8 +156,8 @@ component TagChip inherits Rectangle {
     border-radius: Theme.win95 ? 0px : 4px;
     border-width: root.muted ? 1px : 0px;
     border-color: Theme.line;
-    width: row.preferred-width + 12px;
-    height: 20px;
+    width: row.preferred-width + 12px * Theme.ui-scale;
+    height: 20px * Theme.ui-scale;
     // full-height row + centered texts: an offset row sized off the text's
     // preferred height sat the label visibly at the chip's bottom edge
     row := HorizontalLayout {
@@ -168,14 +168,14 @@ component TagChip inherits Rectangle {
         if root.glyph != "": Text {
             text: root.glyph;
             font-family: "Twemoji Mozilla";
-            font-size: 11px;
+            font-size: 11px * Theme.ui-scale;
             height: 100%;
             vertical-alignment: center;
         }
         Text {
             text: root.label;
             color: root.muted ? Theme.faint : (Theme.win95 ? Theme.text : root.tone);
-            font-size: 11px;
+            font-size: 11px * Theme.ui-scale;
             font-weight: root.muted ? 400 : 600;
             height: 100%;
             vertical-alignment: center;
@@ -287,6 +287,10 @@ component ToolBtn inherits Rectangle {
     in property <bool> active: false;
     callback clicked();
     width: 30px * Theme.ui-scale;
+    // the glyph is the whole label, so the button's NAME is what a screen
+    // reader (and the headless suite) has to go by
+    accessible-role: button;
+    accessible-label: root.name;
     border-radius: Theme.win95 ? 0px : 5px;
     background: root.active ? Theme.accent-soft
         : (root.enabled && ta.has-hover ? Theme.raised : transparent);
@@ -1159,6 +1163,18 @@ export component MemoryPane inherits VerticalLayout {
                                                 WikiState.copy-link(r.id);
                                             }
                                         }
+                                        // …and the TYPED link: the document
+                                        // opens first, because the relation
+                                        // is written into ITS header
+                                        MenuItem {
+                                            title: Strings.mem-menu-relate;
+                                            enabled: r.status != 3;
+                                            activated => {
+                                                WikiState.nav-open(r.id);
+                                                WikiState.link-open("");
+                                                WikiState.link-modal-open = true;
+                                            }
+                                        }
                                         MenuSeparator { }
                                         MenuItem {
                                             title: Strings.mem-menu-delete;
@@ -1498,6 +1514,18 @@ export component MemoryPane inherits VerticalLayout {
                                 WikiState.edit-toggle();
                             }
                         }
+                        // 🔗 — say what this document IS to another one.
+                        // An agent has no real-world experience: the
+                        // relation has to be written down, not inferred.
+                        ToolBtn {
+                            glyph: "🔗";
+                            name: Strings.mem-tb-relate;
+                            enabled: WikiState.can-write-header;
+                            clicked => {
+                                WikiState.link-open("");
+                                WikiState.link-modal-open = true;
+                            }
+                        }
                         // the open file changed vs base: a plain hint plus
                         // its own revert — the numeric summary lives in the
                         // changeset panel, not here
@@ -1557,10 +1585,23 @@ export component MemoryPane inherits VerticalLayout {
                             color: Theme.faint;
                             font-size: 11px;
                         }
-                        // the front matter as a PROPERTY TABLE: the viewer
-                        // shows what the header means, the editor shows the
-                        // header itself. A link-valued property is as
-                        // clickable as a link in the prose.
+                        // the document's tags, one coloured pill each: the
+                        // colour is the tag's own (hue from the lowercased
+                        // string), so the same tag reads the same everywhere
+                        if WikiState.tag-pills.length > 0: HorizontalLayout {
+                            spacing: 6px;
+                            alignment: start;
+                            for p in WikiState.tag-pills: tag-pill := TagChip {
+                                label: p.value;
+                                glyph: "🏷️";
+                                muted: p.status == 3;
+                                tone: Colors.hsv(p.hue, 0.70, 0.62);
+                            }
+                        }
+                        // the rest of the front matter as a PROPERTY
+                        // TABLE: the viewer shows what the header means,
+                        // the editor shows the header itself. A link-valued
+                        // property is as clickable as a link in the prose.
                         if WikiState.props.length > 0: Rectangle {
                             background: Theme.panel-2;
                             border-radius: Theme.win95 ? 0px : 6px;
@@ -1610,22 +1651,16 @@ export component MemoryPane inherits VerticalLayout {
                                 }
                             }
                         }
-                        // the ontology's shop window: with no header the
-                        // document offers the keys this republic already
-                        // uses, one click each
-                        if WikiState.can-add-property: HorizontalLayout {
+                        // a headerless document's one offer: tags. The
+                        // chip disappears the moment a header exists.
+                        if WikiState.can-add-tags: HorizontalLayout {
                             spacing: 6px;
                             alignment: start;
                             PropChip {
-                                label: "+ " + Strings.mem-prop-add;
+                                label: "+ " + Strings.mem-tag-add;
                                 clicked => {
-                                    WikiState.add-property("");
-                                }
-                            }
-                            for k in WikiState.prop-keys: PropChip {
-                                label: k;
-                                clicked => {
-                                    WikiState.add-property(k);
+                                    WikiState.tag-open();
+                                    WikiState.tag-modal-open = true;
                                 }
                             }
                         }
@@ -1721,6 +1756,11 @@ export component MemoryPane inherits VerticalLayout {
                                 width: 100%;
                                 height: 100%;
                                 font-size: Theme.fs-editor;
+                                extra-label: Strings.mem-menu-relate;
+                                extra-activated => {
+                                    WikiState.link-open("");
+                                    WikiState.link-modal-open = true;
+                                }
                                 text <=> WikiState.raw;
                                 changed text => {
                                     WikiState.edited(self.text);

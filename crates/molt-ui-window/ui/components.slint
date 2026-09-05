@@ -806,6 +806,11 @@ export component AppArea inherits Rectangle {
     in-out property <string> text;
     in property <string> placeholder;
     in property <length> font-size: Theme.fs-body;
+    // one caller-supplied menu item under cut/copy/paste ("" = none), so
+    // the wiki editor can offer its semantic link without every other
+    // field growing one
+    in property <string> extra-label;
+    callback extra-activated();
     // hand the caret to the inner input (e.g. right after click-to-edit)
     public function focus-input() {
         input.focus();
@@ -837,6 +842,13 @@ export component AppArea inherits Rectangle {
                 title: Strings.ed-paste;
                 activated => {
                     input.paste();
+                }
+            }
+            if root.extra-label != "": MenuSeparator { }
+            if root.extra-label != "": MenuItem {
+                title: root.extra-label;
+                activated => {
+                    root.extra-activated();
                 }
             }
         }

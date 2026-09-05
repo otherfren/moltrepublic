@@ -66,7 +66,9 @@ pub use wiki_index::graph::body_links;
 /// link inside one (§4.4). ONE parser, like [`body_links`]: the infobox
 /// the GUI renders and the relations the index reads come from the same
 /// rules, so a document cannot look different in the two.
-pub use wiki_index::front_matter::{first_heading, link_target, properties, split as split_front_matter};
+pub use wiki_index::front_matter::{
+    first_heading, key_ok as header_key_ok, link_target, properties, split as split_front_matter,
+};
 
 use std::collections::HashMap;
 use std::path::PathBuf;

@@ -66,7 +66,7 @@ use yaml_rust2::scanner::TScalarStyle;
 const MAX_KEY: usize = 64;
 
 /// A key of the subset: `[A-Za-z_][A-Za-z0-9_-]{0,63}`.
-fn key_ok(k: &str) -> bool {
+pub fn key_ok(k: &str) -> bool {
     !k.is_empty()
         && k.len() <= MAX_KEY
         && k.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')

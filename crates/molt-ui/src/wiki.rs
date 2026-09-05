@@ -52,6 +52,25 @@ pub struct InfoRow {
     /// 3 removed. The header is rendered HERE, so its changes have to
     /// colour here - the prose diff cannot show them.
     pub status: u8,
+    /// A `tags` value renders as a coloured pill; this is its hue
+    /// (0..359, [`tag_hue`]). `-1` on every other key.
+    pub hue: i16,
+}
+
+/// The reserved key whose values the viewer renders as pills
+/// (`knowledge_base_scale.md` §4.4).
+pub const TAG_KEY: &str = "tags";
+
+/// A tag's own colour: FNV-1a over the LOWERCASED tag, folded onto the
+/// hue circle. Case-insensitive on purpose - two spellings of one tag
+/// must not read as two different things.
+pub fn tag_hue(tag: &str) -> u16 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in tag.to_lowercase().bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    u16::try_from(h % 360).unwrap_or(0)
 }
 
 /// One inline run of a block: `link` is empty for plain text, else the
@@ -303,7 +322,55 @@ pub struct Wiki {
     /// vote payload as the display-only staleness hint
     /// (`shared_memory_real.md` §9.1).
     pub base_rev: u64,
+    /// The two authoring modals' drafts. Transient view state: a document
+    /// learns nothing from them until the member presses OK.
+    ont: OntologyDraft,
 }
+
+/// The `+ Tag` and "semantic link" modals while they are open.
+#[derive(Clone, Debug, Default)]
+struct OntologyDraft {
+    /// One row per tag input.
+    tags: Vec<String>,
+    /// The link's display half.
+    name: String,
+    /// The link's target, a path out of the folded base.
+    target: String,
+    /// The target list's filter needle.
+    filter: String,
+    /// The relations switched on.
+    on: Vec<String>,
+    /// A relation the republic has not used yet, being typed.
+    custom: String,
+    /// The link modal is up. The target list is a scan over the whole
+    /// base (10^4..10^5 documents, `knowledge_base_scale.md`), and the
+    /// bridge re-syncs after EVERY action - so it is only built while
+    /// something is looking at it.
+    open: bool,
+}
+
+/// How many target rows the link modal offers at once. The list is a
+/// picker, not a catalogue: past this the filter is the way to find one.
+const MAX_LINK_TARGETS: usize = 200;
+
+/// The relations offered before a republic has invented its own
+/// (`wiki_tags_and_semantic_links.md` B6). An agent has no real-world
+/// experience: what a document IS and how it relates to the others has
+/// to be written down rather than inferred.
+pub const RELATIONS: [&str; 12] = [
+    "is_a",
+    "part_of",
+    "has_part",
+    "depends_on",
+    "causes",
+    "defined_by",
+    "example_of",
+    "opposite_of",
+    "related_to",
+    "see_also",
+    "supersedes",
+    "authored_by",
+];
 
 impl Wiki {
     // ---- construction -----------------------------------------------------
@@ -358,6 +425,7 @@ impl Wiki {
             next_id,
             stack: Vec::new(),
             base_rev: 0,
+            ont: OntologyDraft::default(),
         }
     }
 
@@ -379,6 +447,7 @@ impl Wiki {
             next_id: 1,
             stack: Vec::new(),
             base_rev: 0,
+            ont: OntologyDraft::default(),
         }
     }
 
@@ -1618,6 +1687,11 @@ impl Wiki {
                     value: value.0.clone(),
                     link: value.1.clone(),
                     status,
+                    hue: if key == TAG_KEY {
+                        i16::try_from(tag_hue(&value.0)).unwrap_or(0)
+                    } else {
+                        -1
+                    },
                 });
             }
         }
@@ -1881,32 +1955,264 @@ impl Wiki {
         c
     }
 
-    /// Whether the OPEN document can be given a header: its ratified bytes
-    /// have to be here (the lazy base) and it must not carry one already.
-    /// The UI offers the ontology only where this holds.
-    pub fn can_add_property(&self) -> bool {
+    /// Whether the OPEN document can be tagged: its ratified bytes have
+    /// to be here (the lazy base) and it must not carry a header already.
+    pub fn can_add_tags(&self) -> bool {
         self.active().is_some_and(header_addable)
     }
 
-    /// Give the open document a front-matter block and put the pane in the
-    /// editor with it. `key` comes from what the republic already uses -
-    /// the ontology is content, never a schema this program prescribes.
-    pub fn start_header(&mut self, id: DocId, key: &str) -> bool {
+    /// Give the open document a header holding exactly these tags. Blank
+    /// and repeated entries drop out; nothing is written when none
+    /// survive. The pane stays in the VIEWER - the member asked for tags,
+    /// not for a YAML lesson.
+    pub fn set_tags(&mut self, id: DocId, tags: &[String]) -> bool {
         let Some(d) = self.doc(id) else {
             return false;
         };
         if !header_addable(d) {
             return false;
         }
-        let line = if key.is_empty() {
-            String::new()
-        } else {
-            format!("{key}: ")
-        };
-        let next = format!("---\n{line}\n---\n{}", d.raw);
+        let mut kept: Vec<String> = Vec::new();
+        for t in tags {
+            let t = clean_tag(t);
+            if !t.is_empty() && !kept.contains(&t) {
+                kept.push(t);
+            }
+        }
+        if kept.is_empty() {
+            return false;
+        }
+        let next = format!("---\n{}: [{}]\n---\n{}", TAG_KEY, kept.join(", "), d.raw);
         self.set_raw(id, &next);
-        self.editing = true;
         true
+    }
+
+    // ---- the + Tag modal ---------------------------------------------------
+
+    /// The modal's rows. One empty row is the opened state.
+    pub fn tag_rows(&self) -> &[String] {
+        &self.ont.tags
+    }
+
+    /// Open the modal on one empty row.
+    pub fn tag_open(&mut self) {
+        self.ont.tags = vec![String::new()];
+    }
+
+    pub fn tag_add(&mut self, value: &str) {
+        self.ont.tags.push(value.to_string());
+    }
+
+    pub fn tag_set(&mut self, i: usize, value: &str) {
+        if let Some(row) = self.ont.tags.get_mut(i) {
+            *row = value.to_string();
+        }
+    }
+
+    pub fn tag_remove(&mut self, i: usize) {
+        if i < self.ont.tags.len() {
+            self.ont.tags.remove(i);
+        }
+    }
+
+    /// At least one row would survive the write - an all-blank draft must
+    /// not arm a button that then does nothing.
+    pub fn tag_ready(&self) -> bool {
+        self.ont.tags.iter().any(|t| !clean_tag(t).is_empty())
+    }
+
+    /// Write the drafted tags into the open document's header.
+    pub fn tag_commit(&mut self) -> bool {
+        let Some(id) = self.active_id() else {
+            return false;
+        };
+        let tags = std::mem::take(&mut self.ont.tags);
+        self.set_tags(id, &tags)
+    }
+
+    // ---- the semantic-link modal --------------------------------------------
+
+    /// Open the modal on the document `target` (empty = nothing picked).
+    pub fn link_open(&mut self, target: &str) {
+        self.ont = OntologyDraft {
+            target: target.to_string(),
+            name: self.title_of(target),
+            open: true,
+            ..OntologyDraft::default()
+        };
+    }
+
+    /// The modal closed without writing anything.
+    pub fn link_close(&mut self) {
+        self.ont = OntologyDraft::default();
+    }
+
+    pub fn link_name(&self) -> &str {
+        &self.ont.name
+    }
+
+    pub fn link_target(&self) -> &str {
+        &self.ont.target
+    }
+
+    pub fn link_filter(&self) -> &str {
+        &self.ont.filter
+    }
+
+    pub fn link_custom(&self) -> &str {
+        &self.ont.custom
+    }
+
+    pub fn set_link_name(&mut self, name: &str) {
+        self.ont.name = name.to_string();
+    }
+
+    pub fn set_link_filter(&mut self, needle: &str) {
+        self.ont.filter = needle.to_string();
+    }
+
+    pub fn set_link_custom(&mut self, key: &str) {
+        self.ont.custom = key.to_string();
+    }
+
+    /// Pick a target; the name follows it unless the member typed one.
+    pub fn set_link_target(&mut self, path: &str) {
+        let followed = self.ont.name.is_empty() || self.ont.name == self.title_of(&self.ont.target);
+        self.ont.target = path.to_string();
+        if followed {
+            self.ont.name = self.title_of(path);
+        }
+    }
+
+    /// The documents this link can point at: every base path but the open
+    /// one, narrowed by the filter needle.
+    pub fn link_targets(&self) -> Vec<String> {
+        if !self.ont.open {
+            return Vec::new();
+        }
+        let open = self.active().map(|d| d.path.clone()).unwrap_or_default();
+        let needle = self.ont.filter.to_lowercase();
+        self.docs
+            .iter()
+            .filter(|d| !d.deleted && d.path != open)
+            .map(|d| d.path.clone())
+            .filter(|p| needle.is_empty() || p.to_lowercase().contains(&needle))
+            .take(MAX_LINK_TARGETS)
+            .collect()
+    }
+
+    /// The relations on offer: the built-in vocabulary, then whatever the
+    /// republic already added, each with whether it is switched on.
+    pub fn link_relations(&self) -> Vec<(String, bool)> {
+        let mut keys: Vec<String> = RELATIONS.iter().map(|k| (*k).to_string()).collect();
+        for k in &self.ont.on {
+            if !keys.contains(k) {
+                keys.push(k.clone());
+            }
+        }
+        keys.into_iter()
+            .map(|k| {
+                let on = self.ont.on.contains(&k);
+                (k, on)
+            })
+            .collect()
+    }
+
+    pub fn link_toggle(&mut self, key: &str) {
+        if let Some(i) = self.ont.on.iter().position(|k| k == key) {
+            self.ont.on.remove(i);
+        } else if molt_engine::header_key_ok(key) {
+            self.ont.on.push(key.to_string());
+        }
+    }
+
+    /// Add the typed relation to the offer, switched on. The subset's own
+    /// key rule decides - a key it would reject never reaches a header.
+    pub fn link_add_custom(&mut self) -> bool {
+        let key = self.ont.custom.trim().to_string();
+        if !molt_engine::header_key_ok(&key) {
+            return false;
+        }
+        self.ont.custom.clear();
+        if !self.ont.on.contains(&key) {
+            self.ont.on.push(key);
+        }
+        true
+    }
+
+    /// A link is ready when it has a target and at least one relation.
+    pub fn link_ready(&self) -> bool {
+        !self.ont.target.is_empty() && !self.ont.on.is_empty() && self.can_write_header()
+    }
+
+    /// Write the drafted link into the open document's header.
+    pub fn link_commit(&mut self) -> bool {
+        if !self.link_ready() {
+            return false;
+        }
+        let Some(id) = self.active_id() else {
+            return false;
+        };
+        let draft = std::mem::take(&mut self.ont);
+        self.add_relations(id, &draft.on, &draft.target, &draft.name)
+    }
+
+    /// Whether the open document's header can be written at all: its
+    /// ratified bytes have to be here (the lazy base).
+    pub fn can_write_header(&self) -> bool {
+        self.active().is_some_and(|d| d.loaded())
+    }
+
+    /// Add one link under each relation key. A key that is already there
+    /// grows into a list; a document without a header gets one. The header
+    /// is edited LINE-WISE - re-emitting it canonically would rewrite a
+    /// member's own header on every link.
+    pub fn add_relations(
+        &mut self,
+        id: DocId,
+        keys: &[String],
+        target: &str,
+        name: &str,
+    ) -> bool {
+        let Some(d) = self.doc(id) else {
+            return false;
+        };
+        if !d.loaded() || target.is_empty() {
+            return false;
+        }
+        let keys: Vec<&String> = keys
+            .iter()
+            .filter(|k| molt_engine::header_key_ok(k))
+            .collect();
+        if keys.is_empty() {
+            return false;
+        }
+        let value = link_value(target, name);
+        let mut raw = d.raw.clone();
+        for key in keys {
+            raw = with_relation(&raw, key, &value);
+        }
+        self.set_raw(id, &raw);
+        true
+    }
+
+    /// A document's title for the link's display half: its first heading,
+    /// else its file name.
+    fn title_of(&self, path: &str) -> String {
+        if path.is_empty() {
+            return String::new();
+        }
+        self.docs
+            .iter()
+            .find(|d| d.path == path)
+            .and_then(|d| molt_engine::first_heading(&d.raw))
+            .unwrap_or_else(|| {
+                path.rsplit('/')
+                    .next()
+                    .unwrap_or(path)
+                    .trim_end_matches(".md")
+                    .to_string()
+            })
     }
 
     /// One document's ratified bytes arrived (§4.10). An unedited doc
@@ -2239,6 +2545,114 @@ fn expand_wiki_links(b: &mut Block) {
     b.spans = out;
 }
 
+/// A tag as it can stand in a flow sequence: the punctuation that would
+/// end the scalar removed, the whitespace collapsed.
+fn clean_tag(tag: &str) -> String {
+    let cleaned: String = tag
+        .chars()
+        .map(|c| if "[]{}(),:\"'|#&*!>%@\\".contains(c) { ' ' } else { c })
+        .collect();
+    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// One header value pointing at `target`, displayed as `name`. Always
+/// DOUBLE-QUOTED: `[[…]]` inside a flow sequence would otherwise read as
+/// two nested sequences.
+fn link_value(target: &str, name: &str) -> String {
+    let strip = |s: &str| -> String {
+        s.chars().filter(|c| !"[]|\"\\\n\r".contains(*c)).collect::<String>().trim().to_string()
+    };
+    let target = strip(target);
+    let name = strip(name);
+    if name.is_empty() || name == target {
+        format!("\"[[{target}]]\"")
+    } else {
+        format!("\"[[{target}|{name}]]\"")
+    }
+}
+
+/// The byte range of the header BODY inside `raw` - the same block
+/// boundaries the engine's parser uses.
+fn header_body_span(raw: &str) -> Option<(usize, usize)> {
+    let rest = raw.strip_prefix("---\n").or_else(|| raw.strip_prefix("---\r\n"))?;
+    let start = raw.len() - rest.len();
+    let mut off = start;
+    for line in rest.split_inclusive('\n') {
+        let fence = line.trim_end_matches(['\n', '\r']);
+        if fence == "---" || fence == "..." {
+            return Some((start, off));
+        }
+        off += line.len();
+    }
+    None
+}
+
+/// `raw` with `value` added under `key`. A document without a header gets
+/// one; a key that is already there grows into a list rather than losing
+/// what it said.
+fn with_relation(raw: &str, key: &str, value: &str) -> String {
+    let Some((start, end)) = header_body_span(raw) else {
+        return format!("---\n{key}: {value}\n---\n{raw}");
+    };
+    format!(
+        "{}{}{}",
+        &raw[..start],
+        header_with(&raw[start..end], key, value),
+        &raw[end..]
+    )
+}
+
+/// The header body with `value` added under `key`, edited line-wise: a
+/// canonical re-emit would rewrite the member's own header (order,
+/// comments, style) on every link.
+fn header_with(header: &str, key: &str, value: &str) -> String {
+    let prefix = format!("{key}:");
+    let lines: Vec<&str> = header.split_inclusive('\n').collect();
+    let Some(at) = lines.iter().position(|l| l.starts_with(&prefix)) else {
+        let mut out = header.to_string();
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&format!("{key}: {value}\n"));
+        return out;
+    };
+    let rest = lines[at][prefix.len()..].trim_end_matches(['\n', '\r']).trim();
+    let mut out: Vec<String> = lines.iter().map(|l| (*l).to_string()).collect();
+    if let Some(inner) = rest.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+        let inner = inner.trim();
+        out[at] = if inner.is_empty() {
+            format!("{key}: [{value}]\n")
+        } else {
+            format!("{key}: [{inner}, {value}]\n")
+        };
+    } else if rest.is_empty() {
+        // `key:` alone - a block sequence may follow it
+        let mut last = None;
+        let mut indent = "  ".to_string();
+        for (i, l) in lines.iter().enumerate().skip(at + 1) {
+            let t = l.trim_end_matches(['\n', '\r']);
+            let body = t.trim_start();
+            if body.starts_with("- ") && t.len() > body.len() {
+                if last.is_none() {
+                    indent = t[..t.len() - body.len()].to_string();
+                }
+                last = Some(i);
+            } else if body.is_empty() {
+                continue;
+            } else {
+                break;
+            }
+        }
+        match last {
+            Some(i) => out.insert(i + 1, format!("{indent}- {value}\n")),
+            None => out[at] = format!("{key}: {value}\n"),
+        }
+    } else {
+        out[at] = format!("{key}:\n  - {rest}\n  - {value}\n");
+    }
+    out.concat()
+}
+
 /// A document is open to a header when its ratified bytes are here and it
 /// has none yet.
 fn header_addable(d: &Doc) -> bool {
@@ -2257,13 +2671,29 @@ fn info_props(raw: &str) -> std::collections::BTreeMap<String, Vec<(String, Stri
         .collect()
 }
 
+/// How a header value READS: `[[path|Anna]]` shows "Anna", because that
+/// is the half the member wrote for a human. Everything else shows itself.
+fn link_shown(s: &str) -> String {
+    if let Some(inner) = s.strip_prefix("[[").and_then(|r| r.strip_suffix("]]")) {
+        let mut parts = inner.splitn(2, '|');
+        let target = parts.next().unwrap_or(inner).trim();
+        return parts
+            .next()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .unwrap_or(target)
+            .to_string();
+    }
+    molt_engine::link_target(s).unwrap_or(s).to_string()
+}
+
 /// One header value as infobox rows: `(shown, link target)`. A mapping is
 /// the qualified relation's shape and reads as one row.
 fn info_values(value: &serde_json::Value) -> Vec<(String, String)> {
     let scalar = |v: &serde_json::Value| -> Option<(String, String)> {
         match v {
             serde_json::Value::String(s) => Some((
-                molt_engine::link_target(s).unwrap_or(s).to_string(),
+                link_shown(s),
                 molt_engine::link_target(s).unwrap_or_default().to_string(),
             )),
             serde_json::Value::Number(n) => Some((n.to_string(), String::new())),
@@ -2834,32 +3264,168 @@ mod tests {
         assert!(patch.contains(&format!("b/{name}/")), "{patch}");
     }
 
-    /// The ontology has no schema and no dialog - the only place a member
-    /// can meet it is the open document. Starting a header from one of the
-    /// republic's own keys writes the syntax FOR them.
+    /// The member asked for TAGS, so they get tags - not a raw editor
+    /// with YAML typed into it. The header is written whole and the pane
+    /// stays in the viewer.
     #[test]
-    fn a_key_from_the_vocabulary_starts_the_header_it_names() {
+    fn tagging_a_document_writes_its_header_and_keeps_the_viewer() {
         let mut w = Wiki::empty();
         w.set_base(&[("a.md".to_string(), Some("# A\n".to_string()))], 1);
         let id = w.docs.first().expect("a.md").id;
         w.open(id);
         assert!(w.infobox(id).is_empty(), "no header, no infobox");
 
-        assert!(w.start_header(id, "type"));
+        assert!(w.set_tags(id, &["gruender".into(), "berlin".into()]));
         assert_eq!(
             w.doc(id).expect("open").raw,
-            "---\ntype: \n---\n# A\n",
-            "the key is written out, the value is left to the member"
+            "---\ntags: [gruender, berlin]\n---\n# A\n"
         );
-        assert!(w.editing, "the header is written in the editor, not read");
+        assert!(!w.editing, "tags are written FOR the member, not by them");
+        assert!(!w.can_add_tags(), "the document has a header now");
 
-        // an empty vocabulary still gets a header to type into
+        // …and the viewer reads them back as tag rows
+        let rows = w.infobox(id);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].key, "tags");
+        assert_eq!(rows[0].value, "gruender");
+        assert!(rows[0].hue >= 0 && rows[1].hue >= 0, "tag rows carry a hue");
+
+        // blank and duplicate entries are noise, not tags
         let mut w2 = Wiki::empty();
         w2.set_base(&[("b.md".to_string(), Some("# B\n".to_string()))], 1);
         let id2 = w2.docs.first().expect("b.md").id;
         w2.open(id2);
-        assert!(w2.start_header(id2, ""));
-        assert_eq!(w2.doc(id2).expect("open").raw, "---\n\n---\n# B\n");
+        assert!(!w2.set_tags(id2, &["  ".into()]), "nothing to write");
+        assert!(w2.set_tags(id2, &["x".into(), " x ".into(), "y".into()]));
+        assert_eq!(w2.doc(id2).expect("open").raw, "---\ntags: [x, y]\n---\n# B\n");
+    }
+
+    /// The pill colour is the tag's own, and the same tag is the same
+    /// colour however it was typed - otherwise two spellings of one tag
+    /// read as two different things.
+    #[test]
+    fn a_tags_colour_follows_the_tag_and_ignores_its_case() {
+        assert_eq!(tag_hue("Berlin"), tag_hue("berlin"));
+        assert_eq!(tag_hue("BERLIN"), tag_hue("berlin"));
+        assert_ne!(tag_hue("berlin"), tag_hue("gruender"));
+        for t in ["a", "berlin", "gruender", "", "ümlaut"] {
+            assert!(tag_hue(t) < 360, "{t} left the hue circle");
+        }
+    }
+
+    /// A semantic link lands in the header, under the relation the member
+    /// switched on - that is what makes it a typed edge for the index and
+    /// not just another sentence.
+    #[test]
+    fn a_semantic_link_writes_the_relation_into_the_header() {
+        let mut w = Wiki::empty();
+        w.set_base(
+            &[
+                ("a.md".to_string(), Some("# A\n".to_string())),
+                ("who/petra.md".to_string(), Some("# Petra\n".to_string())),
+            ],
+            1,
+        );
+        let id = w.docs.first().expect("a.md").id;
+        w.open(id);
+
+        w.link_open("");
+        assert!(!w.link_ready(), "no target, no link");
+        w.set_link_target("who/petra.md");
+        assert_eq!(w.link_name(), "Petra", "the name follows the target's title");
+        assert!(!w.link_ready(), "no relation, no link");
+        w.link_toggle("is_a");
+        assert!(w.link_ready());
+        assert!(w.link_commit());
+        assert_eq!(
+            w.doc(id).expect("open").raw,
+            "---\nis_a: \"[[who/petra.md|Petra]]\"\n---\n# A\n"
+        );
+
+        // the same key again: it GROWS, it does not lose what it said
+        w.link_open("a.md");
+        w.set_link_target("who/petra.md");
+        w.set_link_name("Petra Again");
+        w.link_toggle("is_a");
+        assert!(w.link_commit());
+        assert_eq!(
+            w.doc(id).expect("open").raw,
+            "---\nis_a:\n  - \"[[who/petra.md|Petra]]\"\n  - \"[[who/petra.md|Petra Again]]\"\n---\n# A\n"
+        );
+
+        // …and a third lands on the block list rather than beside it
+        w.link_open("");
+        w.set_link_target("who/petra.md");
+        w.set_link_name("Third");
+        w.link_toggle("is_a");
+        assert!(w.link_commit());
+        assert!(
+            w.doc(id).expect("open").raw.contains("  - \"[[who/petra.md|Third]]\"\n---\n"),
+            "{}",
+            w.doc(id).expect("open").raw
+        );
+    }
+
+    /// The relation vocabulary is content, not a schema - but a key the
+    /// header subset would reject must never be written, or the document
+    /// silently loses ALL its properties.
+    #[test]
+    fn a_relation_key_outside_the_subset_never_reaches_a_header() {
+        let mut w = Wiki::empty();
+        w.set_base(&[("a.md".to_string(), Some("# A\n".to_string()))], 1);
+        let id = w.docs.first().expect("a.md").id;
+        w.open(id);
+        w.link_open("a.md");
+
+        for bad in ["1st", "has space", "", "ümlaut"] {
+            w.set_link_custom(bad);
+            assert!(!w.link_add_custom(), "{bad} is not a key of the subset");
+        }
+        w.set_link_custom("lives_in");
+        assert!(w.link_add_custom());
+        assert!(
+            w.link_relations().iter().any(|(k, on)| k == "lives_in" && *on),
+            "the republic's own relation joins the offer, switched on"
+        );
+
+        w.set_link_target("a.md");
+        assert!(w.link_commit());
+        let raw = &w.doc(id).expect("open").raw;
+        assert!(raw.starts_with("---\nlives_in: "), "{raw}");
+        // the engine reads it back: a header it rejects has no properties
+        assert!(
+            molt_engine::properties(raw).0.is_some_and(|m| m.contains_key("lives_in")),
+            "the subset must accept what we wrote: {raw}"
+        );
+    }
+
+    /// A flow list stays a flow list, and an existing scalar keeps its
+    /// place: the member's own header style survives the write.
+    #[test]
+    fn an_existing_key_keeps_the_style_the_member_wrote_it_in() {
+        assert_eq!(
+            header_with("see_also: [\"[[a.md]]\"]\n", "see_also", "\"[[b.md]]\""),
+            "see_also: [\"[[a.md]]\", \"[[b.md]]\"]\n"
+        );
+        assert_eq!(
+            header_with("see_also: []\n", "see_also", "\"[[b.md]]\""),
+            "see_also: [\"[[b.md]]\"]\n"
+        );
+        assert_eq!(
+            header_with("tags: [x]\nsee_also:\n    - \"[[a.md]]\"\n", "see_also", "\"[[b.md]]\""),
+            "tags: [x]\nsee_also:\n    - \"[[a.md]]\"\n    - \"[[b.md]]\"\n",
+            "the block list keeps its own indent"
+        );
+        assert_eq!(
+            header_with("tags: [x]\n", "see_also", "\"[[b.md]]\""),
+            "tags: [x]\nsee_also: \"[[b.md]]\"\n",
+            "an absent key is appended, the rest untouched"
+        );
+        assert_eq!(
+            header_with("see_also:\n", "see_also", "\"[[b.md]]\""),
+            "see_also: \"[[b.md]]\"\n",
+            "an empty key takes the value instead of growing a list"
+        );
     }
 
     /// The offer is absent while the ratified bytes are still on the wire:
@@ -2871,12 +3437,12 @@ mod tests {
         w.set_base(&[("a.md".to_string(), None)], 1);
         let id = w.docs.first().expect("a.md").id;
         w.open(id);
-        assert!(!w.can_add_property());
-        assert!(!w.start_header(id, "type"));
+        assert!(!w.can_add_tags());
+        assert!(!w.set_tags(id, &["x".into()]));
         assert_eq!(w.doc(id).expect("open").status(), Status::Unchanged);
 
         w.load_base("a.md", "# A\n");
-        assert!(w.can_add_property());
+        assert!(w.can_add_tags());
     }
 
     /// A second header would be prose, not front matter - the offer has to
@@ -2893,8 +3459,8 @@ mod tests {
         );
         let id = w.docs.first().expect("a.md").id;
         w.open(id);
-        assert!(!w.can_add_property());
-        assert!(!w.start_header(id, "tags"));
+        assert!(!w.can_add_tags());
+        assert!(!w.set_tags(id, &["x".into()]));
         assert_eq!(
             w.doc(id).expect("open").raw,
             "---\ntype: person\n---\n# A\n"
