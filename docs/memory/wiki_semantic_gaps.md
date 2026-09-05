@@ -4,7 +4,8 @@ Status: ANALYSIS + three decisions (user, 2026-09-05); the rest still
 open. Every "today" claim below was read out of the tree at that date
 (file:line given); the comparisons to other systems carry their sources.
 
-**Decided 2026-09-05** (§7 is the build order that follows from them):
+**Decided 2026-09-05** (§7 is the build order that follows; §5 is empty -
+everything is either decided against or scheduled):
 0. **Relations live in the PROSE** as typed inline links, with the
    predicate shown as a tooltip in the preview; the header keeps identity,
    scalars and qualified relations. Both forms stay valid - edges are a
@@ -220,13 +221,11 @@ their change kind. The fold already computes `touched_paths` per patch
   tool that REPORTS violations is the agent-facing half, and it governs
   nothing.
 
-## 5. Still open
+## 5. Nothing open
 
-- §2.4 (`wiki_changes { since_rev }`) and §3 (dangling / orphan report,
-  `wiki_resolve`, the key-drift hint) are not scheduled. They are
-  maintenance affordances: worth building once agents actually maintain
-  this wiki, not before.
-- Nothing else. §6 is decided and §7 is the build order.
+Every finding above is either decided against (§2.3, and the four
+non-goals in §4) or scheduled in §7. §6 carries the decision that shapes
+the rest.
 
 ## 6. DECIDED (user, 2026-09-05): typed links live in the PROSE
 
@@ -296,36 +295,171 @@ What the decision carries with it:
 
 ## 7. Build order
 
-Each step red-first, each landing green on master. Costs are working
-estimates, not commitments.
+Six steps. Each is red-first, each lands green on master, each carries
+its own documentation - the rules below hold for all of them and are not
+repeated per step:
 
-1. **Recall first (~2 days).** Index the header's string values and
-   `aliases` into searchable fields (§1.3), and add a `props: [(key,
-   value)]` filter to `wiki_search` mapped onto the facets that are
-   already written (§2.1). Today a page is not findable under the name it
-   declares, and `status: draft` has no query path at all. Nothing else
-   in this list buys as much per hour.
-2. **Traversal that says WHY (~1 day).** `WikiNeighbor` carries the edge
-   that reached it (predicate + direction), `wiki_neighbors` accepts
-   `predicate` and `transitive` (§2.2, §6.7). Bounded closure, capped
-   like the current walk.
-3. **Inline typed links (~2 days).** `body_links` learns
-   `[[pred::Name]]` and `[[pred::Name|display]]` - one parser, the same
-   code-span masking, `RawEdge.predicate` already exists, so the graph,
-   `wiki_links` and the MCP surface need no new shape. `WikiSpan` gains
-   `rel`; the preview's `LinkRun` shows it through the existing HintTip
-   overlay. `wiki_props` counts inline predicates (§6.6). The GUI's
-   editor gets no new syntax helper in this step.
-4. **The structured write path (~several days, §1.1).** Move the
-   unified-diff emitter from `molt-ui/src/wiki.rs` down to `molt-core`
-   beside `wiki_fold::apply_patch` - its exact inverse - and add a Seat-scoped
-   `wiki_edit` taking structured edits against the current base
-   (`content`, `replace {old,new}`, `set_props`, `add_relation`, `rename`,
-   `delete`), building the patch engine-side and proposing it. After step
-   3, `add_relation` annotates a SENTENCE rather than setting a header
-   key. Read-only agents keep reading only: the scope split already
-   exists and needs no new privilege concept. A refusal then happens at
-   the call, with a reason, instead of after a vote.
+- **Every new `Command` is an MCP tool or on the documented INTERNAL
+  list.** `co_equality_every_command_is_a_tool_or_documented_internal`
+  fails otherwise. All the reads here are `Scope::Read`; the one write is
+  `Scope::Seat` (the decision above).
+- **The shipping spec is `docs_archive/memory/knowledge_base_scale.md`.**
+  Its §4.4 / §4.5 / §4.6 describe the header subset, the graph and the
+  search as BUILT; whichever step changes one corrects it in the same
+  change. Its §6 lists typed inline links as deferred - step 3 removes
+  that line. A spec that still claims the old behaviour costs a planning
+  session.
+- **Tool descriptions are the agent's only manual.** Every new parameter
+  gets one clause in the tool's `description`
+  (`crates/molt-mcp/src/lib.rs`), in the register the existing ones use:
+  what it does, not how it feels.
+- **This document moves to `docs_archive/memory/` in the change that
+  finishes step 6.**
+
+### Step 1 - Recall. ~2 days. No dependencies.
+
+Today a page is not findable under the name it declares, and a scalar
+property has no query path at all. Largest gap per hour in the list.
+
+- `crates/molt-engine/src/wiki_index/search.rs`: the schema gains a
+  searchable field for the header's own text (its string values, joined)
+  and one for `aliases`; `write()` fills them from the properties it
+  ALREADY parses for the facets. Decide once whether aliases join `title`
+  (so a name match ranks like a title match) or get their own field, and
+  write the reason in the code, not here.
+- Same file: `Filters` gains `props: Vec<(String, String)>`, mapped onto
+  the `/prop/<key>/<value>` facet clauses `facets_of` already writes. The
+  index needs no change for this half.
+- `crates/molt-core/src/lib.rs`: `Command::WikiSearch` gains `props`.
+- `crates/molt-mcp/src/lib.rs`: the `wiki_search` schema and description.
+- Keystones: a document whose header says `aliases: [Müller]` is found by
+  `Müller`; one whose header says `works_at: "[[Acme]]"` is found by
+  `Acme`; `props: [("status","draft")]` returns exactly the drafts, and
+  an unknown key returns nothing rather than everything.
+
+### Step 2 - Traversal that says WHY. ~1 day. No dependencies.
+
+`WikiNeighbor` is `(path, distance)`: an agent learns THAT two documents
+are related and never HOW. And with no declared vocabulary, the
+transitive closure has to be a query option or it does not exist.
+
+- `crates/molt-engine/src/wiki_index/graph.rs::neighbors`: carry the edge
+  that first reached each node - predicate, direction, and the path it
+  came through - and accept a predicate filter plus `transitive`, which
+  drops the depth cap and walks that ONE predicate to fixpoint. The 500
+  cap stays the bound; a cycle terminates on the `seen` set the walk
+  already maintains.
+- `crates/molt-core/src/lib.rs`: `WikiNeighbor` gains the three fields;
+  `Command::WikiNeighbors` gains `predicate` and `transitive`.
+- `crates/molt-mcp/src/lib.rs`: schema + description. Say plainly that
+  `transitive` is the CALLER's assumption about that predicate, because
+  the republic declares none.
+- Keystones: a `part_of` chain of four closes under `transitive` and
+  stops at depth without it; a predicate filter excludes the other edges;
+  a cycle terminates; the cap holds and the reply says it was reached.
+
+### Step 3 - Inline typed predicates. ~2 days. Steps 4 and 5 depend on it.
+
+- `crates/molt-engine/src/wiki_index/graph.rs::body_links`: learn
+  `[[pred::Name]]` and `[[pred::Name|display]]`. ONE parser - `molt-ui`'s
+  `parse_links` already calls this function, so the GUI follows for free.
+  Keep the code-span and fenced-block masking: a predicate in an example
+  is not a claim about the graph. `pred` must satisfy the subset's key
+  rule (`molt_engine::header_key_ok`); if it does not, the whole thing
+  stays an ordinary `[[Name]]` link - never a third syntax.
+- The callers already carry `RawEdge.predicate`, so `WikiGraph`,
+  `wiki_links { predicate }` and the MCP surface need NO new shape.
+  Verify that rather than assume it.
+- `crates/molt-engine/src/proposals.rs::cmd_wiki_props`: the inventory
+  must count inline predicates too. It reads `graph.inventory` today,
+  which is built from header properties only - decide whether to extend
+  the inventory or to merge the graph's predicates into the reply, and
+  say why in the code.
+- The tooltip: `WikiSpan` (`crates/molt-ui-window/ui/theme.slint`) gains
+  `rel`; `molt-ui/src/wiki.rs`'s block parser fills it; the preview's
+  `LinkRun` / `SpanFlow` in `surfaces.slint` shows it through the
+  existing `HintTip` overlay (the generation-owner idiom - a shared
+  overlay needs an owner mark, not an anchor comparison).
+- `docs_archive/memory/knowledge_base_scale.md`: §4.5 gains the inline
+  form, §6 loses the deferral line.
+- Keystones: the sentence `[[works_at::Acme]]` and the header
+  `works_at: "[[Acme]]"` produce the SAME edge; a predicate inside a code
+  span produces none; a predicate failing the key rule degrades to a
+  plain link; `wiki_props` lists an inline-only predicate; the tooltip
+  renders headless over the link run and carries the predicate.
+
+### Step 4 - The authoring surface follows the decision. ~1 day. Depends on 3.
+
+The "Create semantic link" modal shipped 2026-09-05 writes a HEADER key
+(`molt-ui/src/wiki.rs::add_relations`). Under the decision above that is
+no longer the form a member should be led to, and a UI that contradicts
+the decision is worse than no UI.
+
+- The modal writes an inline annotation into the open document's prose.
+  Decide - and write down - WHERE: the honest default is the cursor
+  position in the editor, and a new line at the end of the body in the
+  viewer, which has no cursor.
+- The header path stays reachable for the QUALIFIED form
+  (`{to, since, role}`), which has no inline shape - that is the modal's
+  remaining reason to write a header at all.
+- `add_relations`, `with_relation` and the canonical-emitter fallback
+  stay as they are: they are the qualified path, and their
+  parser-verified write (`grew_by`) is what keeps a header readable.
+- Keystones: the modal's write lands in the body and produces the edge;
+  the qualified form still lands in the header; one Undo takes back
+  either.
+
+### Step 5 - The structured write path + `wiki_resolve`. ~1 week. Depends on 3.
+
+The one item that decides whether an agent can CONTRIBUTE rather than
+only read. Today its only write is a hand-written positional diff that
+`propose` does not even refuse when it cannot apply.
+
+- Move the unified-diff emitter from `crates/molt-ui/src/wiki.rs`
+  (~2352-2460, `similar`, a pure-Rust workspace dependency) down to
+  `crates/molt-core` beside `wiki_fold::apply_patch` - its exact inverse
+  belongs next to it - and have `molt-ui` call it. A pure move plus its
+  own tests; land it as its own commit so a regression here is bisectable.
+- New Seat-scoped `wiki_edit`, one or more edits against the CURRENT
+  base: `content` (whole document), `replace { old, new }` (exact string,
+  the format agent scaffolds converged on), `set_props`, `add_relation`
+  (a sentence, after step 3), `rename`, `delete`. The engine builds the
+  patch and proposes it, so members still see and vote on the same diff.
+- It REFUSES at the call, with a reason: an `old` that is absent or
+  ambiguous, a path that does not exist, a header the parser would not
+  read back. That is the feedback loop the current path lacks.
+- `wiki_resolve { name }` (Read): the candidates for a `[[Name]]`, with
+  the ambiguity said out loud. Name resolution is case-exact and silent
+  today, so an agent cannot check a link target before writing one. It
+  belongs here because it is what makes `add_relation` land on a real page.
+- `crates/molt-mcp/src/lib.rs`: the two tools, their scopes, the
+  `INTERNAL` list if anything internal is added, and the server
+  `instructions` block - which today teaches `wiki_patch` as THE way to
+  write.
+- Keystones: every edit kind round-trips
+  (`apply_patch(build_patch(x)) == x`); an ambiguous `replace` is refused
+  and writes nothing; a read-only key cannot call `wiki_edit` (the
+  scoped-tools test already has the shape); `wiki_resolve` names both
+  candidates for an ambiguous basename.
+
+### Step 6 - Maintenance affordances. ~2 days. Depends on 5.
+
+These exist for an agent that MAINTAINS the wiki, which is only true once
+it can write. Earlier would be building for nobody.
+
+- `wiki_changes { since_rev, limit, cursor }` (Read): the paths touched
+  since a revision, with their change kind. The fold already computes
+  `touched_paths` per patch (`crates/molt-core/src/wiki_fold.rs`); the
+  work is keeping enough per-revision history to answer without a refold.
+- The graph's hygiene as ONE read (`wiki_health`, or parameters on one
+  tool - decide, do not ship three): `WikiGraph.dangling` (`graph.rs:69`,
+  computed today and exposed nowhere) = what this republic references but
+  does not have; orphans = documents with no in-edges; and the key-drift
+  hint - header keys differing only by case or separator (`status` vs
+  `Status`), the failure that silently empties property queries elsewhere.
+- Keystones: a deleted target turns its in-edges dangling and the report
+  says so; a rename moves a path out of the orphan list; `since_rev`
+  answers the same set the fold touched.
 
 ## Sources
 
