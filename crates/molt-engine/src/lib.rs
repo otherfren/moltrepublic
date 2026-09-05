@@ -57,10 +57,11 @@ mod wiki_export;
 mod wiki_index;
 
 /// The wiki's body links — markdown destinations ending in `.md` plus the
-/// readable `[[Name]]` form, code masked out. ONE parser: the GUI's link
-/// navigation reads the same edges the index does
+/// readable `[[Name]]` / `[[pred::Name]]` form, code masked out. ONE
+/// parser, [`link_parts`] included: the GUI's link navigation and its
+/// tooltip read the same edges the index does
 /// (`docs_archive/memory/knowledge_base_scale.md` §4.5).
-pub use wiki_index::graph::body_links;
+pub use wiki_index::graph::{body_link_targets, body_links, link_parts, BodyLink, LinkParts};
 
 /// The document header's boundaries, its properties and what counts as a
 /// link inside one (§4.4). ONE parser, like [`body_links`]: the infobox

@@ -1041,6 +1041,77 @@ fn the_link_graph_follows_the_applied_base() {
     assert!(warnings[0].starts_with("broken.md: "), "{warnings:?}");
 }
 
+/// The inline form over the REAL applied base (`wiki_semantic_gaps.md`
+/// §6): a predicate written in a sentence reaches `wiki_links`'s
+/// predicate filter as an ordinary edge, and `wiki_props` inventories it:
+/// a republic that writes its relations in prose must not read as one
+/// with no relations at all.
+#[test]
+fn an_inline_predicate_reaches_wiki_links_and_wiki_props() {
+    let add = |path: &str, body: &str| {
+        let lines: Vec<&str> = body.split('\n').collect();
+        let mut patch = format!(
+            "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
+            lines.len()
+        );
+        for l in lines {
+            patch.push('+');
+            patch.push_str(l);
+            patch.push('\n');
+        }
+        patch
+    };
+    let wp = |p: String| json!({"op": "wiki_patch", "summary": "x", "value": p});
+    let b = Builder::new(&["petra", "walter"], 2);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    seal_wiki(
+        &mut walter,
+        &b,
+        "petra",
+        40,
+        wp(add("anna.md", "# Anna\nShe [[reports_to::bob]] on Tuesdays.")),
+    );
+    seal_wiki(&mut walter, &b, "petra", 41, wp(add("bob.md", "# Bob")));
+    walter.build_wiki_indexes_now();
+
+    let molt_core::Reply::WikiLinks { edges, .. } = walter
+        .cmd_wiki_links(
+            "anna.md".to_string(),
+            Some("out".to_string()),
+            Some("reports_to".to_string()),
+            0,
+            0,
+        )
+        .expect("links")
+    else {
+        panic!("wrong reply");
+    };
+    assert_eq!(
+        edges
+            .iter()
+            .map(|e| (e.path.as_str(), e.predicate.as_deref(), e.header))
+            .collect::<Vec<_>>(),
+        [("bob.md", Some("reports_to"), false)],
+        "the predicate filter finds the sentence's edge, and it is no header edge"
+    );
+
+    let molt_core::Reply::WikiProps { keys, .. } = walter.cmd_wiki_props().expect("props") else {
+        panic!("wrong reply");
+    };
+    let inline = keys
+        .iter()
+        .find(|k| k.key == "reports_to")
+        .expect("the inline predicate is inventoried");
+    assert_eq!(
+        inline
+            .values
+            .iter()
+            .map(|v| (v.value.as_str(), v.count))
+            .collect::<Vec<_>>(),
+        [("bob", 1)]
+    );
+}
+
 /// `knowledge_base_scale.md` §4.1: the fold cache is a pure DERIVATION.
 /// After every applied block — cache warm, cache dropped, and across a
 /// wholesale re-projection — the served base equals a fresh fold of the

@@ -2000,9 +2000,14 @@ impl State {
         outcome.map_err(|e| MoltError::Engine(format!("wiki index: {e}")))
     }
 
-    /// [`Command::WikiProps`]: what this republic's headers actually say.
-    /// The answer a human needs before writing one - and the reason the
-    /// ontology can stay content instead of becoming a schema.
+    /// [`Command::WikiProps`]: what this republic's documents actually
+    /// say. The answer a human needs before writing a relation - and the
+    /// reason the ontology can stay content instead of becoming a schema.
+    ///
+    /// Inline predicates ride the graph's own inventory rather than a
+    /// second pass here: the pairs are collected where the body is parsed,
+    /// so a header key and the same predicate written in prose land in ONE
+    /// bucket and their counts add (`wiki_index::graph::reparse`).
     pub(crate) fn cmd_wiki_props(&mut self) -> Result<Reply, MoltError> {
         self.require_feature(Surface::Memory)?;
         self.refresh_wiki_graph();

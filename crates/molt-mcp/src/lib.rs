@@ -1096,7 +1096,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wiki_props",
             command: "wiki_props",
             scope: Scope::Read,
-            description: "The header keys this republic's wiki actually uses, each with its values and how often each occurs - the ontology as it IS. Read this before writing a document's front matter: it answers \"what is usual here\" without a schema. It governs nothing; the ontology is content.",
+            description: "Every relation this republic's wiki actually uses - header keys and inline `[[predicate::Name]]` alike - each with its values and how often each occurs. The ontology as it IS: read it before writing a header or a relation, it answers \"what is usual here\" without a schema. It governs nothing; the ontology is content.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::WikiProps),
         },
@@ -1129,13 +1129,13 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wiki_links",
             command: "wiki_links",
             scope: Scope::Read,
-            description: "One document's links. `direction` out|in|both (default both); `predicate` narrows to one front-matter key (a header value that is a link is a typed relation whose predicate is its key). Body links carry no predicate. Page with `limit` and `cursor`.",
+            description: "One document's links. `direction` out|in|both (default both); `predicate` narrows to one relation - a header value that is a link is typed by its key, a body link by writing `[[predicate::Name]]` in the prose. Page with `limit` and `cursor`.",
             schema: || json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "the document's path" },
                     "direction": { "type": "string", "enum": ["out", "in", "both"], "description": "optional: which way the edges point (default both)" },
-                    "predicate": { "type": "string", "description": "optional: only edges carried by this header key" },
+                    "predicate": { "type": "string", "description": "optional: only edges under this predicate" },
                     "limit": { "type": "integer", "description": "optional: page size, 1..=500 (default 100)" },
                     "cursor": { "type": "integer", "description": "optional: continue after this many edges" }
                 },
