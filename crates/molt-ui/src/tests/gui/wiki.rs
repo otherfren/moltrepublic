@@ -1491,6 +1491,70 @@ fn a_long_relation_value_elides_under_the_chip_cap() {
     assert!(widest <= 321.0, "a chip stays under its cap, got {widest}");
 }
 
+/// **A header link sits where its key sits.** `LinkRun` carries a fixed
+/// height, and a row hands a fixed-height child the top edge while it
+/// stretches the neighbours - so the one chip whose value is a link hung
+/// above the centre line the rest of the band shares (reported
+/// 2026-09-05, `subcategory_of: "[[…]]"`).
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_header_link_sits_on_the_chip_centre_line() {
+    let ui = tagged_doc_window(
+        "---\ntype: person\nsubcategory_of: \"[[b.md|Robots]]\"\n---\n# A\n\nprose.\n",
+    );
+    let mid = |e: &i_slint_backend_testing::ElementHandle| {
+        e.absolute_position().y + e.size().height / 2.0
+    };
+    for font in [14.0_f32, 20.0, 28.0] {
+        ui.global::<Theme>().set_fs_app(font);
+        let chip =
+            i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "RelChip")
+                .find(|c| {
+                    c.query_descendants().match_id("RelChip::rc-link").find_first().is_some()
+                })
+                .expect("the linked chip renders");
+        let key = chip
+            .query_descendants()
+            .match_id("RelChip::rc-key")
+            .find_first()
+            .expect("the key renders");
+        let link = chip
+            .query_descendants()
+            .match_id("RelChip::rc-link")
+            .find_first()
+            .expect("the link renders");
+        assert!(link.size().height > 0.0, "font {font}: the link has no height");
+        assert!(
+            (mid(&key) - mid(&chip)).abs() < 0.6,
+            "font {font}: the key itself is off-centre ({} in {})",
+            mid(&key),
+            mid(&chip)
+        );
+        assert!(
+            (mid(&link) - mid(&key)).abs() < 0.6,
+            "font {font}: the link centres at {} where the key centres at {}",
+            mid(&link),
+            mid(&key)
+        );
+        // …and a plain value, which never had the fault, stays put
+        let plain_chip =
+            i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "RelChip")
+                .find(|c| {
+                    c.query_descendants().match_id("RelChip::rc-val").find_first().is_some()
+                })
+                .expect("the plain chip renders");
+        let plain = plain_chip
+            .query_descendants()
+            .match_id("RelChip::rc-val")
+            .find_first()
+            .expect("the plain value renders");
+        assert!(
+            (mid(&plain) - mid(&plain_chip)).abs() < 0.6,
+            "font {font}: a plain value is off its own chip's centre"
+        );
+    }
+}
+
 /// **A header the parser rejects is not a header.** `split_front_matter`
 /// says so, and the index, the graph and every write path read those
 /// lines as body text - so the preview shows them too. A pane that hid

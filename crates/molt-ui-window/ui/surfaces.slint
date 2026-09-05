@@ -509,20 +509,26 @@ component RelChip inherits Rectangle {
                 : root.p.status == 3 ? Theme.bad
                 : transparent;
         }
-        Text {
+        rc-key := Text {
             text: root.p.key;
             color: Theme.dim;
             font-size: Theme.fs-cap;
             font-weight: 600;
             vertical-alignment: center;
         }
-        if root.p.link != "" && root.p.status != 3: LinkRun {
-            label: root.p.value;
-            target: root.p.link;
-            fsize: Theme.fs-cap;
+        // a LinkRun carries a fixed height, and a row parks a fixed-height
+        // child at its TOP edge while it stretches the texts beside it -
+        // only a centring wrapper puts the two on one line
+        if root.p.link != "" && root.p.status != 3: VerticalLayout {
+            alignment: center;
+            rc-link := LinkRun {
+                label: root.p.value;
+                target: root.p.link;
+                fsize: Theme.fs-cap;
+            }
         }
         // a removed value is history, not navigation
-        if root.p.link == "" || root.p.status == 3: Text {
+        if root.p.link == "" || root.p.status == 3: rc-val := Text {
             text: root.p.value;
             color: root.p.status == 3
                 ? Theme.bad.mix(Theme.dim, 0.6)
