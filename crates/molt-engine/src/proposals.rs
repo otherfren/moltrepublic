@@ -2102,7 +2102,7 @@ impl State {
     /// side index would have to stay true across restore, blob swap,
     /// re-projection and the base fetch; the cut is the bound instead.
     pub(crate) fn cmd_wiki_changes(
-        &mut self,
+        &self,
         since_rev: u64,
         limit: u32,
         cursor: u32,
@@ -2151,11 +2151,13 @@ impl State {
             std::collections::BTreeMap::new();
         for payload in self.applied_payloads(Surface::Memory) {
             if let Some((want, size)) = crate::chain::base_commitment_of(payload) {
+                // the same commitment check, and the same refusal by name,
+                // `fold_wiki_from_base` makes (§4.9.6)
                 let held = self
                     .chain
                     .wiki_base
                     .as_ref()
-                    .filter(|base| crate::chain::wiki_base_commitment(base).0 == want);
+                    .filter(|held| crate::chain::wiki_base_commitment(held).0 == want);
                 let Some(held) = held else {
                     return Err(MoltError::WikiBasePending { have: 0, size, want });
                 };
@@ -2199,11 +2201,13 @@ impl State {
         rev: u64,
     ) {
         let renamed = f.renamed && !f.deleted;
-        let mut from = renamed.then(|| f.old_path.clone());
+        let mut from = None;
         if renamed {
-            if let Some(prev) = seen.remove(&f.old_path) {
-                from = prev.from.or(from);
-            }
+            // the old path leaves the list: its disappearance IS the rename
+            from = seen
+                .remove(&f.old_path)
+                .and_then(|prev| prev.from)
+                .or_else(|| Some(f.old_path.clone()));
         }
         let path = f.display_path().to_string();
         let kind = if f.deleted {
@@ -3542,13 +3546,13 @@ mod wiki_maintenance_tests {
     use super::*;
     use serde_json::json;
 
-    const ADD_A: &str = "diff --git a/a.md b/a.md\nnew file mode 100644\n--- /dev/null\n+++ b/a.md\n@@ -0,0 +1,1 @@\n+A\n";
-    const ADD_B: &str = "diff --git a/b.md b/b.md\nnew file mode 100644\n--- /dev/null\n+++ b/b.md\n@@ -0,0 +1,1 @@\n+B\n";
-    const ADD_C: &str = "diff --git a/c.md b/c.md\nnew file mode 100644\n--- /dev/null\n+++ b/c.md\n@@ -0,0 +1,1 @@\n+C\n";
-    const MOVE_A_B: &str =
-        "diff --git a/a.md b/b.md\nsimilarity index 100%\nrename from a.md\nrename to b.md\n";
-    const MOVE_B_C: &str =
-        "diff --git a/b.md b/c.md\nsimilarity index 100%\nrename from b.md\nrename to c.md\n";
+    // fixture paths carry a folder so `scripts/check-doc-refs.py` keeps
+    // scanning this file's real doc references instead of being exempted
+    const ADD_A: &str = "diff --git a/notes/a.md b/notes/a.md\nnew file mode 100644\n--- /dev/null\n+++ b/notes/a.md\n@@ -0,0 +1,1 @@\n+A\n";
+    const ADD_B: &str = "diff --git a/notes/b.md b/notes/b.md\nnew file mode 100644\n--- /dev/null\n+++ b/notes/b.md\n@@ -0,0 +1,1 @@\n+B\n";
+    const ADD_C: &str = "diff --git a/notes/c.md b/notes/c.md\nnew file mode 100644\n--- /dev/null\n+++ b/notes/c.md\n@@ -0,0 +1,1 @@\n+C\n";
+    const MOVE_A_B: &str = "diff --git a/notes/a.md b/notes/b.md\nsimilarity index 100%\nrename from notes/a.md\nrename to notes/b.md\n";
+    const MOVE_B_C: &str = "diff --git a/notes/b.md b/notes/c.md\nsimilarity index 100%\nrename from notes/b.md\nrename to notes/c.md\n";
 
     /// Push applied Memory entries the way a sealed block does.
     fn apply(st: &mut crate::State, patches: &[&str]) {
@@ -3602,10 +3606,15 @@ mod wiki_maintenance_tests {
         let (list, wiki_rev, base_hash, truncated) = changes(&mut st, 0);
         assert_eq!(wiki_rev, 1, "the cut re-based the counter");
         assert_eq!(
+            wiki_rev,
+            st.wiki_base().expect("the base is held").1,
+            "the walk must stamp the revision every other wiki read stamps"
+        );
+        assert_eq!(
             list.iter()
                 .map(|c| (c.path.as_str(), c.kind.as_str()))
                 .collect::<Vec<_>>(),
-            vec![("c.md", "added")],
+            vec![("notes/c.md", "added")],
             "only what happened above the cut is a change"
         );
         assert_eq!(
@@ -3633,7 +3642,7 @@ mod wiki_maintenance_tests {
         ));
     }
 
-    /// A rename CHAIN keeps its origin: an agent holding `a.md` learns
+    /// A rename CHAIN keeps its origin: an agent holding `notes/a.md` learns
     /// where it went even when the path moved twice inside one window.
     #[test]
     fn a_rename_chain_reports_the_path_it_started_from() {
@@ -3644,7 +3653,7 @@ mod wiki_maintenance_tests {
         assert_eq!(list.len(), 1, "one entry per path, not one per hop");
         assert_eq!(
             (list[0].path.as_str(), list[0].kind.as_str(), list[0].from.as_deref()),
-            ("c.md", "renamed", Some("a.md"))
+            ("notes/c.md", "renamed", Some("notes/a.md"))
         );
     }
 
@@ -3656,6 +3665,7 @@ mod wiki_maintenance_tests {
         apply(&mut st, &[ADD_A, ADD_A]);
         let (list, wiki_rev, _, _) = changes(&mut st, 0);
         assert_eq!(wiki_rev, 1, "the second add cannot apply");
+        assert_eq!(wiki_rev, st.wiki_base().expect("a tree").1);
         assert_eq!(list.len(), 1);
     }
 }

@@ -630,6 +630,62 @@ per-patch provenance).
 - Validation: the headless GUI tests in `crates/molt-ui/src/tests/gui/`
   and ONE `cargo build -j 1 -p molt-ui-window -p molt-ui` per change-set.
 
+### 4.11 Maintenance reads
+
+BUILT 2026-09-05 (`wiki_semantic_gaps.md` §7 step 6). Two Read tools for
+the agent that MAINTAINS the wiki, and deliberately not three.
+
+**`wiki_changes { since_rev, limit, cursor }`**: one entry per touched
+path, coalesced to the LATEST kind (`added` / `modified` / `deleted` /
+`renamed`) and the revision it last moved at, rev-ordered, with `total`
+and `next_cursor`. A rename re-keys the entry onto the new path and
+carries `from`; `from` is STICKY through later changes to that path, so an
+agent holding the old path still learns where it went. `since_rev >=
+wiki_rev` is an empty page, never an error.
+
+- **Nothing is stored beside the applied entries.** The walk folds them
+  exactly the way `fold_wiki_from_base` folds them and notes what each
+  patch that APPLIED touched. What that costs, against the plan's
+  assumption: O(entries since the last folded cut), NOT O(entries since
+  `since_rev`). A revision is defined by the FOLD - a void patch does not
+  bump it - so the walk has to apply the patches to learn which entry
+  carries which revision, and there is no rev-to-entry index to read
+  instead. A per-revision side index would be a second thing to keep true
+  across restore, blob swap, re-projection and the base fetch; §4.9's cut
+  is the bound instead.
+- **A folded cut RE-BASES the counter.** `fold_wiki_from_base` does not
+  count the commitment as a patch, so post-cut revisions restart: the same
+  number names a different state either side of a cut, and the value alone
+  cannot say which. The reply therefore carries `base` (the commitment the
+  revisions count from, absent until this republic cuts) and `truncated`,
+  set when the window reaches under the base (`since_rev` 0 with a base
+  beneath it) or above the current revision. A FLAG, not a refusal: the
+  post-cut changes are still worth having, and refusing the natural first
+  call would be hostile.
+- Base-pending (§4.9.6) refuses BY NAME here, like every other wiki read.
+
+**`wiki_health { limit }`**: three lists in one reply, because they are
+asked together and three tools would page three times over one graph.
+`dangling` (`[{ name, from, from_total }]`) is what this republic
+references and does not carry - the "what should I write next" signal,
+computed since K4 and exposed nowhere until now; `orphans` is the
+documents with no in-edges; `key_drift` is the groups of keys folding to
+one key under lowercasing and dropping `-`, `_` and space, the failure
+that silently empties property queries (`status` and `Status` are two
+fields). Each list is capped by `limit` (1..=500, default 100) and carries
+its own total, and `from` is capped the same way. The helpers read
+`graph.inventory`, so an inline predicate counts like a header key.
+`index_rev` / `wiki_rev` and the `index building` answer are the other
+graph reads'.
+
+Keystones: `crates/molt-engine/tests/wiki_maintenance.rs` (a deleted
+target turns its in-edges dangling and the report says so; a rename moves
+a path out of the orphan list; `since_rev` answers exactly the paths the
+fold touched; both reads page and report their totals) plus
+`proposals.rs::wiki_maintenance_tests` (a folded cut answers what it can
+and flags the rest, a rename chain reports where it started, a void patch
+is not a revision) and the two hygiene tests in `wiki_index/graph.rs`.
+
 ## 5. Work packages (build order, each red-first, each green on master)
 
 - **K0 Fold cache + cheap superseding** — BUILT 2026-09-04. §4.1-4.2.
@@ -719,11 +775,18 @@ feed the facets); K7 depends on K1 and K4.
   WikiNeighbors, WikiSearch, NetWikiIndexReady}`, the replies,
   `WikiDocMeta`, `SessionSettings.mcp_read_token`, `NODE_POSTURE_KEYS`,
   `NodePosture.mcp_read_token`, `Reply::Proposed.warnings`.
+- `crates/molt-core/src/lib.rs` - `Command::{WikiChanges, WikiHealth}`,
+  their replies, `WikiChange`, `WikiDangling` (§4.11).
 - `crates/molt-core/src/chain.rs` - `ChainChange::CheckpointFolded` (K6).
 - `crates/molt-engine/src/lib.rs` - `State.wiki_cache`, `applied_epoch`,
   `wiki_pending`, `wiki_graph`, `wiki_reader`, dispatch arms.
 - `crates/molt-engine/src/proposals.rs` - `wiki_tree_cached`,
   `supersede_stale_wiki(moved)`, `applied_iter`, propose warnings.
+- `crates/molt-engine/src/proposals.rs` - `cmd_wiki_changes` +
+  `wiki_change_walk`, `cmd_wiki_health` (§4.11).
+- `crates/molt-engine/src/wiki_index/graph.rs` - `dangling_targets`,
+  `orphans`, `key_drift` (§4.11).
+- `crates/molt-engine/tests/wiki_maintenance.rs` - NEW (§4.11).
 - `crates/molt-engine/src/wiki_index/{mod,front_matter,graph,search}.rs`
   - NEW (K4, K5).
 - `crates/molt-engine/src/chain/{verify,checkpoint,governance,projection}.rs`
@@ -735,6 +798,8 @@ feed the facets); K7 depends on K1 and K4.
 - `crates/molt-mcp/src/lib.rs` - `Scope`, `ToolDef.scope`, the two-key
   `initialize`, scoped `tools/list` and `tools/call`, the new tools, the
   Read-set test, `INTERNAL` + `NetWikiIndexReady`.
+- `crates/molt-mcp/src/lib.rs` - the `wiki_changes` / `wiki_health` tools
+  and their place in the Read set (§4.11).
 - `crates/molt-config/src/lib.rs` - `McpConfig.read_token`,
   `Settings.mcp_read_token`, template / salvage / writer.
 - `crates/molt-ui/src/{settings.rs,actions/settings.rs,i18n.rs,wiki.rs,

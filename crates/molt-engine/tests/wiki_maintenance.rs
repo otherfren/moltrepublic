@@ -142,20 +142,20 @@ const A_LINKS_B: &str = "---\nsee: \"[[b]]\"\n---";
 #[tokio::test]
 async fn a_deleted_target_turns_its_in_edges_dangling_and_the_report_says_so() {
     let w = spawn_solo();
-    apply_patch(&w, &add("a.md", A_LINKS_B)).await;
-    apply_patch(&w, &add("b.md", "# B")).await;
+    apply_patch(&w, &add("notes/a.md", A_LINKS_B)).await;
+    apply_patch(&w, &add("notes/b.md", "# B")).await;
 
     let (dangling, _, orphans) = hygiene(&health(&w, 0).await);
     assert!(dangling.is_empty(), "the target exists: {dangling:?}");
-    assert_eq!(orphans, vec!["a.md".to_string()], "b.md is pointed at");
+    assert_eq!(orphans, vec!["notes/a.md".to_string()], "notes/b.md is pointed at");
 
-    apply_patch(&w, &delete("b.md", "# B")).await;
+    apply_patch(&w, &delete("notes/b.md", "# B")).await;
 
     let reply = health(&w, 0).await;
     let (dangling, from, orphans) = hygiene(&reply);
     assert_eq!(dangling, vec!["b".to_string()]);
-    assert_eq!(from, vec![vec!["a.md".to_string()]]);
-    assert_eq!(orphans, vec!["a.md".to_string()]);
+    assert_eq!(from, vec![vec!["notes/a.md".to_string()]]);
+    assert_eq!(orphans, vec!["notes/a.md".to_string()]);
     match reply {
         Reply::WikiHealth {
             dangling_total,
@@ -172,32 +172,32 @@ async fn a_deleted_target_turns_its_in_edges_dangling_and_the_report_says_so() {
 #[tokio::test]
 async fn a_rename_moves_a_path_out_of_the_orphan_list() {
     let w = spawn_solo();
-    apply_patch(&w, &add("a.md", A_LINKS_B)).await;
-    apply_patch(&w, &add("old.md", "# Old")).await;
+    apply_patch(&w, &add("notes/a.md", A_LINKS_B)).await;
+    apply_patch(&w, &add("notes/old.md", "# Old")).await;
 
     let (dangling, _, orphans) = hygiene(&health(&w, 0).await);
     assert_eq!(dangling, vec!["b".to_string()]);
-    assert_eq!(orphans, vec!["a.md".to_string(), "old.md".to_string()]);
+    assert_eq!(orphans, vec!["notes/a.md".to_string(), "notes/old.md".to_string()]);
 
-    apply_patch(&w, &rename("old.md", "b.md")).await;
+    apply_patch(&w, &rename("notes/old.md", "notes/b.md")).await;
 
     let (dangling, _, orphans) = hygiene(&health(&w, 0).await);
     assert!(dangling.is_empty(), "the rename resolved it: {dangling:?}");
     assert_eq!(
         orphans,
-        vec!["a.md".to_string()],
-        "b.md is pointed at now, old.md is gone"
+        vec!["notes/a.md".to_string()],
+        "notes/b.md is pointed at now, notes/old.md is gone"
     );
 
     let list = change_list(&changes(&w, 0, 0, 0).await);
     let moved = list
         .iter()
-        .find(|c| c.path == "b.md")
+        .find(|c| c.path == "notes/b.md")
         .expect("the rename is reported");
     assert_eq!(moved.kind, "renamed");
-    assert_eq!(moved.from.as_deref(), Some("old.md"));
+    assert_eq!(moved.from.as_deref(), Some("notes/old.md"));
     assert!(
-        !list.iter().any(|c| c.path == "old.md"),
+        !list.iter().any(|c| c.path == "notes/old.md"),
         "one entry per path: the old path rides the rename's `from`"
     );
 }
@@ -209,9 +209,9 @@ async fn a_rename_moves_a_path_out_of_the_orphan_list() {
 async fn since_rev_answers_exactly_the_paths_the_fold_touched() {
     let w = spawn_solo();
     let patches = [
-        add("a.md", "one"),
+        add("notes/a.md", "one"),
         add("notes/b.md", "two"),
-        edit_one_line("a.md", "one", "ONE"),
+        edit_one_line("notes/a.md", "one", "ONE"),
     ];
     for p in &patches {
         apply_patch(&w, p).await;
@@ -254,14 +254,14 @@ async fn since_rev_answers_exactly_the_paths_the_fold_touched() {
         }
     }
 
-    // coalesced: a.md was added at 1 and edited at 3, and reads as ONE
+    // coalesced: notes/a.md was added at 1 and edited at 3, and reads as ONE
     // entry carrying the latest kind
     let list = change_list(&changes(&w, 0, 0, 0).await);
     assert_eq!(
         list.iter()
             .map(|c| (c.path.as_str(), c.kind.as_str(), c.rev))
             .collect::<Vec<_>>(),
-        vec![("notes/b.md", "added", 2), ("a.md", "modified", 3)],
+        vec![("notes/b.md", "added", 2), ("notes/a.md", "modified", 3)],
         "rev-ordered, one entry per path"
     );
 
@@ -273,9 +273,9 @@ async fn since_rev_answers_exactly_the_paths_the_fold_touched() {
 #[tokio::test]
 async fn the_maintenance_reads_page_and_report_their_totals() {
     let w = spawn_solo();
-    apply_patch(&w, &add("a.md", A_LINKS_B)).await;
+    apply_patch(&w, &add("notes/a.md", A_LINKS_B)).await;
     let c = "---\nsee: \"[[ghost]]\"\nStatus: draft\nstatus: draft\n---";
-    apply_patch(&w, &add("c.md", c)).await;
+    apply_patch(&w, &add("notes/c.md", c)).await;
 
     let first = changes(&w, 0, 1, 0).await;
     let (list, cursor, total) = match &first {
