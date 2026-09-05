@@ -802,7 +802,7 @@ impl State {
         let empty = WikiTree::new();
         let tree =
             super::wiki_base::summarize_state(&mut state, self.held_wiki_base().unwrap_or(&empty))?;
-        Ok((state, Some(tree)))
+        Ok((state, tree))
     }
 
     /// The ratified wiki tree this holder keeps for its blob's commitment

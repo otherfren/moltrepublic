@@ -202,7 +202,10 @@ impl crate::State {
             path: String::new(),
             count: series.count,
             size: series.size,
-            root: self.wiki_base_root(series),
+            // the source is this holder's OWN base, so there is nothing to
+            // compare a root against - the sender checks the size instead,
+            // and the fetcher checks the assembled bytes against the chain
+            root: String::new(),
             ranges,
             next: 0,
             started_at: crate::now_secs(),
@@ -221,24 +224,5 @@ impl crate::State {
                 w.notify_one();
             }
         });
-    }
-
-    /// The manifest root of this holder's own base - transport framing,
-    /// computed here rather than carried in the chain (§4.9.1).
-    fn wiki_base_root(&self, series: &WikiBaseSeries) -> String {
-        let Some(tree) = self.chain.wiki_base.as_ref() else {
-            return String::new();
-        };
-        let bytes = molt_core::wiki_fold::wiki_base_canonical_bytes(tree);
-        let mut hashes = Vec::new();
-        for slice in bytes.chunks(molt_net::file_plane::PIECE_PAYLOAD_LEN) {
-            hashes.push(<[u8; 32]>::from(<sha2::Sha256 as sha2::Digest>::digest(slice)));
-        }
-        molt_net::file_plane::Manifest {
-            count: series.count,
-            size: series.size,
-            hashes,
-        }
-        .root()
     }
 }

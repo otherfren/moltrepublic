@@ -679,7 +679,7 @@ fn hash_walk_state(
     at.upto = upto;
     at.consumed_ids.sort_unstable();
     if let Some(base) = base {
-        super::wiki_base::summarize_state(&mut at, base)?;
+        let _ = super::wiki_base::summarize_state(&mut at, base)?;
     }
     Ok(checkpoint_state_hash(&at))
 }

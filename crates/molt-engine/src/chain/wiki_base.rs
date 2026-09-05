@@ -116,17 +116,19 @@ pub(crate) fn summarize(
 pub(crate) fn summarize_state(
     state: &mut molt_core::CheckpointState,
     base: &BTreeMap<String, String>,
-) -> Result<BTreeMap<String, String>, String> {
+) -> Result<Option<BTreeMap<String, String>>, String> {
     let Some((_, group)) = state
         .applied
         .iter_mut()
         .find(|(s, _)| *s == molt_core::Surface::Memory)
     else {
-        return Ok(BTreeMap::new());
+        // NOT the same as an empty tree: a republic with no memory group
+        // commits to nothing, and must not persist a base file for it
+        return Ok(None);
     };
     let (folded, tree) = summarize(group, base)?;
     *group = folded;
-    Ok(tree)
+    Ok(Some(tree))
 }
 
 /// Is there anything to fold? A cut proposes the folded variant only when

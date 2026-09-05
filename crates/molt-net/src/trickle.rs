@@ -417,7 +417,11 @@ async fn publish_wiki_base_piece<S: StateStore>(
                 hashes.push(<[u8; 32]>::from(sha2::Sha256::digest(&piece)));
             }
             let m = Manifest { count: job.count, size, hashes };
-            if m.root() != job.root || m.size != job.size {
+            // no root to compare: the source IS this holder's own base, so
+            // the root would be a self-comparison. The size is what catches
+            // a store that moved under the job, and the FETCHER checks the
+            // assembled bytes against the chain's commitment.
+            if m.size != job.size {
                 drop_job(store, series, "the wiki base moved since the job was queued".into()).await;
                 return Err(Hold::Failed);
             }
