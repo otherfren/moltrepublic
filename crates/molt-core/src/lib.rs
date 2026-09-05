@@ -24,6 +24,7 @@ use serde_json::Value;
 pub mod chain;
 pub mod relay;
 pub mod wiki_fold;
+pub mod wiki_patch;
 pub use chain::{
     applied_lww_slot, approval_bytes, block_link_bytes, checkpoint_canonical_bytes, ChainBlock,
     ChainChange, CheckpointState, MembershipOp, GENESIS_PREV,

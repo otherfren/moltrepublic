@@ -993,22 +993,7 @@ pub(crate) fn wire_wiki_vote(
             return;
         };
         // language-neutral summary for the proposal title, "+2 -1 →1 ~34"
-        let c = m.borrow().changeset_counts();
-        let mut summary = String::new();
-        for (n, sign) in [
-            (c.added, '+'),
-            (c.deleted, '-'),
-            (c.moved, '→'),
-            (c.lines, '~'),
-        ] {
-            if n > 0 {
-                if !summary.is_empty() {
-                    summary.push(' ');
-                }
-                summary.push(sign);
-                summary.push_str(&n.to_string());
-            }
-        }
+        let summary = m.borrow().changeset_counts().summary();
         let payload = serde_json::json!({
             "op": "wiki_patch",
             "summary": summary,

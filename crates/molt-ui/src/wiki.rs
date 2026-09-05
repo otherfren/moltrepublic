@@ -12,7 +12,7 @@
 //! this module stays slint-free so the whole state machine tests headless.
 
 use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
-use similar::{capture_diff_slices, Algorithm, DiffOp, TextDiff};
+use similar::{capture_diff_slices, Algorithm, DiffOp};
 
 pub type DocId = u32;
 
@@ -292,18 +292,10 @@ pub struct StackRow {
 }
 
 /// The NET pending change set, recomputed from base vs working state (the
-/// stack narrates actions; these numbers are what a vote would seal).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct ChangesetCounts {
-    /// Files that exist only in the working set.
-    pub added: usize,
-    /// Base files pending deletion.
-    pub deleted: usize,
-    /// Base files whose path changed (rename or move).
-    pub moved: usize,
-    /// Touched content lines across modified base files.
-    pub lines: usize,
-}
+/// stack narrates actions; these numbers are what a vote would seal). The
+/// EMITTER's own counter, so the panel and the proposal summary can never
+/// disagree.
+pub use molt_core::wiki_patch::PatchCounts as ChangesetCounts;
 
 pub struct Wiki {
     docs: Vec<Doc>,
@@ -1971,7 +1963,7 @@ impl Wiki {
                     }
                     if b.raw.as_deref() != Some(d.raw.as_str()) {
                         let before = b.raw.as_deref().unwrap_or_default();
-                        c.lines += touched_lines(before, &d.raw);
+                        c.lines += molt_core::wiki_patch::touched_lines(before, &d.raw);
                     }
                 }
             }
@@ -2354,73 +2346,48 @@ impl Wiki {
             .collect()
     }
 
-    /// The net changeset as ONE git-format patch (unified diffs + git
-    /// rename/new/deleted headers), files sorted by display path.
+    /// The net changeset as ONE git-format patch, built by the ONE emitter
+    /// (`molt_core::wiki_patch`) the engine's structured writes use too.
     /// `None` when nothing net-changed.
     pub fn build_patch(&self) -> Option<String> {
-        // a patch over bytes this node does not hold would be a LIE about
-        // what the members ratified: refuse rather than guess (§4.10)
+        let (base, after, renames) = self.trees()?;
+        molt_core::wiki_patch::build_patch(&base, &after, &renames)
+    }
+
+    /// The working set as the emitter reads it: the ratified tree, the tree
+    /// a vote would seal, and which new path came from which old one - the
+    /// `Doc` model's base path + deleted flag, projected. `None` when a
+    /// changed document's ratified bytes are not here: a patch over bytes
+    /// this node does not hold would be a LIE about what the members
+    /// ratified (§4.10).
+    fn trees(
+        &self,
+    ) -> Option<(
+        std::collections::BTreeMap<String, String>,
+        std::collections::BTreeMap<String, String>,
+        std::collections::BTreeMap<String, String>,
+    )> {
         if !self.unloaded_changes().is_empty() {
             return None;
         }
-        let mut changed: Vec<&Doc> = self
-            .docs
-            .iter()
-            .filter(|d| d.status() != Status::Unchanged)
-            .collect();
-        if changed.is_empty() {
-            return None;
-        }
-        changed.sort_by_key(|d| match (&d.base, d.deleted) {
-            (Some(b), true) => b.path.clone(),
-            _ => d.path.clone(),
-        });
-        let mut out = String::new();
-        for d in changed {
-            match (&d.base, d.deleted) {
-                (None, _) => {
-                    out.push_str(&format!(
-                        "diff --git a/{p} b/{p}\nnew file mode 100644\n",
-                        p = d.path
-                    ));
-                    out.push_str(&unified("", &d.raw, "/dev/null", &format!("b/{}", d.path)));
-                }
-                (Some(b), true) => {
-                    out.push_str(&format!(
-                        "diff --git a/{p} b/{p}\ndeleted file mode 100644\n",
-                        p = b.path
-                    ));
-                    let before = b.raw.as_deref().unwrap_or_default();
-                    out.push_str(&unified(before, "", &format!("a/{}", b.path), "/dev/null"));
-                }
-                (Some(b), false) => {
-                    let renamed = b.path != d.path;
-                    let edited = b.raw.as_deref() != Some(d.raw.as_str());
-                    if renamed {
-                        out.push_str(&format!("diff --git a/{} b/{}\n", b.path, d.path));
-                        if !edited {
-                            // pure rename — git's exact no-content idiom
-                            out.push_str("similarity index 100%\n");
-                        }
-                        out.push_str(&format!(
-                            "rename from {}\nrename to {}\n",
-                            b.path, d.path
-                        ));
-                    } else {
-                        out.push_str(&format!("diff --git a/{p} b/{p}\n", p = d.path));
-                    }
-                    if edited {
-                        out.push_str(&unified(
-                            b.raw.as_deref().unwrap_or_default(),
-                            &d.raw,
-                            &format!("a/{}", b.path),
-                            &format!("b/{}", d.path),
-                        ));
-                    }
+        let mut base = std::collections::BTreeMap::new();
+        let mut after = std::collections::BTreeMap::new();
+        let mut renames = std::collections::BTreeMap::new();
+        for d in &self.docs {
+            if let Some(b) = &d.base {
+                base.insert(b.path.clone(), b.raw.clone().unwrap_or_default());
+            }
+            if d.deleted {
+                continue;
+            }
+            after.insert(d.path.clone(), d.raw.clone());
+            if let Some(b) = &d.base {
+                if b.path != d.path {
+                    renames.insert(d.path.clone(), b.path.clone());
                 }
             }
         }
-        Some(out)
+        Some((base, after, renames))
     }
 
     /// Markdown link markup for a doc: `[name](path)` (copy-link).
@@ -2430,32 +2397,6 @@ impl Wiki {
             format!("[{stem}]({})", d.path)
         })
     }
-}
-
-/// Touched content lines between two texts: inserted + removed, a replaced
-/// run counted once at its wider side.
-fn touched_lines(old: &str, new: &str) -> usize {
-    TextDiff::from_lines(old, new)
-        .ops()
-        .iter()
-        .map(|op| match op {
-            DiffOp::Insert { new_len, .. } => *new_len,
-            DiffOp::Delete { old_len, .. } => *old_len,
-            DiffOp::Replace {
-                old_len, new_len, ..
-            } => (*old_len).max(*new_len),
-            DiffOp::Equal { .. } => 0,
-        })
-        .sum()
-}
-
-/// One file's unified diff with `---`/`+++` names, git hunk format.
-fn unified(old: &str, new: &str, a: &str, b: &str) -> String {
-    TextDiff::from_lines(old, new)
-        .unified_diff()
-        .context_radius(3)
-        .header(a, b)
-        .to_string()
 }
 
 // ---- markdown → blocks ----------------------------------------------------
