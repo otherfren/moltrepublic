@@ -9677,11 +9677,18 @@ export component AppWindow inherits Window {
 
     // Modal: a SEMANTIC link. An agent reading this wiki has no
     // real-world experience - what a document is to another one has to be
-    // written down, and the header is where the index reads it.
+    // written down, and the sentence that asserts it is where it belongs
+    // (wiki_semantic_gaps.md §6). The header stays one click away for the
+    // qualified form, which has no inline shape.
     if WikiState.link-modal-open: ConfirmModal {
         dialog-width: 620px;
         title: Strings.mem-tb-relate;
-        body: WikiState.doc-path;
+        // the subject AND where the write lands, in the line that is
+        // already there - a row of its own would push the buttons out of
+        // a short window at a large app font
+        body: WikiState.doc-path + "  ·  " + (WikiState.link-header
+            ? Strings.mem-link-at-header
+            : (WikiState.editing ? Strings.mem-link-at-cursor : Strings.mem-link-at-end));
         cancel-label: Strings.close-ws-cancel;
         confirm-label: Strings.mem-link-save;
         confirm-enabled: WikiState.link-ready;
@@ -9691,10 +9698,34 @@ export component AppWindow inherits Window {
         }
         confirmed => {
             WikiState.link-commit();
-            WikiState.link-modal-open = false;
+            // a refusal keeps the modal up, carrying its reason - closing
+            // it would drop the draft the member still has to correct
+            if (WikiState.link-error == "") {
+                WikiState.link-modal-open = false;
+            }
         }
         VerticalLayout {
             spacing: Theme.pane-gap;
+            // where the write lands, decided BEFORE the form is filled in
+            HorizontalLayout {
+                spacing: Theme.pane-gap;
+                AppButton {
+                    label: Strings.mem-link-in-text;
+                    primary: !WikiState.link-header;
+                    clicked => {
+                        WikiState.set-link-header(false);
+                    }
+                }
+                AppButton {
+                    label: Strings.mem-link-in-header;
+                    primary: WikiState.link-header;
+                    enabled: WikiState.can-write-header;
+                    clicked => {
+                        WikiState.set-link-header(true);
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; }
+            }
             Text {
                 text: Strings.mem-link-name;
                 color: Theme.dim;
@@ -9726,10 +9757,11 @@ export component AppWindow inherits Window {
                 }
             }
             Rectangle {
-                // the two lists give way on a short window: at a large app
-                // font the dialog would otherwise push its own buttons past
-                // the bottom edge, where they cannot be pressed
-                height: clamp(root.height * 0.18, 80px, 150px);
+                // the two lists give way on a short window AND at a large
+                // app font: every other row grows with the font, so the
+                // dialog would otherwise push its own buttons past the
+                // bottom edge, where they cannot be pressed
+                height: clamp(root.height * 0.18 - (Theme.ui-scale - 1) * 60px, 72px, 150px);
                 background: Theme.panel-2;
                 border-radius: Theme.win95 ? 0px : 8px;
                 border-width: Theme.border-w;
@@ -9784,7 +9816,7 @@ export component AppWindow inherits Window {
             // the point - one document can BE a thing and be PART of
             // another at the same time
             Rectangle {
-                height: clamp(root.height * 0.11, 56px, 96px);
+                height: clamp(root.height * 0.11 - (Theme.ui-scale - 1) * 30px, 48px, 96px);
                 background: Theme.panel-2;
                 border-radius: Theme.win95 ? 0px : 8px;
                 border-width: Theme.border-w;
@@ -9866,6 +9898,28 @@ export component AppWindow inherits Window {
                         WikiState.link-add-custom();
                     }
                 }
+            }
+            // the qualified relation's extra fields - the header's own
+            // reason to exist, so it shows only in header mode
+            if WikiState.link-header: Text {
+                text: Strings.mem-link-qual;
+                color: Theme.dim;
+                font-size: Theme.fs-cap;
+                font-weight: 600;
+            }
+            if WikiState.link-header: AppField {
+                placeholder: Strings.mem-link-ph-qual;
+                text <=> WikiState.link-qualifiers;
+                edited => {
+                    WikiState.set-link-qualifiers(self.text);
+                }
+            }
+            if WikiState.link-error != "": Text {
+                text: WikiState.link-error;
+                color: Theme.warn;
+                font-size: Theme.fs-cap;
+                wrap: word-wrap;
+                preferred-width: 0;
             }
         }
     }

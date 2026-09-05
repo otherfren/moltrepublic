@@ -735,7 +735,8 @@ fn a_document_without_a_header_offers_tags_and_then_wears_them() {
 }
 
 /// The semantic link is reachable from all three places it was asked for,
-/// and it writes the relation into the OPEN document's header.
+/// and its DEFAULT write is an inline claim in the open document's prose
+/// (`wiki_semantic_gaps.md` §6).
 #[cfg(feature = "live-preview")]
 #[test]
 fn a_semantic_link_is_written_from_the_toolbar_the_editor_and_the_navigator() {
@@ -784,23 +785,29 @@ fn a_semantic_link_is_written_from_the_toolbar_the_editor_and_the_navigator() {
     assert_eq!(g.get_link_name().as_str(), "Anna", "the name follows the target");
     g.invoke_link_toggle("is_a".into());
     assert!(g.get_link_ready());
+    assert!(!g.get_link_header(), "the prose is the default form");
     g.invoke_link_commit();
+    assert_eq!(g.get_link_error().as_str(), "", "the write went through");
     g.set_link_modal_open(false);
 
-    let props = g.get_props();
-    let rows: Vec<(String, String)> = (0..props.row_count())
-        .filter_map(|i| props.row_data(i))
-        .map(|p| (p.key.to_string(), p.value.to_string()))
-        .collect();
     assert_eq!(
-        rows,
-        vec![("is_a".to_string(), "Anna".to_string())],
-        "the relation is a header row, and it points at the target"
+        g.get_raw().as_str(),
+        "# A\n\n[[is_a::anna.md|Anna]]\n",
+        "the claim is a sentence, not a header key"
     );
-    assert_eq!(
-        props.row_data(0).expect("one row").link.as_str(),
-        "anna.md",
-        "…as a real link, not as text"
+    assert_eq!(g.get_props().row_count(), 0, "…and the header stays empty");
+    // the preview shows the target and carries the predicate as its claim
+    let spans: Vec<(String, String, String)> = (0..g.get_blocks().row_count())
+        .filter_map(|i| g.get_blocks().row_data(i))
+        .flat_map(|b| {
+            (0..b.spans.row_count())
+                .filter_map(move |i| b.spans.row_data(i))
+                .map(|sp| (sp.text.to_string(), sp.link.to_string(), sp.rel.to_string()))
+        })
+        .collect();
+    assert!(
+        spans.contains(&("Anna".to_string(), "anna.md".to_string(), "is_a".to_string())),
+        "{spans:?}"
     );
 
     // 2) the navigator's own menu opens the file and raises the same modal
@@ -809,12 +816,79 @@ fn a_semantic_link_is_written_from_the_toolbar_the_editor_and_the_navigator() {
     g.invoke_nav_open(row_id("anna.md"));
     g.invoke_link_open("".into());
     g.set_link_modal_open(true);
-    assert!(g.get_can_write_header(), "the subject is the OPEN document");
+    assert!(g.get_can_write_body(), "the subject is the OPEN document");
     assert!(
         !g.get_link_targets().iter().any(|t| t == "anna.md"),
         "a document cannot be its own target"
     );
     g.set_link_modal_open(false);
+}
+
+/// The header stays reachable, as a DELIBERATE second option: the
+/// qualified relation `{to, since, role}` has no inline shape, and a
+/// refusal keeps the modal up with its reason rather than writing.
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_link_modal_switches_to_a_qualified_header_write() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    ui.set_screen(AppScreen::Main);
+    ui.set_selected_surface("memory".into());
+    ui.set_selected_view("brain".into());
+    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: "memory".into(),
+        ..SurfaceTab::default()
+    }])));
+    let _wiki = wire_wiki(&ui);
+    let g = ui.global::<WikiState>();
+    g.set_base_docs(ModelRc::new(VecModel::from(vec![
+        WikiBase { path: "a.md".into(), content: "# A\n".into(), loaded: true },
+        WikiBase { path: "anna.md".into(), content: "# Anna\n".into(), loaded: true },
+    ])));
+    g.set_base_rev(1);
+    g.invoke_base_arrived();
+    let rows = g.get_nav_rows();
+    let a = (0..rows.row_count())
+        .filter_map(|i| rows.row_data(i))
+        .find(|r| r.label.as_str() == "a.md")
+        .expect("nav row")
+        .id;
+    ui.window().set_size(slint::PhysicalSize::new(1400, 900));
+    ui.show().expect("show headless");
+    g.invoke_nav_open(a);
+
+    g.invoke_link_open("".into());
+    g.set_link_modal_open(true);
+    g.invoke_set_link_header(true);
+    assert!(g.get_link_header());
+    g.invoke_set_link_target("anna.md".into());
+    g.invoke_link_toggle("works_at".into());
+
+    // a qualifier line the subset cannot read writes NOTHING and says so
+    g.invoke_set_link_qualifiers("since 2019".into());
+    g.invoke_link_commit();
+    assert_eq!(
+        g.get_link_error().as_str(),
+        ui.global::<Strings>().get_mem_link_err_qsyntax().as_str()
+    );
+    assert_eq!(g.get_raw().as_str(), "# A\n", "the document is untouched");
+
+    g.invoke_set_link_qualifiers("since: 2019, role: CTO".into());
+    assert_eq!(g.get_link_error().as_str(), "", "correcting clears the reason");
+    g.invoke_link_commit();
+    assert_eq!(g.get_link_error().as_str(), "");
+    assert_eq!(
+        g.get_raw().as_str(),
+        "---\nworks_at: {role: \"CTO\", since: 2019, to: \"[[anna.md|Anna]]\"}\n---\n# A\n"
+    );
+    let props = g.get_props();
+    assert!(
+        (0..props.row_count())
+            .filter_map(|i| props.row_data(i))
+            .any(|p| p.key.as_str() == "works_at"),
+        "the infobox shows the qualified relation"
+    );
 }
 
 /// **K6 §4.9.6 in the window**: while the folded base is being fetched the

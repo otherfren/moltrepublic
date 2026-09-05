@@ -1315,6 +1315,21 @@ lexicon! {
     mem_link_own: "Own relation", "Eigene Beziehung";
     mem_link_ph_own: "lives_in", "lives_in";
     mem_link_save: "Link", "Verknüpfen";
+    // where the write lands: the prose by default, the header for the
+    // qualified form (wiki_semantic_gaps.md §6)
+    mem_link_in_text: "In the text", "Im Text";
+    mem_link_in_header: "In the header", "Im Kopf";
+    mem_link_at_cursor: "Lands at the cursor", "Landet an der Schreibmarke";
+    mem_link_at_end: "Lands at the end of the text", "Landet am Ende des Textes";
+    mem_link_at_header: "Lands in the front matter", "Landet im Kopfblock";
+    mem_link_qual: "Details (optional)", "Angaben (optional)";
+    mem_link_ph_qual: "since: 2019, role: CTO", "since: 2019, role: CTO";
+    // the refusals (wiki::LINK_ERR_*), rendered here so the model stays
+    // language-free
+    mem_link_err_header: "Cannot write this header", "Kopfblock nicht schreibbar";
+    mem_link_err_qual: "This relation already holds a plain value", "Diese Beziehung hat schon einen einfachen Wert";
+    mem_link_err_qsyntax: "Details read as key: value", "Angaben lauten schlüssel: wert";
+    mem_link_err_body: "The link would sit in a code block", "Der Link läge in einem Code-Block";
     mem_search_ph: "Search the wiki", "Wiki durchsuchen";
     mem_search_none: "No hit", "Kein Treffer";
     mem_search_building: "Reading the wiki - search answers in a moment", "Wiki wird gelesen - die Suche antwortet gleich";
