@@ -143,6 +143,7 @@ fn org_titles_render_in_the_active_language_from_the_op_placeholder() {
 #[test]
 fn applied_log_lines_carry_their_patch_id() {
     let snap = molt_core::SurfaceSnapshot {
+        wiki_base_pending: None,
         surface: Surface::Memory,
         gated: true,
         applied: vec![

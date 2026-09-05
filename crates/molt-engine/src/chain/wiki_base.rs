@@ -43,6 +43,21 @@ pub(crate) fn commitment(tree: &BTreeMap<String, String>) -> (String, u64) {
     (molt_storage::content_hash(&bytes), size)
 }
 
+/// The commitment an applied Memory payload carries, if it is a folded
+/// cut's base entry.
+pub(crate) fn base_commitment_of(payload: &Value) -> Option<(String, u64)> {
+    (payload.get("op").and_then(Value::as_str) == Some(WIKI_BASE_OP)).then(|| {
+        (
+            payload
+                .get("hash")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            payload.get("size").and_then(Value::as_u64).unwrap_or_default(),
+        )
+    })
+}
+
 /// Fold a memory group into its commitment form: one `wiki_base` entry
 /// first, every non-wiki entry after it in order. `base` is the tree this
 /// node holds for a commitment the group ALREADY carries (empty when it

@@ -737,7 +737,11 @@ impl State {
         };
         let files = molt_core::wiki_fold::parse_patch(patch);
         let paths = molt_core::wiki_fold::touched_paths(&files);
-        let (tree, _) = self.wiki_base();
+        // base-pending: nothing to check the header against, and a
+        // fabricated verdict would be worse than none
+        let Ok((tree, _)) = self.wiki_base() else {
+            return Vec::new();
+        };
         let mut after: std::collections::BTreeMap<String, String> = paths
             .iter()
             .filter_map(|p| tree.get(p).map(|c| (p.clone(), c.clone())))
@@ -1713,8 +1717,14 @@ impl State {
     /// empty founding tree. Served through the fold CACHE
     /// (`docs/memory/knowledge_base_scale.md` §4.1): one code path still
     /// decides the tree — the cache only decides how often it is recomputed.
-    pub(crate) fn wiki_tree(&self) -> std::collections::BTreeMap<String, String> {
-        self.wiki_base().0.into_owned()
+    ///
+    /// # Errors
+    /// Base-pending (K6): the republic committed to a folded base this
+    /// node does not hold yet.
+    pub(crate) fn wiki_tree(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, String>, MoltError> {
+        Ok(self.wiki_base()?.0.into_owned())
     }
 
     /// One surface's applied payloads BY REFERENCE, in fold order: the
@@ -1754,7 +1764,7 @@ impl State {
             p if p.is_empty() || p.ends_with('/') => p,
             p => format!("{p}/"),
         };
-        let (tree, wiki_rev) = self.wiki_base();
+        let (tree, wiki_rev) = self.wiki_base()?;
         let total = u64::try_from(
             tree.range(prefix.clone()..)
                 .take_while(|(p, _)| p.starts_with(&prefix))
@@ -1795,7 +1805,7 @@ impl State {
     pub(crate) fn cmd_wiki_get(&mut self, path: String) -> Result<Reply, MoltError> {
         self.require_feature(Surface::Memory)?;
         self.refresh_wiki_cache();
-        let (tree, wiki_rev) = self.wiki_base();
+        let (tree, wiki_rev) = self.wiki_base()?;
         let Some(content) = tree.get(&path) else {
             return Err(MoltError::BadPayload(format!("no such document: {path}")));
         };
@@ -1852,7 +1862,7 @@ impl State {
             n => n.clamp(1, WIKI_PAGE_MAX),
         })
         .unwrap_or(100);
-        let wiki_rev = self.wiki_base().1;
+        let wiki_rev = self.wiki_base()?.1;
         let graph = self
             .wiki_graph
             .as_ref()
@@ -1919,7 +1929,7 @@ impl State {
             n => n.min(WIKI_NEIGHBOR_CAP),
         })
         .unwrap_or(500);
-        let wiki_rev = self.wiki_base().1;
+        let wiki_rev = self.wiki_base()?.1;
         let graph = self
             .wiki_graph
             .as_ref()
@@ -2000,7 +2010,7 @@ impl State {
             self.spawn_wiki_index_build();
             return Err(self.index_building());
         }
-        let index_rev = self.wiki_base().1;
+        let index_rev = self.wiki_base()?.1;
         let graph = self
             .wiki_graph
             .as_ref()
@@ -2050,7 +2060,7 @@ impl State {
         })
         .unwrap_or(100);
         let start = usize::try_from(cursor).unwrap_or(0);
-        let wiki_rev = self.wiki_base().1;
+        let wiki_rev = self.wiki_base()?.1;
         let index = self
             .wiki_search
             .as_ref()
@@ -2097,7 +2107,9 @@ impl State {
         };
         self.refresh_wiki_cache();
         let epoch = self.applied_epoch;
-        let tree = self.wiki_base().0.into_owned();
+        let Ok(tree) = self.wiki_tree() else {
+            return; // base-pending: there is no tree to index yet
+        };
         let staging = self.wiki_index_staging.clone();
         self.wiki_index_building = Some(epoch);
         tokio::spawn(async move {
@@ -2133,7 +2145,9 @@ impl State {
     pub(crate) fn build_wiki_indexes_now(&mut self) {
         self.refresh_wiki_cache();
         let epoch = self.applied_epoch;
-        let tree = self.wiki_base().0.into_owned();
+        let Ok(tree) = self.wiki_tree() else {
+            return; // base-pending: there is no tree to index yet
+        };
         self.wiki_graph = Some(wiki_index::graph::WikiGraph::build(&tree));
         self.wiki_graph_epoch = epoch;
         match wiki_index::search::WikiSearch::build(&tree) {
@@ -2177,7 +2191,7 @@ impl State {
     /// The honest refusal while a build runs: an empty page would read as
     /// "nothing matched", which is a different claim.
     fn index_building(&self) -> MoltError {
-        let total = u64::try_from(self.wiki_base().0.len()).unwrap_or(u64::MAX);
+        let total = self.wiki_base().map_or(0, |(t, _)| u64::try_from(t.len()).unwrap_or(u64::MAX));
         MoltError::IndexBuilding { done: 0, total }
     }
 
@@ -2246,23 +2260,57 @@ impl State {
     /// `snapshot(&self)` read it without a mutable borrow.
     pub(crate) fn wiki_base(
         &self,
-    ) -> (
-        std::borrow::Cow<'_, std::collections::BTreeMap<String, String>>,
-        u64,
-    ) {
+    ) -> Result<
+        (
+            std::borrow::Cow<'_, std::collections::BTreeMap<String, String>>,
+            u64,
+        ),
+        MoltError,
+    > {
         if let Some(c) = self.wiki_cache.as_ref() {
             if c.epoch == self.applied_epoch && (c.legacy, c.chain) == self.memory_lens() {
-                return (std::borrow::Cow::Borrowed(&c.tree), c.rev);
+                return Ok((std::borrow::Cow::Borrowed(&c.tree), c.rev));
             }
         }
+        let (tree, rev) = self.fold_wiki_from_base()?;
+        Ok((std::borrow::Cow::Owned(tree), rev))
+    }
+
+    /// The fold itself. A folded cut (K6) replaced the patches below it
+    /// with ONE commitment, so the fold STARTS at the tree that commitment
+    /// names - and refuses outright where this holder does not hold it.
+    /// Folding the rest onto nothing would produce a plausible, wrong tree,
+    /// and the supersede walk would then retire every pending patch that
+    /// touched a document the cut had folded away.
+    fn fold_wiki_from_base(
+        &self,
+    ) -> Result<(std::collections::BTreeMap<String, String>, u64), MoltError> {
         let mut tree = std::collections::BTreeMap::new();
         let mut rev = 0u64;
         for payload in self.applied_payloads(Surface::Memory) {
+            if let Some((want, size)) = crate::chain::base_commitment_of(payload) {
+                let held = self
+                    .chain
+                    .wiki_base
+                    .as_ref()
+                    .filter(|base| crate::chain::wiki_base_commitment(base).0 == want);
+                let Some(base) = held else {
+                    return Err(MoltError::WikiBasePending {
+                        have: 0,
+                        size,
+                        want,
+                    });
+                };
+                // the commitment is a base, not a patch: `rev` counts
+                // applied patches and must not move for it
+                tree.clone_from(base);
+                continue;
+            }
             if molt_core::wiki_fold::fold_one(&mut tree, payload) {
                 rev += 1;
             }
         }
-        (std::borrow::Cow::Owned(tree), rev)
+        Ok((tree, rev))
     }
 
     /// Bring the fold cache up to the current logs: EXTEND it by the
@@ -2293,16 +2341,29 @@ impl State {
                         .skip(c.chain),
                 )
                 .map(|(_, v)| v);
+            // a folded cut (K6) appears in the tail exactly once: the
+            // extension cannot verify it against the held base, so the
+            // whole fold is redone through the checking path
+            let mut folded = false;
             for payload in tail {
+                if crate::chain::base_commitment_of(payload).is_some() {
+                    folded = true;
+                    break;
+                }
                 if molt_core::wiki_fold::fold_one(&mut c.tree, payload) {
                     c.rev = c.rev.saturating_add(1);
                 }
             }
-            c.legacy = legacy;
-            c.chain = chain;
-        } else {
-            let (tree, rev) = self.wiki_base();
-            cache = Some(crate::WikiCache {
+            if folded {
+                cache = None;
+            } else {
+                c.legacy = legacy;
+                c.chain = chain;
+            }
+        }
+        if cache.is_none() {
+            // base-pending answers no reads at all, so it caches nothing
+            cache = self.wiki_base().ok().map(|(tree, rev)| crate::WikiCache {
                 tree: tree.into_owned(),
                 rev,
                 legacy,
@@ -2388,8 +2449,14 @@ impl State {
         let live: std::collections::HashSet<u64> = cands.iter().copied().collect();
         self.wiki_pending.retain(|id, _| live.contains(id));
         self.refresh_wiki_cache();
+        // BASE-PENDING IS A NO-OP HERE, and this is the single most
+        // important line of K6 (§4.9.6): run against a base this node does
+        // not hold, every pending patch fails to apply and would be retired
+        // as superseded - silent, unrecoverable data loss on a rejoiner.
+        let Ok((tree, _)) = self.wiki_base() else {
+            return;
+        };
         let stale: Vec<u64> = {
-            let (tree, _) = self.wiki_base();
             cands
                 .iter()
                 .copied()
@@ -2543,11 +2610,20 @@ impl State {
         // projection GUI and MCP share (shared_memory_real.md WP-B)
         // the COUNT, not the tree (§4.10): the count is free off the
         // cached fold, the tree was a full copy per read
-        let (wiki_docs, wiki_rev) = if surface == Surface::Memory {
-            let (tree, rev) = self.wiki_base();
-            (u64::try_from(tree.len()).unwrap_or(u64::MAX), rev)
+        let (wiki_docs, wiki_rev, wiki_base_pending) = if surface == Surface::Memory {
+            match self.wiki_base() {
+                Ok((tree, rev)) => (u64::try_from(tree.len()).unwrap_or(u64::MAX), rev, None),
+                // K6: no tree yet, and the surface says so rather than
+                // reporting an empty wiki
+                Err(molt_core::MoltError::WikiBasePending { have, size, .. }) => (
+                    0,
+                    0,
+                    Some(molt_core::WikiBaseProgress { have, size }),
+                ),
+                Err(_) => (0, 0, None),
+            }
         } else {
-            (0, 0)
+            (0, 0, None)
         };
         SurfaceSnapshot {
             surface,
@@ -2565,6 +2641,7 @@ impl State {
             },
             wiki_docs,
             wiki_rev,
+            wiki_base_pending,
             // the chat is one window now — nothing is filed away, so there
             // is no second view to offer or hide. Kept on the wire (always
             // false) rather than removed, so an older reader that still asks

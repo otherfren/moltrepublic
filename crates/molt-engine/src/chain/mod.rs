@@ -57,6 +57,10 @@ pub(crate) use verify::{
 };
 #[cfg(test)]
 pub(crate) use verify::block_hash;
+/// The ratified wiki as the fold produces it: path -> document.
+pub(crate) type WikiTree = std::collections::BTreeMap<String, String>;
+
+pub(crate) use wiki_base::{base_commitment_of, commitment as wiki_base_commitment};
 pub(crate) use governance::PendingApproval;
 pub(crate) use membership::{NostrRekey, PendingRecovery, RecoverProgressReport};
 

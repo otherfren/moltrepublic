@@ -1435,6 +1435,14 @@ impl State {
         let (checkpoint_blob, chain) = opened.read_chain().map_err(|e| {
             MoltError::Engine(format!("this workspace's chain is unreadable - {e}"))
         })?;
+        // K6: the folded wiki base, if this holder keeps one. Unreadable is
+        // NOT an open refusal - the tree is a re-fetchable cache of
+        // threshold-signed content, unlike the chain, which is the trust
+        // root itself (§4.9.9)
+        let stored_wiki_base = opened.read_wiki_base().unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "the stored wiki base is unreadable - refetching");
+            None
+        });
         // point of no return: swap the actor state to the new workspace
         self.close_active_storage();
         self.reset_workspace_state();
@@ -1482,6 +1490,10 @@ impl State {
             self.set_checkpoint_blob(checkpoint_blob);
             self.adopt_chain(chain);
         }
+        // …and the tree behind the chain's own commitment. Checked against
+        // it here: bytes that do not answer the commitment are deleted, and
+        // the holder goes base-pending rather than reading a wrong wiki.
+        self.adopt_wiki_base(stored_wiki_base);
         // the wiki indexes are built OFF the actor and EAGERLY: by the time
         // a human searches, the answer is usually already there, and the
         // first search does not pay for parsing the whole base (§4.5/§4.6)
@@ -2146,7 +2158,7 @@ impl State {
             return Err(MoltError::WikiExport("an export is already running"));
         }
         // the wiki IS the open workspace's state: no workspace open, no tree
-        let tree = self.wiki_tree();
+        let tree = self.wiki_tree()?;
         if tree.is_empty() {
             return Err(MoltError::WikiExport("the wiki is empty"));
         }

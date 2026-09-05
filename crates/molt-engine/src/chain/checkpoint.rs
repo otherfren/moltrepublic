@@ -236,6 +236,51 @@ impl State {
         self.chain_sign_and_gossip_approval(id);
     }
 
+    /// K6: take the bytes read from `wiki_base.bin` as this holder's
+    /// folded base - only if they answer the commitment the chain carries.
+    /// Anything else is deleted: the tree is a cache of threshold-signed
+    /// content, so damaged bytes mean "fetch again", never a refused
+    /// workspace (§4.9.9).
+    pub(crate) fn adopt_wiki_base(&mut self, bytes: Option<Vec<u8>>) {
+        self.chain.wiki_base = None;
+        let Some(bytes) = bytes else { return };
+        let Some((want, _)) = self.wiki_base_committed() else {
+            // nothing commits to a base any more - the file is residue
+            self.persist_wiki_base(None);
+            return;
+        };
+        let have = molt_storage::content_hash(&bytes);
+        let tree = molt_core::wiki_fold::wiki_base_from_canonical_bytes(&bytes);
+        match tree {
+            Ok(tree) if have == want => self.chain.wiki_base = Some(tree),
+            Ok(_) => {
+                tracing::warn!(%have, %want, "the stored wiki base is not the committed one - dropping it");
+                self.persist_wiki_base(None);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "the stored wiki base does not parse - dropping it");
+                self.persist_wiki_base(None);
+            }
+        }
+    }
+
+    /// The base commitment this holder's own projection carries (K6).
+    pub(crate) fn wiki_base_committed(&self) -> Option<(String, u64)> {
+        self.applied_payloads(Surface::Memory)
+            .find_map(super::wiki_base::base_commitment_of)
+    }
+
+    /// Write the folded base to disk (`None` drops it). Returns whether it
+    /// is durable - a cut must not forget the patches it folded away while
+    /// the tree is only in memory.
+    pub(crate) fn persist_wiki_base(&self, tree: Option<&std::collections::BTreeMap<String, String>>) -> bool {
+        let Some(active) = &self.active else {
+            return true;
+        };
+        let bytes = tree.map(molt_core::wiki_fold::wiki_base_canonical_bytes);
+        active.handle.persist_wiki_base_blocking(bytes)
+    }
+
     /// WP4b: a served blob arrives ahead of its anchor. Stash it (runtime
     /// only) after the cheap forgery check — the REAL verification happens
     /// in [`State::try_adopt_from_blob`] once the anchor block is here.

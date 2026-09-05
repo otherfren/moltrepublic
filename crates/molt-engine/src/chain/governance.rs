@@ -595,8 +595,20 @@ impl State {
                 // NOT persisted here: every caller of `after_block_applied`
                 // writes the chain once after it (the seal, the tie-break,
                 // the catch-up batch), and the cut is part of that write
-                match self.own_checkpoint_state(upto, folded) {
-                    Ok(blob) => {
+                match self.own_cut_state(upto, folded) {
+                    // K6: the folded tree reaches the DISK before the
+                    // patches that produce it are dropped. Losing that
+                    // order once loses the wiki: the blocks are gone and
+                    // the commitment names bytes nobody kept.
+                    Ok((_, Some(tree))) if !self.persist_wiki_base(Some(&tree)) => {
+                        tracing::error!(
+                            "the folded wiki base did not reach the disk - keeping full history"
+                        );
+                    }
+                    Ok((blob, tree)) => {
+                        if let Some(tree) = tree {
+                            self.chain.wiki_base = Some(tree);
+                        }
                         self.set_checkpoint_blob(Some(blob));
                         self.chain.blocks.retain(|b| b.height >= anchor_height);
                         self.apply_chain_to_state();
@@ -761,29 +773,43 @@ impl State {
         upto: u64,
         folded: bool,
     ) -> Result<molt_core::CheckpointState, String> {
+        Ok(self.own_cut_state(upto, folded)?.0)
+    }
+
+    /// The cut's state AND, for a folded one, the tree it commits to - the
+    /// bytes this holder has to keep once the patches that produce them are
+    /// dropped (K6).
+    ///
+    /// # Errors
+    /// The projection cannot be recomputed, or the fold needs a base this
+    /// holder does not hold.
+    pub(crate) fn own_cut_state(
+        &self,
+        upto: u64,
+        folded: bool,
+    ) -> Result<(molt_core::CheckpointState, Option<WikiTree>), String> {
         let mut state = match &self.chain.checkpoint_blob {
             None => checkpoint_state(&self.chain.blocks, upto)?,
             // the anchor block in chain[0] is state-neutral for the fold
             Some(blob) => fold_state(blob.clone(), &self.chain.blocks, upto)?,
         };
-        if folded {
-            // K6: the shared memory as ONE commitment. Every signer runs
-            // this same summary over its own projection, which is what
-            // makes a folded cut sign-what-you-see.
-            let empty = std::collections::BTreeMap::new();
-            super::wiki_base::summarize_state(
-                &mut state,
-                self.held_wiki_base().unwrap_or(&empty),
-            )?;
+        if !folded {
+            return Ok((state, None));
         }
-        Ok(state)
+        // K6: the shared memory as ONE commitment. Every signer runs this
+        // same summary over its own projection, which is what makes a
+        // folded cut sign-what-you-see.
+        let empty = WikiTree::new();
+        let tree =
+            super::wiki_base::summarize_state(&mut state, self.held_wiki_base().unwrap_or(&empty))?;
+        Ok((state, Some(tree)))
     }
 
     /// The ratified wiki tree this holder keeps for its blob's commitment
     /// (K6). `None` where there is nothing to hold - or where the tree is
     /// still being fetched, which is why a fold refuses rather than
     /// inventing an empty base.
-    pub(crate) fn held_wiki_base(&self) -> Option<&std::collections::BTreeMap<String, String>> {
+    pub(crate) fn held_wiki_base(&self) -> Option<&WikiTree> {
         self.chain.wiki_base.as_ref()
     }
 

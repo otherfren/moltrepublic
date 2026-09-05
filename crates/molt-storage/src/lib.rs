@@ -102,6 +102,11 @@ pub(crate) const READ_CAP_STATE: u64 =
 pub(crate) const READ_CAP_SEGMENT: u64 =
     SEGMENT_ROTATE_BYTES + (FRAME_HEADER_LEN as u64) + (NONCE_LEN as u64) + (FRAME_MAX_LEN as u64);
 pub(crate) const READ_CAP_CONTENT: u64 = 16 * 1024 * 1024; // wiki draft / logo files
+/// The folded wiki base (K6): unlike every other state file this one is
+/// deliberately not frame-bounded — the knowledge base is the content, and
+/// `knowledge_base_scale.md` §3 sizes it at 100 MiB. The cap is a local
+/// DoS ceiling on a damaged or planted file, not a product limit.
+pub(crate) const READ_CAP_WIKI_BASE: u64 = 512 * 1024 * 1024;
 
 /// The ONE sanctioned whole-file read (L8): metadata-checked against the
 /// cap before the bytes are touched. An over-cap file surfaces as
@@ -139,6 +144,16 @@ const CHAIN_SEGMENT: u64 = u64::MAX - 2;
 /// AAD segment number that marks the `log/keys.state` frame (the per-segment
 /// log key table — WP4a, [`segkeys`]).
 const KEYS_SEGMENT: u64 = u64::MAX - 3;
+/// AAD segment number that marks the `wiki_base.bin` frames (K6: the folded
+/// wiki tree a compaction cut committed to).
+const WIKI_BASE_SEGMENT: u64 = u64::MAX - 4;
+/// The lowest reserved marker — a log file numbered at or above it is
+/// ignored (see [`list_sorted`]).
+const RESERVED_SEGMENT_FLOOR: u64 = WIKI_BASE_SEGMENT;
+/// Plaintext per wiki-base frame. The AEAD tag rides INSIDE the frame's
+/// own length field, so a full [`FRAME_MAX_LEN`] chunk would not fit the
+/// frame it is written into.
+const WIKI_BASE_CHUNK: u32 = FRAME_MAX_LEN - 4096;
 
 /// The on-disk shape of `chain.state` (WP4b): historically a bare block
 /// array; a PRUNED holder stores the checkpoint blob next to its suffix.
@@ -1619,6 +1634,72 @@ impl OpenedWorkspace {
         write_atomic(&self.dir, "chain.state", &frame, true)
     }
 
+    /// **K6: the folded wiki base**, sealed at rest like every other state
+    /// file. The bytes are [`molt_core::wiki_fold::wiki_base_canonical_bytes`]
+    /// — the exact preimage of the commitment the chain carries, so a
+    /// reader can check what it loaded against the chain and delete it if
+    /// it does not match. Written as consecutive frames because a knowledge
+    /// base outgrows the single-frame ceiling every other state file
+    /// respects. NOT part of an export: it is a re-fetchable cache, and a
+    /// backup should not carry the whole wiki twice.
+    pub fn write_wiki_base(&self, bytes: &[u8]) -> Result<(), StorageError> {
+        let key = wiki_base_key(&self.key, &self.id);
+        let chunk = usize::try_from(WIKI_BASE_CHUNK).unwrap_or(usize::MAX);
+        let mut out = Vec::with_capacity(bytes.len() + 128);
+        // an EMPTY base is still a base (a republic can ratify a cut with
+        // no documents left), so one empty frame is written for it
+        for (i, part) in bytes.chunks(chunk).chain(bytes.is_empty().then_some(&[][..])).enumerate() {
+            let seq = u64::try_from(i).unwrap_or(u64::MAX);
+            out.extend_from_slice(&encode_frame(&key, &self.id, WIKI_BASE_SEGMENT, seq, part)?);
+        }
+        write_atomic(&self.dir, "wiki_base.bin", &out, true)
+    }
+
+    /// The stored wiki base, or `None` when this holder keeps none.
+    ///
+    /// # Errors
+    /// Unreadable, over the cap, or a frame that does not authenticate.
+    pub fn read_wiki_base(&self) -> Result<Option<Vec<u8>>, StorageError> {
+        let path = self.dir.join("wiki_base.bin");
+        let data = match read_capped(&path, READ_CAP_WIKI_BASE, "wiki_base.bin") {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(StorageError::Corrupt(format!("reading wiki_base.bin: {e}"))),
+        };
+        let key = wiki_base_key(&self.key, &self.id);
+        let (frames, torn) = split_frames(&data);
+        if torn.is_some() {
+            return Err(StorageError::Corrupt("wiki_base.bin is torn".to_string()));
+        }
+        let mut out = Vec::with_capacity(data.len());
+        for (i, frame) in frames.iter().enumerate() {
+            let seq = u64::try_from(i).unwrap_or(u64::MAX);
+            out.extend_from_slice(&decrypt_frame(
+                &key,
+                &self.id,
+                WIKI_BASE_SEGMENT,
+                seq,
+                frame.nonce,
+                frame.ciphertext,
+            )?);
+        }
+        Ok(Some(out))
+    }
+
+    /// Drop the stored wiki base — the answer to bytes that fail their
+    /// commitment (§4.9.9): the tree is a cache of threshold-signed
+    /// content, so a damaged one is re-fetched, never a refused workspace.
+    ///
+    /// # Errors
+    /// The file exists but cannot be removed.
+    pub fn remove_wiki_base(&self) -> Result<(), StorageError> {
+        match fs::remove_file(self.dir.join("wiki_base.bin")) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(StorageError::Corrupt(format!("removing wiki_base.bin: {e}"))),
+        }
+    }
+
     /// Read every envelope with `seq >= from_seq` from the log — the
     /// log-backed outbox source (transport concept §2). Seq is positional
     /// (frame k of the whole log is seq k), so frames before `from_seq`
@@ -1672,6 +1753,11 @@ impl OpenedWorkspace {
 /// transport key).
 fn chain_state_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
     Zeroizing::new(hkdf32(ws_key, "molt-chain-state", id))
+}
+
+/// The `wiki_base.bin` sub-key (K6).
+fn wiki_base_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    Zeroizing::new(hkdf32(ws_key, "molt-wiki-base", id))
 }
 
 /// The `transport.state` sub-key.
@@ -1877,7 +1963,7 @@ fn list_sorted(dir: &Path, ext: &str) -> Vec<(u64, PathBuf)> {
                 // transport, chain, keys): a planted file up there would
                 // become the active segment under a marker's domain, and
                 // its successor number overflows — ignore it (review S5)
-                if no >= KEYS_SEGMENT {
+                if no >= RESERVED_SEGMENT_FLOOR {
                     tracing::warn!(path = %path.display(), "ignoring a file with a reserved number");
                     continue;
                 }
@@ -2679,6 +2765,13 @@ enum WriterMsg {
         blocks: Vec<molt_core::ChainBlock>,
         ack: mpsc::SyncSender<bool>,
     },
+    /// K6: persist (or drop, on `None`) the folded wiki base. Same blocking
+    /// ack as the chain: a cut that dropped the patches has to know the tree
+    /// reached the disk before it forgets them.
+    PersistWikiBase {
+        bytes: Option<Vec<u8>>,
+        ack: mpsc::SyncSender<bool>,
+    },
     Close(mpsc::SyncSender<()>),
 }
 
@@ -2990,6 +3083,22 @@ impl StorageHandle {
                 blocks,
                 ack: ack_tx,
             })
+            .is_err()
+        {
+            return false; // the writer is gone: nothing reached the disk
+        }
+        ack_rx.recv().unwrap_or(false)
+    }
+
+    /// K6: persist the folded wiki base (`None` drops it), acking when
+    /// durable. The bytes are the canonical preimage of the commitment the
+    /// chain carries.
+    #[must_use]
+    pub fn persist_wiki_base_blocking(&self, bytes: Option<Vec<u8>>) -> bool {
+        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
+        if self
+            .tx
+            .send(WriterMsg::PersistWikiBase { bytes, ack: ack_tx })
             .is_err()
         {
             return false; // the writer is gone: nothing reached the disk
@@ -3345,6 +3454,18 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                             ws.write_chain(blob.as_ref(), &blocks).and_then(|()| ws.sync())
                         {
                             fail(&failed_flag, "chain.state write", &e);
+                            ok = false;
+                        }
+                        let _ = ack.send(ok);
+                    }
+                    Ok(WriterMsg::PersistWikiBase { bytes, ack }) => {
+                        let wrote = match &bytes {
+                            Some(b) => ws.write_wiki_base(b),
+                            None => ws.remove_wiki_base(),
+                        };
+                        let mut ok = true;
+                        if let Err(e) = wrote.and_then(|()| ws.sync()) {
+                            fail(&failed_flag, "wiki_base.bin write", &e);
                             ok = false;
                         }
                         let _ = ack.send(ok);
@@ -4261,6 +4382,40 @@ mod tests {
         // …and the file is still there, untouched, for the build that wrote it
         let after = fs::read(dir.join("transport.state")).expect("still there");
         assert_eq!(after, frame, "the refusal must not have rewritten it");
+    }
+
+    /// K6: the folded wiki base round-trips through its own sealed file,
+    /// across the single-frame ceiling every other state file lives under -
+    /// the knowledge base is the content, and a 100 MiB tree is the point.
+    #[test]
+    fn the_wiki_base_round_trips_across_frames() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let ws = create_workspace(tmp.path(), &seed, &founded(42)).expect("create");
+        assert_eq!(ws.read_wiki_base().expect("read"), None, "no base, no file");
+
+        // an empty base is still a base
+        ws.write_wiki_base(&[]).expect("write empty");
+        assert_eq!(ws.read_wiki_base().expect("read"), Some(Vec::new()));
+
+        // …and one larger than a single frame comes back byte-identical
+        let big: Vec<u8> = (0..usize::try_from(WIKI_BASE_CHUNK).unwrap_or(0) + 4096)
+            .map(|i| u8::try_from(i % 251).unwrap_or(0))
+            .collect();
+        ws.write_wiki_base(&big).expect("write big");
+        assert_eq!(ws.read_wiki_base().expect("read"), Some(big));
+
+        // a damaged base is refused, not half-returned
+        let path = ws.dir().join("wiki_base.bin");
+        let mut raw = fs::read(&path).expect("raw");
+        let n = raw.len();
+        raw[n - 1] ^= 0xff;
+        fs::write(&path, &raw).expect("tamper");
+        assert!(ws.read_wiki_base().is_err());
+
+        ws.remove_wiki_base().expect("remove");
+        assert_eq!(ws.read_wiki_base().expect("read"), None);
+        ws.remove_wiki_base().expect("removing twice is not an error");
     }
 
     /// WP4b stage 5: the FIRST pruned chain persist raises the manifest

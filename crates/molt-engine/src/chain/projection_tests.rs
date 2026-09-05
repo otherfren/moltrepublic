@@ -507,7 +507,7 @@ fn a_sealed_wiki_patch_supersedes_overlapping_pending_patches() {
     let mut walter = chain_signer("walter", &b, b.blocks.clone());
     seal_wiki(&mut walter, &b, "petra", 10, wp(ADD_A));
     assert_eq!(
-        walter.wiki_tree().get("a.md").map(String::as_str),
+        walter.wiki_tree().expect("a tree").get("a.md").map(String::as_str),
         Some("hello\nworld\n"),
         "the fold serves the sealed base"
     );
@@ -537,11 +537,11 @@ fn a_sealed_wiki_patch_supersedes_overlapping_pending_patches() {
     // …and the disjoint one still seals and folds
     seal_wiki(&mut walter, &b, "petra", 13, wp(ADD_B));
     assert_eq!(
-        walter.wiki_tree().get("b.md").map(String::as_str),
+        walter.wiki_tree().expect("a tree").get("b.md").map(String::as_str),
         Some("disjoint\n")
     );
     assert_eq!(
-        walter.wiki_tree().get("a.md").map(String::as_str),
+        walter.wiki_tree().expect("a tree").get("a.md").map(String::as_str),
         Some("hallo\nworld\n")
     );
 
@@ -1066,7 +1066,7 @@ fn the_fold_cache_equals_a_fresh_fold_after_every_block() {
     let mut walter = chain_signer("walter", &b, b.blocks.clone());
     for (id, patch) in [(10u64, ADD_A), (11, ADD_B), (12, EDIT_A), (13, RENAME_A)] {
         seal_wiki(&mut walter, &b, "petra", id, wp(patch));
-        let (tree, rev) = walter.wiki_base();
+        let (tree, rev) = walter.wiki_base().expect("a tree");
         assert_eq!(
             (tree.into_owned(), rev),
             fresh(&walter),
@@ -1075,7 +1075,7 @@ fn the_fold_cache_equals_a_fresh_fold_after_every_block() {
         // …and a DROPPED cache serves the same base: the fallback fold is
         // the same function, so a missed refresh costs time, never a tree
         walter.wiki_cache = None;
-        let (tree, rev) = walter.wiki_base();
+        let (tree, rev) = walter.wiki_base().expect("a tree");
         assert_eq!(
             (tree.into_owned(), rev),
             fresh(&walter),
@@ -1084,16 +1084,16 @@ fn the_fold_cache_equals_a_fresh_fold_after_every_block() {
         walter.refresh_wiki_cache();
     }
     assert_eq!(
-        walter.wiki_tree().get("c.md").map(String::as_str),
+        walter.wiki_tree().expect("a tree").get("c.md").map(String::as_str),
         Some("hallo\nworld\n"),
         "add, edit and rename all folded"
     );
-    assert_eq!(walter.wiki_base().1, 4, "four patches applied");
+    assert_eq!(walter.wiki_base().expect("a tree").1, 4, "four patches applied");
 
     // a wholesale re-projection can REMOVE entries — the cache must refold
     // across it rather than extend
     walter.apply_chain_to_state();
-    let (tree, rev) = walter.wiki_base();
+    let (tree, rev) = walter.wiki_base().expect("a tree");
     assert_eq!(
         (tree.into_owned(), rev),
         fresh(&walter),

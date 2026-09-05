@@ -6076,6 +6076,22 @@ pub struct SurfaceSnapshot {
     /// `base_rev` compares against. Additive with a default.
     #[serde(default)]
     pub wiki_rev: u64,
+    /// Memory only, K6: the folded base this holder is still fetching
+    /// (`docs/memory/knowledge_base_scale.md` §4.9.6). `Some` means the
+    /// wiki answers NOTHING yet - the surface shows the progress instead
+    /// of an empty tree, because an empty tree would read as "the republic
+    /// deleted its knowledge base".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wiki_base_pending: Option<WikiBaseProgress>,
+}
+
+/// How much of the committed shared-memory base is here (K6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiBaseProgress {
+    /// Bytes held so far.
+    pub have: u64,
+    /// Bytes the chain's commitment names.
+    pub size: u64,
 }
 
 /// One document of the folded Shared-Memory base.
@@ -6777,6 +6793,22 @@ pub enum MoltError {
     /// (`docs/memory/knowledge_base_scale.md` §4.5/§4.6). Distinct from
     /// [`MoltError::Engine`] on purpose: this is "come back in a moment",
     /// not a fault, and an empty result would be a lie.
+    /// The republic cut its history and committed to a shared-memory base
+    /// this node does not hold yet (`docs/memory/knowledge_base_scale.md`
+    /// §4.9.6). Distinct from an empty wiki on purpose: "nothing here"
+    /// would read as if the republic had deleted its knowledge base.
+    #[error("the shared memory base is still arriving ({have} of {size} bytes)")]
+    WikiBasePending {
+        /// Bytes held so far.
+        have: u64,
+        /// Bytes the commitment names.
+        size: u64,
+        /// The commitment itself, for the log.
+        want: String,
+    },
+    /// The wiki index is still being built off the actor
+    /// (`docs/memory/knowledge_base_scale.md` §4.5/§4.6): "come back in a
+    /// moment", not a fault - an empty result would be a lie.
     #[error("the wiki index is still building ({done} of {total} documents)")]
     IndexBuilding {
         /// Documents indexed so far.

@@ -646,7 +646,7 @@ fn a_checkpoint_cut_keeps_the_wiki_fold_identical() {
         b.push(block);
     }
     let full = chain_signer("walter", &b, b.blocks.clone());
-    let full_tree = full.wiki_tree();
+    let full_tree = full.wiki_tree().expect("a tree");
     assert_eq!(
         full_tree.get("a.md").map(String::as_str),
         Some("hallo\nworld\n")
@@ -1021,4 +1021,114 @@ fn a_folded_cut_without_its_base_is_refused_by_name() {
     let err = verify_suffix_chain(&blob, &suffix, &b.republic_id, None)
         .expect_err("no base, no verdict");
     assert!(err.contains("shared memory base"), "{err}");
+}
+
+/// **K6 keystone: the cut must not eat the wiki.** A folded cut drops the
+/// patches that produced the tree, so the tree itself has to survive the
+/// prune - and where it does not, every read says so instead of reporting
+/// an empty knowledge base.
+#[test]
+fn a_folded_cut_keeps_the_wiki_readable_and_says_so_when_it_cannot() {
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    b.commit_wiki(1, "a.md", "A", &["petra", "walter"]);
+    b.commit_wiki(2, "notes/b.md", "B", &["petra", "walter"]);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    assert_eq!(walter.wiki_tree().expect("a tree").len(), 2);
+
+    let hash = checkpoint_state_hash(
+        &walter.own_checkpoint_state(2, true).expect("folded projection"),
+    );
+    walter.receive_checkpoint_proposal(40, 2, &hash, true);
+    let change = ChainChange::CheckpointFolded {
+        upto: 2,
+        state_hash: hash,
+    };
+    let bytes = approval_bytes(&b.republic_id, 3, &change);
+    let petra_sig = identity_sign(b.key("petra"), &bytes);
+    walter.receive_approval(40, "petra", 3, &petra_sig);
+    assert_eq!(walter.chain.blocks.len(), 1, "history below the cut is dropped");
+
+    // the patches are gone, the documents are not
+    let tree = walter.wiki_tree().expect("the folded base survives the cut");
+    assert_eq!(tree.get("a.md").map(String::as_str), Some("A\n"));
+    assert_eq!(tree.get("notes/b.md").map(String::as_str), Some("B\n"));
+
+    // …and without the base every read refuses BY NAME, rather than
+    // answering an empty wiki
+    let held = walter.chain.wiki_base.take().expect("the cut kept the tree");
+    let err = walter.wiki_tree().expect_err("no base, no tree");
+    assert!(
+        matches!(err, molt_core::MoltError::WikiBasePending { .. }),
+        "{err}"
+    );
+    let snap = walter.snapshot(Surface::Memory, None, None);
+    assert_eq!(snap.wiki_docs, 0);
+    assert_eq!(
+        snap.wiki_base_pending.map(|p| p.size),
+        Some(
+            u64::try_from(molt_core::wiki_fold::wiki_base_canonical_bytes(&held).len())
+                .expect("size")
+        ),
+        "the surface shows what is missing, not an empty wiki"
+    );
+
+    // the bytes come back: matching ones are adopted, anything else is not
+    walter.adopt_wiki_base(Some(molt_core::wiki_fold::wiki_base_canonical_bytes(&held)));
+    assert_eq!(walter.wiki_tree().expect("adopted").len(), 2);
+    walter.adopt_wiki_base(Some(b"not a base".to_vec()));
+    assert!(walter.wiki_tree().is_err(), "garbage is not the base");
+    let mut other = held.clone();
+    other.insert("c.md".to_string(), "C\n".to_string());
+    walter.adopt_wiki_base(Some(molt_core::wiki_fold::wiki_base_canonical_bytes(&other)));
+    assert!(
+        walter.wiki_tree().is_err(),
+        "a well-formed tree that is not the committed one is refused too"
+    );
+}
+
+/// **The single most important line of K6 (§4.9.6).** While the folded base
+/// is missing, the supersede walk must do NOTHING. Run against a base this
+/// node does not hold, every pending patch fails to apply and would be
+/// retired as superseded - terminal, unattributed, and unrecoverable.
+#[test]
+fn the_supersede_walk_is_a_no_op_while_the_base_is_missing() {
+    let edit_a = "diff --git a/a.md b/a.md\n--- a/a.md\n+++ b/a.md\n@@ -1,1 +1,1 @@\n-A\n+AA\n";
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    b.commit_wiki(1, "a.md", "A", &["petra", "walter"]);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    let hash = checkpoint_state_hash(
+        &walter.own_checkpoint_state(1, true).expect("folded projection"),
+    );
+    walter.receive_checkpoint_proposal(40, 1, &hash, true);
+    let change = ChainChange::CheckpointFolded {
+        upto: 1,
+        state_hash: hash,
+    };
+    let bytes = approval_bytes(&b.republic_id, 2, &change);
+    let petra_sig = identity_sign(b.key("petra"), &bytes);
+    walter.receive_approval(40, "petra", 2, &petra_sig);
+
+    // a pending edit of a document only the FOLDED base carries
+    walter.receive_proposed(
+        11,
+        Surface::Memory,
+        json!({"op": "wiki_patch", "summary": "x", "value": edit_a}),
+        "petra",
+    );
+    assert_eq!(
+        walter.proposals.get(&11).map(|p| p.state),
+        Some(ProposalState::Proposed)
+    );
+
+    // the base goes missing (a rejoiner has not fetched it yet)
+    walter.chain.wiki_base = None;
+    walter.bump_applied_epoch();
+    walter.supersede_stale_wiki(None);
+    let p11 = walter.proposals.get(&11).cloned().expect("card 11");
+    assert_eq!(
+        p11.state,
+        ProposalState::Proposed,
+        "a pending patch must survive a base this node simply does not hold"
+    );
+    assert!(!p11.superseded);
 }
