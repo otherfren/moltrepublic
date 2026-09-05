@@ -1550,6 +1550,14 @@ export component AppWindow inherits Window {
             esc.focus();
         }
     }
+    // same lifeline for the wiki's raw editor: its FocusScope dies with
+    // the editor, and a window without a focus item hears no key at all
+    property <bool> wiki-editing: WikiState.editing;
+    changed wiki-editing => {
+        if (!root.wiki-editing && !root.any-modal-open) {
+            esc.focus();
+        }
+    }
     // ONE place performs a welcome card's action — the cards' click handlers
     // and the keyboard paths (arrows + Enter/Space, hotkey letters) share it
     function choice-go(i: int) {
@@ -2548,11 +2556,18 @@ export component AppWindow inherits Window {
             }
             // Multisig-Wiki keyboard routes (only while the brain view is
             // on screen): Ctrl+W closes the active tab, Del deletes the
-            // marked file, Enter opens it. A focused text field consumes
-            // its keys before they bubble here, so typing stays safe.
+            // marked file, Enter opens it, Tab flips the open document
+            // between preview and the raw editor. A focused text field
+            // consumes its keys before they bubble here, so typing stays
+            // safe; Tab is the exception a TextInput drops as a control
+            // char, which is how it reaches us from inside the editor.
             if (root.screen == AppScreen.main && root.selected-surface == "memory" && root.selected-view == "brain") {
                 if (event.text == "w" && event.modifiers.control) {
                     WikiState.close-active();
+                    return accept;
+                }
+                if (event.text == Key.Tab && WikiState.doc-open && !root.any-modal-open) {
+                    WikiState.edit-toggle();
                     return accept;
                 }
                 if (event.text == Key.Delete && WikiState.has-marked) {

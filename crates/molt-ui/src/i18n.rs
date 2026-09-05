@@ -1279,8 +1279,8 @@ lexicon! {
     mem_tb_delete: "Delete", "Löschen";
     mem_tb_collapse: "Collapse all", "Alles einklappen";
     mem_tb_open_all: "Expand all", "Alles ausklappen";
-    mem_tb_edit: "Edit as Markdown", "Als Markdown bearbeiten";
-    mem_tb_preview: "Preview", "Vorschau";
+    mem_tb_edit: "Edit as Markdown (Tab)", "Als Markdown bearbeiten (Tab)";
+    mem_tb_preview: "Preview (Tab)", "Vorschau (Tab)";
     mem_tb_link: "Copy path", "Pfad kopieren";
     mem_tb_locate: "Reveal in navigator", "Im Navigator zeigen";
     mem_tb_prev: "Previous tab", "Vorheriger Tab";

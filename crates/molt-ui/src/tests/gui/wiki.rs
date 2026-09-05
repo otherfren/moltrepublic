@@ -998,3 +998,90 @@ fn dropping_a_tag_row_redraws_the_rows_that_stay() {
     );
     g.set_tag_modal_open(false);
 }
+
+/// Tab is the wiki document pane's mode switch: raw editor ⇄ preview, in
+/// both directions, on a REAL key event. Slint runs its own Tab focus
+/// walk only on keys nobody took, so the window scope can claim it — and
+/// the toolbar tooltip has to name the shortcut.
+#[cfg(feature = "live-preview")]
+#[test]
+fn tab_switches_the_wiki_document_between_preview_and_the_raw_editor() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    ui.set_screen(AppScreen::Main);
+    ui.set_selected_surface("memory".into());
+    ui.set_selected_view("brain".into());
+    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: "memory".into(),
+        ..SurfaceTab::default()
+    }])));
+    let _wiki = wire_wiki(&ui);
+    let g = ui.global::<WikiState>();
+    g.set_base_docs(ModelRc::new(VecModel::from(vec![WikiBase {
+        path: "a.md".into(),
+        content: "# A\n\nprose.\n".into(),
+        loaded: true,
+    }])));
+    g.set_base_rev(1);
+    g.invoke_base_arrived();
+    let id = g.get_nav_rows().row_data(0).expect("nav row").id;
+    ui.window().set_size(slint::PhysicalSize::new(1400, 900));
+    ui.show().expect("show headless");
+    g.invoke_nav_open(id);
+    assert!(g.get_doc_open(), "the document is open");
+    assert!(!g.get_editing(), "…and starts in preview");
+
+    let tab = |ui: &AppWindow| {
+        let text: slint::SharedString = slint::platform::Key::Tab.into();
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::KeyPressed { text: text.clone() });
+        ui.window().dispatch_event(slint::platform::WindowEvent::KeyReleased { text });
+    };
+
+    tab(&ui);
+    assert!(g.get_editing(), "Tab in preview opens the raw editor");
+    tab(&ui);
+    assert!(!g.get_editing(), "Tab in the raw editor goes back to preview");
+    // and again, so neither direction was a one-shot of the focus walk
+    tab(&ui);
+    assert!(g.get_editing(), "the switch keeps working");
+    tab(&ui);
+    assert!(!g.get_editing());
+
+    // Escape leaves the editor the same way, and must leave the keyboard
+    // routed: the editor's own FocusScope goes with it
+    tab(&ui);
+    assert!(g.get_editing());
+    let esc: slint::SharedString = slint::platform::Key::Escape.into();
+    ui.window()
+        .dispatch_event(slint::platform::WindowEvent::KeyPressed { text: esc.clone() });
+    ui.window().dispatch_event(slint::platform::WindowEvent::KeyReleased { text: esc });
+    assert!(!g.get_editing(), "Escape still leaves the editor");
+    tab(&ui);
+    assert!(g.get_editing(), "…and the next Tab is still heard");
+    tab(&ui);
+
+    // a modal owns Tab while it is up - that is where it walks fields
+    g.invoke_tag_open();
+    g.set_tag_modal_open(true);
+    tab(&ui);
+    assert!(!g.get_editing(), "the tag modal keeps Tab");
+    g.set_tag_modal_open(false);
+
+    // and no other surface sees the shortcut at all
+    ui.set_selected_surface("chat".into());
+    tab(&ui);
+    assert!(!g.get_editing(), "Tab is the wiki pane's alone");
+    ui.set_selected_surface("memory".into());
+
+    // the toolbar says so, in both modes and both languages
+    let s = ui.global::<Strings>();
+    for lang in [0, 1] {
+        apply_strings(&ui, lang);
+        for t in [s.get_mem_tb_edit().to_string(), s.get_mem_tb_preview().to_string()] {
+            assert!(t.contains("Tab"), "lang {lang}: {t:?} names the shortcut");
+            assert!(!t.contains('—'), "lang {lang}: {t:?} carries no em dash");
+        }
+    }
+}
