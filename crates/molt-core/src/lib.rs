@@ -4098,6 +4098,22 @@ pub enum Command {
         #[serde(default)]
         limit: u32,
     },
+    /// The STRUCTURED write path (`wiki_semantic_gaps.md` §7 step 5):
+    /// edits against the CURRENT base, applied in order to a working
+    /// copy. The engine diffs the result and proposes THAT patch, so
+    /// members see and vote on the same diff the GUI would have built.
+    /// Nothing is proposed when any edit refuses.
+    WikiEdit {
+        /// The edits, in order.
+        edits: Vec<WikiEdit>,
+    },
+    /// What a `[[Name]]` would bind to, and what else it could mean
+    /// (§4.5). Name resolution is case-exact, so an agent needs a way to
+    /// check a link target before it writes one.
+    WikiResolve {
+        /// The name as it would stand inside the brackets.
+        name: String,
+    },
     /// The GUI publishes what its window currently shows
     /// (`docs_archive/ui/gui_over_mcp.md`) — the read half of driving the GUI
     /// from MCP. ENGINE-INTERNAL in spirit: only the window may speak it
@@ -5852,6 +5868,19 @@ pub enum Reply {
         /// The base revision of the fold itself.
         wiki_rev: u64,
     },
+    /// What a name could mean ([`Command::WikiResolve`]).
+    WikiResolve {
+        /// The name that was asked about.
+        name: String,
+        /// What `[[name]]` binds to today, or `None` when nothing does.
+        exact: Option<String>,
+        /// Every document the name could mean, the bound one first.
+        candidates: Vec<WikiCandidate>,
+        /// The base revision the GRAPH reflects.
+        index_rev: u64,
+        /// The base revision of the fold itself.
+        wiki_rev: u64,
+    },
     /// One wiki document with its content ([`Command::WikiGet`]).
     WikiDocument {
         /// The document's path.
@@ -6323,6 +6352,79 @@ pub struct WikiDangling {
     pub from: Vec<String>,
     /// How many documents reference it in total.
     pub from_total: u64,
+}
+
+/// One document a name could mean ([`Reply::WikiResolve`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiCandidate {
+    /// The document's path.
+    pub path: String,
+    /// How the name reaches it: `"path"`, `"basename"`, `"alias"`, or
+    /// `"case"` - a case-insensitive match the case-exact rule does NOT
+    /// bind, listed so an agent can pick the real spelling.
+    pub via: String,
+}
+
+/// One edit of the structured write path ([`Command::WikiEdit`]). Applied
+/// in order to a working copy of the current base, so a `rename` followed
+/// by a `replace` on the new path is legal.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum WikiEdit {
+    /// Write a whole document. Creates it when the path is free - which is
+    /// how an agent adds a page; there is no separate create op.
+    Content {
+        /// The document's path.
+        path: String,
+        /// Its full markdown, front matter included.
+        content: String,
+    },
+    /// Replace ONE exact occurrence of `old`. Absent or repeated refuses,
+    /// naming how often it occurs - the feedback a line-numbered diff
+    /// could not give.
+    Replace {
+        /// The document's path.
+        path: String,
+        /// The exact text to find, once.
+        old: String,
+        /// What takes its place.
+        new: String,
+    },
+    /// Set header properties: each key is replaced, a JSON `null` removes
+    /// it. The header is re-emitted and parsed back; anything the parser
+    /// would not read as asked refuses.
+    SetProps {
+        /// The document's path.
+        path: String,
+        /// The keys to set, `null` to remove.
+        props: serde_json::Map<String, Value>,
+    },
+    /// Append a typed relation as a sentence: `[[predicate::target]]` at
+    /// the end of the body. The target must resolve to exactly one
+    /// document.
+    AddRelation {
+        /// The document's path.
+        path: String,
+        /// The relation, a header key by the subset's rule.
+        predicate: String,
+        /// The target document, as `wiki_resolve` binds it.
+        target: String,
+        /// What the link reads as; the target itself when absent.
+        #[serde(default)]
+        display: Option<String>,
+    },
+    /// Move a document.
+    Rename {
+        /// The current path.
+        from: String,
+        /// The new path.
+        to: String,
+    },
+    /// Remove a document.
+    Delete {
+        /// The document's path.
+        path: String,
+    },
 }
 
 /// One block of the persistent chain as display data — the row a

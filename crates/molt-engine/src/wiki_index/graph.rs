@@ -16,6 +16,95 @@ use serde_json::Value;
 
 use super::front_matter;
 
+/// The name lookup behind resolution: a document's basename and its stem,
+/// and every alias it declares.
+struct NameIndex<'a> {
+    docs: &'a BTreeMap<String, DocMeta>,
+    by_name: BTreeMap<&'a str, Vec<&'a str>>,
+    by_alias: BTreeMap<&'a str, Vec<&'a str>>,
+}
+
+impl<'a> NameIndex<'a> {
+    fn build(docs: &'a BTreeMap<String, DocMeta>) -> Self {
+        let mut by_name: BTreeMap<&'a str, Vec<&'a str>> = BTreeMap::new();
+        for path in docs.keys() {
+            let base = path.rsplit('/').next().unwrap_or(path);
+            by_name.entry(base).or_default().push(path);
+            if let Some(stem) = base.strip_suffix(".md") {
+                by_name.entry(stem).or_default().push(path);
+            }
+        }
+        let mut by_alias: BTreeMap<&'a str, Vec<&'a str>> = BTreeMap::new();
+        for (path, meta) in docs {
+            for alias in &meta.aliases {
+                by_alias.entry(alias.as_str()).or_default().push(path);
+            }
+        }
+        NameIndex {
+            docs,
+            by_name,
+            by_alias,
+        }
+    }
+
+    /// Exact path, then unique basename or stem, then unique alias. Case
+    /// EXACT, like the path resolution it extends.
+    fn bind(&self, name: &str) -> Option<String> {
+        if self.docs.contains_key(name) {
+            return Some(name.to_string());
+        }
+        let unique = |index: &BTreeMap<&str, Vec<&str>>| -> Option<String> {
+            match index.get(name) {
+                Some(hits) if hits.len() == 1 => hits.first().map(|p| (*p).to_string()),
+                _ => None,
+            }
+        };
+        unique(&self.by_name).or_else(|| unique(&self.by_alias))
+    }
+
+    /// Every document the name could mean, strongest route first and the
+    /// bound one at the head. A `case` entry is a case-insensitive match
+    /// the case-exact rule does NOT bind - the "did you mean", so an agent
+    /// can pick the real spelling instead of writing a dangling link.
+    fn candidates(&self, name: &str) -> Vec<(String, &'static str)> {
+        let mut how: BTreeMap<&str, &'static str> = BTreeMap::new();
+        let mut note = |path: &'a str, via: &'static str| {
+            how.entry(path).or_insert(via);
+        };
+        if let Some((path, _)) = self.docs.get_key_value(name) {
+            note(path, "path");
+        }
+        for path in self.by_name.get(name).into_iter().flatten() {
+            note(path, "basename");
+        }
+        for path in self.by_alias.get(name).into_iter().flatten() {
+            note(path, "alias");
+        }
+        let folded = name.to_lowercase();
+        for path in self.docs.keys() {
+            if path.to_lowercase() == folded {
+                note(path, "case");
+            }
+        }
+        for (key, paths) in self.by_name.iter().chain(self.by_alias.iter()) {
+            if key.to_lowercase() != folded {
+                continue;
+            }
+            for path in paths {
+                note(path, "case");
+            }
+        }
+        let bound = self.bind(name);
+        let mut out: Vec<(String, &'static str)> = how
+            .into_iter()
+            .map(|(path, via)| (path.to_string(), via))
+            .collect();
+        // the binding first, the rest path-sorted: a deterministic order
+        out.sort_by_key(|(path, _)| (Some(path) != bound.as_ref(), path.clone()));
+        out
+    }
+}
+
 /// One resolved edge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Edge {
@@ -150,40 +239,24 @@ impl WikiGraph {
         self.props.insert(path.to_string(), pairs);
     }
 
+    /// What a `[[name]]` binds to, and everything else it could mean -
+    /// THE lookup, so `wiki_resolve` cannot drift from what [`Self::resolve`]
+    /// actually binds.
+    pub(crate) fn resolve_name(&self, name: &str) -> (Option<String>, Vec<(String, &'static str)>) {
+        let index = NameIndex::build(&self.docs);
+        (index.bind(name), index.candidates(name))
+    }
+
     /// Resolve every raw edge against the current document set: exact path,
     /// then unique basename, then unique alias, else dangling.
     fn resolve(&mut self) {
-        let mut by_name: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-        for path in self.docs.keys() {
-            let base = path.rsplit('/').next().unwrap_or(path);
-            by_name.entry(base).or_default().push(path);
-            if let Some(stem) = base.strip_suffix(".md") {
-                by_name.entry(stem).or_default().push(path);
-            }
-        }
-        let mut by_alias: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-        for (path, meta) in &self.docs {
-            for alias in &meta.aliases {
-                by_alias.entry(alias.as_str()).or_default().push(path);
-            }
-        }
-        let unique = |index: &BTreeMap<&str, Vec<&str>>, key: &str| -> Option<String> {
-            match index.get(key) {
-                Some(hits) if hits.len() == 1 => hits.first().map(|p| (*p).to_string()),
-                _ => None,
-            }
-        };
-
+        let index = NameIndex::build(&self.docs);
         let mut out: BTreeMap<String, Vec<Edge>> = BTreeMap::new();
         let mut inn: BTreeMap<String, Vec<Edge>> = BTreeMap::new();
         let mut dangling: BTreeMap<String, Vec<(String, Edge)>> = BTreeMap::new();
         for (src, edges) in &self.raw {
             for raw in edges {
-                let hit = if self.docs.contains_key(&raw.target) {
-                    Some(raw.target.clone())
-                } else {
-                    unique(&by_name, &raw.target).or_else(|| unique(&by_alias, &raw.target))
-                };
+                let hit = index.bind(&raw.target);
                 let edge = |to: String| Edge {
                     to,
                     predicate: raw.predicate.clone(),

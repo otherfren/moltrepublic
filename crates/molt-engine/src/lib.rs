@@ -1726,6 +1726,8 @@ impl State {
                 cursor,
             } => self.cmd_wiki_changes(since_rev, limit, cursor),
             Command::WikiHealth { limit } => self.cmd_wiki_health(limit),
+            Command::WikiEdit { edits } => self.cmd_wiki_edit(edits),
+            Command::WikiResolve { name } => self.cmd_wiki_resolve(name),
             Command::WikiProps => self.cmd_wiki_props(),
             Command::WikiLinks {
                 path,

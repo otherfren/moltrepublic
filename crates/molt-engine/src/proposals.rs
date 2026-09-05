@@ -615,7 +615,7 @@ impl State {
             self.prepare_files_proposal(&mut payload)?;
         }
         validate_payload_fits(surface, &payload, &self.roster())?;
-        let warnings = self.wiki_header_warnings(surface, &payload);
+        let warnings = self.wiki_patch_check(surface, &payload)?;
         // R6: a pool edit that would strand a DECLARED member — sharing no
         // relay with what that seat is on record as reaching (R3b) — is the
         // R4 split as a proposal. Refuse it naming the member and its relay.
@@ -722,42 +722,51 @@ impl State {
         Ok(Reply::Proposed { id, warnings })
     }
 
-    /// What a wiki patch leaves behind that a voter should SEE without it
-    /// being a refusal: a document whose header stands outside the subset
-    /// (§4.4). The fold never reads a header, so a bad one must not void a
-    /// patch - it is a warning on the card, and members may decline.
-    fn wiki_header_warnings(&self, surface: Surface, payload: &Value) -> Vec<String> {
+    /// A wiki patch, checked against the base it claims to apply to.
+    ///
+    /// It REFUSES a patch that does not apply (`wiki_semantic_gaps.md`
+    /// §1.1): without this the vote is minted, members sign it, and the
+    /// fold voids it - a feedback loop that closes after the vote is no
+    /// feedback loop. And it WARNS about a document whose header stands
+    /// outside the subset (§4.4): the fold never reads a header, so a bad
+    /// one must not void a patch - it goes on the card and members decide.
+    fn wiki_patch_check(
+        &self,
+        surface: Surface,
+        payload: &Value,
+    ) -> Result<Vec<String>, MoltError> {
         if surface != Surface::Memory
             || payload.get("op").and_then(Value::as_str) != Some("wiki_patch")
         {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let Some(patch) = payload.get("value").and_then(Value::as_str) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let files = molt_core::wiki_fold::parse_patch(patch);
         let paths = molt_core::wiki_fold::touched_paths(&files);
-        // base-pending: nothing to check the header against, and a
-        // fabricated verdict would be worse than none
+        // base-pending: there is nothing to check against, and a fabricated
+        // verdict would be worse than none
         let Ok((tree, _)) = self.wiki_base() else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let mut after: std::collections::BTreeMap<String, String> = paths
             .iter()
             .filter_map(|p| tree.get(p).map(|c| (p.clone(), c.clone())))
             .collect();
-        if molt_core::wiki_fold::apply_patch(&mut after, &files).is_err() {
-            // a patch that does not apply is superseded, not warned about
-            return Vec::new();
+        if let Err(reason) = molt_core::wiki_fold::apply_patch(&mut after, &files) {
+            return Err(MoltError::BadPayload(format!(
+                "patch does not apply: {reason}"
+            )));
         }
-        after
+        Ok(after
             .iter()
             .filter_map(|(path, content)| {
                 wiki_index::front_matter::properties(content)
                     .1
                     .map(|err| format!("{path}: {err}"))
             })
-            .collect()
+            .collect())
     }
 
     /// The single-operator invariant, stated ONCE: without chain governance
@@ -2229,6 +2238,227 @@ impl State {
         })
     }
 
+    /// [`Command::WikiResolve`] (§4.5): what a `[[name]]` binds to, and
+    /// what else it could mean. The check an agent needs before it writes
+    /// a link, since resolution is case-exact and silent.
+    pub(crate) fn cmd_wiki_resolve(&mut self, name: String) -> Result<Reply, MoltError> {
+        self.require_feature(Surface::Memory)?;
+        self.refresh_wiki_graph();
+        if self.wiki_graph.is_none() {
+            self.spawn_wiki_index_build();
+            return Err(self.index_building());
+        }
+        let wiki_rev = self.wiki_base()?.1;
+        let graph = self
+            .wiki_graph
+            .as_ref()
+            .ok_or_else(|| MoltError::Engine("the wiki index is unavailable".to_string()))?;
+        let (exact, candidates) = graph.resolve_name(&name);
+        Ok(Reply::WikiResolve {
+            name,
+            exact,
+            candidates: candidates
+                .into_iter()
+                .map(|(path, via)| molt_core::WikiCandidate {
+                    path,
+                    via: via.to_string(),
+                })
+                .collect(),
+            index_rev: wiki_rev,
+            wiki_rev,
+        })
+    }
+
+    /// [`Command::WikiEdit`] (`wiki_semantic_gaps.md` §7 step 5): the
+    /// STRUCTURED write path. The edits fold onto a working copy of the
+    /// current base in order, the result is diffed by the ONE emitter and
+    /// the patch goes through the SAME propose path the GUI's changeset
+    /// vote uses - so threshold governance, the header warnings on the
+    /// card and the wire broadcast stay one code path. Any edit that
+    /// cannot land refuses the WHOLE call: a half-applied changeset would
+    /// be a diff nobody asked for.
+    pub(crate) fn cmd_wiki_edit(
+        &mut self,
+        edits: Vec<molt_core::WikiEdit>,
+    ) -> Result<Reply, MoltError> {
+        self.require_feature(Surface::Memory)?;
+        if edits.is_empty() {
+            return Err(MoltError::BadPayload("no edits".to_string()));
+        }
+        // only `add_relation` needs the graph — it resolves its target
+        if edits
+            .iter()
+            .any(|e| matches!(e, molt_core::WikiEdit::AddRelation { .. }))
+        {
+            self.refresh_wiki_graph();
+            if self.wiki_graph.is_none() {
+                self.spawn_wiki_index_build();
+                return Err(self.index_building());
+            }
+        }
+        self.refresh_wiki_cache();
+        // the base RESTRICTED to the paths the edits name: `apply_patch`
+        // reads and writes no others, so the diff over these is the diff
+        // over the whole base (§4.2's argument), and a 100 MiB tree is
+        // never cloned to move one paragraph
+        let touched: std::collections::BTreeSet<String> =
+            edits.iter().flat_map(edit_paths).collect();
+        let base: std::collections::BTreeMap<String, String> = {
+            let (tree, _) = self.wiki_base()?;
+            touched
+                .iter()
+                .filter_map(|p| tree.get(p).map(|c| (p.clone(), c.clone())))
+                .collect()
+        };
+        let mut after = base.clone();
+        let mut renames: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        for edit in &edits {
+            self.fold_wiki_edit(edit, &base, &mut after, &mut renames)?;
+        }
+        // a base path a rename freed and another edit claimed again names
+        // ONE path twice, which the strict applier voids — refuse here,
+        // where the reason can still be said
+        for old in renames.values() {
+            if after.contains_key(old) {
+                return Err(MoltError::BadPayload(format!(
+                    "{old}: moved and re-created - two votes"
+                )));
+            }
+        }
+        let patch = molt_core::wiki_patch::build_patch(&base, &after, &renames)
+            .ok_or_else(|| MoltError::BadPayload("nothing to change".to_string()))?;
+        let summary = molt_core::wiki_patch::count_changes(&base, &after, &renames).summary();
+        self.cmd_propose(
+            Surface::Memory,
+            serde_json::json!({ "op": "wiki_patch", "summary": summary, "value": patch }),
+        )
+    }
+
+    /// One edit onto the working copy. Every refusal names the fault and,
+    /// where a remedy exists, says it once.
+    fn fold_wiki_edit(
+        &self,
+        edit: &molt_core::WikiEdit,
+        base: &std::collections::BTreeMap<String, String>,
+        after: &mut std::collections::BTreeMap<String, String>,
+        renames: &mut std::collections::BTreeMap<String, String>,
+    ) -> Result<(), MoltError> {
+        use molt_core::WikiEdit;
+        let bad = |m: String| MoltError::BadPayload(m);
+        let missing = |p: &str| MoltError::BadPayload(format!("no such document: {p}"));
+        match edit {
+            WikiEdit::Content { path, content } => {
+                // the create op too: a whole document at a free path IS the
+                // new page, so an agent needs no second verb for it
+                if !molt_core::wiki_fold::valid_path(path) {
+                    return Err(bad(format!("invalid path: {path}")));
+                }
+                after.insert(path.clone(), content.clone());
+            }
+            WikiEdit::Replace { path, old, new } => {
+                let doc = after.get(path).ok_or_else(|| missing(path))?;
+                if old.is_empty() {
+                    return Err(bad("replace needs an old text".to_string()));
+                }
+                match doc.matches(old.as_str()).count() {
+                    0 => return Err(bad(format!("old not found in {path}"))),
+                    1 => {}
+                    n => return Err(bad(format!("old occurs {n} times in {path} - widen it"))),
+                }
+                let next = doc.replacen(old.as_str(), new, 1);
+                after.insert(path.clone(), next);
+            }
+            WikiEdit::SetProps { path, props } => {
+                let doc = after.get(path).ok_or_else(|| missing(path))?;
+                let next = set_props(doc, props)?;
+                after.insert(path.clone(), next);
+            }
+            WikiEdit::AddRelation {
+                path,
+                predicate,
+                target,
+                display,
+            } => {
+                let doc = after.get(path).ok_or_else(|| missing(path))?;
+                if !wiki_index::front_matter::key_ok(predicate) {
+                    return Err(bad(format!("not a relation key: {predicate}")));
+                }
+                let bound = self.bind_wiki_name(target, after)?;
+                let shown = display.as_deref().map(str::trim).filter(|d| !d.is_empty());
+                if shown.is_some_and(|d| d.contains(['[', ']', '|', '\n'])) {
+                    return Err(bad("a link text carries no brackets or bar".to_string()));
+                }
+                let inner = match shown {
+                    Some(d) => format!("{predicate}::{bound}|{d}"),
+                    None => format!("{predicate}::{bound}"),
+                };
+                let mut next = doc.clone();
+                if !next.is_empty() {
+                    if !next.ends_with('\n') {
+                        next.push('\n');
+                    }
+                    next.push('\n');
+                }
+                next.push_str(&format!("[[{inner}]]\n"));
+                after.insert(path.clone(), next);
+            }
+            WikiEdit::Rename { from, to } => {
+                if !molt_core::wiki_fold::valid_path(to) {
+                    return Err(bad(format!("invalid path: {to}")));
+                }
+                if after.contains_key(to) {
+                    return Err(bad(format!("already exists: {to}")));
+                }
+                let content = after.remove(from).ok_or_else(|| missing(from))?;
+                after.insert(to.clone(), content);
+                // chained moves collapse onto the BASE path: the emitter
+                // wants where a document came from, not every hop
+                let origin = renames.remove(from).unwrap_or_else(|| from.clone());
+                if base.contains_key(&origin) && origin != *to {
+                    renames.insert(to.clone(), origin);
+                }
+            }
+            WikiEdit::Delete { path } => {
+                if after.remove(path).is_none() {
+                    return Err(missing(path));
+                }
+                renames.remove(path);
+            }
+        }
+        Ok(())
+    }
+
+    /// The document a relation target names. A page THIS call creates is a
+    /// real target — the graph is built from the base and cannot know it
+    /// yet — and everything else goes through the graph's own binding, so
+    /// the write cannot land on a name `wiki_resolve` would not.
+    fn bind_wiki_name(
+        &self,
+        name: &str,
+        after: &std::collections::BTreeMap<String, String>,
+    ) -> Result<String, MoltError> {
+        if after.contains_key(name) {
+            return Ok(name.to_string());
+        }
+        let graph = self
+            .wiki_graph
+            .as_ref()
+            .ok_or_else(|| MoltError::Engine("the wiki index is unavailable".to_string()))?;
+        let (exact, candidates) = graph.resolve_name(name);
+        if let Some(path) = exact {
+            return Ok(path);
+        }
+        if candidates.is_empty() {
+            return Err(MoltError::BadPayload(format!("no document named {name}")));
+        }
+        let named: Vec<&str> = candidates.iter().map(|(p, _)| p.as_str()).collect();
+        Err(MoltError::BadPayload(format!(
+            "{name} is ambiguous: {}",
+            named.join(", ")
+        )))
+    }
+
     /// Kick off an OFF-ACTOR build of both indexes over the current base
     /// (§4.5/§4.6). One at a time: N reads arriving while a build runs
     /// spawn nothing. The tree is snapshotted HERE, on the actor, so the
@@ -3111,6 +3341,79 @@ impl State {
 /// One patch file as the change history records it (§4.11): the path the
 /// change LEFT behind, what it did, and - on a rename - where it moved
 /// from. Coalescing across revisions happens at read time, not here.
+/// Every path one edit names — the restriction the working copy needs.
+fn edit_paths(edit: &molt_core::WikiEdit) -> Vec<String> {
+    use molt_core::WikiEdit;
+    match edit {
+        WikiEdit::Content { path, .. }
+        | WikiEdit::Replace { path, .. }
+        | WikiEdit::SetProps { path, .. }
+        | WikiEdit::AddRelation { path, .. }
+        | WikiEdit::Delete { path } => vec![path.clone()],
+        WikiEdit::Rename { from, to } => vec![from.clone(), to.clone()],
+    }
+}
+
+/// `doc` with these header keys set (a JSON `null` removes one), emitted
+/// through the ONE emitter: the parser's own keys first in the order it
+/// reports them, new ones appended.
+///
+/// The PARSER is the arbiter — the result is read back and must say
+/// exactly what was asked, or the edit refuses. The fold never reads a
+/// header, so a header written wrong would only surface later as a
+/// document that quietly lost its properties.
+fn set_props(
+    doc: &str,
+    props: &serde_json::Map<String, Value>,
+) -> Result<String, MoltError> {
+    let front = wiki_index::front_matter::properties(doc);
+    let before = match front {
+        (Some(map), _) => map,
+        (None, Some(err)) => {
+            return Err(MoltError::BadPayload(format!("header unreadable: {err}")))
+        }
+        (None, None) => serde_json::Map::new(),
+    };
+    let mut want = before.clone();
+    for (key, value) in props {
+        if !wiki_index::front_matter::key_ok(key) {
+            return Err(MoltError::BadPayload(format!("not a header key: {key}")));
+        }
+        if value.is_null() {
+            want.remove(key);
+            continue;
+        }
+        if !wiki_index::front_matter::value_ok(value) {
+            return Err(MoltError::BadPayload(format!(
+                "{key}: value outside the header subset"
+            )));
+        }
+        want.insert(key.clone(), value.clone());
+    }
+    let body = wiki_index::front_matter::split(doc).1;
+    let next = if want.is_empty() {
+        body.to_string()
+    } else {
+        let mut header = String::new();
+        let mut seen: std::collections::BTreeSet<&String> = std::collections::BTreeSet::new();
+        for key in before.keys().chain(props.keys()) {
+            if !seen.insert(key) {
+                continue;
+            }
+            if let Some(value) = want.get(key) {
+                header.push_str(&wiki_index::front_matter::emit_value(key, value));
+            }
+        }
+        format!("---\n{header}---\n{body}")
+    };
+    if wiki_index::front_matter::properties(&next).0.unwrap_or_default() != want {
+        return Err(MoltError::BadPayload(
+            "the header would not read back as asked".to_string(),
+        ));
+    }
+    Ok(next)
+}
+
 fn wiki_touch_of(f: &molt_core::wiki_fold::PatchFile) -> crate::WikiTouch {
     let renamed = f.renamed && !f.deleted;
     crate::WikiTouch {

@@ -409,6 +409,33 @@ pub fn header_lines(header: &str, key: &str, literal: &str) -> String {
     out.concat()
 }
 
+/// A value the subset accepts (§4.4): a string, an integer of at most 18
+/// digits, a list of those, a flat mapping of them, or a list of such
+/// mappings. Anything else the parser would not read back the same way.
+pub fn value_ok(value: &Value) -> bool {
+    fn scalar(v: &Value) -> bool {
+        match v {
+            Value::String(_) => true,
+            // 18 digits: what `scalar_value` reads back as an Integer
+            Value::Number(n) => n
+                .as_i64()
+                .is_some_and(|i| i.unsigned_abs() < 1_000_000_000_000_000_000),
+            _ => false,
+        }
+    }
+    fn flat(map: &serde_json::Map<String, Value>) -> bool {
+        map.iter().all(|(k, v)| key_ok(k) && scalar(v))
+    }
+    match value {
+        Value::Array(items) => items.iter().all(|i| match i {
+            Value::Object(map) => flat(map),
+            other => scalar(other),
+        }),
+        Value::Object(map) => flat(map),
+        other => scalar(other),
+    }
+}
+
 /// One `key: value` for an arbitrary value of the subset. An ARRAY stays
 /// an array even at length one - [`emit_key`] deliberately flattens that,
 /// because its caller is growing a relation list rather than restating a
