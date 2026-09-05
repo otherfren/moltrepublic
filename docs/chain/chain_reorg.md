@@ -1,9 +1,9 @@
 # Deep tie-break: a bounded reorg for a forked chain (A2.3)
 
 Status: BUILT 2026-09-06 (`chain/sync.rs`: `try_reorg`, `fork_candidates`,
-`known_heads`, `serve_from_for`; tests in `chain/sync_tests.rs`). Open:
-the loopback E2E listed last, and R6 (signing `prev`), which stays a design
-question. Companion pieces: the divergence detector (A2.1) and the seal
+`known_heads`, `serve_from_for`; tests in `chain/sync_tests.rs`, the E2E in
+`tests/chain_convergence.rs`). Open: R6 (signing `prev`), which stays a
+design question. Companion pieces: the divergence detector (A2.1) and the seal
 pacing (A2.2), both in `docs/reviews/mcp_agent_friction_fixes.md`.
 
 ## The defect
@@ -103,6 +103,8 @@ with its own tests. Recorded as the next design question, not built here.
   signature never adopts.
 - `a_chain_request_names_the_fork_point`: the server picks the highest
   matching `known` entry and serves from the block above it.
-- Loopback E2E in `tests/`: two nodes seal h and h+1 inside one delivery
-  window (the pacing off) and converge within a few ticks; the wiki on both
-  is identical afterwards.
+- E2E `tests/chain_convergence.rs::concurrent_bursts_end_on_one_chain`: a
+  real 2-of-2 republic over the mock relay, both seats propose four pages
+  each at once and approve whatever appears; both end with identical
+  blocks, identical wikis and no divergence flag (pacing on - the
+  production shape; a loopback variant with pacing off would need a knob).
