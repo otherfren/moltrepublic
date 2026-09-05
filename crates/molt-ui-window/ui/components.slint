@@ -154,6 +154,11 @@ export component AppField inherits Rectangle {
     in property <bool> hero: false;
     callback accepted();
     callback edited();
+    // the dialog that owns this field hands it the focus on open, so the
+    // member can type without clicking first
+    public function focus-input() {
+        input.focus();
+    }
 
     // the box follows the font (Theme.ui-scale), like every control
     height: (root.hero ? 48px : 38px) * Theme.ui-scale;
@@ -701,11 +706,22 @@ export component ConfirmModal inherits Rectangle {
     width: 100%;
     height: 100%;
     background: #0000008c;
+    // Set by an instance that focuses one of its OWN inputs on open: the
+    // key scope below would otherwise take the focus straight back and the
+    // member would have to click before typing.
+    in property <bool> child-focus: false;
+    // Enter from such a field, through the confirm BUTTON's own gate - a
+    // disabled confirm must not fire from the keyboard either.
+    public function confirm-from-field() {
+        if (root.confirm-enabled) {
+            root.confirmed();
+        }
+    }
     // keyboard: the dialog takes focus while it is up — Enter presses the
     // (enabled) confirm button, Escape presses cancel. Zero-sized so clicks
-    // never route focus here; a child field that grabs focus keeps its own
-    // Return (wire its `accepted` to `confirmed` at the instance) while its
-    // Escape bubbles to the window's handler, which closes the same flag.
+    // never route focus here; a child field that holds the focus keeps its
+    // own Return (`confirm-from-field` above) while its Escape bubbles to
+    // the window's handler, which closes the same flag.
     kb := FocusScope {
         width: 0;
         height: 0;
@@ -722,7 +738,9 @@ export component ConfirmModal inherits Rectangle {
         }
     }
     init => {
-        kb.focus();
+        if (!root.child-focus) {
+            kb.focus();
+        }
     }
     // scrim: absorbs clicks to the app behind; outside click cancels
     TouchArea {

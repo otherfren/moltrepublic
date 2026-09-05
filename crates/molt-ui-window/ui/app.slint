@@ -9567,8 +9567,9 @@ export component AppWindow inherits Window {
     // Modal: the tags a headerless document gets. Several free-text rows,
     // the republic's own tags one click away - the ontology is content,
     // never a schema this program prescribes.
-    if WikiState.tag-modal-open: ConfirmModal {
+    if WikiState.tag-modal-open: tag-dlg := ConfirmModal {
         dialog-width: 460px;
+        child-focus: true;
         title: Strings.mem-tag-title;
         body: WikiState.doc-path;
         cancel-label: Strings.close-ws-cancel;
@@ -9602,8 +9603,21 @@ export component AppWindow inherits Window {
                                 horizontal-stretch: 1;
                                 placeholder: Strings.mem-tag-ph;
                                 text: t;
+                                // the LAST row takes the focus: on open it is
+                                // the only one, and after a + or a 🗑️ the whole
+                                // list is rebuilt - which destroys whatever
+                                // input held the focus, leaving the dialog
+                                // deaf to Enter and Escape
+                                init => {
+                                    if (i == WikiState.tag-rows.length - 1) {
+                                        self.focus-input();
+                                    }
+                                }
                                 edited => {
                                     WikiState.tag-set(i, self.text);
+                                }
+                                accepted => {
+                                    tag-dlg.confirm-from-field();
                                 }
                             }
                             AppButton {
@@ -9680,8 +9694,9 @@ export component AppWindow inherits Window {
     // written down, and the sentence that asserts it is where it belongs
     // (wiki_semantic_gaps.md §6). The header stays one click away for the
     // qualified form, which has no inline shape.
-    if WikiState.link-modal-open: ConfirmModal {
+    if WikiState.link-modal-open: link-dlg := ConfirmModal {
         dialog-width: 620px;
+        child-focus: true;
         title: Strings.mem-tb-relate;
         // the subject AND where the write lands, in the line that is
         // already there - a row of its own would push the buttons out of
@@ -9726,12 +9741,6 @@ export component AppWindow inherits Window {
                 }
                 Rectangle { horizontal-stretch: 1; }
             }
-            Text {
-                text: Strings.mem-link-name;
-                color: Theme.dim;
-                font-size: Theme.fs-cap;
-                font-weight: 600;
-            }
             AppField {
                 placeholder: Strings.mem-link-ph-name;
                 // two-way like the wiki search field: a one-way binding
@@ -9742,18 +9751,23 @@ export component AppWindow inherits Window {
                 edited => {
                     WikiState.set-link-name(self.text);
                 }
+                accepted => {
+                    link-dlg.confirm-from-field();
+                }
             }
-            Text {
-                text: Strings.mem-link-target;
-                color: Theme.dim;
-                font-size: Theme.fs-cap;
-                font-weight: 600;
-            }
+            // the field the member types in first, so it opens with the
+            // focus: the link is decided by its TARGET
             AppField {
                 placeholder: Strings.mem-link-ph-filter;
                 text <=> WikiState.link-filter;
+                init => {
+                    self.focus-input();
+                }
                 edited => {
                     WikiState.set-link-filter(self.text);
+                }
+                accepted => {
+                    link-dlg.confirm-from-field();
                 }
             }
             Rectangle {
@@ -9901,17 +9915,14 @@ export component AppWindow inherits Window {
             }
             // the qualified relation's extra fields - the header's own
             // reason to exist, so it shows only in header mode
-            if WikiState.link-header: Text {
-                text: Strings.mem-link-qual;
-                color: Theme.dim;
-                font-size: Theme.fs-cap;
-                font-weight: 600;
-            }
             if WikiState.link-header: AppField {
                 placeholder: Strings.mem-link-ph-qual;
                 text <=> WikiState.link-qualifiers;
                 edited => {
                     WikiState.set-link-qualifiers(self.text);
+                }
+                accepted => {
+                    link-dlg.confirm-from-field();
                 }
             }
             if WikiState.link-error != "": Text {
@@ -10222,6 +10233,7 @@ export component AppWindow inherits Window {
     // =================================================================
     if root.mem-export-open: mex-dlg := ConfirmModal {
         dialog-width: 460px;
+        child-focus: true;
         title: Strings.mem-ex-title;
         body: Strings.mem-ex-body;
         confirm-label: Strings.mem-ex-confirm;
@@ -10239,10 +10251,11 @@ export component AppWindow inherits Window {
                 text <=> root.mem-export-dir;
                 placeholder: "~/wiki-export";
                 horizontal-stretch: 1;
+                init => {
+                    self.focus-input();
+                }
                 accepted => {
-                    if (mex-dlg.confirm-enabled) {
-                        mex-dlg.confirmed();
-                    }
+                    mex-dlg.confirm-from-field();
                 }
             }
             AppButton {

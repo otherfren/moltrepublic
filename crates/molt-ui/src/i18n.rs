@@ -1307,10 +1307,8 @@ lexicon! {
     // the semantic-link modal
     mem_tb_relate: "Semantic link", "Semantischer Link";
     mem_menu_relate: "Create semantic link", "Semantischen Link anlegen";
-    mem_link_name: "Name", "Name";
     mem_link_ph_name: "Display name", "Anzeigename";
-    mem_link_target: "Target", "Ziel";
-    mem_link_ph_filter: "Filter", "Filtern";
+    mem_link_ph_filter: "Filter targets", "Ziele filtern";
     mem_link_rel: "Relations", "Beziehungen";
     mem_link_own: "Own relation", "Eigene Beziehung";
     mem_link_ph_own: "lives_in", "lives_in";
@@ -1322,7 +1320,6 @@ lexicon! {
     mem_link_at_cursor: "Lands at the cursor", "Landet an der Schreibmarke";
     mem_link_at_end: "Lands at the end of the text", "Landet am Ende des Textes";
     mem_link_at_header: "Lands in the front matter", "Landet im Kopfblock";
-    mem_link_qual: "Details (optional)", "Angaben (optional)";
     mem_link_ph_qual: "since: 2019, role: CTO", "since: 2019, role: CTO";
     // the refusals (wiki::LINK_ERR_*), rendered here so the model stays
     // language-free
