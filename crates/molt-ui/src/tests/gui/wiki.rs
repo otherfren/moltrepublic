@@ -1555,6 +1555,104 @@ fn a_header_link_sits_on_the_chip_centre_line() {
     }
 }
 
+/// **A hint never outlives the page it belongs to.** A preview link that
+/// is unmounted while hovered never gets a hover-out, so it can never
+/// clear its own bubble: the claim stayed on screen while the reader was
+/// already on another document (reported 2026-09-05). Every path that
+/// replaces the rendered page - navigator, a click on the link itself,
+/// the raw editor - has to drop it.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_page_change_takes_the_link_hint_with_it() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    ui.set_screen(AppScreen::Main);
+    ui.set_selected_surface("memory".into());
+    ui.set_selected_view("brain".into());
+    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: "memory".into(),
+        ..SurfaceTab::default()
+    }])));
+    let wiki = wire_wiki(&ui);
+    std::mem::forget(wiki);
+    let g = ui.global::<WikiState>();
+    g.set_base_docs(ModelRc::new(VecModel::from(vec![
+        WikiBase {
+            path: "anna.md".into(),
+            content: "# Anna\n\n[[works_at::Acme]]\n".into(),
+            loaded: true,
+        },
+        WikiBase {
+            path: "Acme.md".into(),
+            content: "# Acme\n\nprose.\n".into(),
+            loaded: true,
+        },
+    ])));
+    g.set_base_rev(1);
+    g.invoke_base_arrived();
+    ui.window().set_size(slint::PhysicalSize::new(1400, 900));
+    ui.show().expect("show headless");
+
+    let tip = |ui: &AppWindow| ui.global::<HintTip>().get_label().to_string();
+    let park = |ui: &AppWindow| {
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved {
+                position: slint::LogicalPosition::new(1350.0, 870.0),
+            });
+        settle();
+    };
+    // hover the claim-bearing run and return where the pointer now sits
+    let hover = |ui: &AppWindow| -> slint::LogicalPosition {
+        let link =
+            i_slint_backend_testing::ElementHandle::find_by_element_type_name(ui, "LinkRun")
+                .find(|e| e.size().width > 0.0)
+                .expect("the preview renders the link");
+        let at = slint::LogicalPosition::new(
+            link.absolute_position().x + link.size().width / 2.0,
+            link.absolute_position().y + link.size().height / 2.0,
+        );
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at });
+        settle();
+        at
+    };
+
+    // the navigator: the rows under the pointer vanish, the hint may not
+    g.invoke_nav_open(nav_id(&ui, "anna.md"));
+    park(&ui);
+    hover(&ui);
+    assert_eq!(tip(&ui), "Anna works_at Acme", "the tip renders the claim");
+    g.invoke_nav_open(nav_id(&ui, "Acme.md"));
+    settle();
+    assert_eq!(tip(&ui), "", "a page change takes the hint with it");
+
+    // the link's own click, without the pointer ever moving off it
+    g.invoke_nav_open(nav_id(&ui, "anna.md"));
+    park(&ui);
+    let at = hover(&ui);
+    assert!(!tip(&ui).is_empty(), "the tip is up before the click");
+    ui.window().dispatch_event(slint::platform::WindowEvent::PointerPressed {
+        position: at,
+        button: slint::platform::PointerEventButton::Left,
+    });
+    ui.window().dispatch_event(slint::platform::WindowEvent::PointerReleased {
+        position: at,
+        button: slint::platform::PointerEventButton::Left,
+    });
+    settle();
+    assert_eq!(tip(&ui), "", "following the link takes the hint with it");
+
+    // the raw editor replaces the preview rows outright
+    g.invoke_nav_open(nav_id(&ui, "anna.md"));
+    park(&ui);
+    hover(&ui);
+    assert!(!tip(&ui).is_empty(), "the tip is up before the editor opens");
+    g.invoke_edit_toggle();
+    settle();
+    assert_eq!(tip(&ui), "", "the raw editor takes the hint with it");
+}
+
 /// **A header the parser rejects is not a header.** `split_front_matter`
 /// says so, and the index, the graph and every write path read those
 /// lines as body text - so the preview shows them too. A pane that hid

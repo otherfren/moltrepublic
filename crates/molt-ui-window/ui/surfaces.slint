@@ -874,6 +874,15 @@ export component MemoryPane inherits VerticalLayout {
     // pointer-up that commits the drop)
     property <bool> drag-was: false;
 
+    // WHICH page the preview is rendering ("" = none, the raw editor
+    // included). A link run unmounted while hovered never gets its
+    // hover-out and can never clear its own bubble, so the switch drops
+    // the hint here - the one place every path through it passes.
+    property <string> shown-doc: WikiState.editing ? "" : WikiState.doc-path;
+    changed shown-doc => {
+        HintTip.label = "";
+    }
+
     // status → tone, ONE mapping for nav rows, tabs and the breadcrumb:
     // 1 added (good) · 2 modified (warn) · 3 deleted (bad)
     pure function tone(status: int, idle: color) -> color {
