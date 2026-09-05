@@ -668,13 +668,47 @@ per-patch provenance).
 ### 4.10 The GUI (K7)
 
 - **Infobox** — BUILT 2026-09-04. The viewer hides the header block and
-  renders the parsed properties as a key/value table above the body, a
-  link-valued property clickable exactly like a body link; the editor
-  keeps the raw text. The header is dropped from BOTH sides of the
-  preview diff, or every document carrying one would read as fully
-  changed. `tags` is split off the table since 2026-09-05 and renders as
-  coloured pills, the hue derived from the LOWERCASED tag, and a
-  `[[path|Name]]` value shows the name half rather than the path.
+  renders the parsed properties above the body, a link-valued property
+  clickable exactly like a body link; the editor keeps the raw text. The
+  header is dropped from BOTH sides of the preview diff, or every document
+  carrying one would read as fully changed. `tags` is split off since
+  2026-09-05 and renders as coloured pills, the hue derived from the
+  LOWERCASED tag, and a `[[path|Name]]` value shows the name half rather
+  than the path.
+- **The header band** — BUILT 2026-09-05, from the user's own feedback.
+  The pills open the document at the pane's own padding: the
+  author/version/age line moved to the footer and renders only when a
+  document has any of the three, a ratified one having none - the empty
+  line was what pushed the band off the top edge. A grey hairline under
+  the band separates what the page IS from what it says, and exists only
+  when the band does. Every other key is now a CHIP with its own quiet
+  ground rather than a table row: Slint has no flow layout, so the chips
+  keep their natural widths while the whole set fits on one line
+  (`SpanFlow`'s measured idiom) and fall into a wrapping grid whose cell
+  is the WIDEST chip past that (a `VerticalLayout`'s preferred width is
+  the maximum over its rows). A value beyond the cap elides. A qualified
+  relation stays ONE chip - it is one claim, and a chip per qualifier
+  would repeat the predicate until it read as several - and every chip
+  names its key, so `infobox` no longer blanks a list's continuation rows.
+  The tag pill's own padding is symmetric at every font size: its row was
+  unbounded, and a stretch layout handed the surplus to the label, which
+  put the text flush on the right edge.
+  A header the parser REJECTS still shows its raw lines as prose. Those
+  lines ARE body text to `split_front_matter`, the index and the graph;
+  hiding them would make the pane the only component pretending a header
+  is there, and the member would never learn why their tags do not show.
+- **Dialog keyboard** — BUILT 2026-09-05. `ConfirmModal` carries
+  `child-focus` and `confirm-from-field()`: an instance that focuses one
+  of its own inputs on open keeps the focus (the dialog's zero-sized key
+  scope would otherwise take it straight back), and Enter from a field
+  goes through the confirm BUTTON's gate, so a disabled confirm cannot
+  fire from the keyboard either. The tag modal opens on its first row, the
+  link modal on the target filter, the export dialog on its path;
+  Tab/Shift+Tab walk the inputs (Slint's own focus walk, which runs only
+  because the window's key scope rejects Tab while a modal is up), and
+  Escape still cancels through the window handler. The captions a
+  placeholder already carries are gone from the link modal - three rows
+  the dialog was fighting for at a large app font.
 - **Authoring a relation** — BUILT 2026-09-05
   (`wiki_tags_and_semantic_links.md`, then `wiki_semantic_gaps.md` §6 and
   its step 4). A document without a header offers `+ Tag` and nothing
