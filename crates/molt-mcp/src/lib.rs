@@ -1140,7 +1140,7 @@ pub fn tools() -> Vec<ToolDef> {
                     "tags": { "type": "array", "items": { "type": "string" }, "description": "optional: every tag must be present" },
                     "type": { "type": "string", "description": "optional: the front matter's type" },
                     "folder": { "type": "string", "description": "optional: only documents in this folder" },
-                    "props": { "type": "object", "additionalProperties": { "type": "string" }, "description": "optional: front-matter pairs that must all match, e.g. {\"status\": \"draft\"}" },
+                    "props": { "type": "object", "additionalProperties": { "type": ["string", "integer"] }, "description": "optional: front-matter pairs that must all match, e.g. {\"status\": \"draft\"}; a number is taken as its decimal text" },
                     "limit": { "type": "integer", "description": "optional: page size, 1..=500 (default 100)" },
                     "cursor": { "type": "integer", "description": "optional: continue after this many hits" }
                 }
