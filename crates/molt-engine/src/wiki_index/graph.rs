@@ -288,6 +288,50 @@ impl WikiGraph {
         }
         (found, false)
     }
+
+    /// **Hygiene, part 1** (§4.11): the names this republic REFERENCES and
+    /// does not carry, each with the documents that reference them - the
+    /// "what should I write next" signal, computed on every resolution
+    /// pass and until now exposed nowhere.
+    pub(crate) fn dangling_targets(&self) -> Vec<(String, Vec<String>)> {
+        self.dangling
+            .iter()
+            .map(|(name, refs)| {
+                let mut from: Vec<String> = refs.iter().map(|(src, _)| src.clone()).collect();
+                from.sort_unstable();
+                from.dedup();
+                (name.clone(), from)
+            })
+            .collect()
+    }
+
+    /// **Hygiene, part 2**: documents nothing points at. `inn` is filled
+    /// only for RESOLVED edges and never holds an empty list, so absence
+    /// from it IS the orphan test.
+    pub(crate) fn orphans(&self) -> Vec<String> {
+        self.docs
+            .keys()
+            .filter(|p| !self.inn.contains_key(*p))
+            .cloned()
+            .collect()
+    }
+
+    /// **Hygiene, part 3**: keys that differ only in case or separator.
+    /// `status` and `Status` are two fields to every property query, and
+    /// nothing else in the tool set says so. Read off the INVENTORY, not
+    /// off header parsing, so an inline predicate counts like a header key.
+    pub(crate) fn key_drift(&self) -> Vec<Vec<String>> {
+        let mut folded: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for key in self.inventory.keys() {
+            let fold: String = key
+                .chars()
+                .filter(|c| !matches!(c, '-' | '_' | ' '))
+                .flat_map(char::to_lowercase)
+                .collect();
+            folded.entry(fold).or_default().push(key.clone());
+        }
+        folded.into_values().filter(|g| g.len() > 1).collect()
+    }
 }
 
 /// What a neighbour walk follows.
@@ -869,5 +913,50 @@ mod tests {
         let (found, capped) = g.neighbors("hub.md", &Walk { cap: 3, ..walk(1) });
         assert_eq!(found.len(), 3);
         assert!(!capped, "exactly the cap with nothing left is not a cut");
+    }
+
+    /// **Hygiene** (§4.11): what this republic references and does not
+    /// have, and what nothing points at. Both read off the SAME resolution
+    /// pass `wiki_links` answers from, so neither can contradict it.
+    #[test]
+    fn the_hygiene_lists_name_the_missing_and_the_unreferenced() {
+        let g = WikiGraph::build(&tree(&[
+            ("a.md", "---\nsee: \"[[b]]\"\nnope: \"[[ghost]]\"\n---\n"),
+            ("b.md", "# B\n"),
+            ("lonely.md", "also [[ghost]]\n"),
+        ]));
+        assert_eq!(
+            g.dangling_targets(),
+            vec![(
+                "ghost".to_string(),
+                vec!["a.md".to_string(), "lonely.md".to_string()]
+            )]
+        );
+        assert_eq!(
+            g.orphans(),
+            vec!["a.md".to_string(), "lonely.md".to_string()],
+            "b.md is pointed at, the other two are not"
+        );
+    }
+
+    /// `status` and `Status` are two fields to every property query, and a
+    /// separator does the same thing - the drift hint is what says so.
+    /// Read off the INVENTORY, so an inline predicate counts like a header
+    /// key.
+    #[test]
+    fn key_drift_groups_keys_that_differ_only_in_case_or_separator() {
+        let g = WikiGraph::build(&tree(&[
+            ("a.md", "---\nstatus: draft\nworks_at: Acme\n---\n"),
+            ("b.md", "---\nStatus: final\nworks-at: Beta\n---\n"),
+            ("c.md", "---\nalone: 1\n---\n"),
+        ]));
+        assert_eq!(
+            g.key_drift(),
+            vec![
+                vec!["Status".to_string(), "status".to_string()],
+                vec!["works-at".to_string(), "works_at".to_string()],
+            ],
+            "a key nobody else spells differently is not drift"
+        );
     }
 }
