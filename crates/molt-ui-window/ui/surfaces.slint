@@ -919,7 +919,9 @@ export component MemoryPane inherits VerticalLayout {
                         label: Strings.mem-cs-vote;
                         emoji: "🗳️";
                         primary: true;
-                        enabled: WikiState.base-pending == "";
+                        // a queued vote is already on its way: it goes out
+                        // by itself when the ratified bytes land
+                        enabled: WikiState.base-pending == "" && !WikiState.cs-vote-queued;
                         clicked => {
                             WikiState.cs-vote();
                         }

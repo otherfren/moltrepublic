@@ -1620,3 +1620,219 @@ fn the_link_modal_drops_the_captions_its_placeholders_carry() {
         );
     }
 }
+
+/// A base whose documents carry METADATA ONLY, exactly as `wiki_list`
+/// delivers it (`knowledge_base_scale.md` §4.10), plus a recorder for
+/// every path the bridge asks bytes for.
+fn lazy_base(ui: &AppWindow, paths: &[&str]) -> Rc<RefCell<Vec<String>>> {
+    let g = ui.global::<WikiState>();
+    let wanted: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    {
+        let w = wanted.clone();
+        g.on_content_wanted(move |p| w.borrow_mut().push(p.to_string()));
+    }
+    g.set_base_docs(ModelRc::new(VecModel::from(
+        paths
+            .iter()
+            .map(|p| WikiBase {
+                path: (*p).into(),
+                content: "".into(),
+                loaded: false,
+            })
+            .collect::<Vec<_>>(),
+    )));
+    g.set_base_rev(1);
+    g.invoke_base_arrived();
+    wanted
+}
+
+/// The navigator verbs are deferred (slint#6426 class); headless, the
+/// frame that runs them is `mock_elapsed_time`.
+fn settle() {
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+}
+
+/// The navigator row for `label`.
+fn nav_id(ui: &AppWindow, label: &str) -> i32 {
+    let rows = ui.global::<WikiState>().get_nav_rows();
+    (0..rows.row_count())
+        .filter_map(|i| rows.row_data(i))
+        .find(|r| r.label.as_str() == label)
+        .unwrap_or_else(|| panic!("no nav row {label}"))
+        .id
+}
+
+/// **A change made in the navigator asks for its ratified bytes even
+/// though no tab is open.** The request used to ride the OPEN document
+/// only, so a delete or move made from the tree left its bytes unfetched
+/// forever - and the vote refused forever with it.
+#[test]
+fn a_navigator_change_with_no_tab_open_still_asks_for_the_ratified_bytes() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    let _wiki = wire_wiki(&ui);
+    let g = ui.global::<WikiState>();
+    let wanted = lazy_base(&ui, &["a.md"]);
+    assert!(
+        wanted.borrow().is_empty(),
+        "an untouched base wants nothing"
+    );
+    assert!(!g.get_doc_open(), "no tab is open");
+
+    g.invoke_nav_delete(nav_id(&ui, "a.md"));
+    settle();
+    assert_eq!(
+        wanted.borrow().as_slice(),
+        ["a.md".to_string()],
+        "the deletion hunk needs the ratified text"
+    );
+}
+
+/// **The bytes are asked for under the BASE path.** A rename moves the
+/// working path while the ratified counterpart stays where it was; asking
+/// under the new one got an unknown-path error the engine could never
+/// answer, and `load_base` could not have landed the reply either.
+#[test]
+fn a_rename_with_no_tab_open_asks_under_the_base_path_and_then_patches() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    let _wiki = wire_wiki(&ui);
+    let g = ui.global::<WikiState>();
+    let wanted = lazy_base(&ui, &["a.md"]);
+
+    g.invoke_nav_rename_start(nav_id(&ui, "a.md"));
+    g.invoke_nav_rename_commit(nav_id(&ui, "a.md"), "b.md".into());
+    settle();
+    assert_eq!(
+        wanted.borrow().last().map(String::as_str),
+        Some("a.md"),
+        "the OLD path is the one the republic ratified"
+    );
+    assert_eq!(
+        g.get_cs_patch().as_str(),
+        "",
+        "no patch over bytes this node does not hold"
+    );
+
+    g.invoke_content_arrived("a.md".into(), "alpha\n".into());
+    let patch = g.get_cs_patch().to_string();
+    assert!(patch.contains("rename from a.md"), "{patch}");
+    assert!(patch.contains("rename to b.md"), "{patch}");
+}
+
+/// **A vote over bytes still in flight is QUEUED, never refused.** The
+/// click marks the vote pending and re-requests; the arrival fires the
+/// proposal without a second click, and exactly once.
+#[test]
+fn a_vote_over_unfetched_bytes_is_queued_and_fires_on_arrival() {
+    i_slint_backend_testing::init_no_event_loop();
+    let rt = rt();
+    let _guard = rt.enter();
+    let w = molt_engine::spawn(
+        GroupConfig {
+            member: "me".to_string(),
+            members: vec!["me".to_string()],
+            threshold: 1,
+            self_cosign: false,
+        },
+        SessionView::default(),
+    );
+    // the republic has to HOLD a.md, or the local deletion patch would be
+    // a change against nothing and the engine would refuse it
+    rt.block_on(async {
+        let id = match w
+            .execute(Command::Propose {
+                surface: Surface::Memory,
+                payload: serde_json::json!({
+                    "op": "wiki_patch",
+                    "summary": "a.md",
+                    "value": "diff --git a/a.md b/a.md\nnew file mode 100644\n--- /dev/null\n+++ b/a.md\n@@ -0,0 +1,1 @@\n+alpha\n",
+                }),
+            })
+            .await
+            .expect("seed propose")
+        {
+            Reply::Proposed { id, .. } => id,
+            other => panic!("unexpected: {other:?}"),
+        };
+        w.execute(Command::Approve { proposal: id })
+            .await
+            .expect("seed approve");
+    });
+    let pending = |w: &WalletHandle| {
+        rt.block_on(async {
+            match w
+                .execute(Command::ReadState {
+                    surface: Surface::Memory,
+                    channel: None,
+                    view: None,
+                })
+                .await
+            {
+                Ok(Reply::State(s)) => s.pending.len(),
+                other => panic!("read memory: {other:?}"),
+            }
+        })
+    };
+
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    let (model, last) = wire_wiki(&ui);
+    let cx = Ctx {
+        rt: rt.handle().clone(),
+        wallet: w.clone(),
+        weak: ui.as_weak(),
+        last_settings: Arc::new(Mutex::new(None)),
+        chat_ui: Arc::new(Mutex::new(ChatUiState::default())),
+    };
+    wire_wiki_vote(&ui, &cx, &model, &last);
+    let g = ui.global::<WikiState>();
+    let wanted = lazy_base(&ui, &["a.md"]);
+    g.invoke_nav_delete(nav_id(&ui, "a.md"));
+    settle();
+    wanted.borrow_mut().clear();
+
+    // the click while the bytes are in flight
+    g.invoke_cs_vote();
+    assert!(g.get_cs_vote_queued(), "the vote is queued, not refused");
+    assert_eq!(
+        ui.get_toast_text().as_str(),
+        Lexicon::en().mem_toast_vote_queued,
+        "the toast promises the vote, it does not send the member away"
+    );
+    assert_eq!(
+        wanted.borrow().last().map(String::as_str),
+        Some("a.md"),
+        "the click re-requests instead of trusting a flight in progress"
+    );
+    assert_eq!(pending(&w), 0, "nothing may go out over unheld bytes");
+
+    // …and the arrival fires it, without a second click
+    g.invoke_content_arrived("a.md".into(), "alpha\n".into());
+    assert!(!g.get_cs_vote_queued(), "the queue emptied");
+    rt.block_on(async {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(Reply::State(s)) = w
+                .execute(Command::ReadState {
+                    surface: Surface::Memory,
+                    channel: None,
+                    view: None,
+                })
+                .await
+            {
+                if !s.pending.is_empty() {
+                    return;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("the queued vote never reached the engine");
+    });
+    assert_eq!(pending(&w), 1);
+
+    // a second arrival must not propose the same patch again
+    g.invoke_content_arrived("a.md".into(), "alpha\n".into());
+    rt.block_on(async { tokio::time::sleep(std::time::Duration::from_millis(200)).await });
+    assert_eq!(pending(&w), 1, "a queued vote fires exactly once");
+}

@@ -456,6 +456,8 @@ export global WikiState {
     callback content-wanted(string);
     // …and here they are
     callback content-arrived(string, string);
+    // …or they could not be read after the bounded retries
+    callback content-failed(string);
     // both authoring modals render at the APP ROOT - a layout child of
     // the pane could not overlay it
     in-out property <bool> tag-modal-open;
@@ -557,6 +559,9 @@ export global WikiState {
     in-out property <[WikiChangeRow]> cs-rows;
     // the whole local changeset as a git patch ("" = nothing to show)
     in-out property <string> cs-patch;
+    // a vote fired over bytes still in flight: it goes out by itself when
+    // they land, so the button says "on its way" rather than refusing
+    in-out property <bool> cs-vote-queued;
     // The export gate, in ONE place: an export writes the APPROVED base
     // tree, so an empty base means there is nothing to export - the local
     // stack is a separate question the dialog answers with draft-count().
@@ -1457,7 +1462,8 @@ export global Strings {
     in property <string> mem-cs-confirm-body;
     in property <string> mem-toast-net-empty;
     in property <string> mem-toast-folder-only;
-    in property <string> mem-toast-loading;
+    in property <string> mem-toast-vote-queued;
+    in property <string> mem-toast-content-failed;
     in property <string> mem-menu-revert;
     in property <string> mem-menu-copy-link;
     in property <string> mem-toast-link-md;
