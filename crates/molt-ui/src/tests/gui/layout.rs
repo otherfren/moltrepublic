@@ -1155,3 +1155,132 @@ fn geometry(ui: &AppWindow, id: &str) -> Geometry {
         .unwrap_or_else(|| panic!("{id} renders"));
     (e.absolute_position().x, e.absolute_position().y, e.size().width, e.size().height)
 }
+
+/// Put one surface pane on one sub-view, with every paged list `pages`
+/// long. Only the page COUNTS decide whether a pager row renders, so the
+/// row models stay one entry each.
+#[cfg(feature = "live-preview")]
+fn set_paged_surface(ui: &AppWindow, key: &str, view: &str, pages: i32) {
+    ui.set_selected_surface(key.into());
+    ui.set_selected_view(view.into());
+    let row = |id: i32| ProposalRow { id, text: "Charter".into(), ..ProposalRow::default() };
+    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: key.into(),
+        gated: true,
+        applied_count: 16,
+        pending_count: 16,
+        declined_count: 16,
+        accepted: ModelRc::new(VecModel::from(vec![row(1)])),
+        pending: ModelRc::new(VecModel::from(vec![row(2)])),
+        declined: ModelRc::new(VecModel::from(vec![row(3)])),
+        applied_page: 1,
+        applied_pages: pages,
+        pending_page: 1,
+        pending_pages: pages,
+        declined_page: 1,
+        declined_pages: pages,
+        ..SurfaceTab::default()
+    }])));
+}
+
+/// The pager rows currently on screen.
+#[cfg(feature = "live-preview")]
+fn pager_rows(ui: &AppWindow) -> Vec<i_slint_backend_testing::ElementHandle> {
+    i_slint_backend_testing::ElementHandle::find_by_element_type_name(ui, "PagerRow").collect()
+}
+
+/// The pager's › button: the rightmost of the two inside `row` (the
+/// row is centred in the pane, so its own right edge is empty space).
+#[cfg(feature = "live-preview")]
+fn pager_next(
+    ui: &AppWindow,
+    row: &i_slint_backend_testing::ElementHandle,
+) -> i_slint_backend_testing::ElementHandle {
+    let left = row.absolute_position().x;
+    let right = left + row.size().width;
+    let top = row.absolute_position().y;
+    let bottom = top + row.size().height;
+    let mut inside: Vec<i_slint_backend_testing::ElementHandle> =
+        i_slint_backend_testing::ElementHandle::find_by_element_type_name(ui, "AppButton")
+            .filter(|b| {
+                let p = b.absolute_position();
+                p.x >= left
+                    && p.x + b.size().width <= right
+                    && p.y >= top
+                    && p.y + b.size().height <= bottom
+            })
+            .collect();
+    inside.sort_by(|a, b| {
+        a.absolute_position()
+            .x
+            .partial_cmp(&b.absolute_position().x)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    inside.pop().expect("the pager's two step buttons render")
+}
+
+/// **Every proposal-outcome panel carries its pager, and steps its own
+/// list.** The slicing runs in Rust (15 rows a page), so a panel that
+/// renders the slice without the row strands every page but the first -
+/// and a pager copied into a neighbouring panel would step the wrong
+/// list. Each panel is pinned by the lists it pages, top to bottom; the
+/// rows appear only above one page.
+#[cfg(feature = "live-preview")]
+#[test]
+fn every_outcome_panel_pages_its_own_list() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    ui.window().set_size(slint::PhysicalSize::new(1200, 800));
+    ui.set_screen(AppScreen::Main);
+    apply_strings(&ui, 0);
+    ui.show().expect("show headless");
+    let stepped: Rc<RefCell<Vec<(String, String, i32)>>> = Rc::new(RefCell::new(Vec::new()));
+    let sink = stepped.clone();
+    ui.on_page_list(move |surface, list, delta| {
+        sink.borrow_mut().push((surface.to_string(), list.to_string(), delta));
+    });
+    for (key, view, lists) in [
+        ("organization", "pending", &["pending"][..]),
+        ("organization", "accepted", &["applied"]),
+        ("organization", "declined", &["declined"]),
+        ("files", "pending", &["pending"]),
+        ("files", "accepted", &["applied"]),
+        ("files", "declined", &["declined"]),
+        ("memory", "proposals", &["pending"]),
+        ("memory", "accepted", &["applied"]),
+        ("memory", "denied", &["declined"]),
+        // the other gated surfaces put both lists on one panel: the
+        // proposal cards, then the applied log under them
+        ("quests", "proposals", &["pending", "applied"]),
+        ("vault", "proposals", &["pending", "applied"]),
+        ("wallet", "status", &["pending", "applied"]),
+    ] {
+        set_paged_surface(&ui, key, view, 2);
+        let mut rows = pager_rows(&ui);
+        assert_eq!(
+            rows.len(),
+            lists.len(),
+            "{key}/{view}: one pager per paged list, over two pages"
+        );
+        rows.sort_by(|a, b| {
+            a.absolute_position()
+                .y
+                .partial_cmp(&b.absolute_position().y)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for (row, list) in rows.iter().zip(lists) {
+            stepped.borrow_mut().clear();
+            click(&ui, &pager_next(&ui, row));
+            assert_eq!(
+                stepped.borrow().as_slice(),
+                [(key.to_string(), (*list).to_string(), 1)],
+                "{key}/{view}: the step must address this panel's own list"
+            );
+        }
+        set_paged_surface(&ui, key, view, 1);
+        assert!(
+            pager_rows(&ui).is_empty(),
+            "{key}/{view}: a single page must show no pager"
+        );
+    }
+}

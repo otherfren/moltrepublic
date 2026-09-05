@@ -26,8 +26,9 @@ use crate::labels::{
 };
 use crate::{ChainRow, MemberVoteMark, ProposalRow, RelayChange};
 
-/// Rows per page of the proposal-outcome lists (Organization → Declined
-/// and the gated surfaces' applied log). Below this the pager row hides.
+/// Rows per page of the proposal-outcome lists (a surface's pending,
+/// applied and declined votes, and the chain history). Below this the
+/// pager row hides.
 pub(crate) const LIST_PAGE_SIZE: usize = 15;
 
 /// The pure paging window: `(start, end, page, page_count)` over a list of
@@ -168,8 +169,8 @@ pub(crate) struct SurfacesBundle {
     pub(crate) uploads_filter: String,
     /// Effective (push-clamped) 0-based page per paged proposal-outcome
     /// list, keyed `"{surface}:{list}"` — `apply_surfaces` slices the
-    /// declined/applied models with it and echoes "page x of y" into the
-    /// surface tab (see [`ChatUiState::list_pages`]).
+    /// pending/applied/declined models with it and echoes "page x of y"
+    /// into the surface tab (see [`ChatUiState::list_pages`]).
     pub(crate) list_pages: HashMap<String, usize>,
     /// The status info strip (founding date + mock activity trio).
     pub(crate) org_stats: OrgStats,
@@ -349,11 +350,12 @@ pub(crate) struct ChatUiState {
     /// filename and (full) checksum; "" = all rows.
     pub(crate) uploads_filter: String,
     /// Current 0-based page of the paged proposal-outcome lists, keyed
-    /// `"{surface}:{list}"` (list = "declined" | "applied"); a missing key
-    /// is page 0. UI-LOCAL presentation like the sorts — the engine's
-    /// reads stay the full projections (MCP sees them unchanged). The
-    /// stored page re-bases against the list's current length on every
-    /// push ([`ChatUiState::clamp_list_page`]); a workspace switch resets
+    /// `"{surface}:{list}"` (list = "pending" | "applied" | "declined",
+    /// plus `"chain:history"`); a missing key is page 0. UI-LOCAL
+    /// presentation like the sorts — the engine's reads stay the full
+    /// projections (MCP sees them unchanged). The stored page re-bases
+    /// against the list's current length on every push
+    /// ([`ChatUiState::clamp_surface_pages`]); a workspace switch resets
     /// it with the rest of this state.
     pub(crate) list_pages: HashMap<String, usize>,
 }
@@ -513,6 +515,29 @@ impl ChatUiState {
             self.list_pages.insert(key, page);
         }
         page
+    }
+
+    /// Re-base ALL of one surface's paged lists against their CURRENT
+    /// lengths and record the effective pages under `"{surface}:{list}"`.
+    /// The list of lists is the contract with `mirror.rs`, which slices
+    /// exactly these: one missing here would still slice for the display
+    /// but keep stepping from a page the user cannot see.
+    pub(crate) fn clamp_surface_pages(
+        &mut self,
+        surface: &str,
+        snap: &SurfaceSnapshot,
+        out: &mut HashMap<String, usize>,
+    ) {
+        for (list, len) in [
+            ("pending", snap.pending.len()),
+            ("applied", snap.applied.len()),
+            ("declined", snap.declined.len()),
+        ] {
+            out.insert(
+                format!("{surface}:{list}"),
+                self.clamp_list_page(surface, list, len),
+            );
+        }
     }
 }
 pub(crate) struct SurfaceData {
@@ -943,15 +968,7 @@ pub(crate) async fn gather_surfaces(
             if *sf == Surface::Chat {
                 continue; // the chat log IS the pane — full scrollback, never paged
             }
-            let key = sf.as_str();
-            list_pages.insert(
-                format!("{key}:declined"),
-                st.clamp_list_page(key, "declined", s.declined.len()),
-            );
-            list_pages.insert(
-                format!("{key}:applied"),
-                st.clamp_list_page(key, "applied", s.applied.len()),
-            );
+            st.clamp_surface_pages(sf.as_str(), s, &mut list_pages);
         }
         list_pages.insert(
             "chain:history".to_string(),

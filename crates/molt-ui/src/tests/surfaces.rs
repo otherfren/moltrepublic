@@ -581,11 +581,10 @@ fn org_sort_state_toggles_and_bumps_generation() {
     assert_eq!(st.generation, g + 5, "every change stales in-flight pushes");
 }
 
-/// The pure paging window behind the proposal-outcome lists
-/// (Declined / the applied log): 20 rows per page, the page clamps
-/// into range (a shrunk list must never show an empty page), and a
-/// list of at most one page reports `page_count == 1` — the pager
-/// row hides on that.
+/// The pure paging window behind the proposal-outcome lists (pending /
+/// applied / declined): the page clamps into range (a shrunk list must
+/// never show an empty page), and a list of at most one page reports
+/// `page_count == 1` — the pager row hides on that.
 #[test]
 fn page_slice_windows_and_clamps() {
     // empty list: one (empty) page, never a panic range
@@ -633,6 +632,89 @@ fn list_page_state_steps_clamps_and_resets() {
     // a workspace switch resets the pages with the rest of the state
     st.enter_workspace("ws-b");
     assert_eq!(st.clamp_list_page("memory", "applied", 100), 0);
+}
+
+/// A gated surface's snapshot with `n` rows per paged list — only the
+/// LENGTHS drive the paging, so the rows stay content-free.
+fn outcome_snapshot(pending: usize, applied: usize, declined: usize) -> molt_core::SurfaceSnapshot {
+    let votes = |n: usize| -> Vec<ProposalView> {
+        (0..n)
+            .map(|i| ProposalView {
+                id: ProposalId(u64::try_from(i).unwrap_or(0)),
+                surface: Surface::Organization,
+                payload: serde_json::json!({"op": "add_note", "title": "n"}),
+                approvals: 0,
+                threshold: 2,
+                state: ProposalState::Proposed,
+                approved_by_me: false,
+                declined_by_me: false,
+                current: String::new(),
+                proposed: String::new(),
+                votes: Vec::new(),
+                declined_at: 0,
+                declined_by: String::new(),
+                by: String::new(),
+                mine: false,
+                superseded: false,
+                withdrawn: false,
+            })
+            .collect()
+    };
+    molt_core::SurfaceSnapshot {
+        surface: Surface::Organization,
+        gated: true,
+        applied: vec![serde_json::json!({"op": "add_note", "title": "a"}); applied],
+        applied_ids: vec![None; applied],
+        pending: votes(pending),
+        denied: 0,
+        declined: votes(declined),
+        accepted: Vec::new(),
+        channels: Vec::new(),
+        has_archive: false,
+        wiki_docs: 0,
+        wiki_rev: 0,
+        wiki_base_pending: None,
+    }
+}
+
+/// **Every paged list re-bases on a push — Pending included.**
+/// `mirror.rs` slices all three (pending / applied / declined), so all
+/// three must clamp here too: a list the display clamps but the state
+/// does not keeps stepping from a page the user cannot see, and the
+/// pager reads as dead for as many clicks as the list shrank.
+#[test]
+fn a_push_re_bases_every_paged_list() {
+    let mut st = ChatUiState::default();
+    for list in ["pending", "applied", "declined"] {
+        st.page_list_by("organization", list, 3);
+    }
+    let mut pages = HashMap::new();
+    st.clamp_surface_pages("organization", &outcome_snapshot(60, 60, 60), &mut pages);
+    for list in ["pending", "applied", "declined"] {
+        assert_eq!(
+            pages.get(&format!("organization:{list}")).copied(),
+            Some(3),
+            "{list}: page 4 of a 4-page list is in range"
+        );
+    }
+    // the votes are decided, every list is down to one page
+    let mut pages = HashMap::new();
+    st.clamp_surface_pages("organization", &outcome_snapshot(2, 2, 2), &mut pages);
+    for list in ["pending", "applied", "declined"] {
+        assert_eq!(
+            pages.get(&format!("organization:{list}")).copied(),
+            Some(0),
+            "{list}: a shrunk list re-bases onto its last page"
+        );
+        // …and the clamp wrote back: the next › steps from the page on
+        // screen, not from the stale one
+        st.page_list_by("organization", list, 1);
+        assert_eq!(
+            st.clamp_list_page("organization", list, 60),
+            1,
+            "{list}: the step moved from the visible page"
+        );
+    }
 }
 
 /// The Shared Files nav row: shares, the screen, or a vote on record keep

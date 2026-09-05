@@ -702,8 +702,8 @@ component RelayPoolGroup inherits DetailGroup {
 }
 
 // The paged lists' footer: ‹ Page x of y › — the caller shows it only when
-// the list exceeds one page (count > 20); the actual paging (slice, clamp
-// on shrink) runs in Rust, this row merely steps and displays the echo.
+// the list exceeds one page; the actual paging (slice, clamp on shrink)
+// runs in Rust, this row merely steps and displays the echo.
 component PagerRow inherits HorizontalLayout {
     in property <int> page; // 1-based current page
     in property <int> pages; // total page count
