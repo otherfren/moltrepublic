@@ -329,8 +329,8 @@ predicate.
   and the walk reports `capped` when it hit it (one document past the cap
   is fetched, so a full last page is not reported as a cut). A cycle
   terminates on the `seen` set the walk already keeps. The predicate
-  filter matches the EDGE's predicate, never `header`, so an inline typed
-  link (§6) walks with the same call.
+  filter matches the EDGE's predicate, never its origin, so a body link
+  that carries one walks with the same call.
 
 ### 4.6 Full-text search (K5)
 
