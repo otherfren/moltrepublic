@@ -1373,7 +1373,7 @@ export component AppWindow inherits Window {
     // the phrase dialog for one workspace: decrypt-seal picks the
     // direction (true = sealing/encrypt, false = unsealing/decrypt) —
     // both directions verify the typed recovery phrase in the engine
-    property <bool> decrypt-modal-open: false;
+    in-out property <bool> decrypt-modal-open: false;
     property <bool> decrypt-seal: false;
     property <string> decrypt-id;
     property <string> decrypt-name;
@@ -1602,7 +1602,7 @@ export component AppWindow inherits Window {
     // The destination survives the dialog (re-exporting to the same folder
     // is the common case); the proof box is re-armed on every open, so a
     // previous run's unticked box never silently drops the bundle.
-    property <bool> mem-export-open: false;
+    in-out property <bool> mem-export-open: false;
     // in-out: the native folder picker (Rust, mem-export-pick) writes here,
     // and the field stays hand-editable as a fallback
     in-out property <string> mem-export-dir;
@@ -1677,7 +1677,7 @@ export component AppWindow inherits Window {
     //
     // Still deliberately NOT a "create channel" ritual — a channel exists
     // because a message exists (concept Q2). The dialog only selects it.
-    property <bool> nt-open: false;
+    in-out property <bool> nt-open: false;
     property <string> nt-draft: "";
     // mirrors `molt_core::TOPIC_NAME_MAX_CHARS`; the engine normalizes and
     // would refuse a longer name on the first send, which is far too late to
@@ -1877,7 +1877,7 @@ export component AppWindow inherits Window {
     in-out property <string> recovery-link-error;
     // Vault (design mock): the seal dialog's draft and the one deposit a
     // confirmed seal has produced in this session
-    property <bool> vt-seal-open: false;
+    in-out property <bool> vt-seal-open: false;
     property <string> vt-seal-title;
     property <string> vt-seal-desc;
     property <string> vt-seal-secret;
@@ -1993,7 +1993,7 @@ export component AppWindow inherits Window {
     // chrome controls and the WM close (read from Rust)
     out property <bool> run-active: root.restore-running || root.cw-running || root.jw-running;
     // folder picker for the settings workspace tab
-    property <bool> ws-dir-modal-open: false;
+    in-out property <bool> ws-dir-modal-open: false;
     // in-out: the native picker (Rust, ws-dir-pick) writes the chosen path;
     // the field stays editable as a manual fallback
     in-out property <string> ws-dir-draft;
@@ -2002,7 +2002,7 @@ export component AppWindow inherits Window {
     callback ws-dir-pick();
     // Organization → Status edit drafts (image path + charter). Confirming
     // creates a REAL gated proposal on the Organization surface (org-propose)
-    property <bool> org-logo-modal-open: false;
+    in-out property <bool> org-logo-modal-open: false;
     // in-out: the native picker (Rust, org-logo-pick) writes the chosen path
     in-out property <string> org-logo-draft;
     // the republic's CURRENT image (engine StatusView.image): the file
@@ -2017,8 +2017,8 @@ export component AppWindow inherits Window {
     // carry the seat explicitly (mp-member) — the engine refuses a profile
     // op proposed for anybody else, so the pencils only ever open on the
     // own row (member_profiles_plan.md §5)
-    property <bool> mp-img-open: false;
-    property <bool> mp-desc-open: false;
+    in-out property <bool> mp-img-open: false;
+    in-out property <bool> mp-desc-open: false;
     property <string> mp-member;
     // the row's current picture, copied in when the pencil opens
     property <image> mp-img;
@@ -2054,9 +2054,9 @@ export component AppWindow inherits Window {
     // save the proposed image's original bytes to disk (save dialog,
     // suggested file name = the proposal's value)
     callback save-proposal-image(string /* base64 payload bytes */, string /* file name */);
-    property <bool> org-charter-modal-open: false;
+    in-out property <bool> org-charter-modal-open: false;
     property <string> org-charter-draft;
-    property <bool> org-name-modal-open: false;
+    in-out property <bool> org-name-modal-open: false;
     property <string> org-name-draft;
     // charter reader (click on the charter → full text, scrollable)
     property <bool> charter-view-open: false;
@@ -2083,7 +2083,7 @@ export component AppWindow inherits Window {
     property <bool> org-features-modal-open: false;
     property <bool> of-memory-draft;
     property <bool> of-vault-draft;
-    property <bool> org-relays-modal-open: false;
+    in-out property <bool> org-relays-modal-open: false;
     // R6 pool-edit modal: the draft as ROWS plus the space-joined payload
     // string — the Rust side keeps the two in step (set-relay-draft-rows)
     in-out property <string> org-relays-draft;
@@ -2298,7 +2298,7 @@ export component AppWindow inherits Window {
     }
     // modal: manual backup — target path + export passphrase for the real
     // encrypted blob (the passphrase property is cleared on close, always)
-    property <bool> backup-modal-open: false;
+    in-out property <bool> backup-modal-open: false;
     property <string> backup-path;
     property <string> backup-pass;
     // restore-from-backup (recovery_auto_approval.md §7): a bucket-only row's
@@ -2309,9 +2309,9 @@ export component AppWindow inherits Window {
     in-out property <string> bk-restore-seed;
     // modal: confirm deleting a workspace (type its name to arm the button;
     // the id is what the delete verb actually addresses)
-    property <bool> confirm-delete-open: false;
+    in-out property <bool> confirm-delete-open: false;
     property <string> delete-id;
-    property <string> delete-name;
+    in-out property <string> delete-name;
     property <string> delete-typed;
 
     // Select a row on the Open screen: fill the details panel and drop any
@@ -8771,6 +8771,7 @@ export component AppWindow inherits Window {
     // button stays disabled until the user types the exact name.
     if root.confirm-delete-open: del-dlg := ConfirmModal {
         dialog-width: 420px;
+        child-focus: true;
         title: Strings.del-ws-title;
         body: Strings.del-ws-body;
         confirm-label: Strings.del-ws-confirm;
@@ -8783,6 +8784,8 @@ export component AppWindow inherits Window {
             root.deselect-workspace();
             root.delete-workspace(root.delete-id);
         }
+        // the name stays readable above the field: it is the value to be
+        // copied, and the placeholder carrying it vanishes on the first key
         Text {
             text: root.delete-name;
             color: Theme.text;
@@ -8793,11 +8796,11 @@ export component AppWindow inherits Window {
             text <=> root.delete-typed;
             placeholder: root.delete-name;
             invalid: root.delete-typed != "" && root.delete-typed != root.delete-name;
-            // Enter inside the field = the (gated) action button
+            init => {
+                self.focus-input();
+            }
             accepted => {
-                if (del-dlg.confirm-enabled) {
-                    del-dlg.confirmed();
-                }
+                del-dlg.confirm-from-field();
             }
         }
     }
@@ -8806,6 +8809,7 @@ export component AppWindow inherits Window {
     // screen competing for them.
     if root.nt-open: nt-dlg := ConfirmModal {
         dialog-width: 420px;
+        child-focus: true;
         title: Strings.ch-new-topic;
         confirm-label: Strings.ch-topic-open;
         // the engine trims and caps the name (`ChannelRef::normalized`), so
@@ -8825,10 +8829,11 @@ export component AppWindow inherits Window {
             text <=> root.nt-draft;
             placeholder: Strings.ch-topic-ph;
             invalid: root.nt-draft.character-count > root.nt-max;
+            init => {
+                self.focus-input();
+            }
             accepted => {
-                if (nt-dlg.confirm-enabled) {
-                    nt-dlg.confirmed();
-                }
+                nt-dlg.confirm-from-field();
             }
         }
         if root.nt-draft.character-count > root.nt-max: Text {
@@ -8860,6 +8865,7 @@ export component AppWindow inherits Window {
     // every way out of the modal.
     if root.backup-modal-open: bk-dlg := ConfirmModal {
         dialog-width: 440px;
+        child-focus: true;
         title: Strings.bk-title;
         body: Strings.bk-body;
         confirm-label: Strings.bk-confirm;
@@ -8873,32 +8879,22 @@ export component AppWindow inherits Window {
             root.export-workspace(root.open-id, root.backup-path, root.backup-pass);
             root.backup-pass = "";
         }
-        Text {
-            text: Strings.bk-path;
-            color: Theme.text;
-            font-size: Theme.fs-body;
-        }
         AppField {
             text <=> root.backup-path;
             placeholder: "~/Backups/republic.molt.enc";
-            accepted => {
-                if (bk-dlg.confirm-enabled) {
-                    bk-dlg.confirmed();
-                }
+            init => {
+                self.focus-input();
             }
-        }
-        Text {
-            text: Strings.bk-pass;
-            color: Theme.text;
-            font-size: Theme.fs-body;
+            accepted => {
+                bk-dlg.confirm-from-field();
+            }
         }
         AppField {
             text <=> root.backup-pass;
             secret: true;
+            placeholder: Strings.bk-pass;
             accepted => {
-                if (bk-dlg.confirm-enabled) {
-                    bk-dlg.confirmed();
-                }
+                bk-dlg.confirm-from-field();
             }
         }
     }
@@ -8911,6 +8907,7 @@ export component AppWindow inherits Window {
     // =================================================================
     if root.bk-restore-open: bkr-dlg := ConfirmModal {
         dialog-width: 440px;
+        child-focus: true;
         title: Strings.rw-title-s3;
         body: Strings.bkr-body;
         confirm-label: Strings.bk-restore;
@@ -8926,22 +8923,18 @@ export component AppWindow inherits Window {
             root.rw-mode = "s3";
             root.navigate(AppScreen.restore);
         }
-        Text {
-            text: Strings.rw-seed;
-            color: Theme.text;
-            font-size: Theme.fs-body;
-        }
         HorizontalLayout {
             spacing: 8px;
             AppField {
                 text <=> root.bk-restore-seed;
                 secret: true;
-                placeholder: Strings.ph-seed;
+                placeholder: Strings.rw-seed;
                 horizontal-stretch: 1;
+                init => {
+                    self.focus-input();
+                }
                 accepted => {
-                    if (bkr-dlg.confirm-enabled) {
-                        bkr-dlg.confirmed();
-                    }
+                    bkr-dlg.confirm-from-field();
                 }
             }
             AppButton {
@@ -8966,6 +8959,7 @@ export component AppWindow inherits Window {
     // =================================================================
     if root.org-logo-modal-open: ol-dlg := ConfirmModal {
         dialog-width: 460px;
+        child-focus: true;
         title: Strings.ol-title;
         body: Strings.ol-body;
         confirm-label: Strings.oc-propose;
@@ -9038,10 +9032,11 @@ export component AppWindow inherits Window {
                     text <=> root.org-logo-draft;
                     placeholder: "~/Pictures/republic.png";
                     horizontal-stretch: 1;
+                    init => {
+                        self.focus-input();
+                    }
                     accepted => {
-                        if (ol-dlg.confirm-enabled) {
-                            ol-dlg.confirmed();
-                        }
+                        ol-dlg.confirm-from-field();
                     }
                 }
                 AppButton {
@@ -9066,6 +9061,7 @@ export component AppWindow inherits Window {
     // =================================================================
     if root.mp-img-open: mp-dlg := ConfirmModal {
         dialog-width: 460px;
+        child-focus: true;
         title: Strings.mp-img-title;
         body: Strings.mp-img-body;
         confirm-label: Strings.oc-propose;
@@ -9139,10 +9135,11 @@ export component AppWindow inherits Window {
                     text <=> root.mp-img-draft;
                     placeholder: "~/Pictures/me.png";
                     horizontal-stretch: 1;
+                    init => {
+                        self.focus-input();
+                    }
                     accepted => {
-                        if (mp-dlg.confirm-enabled) {
-                            mp-dlg.confirmed();
-                        }
+                        mp-dlg.confirm-from-field();
                     }
                 }
                 AppButton {
@@ -9165,8 +9162,9 @@ export component AppWindow inherits Window {
     // confirming deposits it into the pane's list and says, in the toast,
     // that nothing left this window.
     // =================================================================
-    if root.vt-seal-open: ConfirmModal {
+    if root.vt-seal-open: vts-dlg := ConfirmModal {
         dialog-width: 520px;
+        child-focus: true;
         title: Strings.vt-seal-new;
         body: Strings.vt-seal-body;
         confirm-label: Strings.vt-seal-confirm;
@@ -9184,11 +9182,20 @@ export component AppWindow inherits Window {
         }
         VerticalLayout {
             spacing: 12px;
+            // two look-alike one-line fields whose placeholders are an
+            // EXAMPLE and the word "optional" - the captions are what
+            // tells them apart, so they stay
             FieldLabel {
                 label: Strings.vt-f-title;
                 AppField {
                     text <=> root.vt-seal-title;
                     placeholder: Strings.vt-f-title-ph;
+                    init => {
+                        self.focus-input();
+                    }
+                    accepted => {
+                        vts-dlg.confirm-from-field();
+                    }
                 }
             }
             FieldLabel {
@@ -9196,6 +9203,9 @@ export component AppWindow inherits Window {
                 AppField {
                     text <=> root.vt-seal-desc;
                     placeholder: Strings.vt-f-desc-ph;
+                    accepted => {
+                        vts-dlg.confirm-from-field();
+                    }
                 }
             }
             FieldLabel {
@@ -9217,14 +9227,14 @@ export component AppWindow inherits Window {
                     }
                 }
             }
-            FieldLabel {
-                label: Strings.vt-f-secret;
-                AppArea {
-                    height: 120px;
-                    // a draft must not drive the dialog's width
-                    preferred-width: 0px;
-                    text <=> root.vt-seal-secret;
-                    placeholder: Strings.vt-f-secret-ph;
+            AppArea {
+                height: 120px;
+                // a draft must not drive the dialog's width
+                preferred-width: 0px;
+                text <=> root.vt-seal-secret;
+                placeholder: Strings.vt-f-secret-ph;
+                ctrl-accepted => {
+                    vts-dlg.confirm-from-field();
                 }
             }
         }
@@ -9235,8 +9245,9 @@ export component AppWindow inherits Window {
     // gated line about the member; the counter runs against the engine's
     // own cap, so the confirm button never proposes a refused length.
     // =================================================================
-    if root.mp-desc-open: ConfirmModal {
+    if root.mp-desc-open: mpd-dlg := ConfirmModal {
         dialog-width: 520px;
+        child-focus: true;
         title: Strings.mp-desc-title;
         body: Strings.mp-desc-body;
         confirm-label: Strings.oc-propose;
@@ -9257,6 +9268,12 @@ export component AppWindow inherits Window {
                 preferred-width: 0px;
                 text <=> root.mp-desc-draft;
                 placeholder: Strings.mp-desc-ph;
+                init => {
+                    self.focus-input();
+                }
+                ctrl-accepted => {
+                    mpd-dlg.confirm-from-field();
+                }
             }
             Text {
                 text: "\{root.mp-desc-draft.character-count} / \{root.mp-desc-max}";
@@ -9274,6 +9291,7 @@ export component AppWindow inherits Window {
     // =================================================================
     if root.decrypt-modal-open: dec-dlg := ConfirmModal {
         dialog-width: 480px;
+        child-focus: true;
         title: root.decrypt-seal
             ? "\{Strings.ew-title} - \{root.decrypt-name}"
             : "\{Strings.dw-title} - \{root.decrypt-name}";
@@ -9295,13 +9313,14 @@ export component AppWindow inherits Window {
             spacing: 8px;
             AppField {
                 text <=> root.decrypt-phrase;
-                placeholder: Strings.ph-seed;
+                placeholder: Strings.rw-seed;
                 secret: true;
                 horizontal-stretch: 1;
+                init => {
+                    self.focus-input();
+                }
                 accepted => {
-                    if (dec-dlg.confirm-enabled) {
-                        dec-dlg.confirmed();
-                    }
+                    dec-dlg.confirm-from-field();
                 }
             }
             AppButton {
@@ -9368,6 +9387,7 @@ export component AppWindow inherits Window {
 
     if root.org-name-modal-open: orn-dlg := ConfirmModal {
         dialog-width: 440px;
+        child-focus: true;
         title: Strings.orn-title;
         body: Strings.orn-body;
         confirm-label: Strings.oc-propose;
@@ -9382,10 +9402,11 @@ export component AppWindow inherits Window {
         AppField {
             text <=> root.org-name-draft;
             placeholder: Strings.ph-ws-name;
+            init => {
+                self.focus-input();
+            }
             accepted => {
-                if (orn-dlg.confirm-enabled) {
-                    orn-dlg.confirmed();
-                }
+                orn-dlg.confirm-from-field();
             }
         }
     }
@@ -9396,8 +9417,9 @@ export component AppWindow inherits Window {
     // becomes a real proposal the members approve by threshold. Applying
     // it does not yet rewrite the shown charter (mock effect).
     // =================================================================
-    if root.org-charter-modal-open: ConfirmModal {
+    if root.org-charter-modal-open: occ-dlg := ConfirmModal {
         dialog-width: 720px;
+        child-focus: true;
         title: Strings.oc-title;
         body: Strings.oc-body;
         confirm-label: Strings.oc-propose;
@@ -9415,6 +9437,12 @@ export component AppWindow inherits Window {
             height: 300px;
             text <=> root.org-charter-draft;
             placeholder: Strings.cw-charter-agenda-ph;
+            init => {
+                self.focus-input();
+            }
+            ctrl-accepted => {
+                occ-dlg.confirm-from-field();
+            }
         }
     }
 
@@ -10060,6 +10088,7 @@ export component AppWindow inherits Window {
     // the space-joined payload string are kept in step Rust-side.
     if root.org-relays-modal-open: ConfirmModal {
         dialog-width: 560px;
+        child-focus: true;
         title: Strings.ocr2-title;
         body: Strings.ocr2-body;
         confirm-label: Strings.oc-propose;
@@ -10122,6 +10151,11 @@ export component AppWindow inherits Window {
                 add-field := AppField {
                     text <=> root.org-relay-add-draft;
                     placeholder: "wss://relay.example";
+                    init => {
+                        self.focus-input();
+                    }
+                    // Enter ADDS here rather than confirming: a URL still
+                    // sitting in the field blocks the proposal anyway
                     accepted => {
                         if (root.org-relay-add-draft != "") {
                             root.relays-draft-add(root.org-relay-add-draft);
@@ -10188,6 +10222,7 @@ export component AppWindow inherits Window {
     // =================================================================
     if root.ws-dir-modal-open: wsd-dlg := ConfirmModal {
         dialog-width: 440px;
+        child-focus: true;
         title: Strings.set-ws-dir-title;
         body: Strings.set-ws-dir-body;
         confirm-label: Strings.rw-file-pick;
@@ -10205,10 +10240,11 @@ export component AppWindow inherits Window {
                 text <=> root.ws-dir-draft;
                 placeholder: "~/.moltrepublic/workspaces";
                 horizontal-stretch: 1;
+                init => {
+                    self.focus-input();
+                }
                 accepted => {
-                    if (wsd-dlg.confirm-enabled) {
-                        wsd-dlg.confirmed();
-                    }
+                    wsd-dlg.confirm-from-field();
                 }
             }
             AppButton {

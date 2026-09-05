@@ -1518,30 +1518,6 @@ fn an_unreadable_header_stays_visible_as_prose() {
     );
 }
 
-/// Type one character into the focused element.
-#[cfg(feature = "live-preview")]
-fn type_char(ui: &AppWindow, c: &str) {
-    let text: slint::SharedString = c.into();
-    ui.window()
-        .dispatch_event(slint::platform::WindowEvent::KeyPressed { text: text.clone() });
-    ui.window().dispatch_event(slint::platform::WindowEvent::KeyReleased { text });
-}
-
-/// Press one named key. Backtab (Shift+Tab) has no `Key` variant - it is
-/// the raw code Slint's focus walk reads.
-#[cfg(feature = "live-preview")]
-fn press(ui: &AppWindow, key: slint::platform::Key) {
-    type_char(ui, &slint::SharedString::from(key));
-}
-
-/// Shift+Tab: one step BACK through the focus order.
-#[cfg(feature = "live-preview")]
-fn back_tab(ui: &AppWindow) {
-    type_char(ui, "\u{0019}");
-}
-
-
-
 /// **A dialog opens ready to type.** The tag modal's first row has the
 /// focus, Enter saves, and a modal whose confirm is disabled saves
 /// nothing.

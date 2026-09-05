@@ -14,6 +14,7 @@
 mod chat;
 mod files;
 mod layout;
+mod modals;
 mod poke;
 mod recovery_backup;
 mod snapshot;
@@ -44,6 +45,28 @@ fn members_window(on: bool) -> AppWindow {
     apply_strings(&ui, 0);
     ui.show().expect("show headless");
     ui
+}
+
+/// Type one character into the focused element.
+#[cfg(feature = "live-preview")]
+fn type_char(ui: &AppWindow, c: &str) {
+    let text: slint::SharedString = c.into();
+    ui.window()
+        .dispatch_event(slint::platform::WindowEvent::KeyPressed { text: text.clone() });
+    ui.window().dispatch_event(slint::platform::WindowEvent::KeyReleased { text });
+}
+
+/// Press one named key. Backtab (Shift+Tab) has no `Key` variant - it is
+/// the raw code Slint's focus walk reads.
+#[cfg(feature = "live-preview")]
+fn press(ui: &AppWindow, key: slint::platform::Key) {
+    type_char(ui, &slint::SharedString::from(key));
+}
+
+/// Shift+Tab: one step BACK through the focus order.
+#[cfg(feature = "live-preview")]
+fn back_tab(ui: &AppWindow) {
+    type_char(ui, "\u{0019}");
 }
 
 /// One real right press inside `area`, `fx` across its width (1.0 = the

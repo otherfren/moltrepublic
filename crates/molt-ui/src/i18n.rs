@@ -974,7 +974,6 @@ lexicon! {
     del_ws_confirm: "Delete permanently", "Endgültig löschen";
     bk_title: "Manual backup", "Manuelles Backup";
     bk_body: "The whole workspace is written to this location as one encrypted file - history, chain, and (when stored here) the recovery seed. Live group/transport state is never included: restoring reads everything, rejoining runs the recovery ritual. Caution: this backup + its passphrase can restore your seat like the recovery phrase - guard both.", "Der gesamte Workspace wird als eine verschlüsselte Datei an diesen Ort geschrieben - Historie, Chain und (wenn hier gespeichert) der Recovery-Seed. Live-Gruppen-/Transport-Zustand ist nie enthalten: Wiederherstellen macht alles lesbar, der Wiederbeitritt läuft über das Recovery-Ritual. Achtung: dieses Backup + seine Passphrase kann deinen Sitz wiederherstellen wie die Recovery-Phrase - beides gut verwahren.";
-    bk_path: "Target file", "Zieldatei";
     bk_pass: "Export passphrase (min. 10 characters)", "Export-Passphrase (mind. 10 Zeichen)";
     bk_confirm: "Save backup", "Backup speichern";
     field_s3_backup: "Automatic S3 backup", "Automatisches S3-Backup";
@@ -1460,7 +1459,6 @@ lexicon! {
     vt_f_desc: "Description", "Beschreibung";
     vt_f_desc_ph: "optional", "optional";
     vt_f_icon: "Icon", "Icon";
-    vt_f_secret: "Secret", "Geheimnis";
     vt_f_secret_ph: "the text that gets sealed", "der Text, der versiegelt wird";
     vt_mock_note: "Mock - nothing was sent", "Mock - nichts gesendet";
     wl_title_balance: "Treasury balance", "Kassenstand";
