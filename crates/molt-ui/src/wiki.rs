@@ -74,11 +74,14 @@ pub fn tag_hue(tag: &str) -> u16 {
 }
 
 /// One inline run of a block: `link` is empty for plain text, else the
-/// `.md` target the run points at.
+/// `.md` target the run points at. `rel` is the predicate the link
+/// declared inline (`[[works_at::Acme]]`), empty for a plain one - the
+/// preview shows it as a tooltip, never as text.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct Span {
     pub text: String,
     pub link: String,
+    pub rel: String,
 }
 
 impl Block {
@@ -102,6 +105,7 @@ impl Block {
             _ => self.spans.push(Span {
                 text: text.to_string(),
                 link: link.to_string(),
+                rel: String::new(),
             }),
         }
     }
@@ -2266,8 +2270,9 @@ impl Wiki {
     }
 
     /// A document's title for the link's display half: its first heading,
-    /// else its file name.
-    fn title_of(&self, path: &str) -> String {
+    /// else its file name. Also the SUBJECT the preview's relation tooltip
+    /// names - an inline claim is about the page, not about the sentence.
+    pub fn title_of(&self, path: &str) -> String {
         if path.is_empty() {
             return String::new();
         }
@@ -2511,6 +2516,7 @@ pub fn parse_blocks(raw: &str) -> Vec<Block> {
                             vec![Span {
                                 text: b.text.clone(),
                                 link: String::new(),
+                                rel: String::new(),
                             }]
                         };
                     }
@@ -2541,9 +2547,10 @@ pub fn parse_blocks(raw: &str) -> Vec<Block> {
     out
 }
 
-/// `.md` link targets in order of first appearance, deduped.
+/// `.md` link targets in order of first appearance, deduped. The
+/// navigator cares where a link GOES; what it asserts rides the spans.
 pub fn parse_links(raw: &str) -> Vec<String> {
-    molt_engine::body_links(raw)
+    molt_engine::body_link_targets(raw)
 }
 
 /// The document without its front matter: the header is rendered as an
@@ -2558,31 +2565,34 @@ pub fn body_of(raw: &str) -> &str {
 /// target can collide with it.
 const CODE_RUN: &str = "\u{1}";
 
-/// Turn the readable `[[Name]]` / `[[Name|shown]]` form into link runs,
-/// once the block's runs are WHOLE. It cannot be done per event: an
-/// unmatched `[` makes pulldown-cmark split a double bracket across
-/// several text events, so a per-event scan never sees the pair.
+/// Turn the readable `[[Name]]` / `[[Name|shown]]` / `[[pred::Name]]`
+/// form into link runs, once the block's runs are WHOLE. It cannot be
+/// done per event: an unmatched `[` makes pulldown-cmark split a double
+/// bracket across several text events, so a per-event scan never sees the
+/// pair. The split itself is the index's (`molt_engine::link_parts`), so
+/// the pane and the graph can never disagree about what a link asserts.
 fn expand_wiki_links(b: &mut Block) {
     let mut out: Vec<Span> = Vec::new();
-    let push = |out: &mut Vec<Span>, text: &str, link: &str| {
+    let push = |out: &mut Vec<Span>, text: &str, link: &str, rel: &str| {
         if text.is_empty() {
             return;
         }
         match out.last_mut() {
-            Some(s) if s.link == link => s.text.push_str(text),
+            Some(s) if s.link == link && s.rel == rel => s.text.push_str(text),
             _ => out.push(Span {
                 text: text.to_string(),
                 link: link.to_string(),
+                rel: rel.to_string(),
             }),
         }
     };
     for sp in std::mem::take(&mut b.spans) {
         if sp.link == CODE_RUN {
-            push(&mut out, &sp.text, "");
+            push(&mut out, &sp.text, "", "");
             continue;
         }
         if !sp.link.is_empty() {
-            push(&mut out, &sp.text, &sp.link);
+            push(&mut out, &sp.text, &sp.link, &sp.rel);
             continue;
         }
         let mut rest = sp.text.as_str();
@@ -2590,25 +2600,21 @@ fn expand_wiki_links(b: &mut Block) {
             let Some(end) = rest[at + 2..].find("]]") else {
                 break;
             };
-            let inner = &rest[at + 2..at + 2 + end];
+            let parts = molt_engine::link_parts(&rest[at + 2..at + 2 + end]);
             // an empty display half falls back to the name: the index reads
             // `[[Name|]]` as an edge, so the pane must not read it as prose
-            let (target, shown) = match inner.split_once('|') {
-                Some((t, d)) if !d.trim().is_empty() => (t.trim(), d.trim()),
-                Some((t, _)) => (t.trim(), t.trim()),
-                None => (inner.trim(), inner.trim()),
-            };
-            if target.is_empty() {
+            let shown = parts.display.unwrap_or(parts.name);
+            if parts.name.is_empty() {
                 // not a link after all — the brackets stay the text they are
-                push(&mut out, &rest[..at + 2], "");
+                push(&mut out, &rest[..at + 2], "", "");
                 rest = &rest[at + 2..];
                 continue;
             }
-            push(&mut out, &rest[..at], "");
-            push(&mut out, shown, target);
+            push(&mut out, &rest[..at], "", "");
+            push(&mut out, shown, parts.name, parts.predicate.unwrap_or(""));
             rest = &rest[at + 2 + end + 2..];
         }
-        push(&mut out, rest, "");
+        push(&mut out, rest, "", "");
     }
     b.text = out.iter().map(|s| s.text.as_str()).collect();
     b.spans = out;
@@ -4095,6 +4101,38 @@ diff --git a/gone.md b/gone.md\n--- a/gone.md\n+++ b/gone.md\n@@ -1,1 +1,1 @@\n-
                 ("Read ", ""),
                 ("charter", "charter.md"),
                 (" and web now.", ""),
+            ]
+        );
+    }
+
+    /// The inline predicate reaches the span, and only the span: the text
+    /// a reader sees is the display half (else the name), never
+    /// `pred::Name`. The split is the index's, so a link the graph reads
+    /// as typed cannot render as prose here.
+    #[test]
+    fn a_typed_link_shows_its_target_and_carries_its_predicate() {
+        let blocks = parse_blocks(
+            "She [[works_at::Acme|Acme GmbH]] and [[knows::Bea]] and [[Carl]], \
+             but `[[works_at::Beta]]` is an example and [[1bad::Delta]] is a name.",
+        );
+        assert_eq!(blocks.len(), 1);
+        let spans: Vec<(&str, &str, &str)> = blocks[0]
+            .spans
+            .iter()
+            .map(|s| (s.text.as_str(), s.link.as_str(), s.rel.as_str()))
+            .collect();
+        assert_eq!(
+            spans,
+            vec![
+                ("She ", "", ""),
+                ("Acme GmbH", "Acme", "works_at"),
+                (" and ", "", ""),
+                ("Bea", "Bea", "knows"),
+                (" and ", "", ""),
+                ("Carl", "Carl", ""),
+                (", but [[works_at::Beta]] is an example and ", "", ""),
+                ("1bad::Delta", "1bad::Delta", ""),
+                (" is a name.", "", ""),
             ]
         );
     }

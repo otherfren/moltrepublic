@@ -346,6 +346,9 @@ export struct WikiTabRow {
 export struct WikiSpan {
     text: string,
     link: string,
+    // the predicate an inline `[[works_at::Acme]]` declared - shown as a
+    // tooltip, never as text
+    rel: string,
 }
 
 export struct WikiBlock {
@@ -500,6 +503,9 @@ export global WikiState {
     // the active doc (empty state when doc-open is false)
     in-out property <bool> doc-open;
     in-out property <string> doc-path;
+    // the open document's title (its first heading, else the file stem):
+    // the SUBJECT a relation tooltip names
+    in-out property <string> doc-title;
     in-out property <string> doc-meta;
     in-out property <int> doc-status;
     in-out property <[WikiBlock]> blocks;
