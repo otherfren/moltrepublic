@@ -409,6 +409,191 @@ pub fn header_lines(header: &str, key: &str, literal: &str) -> String {
     out.concat()
 }
 
+/// `doc` with these header keys set, a JSON `null` REMOVING one; `Err`
+/// says why it cannot be written, in the words the caller passes on.
+///
+/// A member's header is their TEXT, not a serialization: a one-key change
+/// re-emitted whole hands the voters a diff over the whole block, and they
+/// would have to read all of it to see that nothing else moved. So the
+/// edit is LINE-WISE where a key occupies exactly one line, and the
+/// canonical re-emit - which keeps the raw header's own key order - is the
+/// fallback for the shapes that span several. The PARSER is the arbiter
+/// for both paths: a result that does not read back as asked is refused,
+/// never written.
+pub fn with_props(
+    doc: &str,
+    props: &serde_json::Map<String, Value>,
+) -> Result<String, String> {
+    let before = match properties(doc) {
+        (Some(map), _) => map,
+        (None, Some(err)) => return Err(format!("header unreadable: {err}")),
+        (None, None) => serde_json::Map::new(),
+    };
+    let mut want = before.clone();
+    for (key, value) in props {
+        if !key_ok(key) {
+            return Err(format!("not a header key: {key}"));
+        }
+        if value.is_null() {
+            want.remove(key);
+            continue;
+        }
+        if !value_ok(value) {
+            return Err(format!("{key}: value outside the header subset"));
+        }
+        want.insert(key.clone(), value.clone());
+    }
+    let refused = || "the header would not read back as asked".to_string();
+    let reads_back = |next: &str| properties(next).0.unwrap_or_default() == want;
+
+    let span = header_body_span(doc);
+    if span.is_none() && (doc.starts_with("---\n") || doc.starts_with("---\r\n")) {
+        // a block the parser rejected (unclosed) stays untouched: writing a
+        // second header above it would be a different document
+        return Err("header unreadable: the block has no closing fence".to_string());
+    }
+    if want.is_empty() {
+        let next = split(doc).1.to_string();
+        return reads_back(&next).then_some(next).ok_or_else(refused);
+    }
+    let Some((start, end)) = span else {
+        let header = canonical_body(&key_order(&[], &before, props, &want), &want);
+        let next = format!("---\n{header}---\n{doc}");
+        return reads_back(&next).then_some(next).ok_or_else(refused);
+    };
+    let (lead, raw, tail) = match (doc.get(..start), doc.get(start..end), doc.get(end..)) {
+        (Some(l), Some(r), Some(t)) => (l, r, t),
+        _ => return Err(refused()),
+    };
+    let runs = key_runs(raw);
+    if let Some(patched) = line_wise(raw, &runs, &before, props) {
+        let next = format!("{lead}{patched}{tail}");
+        if reads_back(&next) {
+            return Ok(next);
+        }
+    }
+    let header = canonical_body(&key_order(&runs, &before, props, &want), &want);
+    let next = format!("{lead}{header}{tail}");
+    reads_back(&next).then_some(next).ok_or_else(refused)
+}
+
+/// The key order a re-emit keeps: the RAW header's own order first (the
+/// member wrote it that way), then any parsed key the line scan did not
+/// find, then the new ones.
+fn key_order(
+    runs: &[KeyRun],
+    before: &serde_json::Map<String, Value>,
+    props: &serde_json::Map<String, Value>,
+    want: &serde_json::Map<String, Value>,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let named = runs.iter().map(|r| &r.key);
+    for key in named.chain(before.keys()).chain(props.keys()) {
+        if want.contains_key(key) && !out.contains(key) {
+            out.push(key.clone());
+        }
+    }
+    out
+}
+
+/// The header body re-emitted in `order`.
+fn canonical_body(order: &[String], want: &serde_json::Map<String, Value>) -> String {
+    let mut out = String::new();
+    for key in order {
+        if let Some(value) = want.get(key) {
+            out.push_str(&emit_value(key, value));
+        }
+    }
+    out
+}
+
+/// One top-level key of a header body and the lines its value occupies.
+struct KeyRun {
+    key: String,
+    at: usize,
+    lines: usize,
+}
+
+/// The top-level `key:` lines of a header body, in the order the TEXT has
+/// them. A run reaches over the INDENTED lines that continue the value (a
+/// block sequence, a nested mapping); a comment or a blank line at column
+/// 0 belongs to neither key and is simply left where it stands.
+fn key_runs(header: &str) -> Vec<KeyRun> {
+    let lines: Vec<&str> = header.split_inclusive('\n').collect();
+    let continues = |l: &&str| l.starts_with(char::is_whitespace) && !l.trim().is_empty();
+    lines
+        .iter()
+        .enumerate()
+        .filter_map(|(at, l)| top_level_key(l).map(|key| (key, at)))
+        .map(|(key, at)| {
+            let mut len = 1;
+            while lines.get(at + len).is_some_and(continues) {
+                len += 1;
+            }
+            KeyRun { key, at, lines: len }
+        })
+        .collect()
+}
+
+/// The key a header line opens, if it opens one: at column 0, a key of the
+/// subset, and a `:` that YAML reads as a mapping (`key:value` is a
+/// scalar, not a key).
+fn top_level_key(line: &str) -> Option<String> {
+    let text = line.trim_end_matches(['\n', '\r']);
+    if text.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let (key, rest) = text.split_once(':')?;
+    (key_ok(key) && (rest.is_empty() || rest.starts_with(char::is_whitespace)))
+        .then(|| key.to_string())
+}
+
+/// The header body with only the touched lines rewritten, or `None` when a
+/// key's shape does not fit on one line and the whole block has to be
+/// re-emitted instead.
+fn line_wise(
+    raw: &str,
+    runs: &[KeyRun],
+    before: &serde_json::Map<String, Value>,
+    props: &serde_json::Map<String, Value>,
+) -> Option<String> {
+    let mut lines: Vec<String> = raw.split_inclusive('\n').map(str::to_string).collect();
+    let mut dropped: Vec<usize> = Vec::new();
+    let mut appended: Vec<String> = Vec::new();
+    for (key, value) in props {
+        let run = runs.iter().find(|r| &r.key == key);
+        // a key the parser sees and the scan does not has an odd shape:
+        // appending it would write it twice
+        if run.is_none() && before.contains_key(key) {
+            return None;
+        }
+        let literal = (!value.is_null()).then(|| emit_value(key, value));
+        if literal.as_ref().is_some_and(|l| l.lines().count() != 1) {
+            return None;
+        }
+        match (run, literal) {
+            (Some(r), _) if r.lines != 1 => return None,
+            (Some(r), None) => dropped.push(r.at),
+            (Some(r), Some(l)) => lines[r.at] = l,
+            (None, None) => {}
+            (None, Some(l)) => appended.push(l),
+        }
+    }
+    let mut out = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        if !dropped.contains(&i) {
+            out.push_str(line);
+        }
+    }
+    if !appended.is_empty() {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&appended.concat());
+    }
+    Some(out)
+}
+
 /// A value the subset accepts (§4.4): a string, an integer of at most 18
 /// digits, a list of those, a flat mapping of them, or a list of such
 /// mappings. Anything else the parser would not read back the same way.
@@ -457,6 +642,40 @@ pub fn emit_value(key: &str, value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// When a key's shape spans several lines the whole block is
+    /// re-emitted - but in the order the MEMBER wrote, not the parser's
+    /// alphabetical one, so the diff stays about the change.
+    #[test]
+    fn a_re_emit_keeps_the_raw_key_order() {
+        let doc = "---\ntype: person\naliases:\n  - Mueller\nborn: 1975\n---\n# P.\n";
+        let props = serde_json::json!({ "aliases": ["A", "B"] })
+            .as_object()
+            .expect("an object")
+            .clone();
+        assert_eq!(
+            with_props(doc, &props).expect("it writes"),
+            "---\ntype: \"person\"\naliases:\n  - \"A\"\n  - \"B\"\nborn: 1975\n---\n# P.\n"
+        );
+    }
+
+    /// Removing the last key removes the block; a header the parser cannot
+    /// read is never rewritten.
+    #[test]
+    fn the_last_key_takes_the_block_with_it() {
+        let null = serde_json::json!({ "type": null })
+            .as_object()
+            .expect("an object")
+            .clone();
+        assert_eq!(
+            with_props("---\ntype: person\n---\n# P.\n", &null).expect("it writes"),
+            "# P.\n"
+        );
+        assert!(with_props("---\n- not a mapping\n---\nx", &null).is_err());
+        // an unclosed block is not a header the parser accepts, and a second
+        // one above it would be a different document
+        assert!(with_props("---\ntype: person\n", &null).is_err());
+    }
 
     /// The emitter's contract with the parser above: what it writes, the
     /// parser reads back UNCHANGED - every shape of the subset, a

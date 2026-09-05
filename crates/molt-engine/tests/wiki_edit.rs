@@ -261,6 +261,69 @@ async fn an_edit_that_cannot_land_is_refused_and_proposes_nothing() {
     assert_eq!(open_proposals(&w).await, before, "no edit ever proposed");
 }
 
+/// A one-key `set_props` must touch ONE line. The header is a member's
+/// text: re-emitting it whole would hand the voters a diff over the whole
+/// block for a one-key change, and they would have to read all of it to
+/// see that nothing else moved.
+#[tokio::test]
+async fn set_props_changes_one_line_of_a_written_header() {
+    let w = spawn_solo();
+    let before = "---\ntype: person\n# who they are\naliases: [P. Mueller, Mueller]\ntags:\n  - berlin\n  - gruender\nborn: 1975\n---\n# P.\n\nSchreibt.\n";
+    edit(&w, vec![content("p.md", before)])
+        .await
+        .expect("a document with a written header");
+    edit(
+        &w,
+        vec![WikiEdit::SetProps {
+            path: "p.md".to_string(),
+            props: serde_json::json!({ "born": 1976 })
+                .as_object()
+                .expect("an object")
+                .clone(),
+        }],
+    )
+    .await
+    .expect("one scalar");
+
+    let after = doc(&w, "p.md").await;
+    let changed: Vec<(&str, &str)> = before
+        .lines()
+        .zip(after.lines())
+        .filter(|(a, b)| a != b)
+        .collect();
+    assert_eq!(
+        changed,
+        [("born: 1975", "born: 1976")],
+        "one line, and it is the key's:\n{after}"
+    );
+    assert_eq!(
+        before.lines().count(),
+        after.lines().count(),
+        "no line added or dropped:\n{after}"
+    );
+
+    // …and a NEW key is appended, still leaving the rest byte-identical
+    edit(
+        &w,
+        vec![WikiEdit::SetProps {
+            path: "p.md".to_string(),
+            props: serde_json::json!({ "status": "draft", "type": null })
+                .as_object()
+                .expect("an object")
+                .clone(),
+        }],
+    )
+    .await
+    .expect("one added, one removed");
+    let last = doc(&w, "p.md").await;
+    assert!(last.contains("# who they are"), "the comment survives: {last}");
+    assert!(!last.contains("type: person"), "the removal landed: {last}");
+    assert!(
+        last.contains("born: 1976\nstatus: \"draft\"\n"),
+        "a new key is appended after the existing ones: {last}"
+    );
+}
+
 /// A header the parser would not read back is refused rather than
 /// written: the fold does not read headers, so a broken one would only
 /// surface as a document that lost its properties.

@@ -280,11 +280,26 @@ relation as a flow mapping. `emit_header_key` deliberately FLATTENS a
 one-element list, because its caller is growing a relation; `emit_header_value`
 does not, and that is the one `set_props` uses.
 
-`set_props` writes exactly the subset above: a string, an integer of at
-most 18 digits, a list of those, a flat mapping of them, or a list of such
-mappings. Anything else - a boolean, a float, deeper nesting - refuses at
-the call rather than becoming a document that quietly lost its properties.
-A JSON `null` REMOVES the key; removing the last one drops the block.
+`set_props` (`front_matter::with_props`) writes exactly the subset above: a
+string, an integer of at most 18 digits, a list of those, a flat mapping of
+them, or a list of such mappings. Anything else - a boolean, a float,
+deeper nesting - refuses at the call rather than becoming a document that
+quietly lost its properties. A JSON `null` REMOVES the key; removing the
+last one drops the block.
+
+**And it edits the header LINE-WISE**, like the GUI's `with_relation`: a
+member's header is their text, not a serialization, and a one-key change
+re-emitted whole would hand the voters a diff over the whole block that
+they have to read to see nothing else moved. A key whose value occupies
+exactly one line (`key: scalar`, a flow list, a flow mapping) has THAT line
+replaced - or dropped, or appended for a new key - and every other byte
+stays as written, comments included. Only a shape that spans several lines
+(a block sequence, a nested mapping) falls back to the canonical re-emit,
+and that keeps the RAW header's own key order (the line scan's, then any
+parsed key it did not find, then the new ones) - never the parser map's
+alphabetical one. The parser is the arbiter on both paths: a result that
+does not read back as exactly the old properties with these keys
+replaced or removed is refused, never written.
 
 ### 4.5 The link graph (K4)
 
@@ -948,8 +963,8 @@ feed the facets); K7 depends on K1 and K4.
 - `crates/molt-engine/src/lib.rs` - `State.wiki_cache`, `applied_epoch`,
   `wiki_pending`, `wiki_graph`, `wiki_reader`, dispatch arms.
 - `crates/molt-engine/src/proposals.rs` - `cmd_wiki_edit`, `fold_wiki_edit`,
-  `bind_wiki_name`, `set_props`, `edit_paths`, `cmd_wiki_resolve`,
-  `wiki_patch_check` (§4.12); `wiki_tree_cached`,
+  `bind_wiki_name`, `edit_paths`, `cmd_wiki_resolve`, `wiki_patch_check`
+  (§4.12); `wiki_tree_cached`,
   `supersede_stale_wiki(moved)`, `applied_iter`, propose warnings.
 - `crates/molt-engine/src/proposals.rs` - `cmd_wiki_changes`,
   `fold_wiki_step`, `coalesce_wiki_changes`, `cmd_wiki_health` (§4.11).
@@ -960,7 +975,8 @@ feed the facets); K7 depends on K1 and K4.
   `orphans`, `key_drift` (§4.11); `NameIndex`, `resolve_name` (§4.5).
 - `crates/molt-engine/tests/wiki_maintenance.rs` - NEW (§4.11).
 - `crates/molt-engine/src/wiki_index/{mod,front_matter,graph,search}.rs`
-  - NEW (K4, K5).
+  - NEW (K4, K5); `front_matter` also holds the ONE emitter and
+  `with_props`, the line-wise header write (§4.4).
 - `crates/molt-engine/src/chain/{verify,checkpoint,governance,projection}.rs`
   - `summarize_memory`, the folded variant's walk and proposal (K6),
   epoch bumps (K0).

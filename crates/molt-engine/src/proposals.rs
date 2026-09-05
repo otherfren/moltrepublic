@@ -2372,7 +2372,8 @@ impl State {
             }
             WikiEdit::SetProps { path, props } => {
                 let doc = after.get(path).ok_or_else(|| missing(path))?;
-                let next = set_props(doc, props)?;
+                let next = wiki_index::front_matter::with_props(doc, props)
+                    .map_err(MoltError::BadPayload)?;
                 after.insert(path.clone(), next);
             }
             WikiEdit::AddRelation {
@@ -3353,66 +3354,6 @@ fn edit_paths(edit: &molt_core::WikiEdit) -> Vec<String> {
         | WikiEdit::Delete { path } => vec![path.clone()],
         WikiEdit::Rename { from, to } => vec![from.clone(), to.clone()],
     }
-}
-
-/// `doc` with these header keys set (a JSON `null` removes one), emitted
-/// through the ONE emitter: the parser's own keys first in the order it
-/// reports them, new ones appended.
-///
-/// The PARSER is the arbiter — the result is read back and must say
-/// exactly what was asked, or the edit refuses. The fold never reads a
-/// header, so a header written wrong would only surface later as a
-/// document that quietly lost its properties.
-fn set_props(
-    doc: &str,
-    props: &serde_json::Map<String, Value>,
-) -> Result<String, MoltError> {
-    let front = wiki_index::front_matter::properties(doc);
-    let before = match front {
-        (Some(map), _) => map,
-        (None, Some(err)) => {
-            return Err(MoltError::BadPayload(format!("header unreadable: {err}")))
-        }
-        (None, None) => serde_json::Map::new(),
-    };
-    let mut want = before.clone();
-    for (key, value) in props {
-        if !wiki_index::front_matter::key_ok(key) {
-            return Err(MoltError::BadPayload(format!("not a header key: {key}")));
-        }
-        if value.is_null() {
-            want.remove(key);
-            continue;
-        }
-        if !wiki_index::front_matter::value_ok(value) {
-            return Err(MoltError::BadPayload(format!(
-                "{key}: value outside the header subset"
-            )));
-        }
-        want.insert(key.clone(), value.clone());
-    }
-    let body = wiki_index::front_matter::split(doc).1;
-    let next = if want.is_empty() {
-        body.to_string()
-    } else {
-        let mut header = String::new();
-        let mut seen: std::collections::BTreeSet<&String> = std::collections::BTreeSet::new();
-        for key in before.keys().chain(props.keys()) {
-            if !seen.insert(key) {
-                continue;
-            }
-            if let Some(value) = want.get(key) {
-                header.push_str(&wiki_index::front_matter::emit_value(key, value));
-            }
-        }
-        format!("---\n{header}---\n{body}")
-    };
-    if wiki_index::front_matter::properties(&next).0.unwrap_or_default() != want {
-        return Err(MoltError::BadPayload(
-            "the header would not read back as asked".to_string(),
-        ));
-    }
-    Ok(next)
 }
 
 fn wiki_touch_of(f: &molt_core::wiki_fold::PatchFile) -> crate::WikiTouch {
