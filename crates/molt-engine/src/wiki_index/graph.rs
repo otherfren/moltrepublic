@@ -21,9 +21,11 @@ use super::front_matter;
 pub(crate) struct Edge {
     /// The other end: the target for an out-edge, the source for an in-edge.
     pub(crate) to: String,
-    /// The header key that carried it; `None` for a link in the body.
+    /// The predicate: the header key that carried it, or the `pred::` an
+    /// inline body link declared. `None` for a plain link.
     pub(crate) predicate: Option<String>,
-    /// Did it come from the header?
+    /// Did it come from the header? An inline predicate does NOT set this -
+    /// the flag answers "from the front matter?", not "typed?".
     pub(crate) header: bool,
 }
 
@@ -116,12 +118,13 @@ impl WikiGraph {
         for (key, value) in &props {
             collect_typed(key, value, &mut edges);
         }
-        // …and the body's plain links
+        // …and the body's links, each with the predicate it declared
         let (_, body) = front_matter::split(content);
-        for target in body_links(body) {
+        let inline = body_links(body);
+        for link in &inline {
             edges.push(RawEdge {
-                target,
-                predicate: None,
+                target: link.target.clone(),
+                predicate: link.predicate.clone(),
                 header: false,
             });
         }
@@ -130,6 +133,18 @@ impl WikiGraph {
         for (key, value) in &props {
             for shown in scalar_strings(value) {
                 pairs.push((key.clone(), shown));
+            }
+        }
+        // An inline predicate is the same claim as the header key, so it
+        // lands in the SAME bucket rather than beside it: `wiki_props` is
+        // the one call that answers "what relations does this republic
+        // use", and two buckets per predicate would split that answer.
+        // Once per document - two spellings of one claim are one claim.
+        for link in inline {
+            let Some(pred) = link.predicate else { continue };
+            let pair = (pred, link.target);
+            if !pairs.contains(&pair) {
+                pairs.push(pair);
             }
         }
         self.props.insert(path.to_string(), pairs);
@@ -389,19 +404,73 @@ fn collect_typed(key: &str, value: &Value, out: &mut Vec<RawEdge>) {
     }
 }
 
+/// One link a body wrote, before resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BodyLink {
+    /// The target exactly as written: a `.md` destination, or the name
+    /// inside a `[[…]]`.
+    pub target: String,
+    /// The `pred::` the link declared inline; `None` for a plain link.
+    pub predicate: Option<String>,
+}
+
+/// The parts of a `[[…]]`.
+pub struct LinkParts<'a> {
+    /// The inline predicate, if the left half is a valid header key.
+    pub predicate: Option<&'a str>,
+    /// The link target.
+    pub name: &'a str,
+    /// The display half, if it carries text.
+    pub display: Option<&'a str>,
+}
+
+/// Split the inside of a `[[…]]` — the ONE rule the index and the GUI
+/// share. `|display` comes off first, then the FIRST `::`: its left half
+/// is the predicate only if it is a valid header key (§4.4), otherwise
+/// the whole left part is the name and every `::` in it stays there.
+///
+/// The consequence, deliberately: `[[std::vector]]` in prose IS a typed
+/// link (`std` → `vector`). In a code span it is masked and therefore no
+/// link at all, which is where an example belongs.
+pub fn link_parts(inner: &str) -> LinkParts<'_> {
+    let (left, display) = match inner.split_once('|') {
+        Some((l, d)) => (l.trim(), Some(d.trim()).filter(|d| !d.is_empty())),
+        None => (inner.trim(), None),
+    };
+    match left.split_once("::") {
+        Some((pred, name)) if front_matter::key_ok(pred.trim()) && !name.trim().is_empty() => {
+            LinkParts {
+                predicate: Some(pred.trim()),
+                name: name.trim(),
+                display,
+            }
+        }
+        _ => LinkParts {
+            predicate: None,
+            name: left,
+            display,
+        },
+    }
+}
+
 /// The body's links: markdown destinations ending in `.md`, plus the
-/// readable `[[Name]]` form. Code spans and code blocks are masked out —
-/// a link in a fenced example is not a claim about the graph.
-pub fn body_links(markdown: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+/// readable `[[Name]]` / `[[pred::Name]]` form. Code spans and code
+/// blocks are masked out — a link in a fenced example is not a claim
+/// about the graph. Deduped by the whole link, so two predicates onto one
+/// target stay two claims.
+pub fn body_links(markdown: &str) -> Vec<BodyLink> {
+    let mut out: Vec<BodyLink> = Vec::new();
     let mut code: Vec<(usize, usize)> = Vec::new();
     let mut depth = 0u32;
     for (event, range) in Parser::new(markdown).into_offset_iter() {
         match event {
             Event::Start(Tag::Link { dest_url, .. }) => {
-                let dest = dest_url.to_string();
-                if dest.ends_with(".md") && !out.contains(&dest) {
-                    out.push(dest);
+                let link = BodyLink {
+                    target: dest_url.to_string(),
+                    predicate: None,
+                };
+                if link.target.ends_with(".md") && !out.contains(&link) {
+                    out.push(link);
                 }
             }
             Event::Start(Tag::CodeBlock(_)) => depth += 1,
@@ -417,16 +486,31 @@ pub fn body_links(markdown: &str) -> Vec<String> {
     while i + 3 < bytes.len() {
         if bytes[i] == b'[' && bytes[i + 1] == b'[' && !masked(i) {
             if let Some(end) = markdown[i + 2..].find("]]") {
-                let inner = &markdown[i + 2..i + 2 + end];
-                let name = inner.split('|').next().unwrap_or(inner).trim();
-                if !name.is_empty() && !name.contains('\n') && !out.contains(&name.to_string()) {
-                    out.push(name.to_string());
+                let parts = link_parts(&markdown[i + 2..i + 2 + end]);
+                let link = BodyLink {
+                    target: parts.name.to_string(),
+                    predicate: parts.predicate.map(str::to_string),
+                };
+                if !link.target.is_empty() && !link.target.contains('\n') && !out.contains(&link) {
+                    out.push(link);
                 }
                 i += end + 4;
                 continue;
             }
         }
         i += 1;
+    }
+    out
+}
+
+/// Just the targets, deduped in order of first appearance: what a
+/// navigator needs, which is where a link GOES and not what it asserts.
+pub fn body_link_targets(markdown: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for link in body_links(markdown) {
+        if !out.contains(&link.target) {
+            out.push(link.target);
+        }
     }
     out
 }
@@ -478,8 +562,8 @@ mod tests {
 
     /// The header key IS the predicate, including inside a qualified
     /// relation - `works_at: { to: … }` binds under `works_at`, never
-    /// under `to`. Body links carry none. Name resolution is CASE-EXACT,
-    /// like the path resolution it extends.
+    /// under `to`. A PLAIN body link carries none. Name resolution is
+    /// CASE-EXACT, like the path resolution it extends.
     #[test]
     fn the_predicate_is_the_header_key() {
         let g = WikiGraph::build(&tree(&[
@@ -564,7 +648,8 @@ mod tests {
     /// A link inside a code fence is an example, not a claim.
     #[test]
     fn code_blocks_do_not_carry_links() {
-        let links = body_links("real [[Anna]]\n\n```\nnot [[Bob]]\n```\n\nand `[[Carl]]` inline\n");
+        let links =
+            body_link_targets("real [[Anna]]\n\n```\nnot [[Bob]]\n```\n\nand `[[Carl]]` inline\n");
         assert_eq!(links, vec!["Anna".to_string()]);
     }
 
@@ -586,6 +671,85 @@ mod tests {
             .iter()
             .map(|r| (r.path.as_str(), r.distance))
             .collect()
+    }
+
+    /// **The plan's §6 keystone**: a relation written in the SENTENCE is
+    /// the same edge as the same relation written in the header - one set,
+    /// not two, and only the `header` flag tells them apart. A predicate
+    /// inside a code span is an example, not a claim; a `pred::` that is
+    /// not a valid header key is no predicate at all (the whole string
+    /// stays the name), and a SECOND `::` belongs to the name.
+    #[test]
+    fn an_inline_predicate_is_the_same_edge_as_the_header_key() {
+        let g = WikiGraph::build(&tree(&[
+            ("anna.md", "# Anna\n\nShe [[works_at::Acme]] since 2019.\n"),
+            ("bob.md", "---\nworks_at: \"[[Acme]]\"\n---\n# Bob\n"),
+            ("carl.md", "# Carl\n\n`[[works_at::Acme]]` is how it is written.\n"),
+            ("dora.md", "# Dora\n\nShe [[1bad::Acme]] and [[a::b::c]].\n"),
+            ("Acme.md", "# Acme\n"),
+        ]));
+        let edges = |path: &str| -> Vec<(String, Option<String>, bool)> {
+            let mut e: Vec<(String, Option<String>, bool)> = g
+                .out
+                .get(path)
+                .into_iter()
+                .flatten()
+                .map(|e| (e.to.clone(), e.predicate.clone(), e.header))
+                .collect();
+            e.sort();
+            e
+        };
+        assert_eq!(
+            edges("anna.md"),
+            vec![("Acme.md".to_string(), Some("works_at".to_string()), false)],
+            "the sentence carries the predicate, and it is not a header edge"
+        );
+        assert_eq!(
+            edges("bob.md"),
+            vec![("Acme.md".to_string(), Some("works_at".to_string()), true)],
+            "…the header writes the same edge"
+        );
+        assert!(
+            edges("carl.md").is_empty()
+                && !g
+                    .dangling
+                    .values()
+                    .flatten()
+                    .any(|(src, _)| src == "carl.md"),
+            "a predicate in a code span is not a claim about the graph"
+        );
+        assert!(
+            g.dangling.contains_key("1bad::Acme"),
+            "a predicate that is not a header key leaves an ordinary link"
+        );
+        assert!(
+            g.dangling.contains_key("b::c"),
+            "only the FIRST :: splits; the rest is the name"
+        );
+        // …and the target sees both claims from the other side
+        assert_eq!(targets(g.inn.get("Acme.md")), vec!["anna.md", "bob.md"]);
+    }
+
+    /// The inventory (`wiki_props`) is the ontology as it IS, so it must
+    /// see the form the republic writes: both spellings land in ONE bucket
+    /// and their counts add. Per document a claim counts once, however
+    /// often it is written.
+    #[test]
+    fn the_inventory_counts_inline_predicates_with_the_header_ones() {
+        let g = WikiGraph::build(&tree(&[
+            ("anna.md", "# Anna\n\n[[works_at::Acme]]\n"),
+            ("bob.md", "---\nworks_at: \"[[Acme]]\"\n---\n# Bob\n"),
+            (
+                "cora.md",
+                "---\nworks_at: \"[[Acme]]\"\n---\n# Cora\n\nand again [[works_at::Acme]]\n",
+            ),
+            ("Acme.md", "# Acme\n"),
+        ]));
+        assert_eq!(
+            g.inventory.get("works_at").and_then(|v| v.get("Acme")),
+            Some(&3),
+            "three documents, one bucket - and cora's two spellings are one claim"
+        );
     }
 
     /// Two hops, both directions, and the start is never its own neighbour.

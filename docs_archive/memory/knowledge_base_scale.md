@@ -264,14 +264,34 @@ works_at:
 link-valued key inside the mapping is ALSO an edge with the outer key as
 predicate.
 
+A header value keeps exactly this parse: `[[a::b]]` there is the name
+`a::b`, not a predicate. The inline form lives in the BODY only (§4.5).
+
 ### 4.5 The link graph (K4)
 
 `crates/molt-engine/src/wiki_index/graph.rs`:
 
-- `body_links(markdown) -> Vec<String>`: pulldown-cmark link destinations
-  ending in `.md` (moved from `molt-ui/src/wiki.rs:1944`, which then calls
-  it) PLUS `[[Name]]` / `[[Name|display]]` in text events - the readable
-  form in prose, rendered as a link by the GUI (K7).
+- `body_links(markdown) -> Vec<BodyLink { target, predicate }>`:
+  pulldown-cmark link destinations ending in `.md` (moved from
+  `molt-ui/src/wiki.rs:1944`, which then calls it) PLUS `[[Name]]` /
+  `[[Name|display]]` in text events - the readable form in prose,
+  rendered as a link by the GUI (K7). `body_link_targets` projects the
+  targets for a navigator that only wants to know where a link goes.
+- **Typed inline links (BUILT 2026-09-05, `wiki_semantic_gaps.md` §6).**
+  `[[pred::Name]]` and `[[pred::Name|display]]` carry the predicate in
+  the sentence that asserts it. `link_parts` is the ONE split and the GUI uses it too:
+  `|display` comes off first, then the FIRST `::`, whose left half is the
+  predicate only if it passes the subset's key rule (§4.4) - otherwise the
+  whole left part is the name and every `::` in it stays there. So
+  `[[std::vector]]` in prose IS a typed link, and inside a code span it is
+  masked and no link at all. The edge is `predicate: Some(pred),
+  header: false`: `header` answers "from the front matter?", not "typed?".
+  A sentence and a header key therefore write the SAME edge, and edges are
+  a set - `wiki_links { predicate }` needed no new shape. The VISIBLE text
+  never shows the predicate; the preview renders the claim ("this document
+  - pred -> target") as a tooltip over the link run, which is the safety
+  mechanism for an annotation that binds to the page rather than to the
+  sentence's subject.
 - Resolution, in order: exact path → unique basename (today's rule) →
   unique alias (from `aliases`) → ambiguous / missing (kept as a dangling
   edge by target string).
@@ -311,13 +331,16 @@ predicate.
     today's GUI rule; a case-folding rule would need its own ambiguity
     story.
   - `body_links` masks code spans and fenced blocks, so a link in an
-    example is not a claim about the graph. It is the ONE parser now:
-    `molt-ui`'s `parse_links` calls it.
+    example is not a claim about the graph - a typed one included. It is
+    the ONE parser now: `molt-ui`'s `parse_links` calls it, and its
+    preview splits `pred::Name` with the same `link_parts`.
 - Tools (Read): `wiki_links { path, direction: out|in|both, predicate:
-  Option<String>, limit, cursor }` → edges; `wiki_neighbors { path, depth:
-  1|2, limit, predicate: Option<String>, direction: out|in|both,
-  transitive }` → documents with distance (BFS, cap 500). Both carry
-  `index_rev` (the fold revision the graph reflects) and `wiki_rev`.
+  Option<String>, limit, cursor }` → edges (a predicate is a header key or
+  an inline `pred::`, and `wiki_props` inventories both in one bucket);
+  `wiki_neighbors { path, depth: 1|2, limit, predicate: Option<String>,
+  direction: out|in|both, transitive }` → documents with distance (BFS,
+  cap 500). Both carry `index_rev` (the fold revision the graph reflects)
+  and `wiki_rev`.
 - **Traversal that says WHY (BUILT 2026-09-05).** Every neighbour carries
   the edge that FIRST reached it - `predicate`, `direction` (out|in, as
   seen from the document it was reached from) and `via` (the documents in
@@ -729,8 +752,6 @@ feed the facets); K7 depends on K1 and K4.
 - Bundle approval or chunked changesets (decision 1).
 - Vector / embedding search, and any external embedding API (the wiki's
   text would leave the republic).
-- Typed inline links in prose (`[[works_at::Acme]]`): a later stage on top
-  of K4 if named relations in sentences are wanted.
 - MCP resources (`resources/list` / `resources/read`): optional later; the
   tools carry the same reads.
 - Republic-level roles or rights: the read scope is host-local

@@ -173,6 +173,9 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
         let path_changed = s.get_doc_path().as_str() != doc.path;
         s.set_doc_open(true);
         s.set_doc_path(doc.path.clone().into());
+        // the SUBJECT of an inline relation: the claim belongs to this
+        // page, whatever the sentence's grammar suggests
+        s.set_doc_title(w.title_of(&doc.path).into());
         s.set_doc_meta(format!("{} · {} · {}", doc.author, doc.ver, doc.when).into());
         s.set_doc_status(wiki_status_code(doc.status()));
         let blocks: Vec<WikiBlock> = w
@@ -193,6 +196,7 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
                         .map(|sp| WikiSpan {
                             text: sp.text.into(),
                             link: sp.link.into(),
+                            rel: sp.rel.into(),
                         })
                         .collect::<Vec<_>>(),
                 )),
@@ -238,6 +242,7 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
     } else {
         s.set_doc_open(false);
         s.set_doc_path("".into());
+        s.set_doc_title("".into());
         s.set_doc_meta("".into());
         s.set_doc_status(0);
         sync_model(&s.get_blocks(), Vec::new(), wiki_block_eq, |m| s.set_blocks(m));

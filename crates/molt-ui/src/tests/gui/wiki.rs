@@ -1085,3 +1085,103 @@ fn tab_switches_the_wiki_document_between_preview_and_the_raw_editor() {
         }
     }
 }
+
+/// **The tooltip IS the safety mechanism** (`wiki_semantic_gaps.md` §6):
+/// an inline annotation attaches to the PAGE, never to the sentence's
+/// grammatical subject, so the preview renders the claim it actually
+/// writes - this document, the predicate, the target - where a reader
+/// sees it before ratifying. The predicate never shows in the link text.
+#[cfg(feature = "live-preview")]
+#[test]
+fn an_inline_predicate_shows_its_claim_over_the_link() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    ui.set_screen(AppScreen::Main);
+    ui.set_selected_surface("memory".into());
+    ui.set_selected_view("brain".into());
+    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: "memory".into(),
+        ..SurfaceTab::default()
+    }])));
+    let _wiki = wire_wiki(&ui);
+    let g = ui.global::<WikiState>();
+    g.set_base_docs(ModelRc::new(VecModel::from(vec![
+        WikiBase {
+            path: "anna.md".into(),
+            content: "# Anna\n\n[[works_at::Acme]]\n".into(),
+            loaded: true,
+        },
+        WikiBase {
+            path: "carl.md".into(),
+            content: "# Carl\n\n[[Acme]]\n".into(),
+            loaded: true,
+        },
+        WikiBase {
+            path: "Acme.md".into(),
+            content: "# Acme".into(),
+            loaded: true,
+        },
+    ])));
+    g.set_base_rev(1);
+    g.invoke_base_arrived();
+    let open = |path: &str| {
+        let rows = g.get_nav_rows();
+        let row = (0..rows.row_count())
+            .filter_map(|i| rows.row_data(i))
+            .find(|r| r.label.as_str() == path)
+            .expect("nav row");
+        g.invoke_nav_open(row.id);
+    };
+    ui.window().set_size(slint::PhysicalSize::new(1400, 900));
+    ui.show().expect("show headless");
+    open("anna.md");
+
+    // the predicate is the TOOLTIP, never the text: the sentence reads as
+    // the author wrote it
+    let spans: Vec<(String, String, String)> = (0..g.get_blocks().row_count())
+        .filter_map(|i| g.get_blocks().row_data(i))
+        .flat_map(|b| {
+            (0..b.spans.row_count())
+                .filter_map(move |i| b.spans.row_data(i))
+                .map(|sp| (sp.text.to_string(), sp.link.to_string(), sp.rel.to_string()))
+        })
+        .collect();
+    assert!(
+        spans.contains(&("Acme".to_string(), "Acme".to_string(), "works_at".to_string())),
+        "the run shows the target and carries the predicate: {spans:?}"
+    );
+
+    // a `changed` handler runs from the change trackers, which headless
+    // means mock_elapsed_time - the real app gets that frame from its
+    // render loop
+    let hover = |ui: &AppWindow| {
+        let link =
+            i_slint_backend_testing::ElementHandle::find_by_element_type_name(ui, "LinkRun")
+                .find(|e| e.size().width > 0.0)
+                .expect("the preview renders the link");
+        let at = slint::LogicalPosition::new(
+            link.absolute_position().x + link.size().width / 2.0,
+            link.absolute_position().y + link.size().height / 2.0,
+        );
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at });
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
+        ui.global::<HintTip>().get_label().to_string()
+    };
+    let leave = |ui: &AppWindow| {
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved {
+                position: slint::LogicalPosition::new(1350.0, 870.0),
+            });
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
+        ui.global::<HintTip>().get_label().to_string()
+    };
+
+    assert_eq!(hover(&ui), "Anna works_at Acme", "the tip renders the claim");
+    assert_eq!(leave(&ui), "", "…and goes with the pointer");
+
+    // …a link that asserts nothing says nothing
+    open("carl.md");
+    assert_eq!(hover(&ui), "", "a plain link has no claim to render");
+}

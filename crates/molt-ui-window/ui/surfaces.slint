@@ -380,10 +380,14 @@ component ScrollBody inherits Rectangle {
 // (bad) blocks; a removed GHOST keeps the dropped base content visible,
 // dimmed in the bad tone (Slint Text has no strikethrough).
 // One clickable .md-link run in the preview: accent + underline, a soft
-// pill while hovered; a click navigates to the linked document.
+// pill while hovered; a click navigates to the linked document. With a
+// `rel` it also carries a CLAIM, and hovering renders it: an inline
+// annotation binds to the page, never to the sentence's subject, so the
+// reader has to see what the graph will store.
 component LinkRun inherits Rectangle {
     in property <string> label;
     in property <string> target;
+    in property <string> rel;
     in property <length> fsize: Theme.fs-editor;
     width: lt.preferred-width + 4px;
     height: lt.preferred-height;
@@ -407,6 +411,20 @@ component LinkRun inherits Rectangle {
         mouse-cursor: MouseCursor.pointer;
         clicked => {
             WikiState.open-link(root.target);
+        }
+        // the overlay is shared, so the writer marks its own bubble and
+        // only that generation may clear it (an anchor comparison breaks
+        // the moment the run moves under the pointer)
+        property <int> tip-gen;
+        changed has-hover => {
+            if (self.has-hover && root.rel != "") {
+                self.tip-gen = HintTip.show(
+                    WikiState.doc-title + " " + root.rel + " " + root.label,
+                    root.absolute-position.x,
+                    root.absolute-position.y + root.height + 6px);
+            } else {
+                HintTip.hide(self.tip-gen);
+            }
         }
     }
 }
@@ -479,6 +497,7 @@ component SpanFlow inherits Rectangle {
             if sp.link != "": LinkRun {
                 label: sp.text;
                 target: sp.link;
+                rel: sp.rel;
                 fsize: root.fsize;
             }
         }
@@ -500,6 +519,7 @@ component SpanFlow inherits Rectangle {
                 LinkRun {
                     label: sp.text;
                     target: sp.link;
+                    rel: sp.rel;
                     fsize: root.fsize;
                 }
             }
