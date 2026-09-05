@@ -640,19 +640,27 @@ path, coalesced to the LATEST kind (`added` / `modified` / `deleted` /
 `renamed`) and the revision it last moved at, rev-ordered, with `total`
 and `next_cursor`. A rename re-keys the entry onto the new path and
 carries `from`; `from` is STICKY through later changes to that path, so an
-agent holding the old path still learns where it went. `since_rev >=
-wiki_rev` is an empty page, never an error.
+agent holding the old path still learns where it went. A path that was
+ADDED and then deleted inside the window is ELIDED - it never existed for
+the caller, so telling it to forget the path would be a wrong answer and a
+`wiki_get` on it fails; the window's FIRST kind travels through a rename
+the way `from` does, so an add that moved and was then deleted is elided
+too. `since_rev >= wiki_rev` is an empty page, never an error.
 
-- **Nothing is stored beside the applied entries.** The walk folds them
-  exactly the way `fold_wiki_from_base` folds them and notes what each
-  patch that APPLIED touched. What that costs, against the plan's
-  assumption: O(entries since the last folded cut), NOT O(entries since
-  `since_rev`). A revision is defined by the FOLD - a void patch does not
-  bump it - so the walk has to apply the patches to learn which entry
-  carries which revision, and there is no rev-to-entry index to read
-  instead. A per-revision side index would be a second thing to keep true
-  across restore, blob swap, re-projection and the base fetch; §4.9's cut
-  is the bound instead.
+- **The per-revision history rides the FOLD CACHE (§4.1).** Nothing is
+  stored beside the applied entries, and there is no second staleness
+  story: `WikiCache` gains `history` (one entry per applied revision, with
+  what that patch touched) and it is invalidated exactly when the tree is.
+  ONE fold step (`fold_wiki_step`) folds a payload onto the tree and, where
+  it applied, bumps the revision and records what it touched - the same
+  step the full fold and `refresh_wiki_cache`'s extension loop run, so the
+  cached history cannot describe a different fold than the tree it rides
+  on. `cmd_wiki_changes` refreshes the cache the way the graph reads
+  refresh the graph and then coalesces from `since_rev` on: **O(entries
+  since `since_rev`)**, not a refold per call. A revision is defined by the
+  FOLD (a void patch does not bump it), so a read that went back to the
+  applied log instead would pay a full refold on every maintainer wake -
+  which is the cost K0 exists to remove.
 - **A folded cut RE-BASES the counter.** `fold_wiki_from_base` does not
   count the commitment as a patch, so post-cut revisions restart: the same
   number names a different state either side of a cut, and the value alone
@@ -683,8 +691,14 @@ target turns its in-edges dangling and the report says so; a rename moves
 a path out of the orphan list; `since_rev` answers exactly the paths the
 fold touched; both reads page and report their totals) plus
 `proposals.rs::wiki_maintenance_tests` (a folded cut answers what it can
-and flags the rest, a rename chain reports where it started, a void patch
-is not a revision) and the two hygiene tests in `wiki_index/graph.rs`.
+and flags the rest and reaches the same answer as a fresh fold; the
+history is answered from the CACHE, proven by a rewrite of the applied
+payloads the cache cannot notice; a path added and deleted inside the
+window is elided; a rename chain reports where it started; a void patch is
+not a revision) and the two hygiene tests in `wiki_index/graph.rs`. The
+existing `the_fold_cache_equals_a_fresh_fold_after_every_block`
+(`chain/projection_tests.rs`) keeps the shared fold step honest against
+`molt_core::wiki_fold`.
 
 ## 5. Work packages (build order, each red-first, each green on master)
 
@@ -782,8 +796,10 @@ feed the facets); K7 depends on K1 and K4.
   `wiki_pending`, `wiki_graph`, `wiki_reader`, dispatch arms.
 - `crates/molt-engine/src/proposals.rs` - `wiki_tree_cached`,
   `supersede_stale_wiki(moved)`, `applied_iter`, propose warnings.
-- `crates/molt-engine/src/proposals.rs` - `cmd_wiki_changes` +
-  `wiki_change_walk`, `cmd_wiki_health` (§4.11).
+- `crates/molt-engine/src/proposals.rs` - `cmd_wiki_changes`,
+  `fold_wiki_step`, `coalesce_wiki_changes`, `cmd_wiki_health` (§4.11).
+- `crates/molt-engine/src/lib.rs` - `WikiCache.history` / `.base`,
+  `WikiRevChanges`, `WikiTouch` (§4.11).
 - `crates/molt-engine/src/wiki_index/graph.rs` - `dangling_targets`,
   `orphans`, `key_drift` (§4.11).
 - `crates/molt-engine/tests/wiki_maintenance.rs` - NEW (§4.11).
