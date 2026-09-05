@@ -2176,6 +2176,7 @@ impl Wiki {
     /// Pick a target; the name follows it unless the member typed one.
     pub fn set_link_target(&mut self, path: &str) {
         let followed = self.ont.name.is_empty() || self.ont.name == self.title_of(&self.ont.target);
+        self.ont.error = "";
         self.ont.target = path.to_string();
         if followed {
             self.ont.name = self.title_of(path);
@@ -2235,6 +2236,9 @@ impl Wiki {
     }
 
     pub fn link_toggle(&mut self, key: &str) {
+        // every edit to the draft drops the last refusal: it described a
+        // write the member is already changing
+        self.ont.error = "";
         if let Some(i) = self.ont.on.iter().position(|k| k == key) {
             self.ont.on.remove(i);
         } else if molt_engine::header_key_ok(key) {

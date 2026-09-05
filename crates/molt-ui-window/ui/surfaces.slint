@@ -1190,11 +1190,11 @@ export component MemoryPane inherits VerticalLayout {
                                         }
                                         // …and the TYPED link: the document
                                         // opens first, because the relation
-                                        // is written into ITS header
+                                        // is written into ITS prose
                                         MenuItem {
                                             title: Strings.mem-menu-relate;
                                             enabled: r.status != 3;
-                                            // no can-write-header gate here:
+                                            // no can-write-body gate here:
                                             // that flag describes the OPEN
                                             // document, and this row is not
                                             // open yet - the lazy base
