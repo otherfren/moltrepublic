@@ -58,11 +58,24 @@ thread_local! {
         std::cell::RefCell::new((String::new(), std::time::Instant::now()));
 }
 
+/// The refusal a failed link commit left, in the ACTIVE language: the
+/// model deals in codes so it stays language-free (`wiki::LINK_ERR_*`).
+fn link_error_text(ui: &AppWindow, code: &str) -> String {
+    let s = ui.global::<Strings>();
+    match code {
+        wiki::LINK_ERR_HEADER => s.get_mem_link_err_header().to_string(),
+        wiki::LINK_ERR_QUALIFIED => s.get_mem_link_err_qual().to_string(),
+        wiki::LINK_ERR_QUAL_SYNTAX => s.get_mem_link_err_qsyntax().to_string(),
+        wiki::LINK_ERR_BODY => s.get_mem_link_err_body().to_string(),
+        _ => String::new(),
+    }
+}
+
 /// Push the wiki model into the `WikiState` global — the whole face, after
 /// every mutation (the models are small, and rows patch in place). EXCEPT
 /// the editor buffer: `raw` is rewritten only when the active doc or the
 /// edit mode changes (`last`), never on the keystroke echo — a mid-typing
-/// rewrite fights the caret.
+/// rewrite fights the caret. A modal write clears `last` itself.
 fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, bool)>) {
     // the debounced draft persist rides every sync (every model mutation
     // lands here) — cheap: serialize, compare, at most one engine hop/2 s
@@ -154,7 +167,11 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
     s.set_link_filter(w.link_filter().into());
     s.set_link_custom(w.link_custom().into());
     s.set_link_ready(w.link_ready());
+    s.set_link_header(w.link_header());
+    s.set_link_qualifiers(w.link_qualifiers().into());
+    s.set_link_error(link_error_text(ui, w.link_error()).into());
     s.set_can_write_header(w.can_write_header());
+    s.set_can_write_body(w.can_write_body());
     let targets: Vec<slint::SharedString> =
         w.link_targets().into_iter().map(Into::into).collect();
     sync_model(&s.get_link_targets(), targets, PartialEq::eq, |m| s.set_link_targets(m));
@@ -374,9 +391,29 @@ pub(crate) fn wire_wiki(
     act!(on_tag_remove, |w, i: i32| {
         w.tag_remove(usize::try_from(i).unwrap_or(0));
     });
-    act!(on_tag_commit, |w| {
-        w.tag_commit();
-    });
+    // the two modal writes change the text UNDER an open editor, so they
+    // drop the raw guard for their own sync: without it the editor keeps
+    // showing the old bytes and the next keystroke pushes them back over
+    // the write. Only on a write — a refusal changed nothing.
+    macro_rules! wrote {
+        ($setter:ident, |$w:ident| $body:expr) => {{
+            let m = model.clone();
+            let la = last.clone();
+            let weak = ui.as_weak();
+            g.$setter(move || {
+                let Some(ui) = weak.upgrade() else { return };
+                let wrote = {
+                    let mut $w = m.borrow_mut();
+                    $body
+                };
+                if wrote {
+                    *la.borrow_mut() = None;
+                }
+                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            });
+        }};
+    }
+    wrote!(on_tag_commit, |w| w.tag_commit());
     act!(on_link_open, |w, target: slint::SharedString| w.link_open(&target));
     act!(on_link_close, |w| w.link_close());
     act!(on_relation_vocab, |w, keys: ModelRc<slint::SharedString>| {
@@ -386,13 +423,24 @@ pub(crate) fn wire_wiki(
     act!(on_set_link_target, |w, v: slint::SharedString| w.set_link_target(&v));
     act!(on_set_link_filter, |w, v: slint::SharedString| w.set_link_filter(&v));
     act!(on_set_link_custom, |w, v: slint::SharedString| w.set_link_custom(&v));
+    act!(on_set_link_header, |w, on: bool| w.set_link_header(on));
+    act!(on_set_link_qualifiers, |w, v: slint::SharedString| w
+        .set_link_qualifiers(&v));
+    // NOT through `act!`: the caret fires on every keystroke, arrow key
+    // and click, and a whole-face sync per caret move would rebuild the
+    // nav model, the blocks and the patch twice per keystroke. Nothing on
+    // the face reads it - the next commit does.
+    {
+        let m = model.clone();
+        g.on_set_cursor(move |at| {
+            m.borrow_mut().set_cursor(usize::try_from(at).unwrap_or(0));
+        });
+    }
     act!(on_link_add_custom, |w| {
         w.link_add_custom();
     });
     act!(on_link_toggle, |w, key: slint::SharedString| w.link_toggle(&key));
-    act!(on_link_commit, |w| {
-        w.link_commit();
-    });
+    wrote!(on_link_commit, |w| w.link_commit());
     act!(on_open_link, |w, target: slint::SharedString| {
         // a dead link is a no-op — the preview stays put
         let _ = w.open_link(&target);

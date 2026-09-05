@@ -481,8 +481,18 @@ export global WikiState {
     in-out property <[WikiRelation]> link-relations;
     // target picked and at least one relation on
     in-out property <bool> link-ready;
+    // WHERE the write lands: the prose by default (a relation belongs in
+    // the sentence that asserts it), the front matter only for the
+    // qualified form, which has no inline shape
+    in-out property <bool> link-header;
+    // the qualified relation's extra fields, `key: value, key: value`
+    in-out property <string> link-qualifiers;
+    // why the last commit wrote nothing ("" = it wrote)
+    in-out property <string> link-error;
     // the open document's bytes are here, so a header can be written
     in-out property <bool> can-write-header;
+    // …and the weaker claim an inline write needs: just the bytes
+    in-out property <bool> can-write-body;
     callback link-open(string);
     callback link-close();
     // the header keys this republic already uses as relations
@@ -493,6 +503,11 @@ export global WikiState {
     callback set-link-custom(string);
     callback link-add-custom();
     callback link-toggle(string);
+    callback set-link-header(bool);
+    callback set-link-qualifiers(string);
+    // the raw editor's caret, so an inline claim lands where the member
+    // is writing
+    callback set-cursor(int);
     callback link-commit();
     // the ACTIVE workspace id (drafts are per workspace): a change resets
     // the model and loads that workspace's stored draft (WP-D)
@@ -1379,6 +1394,17 @@ export global Strings {
     in property <string> mem-link-own;
     in property <string> mem-link-ph-own;
     in property <string> mem-link-save;
+    in property <string> mem-link-in-text;
+    in property <string> mem-link-in-header;
+    in property <string> mem-link-at-cursor;
+    in property <string> mem-link-at-end;
+    in property <string> mem-link-at-header;
+    in property <string> mem-link-qual;
+    in property <string> mem-link-ph-qual;
+    in property <string> mem-link-err-header;
+    in property <string> mem-link-err-qual;
+    in property <string> mem-link-err-qsyntax;
+    in property <string> mem-link-err-body;
     in property <string> mem-prop-hint;
     in property <string> tip-settings;
     in property <string> quit-title;
