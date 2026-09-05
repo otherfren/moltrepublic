@@ -4059,6 +4059,28 @@ pub enum Command {
         #[serde(default)]
         limit: u32,
     },
+    /// What the wiki's documents did since a base revision (§4.11) - the
+    /// read for an agent that MAINTAINS the wiki instead of re-reading it.
+    WikiChanges {
+        /// Only what changed after this base revision (0 = from the start
+        /// of what is still reconstructible).
+        #[serde(default)]
+        since_rev: u64,
+        /// Page size, clamped to 1..=500 (0 = the default 100).
+        #[serde(default)]
+        limit: u32,
+        /// Continue after this many entries.
+        #[serde(default)]
+        cursor: u32,
+    },
+    /// The wiki's hygiene in ONE read (§4.11): what this republic
+    /// references and does not have, what nothing points at, and the
+    /// header keys that differ only in case or separator.
+    WikiHealth {
+        /// How many of EACH list, clamped to 1..=500 (0 = the default 100).
+        #[serde(default)]
+        limit: u32,
+    },
     /// The GUI publishes what its window currently shows
     /// (`docs_archive/ui/gui_over_mcp.md`) — the read half of driving the GUI
     /// from MCP. ENGINE-INTERNAL in spirit: only the window may speak it
@@ -5769,6 +5791,47 @@ pub enum Reply {
         /// The base revision of the fold itself.
         wiki_rev: u64,
     },
+    /// What changed since a revision ([`Command::WikiChanges`]).
+    WikiChanges {
+        /// One entry per touched path, oldest change first.
+        changes: Vec<WikiChange>,
+        /// Pass back as `cursor`; `None` = last page.
+        next_cursor: Option<u32>,
+        /// How many paths the window touched in total.
+        total: u64,
+        /// The base revision this answer was read at.
+        wiki_rev: u64,
+        /// The folded base the revisions count from; absent until this
+        /// republic has cut. A cut RE-BASES the counter, so a `since_rev`
+        /// taken under a different base is not comparable to this one.
+        #[serde(default)]
+        base: Option<String>,
+        /// The answer does not reach as far back as asked: below a folded
+        /// base there is one tree and no change list, and a `since_rev`
+        /// above `wiki_rev` was minted under another base.
+        truncated: bool,
+    },
+    /// The wiki's hygiene ([`Command::WikiHealth`]). Each list is capped
+    /// by the request's `limit` and carries its own total.
+    WikiHealth {
+        /// Names some document references and no document carries.
+        dangling: Vec<WikiDangling>,
+        /// How many such names there are.
+        dangling_total: u64,
+        /// Documents no link points at, path-sorted.
+        orphans: Vec<String>,
+        /// How many orphans there are.
+        orphans_total: u64,
+        /// Groups of keys that fold to one key under lowercasing and
+        /// dropping `-`, `_` and spaces.
+        key_drift: Vec<Vec<String>>,
+        /// How many such groups there are.
+        key_drift_total: u64,
+        /// The base revision the GRAPH reflects.
+        index_rev: u64,
+        /// The base revision of the fold itself.
+        wiki_rev: u64,
+    },
     /// One wiki document with its content ([`Command::WikiGet`]).
     WikiDocument {
         /// The document's path.
@@ -6198,6 +6261,36 @@ pub struct WikiNeighbor {
     pub path: String,
     /// How many hops away, following links in either direction.
     pub distance: u32,
+}
+
+/// One path's change since a revision ([`Reply::WikiChanges`], §4.11).
+/// COALESCED: a path edited five times appears once, with the latest kind
+/// and the revision it last moved at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiChange {
+    /// The path as the change left it (the old path for a deletion).
+    pub path: String,
+    /// `"added"`, `"modified"`, `"deleted"` or `"renamed"`.
+    pub kind: String,
+    /// The base revision this path last changed at.
+    pub rev: u64,
+    /// Where the path came from, when a rename moved it inside the
+    /// window. Sticky: it survives later edits of the same path, so an
+    /// agent holding the old path always learns where it went.
+    #[serde(default)]
+    pub from: Option<String>,
+}
+
+/// One name the wiki references and does not carry
+/// ([`Reply::WikiHealth`], §4.11).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiDangling {
+    /// The link target exactly as the documents wrote it.
+    pub name: String,
+    /// The documents that reference it, capped by the request's `limit`.
+    pub from: Vec<String>,
+    /// How many documents reference it in total.
+    pub from_total: u64,
 }
 
 /// One block of the persistent chain as display data — the row a

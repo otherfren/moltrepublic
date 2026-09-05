@@ -427,6 +427,16 @@ fn opt_u32_arg(args: &Value, key: &str) -> Result<u32, String> {
     }
 }
 
+/// The same, in the revision counters' width.
+fn opt_u64_arg(args: &Value, key: &str) -> Result<u64, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(0),
+        Some(v) => v
+            .as_u64()
+            .ok_or_else(|| format!("argument `{key}` must be a non-negative integer")),
+    }
+}
+
 fn bool_arg(args: &Value, key: &str) -> Result<bool, String> {
     args.get(key)
         .and_then(Value::as_bool)
@@ -1181,6 +1191,40 @@ pub fn tools() -> Vec<ToolDef> {
             }),
             build: |args| Ok(Command::WikiGet {
                 path: str_arg(args, "path")?,
+            }),
+        },
+        ToolDef {
+            name: "wiki_changes",
+            command: "wiki_changes",
+            scope: Scope::Read,
+            description: "What the wiki's documents did since a revision - one entry per path, so a maintaining agent re-reads only what moved. `since_rev` is a `wiki_rev` from an earlier read (0 = from the start); `limit` is clamped to 1..=500 (default 100) and `cursor` continues a page. Each entry carries `kind` (added, modified, deleted, renamed), the `rev` it last changed at, and on a rename the path it came `from`. `base` names the folded base the revisions count from - a checkpoint re-bases the counter, so a `since_rev` taken under a different `base` is not comparable - and `truncated` says the answer does not reach as far back as asked: re-read the tree with wiki_list.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "since_rev": { "type": "integer", "description": "optional: only changes after this base revision (0 = from the start)" },
+                    "limit": { "type": "integer", "description": "optional: page size, 1..=500 (default 100)" },
+                    "cursor": { "type": "integer", "description": "optional: continue after this many entries" }
+                }
+            }),
+            build: |args| Ok(Command::WikiChanges {
+                since_rev: opt_u64_arg(args, "since_rev")?,
+                limit: opt_u32_arg(args, "limit")?,
+                cursor: opt_u32_arg(args, "cursor")?,
+            }),
+        },
+        ToolDef {
+            name: "wiki_health",
+            command: "wiki_health",
+            scope: Scope::Read,
+            description: "The wiki's hygiene in one read. `dangling` = names some document links to and no document carries, each with who references them - the best \"what should I write next\" signal; `orphans` = documents nothing links to; `key_drift` = groups of front-matter keys that differ only in case or separator (`status` and `Status` are two fields to every property query). `limit` caps each list on its own, 1..=500 (default 100), and each carries its own total.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "description": "optional: how many of EACH list, 1..=500 (default 100)" }
+                }
+            }),
+            build: |args| Ok(Command::WikiHealth {
+                limit: opt_u32_arg(args, "limit")?,
             }),
         },
         ToolDef {
@@ -3126,7 +3170,9 @@ mod tests {
             read,
             [
                 "read_uploads",
+                "wiki_changes",
                 "wiki_get",
+                "wiki_health",
                 "wiki_links",
                 "wiki_list",
                 "wiki_neighbors",

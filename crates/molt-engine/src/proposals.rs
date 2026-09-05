@@ -2091,6 +2091,188 @@ impl State {
         })
     }
 
+    /// [`Command::WikiChanges`] (§4.11): what the documents did since a
+    /// base revision, for an agent that maintains the wiki.
+    ///
+    /// The applied entries ARE the history, so nothing is stored beside
+    /// them - but reading them costs O(entries since the last folded cut),
+    /// not O(entries since `since_rev`): a revision is defined by the FOLD
+    /// (a void patch does not bump it), so the walk has to apply the
+    /// patches to learn which entry carries which revision. A per-revision
+    /// side index would have to stay true across restore, blob swap,
+    /// re-projection and the base fetch; the cut is the bound instead.
+    pub(crate) fn cmd_wiki_changes(
+        &mut self,
+        since_rev: u64,
+        limit: u32,
+        cursor: u32,
+    ) -> Result<Reply, MoltError> {
+        self.require_feature(Surface::Memory)?;
+        let page = usize::try_from(match limit {
+            0 => WIKI_PAGE_DEFAULT,
+            n => n.clamp(1, WIKI_PAGE_MAX),
+        })
+        .unwrap_or(100);
+        let (mut changes, wiki_rev, base) = self.wiki_change_walk(since_rev)?;
+        // revision first, then path: the order an agent replays them in
+        changes.sort_by(|a, b| a.rev.cmp(&b.rev).then_with(|| a.path.cmp(&b.path)));
+        let total = u64::try_from(changes.len()).unwrap_or(u64::MAX);
+        let start = usize::try_from(cursor).unwrap_or(0);
+        let page = page.min(changes.len().saturating_sub(start));
+        let next_cursor = (start + page < changes.len())
+            .then(|| u32::try_from(start + page).unwrap_or(u32::MAX));
+        // below a folded base there is no change list at all, only a tree -
+        // so a caller asking from the start of history, or from a revision
+        // this base never reached, is TOLD rather than handed a short
+        // answer that reads as complete
+        let truncated = (base.is_some() && since_rev == 0) || since_rev > wiki_rev;
+        Ok(Reply::WikiChanges {
+            changes: changes.into_iter().skip(start).take(page).collect(),
+            next_cursor,
+            total,
+            wiki_rev,
+            base,
+            truncated,
+        })
+    }
+
+    /// The change walk: the applied Memory entries folded exactly the way
+    /// [`Self::fold_wiki_from_base`] folds them, noting what each patch
+    /// that APPLIED touched. Returns the coalesced changes above
+    /// `since_rev`, the current revision, and the folded base beneath.
+    fn wiki_change_walk(
+        &self,
+        since_rev: u64,
+    ) -> Result<(Vec<molt_core::WikiChange>, u64, Option<String>), MoltError> {
+        let mut tree = std::collections::BTreeMap::new();
+        let mut rev = 0u64;
+        let mut base = None;
+        let mut seen: std::collections::BTreeMap<String, molt_core::WikiChange> =
+            std::collections::BTreeMap::new();
+        for payload in self.applied_payloads(Surface::Memory) {
+            if let Some((want, size)) = crate::chain::base_commitment_of(payload) {
+                let held = self
+                    .chain
+                    .wiki_base
+                    .as_ref()
+                    .filter(|base| crate::chain::wiki_base_commitment(base).0 == want);
+                let Some(held) = held else {
+                    return Err(MoltError::WikiBasePending { have: 0, size, want });
+                };
+                tree.clone_from(held);
+                // the cut replaced everything below it with ONE tree: those
+                // revisions are not answerable any more. `rev` is left
+                // alone, exactly as the fold leaves it, or this read would
+                // stamp a different wiki_rev than every other wiki read.
+                seen.clear();
+                base = Some(want);
+                continue;
+            }
+            if payload.get("op").and_then(Value::as_str) != Some("wiki_patch") {
+                continue;
+            }
+            let Some(patch) = payload.get("value").and_then(Value::as_str) else {
+                continue;
+            };
+            let files = molt_core::wiki_fold::parse_patch(patch);
+            if molt_core::wiki_fold::apply_patch(&mut tree, &files).is_err() {
+                continue; // VOID: it moved nothing, so it is not a revision
+            }
+            rev = rev.saturating_add(1);
+            if rev <= since_rev {
+                continue;
+            }
+            for f in &files {
+                Self::note_wiki_file_change(&mut seen, f, rev);
+            }
+        }
+        Ok((seen.into_values().collect(), rev, base))
+    }
+
+    /// One patch file into the coalesced list. A rename RE-KEYS the entry
+    /// onto the new path and carries `from` with it; `from` is sticky
+    /// afterwards, so an agent holding the old path still learns where it
+    /// went when the new one is later edited or deleted.
+    fn note_wiki_file_change(
+        seen: &mut std::collections::BTreeMap<String, molt_core::WikiChange>,
+        f: &molt_core::wiki_fold::PatchFile,
+        rev: u64,
+    ) {
+        let renamed = f.renamed && !f.deleted;
+        let mut from = renamed.then(|| f.old_path.clone());
+        if renamed {
+            if let Some(prev) = seen.remove(&f.old_path) {
+                from = prev.from.or(from);
+            }
+        }
+        let path = f.display_path().to_string();
+        let kind = if f.deleted {
+            "deleted"
+        } else if renamed {
+            "renamed"
+        } else if f.added {
+            "added"
+        } else {
+            "modified"
+        };
+        let carried = seen.get(&path).and_then(|c| c.from.clone());
+        seen.insert(
+            path.clone(),
+            molt_core::WikiChange {
+                path,
+                kind: kind.to_string(),
+                rev,
+                from: from.or(carried),
+            },
+        );
+    }
+
+    /// [`Command::WikiHealth`] (§4.11): the graph's hygiene as ONE read -
+    /// what this republic references and does not have, what nothing
+    /// points at, and the keys that differ only in case or separator.
+    /// Three questions in one call because they are asked together, and
+    /// three tools would page three times over the same graph.
+    pub(crate) fn cmd_wiki_health(&mut self, limit: u32) -> Result<Reply, MoltError> {
+        self.require_feature(Surface::Memory)?;
+        self.refresh_wiki_graph();
+        if self.wiki_graph.is_none() {
+            self.spawn_wiki_index_build();
+            return Err(self.index_building());
+        }
+        let cap = usize::try_from(match limit {
+            0 => WIKI_PAGE_DEFAULT,
+            n => n.clamp(1, WIKI_PAGE_MAX),
+        })
+        .unwrap_or(100);
+        let wiki_rev = self.wiki_base()?.1;
+        let graph = self
+            .wiki_graph
+            .as_ref()
+            .ok_or_else(|| MoltError::Engine("the wiki index is unavailable".to_string()))?;
+        let dangling = graph.dangling_targets();
+        let orphans = graph.orphans();
+        let drift = graph.key_drift();
+        let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+        Ok(Reply::WikiHealth {
+            dangling_total: count(dangling.len()),
+            dangling: dangling
+                .into_iter()
+                .take(cap)
+                .map(|(name, from)| molt_core::WikiDangling {
+                    name,
+                    from_total: count(from.len()),
+                    from: from.into_iter().take(cap).collect(),
+                })
+                .collect(),
+            orphans_total: count(orphans.len()),
+            orphans: orphans.into_iter().take(cap).collect(),
+            key_drift_total: count(drift.len()),
+            key_drift: drift.into_iter().take(cap).collect(),
+            index_rev: wiki_rev,
+            wiki_rev,
+        })
+    }
+
     /// Kick off an OFF-ACTOR build of both indexes over the current base
     /// (§4.5/§4.6). One at a time: N reads arriving while a build runs
     /// spawn nothing. The tree is snapshotted HERE, on the actor, so the
@@ -3352,5 +3534,128 @@ mod size_gate_tests {
             stored.payload.get("value").and_then(Value::as_str),
             Some("keeps the bees")
         );
+    }
+}
+
+#[cfg(test)]
+mod wiki_maintenance_tests {
+    use super::*;
+    use serde_json::json;
+
+    const ADD_A: &str = "diff --git a/a.md b/a.md\nnew file mode 100644\n--- /dev/null\n+++ b/a.md\n@@ -0,0 +1,1 @@\n+A\n";
+    const ADD_B: &str = "diff --git a/b.md b/b.md\nnew file mode 100644\n--- /dev/null\n+++ b/b.md\n@@ -0,0 +1,1 @@\n+B\n";
+    const ADD_C: &str = "diff --git a/c.md b/c.md\nnew file mode 100644\n--- /dev/null\n+++ b/c.md\n@@ -0,0 +1,1 @@\n+C\n";
+    const MOVE_A_B: &str =
+        "diff --git a/a.md b/b.md\nsimilarity index 100%\nrename from a.md\nrename to b.md\n";
+    const MOVE_B_C: &str =
+        "diff --git a/b.md b/c.md\nsimilarity index 100%\nrename from b.md\nrename to c.md\n";
+
+    /// Push applied Memory entries the way a sealed block does.
+    fn apply(st: &mut crate::State, patches: &[&str]) {
+        let entries = st.chain.applied.entry(Surface::Memory).or_default();
+        for patch in patches {
+            entries.push((None, json!({ "op": "wiki_patch", "value": *patch })));
+        }
+        st.bump_applied_epoch();
+    }
+
+    fn changes(
+        st: &mut crate::State,
+        since_rev: u64,
+    ) -> (Vec<molt_core::WikiChange>, u64, Option<String>, bool) {
+        match st.cmd_wiki_changes(since_rev, 0, 0).expect("changes") {
+            Reply::WikiChanges {
+                changes,
+                wiki_rev,
+                base,
+                truncated,
+                ..
+            } => (changes, wiki_rev, base, truncated),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// **A folded cut (K6, §4.9) re-bases the revision counter.** The
+    /// patches below it are gone and post-cut revisions start from 1
+    /// again, so a window reaching under the cut cannot be answered - and
+    /// says so rather than looking complete.
+    #[test]
+    fn a_folded_cut_answers_what_it_can_and_flags_the_rest() {
+        let mut st = crate::tests::plain_state();
+        let base = molt_core::wiki_fold::wiki_fold(&[
+            json!({ "op": "wiki_patch", "value": ADD_A }),
+            json!({ "op": "wiki_patch", "value": ADD_B }),
+        ]);
+        assert_eq!(base.len(), 2);
+        let (hash, size) = crate::chain::wiki_base_commitment(&base);
+        st.chain.wiki_base = Some(base);
+        st.chain
+            .applied
+            .entry(Surface::Memory)
+            .or_default()
+            .push((
+                None,
+                json!({ "op": "wiki_base", "hash": hash.clone(), "size": size }),
+            ));
+        apply(&mut st, &[ADD_C]);
+
+        let (list, wiki_rev, base_hash, truncated) = changes(&mut st, 0);
+        assert_eq!(wiki_rev, 1, "the cut re-based the counter");
+        assert_eq!(
+            list.iter()
+                .map(|c| (c.path.as_str(), c.kind.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("c.md", "added")],
+            "only what happened above the cut is a change"
+        );
+        assert_eq!(
+            base_hash.as_deref(),
+            Some(hash.as_str()),
+            "…and the answer names the base its revisions count from"
+        );
+        assert!(truncated, "below the cut there is a tree, not a change list");
+
+        // a revision this base really reached is a complete, unflagged page
+        let (list, _, _, truncated) = changes(&mut st, 1);
+        assert!(list.is_empty() && !truncated);
+        // one it never reached was minted under another base: flagged, not
+        // silently empty
+        let (list, _, _, truncated) = changes(&mut st, 7);
+        assert!(list.is_empty() && truncated);
+
+        // and with the tree gone the read refuses BY NAME like every other
+        // wiki read (§4.9.6), never with an empty change list
+        st.chain.wiki_base = None;
+        st.bump_applied_epoch();
+        assert!(matches!(
+            st.cmd_wiki_changes(0, 0, 0).expect_err("no base, no answer"),
+            MoltError::WikiBasePending { .. }
+        ));
+    }
+
+    /// A rename CHAIN keeps its origin: an agent holding `a.md` learns
+    /// where it went even when the path moved twice inside one window.
+    #[test]
+    fn a_rename_chain_reports_the_path_it_started_from() {
+        let mut st = crate::tests::plain_state();
+        apply(&mut st, &[ADD_A, MOVE_A_B, MOVE_B_C]);
+        let (list, wiki_rev, _, _) = changes(&mut st, 0);
+        assert_eq!(wiki_rev, 3);
+        assert_eq!(list.len(), 1, "one entry per path, not one per hop");
+        assert_eq!(
+            (list[0].path.as_str(), list[0].kind.as_str(), list[0].from.as_deref()),
+            ("c.md", "renamed", Some("a.md"))
+        );
+    }
+
+    /// A VOID patch moves nothing, so it is not a revision and it names no
+    /// change - the same verdict the fold reaches.
+    #[test]
+    fn a_void_patch_is_not_a_revision() {
+        let mut st = crate::tests::plain_state();
+        apply(&mut st, &[ADD_A, ADD_A]);
+        let (list, wiki_rev, _, _) = changes(&mut st, 0);
+        assert_eq!(wiki_rev, 1, "the second add cannot apply");
+        assert_eq!(list.len(), 1);
     }
 }
