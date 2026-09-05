@@ -479,6 +479,7 @@ impl State {
             next: 0,
             started_at,
             stored,
+            wiki_base: false,
         };
         tokio::spawn(async move {
             let series = job.series.clone();
@@ -507,6 +508,10 @@ impl State {
     ) -> Result<Reply, MoltError> {
         let me = self.member();
         if *from == me {
+            return Ok(Reply::Ack);
+        }
+        // K6: the folded wiki base is a series without a share behind it
+        if self.serve_wiki_base_pieces(id, &ranges) {
             return Ok(Reply::Ack);
         }
         let Ok((ident, _)) = self.share_identity(&id) else {

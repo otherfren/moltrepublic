@@ -264,6 +264,44 @@ pub fn outer_key(key: &[u8; 32]) -> [u8; 32] {
     out
 }
 
+/// **The folded wiki base's series key** (K6,
+/// `docs/memory/knowledge_base_scale.md` §8.4): `HKDF-SHA256(ikm = the
+/// rotation seed, info = "molt-wiki-base-v1" ‖ commitment)`.
+///
+/// DERIVED, never minted, and that is the whole argument: the series is
+/// addressed by its content commitment, so every holder must seal the
+/// same pieces or a fetcher could not take them from whoever happens to
+/// be online. An MLS-exporter key would be epoch-bound and would make
+/// holders unusable to each other. The rotation seed is also the one
+/// shared secret a rejoiner holds before it holds any chain - which is
+/// exactly the node that needs the base. The cost, stated plainly: the
+/// base tree has the rotation seed's lifetime, so no forward secrecy
+/// against a relay that recorded the ciphertext and later obtains the
+/// seed - a member-compromise scenario in which the wiki is already in
+/// the attacker's hands.
+pub fn wiki_base_key(rotation_seed: &[u8; 32], commitment: &str) -> [u8; 32] {
+    let hk = hkdf::Hkdf::<Sha256>::new(None, rotation_seed);
+    let mut info = Vec::with_capacity(18 + commitment.len());
+    info.extend_from_slice(b"molt-wiki-base-v1");
+    info.extend_from_slice(commitment.as_bytes());
+    let mut out = [0u8; 32];
+    hk.expand(&info, &mut out)
+        .expect("32 bytes is within the HKDF-SHA256 expand limit");
+    out
+}
+
+/// The series id the folded base travels as: the first 16 bytes of its own
+/// commitment. Content-addressed on purpose - two holders publish into ONE
+/// series, and a fetcher takes pieces from all of them.
+#[must_use]
+pub fn wiki_base_series(commitment: &str) -> Option<[u8; MSG_ID_LEN]> {
+    let raw = hex::decode(commitment).ok()?;
+    let head = raw.get(..MSG_ID_LEN)?;
+    let mut id = [0u8; MSG_ID_LEN];
+    id.copy_from_slice(head);
+    Some(id)
+}
+
 /// Frame one piece: header + payload, zero-padded to the uniform block.
 pub fn frame_piece(index: u32, count: u32, payload: &[u8]) -> Result<Vec<u8>, NetError> {
     if payload.len() > PIECE_PAYLOAD_LEN {
@@ -522,8 +560,11 @@ pub struct SeriesExpect {
     pub count: u32,
     /// The share's byte length.
     pub size: u64,
-    /// The share's manifest root, hex.
-    pub root: String,
+    /// The share's manifest root, hex - `None` where the caller verifies
+    /// the assembled content itself against a stronger commitment (K6:
+    /// the chain's threshold-signed content hash). Without it a lying
+    /// holder can waste a transfer, never place wrong bytes.
+    pub root: Option<String>,
 }
 
 /// Where fetched slices land: memory for tests and small files, a `.part`
@@ -1047,7 +1088,7 @@ pub async fn fetch_series_v2_with(
     }
     let layout = Manifest::layout_for(expect.count)
         .ok_or_else(|| NetError::Framing("the share exceeds the largest series".into()))?;
-    let root = expect.root.to_lowercase();
+    let root = expect.root.as_ref().map(|r| r.to_lowercase());
     let outer = outer_key(key);
     let count = layout.count;
     let chunk_slots = usize::try_from(layout.chunks).unwrap_or(usize::MAX);
@@ -1087,7 +1128,11 @@ pub async fn fetch_series_v2_with(
                     continue; // a re-share under the same key cannot happen; refuse the geometry anyway
                 }
                 if index == layout.top {
-                    if top.is_some() || hex::encode(sha(payload)) != root {
+                    if top.is_some()
+                        || root
+                            .as_ref()
+                            .is_some_and(|r| &hex::encode(sha(payload)) != r)
+                    {
                         continue; // a record the root disowns is a forgery
                     }
                     let Ok(record) = TopRecord::parse(payload) else {

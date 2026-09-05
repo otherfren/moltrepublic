@@ -334,6 +334,7 @@ impl State {
         self.release_stale_parked(now);
         // the mirror worker's planning beat (mirroring §3.3; gated inside)
         self.mirror_worker_tick(now);
+        self.wiki_base_tick();
         Ok(Reply::Ack)
     }
 

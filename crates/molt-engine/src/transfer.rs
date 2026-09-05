@@ -1174,6 +1174,13 @@ static PIECE_WANT_AFTER_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::At
 /// How often an incomplete fetch repeats its ask.
 const PIECE_WANT_REPEAT: Duration = Duration::from_secs(30 * 60);
 
+/// The folded wiki base asks EARLY and repeats often (K6, §8.5): a node
+/// waiting for it has no wiki at all, while a share's requester is only
+/// missing one file. The ask itself is one small control frame; what it
+/// unlocks is the whole knowledge base.
+const WIKI_BASE_WANT_AFTER: Duration = Duration::from_secs(5);
+const WIKI_BASE_WANT_REPEAT: Duration = Duration::from_secs(60);
+
 pub(crate) fn set_piece_want_after(d: Duration) {
     PIECE_WANT_AFTER_MS.store(
         u64::try_from(d.as_millis()).unwrap_or(u64::MAX),
@@ -1325,7 +1332,7 @@ pub(crate) fn spawn_mirror_fetch<S: FetchJobStore>(
             let expect = molt_net::file_plane::SeriesExpect {
                 count: job.count,
                 size: job.size,
-                root: job.root.clone(),
+                root: Some(job.root.clone()),
             };
             let (count, started_at) = (job.count, job.started_at);
             let mut sink = MirrorSink {
@@ -1557,7 +1564,7 @@ pub(crate) fn spawn_nostr_fetch_v2<S: FetchJobStore>(
                 let expect = molt_net::file_plane::SeriesExpect {
                     count: job.count,
                     size: job.size,
-                    root: job.root.clone(),
+                    root: Some(job.root.clone()),
                 };
                 let started = tokio::time::Instant::now();
                 let mut last_ask: Option<tokio::time::Instant> = None;
@@ -1620,6 +1627,78 @@ pub(crate) fn spawn_nostr_fetch_v2<S: FetchJobStore>(
         let cmd = match result {
             Ok(path) => Command::NetFileDone { id, path, generation: Some(scope) },
             Err(reason) => Command::NetFileFailed { id, reason, generation: Some(scope) },
+        };
+        feed(&cmd_tx, cmd).await;
+    })
+    .abort_handle()
+}
+
+/// **The folded wiki base's fetch** (K6). Unlike a share it lands in
+/// MEMORY: the engine holds the ratified tree anyway, and a `.part` file
+/// would be the whole knowledge base in plaintext on disk for as long as
+/// the fetch runs. The assembled bytes are checked against the chain's
+/// commitment on the actor, so nothing here has to be trusted.
+pub(crate) fn spawn_wiki_base_fetch(
+    channel: molt_net::ritual_net::GroupChannel,
+    id: MessageId,
+    key: [u8; 32],
+    expect: molt_net::file_plane::SeriesExpect,
+    scope: u64,
+    cmd_tx: mpsc::Sender<Envelope>,
+) -> tokio::task::AbortHandle {
+    tokio::spawn(async move {
+        let mut sink: Vec<u8> = Vec::new();
+        let started = tokio::time::Instant::now();
+        let mut last_ask: Option<tokio::time::Instant> = None;
+        let ask_tx = cmd_tx.clone();
+        let mut on_quiet = move |missing: Vec<(u32, u32)>| -> bool {
+            if missing.is_empty() {
+                return true;
+            }
+            let due = match last_ask {
+                None => started.elapsed() >= WIKI_BASE_WANT_AFTER,
+                Some(at) => at.elapsed() >= WIKI_BASE_WANT_REPEAT,
+            };
+            if due {
+                last_ask = Some(tokio::time::Instant::now());
+                let (reply, _rx) = tokio::sync::oneshot::channel();
+                let _ = ask_tx.try_send(Envelope {
+                    cmd: Command::NetPieceWantSend {
+                        id,
+                        ranges: missing,
+                        generation: Some(scope),
+                    },
+                    reply,
+                });
+            }
+            true
+        };
+        let opts = molt_net::file_plane::FetchOpts {
+            quiet: molt_net::file_plane::FETCH_QUIET,
+            ceiling: None,
+            on_quiet: Some(&mut on_quiet),
+        };
+        let outcome = molt_net::file_plane::fetch_series_v2_with(
+            &channel,
+            &key,
+            0,
+            &expect,
+            &mut sink,
+            opts,
+        )
+        .await;
+        let cmd = match outcome {
+            Ok(manifest) => {
+                sink.truncate(usize::try_from(manifest.size).unwrap_or(usize::MAX));
+                Command::NetWikiBaseFetched {
+                    bytes: sink,
+                    generation: Some(scope),
+                }
+            }
+            Err(e) => Command::NetWikiBaseFailed {
+                reason: e.to_string(),
+                generation: Some(scope),
+            },
         };
         feed(&cmd_tx, cmd).await;
     })

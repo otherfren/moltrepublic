@@ -150,10 +150,16 @@ const WIKI_BASE_SEGMENT: u64 = u64::MAX - 4;
 /// The lowest reserved marker — a log file numbered at or above it is
 /// ignored (see [`list_sorted`]).
 const RESERVED_SEGMENT_FLOOR: u64 = WIKI_BASE_SEGMENT;
-/// Plaintext per wiki-base frame. The AEAD tag rides INSIDE the frame's
-/// own length field, so a full [`FRAME_MAX_LEN`] chunk would not fit the
-/// frame it is written into.
-const WIKI_BASE_CHUNK: u32 = FRAME_MAX_LEN - 4096;
+/// Plaintext per wiki-base frame: EXACTLY one file-plane piece
+/// (`molt_net::file_plane::PIECE_PAYLOAD_LEN`, cross-checked by a static
+/// assertion in molt-engine - this crate sits below molt-net and cannot
+/// name it). Frame `k` therefore starts at `k * WIKI_BASE_STRIDE`, so a
+/// holder serves piece `k` with one seek and one decrypt, and the wiki
+/// never touches the disk in plaintext.
+pub const WIKI_BASE_CHUNK: usize = 44_000;
+/// The on-disk stride of one wiki-base frame: header, nonce, plaintext,
+/// AEAD tag. Every frame but the last has exactly this length.
+const WIKI_BASE_STRIDE: usize = FRAME_HEADER_LEN + NONCE_LEN + WIKI_BASE_CHUNK + 16;
 
 /// The on-disk shape of `chain.state` (WP4b): historically a bare block
 /// array; a PRUNED holder stores the checkpoint blob next to its suffix.
@@ -1644,7 +1650,7 @@ impl OpenedWorkspace {
     /// backup should not carry the whole wiki twice.
     pub fn write_wiki_base(&self, bytes: &[u8]) -> Result<(), StorageError> {
         let key = wiki_base_key(&self.key, &self.id);
-        let chunk = usize::try_from(WIKI_BASE_CHUNK).unwrap_or(usize::MAX);
+        let chunk = WIKI_BASE_CHUNK;
         let mut out = Vec::with_capacity(bytes.len() + 128);
         // an EMPTY base is still a base (a republic can ratify a cut with
         // no documents left), so one empty frame is written for it
@@ -1684,6 +1690,55 @@ impl OpenedWorkspace {
             )?);
         }
         Ok(Some(out))
+    }
+
+    /// One piece of the stored wiki base, decrypted: what a holder
+    /// publishes when a peer asks for piece `index` (K6). Frames are
+    /// fixed-stride, so this is a seek and a single frame decrypt - no
+    /// scan, and never the whole base in memory.
+    ///
+    /// # Errors
+    /// Unreadable, or a frame that does not authenticate.
+    pub fn read_wiki_base_piece(&self, index: u32) -> Result<Option<Vec<u8>>, StorageError> {
+        use std::io::{Read as _, Seek as _};
+        let path = self.dir.join("wiki_base.bin");
+        let mut file = match fs::File::open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(StorageError::Corrupt(format!("reading wiki_base.bin: {e}"))),
+        };
+        let Some(at) = usize::try_from(index)
+            .ok()
+            .and_then(|i| i.checked_mul(WIKI_BASE_STRIDE))
+            .and_then(|o| u64::try_from(o).ok())
+        else {
+            return Ok(None);
+        };
+        if file.seek(std::io::SeekFrom::Start(at)).is_err() {
+            return Ok(None);
+        }
+        let mut buf = vec![0u8; WIKI_BASE_STRIDE];
+        let mut filled = 0;
+        while filled < buf.len() {
+            match file.read(&mut buf[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(e) => return Err(StorageError::Corrupt(format!("reading wiki_base.bin: {e}"))),
+            }
+        }
+        let (frames, _) = split_frames(&buf[..filled]);
+        let Some(frame) = frames.first() else {
+            return Ok(None);
+        };
+        decrypt_frame(
+            &wiki_base_key(&self.key, &self.id),
+            &self.id,
+            WIKI_BASE_SEGMENT,
+            u64::from(index),
+            frame.nonce,
+            frame.ciphertext,
+        )
+        .map(Some)
     }
 
     /// Drop the stored wiki base — the answer to bytes that fail their
@@ -2772,6 +2827,11 @@ enum WriterMsg {
         bytes: Option<Vec<u8>>,
         ack: mpsc::SyncSender<bool>,
     },
+    /// K6: one decrypted piece of the stored wiki base (the publish path).
+    LoadWikiBasePiece {
+        index: u32,
+        reply: tokio::sync::oneshot::Sender<Option<Vec<u8>>>,
+    },
     Close(mpsc::SyncSender<()>),
 }
 
@@ -3104,6 +3164,20 @@ impl StorageHandle {
             return false; // the writer is gone: nothing reached the disk
         }
         ack_rx.recv().unwrap_or(false)
+    }
+
+    /// K6: one decrypted piece of the stored wiki base, for the trickle
+    /// sender. `None` when this holder keeps no base, the index is past
+    /// its end, or the writer is gone.
+    pub async fn load_wiki_base_piece(&self, index: u32) -> Option<Vec<u8>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if !self
+            .send_from_async(WriterMsg::LoadWikiBasePiece { index, reply: tx })
+            .await
+        {
+            return None;
+        }
+        rx.await.ok().flatten()
     }
 
     /// Load `transport.state` (defaults when absent, damaged, or the
@@ -3469,6 +3543,13 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                             ok = false;
                         }
                         let _ = ack.send(ok);
+                    }
+                    Ok(WriterMsg::LoadWikiBasePiece { index, reply }) => {
+                        let piece = ws.read_wiki_base_piece(index).unwrap_or_else(|e| {
+                            tracing::warn!(error = %e, index, "wiki base piece unreadable");
+                            None
+                        });
+                        let _ = reply.send(piece);
                     }
                     Ok(WriterMsg::Snapshot(snap)) => {
                         if let Err(e) = ws.sync().and_then(|()| ws.write_snapshot(&snap)) {
@@ -4399,11 +4480,24 @@ mod tests {
         assert_eq!(ws.read_wiki_base().expect("read"), Some(Vec::new()));
 
         // …and one larger than a single frame comes back byte-identical
-        let big: Vec<u8> = (0..usize::try_from(WIKI_BASE_CHUNK).unwrap_or(0) + 4096)
+        let big: Vec<u8> = (0..WIKI_BASE_CHUNK + 4096)
             .map(|i| u8::try_from(i % 251).unwrap_or(0))
             .collect();
         ws.write_wiki_base(&big).expect("write big");
         assert_eq!(ws.read_wiki_base().expect("read"), Some(big));
+
+        // …and a holder serves piece k with one seek: the frames are
+        // fixed-stride, which is what makes a 100 MiB base publishable
+        // without ever writing the wiki out in plaintext
+        let again = ws.read_wiki_base().expect("read").expect("present");
+        for (index, want) in again.chunks(WIKI_BASE_CHUNK).enumerate() {
+            let got = ws
+                .read_wiki_base_piece(u32::try_from(index).expect("index"))
+                .expect("piece")
+                .expect("present");
+            assert_eq!(got, want, "piece {index}");
+        }
+        assert_eq!(ws.read_wiki_base_piece(9_999).expect("past the end"), None);
 
         // a damaged base is refused, not half-returned
         let path = ws.dir().join("wiki_base.bin");

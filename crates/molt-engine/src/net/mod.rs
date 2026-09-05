@@ -38,6 +38,7 @@ use delivery::ACK_DEBOUNCE_SECS;
 mod demo_mesh;
 pub(crate) mod files;
 mod mirror;
+mod wiki_base;
 mod ingest;
 mod presence;
 pub(crate) use presence::pill_state;
@@ -279,6 +280,12 @@ impl crate::transfer::FetchJobStore for FileStateStore {
 }
 
 impl supervisor::StateStore for FileStateStore {
+    /// K6: the trickle sender's window into the sealed base - one frame,
+    /// decrypted by the writer thread that owns the workspace key.
+    async fn wiki_base_piece(&self, index: u32) -> Option<Vec<u8>> {
+        self.handle.load_wiki_base_piece(index).await
+    }
+
     async fn load(&self) -> molt_core::TransportState {
         self.handle.load_transport_state().await
     }

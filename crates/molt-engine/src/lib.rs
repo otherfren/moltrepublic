@@ -644,6 +644,13 @@ pub(crate) struct FilePlane {
     pub(crate) mirror_fetches: HashMap<molt_core::MessageId, tokio::task::AbortHandle>,
     pub(crate) mirror_pending: HashMap<molt_core::MessageId, u64>,
     pub(crate) mirror_planned_at: u64,
+    /// K6: the running fetch of the folded wiki base (at most one).
+    pub(crate) wiki_base_fetch: Option<tokio::task::AbortHandle>,
+    /// Unix seconds before which no new base fetch starts. A fetch that
+    /// finds nobody online ends in seconds, and without this the beat
+    /// would restart it every second for as long as the republic is
+    /// quiet.
+    pub(crate) wiki_base_next_try: u64,
     pub(crate) mirror_quota_noted: bool,
     /// Verified pieces of each running mirror fetch, as last reported.
     pub(crate) mirror_progress: HashMap<molt_core::MessageId, u32>,
@@ -1203,6 +1210,8 @@ impl State {
             compacted_at: 0,
             parked: chat::ParkedRefs::new(),
             files: FilePlane {
+                wiki_base_fetch: None,
+                wiki_base_next_try: 0,
                 share_paths: HashMap::new(),
                 downloads: HashMap::new(),
                 serve_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
@@ -1456,6 +1465,19 @@ impl State {
                 }
                 self.receive_poke(&from, &to);
                 Ok(Reply::Ack)
+            }
+            // the FETCH's own scope, like every other off-actor file task
+            Command::NetWikiBaseFetched { bytes, generation } => {
+                if !self.net_scope_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.cmd_net_wiki_base_fetched(bytes)
+            }
+            Command::NetWikiBaseFailed { reason, generation } => {
+                if !self.net_scope_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.cmd_net_wiki_base_failed(&reason)
             }
             Command::NetPieceWanted { from, id, ranges, generation } => {
                 if !self.net_generation_current(generation) {

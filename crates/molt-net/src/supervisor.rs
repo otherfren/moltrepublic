@@ -491,6 +491,14 @@ pub trait OutboxLog: Send + Sync + Clone + 'static {
 /// Where delivery cursors persist (`transport.state`, or memory for the
 /// demo).
 pub trait StateStore: Send + Sync + Clone + 'static {
+    /// K6: one plaintext piece of the folded wiki base this holder keeps,
+    /// decrypted from its sealed copy for exactly this publish. `None`
+    /// where the store keeps no base - which is every store but the
+    /// engine's, so the default says so.
+    fn wiki_base_piece(&self, index: u32) -> impl std::future::Future<Output = Option<Vec<u8>>> + Send {
+        let _ = index;
+        async { None }
+    }
     /// Load the persisted state (defaults when absent).
     fn load(&self) -> impl std::future::Future<Output = TransportState> + Send;
     /// Persist a snapshot (atomic rewrite; implementations may queue).

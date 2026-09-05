@@ -360,7 +360,7 @@ fn write_tmp(dir: &tempfile::TempDir, name: &str, bytes: &[u8]) -> std::path::Pa
 
 fn expect_of(bytes: &[u8]) -> (Manifest, SeriesExpect, String) {
     let (m, sha) = manifest_of_reader(bytes).expect("manifest");
-    let expect = SeriesExpect { count: m.count, size: m.size, root: m.root() };
+    let expect = SeriesExpect { count: m.count, size: m.size, root: Some(m.root()) };
     (m, expect, sha)
 }
 

@@ -17,11 +17,11 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
-/// K6 lands in stages, and the fold is only safe once a holder KEEPS the
-/// folded tree locally and can fetch a missing one: without that a cut
-/// would drop the patches and leave the wiki empty. Accepting a folded cut
-/// works from the start; PROPOSING one waits for the base store.
-pub(crate) const FOLD_CUTS: bool = false;
+/// Whether a cut PROPOSES the folded form. On since the base store (K6b)
+/// and the base's own file-plane series (K6c) landed: a folded cut drops
+/// the patches, so it may only be proposed by a build that keeps the tree
+/// locally and can fetch a missing one.
+pub(crate) const FOLD_CUTS: bool = true;
 
 /// A memory group in its folded form, and the tree it commits to.
 type Folded = (Vec<(u64, Value)>, BTreeMap<String, String>);

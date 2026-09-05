@@ -316,6 +316,12 @@ async fn tick<S: StateStore>(
             }
         };
     }
+    // K6: this holder's own folded wiki base. Every piece is decrypted
+    // from the sealed file for exactly this publish - the knowledge base
+    // never exists in plaintext on disk, the way a shared file does.
+    if job.wiki_base {
+        return publish_wiki_base_piece(chan, store, &job, manifests, day).await;
+    }
     let manifest = match manifests.get(&job.series) {
         Some(m) => m.clone(),
         None => {
@@ -385,6 +391,81 @@ async fn tick<S: StateStore>(
     }
 }
 
+/// One piece of the folded wiki base (K6). The manifest is built once
+/// from the holder's own sealed copy and cached like any other series';
+/// a base that is not here yet HOLDS the job rather than dropping it,
+/// because the very next cut may bring it.
+async fn publish_wiki_base_piece<S: StateStore>(
+    chan: &GroupChannel,
+    store: &S,
+    job: &PublishJob,
+    manifests: &mut HashMap<String, Manifest>,
+    day: u64,
+) -> Result<(), Hold> {
+    let series = job.series.clone();
+    let manifest = match manifests.get(&series) {
+        Some(m) => m.clone(),
+        None => {
+            let mut hashes = Vec::new();
+            let mut size = 0u64;
+            for i in 0..job.count {
+                let Some(piece) = store.wiki_base_piece(i).await else {
+                    tracing::debug!(series = %series, gate = "no base", "file trickle: waiting");
+                    return Err(Hold::Gated);
+                };
+                size = size.saturating_add(u64::try_from(piece.len()).unwrap_or(0));
+                hashes.push(<[u8; 32]>::from(sha2::Sha256::digest(&piece)));
+            }
+            let m = Manifest { count: job.count, size, hashes };
+            if m.root() != job.root || m.size != job.size {
+                drop_job(store, series, "the wiki base moved since the job was queued".into()).await;
+                return Err(Hold::Failed);
+            }
+            manifests.insert(job.series.clone(), m.clone());
+            m
+        }
+    };
+    let (Some(index), Ok(key)) = (
+        index_at(&job.ranges, job.next),
+        <[u8; 32]>::try_from(job.key.as_slice()),
+    ) else {
+        drop_job(store, series, "malformed job".into()).await;
+        return Err(Hold::Failed);
+    };
+    let framed = match meta_piece(&manifest, index) {
+        Ok(Some(meta)) => meta,
+        Ok(None) => {
+            let Some(slice) = store.wiki_base_piece(index).await else {
+                return Err(Hold::Gated);
+            };
+            match frame_piece(index, manifest.count, &slice) {
+                Ok(f) => f,
+                Err(e) => {
+                    drop_job(store, series, e.to_string()).await;
+                    return Err(Hold::Failed);
+                }
+            }
+        }
+        Err(e) => {
+            manifests.remove(&series);
+            drop_job(store, series, e.to_string()).await;
+            return Err(Hold::Failed);
+        }
+    };
+    let stamp = crate::ritual_net::now_secs();
+    match publish_piece_paced(chan, &outer_key(&key), &framed, stamp).await {
+        Ok(_) => {
+            advance(store, job, day).await;
+            tracing::debug!(series = %series, index, "file trickle: wiki base piece published");
+            Ok(())
+        }
+        Err(e) => {
+            tracing::debug!(series = %series, index, error = %e, "file trickle: wiki base piece held");
+            Err(Hold::Failed)
+        }
+    }
+}
+
 /// One piece went out: the day's counter and the job's cursor advance, a
 /// finished job leaves the queue.
 async fn advance<S: StateStore>(store: &S, job: &PublishJob, day: u64) {
@@ -418,21 +499,31 @@ async fn drop_job<S: StateStore>(store: &S, series: String, why: String) {
         .await;
 }
 
-/// The framed piece at `index`: a data slice read at its offset and
-/// checked against the manifest (a changed file is refused), a manifest
-/// chunk, or the top record.
-fn piece_bytes(job: &PublishJob, manifest: &Manifest, index: u32) -> Result<Vec<u8>, NetError> {
-    use std::io::Seek as _;
+/// The framed piece at `index` when it is NOT a data slice: the top
+/// record or a manifest chunk. `None` means "this is a data slice", which
+/// every source answers its own way.
+fn meta_piece(manifest: &Manifest, index: u32) -> Result<Option<Vec<u8>>, NetError> {
     let layout = Manifest::layout_for(manifest.count)
         .ok_or_else(|| NetError::Framing("the series exceeds the largest layout".into()))?;
     if index == layout.top {
-        return frame_piece(index, manifest.count, &manifest.top_bytes());
+        return frame_piece(index, manifest.count, &manifest.top_bytes()).map(Some);
     }
     if index > layout.top {
         return Err(NetError::Framing(format!("piece {index} is outside the series")));
     }
     if index >= manifest.count {
-        return frame_piece(index, manifest.count, &manifest.chunk(index - manifest.count));
+        return frame_piece(index, manifest.count, &manifest.chunk(index - manifest.count)).map(Some);
+    }
+    Ok(None)
+}
+
+/// The framed piece at `index`: a data slice read at its offset and
+/// checked against the manifest (a changed file is refused), a manifest
+/// chunk, or the top record.
+fn piece_bytes(job: &PublishJob, manifest: &Manifest, index: u32) -> Result<Vec<u8>, NetError> {
+    use std::io::Seek as _;
+    if let Some(meta) = meta_piece(manifest, index)? {
+        return Ok(meta);
     }
     let want_len = expected_slice_len(index, manifest.count, manifest.size)
         .ok_or_else(|| NetError::Framing("slice geometry".into()))?;
@@ -479,6 +570,7 @@ mod tests {
             next: 0,
             started_at: 0,
             stored: false,
+            wiki_base: false,
         };
         let whole = whole_series_ranges(Manifest::layout_for(3).expect("layout"));
         let jobs = vec![job("a", whole.clone()), job("b", vec![(1, 1)]), job("c", whole)];

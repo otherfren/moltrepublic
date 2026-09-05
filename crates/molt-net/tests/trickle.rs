@@ -61,6 +61,7 @@ fn job(path: &std::path::Path, m: &Manifest, ranges: Vec<(u32, u32)>) -> molt_co
         next: 0,
         started_at: unix_now(),
         stored: false,
+        wiki_base: false,
     }
 }
 

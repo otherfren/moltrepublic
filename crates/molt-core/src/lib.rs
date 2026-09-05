@@ -2150,6 +2150,11 @@ pub struct PublishJob {
     /// index) instead of the shared file: published as stored.
     #[serde(default)]
     pub stored: bool,
+    /// K6: the source is this holder's own sealed wiki base, not a file -
+    /// `path` is unused. Wins over `stored`. Additive: absent on every job
+    /// written before the folded cut existed.
+    #[serde(default)]
+    pub wiki_base: bool,
 }
 
 /// Whether bit `index` of a little-endian bitmap is set.
@@ -3998,6 +4003,24 @@ pub enum Command {
         /// Continue after this many edges.
         #[serde(default)]
         cursor: u32,
+    },
+    /// INTERNAL (K6): the folded wiki base arrived off the actor. The
+    /// bytes are checked against the chain's own commitment before they
+    /// become this holder's base.
+    NetWikiBaseFetched {
+        /// The assembled canonical bytes.
+        bytes: Vec<u8>,
+        /// The workspace generation the fetch started under.
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// INTERNAL (K6): the folded wiki base fetch ended without the tree.
+    NetWikiBaseFailed {
+        /// What went wrong, for the log.
+        reason: String,
+        /// The workspace generation the fetch started under.
+        #[serde(default)]
+        generation: Option<u64>,
     },
     /// The header keys this republic actually uses, with their values -
     /// the ontology as it IS, derived from the fold. A view, never a
