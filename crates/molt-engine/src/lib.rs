@@ -71,6 +71,14 @@ pub use wiki_index::front_matter::{
     first_heading, key_ok as header_key_ok, link_target, properties, split as split_front_matter,
 };
 
+/// The header EMITTER, the parser's own inverse (§4.4). ONE of them: the
+/// GUI's relation modal and the engine's `wiki_edit` write the same shape,
+/// and a header the parser above would not read back is never written.
+pub use wiki_index::front_matter::{
+    canonical_header, emit_key as emit_header_key, emit_value as emit_header_value,
+    header_body_span, header_lines, value_list as header_value_list, yaml_quote,
+};
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 

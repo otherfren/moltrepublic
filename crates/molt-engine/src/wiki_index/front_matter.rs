@@ -242,9 +242,224 @@ pub(crate) fn kind_of(doc: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+
+// ---------------------------------------------------------------------------
+// The header EMITTER (§4.4)
+//
+// ONE emitter for both writers: the GUI's relation modal and the engine's
+// `wiki_edit` write the same header shape, and the PARSER above is the
+// arbiter for both - what it does not read back is never written.
+// ---------------------------------------------------------------------------
+
+/// A YAML double-quoted scalar - the one form no member input can break
+/// out of.
+pub fn yaml_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' | '\r' | '\t' => out.push(' '),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// The byte range of the header BODY inside `raw`. The ENGINE decides
+/// whether there is a header at all (size rule included); this only
+/// locates the block it named, and gives up when the two disagree.
+pub fn header_body_span(raw: &str) -> Option<(usize, usize)> {
+    let header = split(raw).0?;
+    let rest = raw.strip_prefix("---\n").or_else(|| raw.strip_prefix("---\r\n"))?;
+    let start = raw.len() - rest.len();
+    let mut off = start;
+    for line in rest.split_inclusive('\n') {
+        let fence = line.trim_end_matches(['\n', '\r']);
+        if fence == "---" || fence == "..." {
+            return (raw.get(start..off) == Some(header)).then_some((start, off));
+        }
+        off += line.len();
+    }
+    None
+}
+
+/// A header value as the list it stands for: a scalar is a list of one,
+/// an absent key the empty list.
+pub fn value_list(v: Option<&Value>) -> Vec<Value> {
+    match v {
+        None => Vec::new(),
+        Some(Value::Array(items)) => items.clone(),
+        Some(other) => vec![other.clone()],
+    }
+}
+
+/// The header re-emitted from what the parser says it holds, with
+/// `display` added under `key`. The fallback, never the first choice: it
+/// loses comments and formatting, which is why the line-wise edit runs
+/// first.
+pub fn canonical_header(
+    before: &serde_json::Map<String, Value>,
+    key: &str,
+    display: &str,
+) -> String {
+    let mut out = String::new();
+    for (k, v) in before {
+        if k == key {
+            let mut items = value_list(Some(v));
+            items.push(Value::String(display.to_string()));
+            out.push_str(&emit_key(k, &items));
+        } else {
+            out.push_str(&emit_key(k, &value_list(Some(v))));
+        }
+    }
+    if !before.contains_key(key) {
+        out.push_str(&emit_key(key, &[Value::String(display.to_string())]));
+    }
+    out
+}
+
+/// One `key: value` (or block list) of the canonical emitter.
+pub fn emit_key(key: &str, items: &[Value]) -> String {
+    match items {
+        [] => format!("{key}: {}\n", yaml_quote("")),
+        [one] => format!("{key}: {}\n", emit_scalar(one)),
+        many => {
+            let mut out = format!("{key}:\n");
+            for item in many {
+                out.push_str(&format!("  - {}\n", emit_scalar(item)));
+            }
+            out
+        }
+    }
+}
+
+/// One value of the canonical emitter. A flat mapping is the qualified
+/// relation's shape and stays one, in flow form.
+fn emit_scalar(v: &Value) -> String {
+    match v {
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => yaml_quote(s),
+        Value::Object(map) => {
+            let inner = map
+                .iter()
+                .map(|(k, v)| format!("{k}: {}", emit_scalar(v)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{{inner}}}")
+        }
+        other => yaml_quote(&other.to_string()),
+    }
+}
+
+/// The header body with `literal` added under `key`, edited line-wise.
+/// Best-effort: [`with_relation`] verifies the result and falls back to
+/// the canonical emitter when this misreads the shape.
+pub fn header_lines(header: &str, key: &str, literal: &str) -> String {
+    let prefix = format!("{key}:");
+    let lines: Vec<&str> = header.split_inclusive('\n').collect();
+    let Some(at) = lines.iter().position(|l| l.starts_with(&prefix)) else {
+        let mut out = header.to_string();
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&format!("{key}: {literal}\n"));
+        return out;
+    };
+    let rest = lines[at]
+        .get(prefix.len()..)
+        .unwrap_or_default()
+        .trim_end_matches(['\n', '\r'])
+        .trim();
+    let mut out: Vec<String> = lines.iter().map(|l| (*l).to_string()).collect();
+    if let Some(inner) = rest.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+        let inner = inner.trim();
+        out[at] = if inner.is_empty() {
+            format!("{key}: [{literal}]\n")
+        } else {
+            format!("{key}: [{inner}, {literal}]\n")
+        };
+    } else if rest.is_empty() {
+        // `key:` alone - a block sequence may follow, at ANY indent
+        let mut last = None;
+        let mut indent = "  ".to_string();
+        for (i, l) in lines.iter().enumerate().skip(at + 1) {
+            let t = l.trim_end_matches(['\n', '\r']);
+            let body = t.trim_start();
+            if body.starts_with("- ") {
+                if last.is_none() {
+                    indent = t.get(..t.len() - body.len()).unwrap_or("").to_string();
+                }
+                last = Some(i);
+            } else if body.is_empty() {
+                continue;
+            } else {
+                break;
+            }
+        }
+        match last {
+            Some(i) => out.insert(i + 1, format!("{indent}- {literal}\n")),
+            None => out[at] = format!("{key}: {literal}\n"),
+        }
+    } else {
+        out[at] = format!("{key}:\n  - {rest}\n  - {literal}\n");
+    }
+    out.concat()
+}
+
+/// One `key: value` for an arbitrary value of the subset. An ARRAY stays
+/// an array even at length one - [`emit_key`] deliberately flattens that,
+/// because its caller is growing a relation list rather than restating a
+/// value.
+pub fn emit_value(key: &str, value: &Value) -> String {
+    match value {
+        Value::Array(items) if items.is_empty() => format!("{key}: []\n"),
+        Value::Array(items) => {
+            let mut out = format!("{key}:\n");
+            for item in items {
+                out.push_str(&format!("  - {}\n", emit_scalar(item)));
+            }
+            out
+        }
+        other => format!("{key}: {}\n", emit_scalar(other)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The emitter's contract with the parser above: what it writes, the
+    /// parser reads back UNCHANGED - every shape of the subset, a
+    /// one-element list included. The structured write path verifies each
+    /// header this way before it proposes one, so a drift here is a
+    /// refused edit rather than a broken document.
+    #[test]
+    fn the_emitter_round_trips_every_shape_of_the_subset() {
+        let props: serde_json::Map<String, Value> = serde_json::from_str(
+            r#"{
+                "type": "person",
+                "born": 1975,
+                "negative": -3,
+                "tags": ["berlin"],
+                "aliases": ["P. Müller", "Müller", "a: b"],
+                "works_at": {"to": "[[Acme GmbH]]", "since": 2019, "role": "CTO"},
+                "seen": [{"at": "berlin", "year": 2020}],
+                "note": "yes: no # [[x]]",
+                "nothing": []
+            }"#,
+        )
+        .expect("the fixture is JSON");
+        let mut header = String::new();
+        for (k, v) in &props {
+            header.push_str(&emit_value(k, v));
+        }
+        let doc = format!("---\n{header}---\n# x\n");
+        assert_eq!(properties(&doc).0.as_ref(), Some(&props), "emitted:\n{header}");
+    }
+
 
     #[test]
     fn a_header_needs_the_first_line_and_a_closing_fence() {

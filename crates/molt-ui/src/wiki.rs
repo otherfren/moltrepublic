@@ -2004,7 +2004,7 @@ impl Wiki {
         // one this program writes
         let holds = molt_engine::properties(&next)
             .0
-            .and_then(|m| m.get(TAG_KEY).map(|v| value_list(Some(v))))
+            .and_then(|m| m.get(TAG_KEY).map(|v| molt_engine::header_value_list(Some(v))))
             .is_some_and(|got| {
                 got == kept
                     .iter()
@@ -2567,23 +2567,6 @@ fn clean_tag(tag: &str) -> String {
     tag.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// A YAML double-quoted scalar - the one form no member input can break
-/// out of.
-fn yaml_quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' | '\r' | '\t' => out.push(' '),
-            _ => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
 /// A tag reads best bare, but only a conservative shape survives a flow
 /// sequence untouched - everything else is quoted rather than censored.
 fn tag_literal(tag: &str) -> String {
@@ -2595,7 +2578,7 @@ fn tag_literal(tag: &str) -> String {
     if bare {
         tag.to_string()
     } else {
-        yaml_quote(tag)
+        molt_engine::yaml_quote(tag)
     }
 }
 
@@ -2615,34 +2598,6 @@ fn link_display(target: &str, name: &str) -> String {
     }
 }
 
-/// The byte range of the header BODY inside `raw`. The ENGINE decides
-/// whether there is a header at all (size rule included); this only
-/// locates the block it named, and gives up when the two disagree.
-fn header_body_span(raw: &str) -> Option<(usize, usize)> {
-    let header = molt_engine::split_front_matter(raw).0?;
-    let rest = raw.strip_prefix("---\n").or_else(|| raw.strip_prefix("---\r\n"))?;
-    let start = raw.len() - rest.len();
-    let mut off = start;
-    for line in rest.split_inclusive('\n') {
-        let fence = line.trim_end_matches(['\n', '\r']);
-        if fence == "---" || fence == "..." {
-            return (raw.get(start..off) == Some(header)).then_some((start, off));
-        }
-        off += line.len();
-    }
-    None
-}
-
-/// A header value as the list it stands for: a scalar is a list of one,
-/// an absent key the empty list.
-fn value_list(v: Option<&serde_json::Value>) -> Vec<serde_json::Value> {
-    match v {
-        None => Vec::new(),
-        Some(serde_json::Value::Array(items)) => items.clone(),
-        Some(other) => vec![other.clone()],
-    }
-}
-
 /// `raw` with `display` added under `key`, or `None` when the result
 /// would not be a header the engine can read back.
 ///
@@ -2651,8 +2606,8 @@ fn value_list(v: Option<&serde_json::Value>) -> Vec<serde_json::Value> {
 /// as "the same header plus this value" is thrown away for a canonical
 /// re-emit, and a header it cannot read at all is never touched.
 fn with_relation(raw: &str, key: &str, display: &str) -> Option<String> {
-    let literal = yaml_quote(display);
-    let Some((start, end)) = header_body_span(raw) else {
+    let literal = molt_engine::yaml_quote(display);
+    let Some((start, end)) = molt_engine::header_body_span(raw) else {
         // a block the engine rejected (oversized, unclosed) stays untouched
         if raw.starts_with("---\n") || raw.starts_with("---\r\n") {
             return None;
@@ -2662,11 +2617,11 @@ fn with_relation(raw: &str, key: &str, display: &str) -> Option<String> {
     };
     let before = molt_engine::properties(raw).0?;
     let (head, lead, tail) = (raw.get(start..end)?, raw.get(..start)?, raw.get(end..)?);
-    let patched = format!("{lead}{}{tail}", header_lines(head, key, &literal));
+    let patched = format!("{lead}{}{tail}", molt_engine::header_lines(head, key, &literal));
     if grew_by(&patched, &before, key, display) {
         return Some(patched);
     }
-    let rebuilt = format!("{lead}{}{tail}", canonical_header(&before, key, display));
+    let rebuilt = format!("{lead}{}{tail}", molt_engine::canonical_header(&before, key, display));
     grew_by(&rebuilt, &before, key, display).then_some(rebuilt)
 }
 
@@ -2688,122 +2643,9 @@ fn grew_by(
             return false;
         }
     }
-    let mut want = value_list(before.get(key));
+    let mut want = molt_engine::header_value_list(before.get(key));
     want.push(serde_json::Value::String(display.to_string()));
-    value_list(after.get(key)) == want
-}
-
-/// The header re-emitted from what the parser says it holds, with
-/// `display` added under `key`. The fallback, never the first choice: it
-/// loses comments and formatting, which is why the line-wise edit runs
-/// first.
-fn canonical_header(
-    before: &serde_json::Map<String, serde_json::Value>,
-    key: &str,
-    display: &str,
-) -> String {
-    let mut out = String::new();
-    for (k, v) in before {
-        if k == key {
-            let mut items = value_list(Some(v));
-            items.push(serde_json::Value::String(display.to_string()));
-            out.push_str(&emit_key(k, &items));
-        } else {
-            out.push_str(&emit_key(k, &value_list(Some(v))));
-        }
-    }
-    if !before.contains_key(key) {
-        out.push_str(&emit_key(key, &[serde_json::Value::String(display.to_string())]));
-    }
-    out
-}
-
-/// One `key: value` (or block list) of the canonical emitter.
-fn emit_key(key: &str, items: &[serde_json::Value]) -> String {
-    match items {
-        [] => format!("{key}: {}\n", yaml_quote("")),
-        [one] => format!("{key}: {}\n", emit_scalar(one)),
-        many => {
-            let mut out = format!("{key}:\n");
-            for item in many {
-                out.push_str(&format!("  - {}\n", emit_scalar(item)));
-            }
-            out
-        }
-    }
-}
-
-/// One value of the canonical emitter. A flat mapping is the qualified
-/// relation's shape and stays one, in flow form.
-fn emit_scalar(v: &serde_json::Value) -> String {
-    match v {
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => yaml_quote(s),
-        serde_json::Value::Object(map) => {
-            let inner = map
-                .iter()
-                .map(|(k, v)| format!("{k}: {}", emit_scalar(v)))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("{{{inner}}}")
-        }
-        other => yaml_quote(&other.to_string()),
-    }
-}
-
-/// The header body with `literal` added under `key`, edited line-wise.
-/// Best-effort: [`with_relation`] verifies the result and falls back to
-/// the canonical emitter when this misreads the shape.
-fn header_lines(header: &str, key: &str, literal: &str) -> String {
-    let prefix = format!("{key}:");
-    let lines: Vec<&str> = header.split_inclusive('\n').collect();
-    let Some(at) = lines.iter().position(|l| l.starts_with(&prefix)) else {
-        let mut out = header.to_string();
-        if !out.is_empty() && !out.ends_with('\n') {
-            out.push('\n');
-        }
-        out.push_str(&format!("{key}: {literal}\n"));
-        return out;
-    };
-    let rest = lines[at]
-        .get(prefix.len()..)
-        .unwrap_or_default()
-        .trim_end_matches(['\n', '\r'])
-        .trim();
-    let mut out: Vec<String> = lines.iter().map(|l| (*l).to_string()).collect();
-    if let Some(inner) = rest.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
-        let inner = inner.trim();
-        out[at] = if inner.is_empty() {
-            format!("{key}: [{literal}]\n")
-        } else {
-            format!("{key}: [{inner}, {literal}]\n")
-        };
-    } else if rest.is_empty() {
-        // `key:` alone - a block sequence may follow, at ANY indent
-        let mut last = None;
-        let mut indent = "  ".to_string();
-        for (i, l) in lines.iter().enumerate().skip(at + 1) {
-            let t = l.trim_end_matches(['\n', '\r']);
-            let body = t.trim_start();
-            if body.starts_with("- ") {
-                if last.is_none() {
-                    indent = t.get(..t.len() - body.len()).unwrap_or("").to_string();
-                }
-                last = Some(i);
-            } else if body.is_empty() {
-                continue;
-            } else {
-                break;
-            }
-        }
-        match last {
-            Some(i) => out.insert(i + 1, format!("{indent}- {literal}\n")),
-            None => out[at] = format!("{key}: {literal}\n"),
-        }
-    } else {
-        out[at] = format!("{key}:\n  - {rest}\n  - {literal}\n");
-    }
-    out.concat()
+    molt_engine::header_value_list(after.get(key)) == want
 }
 
 /// A document is open to a header when its ratified bytes are here and it
@@ -3596,10 +3438,10 @@ mod tests {
                     assert_eq!(after.get(k), Some(v), "{k} was lost writing {raw:?}");
                 }
             }
-            let mut want = value_list(before.get(*key));
+            let mut want = molt_engine::header_value_list(before.get(*key));
             want.push(serde_json::Value::String("[[b.md|B]]".to_string()));
             assert_eq!(
-                value_list(after.get(*key)),
+                molt_engine::header_value_list(after.get(*key)),
                 want,
                 "the key must GROW, not be replaced: {raw:?} -> {next:?}"
             );
@@ -3634,7 +3476,7 @@ mod tests {
                 .0
                 .unwrap_or_else(|| panic!("{tag} broke the header: {raw:?}"));
             assert_eq!(
-                value_list(props.get(TAG_KEY)),
+                molt_engine::header_value_list(props.get(TAG_KEY)),
                 vec![serde_json::Value::String(tag.to_string())],
                 "{tag} did not come back as itself"
             );
