@@ -267,6 +267,25 @@ predicate.
 A header value keeps exactly this parse: `[[a::b]]` there is the name
 `a::b`, not a predicate. The inline form lives in the BODY only (§4.5).
 
+**The canonical EMITTER (BUILT 2026-09-05), in the parser's own crate**
+(`wiki_index/front_matter.rs`, exported as `molt_engine::canonical_header`
+/ `emit_header_key` / `emit_header_value` / `yaml_quote` /
+`header_value_list` / `header_lines` / `header_body_span`). ONE of them:
+the GUI's relation modal and the engine's `wiki_edit` (§4.12) write the
+same header, and the PARSER above is the arbiter for both - what it does
+not read back is never written. It quotes every string
+(`[[…]]` ALWAYS: bare in a flow sequence it reads as a nested sequence),
+leaves an integer bare, writes a list as a block sequence and a qualified
+relation as a flow mapping. `emit_header_key` deliberately FLATTENS a
+one-element list, because its caller is growing a relation; `emit_header_value`
+does not, and that is the one `set_props` uses.
+
+`set_props` writes exactly the subset above: a string, an integer of at
+most 18 digits, a list of those, a flat mapping of them, or a list of such
+mappings. Anything else - a boolean, a float, deeper nesting - refuses at
+the call rather than becoming a document that quietly lost its properties.
+A JSON `null` REMOVES the key; removing the last one drops the block.
+
 ### 4.5 The link graph (K4)
 
 `crates/molt-engine/src/wiki_index/graph.rs`:
@@ -334,6 +353,15 @@ A header value keeps exactly this parse: `[[a::b]]` there is the name
     example is not a claim about the graph - a typed one included. It is
     the ONE parser now: `molt-ui`'s `parse_links` calls it, and its
     preview splits `pred::Name` with the same `link_parts`.
+- **`wiki_resolve { name }` (Read, BUILT 2026-09-05).** Resolution is
+  case-exact and silent - a `[[Acme]]` that finds nothing simply dangles -
+  so an agent needed a way to check a target BEFORE writing a link.
+  `exact` is what the rule above binds, `candidates` every document the
+  name could mean with `via` in {path, basename, alias, case}; a `case`
+  entry is a case-insensitive match the rule does NOT bind, listed as the
+  "did you mean". The lookup is a METHOD on the graph (`NameIndex`, used
+  by `resolve` itself), so the tool cannot drift from what edges actually
+  bind. Order: the binding first, then path-sorted.
 - Tools (Read): `wiki_links { path, direction: out|in|both, predicate:
   Option<String>, limit, cursor }` → edges (a predicate is a header key or
   an inline `pred::`, and `wiki_props` inventories both in one bucket);
@@ -760,6 +788,70 @@ existing `the_fold_cache_equals_a_fresh_fold_after_every_block`
 (`chain/projection_tests.rs`) keeps the shared fold step honest against
 `molt_core::wiki_fold`.
 
+### 4.12 The structured write path (`wiki_edit`)
+
+BUILT 2026-09-05 (`wiki_semantic_gaps.md` §7 step 5). Until it, an agent's
+only write was a hand-written positional diff - the format LLMs are worst
+at, against an applier stricter than git's, whose verdict arrived after
+the vote.
+
+**`wiki_edit { edits }` (Seat).** The edits apply IN ORDER to a working
+copy of the current base, so a `rename` followed by a `replace` on the new
+path is legal. Six ops, and no seventh: `content { path, content }` (a
+whole document; a free path CREATES it, which is why there is no separate
+create), `replace { path, old, new }` (one exact occurrence - the form
+coding-agent scaffolds converged on), `set_props { path, props }`,
+`add_relation { path, predicate, target, display }`, `rename { from, to }`,
+`delete { path }`.
+
+- **One code path.** The result tree is diffed by the ONE emitter
+  (`molt_core::wiki_patch`, moved down from the GUI in the same change) and
+  the patch goes through `cmd_propose` exactly as the GUI's changeset vote
+  does - same threshold governance, same header warnings on the card, same
+  wire broadcast, same summary string. The reply IS `Reply::Proposed`: this
+  is propose, not save.
+- **Only the touched paths are copied.** `apply_patch` reads and writes no
+  others, so the diff over a tree RESTRICTED to the paths the edits name
+  equals the diff over the whole base (§4.2's argument) - a 100 MiB tree is
+  never cloned to move one paragraph.
+- **It refuses AT THE CALL, and then proposes nothing at all** - not even
+  the edits that would have worked: `no such document: <path>`; `old not
+  found in <path>`; `old occurs N times in <path> - widen it`; `<key>:
+  value outside the header subset`; `header unreadable: <err>`; `the header
+  would not read back as asked`; `not a relation key: <pred>`; `no document
+  named <target>` / `<target> is ambiguous: <paths>`; `already exists:
+  <to>`; `invalid path: <p>`; `<p>: moved and re-created - two votes` (that
+  patch would name one path twice and the strict applier voids it);
+  `nothing to change`; `no edits`. Base-pending refuses by name like every
+  read.
+- **`add_relation` binds through the graph** (§4.5), never through a
+  second rule - except that a page THIS call creates is a real target, which
+  the graph cannot know yet. It appends `[[pred::target]]` as a paragraph
+  at the end of the body. The tool description says plainly that the better
+  form is the same `[[pred::Name]]` inside a `content` or `replace` edit,
+  because a relation belongs in the sentence that asserts it
+  (`wiki_semantic_gaps.md` §6); `add_relation` is for when there is no such
+  sentence.
+- **`propose` now refuses a raw `wiki_patch` that does not apply**
+  (`wiki_semantic_gaps.md` §1.1) with `patch does not apply: <reason>`,
+  checked over the touched paths exactly as the header warnings are. A
+  feedback loop that closes after the vote is no feedback loop. Base-pending
+  proposes as before: there is nothing to check against, and a fabricated
+  verdict is worse than none.
+
+Keystones: `crates/molt-engine/tests/wiki_edit.rs` (every op lands in the
+base and the relation is a real edge; an ambiguous `replace` refuses,
+proposes nothing and writes nothing, with each refusal pinned; a header
+the parser cannot read refuses; `wiki_resolve` names both candidates for
+an ambiguous basename and offers the real spelling for a wrong case; a
+stale raw patch is refused at propose and a good one still proposes),
+`molt_core::wiki_patch` (`apply_patch(build_patch(x)) == x` over every
+edit kind, the file order, the summary) and
+`front_matter::the_emitter_round_trips_every_shape_of_the_subset`. The MCP
+half: `wiki_edit` is Seat and a read-only key is refused it
+(`a_read_token_reads_but_cannot_propose`), `wiki_resolve` joins the Read
+set (`the_read_scope_is_exactly_this_set`).
+
 ## 5. Work packages (build order, each red-first, each green on master)
 
 - **K0 Fold cache + cheap superseding** — BUILT 2026-09-04. §4.1-4.2.
@@ -843,6 +935,9 @@ feed the facets); K7 depends on K1 and K4.
 
 - `crates/molt-core/src/wiki_fold.rs` - `touched_paths`, `wiki_base` in
   `fold_one` (K6).
+- `crates/molt-core/src/wiki_patch.rs` - NEW (§4.12): the unified-diff
+  EMITTER beside its applier, `build_patch` / `count_changes` /
+  `touched_lines` / `PatchCounts::summary`, moved down from `molt-ui`.
 - `crates/molt-core/src/lib.rs` - `Command::{WikiList, WikiGet, WikiLinks,
   WikiNeighbors, WikiSearch, NetWikiIndexReady}`, the replies,
   `WikiDocMeta`, `SessionSettings.mcp_read_token`, `NODE_POSTURE_KEYS`,
@@ -852,14 +947,17 @@ feed the facets); K7 depends on K1 and K4.
 - `crates/molt-core/src/chain.rs` - `ChainChange::CheckpointFolded` (K6).
 - `crates/molt-engine/src/lib.rs` - `State.wiki_cache`, `applied_epoch`,
   `wiki_pending`, `wiki_graph`, `wiki_reader`, dispatch arms.
-- `crates/molt-engine/src/proposals.rs` - `wiki_tree_cached`,
+- `crates/molt-engine/src/proposals.rs` - `cmd_wiki_edit`, `fold_wiki_edit`,
+  `bind_wiki_name`, `set_props`, `edit_paths`, `cmd_wiki_resolve`,
+  `wiki_patch_check` (§4.12); `wiki_tree_cached`,
   `supersede_stale_wiki(moved)`, `applied_iter`, propose warnings.
 - `crates/molt-engine/src/proposals.rs` - `cmd_wiki_changes`,
   `fold_wiki_step`, `coalesce_wiki_changes`, `cmd_wiki_health` (§4.11).
 - `crates/molt-engine/src/lib.rs` - `WikiCache.history` / `.base`,
-  `WikiRevChanges`, `WikiTouch` (§4.11).
+  `WikiRevChanges`, `WikiTouch` (§4.11); `Command::{WikiEdit, WikiResolve}`,
+  `WikiEdit`, `Reply::WikiResolve`, `WikiCandidate` (§4.12).
 - `crates/molt-engine/src/wiki_index/graph.rs` - `dangling_targets`,
-  `orphans`, `key_drift` (§4.11).
+  `orphans`, `key_drift` (§4.11); `NameIndex`, `resolve_name` (§4.5).
 - `crates/molt-engine/tests/wiki_maintenance.rs` - NEW (§4.11).
 - `crates/molt-engine/src/wiki_index/{mod,front_matter,graph,search}.rs`
   - NEW (K4, K5).
@@ -869,6 +967,7 @@ feed the facets); K7 depends on K1 and K4.
 - `crates/molt-engine/src/chat.rs`, `net/ingest.rs` - `MOLT_WAKE_PENDING`
   (K3).
 - `crates/molt-engine/tests/c_free_guard.rs` - NEW (K5).
+- `crates/molt-engine/tests/wiki_edit.rs` - NEW (§4.12).
 - `crates/molt-mcp/src/lib.rs` - `Scope`, `ToolDef.scope`, the two-key
   `initialize`, scoped `tools/list` and `tools/call`, the new tools, the
   Read-set test, `INTERNAL` + `NetWikiIndexReady`.
