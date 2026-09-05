@@ -692,7 +692,11 @@ per-patch provenance).
   names its key, so `infobox` no longer blanks a list's continuation rows.
   The tag pill's own padding is symmetric at every font size: its row was
   unbounded, and a stretch layout handed the surplus to the label, which
-  put the text flush on the right edge.
+  put the text flush on the right edge. The pills WRAP on the same
+  measured idiom (`TagFlow`, 2026-09-05) - the pill is its own measure
+  there, since a `TagChip`'s width is derived from its content, and the
+  two branches carry different ids because one component may not name the
+  same element twice.
   A header the parser REJECTS still shows its raw lines as prose. Those
   lines ARE body text to `split_front_matter`, the index and the graph;
   hiding them would make the pane the only component pretending a header
@@ -709,6 +713,14 @@ per-patch provenance).
   Escape still cancels through the window handler. The captions a
   placeholder already carries are gone from the link modal - three rows
   the dialog was fighting for at a large app font.
+  **Rolled out to EVERY dialog with an input 2026-09-05**: each opens on
+  its first field, and a dialog whose confirming field is multi-line
+  keeps Return for the newline and confirms on Ctrl+Enter - `AppArea`
+  captures that combination on the way down, because the focused
+  `TextInput` would consume it first. Two Enters mean something else on
+  purpose: the relay pool's add field ADDS the typed relay (a URL still
+  in the field blocks the proposal anyway), and a dialog with no input at
+  all keeps the zero-sized key scope it always had.
 - **Authoring a relation** — BUILT 2026-09-05
   (`wiki_tags_and_semantic_links.md`, then `wiki_semantic_gaps.md` §6 and
   its step 4). A document without a header offers `+ Tag` and nothing
