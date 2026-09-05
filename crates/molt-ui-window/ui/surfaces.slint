@@ -21,7 +21,7 @@
 // Each pane is one component taking only the selected sub-view key, so the
 // panes stay independently editable under scripts/dev-ui.sh hot-reload.
 
-import { Theme, Strings, HintTip, WikiState, WikiNavRow, WikiTabRow, WikiBlock, WikiSpan } from "theme.slint";
+import { Theme, Strings, HintTip, WikiState, WikiNavRow, WikiTabRow, WikiBlock, WikiSpan, WikiProp } from "theme.slint";
 import { AppButton, AppField, AppArea, AppDropdown, ScrollHint, DotLabel, InsetWell } from "components.slint";
 
 // ---------------------------------------------------------------------------
@@ -160,13 +160,20 @@ component TagChip inherits Rectangle {
     border-radius: Theme.win95 ? 0px : 4px;
     border-width: root.muted ? 1px : 0px;
     border-color: Theme.line;
-    width: row.preferred-width + 12px * Theme.ui-scale;
+    // the label's inset, on BOTH sides: the width adds exactly two of
+    // them and the row is bounded to what is left. Unbounded, the row ran
+    // the full chip width from an inset x, and a stretch layout handed the
+    // surplus to its children - which pushed the label's glyphs flush onto
+    // the chip's right edge.
+    property <length> pad: 6px * Theme.ui-scale;
+    width: tag-row.preferred-width + 2 * root.pad;
     height: 20px * Theme.ui-scale;
     // full-height row + centered texts: an offset row sized off the text's
     // preferred height sat the label visibly at the chip's bottom edge
-    row := HorizontalLayout {
-        x: 6px;
+    tag-row := HorizontalLayout {
+        x: root.pad;
         y: 0;
+        width: parent.width - 2 * root.pad;
         height: parent.height;
         spacing: 4px;
         if root.glyph != "": Text {
@@ -176,7 +183,7 @@ component TagChip inherits Rectangle {
             height: 100%;
             vertical-alignment: center;
         }
-        Text {
+        tag-label := Text {
             text: root.label;
             color: root.muted ? Theme.faint
                 : (Theme.win95 || root.tone-ground-only ? Theme.text : root.tone);
@@ -464,6 +471,146 @@ component PropChip inherits Rectangle {
             } else {
                 HintTip.hide(self.tip-gen);
             }
+        }
+    }
+}
+
+// One header property as a chip: the key dim, the value in the reading
+// colour and clickable when it points at a document. The quiet own ground
+// tells a RELATION apart from the hue-coloured tag pills - what a page
+// relates to is a fact, not a topic. A qualified relation stays ONE chip
+// (`to: Acme · since: 2019`): it is one claim, and a chip per qualifier
+// would repeat the predicate until it read as several.
+component RelChip inherits Rectangle {
+    in property <WikiProp> p;
+    // a value past this elides - one long note must not set the width of
+    // every other chip
+    in property <length> cap: 320px * Theme.ui-scale;
+    property <length> pad: 8px * Theme.ui-scale;
+    width: min(root.cap, rc-row.preferred-width + 2 * root.pad);
+    height: 24px * Theme.ui-scale;
+    background: Theme.raised;
+    border-radius: Theme.win95 ? 0px : 4px;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    clip: true;
+    rc-row := HorizontalLayout {
+        x: root.pad;
+        width: parent.width - 2 * root.pad;
+        height: parent.height;
+        spacing: 6px;
+        // the same 3px rail a changed prose block carries: the header
+        // renders HERE, so a header-only edit has to colour HERE
+        Rectangle {
+            width: 3px;
+            border-radius: 1.5px;
+            background: root.p.status == 1 ? Theme.good
+                : root.p.status == 2 ? Theme.warn
+                : root.p.status == 3 ? Theme.bad
+                : transparent;
+        }
+        Text {
+            text: root.p.key;
+            color: Theme.dim;
+            font-size: Theme.fs-cap;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+        if root.p.link != "" && root.p.status != 3: LinkRun {
+            label: root.p.value;
+            target: root.p.link;
+            fsize: Theme.fs-cap;
+        }
+        // a removed value is history, not navigation
+        if root.p.link == "" || root.p.status == 3: Text {
+            text: root.p.value;
+            color: root.p.status == 3
+                ? Theme.bad.mix(Theme.dim, 0.6)
+                : Theme.text;
+            font-size: Theme.fs-cap;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+// A chip's inner metrics for the two hidden measures below - one
+// component, so a change to the chip cannot silently un-measure it.
+component RelMeasure inherits HorizontalLayout {
+    in property <WikiProp> p;
+    spacing: 6px;
+    Rectangle {
+        width: 3px;
+    }
+    Text {
+        text: root.p.key;
+        font-size: Theme.fs-cap;
+        font-weight: 600;
+    }
+    Text {
+        text: root.p.value;
+        font-size: Theme.fs-cap;
+    }
+    // a link-valued chip draws a LinkRun, which is 4px wider than its
+    // text - measured for every chip, so the cell never clips one
+    Rectangle {
+        width: 4px;
+    }
+}
+
+// The front matter's relations, side by side and WRAPPING. Slint has no
+// flow layout and a repeater cannot read its siblings' widths, so this is
+// the measured pair the tree already uses: while the whole set fits on one
+// line the chips render at their NATURAL widths (SpanFlow's idiom), and
+// past that they fall into a grid whose cell is the WIDEST chip (a
+// VerticalLayout's preferred width is the maximum over its rows), which
+// wraps by index. `visible: false` stops the painting, not the measuring.
+component RelFlow inherits Rectangle {
+    in property <[WikiProp]> props;
+    property <length> gap: 6px;
+    property <length> cap: 320px * Theme.ui-scale;
+    property <length> cell-h: 24px * Theme.ui-scale;
+    property <length> pad: 8px * Theme.ui-scale;
+    property <length> cell-w: min(root.cap, mcol.preferred-width + 2 * root.pad);
+    property <bool> fits:
+        mrow.preferred-width + 2 * root.pad * root.props.length <= root.width - 8px;
+    property <int> cols: max(1, Math.floor((root.width + root.gap) / (root.cell-w + root.gap)));
+    property <int> rows: Math.ceil(root.props.length / root.cols);
+    height: root.fits ? root.cell-h
+        : root.rows * root.cell-h + max(0, root.rows - 1) * root.gap;
+    mcol := VerticalLayout {
+        visible: false;
+        for p in root.props: RelMeasure {
+            p: p;
+        }
+    }
+    mrow := HorizontalLayout {
+        visible: false;
+        spacing: root.gap;
+        for p in root.props: RelMeasure {
+            p: p;
+        }
+    }
+    if root.fits: HorizontalLayout {
+        width: 100%;
+        height: 100%;
+        spacing: root.gap;
+        alignment: start;
+        for p in root.props: RelChip {
+            p: p;
+            cap: root.cap;
+        }
+    }
+    if !root.fits: Rectangle {
+        width: 100%;
+        height: 100%;
+        for p[i] in root.props: RelChip {
+            x: Math.mod(i, root.cols) * (root.cell-w + root.gap);
+            y: Math.floor(i / root.cols) * (root.cell-h + root.gap);
+            width: root.cell-w;
+            height: root.cell-h;
+            p: p;
+            cap: root.cap;
         }
     }
 }
@@ -1608,18 +1755,14 @@ export component MemoryPane inherits VerticalLayout {
                             }
                         }
                     }
-                    if WikiState.doc-open && !WikiState.editing: ScrollBody {
+                    if WikiState.doc-open && !WikiState.editing: doc-body := ScrollBody {
                         pad: 16px;
-                        gap: 8px;
-                        // author · version · age — the note-footer idiom
-                        Text {
-                            text: WikiState.doc-meta;
-                            color: Theme.faint;
-                            font-size: 11px;
-                        }
+                        gap: Theme.pane-gap;
                         // the document's tags, one coloured pill each: the
                         // colour is the tag's own (hue from the lowercased
-                        // string), so the same tag reads the same everywhere
+                        // string), so the same tag reads the same everywhere.
+                        // The band opens the document - what a page IS comes
+                        // before what it says.
                         if WikiState.tag-pills.length > 0: HorizontalLayout {
                             spacing: 6px;
                             alignment: start;
@@ -1631,58 +1774,20 @@ export component MemoryPane inherits VerticalLayout {
                                 tone-ground-only: true;
                             }
                         }
-                        // the rest of the front matter as a PROPERTY
-                        // TABLE: the viewer shows what the header means,
-                        // the editor shows the header itself. A link-valued
-                        // property is as clickable as a link in the prose.
-                        if WikiState.props.length > 0: Rectangle {
-                            background: Theme.panel-2;
-                            border-radius: Theme.win95 ? 0px : 6px;
-                            border-width: Theme.border-w;
-                            border-color: Theme.line;
-                            height: pbox.preferred-height;
-                            pbox := VerticalLayout {
-                                padding: 8px;
-                                spacing: 3px;
-                                for p in WikiState.props: HorizontalLayout {
-                                    spacing: 8px;
-                                    alignment: start;
-                                    // the same 3px rail a changed prose block
-                                    // carries: the header renders HERE, so a
-                                    // header-only edit has to colour HERE
-                                    Rectangle {
-                                        width: 3px;
-                                        border-radius: 1.5px;
-                                        background: p.status == 1 ? Theme.good
-                                            : p.status == 2 ? Theme.warn
-                                            : p.status == 3 ? Theme.bad
-                                            : transparent;
-                                    }
-                                    Text {
-                                        width: 120px;
-                                        text: p.key;
-                                        color: Theme.dim;
-                                        font-size: Theme.fs-cap;
-                                        font-weight: 600;
-                                        overflow: elide;
-                                        vertical-alignment: center;
-                                    }
-                                    if p.link != "" && p.status != 3: LinkRun {
-                                        label: p.value;
-                                        target: p.link;
-                                        fsize: Theme.fs-cap;
-                                    }
-                                    // a removed value is history, not navigation
-                                    if p.link == "" || p.status == 3: Text {
-                                        text: p.value;
-                                        color: p.status == 3
-                                            ? Theme.bad.mix(Theme.dim, 0.6)
-                                            : Theme.text;
-                                        font-size: Theme.fs-cap;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                            }
+                        // the rest of the front matter as RELATION CHIPS:
+                        // the viewer shows what the header means, the editor
+                        // shows the header itself. A link-valued property is
+                        // as clickable as a link in the prose.
+                        if WikiState.props.length > 0: RelFlow {
+                            props: WikiState.props;
+                        }
+                        // …and one grey rule under the band: what the
+                        // document IS is not what it SAYS. It exists only
+                        // when the band above it does.
+                        if WikiState.tag-pills.length > 0
+                            || WikiState.props.length > 0: head-rule := Rectangle {
+                            height: Theme.border-w;
+                            background: Theme.line;
                         }
                         // a headerless document's one offer: tags. The
                         // chip disappears the moment a header exists.
@@ -1713,6 +1818,15 @@ export component MemoryPane inherits VerticalLayout {
                                 width: 100%;
                                 b: b;
                             }
+                        }
+                        // author · version · age, where the note-footer
+                        // idiom puts it. A ratified document carries none
+                        // of the three, and an empty line at the TOP is
+                        // what pushed the tag band off the edge.
+                        if WikiState.doc-meta != "": Text {
+                            text: WikiState.doc-meta;
+                            color: Theme.faint;
+                            font-size: 11px;
                         }
                         // cross-links — what makes the tree a wiki. One
                         // chip per line: paths are long and the chips

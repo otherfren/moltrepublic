@@ -1301,3 +1301,322 @@ fn an_inline_predicate_shows_its_claim_over_the_link() {
     open("carl.md");
     assert_eq!(hover(&ui), "", "a plain link has no claim to render");
 }
+
+/// A tag pill's label must sit in the MIDDLE of its pill: the same air on
+/// both sides at every app font size. The chip's total width adds the
+/// inset twice, so anything the row does asymmetrically shows up as an
+/// off-centre label.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_tag_pill_pads_its_label_symmetrically() {
+    let ui = tagged_doc_window("---\ntags: [alpha]\n---\n# A\n\nprose.\n");
+    for font in [14.0_f32, 20.0, 26.0] {
+        ui.global::<Theme>().set_fs_app(font);
+        let pill = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "MemoryPane::tag-pill")
+            .next()
+            .expect("the pill renders");
+        let row = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "TagChip::tag-row")
+            .next()
+            .expect("the label row renders");
+        let label = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "TagChip::tag-label")
+            .next()
+            .expect("the label renders");
+        let left = row.absolute_position().x - pill.absolute_position().x;
+        let right = (pill.absolute_position().x + pill.size().width)
+            - (row.absolute_position().x + row.size().width);
+        assert!(
+            (left - right).abs() < 0.6,
+            "font {font}: the pill pads {left} left and {right} right"
+        );
+        assert!(left > 0.5, "font {font}: the pill has no padding at all");
+        // the label's own glyphs stay inside that inset - the defect was
+        // the label element running past the pill's right edge
+        assert!(
+            label.absolute_position().x + label.size().width
+                <= pill.absolute_position().x + pill.size().width - left + 0.6,
+            "font {font}: the label reaches the pill's right edge"
+        );
+    }
+}
+
+/// One wiki document open in the Memory pane's preview, headless.
+#[cfg(feature = "live-preview")]
+fn tagged_doc_window(content: &str) -> AppWindow {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    ui.set_screen(AppScreen::Main);
+    ui.set_selected_surface("memory".into());
+    ui.set_selected_view("brain".into());
+    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: "memory".into(),
+        ..SurfaceTab::default()
+    }])));
+    let wiki = wire_wiki(&ui);
+    std::mem::forget(wiki);
+    let g = ui.global::<WikiState>();
+    g.set_base_docs(ModelRc::new(VecModel::from(vec![WikiBase {
+        path: "a.md".into(),
+        content: content.into(),
+        loaded: true,
+    }])));
+    g.set_base_rev(1);
+    g.invoke_base_arrived();
+    let id = g.get_nav_rows().row_data(0).expect("nav row").id;
+    ui.window().set_size(slint::PhysicalSize::new(1400, 900));
+    ui.show().expect("show headless");
+    g.invoke_nav_open(id);
+    ui
+}
+
+/// **The preview opens on what the document IS.** The tag pills are the
+/// first thing in the document area, at the pane's own padding and
+/// nothing more; no raw front-matter line reaches the prose; and one grey
+/// rule sets the header band apart from the body.
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_preview_opens_with_the_header_band_at_the_top_edge() {
+    let ui = tagged_doc_window(
+        "---\ntags: [alpha]\ntype: person\n---\n# A\n\nprose.\n",
+    );
+    let at = |id: &str| {
+        i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, id)
+            .next()
+            .unwrap_or_else(|| panic!("{id} renders"))
+    };
+    let body = at("MemoryPane::doc-body");
+    let pill = at("MemoryPane::tag-pill");
+    assert!(
+        (pill.absolute_position().y - body.absolute_position().y - 16.0).abs() < 0.6,
+        "the pills sit at the body's own padding: {} vs {}",
+        pill.absolute_position().y,
+        body.absolute_position().y
+    );
+    // no front-matter line reaches the prose
+    let g = ui.global::<WikiState>();
+    let blocks: Vec<String> = (0..g.get_blocks().row_count())
+        .filter_map(|i| g.get_blocks().row_data(i))
+        .map(|b| b.text.to_string())
+        .collect();
+    assert!(
+        !blocks.iter().any(|t| t.contains("---") || t.contains("type:")),
+        "the header must not render as prose: {blocks:?}"
+    );
+
+    // the rule spans the body's inner width, one pane gap from the band
+    // above and from the prose below
+    let rule = at("MemoryPane::head-rule");
+    assert!((rule.size().height - 1.0).abs() < 0.6, "a hairline, not a bar");
+    assert!(
+        (rule.size().width - (body.size().width - 32.0)).abs() < 1.0,
+        "the rule runs the full body width: {} in {}",
+        rule.size().width,
+        body.size().width
+    );
+    let chip = i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "RelChip")
+        .next()
+        .expect("a relation chip renders");
+    let gap_above = rule.absolute_position().y - (chip.absolute_position().y + chip.size().height);
+    assert!((gap_above - 8.0).abs() < 0.6, "one pane gap above the rule, got {gap_above}");
+}
+
+/// A document with no header has no band and therefore no rule - a bare
+/// line over nothing reads as a broken layout.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_headerless_document_shows_no_rule() {
+    let ui = tagged_doc_window("# A\n\nprose.\n");
+    assert_eq!(
+        i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "MemoryPane::head-rule")
+            .count(),
+        0,
+        "no header, no rule"
+    );
+}
+
+/// **Relations flow, they do not stack.** Every `key: value` pair is a
+/// chip of its own, side by side while the width allows and wrapping to
+/// the next row when it does not.
+#[cfg(feature = "live-preview")]
+#[test]
+fn header_relations_flow_side_by_side_and_wrap() {
+    let ui = tagged_doc_window(
+        "---\ntype: person\nborn: 1975\nworks_at: \"[[b.md|Acme]]\"\n---\n# A\n\nprose.\n",
+    );
+    let chips = |ui: &AppWindow| -> Vec<(f32, f32, f32)> {
+        i_slint_backend_testing::ElementHandle::find_by_element_type_name(ui, "RelChip")
+            .map(|e| (e.absolute_position().x, e.absolute_position().y, e.size().width))
+            .collect()
+    };
+    let wide = chips(&ui);
+    assert_eq!(wide.len(), 3, "one chip per pair");
+    assert!(
+        wide.iter().all(|c| (c.1 - wide[0].1).abs() < 0.6),
+        "at 1400px they share one row: {wide:?}"
+    );
+    assert!(
+        wide.windows(2).all(|w| w[0].0 + w[0].2 <= w[1].0 + 0.6),
+        "…side by side, in order: {wide:?}"
+    );
+
+    // narrow the window and they wrap instead of running off the pane
+    ui.window().set_size(slint::PhysicalSize::new(560, 900));
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
+    let narrow = chips(&ui);
+    assert_eq!(narrow.len(), 3, "the chips stay");
+    let rows: std::collections::BTreeSet<i32> =
+        narrow.iter().map(|c| c.1 as i32).collect();
+    assert!(rows.len() > 1, "a narrow pane wraps them: {narrow:?}");
+}
+
+/// A long value elides under the chip cap instead of pushing the flow off
+/// the pane.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_long_relation_value_elides_under_the_chip_cap() {
+    let long = "x".repeat(400);
+    let ui = tagged_doc_window(&format!(
+        "---\nnote: \"{long}\"\ntype: person\n---\n# A\n\nprose.\n"
+    ));
+    let widest = i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "RelChip")
+        .map(|e| e.size().width)
+        .fold(0.0_f32, f32::max);
+    assert!(widest > 0.0, "the chips render");
+    assert!(widest <= 321.0, "a chip stays under its cap, got {widest}");
+}
+
+/// **A header the parser rejects is not a header.** `split_front_matter`
+/// says so, and the index, the graph and every write path read those
+/// lines as body text - so the preview shows them too. A pane that hid
+/// them would be the only component pretending a header is there, and the
+/// member would never learn why their tags do not show.
+#[cfg(feature = "live-preview")]
+#[test]
+fn an_unreadable_header_stays_visible_as_prose() {
+    let ui = tagged_doc_window("---\ntags: [alpha]\n# A\n\nprose.\n");
+    let g = ui.global::<WikiState>();
+    let blocks: Vec<String> = (0..g.get_blocks().row_count())
+        .filter_map(|i| g.get_blocks().row_data(i))
+        .map(|b| b.text.to_string())
+        .collect();
+    assert!(
+        blocks.iter().any(|t| t.contains("tags: [alpha]")),
+        "an unclosed block is prose, and the member has to see it: {blocks:?}"
+    );
+    assert_eq!(g.get_tag_pills().row_count(), 0, "…and it is no header");
+    assert_eq!(
+        i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "MemoryPane::head-rule")
+            .count(),
+        0,
+        "no band, no rule"
+    );
+}
+
+/// Type one character into the focused element.
+#[cfg(feature = "live-preview")]
+fn type_char(ui: &AppWindow, c: &str) {
+    let text: slint::SharedString = c.into();
+    ui.window()
+        .dispatch_event(slint::platform::WindowEvent::KeyPressed { text: text.clone() });
+    ui.window().dispatch_event(slint::platform::WindowEvent::KeyReleased { text });
+}
+
+/// Press one named key. Backtab (Shift+Tab) has no `Key` variant - it is
+/// the raw code Slint's focus walk reads.
+#[cfg(feature = "live-preview")]
+fn press(ui: &AppWindow, key: slint::platform::Key) {
+    type_char(ui, &slint::SharedString::from(key));
+}
+
+/// Shift+Tab: one step BACK through the focus order.
+#[cfg(feature = "live-preview")]
+fn back_tab(ui: &AppWindow) {
+    type_char(ui, "\u{0019}");
+}
+
+/// **A dialog opens ready to type.** The tag modal's first row has the
+/// focus, Enter saves, and a modal whose confirm is disabled saves
+/// nothing.
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_tag_modal_opens_on_its_first_row_and_enter_saves() {
+    let ui = tagged_doc_window("# A\n\nprose.\n");
+    let g = ui.global::<WikiState>();
+    g.invoke_tag_open();
+    g.set_tag_modal_open(true);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
+
+    // an empty row keeps the confirm disabled - Enter must do nothing
+    press(&ui, slint::platform::Key::Return);
+    assert!(g.get_tag_modal_open(), "a disabled confirm does not fire");
+
+    type_char(&ui, "x");
+    let row = g.get_tag_rows().row_data(0).expect("one row").to_string();
+    assert_eq!(row, "x", "the first row had the focus");
+    // a second row takes the focus with it: the rebuild destroys the input
+    // that had it, and a dialog nothing can type into is a dead dialog
+    g.invoke_tag_add("".into());
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
+    type_char(&ui, "y");
+    assert_eq!(
+        g.get_tag_rows().row_data(1).expect("second row").to_string(),
+        "y",
+        "the new row has the focus"
+    );
+
+    press(&ui, slint::platform::Key::Return);
+    assert!(!g.get_tag_modal_open(), "Enter saves and closes");
+    assert!(
+        g.get_raw().as_str().starts_with("---\ntags: [x, y]\n---\n"),
+        "…and it wrote both rows"
+    );
+}
+
+/// The link modal opens on the TARGET FILTER - the field a member types
+/// in first - and Tab walks on to the next input.
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_link_modal_opens_on_the_target_filter_and_tab_walks() {
+    let ui = tagged_doc_window("# A\n\nprose.\n");
+    let g = ui.global::<WikiState>();
+    g.invoke_link_open("".into());
+    g.set_link_modal_open(true);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
+
+    type_char(&ui, "b");
+    assert_eq!(g.get_link_filter().as_str(), "b", "the filter had the focus");
+    // nothing is picked yet, so Enter must not write
+    press(&ui, slint::platform::Key::Return);
+    assert!(g.get_link_modal_open(), "a disabled confirm does not fire");
+
+    press(&ui, slint::platform::Key::Tab);
+    type_char(&ui, "z");
+    assert_eq!(g.get_link_custom().as_str(), "z", "Tab walked to the next input");
+    assert_eq!(g.get_link_filter().as_str(), "b", "…and left the filter alone");
+
+    // …and back the other way, to the field above the filter
+    back_tab(&ui);
+    back_tab(&ui);
+    type_char(&ui, "n");
+    assert_eq!(g.get_link_name().as_str(), "n", "Shift+Tab walks back");
+}
+
+/// The captions a placeholder already carries are gone: fewer rows, and
+/// the dialog fits at a large font.
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_link_modal_drops_the_captions_its_placeholders_carry() {
+    let ui = tagged_doc_window("# A\n\nprose.\n");
+    let g = ui.global::<WikiState>();
+    g.invoke_link_open("".into());
+    g.set_link_modal_open(true);
+    g.set_link_header(true);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
+    for gone in ["Name", "Target", "Details (optional)"] {
+        assert_eq!(
+            i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, gone).count(),
+            0,
+            "{gone} is a caption its placeholder already carries"
+        );
+    }
+}

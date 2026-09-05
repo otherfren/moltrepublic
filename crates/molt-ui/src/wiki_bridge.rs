@@ -193,7 +193,14 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
         // the SUBJECT of an inline relation: the claim belongs to this
         // page, whatever the sentence's grammar suggests
         s.set_doc_title(w.title_of(&doc.path).into());
-        s.set_doc_meta(format!("{} · {} · {}", doc.author, doc.ver, doc.when).into());
+        // a ratified document has no author/version/age of its own: the
+        // line would read " ·  · " and the pane hides it instead
+        let meta = if doc.author.is_empty() && doc.ver.is_empty() && doc.when.is_empty() {
+            String::new()
+        } else {
+            format!("{} · {} · {}", doc.author, doc.ver, doc.when)
+        };
+        s.set_doc_meta(meta.into());
         s.set_doc_status(wiki_status_code(doc.status()));
         let blocks: Vec<WikiBlock> = w
             .preview(id)

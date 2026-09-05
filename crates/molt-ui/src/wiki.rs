@@ -1733,7 +1733,9 @@ impl Wiki {
                     (None, None) => continue,
                 };
                 out.push(InfoRow {
-                    key: if i == 0 { key.clone() } else { String::new() },
+                    // every row names its key: it renders as a chip of its
+                    // own, and a chip without its predicate says nothing
+                    key: key.clone(),
                     value: value.0.clone(),
                     link: value.1.clone(),
                     status,
@@ -2723,9 +2725,16 @@ pub fn parse_links(raw: &str) -> Vec<String> {
     molt_engine::body_link_targets(raw)
 }
 
-/// The document without its front matter: the header is rendered as an
-/// INFOBOX, never as prose (§4.10). Both sides of the preview diff go
-/// through this, or every document with a header would read as changed.
+/// The document without its front matter: the header is rendered as the
+/// tag/relation band, never as prose (§4.10). Both sides of the preview
+/// diff go through this, or every document with a header would read as
+/// changed.
+///
+/// A block the parser REJECTS (no closing fence, oversized) is not front
+/// matter and stays in the body: the index, the graph and every write
+/// path read those lines as prose, and a pane that hid them would be the
+/// only component pretending a header is there - the member would never
+/// learn why their tags do not show.
 pub fn body_of(raw: &str) -> &str {
     molt_engine::split_front_matter(raw).1
 }
@@ -3482,12 +3491,7 @@ mod tests {
         // …and it reads as a property table instead
         let rows = w.infobox(id);
         let by_key = |k: &str| -> Vec<&InfoRow> {
-            // a list shows its key once, on the first row
-            let start = rows.iter().position(|r| r.key == k).expect("key present");
-            rows[start..]
-                .iter()
-                .take_while(|r| r.key == k || r.key.is_empty())
-                .collect()
+            rows.iter().filter(|r| r.key == k).collect()
         };
         assert_eq!(by_key("type")[0].value, "person");
         assert_eq!(by_key("type")[0].link, "", "a plain value is no link");
@@ -3497,8 +3501,10 @@ mod tests {
         assert_eq!(works[0].link, "Acme", "…and the row points at the document");
         let knows = by_key("knows");
         assert_eq!(knows.len(), 2, "one row per value");
-        assert_eq!(knows[0].key, "knows");
-        assert_eq!(knows[1].key, "", "the key is shown once");
+        // EVERY row names its key: a row is a chip of its own now, and a
+        // chip without its predicate says nothing. The blank continuation
+        // was the vertical table's alignment trick.
+        assert_eq!(knows[1].key, "knows");
         assert_eq!(knows[1].value, "Cara");
 
         // the editor's buffer is the raw document, header included
