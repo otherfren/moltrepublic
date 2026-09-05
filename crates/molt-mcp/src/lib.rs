@@ -286,15 +286,17 @@ returns immediately - poll read_session for the outcome. propose payloads \
 set_image {value,bytes_b64}, remove_image, set_relays {value: \"wss://a wss://b\"}, \
 set_features {value: \"memory quests\"}, set_member_image {member,value,bytes_b64} \
 /remove_member_image/set_member_desc {member,value} (own seat only, square \
-picture); memory add_note {title}, wiki_patch \
-{value: git-format patch, summary}; files persist {id} (the engine fills the \
+picture); memory add_note {title}; files persist {id} (the engine fills the \
 share's identity; a live share only), unpersist {id, at: unix now} (a \
 persistent share only); quests/vault/wallet add_quest/seal_secret/ \
 transfer {title}. Traps: founding/join/recovery need a confirmed relay \
 (relay_add, then confirm); mark_channel_read moves your PRIVATE cursor while \
 mark_read broadcasts read receipts; restore_start = offline knowledge from a \
 backup blob, recover_start = rejoin the live republic; navigate/select_* only \
-move the human's GUI and are never required before other tools."
+move the human's GUI and are never required before other tools. The WIKI is \
+written with wiki_edit - structured edits, refused at the call with a reason; \
+propose op wiki_patch is the raw form for a caller that already holds a patch, \
+and both become the same changeset vote."
             }),
         ));
     }
@@ -1019,12 +1021,12 @@ pub fn tools() -> Vec<ToolDef> {
             name: "propose",
             command: "propose",
             scope: Scope::Seat,
-            description: "Put an object forward for threshold approval on a gated surface. An Organization set_image payload must embed the actual image as base64 `bytes_b64` and the bytes must DECODE as a picture (png/jpeg/webp/gif/bmp, ≤8192x8192; svg is refused) - sign-what-you-see: members vote on the image, so undecodable bytes are refused here and dropped by every peer. Payload size is capped at what one relay message can carry (about 64 KiB of image for a small roster); an over-size proposal is refused with the exact figure that fits. Organization op set_features enables charter features: value = space-separated keys among memory/quests/vault/wallet, the FULL target set - it must keep every enabled feature (enable-only, never off again) and add at least one. Proposing on a surface whose feature is not enabled is refused (status.features lists the enabled set). Memory op wiki_patch is a wiki changeset vote: `value` carries a raw git-format patch (unified diffs; rename/new/deleted headers), `summary` a short count string like \"+2 -1 →1 ~34\" - the GUI's changeset vote emits exactly this shape and renders the patch in its diff viewer.",
+            description: "Put an object forward for threshold approval on a gated surface. An Organization set_image payload must embed the actual image as base64 `bytes_b64` and the bytes must DECODE as a picture (png/jpeg/webp/gif/bmp, ≤8192x8192; svg is refused) - sign-what-you-see: members vote on the image, so undecodable bytes are refused here and dropped by every peer. Payload size is capped at what one relay message can carry (about 64 KiB of image for a small roster); an over-size proposal is refused with the exact figure that fits. Organization op set_features enables charter features: value = space-separated keys among memory/quests/vault/wallet, the FULL target set - it must keep every enabled feature (enable-only, never off again) and add at least one. Proposing on a surface whose feature is not enabled is refused (status.features lists the enabled set). Memory op wiki_patch is a wiki changeset vote: `value` carries a raw git-format patch (unified diffs; rename/new/deleted headers), `summary` a short count string like \"+2 -1 →1 ~34\" - the GUI's changeset vote emits exactly this shape and renders the patch in its diff viewer. It is the RAW form, for a caller that already holds a patch, and it is refused when the patch does not apply to the current base; wiki_edit writes the wiki without one.",
             schema: || json!({
                 "type": "object",
                 "properties": {
                     "surface": { "type": "string", "enum": gated_enum() },
-                    "payload": { "type": "object", "description": "surface-specific transition {\"op\": ...}: organization set_name/set_charter/set_chat_retention {value}, set_image {value, bytes_b64}, remove_image, set_relays {value: \"wss://a wss://b\"}, set_features {value: \"memory quests\"}, set_member_image {member, value, bytes_b64}/remove_member_image/set_member_desc {member, value} (own seat only, square picture); memory add_note {title}, wiki_patch {value: git-format patch, summary}; quests add_quest {title}; vault seal_secret {title}; wallet transfer {title}" }
+                    "payload": { "type": "object", "description": "surface-specific transition {\"op\": ...}: organization set_name/set_charter/set_chat_retention {value}, set_image {value, bytes_b64}, remove_image, set_relays {value: \"wss://a wss://b\"}, set_features {value: \"memory quests\"}, set_member_image {member, value, bytes_b64}/remove_member_image/set_member_desc {member, value} (own seat only, square picture); memory add_note {title}, wiki_patch {value: git-format patch, summary} (raw - wiki_edit is the structured way); quests add_quest {title}; vault seal_secret {title}; wallet transfer {title}" }
                 },
                 "required": ["surface", "payload"]
             }),
@@ -1262,6 +1264,107 @@ pub fn tools() -> Vec<ToolDef> {
             build: |args| Ok(Command::WikiHealth {
                 limit: opt_u32_arg(args, "limit")?,
             }),
+        },
+        ToolDef {
+            name: "wiki_resolve",
+            command: "wiki_resolve",
+            scope: Scope::Read,
+            description: "What a `[[name]]` binds to, and what else it could mean. `exact` is the document the name resolves to today (exact path, else a unique basename or stem, else a unique alias), null when nothing does. `candidates` lists every document it could mean, `via` saying how: path, basename, alias, or `case` - a case-insensitive match resolution does NOT bind, offered so you can write the real spelling. Check a target here before writing a link; an unresolved one is a dangling edge, not an error.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "the name as it would stand inside the brackets" }
+                },
+                "required": ["name"]
+            }),
+            build: |args| Ok(Command::WikiResolve {
+                name: str_arg(args, "name")?,
+            }),
+        },
+        ToolDef {
+            name: "wiki_edit",
+            command: "wiki_edit",
+            scope: Scope::Seat,
+            description: "Write the wiki. The edits apply IN ORDER to a working copy of the current base, the engine diffs the result and puts THAT patch to the members as a normal changeset vote - so this is propose, not save, and the reply is the proposal id. An edit that cannot land refuses the whole call with the reason (a path that does not exist, an `old` that is absent or occurs more than once, a header the parser would not read back, a relation target that does not resolve uniquely, a rename onto an existing path) and proposes nothing. Ops: content {path, content} writes a whole document and creates it when the path is free · replace {path, old, new} replaces ONE exact occurrence · set_props {path, props} sets header keys, null removes one · add_relation {path, predicate, target, display} appends `[[predicate::target]]` as a sentence · rename {from, to} · delete {path}. A relation belongs in the sentence that asserts it, so the better form is usually the same `[[predicate::Name]]` written inside a content or replace edit; add_relation is the fallback when there is no sentence to put it in. Check a target with wiki_resolve first, and wiki_props for the relation names this republic already uses.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "edits": {
+                        "type": "array",
+                        "description": "the edits, applied in order against the current base",
+                        "items": {
+                            "type": "object",
+                            "oneOf": [
+                                {
+                                    "title": "content",
+                                    "properties": {
+                                        "op": { "const": "content" },
+                                        "path": { "type": "string", "description": "the document's path, e.g. \"people/anna.md\"" },
+                                        "content": { "type": "string", "description": "the whole document, front matter included; a free path creates it" }
+                                    },
+                                    "required": ["op", "path", "content"]
+                                },
+                                {
+                                    "title": "replace",
+                                    "properties": {
+                                        "op": { "const": "replace" },
+                                        "path": { "type": "string", "description": "the document's path" },
+                                        "old": { "type": "string", "description": "the exact text to find; it must occur exactly once" },
+                                        "new": { "type": "string", "description": "what takes its place" }
+                                    },
+                                    "required": ["op", "path", "old", "new"]
+                                },
+                                {
+                                    "title": "set_props",
+                                    "properties": {
+                                        "op": { "const": "set_props" },
+                                        "path": { "type": "string", "description": "the document's path" },
+                                        "props": { "type": "object", "description": "header keys to set; null removes one. A value is a string, an integer, a list of those, a flat mapping of them, or a list of such mappings" }
+                                    },
+                                    "required": ["op", "path", "props"]
+                                },
+                                {
+                                    "title": "add_relation",
+                                    "properties": {
+                                        "op": { "const": "add_relation" },
+                                        "path": { "type": "string", "description": "the document the relation is about" },
+                                        "predicate": { "type": "string", "description": "the relation, e.g. \"works_at\"" },
+                                        "target": { "type": "string", "description": "the target document: a path, a unique basename or a unique alias" },
+                                        "display": { "type": "string", "description": "optional: what the link reads as" }
+                                    },
+                                    "required": ["op", "path", "predicate", "target"]
+                                },
+                                {
+                                    "title": "rename",
+                                    "properties": {
+                                        "op": { "const": "rename" },
+                                        "from": { "type": "string", "description": "the current path" },
+                                        "to": { "type": "string", "description": "the new path" }
+                                    },
+                                    "required": ["op", "from", "to"]
+                                },
+                                {
+                                    "title": "delete",
+                                    "properties": {
+                                        "op": { "const": "delete" },
+                                        "path": { "type": "string", "description": "the document's path" }
+                                    },
+                                    "required": ["op", "path"]
+                                }
+                            ]
+                        }
+                    }
+                },
+                "required": ["edits"]
+            }),
+            build: |args| {
+                let edits = match args.get("edits") {
+                    None | Some(Value::Null) => Vec::new(),
+                    Some(v) => serde_json::from_value(v.clone())
+                        .map_err(|e| format!("`edits`: {e}"))?,
+                };
+                Ok(Command::WikiEdit { edits })
+            },
         },
         ToolDef {
             name: "list_proposals",
@@ -3129,6 +3232,28 @@ mod tests {
             "the refusal has to name the reason"
         );
 
+        // the structured wiki WRITE is a seat verb like any other
+        let resp = handle_rpc(
+            &h,
+            call("wiki_edit", json!({ "edits": [] })),
+            Some(&cred),
+            &mut authed,
+        )
+        .await
+        .expect("tools/call replies");
+        assert_eq!(resp["error"]["code"], -32001, "writing is not reading");
+
+        // …while resolving a name is a read and passes the gate
+        let resp = handle_rpc(
+            &h,
+            call("wiki_resolve", json!({ "name": "x" })),
+            Some(&cred),
+            &mut authed,
+        )
+        .await
+        .expect("tools/call replies");
+        assert!(resp.get("error").is_none(), "wiki_resolve is a read");
+
         // …and the SEAT key still carries everything
         let mut seat = None;
         let _ = handle_rpc(&h, init_req("seat"), Some(&cred), &mut seat).await;
@@ -3213,6 +3338,7 @@ mod tests {
                 "wiki_list",
                 "wiki_neighbors",
                 "wiki_props",
+                "wiki_resolve",
                 "wiki_search",
             ],
             "the read key reaches the WIKI and the SHARED FILES, nothing else"
