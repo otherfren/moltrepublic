@@ -208,6 +208,24 @@ async fn a_traversal_says_under_which_relation_it_reached_a_document() {
         vec![("c.md", "in"), ("b.md", "in"), ("a.md", "in")]
     );
 
+    // a cut walk says so, instead of reading as a complete answer
+    let (docs, capped) = near(
+        read(
+            &w,
+            Command::WikiNeighbors {
+                path: "a.md".to_string(),
+                depth: 2,
+                limit: 1,
+                predicate: None,
+                direction: None,
+                transitive: false,
+            },
+        )
+        .await,
+    );
+    assert_eq!(docs.len(), 1);
+    assert!(capped, "the reply names the cap it stopped at");
+
     // a closure over "some relation" is refused, not guessed
     let err = w
         .execute(neighbors("a.md", None, None, true))
