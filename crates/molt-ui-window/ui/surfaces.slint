@@ -615,6 +615,69 @@ component RelFlow inherits Rectangle {
     }
 }
 
+// The document's tags, side by side and WRAPPING. RelFlow's measured
+// idiom, but the pill is its OWN measure: a TagChip's width is derived
+// from its content, so a hidden copy can never drift from the real one.
+// The two branches carry different ids because one component may not
+// name the same element twice.
+component TagFlow inherits Rectangle {
+    in property <[WikiProp]> pills;
+    property <length> gap: 6px;
+    property <length> cell-h: 20px * Theme.ui-scale;
+    property <length> cell-w: mcol.preferred-width;
+    property <bool> fits: mrow.preferred-width <= root.width;
+    property <int> cols: max(1, Math.floor((root.width + root.gap) / (root.cell-w + root.gap)));
+    property <int> rows: Math.ceil(root.pills.length / root.cols);
+    height: root.fits ? root.cell-h
+        : root.rows * root.cell-h + max(0, root.rows - 1) * root.gap;
+    mcol := VerticalLayout {
+        visible: false;
+        // `muted` picks the label's weight, and the weight is a width
+        for p in root.pills: TagChip {
+            label: p.value;
+            glyph: "🏷️";
+            muted: p.status == 3;
+        }
+    }
+    mrow := HorizontalLayout {
+        visible: false;
+        spacing: root.gap;
+        for p in root.pills: TagChip {
+            label: p.value;
+            glyph: "🏷️";
+            muted: p.status == 3;
+        }
+    }
+    if root.fits: HorizontalLayout {
+        width: 100%;
+        height: 100%;
+        spacing: root.gap;
+        alignment: start;
+        for p in root.pills: tag-pill := TagChip {
+            label: p.value;
+            glyph: "🏷️";
+            muted: p.status == 3;
+            tone: Colors.hsv(p.hue, 0.70, 0.62);
+            tone-ground-only: true;
+        }
+    }
+    if !root.fits: Rectangle {
+        width: 100%;
+        height: 100%;
+        for p[i] in root.pills: tag-cell := TagChip {
+            x: Math.mod(i, root.cols) * (root.cell-w + root.gap);
+            y: Math.floor(i / root.cols) * (root.cell-h + root.gap);
+            width: root.cell-w;
+            height: root.cell-h;
+            label: p.value;
+            glyph: "🏷️";
+            muted: p.status == 3;
+            tone: Colors.hsv(p.hue, 0.70, 0.62);
+            tone-ground-only: true;
+        }
+    }
+}
+
 // A block's inline runs with clickable .md links. While the whole line
 // fits unwrapped it renders as a true inline row; a longer link-bearing
 // block falls back to stacked runs (Slint has no wrapping rich text) —
@@ -1765,16 +1828,8 @@ export component MemoryPane inherits VerticalLayout {
                         // string), so the same tag reads the same everywhere.
                         // The band opens the document - what a page IS comes
                         // before what it says.
-                        if WikiState.tag-pills.length > 0: HorizontalLayout {
-                            spacing: 6px;
-                            alignment: start;
-                            for p in WikiState.tag-pills: tag-pill := TagChip {
-                                label: p.value;
-                                glyph: "🏷️";
-                                muted: p.status == 3;
-                                tone: Colors.hsv(p.hue, 0.70, 0.62);
-                                tone-ground-only: true;
-                            }
+                        if WikiState.tag-pills.length > 0: TagFlow {
+                            pills: WikiState.tag-pills;
                         }
                         // the rest of the front matter as RELATION CHIPS:
                         // the viewer shows what the header means, the editor

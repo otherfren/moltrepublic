@@ -685,7 +685,7 @@ fn a_document_without_a_header_offers_tags_and_then_wears_them() {
         g.invoke_nav_open(row.id);
     };
     let pills = |ui: &AppWindow| {
-        i_slint_backend_testing::ElementHandle::find_by_element_id(ui, "MemoryPane::tag-pill")
+        i_slint_backend_testing::ElementHandle::find_by_element_id(ui, "TagFlow::tag-pill")
             .count()
     };
 
@@ -1312,14 +1312,20 @@ fn a_tag_pill_pads_its_label_symmetrically() {
     let ui = tagged_doc_window("---\ntags: [alpha]\n---\n# A\n\nprose.\n");
     for font in [14.0_f32, 20.0, 26.0] {
         ui.global::<Theme>().set_fs_app(font);
-        let pill = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "MemoryPane::tag-pill")
+        let pill = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "TagFlow::tag-pill")
             .next()
             .expect("the pill renders");
-        let row = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "TagChip::tag-row")
-            .next()
+        // …and its OWN row and label: the flow measures with hidden
+        // chips of the same type, which come first in tree order
+        let row = pill
+            .query_descendants()
+            .match_id("TagChip::tag-row")
+            .find_first()
             .expect("the label row renders");
-        let label = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "TagChip::tag-label")
-            .next()
+        let label = pill
+            .query_descendants()
+            .match_id("TagChip::tag-label")
+            .find_first()
             .expect("the label renders");
         let left = row.absolute_position().x - pill.absolute_position().x;
         let right = (pill.absolute_position().x + pill.size().width)
@@ -1385,7 +1391,7 @@ fn the_preview_opens_with_the_header_band_at_the_top_edge() {
             .unwrap_or_else(|| panic!("{id} renders"))
     };
     let body = at("MemoryPane::doc-body");
-    let pill = at("MemoryPane::tag-pill");
+    let pill = at("TagFlow::tag-pill");
     assert!(
         (pill.absolute_position().y - body.absolute_position().y - 16.0).abs() < 0.6,
         "the pills sit at the body's own padding: {} vs {}",
@@ -1533,6 +1539,8 @@ fn press(ui: &AppWindow, key: slint::platform::Key) {
 fn back_tab(ui: &AppWindow) {
     type_char(ui, "\u{0019}");
 }
+
+
 
 /// **A dialog opens ready to type.** The tag modal's first row has the
 /// focus, Enter saves, and a modal whose confirm is disabled saves
@@ -1861,5 +1869,70 @@ fn a_drafted_document_carries_its_meta_line_at_the_foot() {
     assert!(
         line.absolute_position().y > lowest_block,
         "the meta line sits under the prose, not over the tags"
+    );
+}
+
+/// Every tag pill the flow is showing - the row branch and the wrapped
+/// one carry different ids, and only one of them exists at a time.
+#[cfg(feature = "live-preview")]
+fn tag_pills(ui: &AppWindow) -> Vec<i_slint_backend_testing::ElementHandle> {
+    i_slint_backend_testing::ElementHandle::find_by_element_id(ui, "TagFlow::tag-pill")
+        .chain(i_slint_backend_testing::ElementHandle::find_by_element_id(
+            ui,
+            "TagFlow::tag-cell",
+        ))
+        .collect()
+}
+
+/// **The tag band wraps.** Many tags on a narrow pane must fall into a
+/// second row - a plain start-aligned row ran them off the pane's edge,
+/// where the last ones cannot be read at all.
+#[cfg(feature = "live-preview")]
+#[test]
+fn many_tag_pills_wrap_inside_the_pane() {
+    let tags: Vec<String> = (0..12).map(|i| format!("longish-tag-{i:02}")).collect();
+    let ui = tagged_doc_window(&format!(
+        "---\ntags: [{}]\n---\n# A\n\nprose.\n",
+        tags.join(", ")
+    ));
+    ui.window().set_size(slint::PhysicalSize::new(900, 900));
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
+
+    let flow = i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "TagFlow")
+        .next()
+        .expect("the flow renders");
+    let pills = tag_pills(&ui);
+    assert_eq!(pills.len(), 12, "one pill per tag");
+
+    let mut rows: Vec<i32> =
+        pills.iter().map(|p| p.absolute_position().y.round() as i32).collect();
+    rows.sort_unstable();
+    rows.dedup();
+    assert!(rows.len() > 1, "12 tags do not fit on one row: {rows:?}");
+
+    let right = flow.absolute_position().x + flow.size().width;
+    for p in &pills {
+        let edge = p.absolute_position().x + p.size().width;
+        assert!(edge <= right + 0.6, "a pill ends at {edge}, past the pane's {right}");
+    }
+}
+
+/// …and while they fit, they keep their own widths: a wrapping grid for
+/// three short tags would pad them all to the widest one.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_few_tag_pills_stay_on_one_row_at_natural_widths() {
+    let ui = tagged_doc_window("---\ntags: [a, bbbbbbbbbbbb, cc]\n---\n# A\n\nprose.\n");
+    let pills = tag_pills(&ui);
+    assert_eq!(pills.len(), 3, "one pill per tag");
+    let mut rows: Vec<i32> =
+        pills.iter().map(|p| p.absolute_position().y.round() as i32).collect();
+    rows.sort_unstable();
+    rows.dedup();
+    assert_eq!(rows.len(), 1, "three tags share one row");
+    let widths: Vec<f32> = pills.iter().map(|p| p.size().width).collect();
+    assert!(
+        widths[0] < widths[1],
+        "the pills keep their natural widths: {widths:?}"
     );
 }
