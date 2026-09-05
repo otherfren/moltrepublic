@@ -885,23 +885,31 @@ fn the_authoring_modals_fit_the_window_at_every_font_size() {
     ui.show().expect("show headless");
     g.invoke_nav_open(id);
 
+    // the DIALOG's own extent, not the window's: a modal is a scrim over
+    // the whole window, so its confirm button is what has to stay inside
     let fits = |ui: &AppWindow, what: &str, font: f32| {
-        let bottoms: Vec<f32> = i_slint_backend_testing::ElementHandle::find_by_element_type_name(
+        let modals = i_slint_backend_testing::ElementHandle::find_by_element_type_name(
             ui,
             "ConfirmModal",
         )
-        .map(|m| m.absolute_position().y + m.size().height)
-        .collect();
-        assert_eq!(bottoms.len(), 1, "{what}: exactly one modal is up");
+        .count();
+        assert_eq!(modals, 1, "{what}: exactly one modal is up");
+        // the confirm button is the LAST AppButton of the dialog, and the
+        // dialog is the only thing on screen that carries these labels
         let low = i_slint_backend_testing::ElementHandle::find_by_element_id(
             ui,
             "AppButton::abtn-label",
         )
+        .filter(|e| {
+            e.accessible_label()
+                .is_some_and(|l| l == "Save" || l == "Link" || l == "Cancel")
+        })
         .map(|e| e.absolute_position().y + e.size().height)
         .fold(f32::MIN, f32::max);
+        assert!(low > f32::MIN, "{what}: the dialog's own buttons must be found");
         assert!(
             low <= 760.0,
-            "{what} at font {font}: its lowest button ends at {low}, past the window"
+            "{what} at font {font}: its buttons end at {low}, past the window"
         );
     };
 
@@ -909,8 +917,10 @@ fn the_authoring_modals_fit_the_window_at_every_font_size() {
         ui.global::<Theme>().set_fs_app(font);
         g.invoke_tag_open();
         g.set_tag_modal_open(true);
-        g.invoke_tag_add("".into());
-        g.invoke_tag_add("".into());
+        // as many rows as the vocabulary chips plus the + button can make
+        for _ in 0..20 {
+            g.invoke_tag_add("".into());
+        }
         fits(&ui, "the tag modal", font);
         g.set_tag_modal_open(false);
 

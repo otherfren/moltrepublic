@@ -1303,8 +1303,6 @@ lexicon! {
     // the + Tag modal
     mem_tag_title: "Tags", "Tags";
     mem_tag_ph: "one tag", "ein Tag";
-    mem_tag_more: "Tag", "Tag";
-    mem_save: "Save", "Speichern";
     mem_tag_used: "Already in use", "Schon in Gebrauch";
     // the semantic-link modal
     mem_tb_relate: "Semantic link", "Semantischer Link";

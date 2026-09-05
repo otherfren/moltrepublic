@@ -152,6 +152,10 @@ component TagChip inherits Rectangle {
     // the chip's colour family; the default keeps the classic accent chip
     // byte-identical (accent-soft IS accent.transparentize(0.84))
     in property <color> tone: Theme.accent;
+    // Opt-in: tint only the GROUND and keep the theme's ink for the label.
+    // A derived hue may land anywhere on the circle, and a dark-blue label
+    // on a dark-blue ground is unreadable in the dark palette.
+    in property <bool> tone-ground-only: false;
     background: root.muted ? transparent : root.tone.transparentize(0.84);
     border-radius: Theme.win95 ? 0px : 4px;
     border-width: root.muted ? 1px : 0px;
@@ -174,7 +178,8 @@ component TagChip inherits Rectangle {
         }
         Text {
             text: root.label;
-            color: root.muted ? Theme.faint : (Theme.win95 ? Theme.text : root.tone);
+            color: root.muted ? Theme.faint
+                : (Theme.win95 || root.tone-ground-only ? Theme.text : root.tone);
             font-size: 11px * Theme.ui-scale;
             font-weight: root.muted ? 400 : 600;
             height: 100%;
@@ -1169,6 +1174,11 @@ export component MemoryPane inherits VerticalLayout {
                                         MenuItem {
                                             title: Strings.mem-menu-relate;
                                             enabled: r.status != 3;
+                                            // no can-write-header gate here:
+                                            // that flag describes the OPEN
+                                            // document, and this row is not
+                                            // open yet - the lazy base
+                                            // arrives while the member types
                                             activated => {
                                                 WikiState.nav-open(r.id);
                                                 WikiState.link-open("");
@@ -1596,6 +1606,7 @@ export component MemoryPane inherits VerticalLayout {
                                 glyph: "🏷️";
                                 muted: p.status == 3;
                                 tone: Colors.hsv(p.hue, 0.70, 0.62);
+                                tone-ground-only: true;
                             }
                         }
                         // the rest of the front matter as a PROPERTY
@@ -1756,7 +1767,8 @@ export component MemoryPane inherits VerticalLayout {
                                 width: 100%;
                                 height: 100%;
                                 font-size: Theme.fs-editor;
-                                extra-label: Strings.mem-menu-relate;
+                                extra-label: WikiState.can-write-header
+                                    ? Strings.mem-menu-relate : "";
                                 extra-activated => {
                                     WikiState.link-open("");
                                     WikiState.link-modal-open = true;

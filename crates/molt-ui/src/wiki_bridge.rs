@@ -374,6 +374,9 @@ pub(crate) fn wire_wiki(
     });
     act!(on_link_open, |w, target: slint::SharedString| w.link_open(&target));
     act!(on_link_close, |w| w.link_close());
+    act!(on_relation_vocab, |w, keys: ModelRc<slint::SharedString>| {
+        w.set_relation_vocab(keys.iter().map(|k| k.to_string()).collect());
+    });
     act!(on_set_link_name, |w, v: slint::SharedString| w.set_link_name(&v));
     act!(on_set_link_target, |w, v: slint::SharedString| w.set_link_target(&v));
     act!(on_set_link_filter, |w, v: slint::SharedString| w.set_link_filter(&v));
@@ -1085,20 +1088,38 @@ pub(crate) fn wire_wiki_index(ui: &AppWindow, ctx: &Ctx) {
                         None => break,
                     }
                 }
-                // …and the tags this republic already uses, which is
-                // what the + Tag modal offers instead of a schema
-                let vocab: Vec<String> = match wh.execute(Command::WikiProps).await {
-                    Ok(Reply::WikiProps { keys, .. }) => keys
-                        .into_iter()
-                        .find(|k| k.key == wiki::TAG_KEY)
-                        .map(|k| {
-                            // a hint, not a catalogue: the chips sit above
-                            // the inputs and must not push OK off the modal
-                            k.values.into_iter().take(12).map(|v| v.value).collect()
-                        })
-                        .unwrap_or_default(),
-                    _ => Vec::new(),
-                };
+                // …and what this republic's headers already say: the
+                // tags the + Tag modal offers, and the keys it uses as
+                // RELATIONS - the ontology is content, not a schema
+                let (vocab, relations): (Vec<String>, Vec<String>) =
+                    match wh.execute(Command::WikiProps).await {
+                        Ok(Reply::WikiProps { keys, .. }) => {
+                            let tags = keys
+                                .iter()
+                                .find(|k| k.key == wiki::TAG_KEY)
+                                .map(|k| {
+                                    // a hint, not a catalogue: the chips sit
+                                    // above the inputs and must not push OK
+                                    // off the modal
+                                    k.values.iter().take(12).map(|v| v.value.clone()).collect()
+                                })
+                                .unwrap_or_default();
+                            // a key is a RELATION where its values are links
+                            let rels = keys
+                                .iter()
+                                .filter(|k| k.key != wiki::TAG_KEY)
+                                .filter(|k| {
+                                    k.values
+                                        .iter()
+                                        .any(|v| molt_engine::link_target(&v.value).is_some())
+                                })
+                                .take(24)
+                                .map(|k| k.key.clone())
+                                .collect();
+                            (tags, rels)
+                        }
+                        _ => (Vec::new(), Vec::new()),
+                    };
                 let _ = slint::invoke_from_event_loop(move || {
                     let Some(ui) = weak.upgrade() else { return };
                     let g = ui.global::<WikiState>();
@@ -1121,6 +1142,12 @@ pub(crate) fn wire_wiki_index(ui: &AppWindow, ctx: &Ctx) {
                     sync_model(&g.get_tag_vocab(), vocab, PartialEq::eq, |m| {
                         g.set_tag_vocab(m);
                     });
+                    g.invoke_relation_vocab(ModelRc::new(VecModel::from(
+                        relations
+                            .into_iter()
+                            .map(slint::SharedString::from)
+                            .collect::<Vec<_>>(),
+                    )));
                     g.invoke_base_arrived();
                 });
             });

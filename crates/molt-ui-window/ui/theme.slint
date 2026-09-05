@@ -482,6 +482,8 @@ export global WikiState {
     in-out property <bool> can-write-header;
     callback link-open(string);
     callback link-close();
+    // the header keys this republic already uses as relations
+    callback relation-vocab([string]);
     callback set-link-name(string);
     callback set-link-target(string);
     callback set-link-filter(string);
@@ -1360,8 +1362,6 @@ export global Strings {
     in property <string> mem-tag-add;
     in property <string> mem-tag-title;
     in property <string> mem-tag-ph;
-    in property <string> mem-tag-more;
-    in property <string> mem-save;
     in property <string> mem-tag-used;
     in property <string> mem-tb-relate;
     in property <string> mem-menu-relate;

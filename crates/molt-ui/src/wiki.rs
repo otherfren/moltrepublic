@@ -322,6 +322,10 @@ pub struct Wiki {
     /// vote payload as the display-only staleness hint
     /// (`shared_memory_real.md` §9.1).
     pub base_rev: u64,
+    /// The header keys this republic already uses AS RELATIONS (their
+    /// values are links). The ontology is content: what the members
+    /// already say outranks anything this program ships with.
+    relation_vocab: Vec<String>,
     /// The two authoring modals' drafts. Transient view state: a document
     /// learns nothing from them until the member presses OK.
     ont: OntologyDraft,
@@ -342,6 +346,9 @@ struct OntologyDraft {
     on: Vec<String>,
     /// A relation the republic has not used yet, being typed.
     custom: String,
+    /// Relations the member added by hand this session. Kept apart from
+    /// `on`, or switching one OFF would drop it out of the offer.
+    extra: Vec<String>,
     /// The link modal is up. The target list is a scan over the whole
     /// base (10^4..10^5 documents, `knowledge_base_scale.md`), and the
     /// bridge re-syncs after EVERY action - so it is only built while
@@ -426,6 +433,7 @@ impl Wiki {
             stack: Vec::new(),
             base_rev: 0,
             ont: OntologyDraft::default(),
+            relation_vocab: Vec::new(),
         }
     }
 
@@ -448,6 +456,7 @@ impl Wiki {
             stack: Vec::new(),
             base_rev: 0,
             ont: OntologyDraft::default(),
+            relation_vocab: Vec::new(),
         }
     }
 
@@ -1565,12 +1574,23 @@ impl Wiki {
     /// doc coalesces into a single stack entry (its `before` is the state
     /// the run started from); switching docs starts a new run.
     pub fn set_raw(&mut self, id: DocId, raw: &str) {
+        self.write_raw(id, raw, true);
+    }
+
+    /// A DISCRETE write (the tag and semantic-link modals): its own stack
+    /// entry, so one Undo takes back the modal's change and not the run of
+    /// keystrokes that happened to come before it.
+    fn set_raw_discrete(&mut self, id: DocId, raw: &str) {
+        self.write_raw(id, raw, false);
+    }
+
+    fn write_raw(&mut self, id: DocId, raw: &str, coalescing: bool) {
         let Some(d) = self.doc(id) else { return };
         if d.deleted || d.raw == raw {
             return;
         }
-        let coalesce =
-            matches!(self.stack.last(), Some(Change::Edited { id: last, .. }) if *last == id);
+        let coalesce = coalescing
+            && matches!(self.stack.last(), Some(Change::Edited { id: last, .. }) if *last == id);
         if !coalesce {
             self.stack.push(Change::Edited {
                 id,
@@ -1982,8 +2002,23 @@ impl Wiki {
         if kept.is_empty() {
             return false;
         }
-        let next = format!("---\n{}: [{}]\n---\n{}", TAG_KEY, kept.join(", "), d.raw);
-        self.set_raw(id, &next);
+        let literals: Vec<String> = kept.iter().map(|t| tag_literal(t)).collect();
+        let next = format!("---\n{}: [{}]\n---\n{}", TAG_KEY, literals.join(", "), d.raw);
+        // the engine is the arbiter: a header it cannot read back is not
+        // one this program writes
+        let holds = molt_engine::properties(&next)
+            .0
+            .and_then(|m| m.get(TAG_KEY).map(|v| value_list(Some(v))))
+            .is_some_and(|got| {
+                got == kept
+                    .iter()
+                    .map(|t| serde_json::Value::String(t.clone()))
+                    .collect::<Vec<_>>()
+            });
+        if !holds {
+            return false;
+        }
+        self.set_raw_discrete(id, &next);
         true
     }
 
@@ -2095,19 +2130,37 @@ impl Wiki {
         self.docs
             .iter()
             .filter(|d| !d.deleted && d.path != open)
-            .map(|d| d.path.clone())
-            .filter(|p| needle.is_empty() || p.to_lowercase().contains(&needle))
+            .filter(|d| needle.is_empty() || d.path.to_lowercase().contains(&needle))
             .take(MAX_LINK_TARGETS)
+            .map(|d| d.path.clone())
             .collect()
     }
 
-    /// The relations on offer: the built-in vocabulary, then whatever the
-    /// republic already added, each with whether it is switched on.
+    /// What this republic already uses as a relation, from the engine's
+    /// header inventory (`Command::WikiProps`).
+    pub fn set_relation_vocab(&mut self, keys: Vec<String>) {
+        self.relation_vocab = keys;
+    }
+
+    /// The relations on offer: what the republic already says FIRST, then
+    /// the built-in vocabulary, then anything the member added by hand -
+    /// each with whether it is switched on. A relation stays on the list
+    /// when it is switched off again.
     pub fn link_relations(&self) -> Vec<(String, bool)> {
-        let mut keys: Vec<String> = RELATIONS.iter().map(|k| (*k).to_string()).collect();
-        for k in &self.ont.on {
-            if !keys.contains(k) {
-                keys.push(k.clone());
+        let mut keys: Vec<String> = Vec::new();
+        for k in self.relation_vocab.iter().cloned() {
+            if !keys.contains(&k) {
+                keys.push(k);
+            }
+        }
+        for k in RELATIONS.iter().map(|k| (*k).to_string()) {
+            if !keys.contains(&k) {
+                keys.push(k);
+            }
+        }
+        for k in self.ont.extra.iter().chain(self.ont.on.iter()).cloned() {
+            if !keys.contains(&k) {
+                keys.push(k);
             }
         }
         keys.into_iter()
@@ -2134,6 +2187,9 @@ impl Wiki {
             return false;
         }
         self.ont.custom.clear();
+        if !self.ont.extra.contains(&key) {
+            self.ont.extra.push(key.clone());
+        }
         if !self.ont.on.contains(&key) {
             self.ont.on.push(key);
         }
@@ -2158,9 +2214,17 @@ impl Wiki {
     }
 
     /// Whether the open document's header can be written at all: its
-    /// ratified bytes have to be here (the lazy base).
+    /// ratified bytes have to be here (the lazy base), and a header it
+    /// already carries has to be one the engine reads - this program does
+    /// not edit inside a block the parser rejects.
     pub fn can_write_header(&self) -> bool {
-        self.active().is_some_and(|d| d.loaded())
+        self.active().is_some_and(|d| {
+            d.loaded()
+                && match molt_engine::split_front_matter(&d.raw).0 {
+                    None => true,
+                    Some(_) => molt_engine::properties(&d.raw).0.is_some(),
+                }
+        })
     }
 
     /// Add one link under each relation key. A key that is already there
@@ -2187,12 +2251,17 @@ impl Wiki {
         if keys.is_empty() {
             return false;
         }
-        let value = link_value(target, name);
+        let display = link_display(target, name);
         let mut raw = d.raw.clone();
         for key in keys {
-            raw = with_relation(&raw, key, &value);
+            let Some(next) = with_relation(&raw, key, &display) else {
+                // a header the engine cannot read back stays untouched -
+                // the button that got here is gated on the same question
+                return false;
+            };
+            raw = next;
         }
-        self.set_raw(id, &raw);
+        self.set_raw_discrete(id, &raw);
         true
     }
 
@@ -2545,67 +2614,200 @@ fn expand_wiki_links(b: &mut Block) {
     b.spans = out;
 }
 
-/// A tag as it can stand in a flow sequence: the punctuation that would
-/// end the scalar removed, the whitespace collapsed.
+/// A tag with its whitespace collapsed. Nothing is stripped: the emitter
+/// quotes whatever would not survive a flow sequence.
 fn clean_tag(tag: &str) -> String {
-    let cleaned: String = tag
-        .chars()
-        .map(|c| if "[]{}(),:\"'|#&*!>%@\\".contains(c) { ' ' } else { c })
-        .collect();
-    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+    tag.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// One header value pointing at `target`, displayed as `name`. Always
-/// DOUBLE-QUOTED: `[[…]]` inside a flow sequence would otherwise read as
-/// two nested sequences.
-fn link_value(target: &str, name: &str) -> String {
+/// A YAML double-quoted scalar - the one form no member input can break
+/// out of.
+fn yaml_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' | '\r' | '\t' => out.push(' '),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// A tag reads best bare, but only a conservative shape survives a flow
+/// sequence untouched - everything else is quoted rather than censored.
+fn tag_literal(tag: &str) -> String {
+    let bare = tag.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && tag.ends_with(|c: char| c.is_ascii_alphanumeric())
+        && tag
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || " _-./".contains(c));
+    if bare {
+        tag.to_string()
+    } else {
+        yaml_quote(tag)
+    }
+}
+
+/// One header value pointing at `target`, displayed as `name`, as a human
+/// reads it. The emitter quotes it - `[[…]]` in a flow sequence would
+/// otherwise read as two nested sequences.
+fn link_display(target: &str, name: &str) -> String {
     let strip = |s: &str| -> String {
-        s.chars().filter(|c| !"[]|\"\\\n\r".contains(*c)).collect::<String>().trim().to_string()
+        s.chars().filter(|c| !"[]|\n\r".contains(*c)).collect::<String>().trim().to_string()
     };
     let target = strip(target);
     let name = strip(name);
     if name.is_empty() || name == target {
-        format!("\"[[{target}]]\"")
+        format!("[[{target}]]")
     } else {
-        format!("\"[[{target}|{name}]]\"")
+        format!("[[{target}|{name}]]")
     }
 }
 
-/// The byte range of the header BODY inside `raw` - the same block
-/// boundaries the engine's parser uses.
+/// The byte range of the header BODY inside `raw`. The ENGINE decides
+/// whether there is a header at all (size rule included); this only
+/// locates the block it named, and gives up when the two disagree.
 fn header_body_span(raw: &str) -> Option<(usize, usize)> {
+    let header = molt_engine::split_front_matter(raw).0?;
     let rest = raw.strip_prefix("---\n").or_else(|| raw.strip_prefix("---\r\n"))?;
     let start = raw.len() - rest.len();
     let mut off = start;
     for line in rest.split_inclusive('\n') {
         let fence = line.trim_end_matches(['\n', '\r']);
         if fence == "---" || fence == "..." {
-            return Some((start, off));
+            return (raw.get(start..off) == Some(header)).then_some((start, off));
         }
         off += line.len();
     }
     None
 }
 
-/// `raw` with `value` added under `key`. A document without a header gets
-/// one; a key that is already there grows into a list rather than losing
-/// what it said.
-fn with_relation(raw: &str, key: &str, value: &str) -> String {
-    let Some((start, end)) = header_body_span(raw) else {
-        return format!("---\n{key}: {value}\n---\n{raw}");
-    };
-    format!(
-        "{}{}{}",
-        &raw[..start],
-        header_with(&raw[start..end], key, value),
-        &raw[end..]
-    )
+/// A header value as the list it stands for: a scalar is a list of one,
+/// an absent key the empty list.
+fn value_list(v: Option<&serde_json::Value>) -> Vec<serde_json::Value> {
+    match v {
+        None => Vec::new(),
+        Some(serde_json::Value::Array(items)) => items.clone(),
+        Some(other) => vec![other.clone()],
+    }
 }
 
-/// The header body with `value` added under `key`, edited line-wise: a
-/// canonical re-emit would rewrite the member's own header (order,
-/// comments, style) on every link.
-fn header_with(header: &str, key: &str, value: &str) -> String {
+/// `raw` with `display` added under `key`, or `None` when the result
+/// would not be a header the engine can read back.
+///
+/// The edit is line-wise so a member's own header keeps its order, style
+/// and comments - but the PARSER is the arbiter: an edit it does not read
+/// as "the same header plus this value" is thrown away for a canonical
+/// re-emit, and a header it cannot read at all is never touched.
+fn with_relation(raw: &str, key: &str, display: &str) -> Option<String> {
+    let literal = yaml_quote(display);
+    let Some((start, end)) = header_body_span(raw) else {
+        // a block the engine rejected (oversized, unclosed) stays untouched
+        if raw.starts_with("---\n") || raw.starts_with("---\r\n") {
+            return None;
+        }
+        let next = format!("---\n{key}: {literal}\n---\n{raw}");
+        return grew_by(&next, &serde_json::Map::new(), key, display).then_some(next);
+    };
+    let before = molt_engine::properties(raw).0?;
+    let (head, lead, tail) = (raw.get(start..end)?, raw.get(..start)?, raw.get(end..)?);
+    let patched = format!("{lead}{}{tail}", header_lines(head, key, &literal));
+    if grew_by(&patched, &before, key, display) {
+        return Some(patched);
+    }
+    let rebuilt = format!("{lead}{}{tail}", canonical_header(&before, key, display));
+    grew_by(&rebuilt, &before, key, display).then_some(rebuilt)
+}
+
+/// Does `doc` say exactly what `before` said, plus `display` under `key`?
+fn grew_by(
+    doc: &str,
+    before: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    display: &str,
+) -> bool {
+    let Some(after) = molt_engine::properties(doc).0 else {
+        return false;
+    };
+    if after.len() != before.len() + usize::from(!before.contains_key(key)) {
+        return false;
+    }
+    for (k, v) in before {
+        if k != key && after.get(k) != Some(v) {
+            return false;
+        }
+    }
+    let mut want = value_list(before.get(key));
+    want.push(serde_json::Value::String(display.to_string()));
+    value_list(after.get(key)) == want
+}
+
+/// The header re-emitted from what the parser says it holds, with
+/// `display` added under `key`. The fallback, never the first choice: it
+/// loses comments and formatting, which is why the line-wise edit runs
+/// first.
+fn canonical_header(
+    before: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    display: &str,
+) -> String {
+    let mut out = String::new();
+    for (k, v) in before {
+        if k == key {
+            let mut items = value_list(Some(v));
+            items.push(serde_json::Value::String(display.to_string()));
+            out.push_str(&emit_key(k, &items));
+        } else {
+            out.push_str(&emit_key(k, &value_list(Some(v))));
+        }
+    }
+    if !before.contains_key(key) {
+        out.push_str(&emit_key(key, &[serde_json::Value::String(display.to_string())]));
+    }
+    out
+}
+
+/// One `key: value` (or block list) of the canonical emitter.
+fn emit_key(key: &str, items: &[serde_json::Value]) -> String {
+    match items {
+        [] => format!("{key}: {}\n", yaml_quote("")),
+        [one] => format!("{key}: {}\n", emit_scalar(one)),
+        many => {
+            let mut out = format!("{key}:\n");
+            for item in many {
+                out.push_str(&format!("  - {}\n", emit_scalar(item)));
+            }
+            out
+        }
+    }
+}
+
+/// One value of the canonical emitter. A flat mapping is the qualified
+/// relation's shape and stays one, in flow form.
+fn emit_scalar(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => yaml_quote(s),
+        serde_json::Value::Object(map) => {
+            let inner = map
+                .iter()
+                .map(|(k, v)| format!("{k}: {}", emit_scalar(v)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{{inner}}}")
+        }
+        other => yaml_quote(&other.to_string()),
+    }
+}
+
+/// The header body with `literal` added under `key`, edited line-wise.
+/// Best-effort: [`with_relation`] verifies the result and falls back to
+/// the canonical emitter when this misreads the shape.
+fn header_lines(header: &str, key: &str, literal: &str) -> String {
     let prefix = format!("{key}:");
     let lines: Vec<&str> = header.split_inclusive('\n').collect();
     let Some(at) = lines.iter().position(|l| l.starts_with(&prefix)) else {
@@ -2613,28 +2815,32 @@ fn header_with(header: &str, key: &str, value: &str) -> String {
         if !out.is_empty() && !out.ends_with('\n') {
             out.push('\n');
         }
-        out.push_str(&format!("{key}: {value}\n"));
+        out.push_str(&format!("{key}: {literal}\n"));
         return out;
     };
-    let rest = lines[at][prefix.len()..].trim_end_matches(['\n', '\r']).trim();
+    let rest = lines[at]
+        .get(prefix.len()..)
+        .unwrap_or_default()
+        .trim_end_matches(['\n', '\r'])
+        .trim();
     let mut out: Vec<String> = lines.iter().map(|l| (*l).to_string()).collect();
     if let Some(inner) = rest.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
         let inner = inner.trim();
         out[at] = if inner.is_empty() {
-            format!("{key}: [{value}]\n")
+            format!("{key}: [{literal}]\n")
         } else {
-            format!("{key}: [{inner}, {value}]\n")
+            format!("{key}: [{inner}, {literal}]\n")
         };
     } else if rest.is_empty() {
-        // `key:` alone - a block sequence may follow it
+        // `key:` alone - a block sequence may follow, at ANY indent
         let mut last = None;
         let mut indent = "  ".to_string();
         for (i, l) in lines.iter().enumerate().skip(at + 1) {
             let t = l.trim_end_matches(['\n', '\r']);
             let body = t.trim_start();
-            if body.starts_with("- ") && t.len() > body.len() {
+            if body.starts_with("- ") {
                 if last.is_none() {
-                    indent = t[..t.len() - body.len()].to_string();
+                    indent = t.get(..t.len() - body.len()).unwrap_or("").to_string();
                 }
                 last = Some(i);
             } else if body.is_empty() {
@@ -2644,11 +2850,11 @@ fn header_with(header: &str, key: &str, value: &str) -> String {
             }
         }
         match last {
-            Some(i) => out.insert(i + 1, format!("{indent}- {value}\n")),
-            None => out[at] = format!("{key}: {value}\n"),
+            Some(i) => out.insert(i + 1, format!("{indent}- {literal}\n")),
+            None => out[at] = format!("{key}: {literal}\n"),
         }
     } else {
-        out[at] = format!("{key}:\n  - {rest}\n  - {value}\n");
+        out[at] = format!("{key}:\n  - {rest}\n  - {literal}\n");
     }
     out.concat()
 }
@@ -3399,32 +3605,149 @@ mod tests {
         );
     }
 
-    /// A flow list stays a flow list, and an existing scalar keeps its
-    /// place: the member's own header style survives the write.
+    /// **Every header shape survives a relation write.** The line-wise
+    /// edit keeps the member's style where it can read the shape; where
+    /// it cannot, the PARSER catches it and a canonical re-emit takes
+    /// over. What must never happen is a header the engine can no longer
+    /// read - that costs the document all of its properties at once.
     #[test]
-    fn an_existing_key_keeps_the_style_the_member_wrote_it_in() {
+    fn a_relation_write_never_leaves_a_header_the_engine_cannot_read() {
+        // (header body, the key to grow) - the shapes a member writes
+        let shapes: &[(&str, &str)] = &[
+            ("", "see_also"),
+            ("tags: [x]\n", "see_also"),
+            ("see_also: \"[[a.md]]\"\n", "see_also"),
+            ("see_also: [\"[[a.md]]\"]\n", "see_also"),
+            ("see_also: []\n", "see_also"),
+            ("see_also:\n", "see_also"),
+            // …the zero-indent block sequence, which is idiomatic YAML
+            ("see_also:\n- \"[[a.md]]\"\n", "see_also"),
+            ("see_also:\n    - \"[[a.md]]\"\n", "see_also"),
+            // …a flow list continued on the next line
+            ("see_also: [\"[[a.md]]\",\n  \"[[c.md]]\"]\n", "see_also"),
+            // …the qualified relation's flat mapping
+            ("authored_by:\n  to: \"[[a.md]]\"\n", "authored_by"),
+            // …a block scalar, and a comment, and a space before the colon
+            ("note: |\n  two\n  lines\n", "see_also"),
+            ("tags: [x] # a note\n", "tags"),
+            ("see_also : \"[[a.md]]\"\n", "see_also"),
+            // …a key that is a number, and one that is not touched
+            ("weight: 3\nsee_also: \"[[a.md]]\"\n", "see_also"),
+        ];
+        for (head, key) in shapes {
+            let raw = format!("---\n{head}---\n# A\n");
+            let before = molt_engine::properties(&raw)
+                .0
+                .unwrap_or_else(|| panic!("the fixture itself must parse: {raw:?}"));
+            let next = with_relation(&raw, key, "[[b.md|B]]")
+                .unwrap_or_else(|| panic!("refused a readable header: {raw:?}"));
+            let after = molt_engine::properties(&next)
+                .0
+                .unwrap_or_else(|| panic!("wrote a header the engine rejects: {next:?}"));
+            for (k, v) in &before {
+                if k != key {
+                    assert_eq!(after.get(k), Some(v), "{k} was lost writing {raw:?}");
+                }
+            }
+            let mut want = value_list(before.get(*key));
+            want.push(serde_json::Value::String("[[b.md|B]]".to_string()));
+            assert_eq!(
+                value_list(after.get(*key)),
+                want,
+                "the key must GROW, not be replaced: {raw:?} -> {next:?}"
+            );
+            assert!(next.ends_with("---\n# A\n"), "the body moved: {next:?}");
+        }
+
+        // a header the engine cannot read is not one this program edits
+        for broken in [
+            "---\nsee_also: [unclosed\n---\n# A\n",
+            // a zero-indent flow continuation: yaml_rust2 rejects it, so
+            // the document HAS no properties and we must not pretend
+            "---\nsee_also: [\n  \"[[a.md]]\",\n]\n---\n# A\n",
+        ] {
+            assert!(molt_engine::properties(broken).0.is_none(), "the fixture is broken");
+            assert_eq!(with_relation(broken, "see_also", "[[b.md]]"), None, "{broken:?}");
+        }
+    }
+
+    /// A tag is whatever the member typed - the emitter quotes what would
+    /// not survive a flow sequence instead of censoring it, and the
+    /// parser confirms the write before it lands.
+    #[test]
+    fn a_tag_with_punctuation_still_writes_a_readable_header() {
+        for tag in ["`draft`", "? x", "a, b", "\"q\"", "#tag", "a: b", "ümlaut", "x] y"] {
+            let mut w = Wiki::empty();
+            w.set_base(&[("a.md".to_string(), Some("# A\n".to_string()))], 1);
+            let id = w.docs.first().expect("a.md").id;
+            w.open(id);
+            assert!(w.set_tags(id, &[tag.to_string()]), "{tag} was refused");
+            let raw = &w.doc(id).expect("open").raw;
+            let props = molt_engine::properties(raw)
+                .0
+                .unwrap_or_else(|| panic!("{tag} broke the header: {raw:?}"));
+            assert_eq!(
+                value_list(props.get(TAG_KEY)),
+                vec![serde_json::Value::String(tag.to_string())],
+                "{tag} did not come back as itself"
+            );
+        }
+    }
+
+    /// The offer leads with what the republic already says, and a
+    /// relation the member added stays on the list when it is switched
+    /// off again - otherwise the only way back is to retype it.
+    #[test]
+    fn the_relation_offer_holds_the_republics_own_keys_and_keeps_what_was_added() {
+        let mut w = Wiki::empty();
+        w.set_base(&[("a.md".to_string(), Some("# A\n".to_string()))], 1);
+        let id = w.docs.first().expect("a.md").id;
+        w.open(id);
+        w.set_relation_vocab(vec!["lives_in".to_string(), "is_a".to_string()]);
+        w.link_open("");
+
+        let offer = w.link_relations();
+        assert_eq!(offer.first().map(|(k, _)| k.as_str()), Some("lives_in"),
+            "what the republic already uses comes first");
         assert_eq!(
-            header_with("see_also: [\"[[a.md]]\"]\n", "see_also", "\"[[b.md]]\""),
-            "see_also: [\"[[a.md]]\", \"[[b.md]]\"]\n"
+            offer.iter().filter(|(k, _)| k == "is_a").count(),
+            1,
+            "a key the republic shares with the built-ins appears once"
         );
-        assert_eq!(
-            header_with("see_also: []\n", "see_also", "\"[[b.md]]\""),
-            "see_also: [\"[[b.md]]\"]\n"
+        assert!(offer.iter().any(|(k, _)| k == "part_of"), "the built-ins are still offered");
+
+        w.set_link_custom("works_on");
+        assert!(w.link_add_custom());
+        assert!(w.link_relations().iter().any(|(k, on)| k == "works_on" && *on));
+        w.link_toggle("works_on");
+        assert!(
+            w.link_relations().iter().any(|(k, on)| k == "works_on" && !*on),
+            "switching it off must not take it off the list"
         );
+    }
+
+    /// A modal write is a DISCRETE change: one Undo takes it back and
+    /// leaves the run of keystrokes that came before it alone.
+    #[test]
+    fn a_modal_write_is_its_own_undo_step() {
+        let mut w = Wiki::empty();
+        w.set_base(&[("a.md".to_string(), Some("# A\n".to_string()))], 1);
+        let id = w.docs.first().expect("a.md").id;
+        w.open(id);
+        w.set_raw(id, "# A\n\ntyped\n");
+        w.set_raw(id, "# A\n\ntyped more\n");
+        assert_eq!(w.stack_len(), 1, "a run of keystrokes is one entry");
+
+        w.link_open("");
+        w.set_link_target("a.md");
+        w.link_toggle("is_a");
+        assert!(w.link_commit());
+        assert_eq!(w.stack_len(), 2, "the modal write is its own entry");
+        assert!(w.undo().is_ok(), "…and undoing it");
         assert_eq!(
-            header_with("tags: [x]\nsee_also:\n    - \"[[a.md]]\"\n", "see_also", "\"[[b.md]]\""),
-            "tags: [x]\nsee_also:\n    - \"[[a.md]]\"\n    - \"[[b.md]]\"\n",
-            "the block list keeps its own indent"
-        );
-        assert_eq!(
-            header_with("tags: [x]\n", "see_also", "\"[[b.md]]\""),
-            "tags: [x]\nsee_also: \"[[b.md]]\"\n",
-            "an absent key is appended, the rest untouched"
-        );
-        assert_eq!(
-            header_with("see_also:\n", "see_also", "\"[[b.md]]\""),
-            "see_also: \"[[b.md]]\"\n",
-            "an empty key takes the value instead of growing a list"
+            w.doc(id).expect("open").raw,
+            "# A\n\ntyped more\n",
+            "one Undo takes back the link, not the typing"
         );
     }
 

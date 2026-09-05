@@ -1809,6 +1809,22 @@ export component AppWindow inherits Window {
     // commands (join-start / recover-start); what the merge changes is only
     // which of them a click issues.
     property <LinkPreview> rv-kind: root.classify-link(root.rv-link);
+    // one changeset kind (0 created · 1 folder · 2 renamed · 3 moved ·
+    // 4 deleted · 5 edited) → its glyph and its tone, named once
+    pure function cs-glyph(kind: int) -> string {
+        return kind == 0 ? "➕"
+            : kind == 1 ? "📁"
+            : kind == 2 ? "🏷️"
+            : kind == 3 ? "➡️"
+            : kind == 4 ? "🗑️"
+            : "✏️";
+    }
+    pure function cs-tone(kind: int) -> color {
+        return kind == 4 ? Theme.bad
+            : (kind == 0 || kind == 1) ? Theme.good
+            : Theme.warn;
+    }
+
     pure function link-armed() -> bool {
         // a run in flight owns the screen: a second start can only be
         // refused, and a button that can only fail reads as a broken UI.
@@ -9541,7 +9557,7 @@ export component AppWindow inherits Window {
         title: Strings.mem-tag-title;
         body: WikiState.doc-path;
         cancel-label: Strings.close-ws-cancel;
-        confirm-label: Strings.mem-save;
+        confirm-label: Strings.set-save;
         confirm-enabled: WikiState.tag-ready;
         dismissed => {
             WikiState.tag-modal-open = false;
@@ -9552,31 +9568,53 @@ export component AppWindow inherits Window {
         }
         VerticalLayout {
             spacing: Theme.pane-gap;
-            for t[i] in WikiState.tag-rows: HorizontalLayout {
-                spacing: Theme.pane-gap;
-                AppField {
-                    horizontal-stretch: 1;
-                    placeholder: Strings.mem-tag-ph;
-                    text: t;
-                    edited => {
-                        WikiState.tag-set(i, self.text);
+            // the rows SCROLL: unbounded, they push the dialog's own
+            // buttons past the window edge, where they cannot be pressed
+            Rectangle {
+                height: min(trows.preferred-height, clamp(root.height * 0.34, 100px, 300px));
+                clip: true;
+                tgfl := Flickable {
+                    width: 100%;
+                    height: 100%;
+                    viewport-width: self.width;
+                    viewport-height: min(trows.preferred-height, clamp(root.height * 0.34, 100px, 300px));
+                    trows := VerticalLayout {
+                        spacing: Theme.pane-gap;
+                        alignment: start;
+                        for t[i] in WikiState.tag-rows: HorizontalLayout {
+                            spacing: Theme.pane-gap;
+                            AppField {
+                                horizontal-stretch: 1;
+                                placeholder: Strings.mem-tag-ph;
+                                text: t;
+                                edited => {
+                                    WikiState.tag-set(i, self.text);
+                                }
+                            }
+                            AppButton {
+                                label: "";
+                                emoji: "🗑️";
+                                pad: 10px;
+                                height: 38px * Theme.ui-scale;
+                                enabled: WikiState.tag-rows.length > 1;
+                                clicked => {
+                                    WikiState.tag-remove(i);
+                                }
+                            }
+                        }
                     }
                 }
-                AppButton {
-                    label: "";
-                    emoji: "🗑️";
-                    pad: 10px;
-                    height: 38px * Theme.ui-scale;
-                    enabled: WikiState.tag-rows.length > 1;
-                    clicked => {
-                        WikiState.tag-remove(i);
-                    }
+                ScrollHint {
+                    x: parent.width - 7px;
+                    view-h: tgfl.height;
+                    content-h: tgfl.viewport-height;
+                    scroll-y: tgfl.viewport-y;
                 }
             }
             HorizontalLayout {
                 spacing: Theme.pane-gap;
                 AppButton {
-                    label: Strings.mem-tag-more;
+                    label: Strings.mem-tag-add;
                     emoji: "➕";
                     pad: 10px;
                     clicked => {
@@ -9847,9 +9885,6 @@ export component AppWindow inherits Window {
                 cs-stack := VerticalLayout {
                     padding: 8px;
                     alignment: start;
-                    // kind → glyph / tone
-                    // (0 created · 1 folder · 2 renamed · 3 moved ·
-                    //  4 deleted · 5 edited)
                     for r in WikiState.cs-rows: HorizontalLayout {
                         height: 24px * Theme.ui-scale;
                         spacing: 6px;
@@ -9857,12 +9892,7 @@ export component AppWindow inherits Window {
                             width: 16px;
                             clip: true;
                             Text {
-                                text: r.kind == 0 ? "➕"
-                                    : r.kind == 1 ? "📁"
-                                    : r.kind == 2 ? "🏷️"
-                                    : r.kind == 3 ? "➡️"
-                                    : r.kind == 4 ? "🗑️"
-                                    : "✏️";
+                                text: root.cs-glyph(r.kind);
                                 font-family: "Twemoji Mozilla";
                                 font-size: 11px;
                                 width: 100%;
@@ -9873,9 +9903,7 @@ export component AppWindow inherits Window {
                         }
                         csm-row := Text {
                             text: r.label;
-                            color: r.kind == 4 ? Theme.bad
-                                : (r.kind == 0 || r.kind == 1) ? Theme.good
-                                : Theme.warn;
+                            color: root.cs-tone(r.kind);
                             font-size: Theme.fs-cap;
                             vertical-alignment: center;
                             overflow: elide;
