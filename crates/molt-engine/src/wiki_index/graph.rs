@@ -613,7 +613,12 @@ pub fn body_links(markdown: &str) -> Vec<BodyLink> {
                     target: dest_url.to_string(),
                     predicate: None,
                 };
-                if link.target.ends_with(".md") && !out.contains(&link) {
+                // a URL that happens to end in `.md` (a NIP on GitHub) is a
+                // source, not a wiki path (G15, round 2)
+                if link.target.ends_with(".md")
+                    && !link.target.contains("://")
+                    && !out.contains(&link)
+                {
                     out.push(link);
                 }
             }
@@ -726,6 +731,21 @@ mod tests {
         let (exact, candidates) = g.resolve_name("Unitree Robotics");
         assert_eq!(exact.as_deref(), Some("hersteller/unitree.md"));
         assert_eq!(candidates[0].1, "title");
+    }
+
+    /// G15: a markdown link to a URL that ends in `.md` cites a source; only
+    /// a path is a wiki link.
+    #[test]
+    fn a_url_ending_in_md_is_a_source_not_a_link() {
+        let g = WikiGraph::build(&tree(&[
+            (
+                "n.md",
+                "see [NIP-01](https://github.com/nostr-protocol/nips/blob/master/01.md) and [local](a.md)\n",
+            ),
+            ("a.md", "# A\n"),
+        ]));
+        assert_eq!(targets(g.out.get("n.md")), vec!["a.md".to_string()]);
+        assert!(g.dangling.is_empty(), "the URL dangles nowhere: {:?}", g.dangling);
     }
 
     /// F14: inside a table cell the display separator is written `\|`;

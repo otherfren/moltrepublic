@@ -410,13 +410,18 @@ fn present(name: &str, args: &Value, mut value: Value) -> Result<Value, String> 
     }
 }
 
-/// A proposer pulled it back: `state` says so, instead of the engine's
-/// terminal `rejected` beside a `withdrawn` flag (F4).
+/// A proposer pulled it back, or the base moved under a wiki patch:
+/// `state` says so, instead of the engine's terminal `rejected` beside a
+/// `withdrawn` / `superseded` flag (F4, G9) - "rejected with nobody
+/// declining" sent a proposer hunting for a phantom decliner.
 fn withdrawn_is_a_state(v: &mut Value) {
     match v {
         Value::Object(o) => {
+            let rejected = o.get("state") == Some(&Value::String("rejected".to_string()));
             if o.get("withdrawn") == Some(&Value::Bool(true)) && o.contains_key("state") {
                 o.insert("state".to_string(), Value::String("withdrawn".to_string()));
+            } else if rejected && o.get("superseded") == Some(&Value::Bool(true)) {
+                o.insert("state".to_string(), Value::String("superseded".to_string()));
             }
             for child in o.values_mut() {
                 withdrawn_is_a_state(child);
@@ -1117,7 +1122,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "propose",
             command: "propose",
             scope: Scope::Seat,
-            description: "Put an object forward for threshold approval on a gated surface. An Organization set_image payload must embed the actual image as base64 `bytes_b64` and the bytes must DECODE as a picture (png/jpeg/webp/gif/bmp, ≤8192x8192; svg is refused) - sign-what-you-see: members vote on the image, so undecodable bytes are refused here and dropped by every peer. Payload size is capped at what one relay message can carry (about 64 KiB of image for a small roster); an over-size proposal is refused with the exact figure that fits. Organization op set_features enables charter features: value = space-separated keys among memory/quests/vault/wallet, the FULL target set - it must keep every enabled feature (enable-only, never off again) and add at least one. Proposing on a surface whose feature is not enabled is refused (status.features lists the enabled set). Memory op wiki_patch is a wiki changeset vote: `value` carries a raw git-format patch (unified diffs; rename/new/deleted headers), `summary` a short count string like \"+2 -1 →1 ~34\" - the GUI's changeset vote emits exactly this shape and renders the patch in its diff viewer. It is the RAW form, for a caller that already holds a patch, and it is refused when the patch does not apply to the current base; wiki_edit writes the wiki without one. The proposer's own signature is the first of m; the reply names the proposal's `channel`.",
+            description: "Put an object forward for threshold approval on a gated surface. An Organization set_image payload must embed the actual image as base64 `bytes_b64` and the bytes must DECODE as a picture (png/jpeg/webp/gif/bmp, ≤8192x8192; svg is refused) - sign-what-you-see: members vote on the image, so undecodable bytes are refused here and dropped by every peer. Payload size is capped at what one relay message can carry (about 64 KiB of image for a small roster); an over-size proposal is refused with the exact figure that fits. Organization op set_features enables charter features: value = space-separated keys among memory/quests/vault/wallet, the FULL target set - it must keep every enabled feature (enable-only, never off again) and add at least one. Proposing on a surface whose feature is not enabled is refused (status.features lists the enabled set). Memory op wiki_patch is a wiki changeset vote: `value` carries a raw git-format patch (unified diffs; rename/new/deleted headers), `summary` a short count string like \"+2 -1 →1 ~34\" - the GUI's changeset vote emits exactly this shape and renders the patch in its diff viewer. It is the RAW form, for a caller that already holds a patch, and it is refused when the patch does not apply to the current base; wiki_edit writes the wiki without one. The proposer's own signature is the first of m; the reply names the proposal's `channel`. Ids are minted per seat, so the sequence has gaps by design.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1478,7 +1483,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "list_proposals",
             command: "list_proposals",
             scope: Scope::Seat,
-            description: "List every proposal the engine currently knows about - HEADERS: id, surface, by, state (`withdrawn` when the proposer pulled it back), approvals/threshold, the votes, `summary`, the `paths` a wiki patch touches, `channel`. The patch and the before/after texts are left out (a 9 KB patch was answered three times over); `with_patch: true` includes them, read_proposal {id} fetches ONE in full.",
+            description: "List every proposal the engine currently knows about - HEADERS: id, surface, by, state (`withdrawn` when the proposer pulled it back), approvals/threshold, the votes, `summary`, the `paths` a wiki patch touches, `channel`. The patch and the before/after texts are left out (a 9 KB patch was answered three times over); `with_patch: true` includes them, read_proposal {id} fetches ONE in full. Ids are minted per seat (seat k of n takes every n-th number), so gaps in the sequence are normal, not lost proposals.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -2614,6 +2619,17 @@ mod tests {
         let list = present("list_proposals", &json!({}), reply.clone()).expect("presents");
         let p4 = &list["proposals"][0];
         assert_eq!(p4["state"], "withdrawn", "a pulled-back card says so");
+        let stale = present(
+            "list_proposals",
+            &json!({}),
+            json!({ "reply": "proposals", "proposals": [
+                { "id": 6, "state": "rejected", "withdrawn": false, "superseded": true, "payload": {} },
+                { "id": 7, "state": "applied", "withdrawn": false, "superseded": true, "payload": {} }
+            ] }),
+        )
+        .expect("presents");
+        assert_eq!(stale["proposals"][0]["state"], "superseded", "a stale patch says so, not rejected");
+        assert_eq!(stale["proposals"][1]["state"], "applied", "an applied card keeps its state");
         assert_eq!(p4["paths"], json!(["a.md", "b/c.md"]));
         assert_eq!(p4["channel"], json!({ "kind": "patch", "id": 4 }));
         assert!(p4.get("current").is_none() && p4.get("proposed").is_none());

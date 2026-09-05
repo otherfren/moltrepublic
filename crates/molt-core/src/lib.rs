@@ -7077,7 +7077,7 @@ pub enum MoltError {
     /// A write into the discussion channel of a decided vote (the
     /// discussion stays readable, linked from the vote's card — but the
     /// deliberation ended with the vote).
-    #[error("discussion of proposal {0:?} is read-only - the vote is {1:?}")]
+    #[error("discussion of proposal {0} is read-only - the vote is {1}")]
     DiscussionClosed(ProposalId, ProposalState),
     /// A settings value failed validation (nothing was stored or written).
     #[error("settings: {0}")]

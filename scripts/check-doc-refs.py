@@ -74,6 +74,7 @@ NO_BARE_SCAN_FILES = {
     # the agent round's observation log and briefing quote WIKI paths and
     # the agents' own scratch file by name
     "docs/reviews/mcp_agent_friction_2026-09-05.md": "quoted wiki paths from the live run",
+    "docs/reviews/mcp_agent_friction_2026-09-06.md": "quoted wiki paths from the second run",
     "docs/reviews/agent_wiki_round_2_briefing.md": "the agents' friction.md scratch file",
 }
 
