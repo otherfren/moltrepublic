@@ -75,8 +75,9 @@ pub use wiki_index::front_matter::{
 /// GUI's relation modal and the engine's `wiki_edit` write the same shape,
 /// and a header the parser above would not read back is never written.
 pub use wiki_index::front_matter::{
-    canonical_header, emit_key as emit_header_key, emit_value as emit_header_value,
-    header_body_span, header_lines, value_list as header_value_list, yaml_quote,
+    canonical_header, emit_key as emit_header_key, emit_scalar as emit_header_scalar,
+    emit_value as emit_header_value, header_body_span, header_lines,
+    value_list as header_value_list, with_props, yaml_quote,
 };
 
 use std::collections::HashMap;

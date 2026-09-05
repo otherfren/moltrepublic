@@ -333,6 +333,9 @@ pub struct Wiki {
     /// The two authoring modals' drafts. Transient view state: a document
     /// learns nothing from them until the member presses OK.
     ont: OntologyDraft,
+    /// The raw editor's caret, bound to the document it was measured in -
+    /// an offset carried over from another tab is stale by construction.
+    cursor: Option<(DocId, usize)>,
 }
 
 /// The `+ Tag` and "semantic link" modals while they are open.
@@ -358,7 +361,28 @@ struct OntologyDraft {
     /// bridge re-syncs after EVERY action - so it is only built while
     /// something is looking at it.
     open: bool,
+    /// Write into the front matter instead of the prose. Off by default:
+    /// the decision puts a relation in the sentence that asserts it
+    /// (`wiki_semantic_gaps.md` §6), and the header is the deliberate
+    /// detour for the qualified form, which has no inline shape.
+    header: bool,
+    /// The qualified relation's extra fields, `key: value, key: value`.
+    quals: String,
+    /// Why the last commit wrote nothing (a `LINK_ERR_*` code, empty when
+    /// it wrote). A code, not a sentence: the language layer renders it.
+    error: &'static str,
 }
+
+/// The write would leave a header the engine cannot read back.
+pub const LINK_ERR_HEADER: &str = "header";
+/// The relation already carries a plain value, which qualifiers cannot
+/// join without silently converting what the member wrote.
+pub const LINK_ERR_QUALIFIED: &str = "qualified";
+/// The qualifier line is not `key: value, key: value` of the subset.
+pub const LINK_ERR_QUAL_SYNTAX: &str = "qual_syntax";
+/// Nowhere in the prose where the link would assert anything (a code
+/// block swallows it).
+pub const LINK_ERR_BODY: &str = "body";
 
 /// How many target rows the link modal offers at once. The list is a
 /// picker, not a catalogue: past this the filter is the way to find one.
@@ -438,6 +462,7 @@ impl Wiki {
             base_rev: 0,
             ont: OntologyDraft::default(),
             relation_vocab: Vec::new(),
+            cursor: None,
         }
     }
 
@@ -461,6 +486,7 @@ impl Wiki {
             base_rev: 0,
             ont: OntologyDraft::default(),
             relation_vocab: Vec::new(),
+            cursor: None,
         }
     }
 
@@ -2102,6 +2128,39 @@ impl Wiki {
         &self.ont.custom
     }
 
+    pub fn link_header(&self) -> bool {
+        self.ont.header
+    }
+
+    pub fn link_qualifiers(&self) -> &str {
+        &self.ont.quals
+    }
+
+    /// Why the last commit wrote nothing (a `LINK_ERR_*` code).
+    pub fn link_error(&self) -> &str {
+        self.ont.error
+    }
+
+    /// Switch the write between the prose and the front matter. A header
+    /// this program cannot read back is not one it offers to write.
+    pub fn set_link_header(&mut self, on: bool) {
+        if on && !self.can_write_header() {
+            return;
+        }
+        self.ont.header = on;
+        self.ont.error = "";
+    }
+
+    pub fn set_link_qualifiers(&mut self, line: &str) {
+        self.ont.quals = line.to_string();
+        self.ont.error = "";
+    }
+
+    /// The raw editor's caret, in bytes into the OPEN document's raw text.
+    pub fn set_cursor(&mut self, at: usize) {
+        self.cursor = self.active_id().map(|id| (id, at));
+    }
+
     pub fn set_link_name(&mut self, name: &str) {
         self.ont.name = name.to_string();
     }
@@ -2117,6 +2176,7 @@ impl Wiki {
     /// Pick a target; the name follows it unless the member typed one.
     pub fn set_link_target(&mut self, path: &str) {
         let followed = self.ont.name.is_empty() || self.ont.name == self.title_of(&self.ont.target);
+        self.ont.error = "";
         self.ont.target = path.to_string();
         if followed {
             self.ont.name = self.title_of(path);
@@ -2176,6 +2236,9 @@ impl Wiki {
     }
 
     pub fn link_toggle(&mut self, key: &str) {
+        // every edit to the draft drops the last refusal: it described a
+        // write the member is already changing
+        self.ont.error = "";
         if let Some(i) = self.ont.on.iter().position(|k| k == key) {
             self.ont.on.remove(i);
         } else if molt_engine::header_key_ok(key) {
@@ -2200,21 +2263,55 @@ impl Wiki {
         true
     }
 
-    /// A link is ready when it has a target and at least one relation.
+    /// A link is ready when it has a target, at least one relation, and a
+    /// document the CHOSEN form can be written into.
     pub fn link_ready(&self) -> bool {
-        !self.ont.target.is_empty() && !self.ont.on.is_empty() && self.can_write_header()
+        !self.ont.target.is_empty()
+            && !self.ont.on.is_empty()
+            && if self.ont.header {
+                self.can_write_header()
+            } else {
+                self.can_write_body()
+            }
     }
 
-    /// Write the drafted link into the open document's header.
+    /// Write the drafted link where the member chose. On a refusal the
+    /// draft STAYS, carrying the reason: the modal is still up and the
+    /// member has something to correct.
     pub fn link_commit(&mut self) -> bool {
+        self.ont.error = "";
         if !self.link_ready() {
             return false;
         }
         let Some(id) = self.active_id() else {
             return false;
         };
-        let draft = std::mem::take(&mut self.ont);
-        self.add_relations(id, &draft.on, &draft.target, &draft.name)
+        let draft = self.ont.clone();
+        let done = if draft.header {
+            match parse_qualifiers(&draft.quals) {
+                None => Err(LINK_ERR_QUAL_SYNTAX),
+                // no qualifiers, no mapping: this is the plain header key
+                Some(quals) if quals.is_empty() => self
+                    .add_relations(id, &draft.on, &draft.target, &draft.name)
+                    .then_some(())
+                    .ok_or(LINK_ERR_HEADER),
+                Some(quals) => {
+                    self.add_qualified(id, &draft.on, &draft.target, &draft.name, &quals)
+                }
+            }
+        } else {
+            self.add_inline_relations(id, &draft.on, &draft.target, &draft.name)
+        };
+        match done {
+            Ok(()) => {
+                self.ont = OntologyDraft::default();
+                true
+            }
+            Err(code) => {
+                self.ont.error = code;
+                false
+            }
+        }
     }
 
     /// Whether the open document's header can be written at all: its
@@ -2224,11 +2321,19 @@ impl Wiki {
     pub fn can_write_header(&self) -> bool {
         self.active().is_some_and(|d| {
             d.loaded()
+                && !d.deleted
                 && match molt_engine::split_front_matter(&d.raw).0 {
                     None => true,
                     Some(_) => molt_engine::properties(&d.raw).0.is_some(),
                 }
         })
+    }
+
+    /// Whether the open document's PROSE can be written: its ratified
+    /// bytes have to be here, and that is all. An inline claim is a
+    /// sentence, so a header the parser rejects does not block it.
+    pub fn can_write_body(&self) -> bool {
+        self.active().is_some_and(|d| d.loaded() && !d.deleted)
     }
 
     /// Add one link under each relation key. A key that is already there
@@ -2255,7 +2360,7 @@ impl Wiki {
         if keys.is_empty() {
             return false;
         }
-        let display = link_display(target, name);
+        let display = link_display(None, target, name);
         let mut raw = d.raw.clone();
         for key in keys {
             let Some(next) = with_relation(&raw, key, &display) else {
@@ -2267,6 +2372,123 @@ impl Wiki {
         }
         self.set_raw_discrete(id, &raw);
         true
+    }
+
+    /// Write one inline claim per relation into the document's PROSE,
+    /// which is where the decision puts a relation
+    /// (`wiki_semantic_gaps.md` §6): all of them in ONE insertion, so one
+    /// Undo takes the whole claim back.
+    ///
+    /// WHERE it lands: the raw editor's caret while the editor is open on
+    /// THIS document, else a new paragraph at the end of the body. Mid-line
+    /// the insertion keeps exactly one space on each side where the
+    /// neighbour is not whitespace. A caret that is stale, off a char
+    /// boundary or inside the front matter falls back to the end rule
+    /// rather than panicking - and so does a landing spot where the index
+    /// would not see the link at all (a code block masks it). A write that
+    /// still asserts nothing is refused.
+    pub fn add_inline_relations(
+        &mut self,
+        id: DocId,
+        keys: &[String],
+        target: &str,
+        name: &str,
+    ) -> Result<(), &'static str> {
+        let Some(d) = self.doc(id) else {
+            return Err(LINK_ERR_BODY);
+        };
+        if !d.loaded() || d.deleted || target.is_empty() {
+            return Err(LINK_ERR_BODY);
+        }
+        let keys: Vec<&String> = keys
+            .iter()
+            .filter(|k| molt_engine::header_key_ok(k))
+            .collect();
+        if keys.is_empty() {
+            return Err(LINK_ERR_BODY);
+        }
+        let markup = keys
+            .iter()
+            .map(|k| link_display(Some(k), target, name))
+            .collect::<Vec<_>>()
+            .join(" ");
+        // the edges the write must produce, read back with the INDEX's own
+        // parser - a claim the graph cannot see is not a claim
+        let want: Vec<molt_engine::BodyLink> = keys
+            .iter()
+            .map(|k| molt_engine::BodyLink {
+                target: link_half(target),
+                predicate: Some((*k).clone()),
+            })
+            .collect();
+        let asserts = |doc: &str| {
+            let got = molt_engine::body_links(body_of(doc));
+            want.iter().all(|w| got.contains(w))
+        };
+        let raw = d.raw.clone();
+        let at_caret = self
+            .cursor
+            .filter(|(c, _)| *c == id && self.editing)
+            .and_then(|(_, at)| splice_at(&raw, at, &markup));
+        let next = at_caret
+            .filter(|s| asserts(s))
+            .or_else(|| Some(appended(&raw, &markup)).filter(|s| asserts(s)))
+            .ok_or(LINK_ERR_BODY)?;
+        self.set_raw_discrete(id, &next);
+        Ok(())
+    }
+
+    /// Write the QUALIFIED relation - `key: { to, since, … }` - into the
+    /// header, the one form the prose has no shape for. Same discipline as
+    /// [`with_relation`]: the parser has to read back the old header plus
+    /// exactly this value, or the document is left untouched.
+    fn add_qualified(
+        &mut self,
+        id: DocId,
+        keys: &[String],
+        target: &str,
+        name: &str,
+        quals: &[(String, serde_json::Value)],
+    ) -> Result<(), &'static str> {
+        let Some(d) = self.doc(id) else {
+            return Err(LINK_ERR_HEADER);
+        };
+        if !d.loaded() || d.deleted || target.is_empty() {
+            return Err(LINK_ERR_HEADER);
+        }
+        let keys: Vec<&String> = keys
+            .iter()
+            .filter(|k| molt_engine::header_key_ok(k))
+            .collect();
+        if keys.is_empty() {
+            return Err(LINK_ERR_HEADER);
+        }
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "to".to_string(),
+            serde_json::Value::String(link_display(None, target, name)),
+        );
+        for (k, v) in quals {
+            // `to` carries the link itself; a second one would silently
+            // replace what the member picked
+            if map.insert(k.clone(), v.clone()).is_some() {
+                return Err(LINK_ERR_QUAL_SYNTAX);
+            }
+        }
+        let value = serde_json::Value::Object(map);
+        let mut raw = d.raw.clone();
+        for key in keys {
+            let held = molt_engine::properties(&raw).0.and_then(|m| m.get(key).cloned());
+            // a key already holding a plain value would grow into a list
+            // mixing scalars and mappings - the subset READS that back, so
+            // the member's own value would quietly become a sibling
+            if held.is_some_and(|v| !qualified_shape(&v)) {
+                return Err(LINK_ERR_QUALIFIED);
+            }
+            raw = with_qualified(&raw, key, &value).ok_or(LINK_ERR_HEADER)?;
+        }
+        self.set_raw_discrete(id, &raw);
+        Ok(())
     }
 
     /// A document's title for the link's display half: its first heading,
@@ -2589,20 +2811,149 @@ fn tag_literal(tag: &str) -> String {
     }
 }
 
-/// One header value pointing at `target`, displayed as `name`, as a human
-/// reads it. The emitter quotes it - `[[…]]` in a flow sequence would
-/// otherwise read as two nested sequences.
-fn link_display(target: &str, name: &str) -> String {
-    let strip = |s: &str| -> String {
-        s.chars().filter(|c| !"[]|\n\r".contains(*c)).collect::<String>().trim().to_string()
-    };
-    let target = strip(target);
-    let name = strip(name);
+/// One half of a `[[…]]`: the brackets, the pipe and a line break would
+/// end the link early, so they never enter one.
+fn link_half(s: &str) -> String {
+    s.chars().filter(|c| !"[]|\n\r".contains(*c)).collect::<String>().trim().to_string()
+}
+
+/// ONE link pointing at `target`, displayed as `name` - the shape both
+/// authoring forms share, so a member sees the same link either way. With
+/// `pred` it is the inline claim `[[pred::target|name]]`; the display half
+/// is dropped where it only repeats the target. As a HEADER value the
+/// emitter quotes it, or `[[…]]` in a flow sequence would read as two
+/// nested sequences.
+fn link_display(pred: Option<&str>, target: &str, name: &str) -> String {
+    let target = link_half(target);
+    let name = link_half(name);
+    let lead = pred.map(|p| format!("{p}::")).unwrap_or_default();
     if name.is_empty() || name == target {
-        format!("[[{target}]]")
+        format!("[[{lead}{target}]]")
     } else {
-        format!("[[{target}|{name}]]")
+        format!("[[{lead}{target}|{name}]]")
     }
+}
+
+/// `raw` with `markup` spliced in at byte offset `at`, or `None` when the
+/// offset cannot be used: past the end, off a char boundary, or inside the
+/// front matter, where a link would be a header edit rather than a
+/// sentence. Neighbours that are not whitespace get exactly one space.
+fn splice_at(raw: &str, at: usize, markup: &str) -> Option<String> {
+    let body_at = raw.len() - body_of(raw).len();
+    if at < body_at || at > raw.len() || !raw.is_char_boundary(at) {
+        return None;
+    }
+    let (head, tail) = raw.split_at(at);
+    let mut out = String::with_capacity(raw.len() + markup.len() + 2);
+    out.push_str(head);
+    if head.chars().next_back().is_some_and(|c| !c.is_whitespace()) {
+        out.push(' ');
+    }
+    out.push_str(markup);
+    if tail.chars().next().is_some_and(|c| !c.is_whitespace()) {
+        out.push(' ');
+    }
+    out.push_str(tail);
+    Some(out)
+}
+
+/// `raw` with `markup` as a new paragraph at the end - the viewer's rule,
+/// which has no caret. Only ADDS: a member's own trailing blank lines are
+/// not diff noise this program invents.
+fn appended(raw: &str, markup: &str) -> String {
+    let mut out = raw.to_string();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    if !out.is_empty() && !out.ends_with("\n\n") {
+        out.push('\n');
+    }
+    out.push_str(markup);
+    out.push('\n');
+    out
+}
+
+/// Does this header value already carry the qualified shape - a mapping,
+/// or a list of them?
+fn qualified_shape(v: &serde_json::Value) -> bool {
+    v.is_object() || v.as_array().is_some_and(|a| a.iter().all(serde_json::Value::is_object))
+}
+
+/// The modal's optional qualifier line, `key: value, key: value`. A value
+/// of at most 18 digits stays an Integer, everything else a String - the
+/// subset's own scalar rule (§4.4). `None` = the line is not readable, and
+/// then nothing is written: dropping the half it understood would write a
+/// relation the member did not draft.
+fn parse_qualifiers(line: &str) -> Option<Vec<(String, serde_json::Value)>> {
+    let mut out: Vec<(String, serde_json::Value)> = Vec::new();
+    for part in line.split(',').filter(|p| !p.trim().is_empty()) {
+        let (key, value) = part.split_once(':')?;
+        let (key, value) = (key.trim(), value.trim());
+        if !molt_engine::header_key_ok(key) || value.is_empty() {
+            return None;
+        }
+        if out.iter().any(|(k, _)| k == key) {
+            return None;
+        }
+        out.push((key.to_string(), qual_value(value)));
+    }
+    Some(out)
+}
+
+/// One qualifier value, typed by the subset's rule.
+fn qual_value(text: &str) -> serde_json::Value {
+    let body = text.strip_prefix('-').unwrap_or(text);
+    if !body.is_empty() && body.len() <= 18 && body.bytes().all(|b| b.is_ascii_digit()) {
+        if let Ok(n) = text.parse::<i64>() {
+            return serde_json::Value::from(n);
+        }
+    }
+    serde_json::Value::String(text.to_string())
+}
+
+/// `raw` with the qualified `value` added under `key`, or `None` when the
+/// result would not be a header the engine reads back. The qualified twin
+/// of [`with_relation`], and deliberately without its canonical fallback:
+/// a qualified write that the line-wise edit gets wrong is REFUSED, so a
+/// member's own formatting is never re-emitted behind their back.
+fn with_qualified(raw: &str, key: &str, value: &serde_json::Value) -> Option<String> {
+    let literal = molt_engine::emit_header_scalar(value);
+    let Some((start, end)) = molt_engine::header_body_span(raw) else {
+        // a block the engine rejected (oversized, unclosed) stays untouched
+        if raw.starts_with("---\n") || raw.starts_with("---\r\n") {
+            return None;
+        }
+        let next = format!("---\n{key}: {literal}\n---\n{raw}");
+        return grew_by_value(&next, &serde_json::Map::new(), key, value).then_some(next);
+    };
+    let before = molt_engine::properties(raw).0?;
+    let (head, lead, tail) = (raw.get(start..end)?, raw.get(..start)?, raw.get(end..)?);
+    let patched = format!("{lead}{}{tail}", molt_engine::header_lines(head, key, &literal));
+    grew_by_value(&patched, &before, key, value).then_some(patched)
+}
+
+/// Does `doc` say exactly what `before` said, plus `value` under `key`?
+/// [`grew_by`]'s twin for a value that is not a plain string.
+fn grew_by_value(
+    doc: &str,
+    before: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: &serde_json::Value,
+) -> bool {
+    let Some(after) = molt_engine::properties(doc).0 else {
+        return false;
+    };
+    if after.len() != before.len() + usize::from(!before.contains_key(key)) {
+        return false;
+    }
+    for (k, v) in before {
+        if k != key && after.get(k) != Some(v) {
+            return false;
+        }
+    }
+    let mut want = molt_engine::header_value_list(before.get(key));
+    want.push(value.clone());
+    molt_engine::header_value_list(after.get(key)) == want
 }
 
 /// `raw` with `display` added under `key`, or `None` when the result
@@ -3332,6 +3683,7 @@ mod tests {
         w.open(id);
 
         w.link_open("");
+        w.set_link_header(true);
         assert!(!w.link_ready(), "no target, no link");
         w.set_link_target("who/petra.md");
         assert_eq!(w.link_name(), "Petra", "the name follows the target's title");
@@ -3346,6 +3698,7 @@ mod tests {
 
         // the same key again: it GROWS, it does not lose what it said
         w.link_open("a.md");
+        w.set_link_header(true);
         w.set_link_target("who/petra.md");
         w.set_link_name("Petra Again");
         w.link_toggle("is_a");
@@ -3357,6 +3710,7 @@ mod tests {
 
         // …and a third lands on the block list rather than beside it
         w.link_open("");
+        w.set_link_header(true);
         w.set_link_target("who/petra.md");
         w.set_link_name("Third");
         w.link_toggle("is_a");
@@ -3378,6 +3732,7 @@ mod tests {
         let id = w.docs.first().expect("a.md").id;
         w.open(id);
         w.link_open("a.md");
+        w.set_link_header(true);
 
         for bad in ["1st", "has space", "", "ümlaut"] {
             w.set_link_custom(bad);
@@ -3398,6 +3753,327 @@ mod tests {
         assert!(
             molt_engine::properties(raw).0.is_some_and(|m| m.contains_key("lives_in")),
             "the subset must accept what we wrote: {raw}"
+        );
+    }
+
+    /// The decision (`wiki_semantic_gaps.md` §6) puts a relation in the
+    /// sentence that asserts it, so the modal's DEFAULT write is inline -
+    /// and it has to produce the edge a header key would.
+    #[test]
+    fn the_modals_default_write_lands_in_the_prose_and_produces_the_edge() {
+        let mut w = Wiki::empty();
+        w.set_base(
+            &[
+                ("a.md".to_string(), Some("# A\n\nAnna works here.\n".to_string())),
+                ("acme.md".to_string(), Some("# Acme\n".to_string())),
+            ],
+            1,
+        );
+        let id = w.docs.first().expect("a.md").id;
+        w.open(id);
+
+        w.link_open("");
+        w.set_link_target("acme.md");
+        w.link_toggle("works_at");
+        assert!(w.link_ready(), "an inline claim needs no readable header");
+        assert!(w.link_commit());
+        assert_eq!(
+            w.doc(id).expect("open").raw,
+            "# A\n\nAnna works here.\n\n[[works_at::acme.md|Acme]]\n",
+            "no editor, no caret: a new paragraph at the end of the body"
+        );
+        // …and the INDEX reads back exactly the edge the member drew
+        assert_eq!(
+            molt_engine::body_links(&w.doc(id).expect("open").raw),
+            vec![molt_engine::BodyLink {
+                target: "acme.md".to_string(),
+                predicate: Some("works_at".to_string()),
+            }]
+        );
+
+        // the display half is dropped where it only repeats the target -
+        // ONE rule, the same the header form writes
+        w.link_open("");
+        w.set_link_target("acme.md");
+        w.set_link_name("acme.md");
+        w.link_toggle("is_a");
+        assert!(w.link_commit());
+        assert!(
+            w.doc(id).expect("open").raw.ends_with("\n[[is_a::acme.md]]\n"),
+            "{}",
+            w.doc(id).expect("open").raw
+        );
+    }
+
+    /// With the raw editor open the claim lands where the member is
+    /// writing, keeping exactly one space on each side of it.
+    #[test]
+    fn an_inline_relation_lands_at_the_editors_cursor() {
+        let at_offset = |at: usize| -> String {
+            let mut w = Wiki::empty();
+            w.set_base(
+                &[
+                    ("a.md".to_string(), Some("# A\n\nAnna works here.\n".to_string())),
+                    ("acme.md".to_string(), Some("# Acme\n".to_string())),
+                ],
+                1,
+            );
+            let id = w.docs.first().expect("a.md").id;
+            w.open(id);
+            w.editing = true;
+            w.set_cursor(at);
+            w.link_open("");
+            w.set_link_target("acme.md");
+            w.link_toggle("works_at");
+            assert!(w.link_commit(), "the write must land at {at}");
+            w.doc(id).expect("open").raw.clone()
+        };
+        // between two words: one space either side, never two
+        assert_eq!(
+            at_offset(15),
+            "# A\n\nAnna works [[works_at::acme.md|Acme]] here.\n"
+        );
+        // mid-word: the same rule, and it is where the member aimed
+        assert_eq!(
+            at_offset(7),
+            "# A\n\nAn [[works_at::acme.md|Acme]] na works here.\n"
+        );
+        // at a line end the newline is already whitespace
+        assert_eq!(
+            at_offset(21),
+            "# A\n\nAnna works here. [[works_at::acme.md|Acme]]\n"
+        );
+    }
+
+    /// A caret this document did not produce must not decide where the
+    /// claim lands: another tab's, one inside the front matter, one off a
+    /// char boundary, one from a closed editor.
+    #[test]
+    fn a_stale_or_unusable_cursor_falls_back_to_the_end_of_the_body() {
+        let write = |raw: &str, prepare: &dyn Fn(&mut Wiki, DocId)| -> String {
+            let mut w = Wiki::empty();
+            w.set_base(
+                &[
+                    ("a.md".to_string(), Some(raw.to_string())),
+                    ("b.md".to_string(), Some("# B\n".to_string())),
+                    ("acme.md".to_string(), Some("# Acme\n".to_string())),
+                ],
+                1,
+            );
+            let id = w.docs.first().expect("a.md").id;
+            w.open(id);
+            prepare(&mut w, id);
+            w.link_open("");
+            w.set_link_target("acme.md");
+            w.link_toggle("is_a");
+            assert!(w.link_commit());
+            w.doc(id).expect("open").raw.clone()
+        };
+        let tail = "\n[[is_a::acme.md|Acme]]\n";
+
+        // the editor is closed: there is no caret to speak of
+        assert!(write("# A\n", &|w, _| w.set_cursor(2)).ends_with(tail));
+        // the caret was measured in ANOTHER document
+        assert!(write("# A\n", &|w, id| {
+            let other = w.docs.iter().find(|d| d.path == "b.md").expect("b.md").id;
+            w.open(other);
+            w.editing = true;
+            w.set_cursor(2);
+            w.open(id);
+        })
+        .ends_with(tail));
+        // inside the front matter, where a link would be a header edit
+        assert!(write("---\ntype: person\n---\n# A\n", &|w, _| {
+            w.editing = true;
+            w.set_cursor(6);
+        })
+        .ends_with(tail));
+        // off a char boundary
+        assert!(write("# Ä\n", &|w, _| {
+            w.editing = true;
+            w.set_cursor(3);
+        })
+        .ends_with(tail));
+    }
+
+    /// Several relations are ONE insertion: a document can BE a thing and
+    /// be PART of another at once, and one Undo takes the whole claim back.
+    #[test]
+    fn several_inline_relations_are_one_insertion_and_one_undo() {
+        let mut w = Wiki::empty();
+        w.set_base(
+            &[
+                ("a.md".to_string(), Some("# A\n".to_string())),
+                ("acme.md".to_string(), Some("# Acme\n".to_string())),
+            ],
+            1,
+        );
+        let id = w.docs.first().expect("a.md").id;
+        w.open(id);
+        w.link_open("");
+        w.set_link_target("acme.md");
+        w.link_toggle("is_a");
+        w.link_toggle("part_of");
+        assert!(w.link_commit());
+        assert_eq!(
+            w.doc(id).expect("open").raw,
+            "# A\n\n[[is_a::acme.md|Acme]] [[part_of::acme.md|Acme]]\n"
+        );
+        assert_eq!(
+            molt_engine::body_links(&w.doc(id).expect("open").raw)
+                .into_iter()
+                .map(|l| (l.target, l.predicate))
+                .collect::<Vec<_>>(),
+            vec![
+                ("acme.md".to_string(), Some("is_a".to_string())),
+                ("acme.md".to_string(), Some("part_of".to_string())),
+            ]
+        );
+        assert_eq!(w.stack_len(), 1);
+        assert!(w.undo().is_ok());
+        assert_eq!(w.doc(id).expect("open").raw, "# A\n");
+    }
+
+    /// The qualified relation has no inline shape, so the header stays
+    /// reachable for it - and its write is parser-verified like every
+    /// other header write here.
+    #[test]
+    fn the_qualified_form_lands_in_the_header_and_one_undo_takes_it_back() {
+        let mut w = Wiki::empty();
+        w.set_base(
+            &[
+                ("a.md".to_string(), Some("# A\n".to_string())),
+                ("acme.md".to_string(), Some("# Acme\n".to_string())),
+            ],
+            1,
+        );
+        let id = w.docs.first().expect("a.md").id;
+        w.open(id);
+        w.link_open("");
+        w.set_link_header(true);
+        w.set_link_target("acme.md");
+        w.link_toggle("works_at");
+        w.set_link_qualifiers("since: 2019, role: CTO");
+        assert!(w.link_commit());
+        let raw = w.doc(id).expect("open").raw.clone();
+        assert_eq!(
+            molt_engine::properties(&raw).0.and_then(|m| m.get("works_at").cloned()),
+            Some(serde_json::json!({
+                "to": "[[acme.md|Acme]]",
+                "since": 2019,
+                "role": "CTO",
+            })),
+            "{raw}"
+        );
+        assert_eq!(w.stack_len(), 1);
+        assert!(w.undo().is_ok());
+        assert_eq!(w.doc(id).expect("open").raw, "# A\n");
+
+        // …and without qualifiers the header write is the one that shipped
+        w.link_open("");
+        w.set_link_header(true);
+        w.set_link_target("acme.md");
+        w.link_toggle("works_at");
+        assert!(w.link_commit());
+        assert_eq!(
+            w.doc(id).expect("open").raw,
+            "---\nworks_at: \"[[acme.md|Acme]]\"\n---\n# A\n"
+        );
+    }
+
+    /// A refusal leaves the document ALONE and says why: a key already
+    /// holding a plain value is never silently converted, and a qualifier
+    /// line outside the subset writes nothing.
+    #[test]
+    fn a_qualified_write_refuses_rather_than_converting() {
+        let start = "---\nworks_at: \"[[x.md]]\"\n---\n# A\n";
+        let mut w = Wiki::empty();
+        w.set_base(
+            &[
+                ("a.md".to_string(), Some(start.to_string())),
+                ("acme.md".to_string(), Some("# Acme\n".to_string())),
+            ],
+            1,
+        );
+        let id = w.docs.first().expect("a.md").id;
+        w.open(id);
+        let draft = |w: &mut Wiki, quals: &str| {
+            w.link_open("");
+            w.set_link_header(true);
+            w.set_link_target("acme.md");
+            w.link_toggle("works_at");
+            w.set_link_qualifiers(quals);
+        };
+
+        draft(&mut w, "since: 2019");
+        assert!(!w.link_commit());
+        assert_eq!(w.link_error(), LINK_ERR_QUALIFIED);
+        assert_eq!(w.doc(id).expect("open").raw, start, "nothing was written");
+
+        // …a line the subset cannot read, a key it rejects, an empty
+        // value, and the object key the write itself occupies
+        for bad in ["since 2019", "1st: x", "since:", "to: x"] {
+            draft(&mut w, bad);
+            assert!(!w.link_commit(), "{bad} must not be written");
+            assert_eq!(w.link_error(), LINK_ERR_QUAL_SYNTAX, "{bad}");
+            assert_eq!(w.doc(id).expect("open").raw, start);
+        }
+        assert_eq!(w.stack_len(), 0, "a refusal is not a change");
+    }
+
+    /// An unclosed code fence masks everything after it, so the claim
+    /// would assert nothing. Refuse and say so rather than write a link
+    /// the index will never see.
+    #[test]
+    fn an_inline_write_that_would_assert_nothing_is_refused() {
+        let start = "# A\n\n```\ncode\n";
+        let mut w = Wiki::empty();
+        w.set_base(
+            &[
+                ("a.md".to_string(), Some(start.to_string())),
+                ("acme.md".to_string(), Some("# Acme\n".to_string())),
+            ],
+            1,
+        );
+        let id = w.docs.first().expect("a.md").id;
+        w.open(id);
+        w.link_open("");
+        w.set_link_target("acme.md");
+        w.link_toggle("is_a");
+        assert!(!w.link_commit());
+        assert_eq!(w.link_error(), LINK_ERR_BODY);
+        assert_eq!(w.doc(id).expect("open").raw, start);
+        assert_eq!(w.stack_len(), 0);
+    }
+
+    /// A header the parser rejects blocks the HEADER form only: an inline
+    /// claim is prose and needs no header at all, so the modal's entry
+    /// points must stay open on such a document.
+    #[test]
+    fn an_unreadable_header_does_not_block_the_inline_form() {
+        let start = "---\nsee_also: [unclosed\n---\n# A\n";
+        let mut w = Wiki::empty();
+        w.set_base(
+            &[
+                ("a.md".to_string(), Some(start.to_string())),
+                ("acme.md".to_string(), Some("# Acme\n".to_string())),
+            ],
+            1,
+        );
+        let id = w.docs.first().expect("a.md").id;
+        w.open(id);
+        assert!(!w.can_write_header());
+        assert!(w.can_write_body());
+
+        w.link_open("");
+        w.set_link_target("acme.md");
+        w.link_toggle("is_a");
+        assert!(w.link_ready());
+        assert!(w.link_commit());
+        assert_eq!(
+            w.doc(id).expect("open").raw,
+            "---\nsee_also: [unclosed\n---\n# A\n\n[[is_a::acme.md|Acme]]\n",
+            "the broken header stays exactly as the member wrote it"
         );
     }
 

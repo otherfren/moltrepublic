@@ -338,7 +338,7 @@ pub fn emit_key(key: &str, items: &[Value]) -> String {
 
 /// One value of the canonical emitter. A flat mapping is the qualified
 /// relation's shape and stays one, in flow form.
-fn emit_scalar(v: &Value) -> String {
+pub fn emit_scalar(v: &Value) -> String {
     match v {
         Value::Number(n) => n.to_string(),
         Value::String(s) => yaml_quote(s),

@@ -1190,11 +1190,11 @@ export component MemoryPane inherits VerticalLayout {
                                         }
                                         // …and the TYPED link: the document
                                         // opens first, because the relation
-                                        // is written into ITS header
+                                        // is written into ITS prose
                                         MenuItem {
                                             title: Strings.mem-menu-relate;
                                             enabled: r.status != 3;
-                                            // no can-write-header gate here:
+                                            // no can-write-body gate here:
                                             // that flag describes the OPEN
                                             // document, and this row is not
                                             // open yet - the lazy base
@@ -1547,10 +1547,12 @@ export component MemoryPane inherits VerticalLayout {
                         // 🔗 — say what this document IS to another one.
                         // An agent has no real-world experience: the
                         // relation has to be written down, not inferred.
+                        // Gated on the BODY: the default write is prose,
+                        // which a header the parser rejects does not block.
                         ToolBtn {
                             glyph: "🔗";
                             name: Strings.mem-tb-relate;
-                            enabled: WikiState.can-write-header;
+                            enabled: WikiState.can-write-body;
                             clicked => {
                                 WikiState.link-open("");
                                 WikiState.link-modal-open = true;
@@ -1787,11 +1789,16 @@ export component MemoryPane inherits VerticalLayout {
                                 width: 100%;
                                 height: 100%;
                                 font-size: Theme.fs-editor;
-                                extra-label: WikiState.can-write-header
+                                extra-label: WikiState.can-write-body
                                     ? Strings.mem-menu-relate : "";
                                 extra-activated => {
                                     WikiState.link-open("");
                                     WikiState.link-modal-open = true;
+                                }
+                                // the caret rides along, so the modal knows
+                                // where the member is writing
+                                changed cursor-byte-offset => {
+                                    WikiState.set-cursor(self.cursor-byte-offset);
                                 }
                                 text <=> WikiState.raw;
                                 changed text => {

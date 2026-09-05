@@ -675,16 +675,46 @@ per-patch provenance).
   changed. `tags` is split off the table since 2026-09-05 and renders as
   coloured pills, the hue derived from the LOWERCASED tag, and a
   `[[path|Name]]` value shows the name half rather than the path.
-- **Authoring the header** — BUILT 2026-09-05
-  (`wiki_tags_and_semantic_links.md`). A document without a header offers
-  `+ Tag` and nothing else: a modal takes several free-text tags and
-  writes `tags: [...]`, leaving the pane in the viewer. Typed relations
-  are authored by "Create semantic link" (toolbar, editor context menu,
-  navigator file menu - the navigator opens the file first, because the
-  relation is written into ITS header): name, target out of the folded
-  base, and any number of relations switched on, each becoming one header
-  key with a quoted `"[[path|Name]]"` value. Existing keys grow into a
-  list; the header is edited LINE-WISE, never re-emitted.
+- **Authoring a relation** — BUILT 2026-09-05
+  (`wiki_tags_and_semantic_links.md`, then `wiki_semantic_gaps.md` §6 and
+  its step 4). A document without a header offers `+ Tag` and nothing
+  else: a modal takes several free-text tags and writes `tags: [...]`,
+  leaving the pane in the viewer. Typed relations are authored by "Create
+  semantic link" (toolbar, editor context menu, navigator file menu - the
+  navigator opens the file first, because the relation is written into
+  THAT document): name, target out of the folded base, and any number of
+  relations switched on. A two-option switch picks the form, and one hint
+  line under it says where the write will land.
+  - **In the text - the DEFAULT**, because a relation belongs in the
+    sentence that asserts it (§6). Every switched-on relation `k` becomes
+    one `[[k::path|Name]]`, several of them separated by a single space in
+    ONE insertion. It lands at the raw editor's caret while the editor is
+    open on this document, else as a new paragraph at the end of the body -
+    the viewer has no caret. Mid-line the insertion keeps exactly one
+    space on each side where the neighbour is not whitespace. A caret that
+    is stale (measured in another tab), off a char boundary or inside the
+    front matter falls back to the end rule; so does a landing spot where
+    `body_links` would not see the link at all (a code block masks it),
+    and a write that still asserts nothing is REFUSED. The result is read
+    back through the INDEX's own parser, so the claim the member drew is
+    the edge the graph gets.
+  - **In the header**, the deliberate detour for the QUALIFIED form, which
+    has no inline shape. Without qualifiers this is the write that shipped
+    2026-09-05: one header key per relation with a quoted `"[[path|Name]]"`
+    value, existing keys growing into a list, the header edited LINE-WISE
+    and never re-emitted. An optional `key: value, key: value` line makes
+    it `k: { to, … }` instead (a value of at most 18 digits stays an
+    Integer, §4.4), under the same parser-verified discipline: the result
+    has to read back as the old header plus exactly this value, or nothing
+    is written. A key already holding a PLAIN value is refused rather than
+    converted - the subset reads a mixed list back, so the member's own
+    value would quietly become a sibling.
+
+  Either write is ONE discrete change on the changeset stack: one Undo
+  takes the whole claim back. The entry points gate on the document's
+  BYTES, not on its header - a header the parser rejects blocks the header
+  form only. A refusal keeps the modal up with its one-line reason and
+  leaves the document untouched.
 - **`[[Name]]` in the body** — BUILT. Two traps found in the building:
   pulldown-cmark splits an unmatched `[[` across several text events, so
   the scan has to run over a block's FINISHED runs (a per-event scan

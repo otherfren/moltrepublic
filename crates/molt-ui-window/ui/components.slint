@@ -811,6 +811,9 @@ export component AppArea inherits Rectangle {
     // field growing one
     in property <string> extra-label;
     callback extra-activated();
+    // the caret, so a caller can insert at the member's writing position
+    // (the wiki's inline relation). A BYTE offset into `text`.
+    out property <int> cursor-byte-offset: input.cursor-position-byte-offset;
     // hand the caret to the inner input (e.g. right after click-to-edit)
     public function focus-input() {
         input.focus();
