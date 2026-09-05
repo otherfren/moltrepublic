@@ -372,9 +372,7 @@ pub fn link_parts(inner: &str) -> LinkParts<'_> {
         None => (inner.trim(), None),
     };
     match left.split_once("::") {
-        Some((pred, name))
-            if front_matter::key_ok(pred.trim()) && !name.trim().is_empty() =>
-        {
+        Some((pred, name)) if front_matter::key_ok(pred.trim()) && !name.trim().is_empty() => {
             LinkParts {
                 predicate: Some(pred.trim()),
                 name: name.trim(),
@@ -401,9 +399,8 @@ pub fn body_links(markdown: &str) -> Vec<BodyLink> {
     for (event, range) in Parser::new(markdown).into_offset_iter() {
         match event {
             Event::Start(Tag::Link { dest_url, .. }) => {
-                let dest = dest_url.to_string();
                 let link = BodyLink {
-                    target: dest,
+                    target: dest_url.to_string(),
                     predicate: None,
                 };
                 if link.target.ends_with(".md") && !out.contains(&link) {
@@ -428,10 +425,7 @@ pub fn body_links(markdown: &str) -> Vec<BodyLink> {
                     target: parts.name.to_string(),
                     predicate: parts.predicate.map(str::to_string),
                 };
-                if !link.target.is_empty()
-                    && !link.target.contains('\n')
-                    && !out.contains(&link)
-                {
+                if !link.target.is_empty() && !link.target.contains('\n') && !out.contains(&link) {
                     out.push(link);
                 }
                 i += end + 4;
@@ -502,8 +496,8 @@ mod tests {
 
     /// The header key IS the predicate, including inside a qualified
     /// relation - `works_at: { to: … }` binds under `works_at`, never
-    /// under `to`. A PLAIN body link carries none. Name resolution is CASE-EXACT,
-    /// like the path resolution it extends.
+    /// under `to`. A PLAIN body link carries none. Name resolution is
+    /// CASE-EXACT, like the path resolution it extends.
     #[test]
     fn the_predicate_is_the_header_key() {
         let g = WikiGraph::build(&tree(&[
