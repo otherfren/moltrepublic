@@ -553,6 +553,17 @@ export global WikiState {
     // the navigator consumes it
     in-out property <int> nav-scroll-to: -1;
     in-out property <bool> has-marked;
+    // the MARKED row's facts: the navigator keeps ONE context menu per
+    // row KIND and builds it from these
+    in-out property <bool> marked-is-folder;
+    in-out property <int> marked-id; // file rows
+    in-out property <string> marked-path; // folder rows
+    in-out property <int> marked-depth;
+    in-out property <int> marked-status;
+    // the row whose inline rename is open (-1 = none): its input exists
+    // only while the row is inside the navigator's window, so the
+    // navigator scrolls to it
+    in-out property <int> nav-renaming-row: -1;
     // the changeset panel: NET counts + the action stack. The panel is
     // visible while the stack is non-empty.
     in-out property <int> cs-added;
