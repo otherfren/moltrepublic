@@ -92,10 +92,11 @@ impl State {
 
     /// Whether and how this share's bytes are on this device: the own
     /// source file, a verified download (the live one or the registry),
-    /// or the mirror's pieces - in that order.
+    /// or the mirror's pieces - in that order. A REPLACED source file is
+    /// no source at all ([`State::share_file_changed`]).
     pub(crate) fn local_copy_of(&self, u: &UploadView) -> LocalCopy {
         if let Some(p) = self.files.share_paths.get(&u.id) {
-            if p.is_file() {
+            if p.is_file() && !self.share_file_changed(&u.id, u.size) {
                 return LocalCopy::Own { path: p.display().to_string() };
             }
         }
@@ -121,6 +122,49 @@ impl State {
             }
             None => LocalCopy::None,
         }
+    }
+
+    /// The mirror's sealed pieces as a byte source - `None` unless this
+    /// seat holds the WHOLE series with a usable key and folder. The
+    /// mirror-first download (D2) and [`State::byte_source`] read the
+    /// same answer.
+    pub(crate) fn mirrored_byte_source(&self, id: &MessageId) -> Option<ByteSource> {
+        let job = self.files.mirror.jobs.get(&id.to_string()).filter(|j| j.complete)?;
+        let key = <[u8; 32]>::try_from(job.key.as_slice()).ok()?;
+        let dir = self.mirror_dir()?.join(id.to_string());
+        Some(ByteSource::Pieces {
+            dir,
+            key,
+            count: job.count,
+            size: job.size,
+        })
+    }
+
+    /// Whether MY share's source file was replaced since `share_file`
+    /// hashed it (R21): size or mtime off the stamp. A share is immutable
+    /// - a new version is a new share - and re-hashing every file on
+    /// every read is not affordable, so the stamp is the cheap witness.
+    /// `false` for anything that is not this seat's own live share.
+    pub(crate) fn share_file_changed(&self, id: &molt_core::MessageId, size: u64) -> bool {
+        let Some(path) = self.files.share_paths.get(id) else {
+            return false;
+        };
+        let Ok(meta) = std::fs::metadata(path) else {
+            return false; // gone is `available: false`, not `changed`
+        };
+        if meta.len() != size {
+            return true;
+        }
+        let Some(&stamp) = self.files.share_stamps.get(id) else {
+            return false; // a share from a build before the stamp
+        };
+        let now = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        stamp != 0 && now != 0 && now != stamp
     }
 
     /// A VERIFIED download's landing, remembered by CONTENT so a restart
@@ -215,31 +259,25 @@ impl State {
             LocalCopy::Own { path } | LocalCopy::Downloaded { path } => {
                 Ok(ByteSource::File(std::path::PathBuf::from(path)))
             }
-            LocalCopy::Mirrored => {
-                let job = self
-                    .files
-                    .mirror
-                    .jobs
-                    .get(&upload.id.to_string())
-                    .ok_or_else(|| MoltError::Engine("upload bytes: the mirror is gone".to_string()))?;
-                let key = <[u8; 32]>::try_from(job.key.as_slice()).map_err(|_| {
-                    MoltError::Engine("upload bytes: the share carries no key".to_string())
-                })?;
-                let dir = self
-                    .mirror_dir()
-                    .ok_or_else(|| MoltError::Engine("upload bytes: no mirror folder".to_string()))?
-                    .join(upload.id.to_string());
-                Ok(ByteSource::Pieces {
-                    dir,
-                    key,
-                    count: job.count,
-                    size: job.size,
-                })
-            }
+            LocalCopy::Mirrored => self
+                .mirrored_byte_source(&upload.id)
+                .ok_or_else(|| MoltError::Engine("upload bytes: the mirror is not readable".to_string())),
             LocalCopy::Partial { .. } | LocalCopy::None => {
                 Err(MoltError::Engine("upload bytes: not on this device".to_string()))
             }
         }
+    }
+}
+
+/// The ONE word [`UploadView::local`] carries - the path half of
+/// [`LocalCopy`] stays with the seat.
+pub(crate) fn local_word(local: &LocalCopy) -> &'static str {
+    match local {
+        LocalCopy::None => "none",
+        LocalCopy::Own { .. } => "own",
+        LocalCopy::Downloaded { .. } => "downloaded",
+        LocalCopy::Mirrored => "mirrored",
+        LocalCopy::Partial { .. } => "partial",
     }
 }
 
@@ -314,6 +352,21 @@ fn open_pieces(
 ) -> Result<Vec<u8>, MoltError> {
     let want = usize::try_from(size).unwrap_or(usize::MAX);
     let mut out: Vec<u8> = Vec::with_capacity(want.min(1 << 20));
+    write_pieces(dir, key, count, size, &mut out)?;
+    Ok(out)
+}
+
+/// The same assembly, streamed into `out` - what the mirror-first
+/// download writes into its `.part` instead of holding the file in RAM
+/// (D2). `size` closes it: the sink holds exactly the file's length.
+pub(crate) fn write_pieces(
+    dir: &std::path::Path,
+    key: &[u8; 32],
+    count: u32,
+    size: u64,
+    out: &mut impl std::io::Write,
+) -> Result<(), MoltError> {
+    let mut written: u64 = 0;
     for index in 0..count {
         let sealed = std::fs::read_to_string(dir.join(index.to_string()))
             .map_err(|e| MoltError::Engine(format!("upload bytes: piece {index}: {e}")))?;
@@ -324,16 +377,19 @@ fn open_pieces(
                 "upload bytes: piece {index} claims {got}"
             )));
         }
-        out.extend_from_slice(&payload);
-        // one piece of slack: a padded last slice is trimmed below, a
-        // series claiming more than its manifest size is not read on
-        if out.len() > want.saturating_add(molt_net::file_plane::PIECE_PAYLOAD_LEN) {
+        // the last slice is padded to the piece length: write only what
+        // the file still owes, and never more than it
+        let owed = usize::try_from(size.saturating_sub(written)).unwrap_or(usize::MAX);
+        if payload.len() > owed.saturating_add(molt_net::file_plane::PIECE_PAYLOAD_LEN) {
             return Err(MoltError::Engine("upload bytes: the pieces exceed the file".to_string()));
         }
+        let take = payload.len().min(owed);
+        out.write_all(&payload[..take])
+            .map_err(|e| MoltError::Engine(format!("upload bytes: piece {index}: {e}")))?;
+        written = written.saturating_add(u64::try_from(take).unwrap_or(0));
     }
-    if out.len() < want {
+    if written < size {
         return Err(MoltError::Engine("upload bytes: the mirror is incomplete".to_string()));
     }
-    out.truncate(want);
-    Ok(out)
+    Ok(())
 }

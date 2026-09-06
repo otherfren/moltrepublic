@@ -1652,6 +1652,13 @@ pub struct WorkspacePrefs {
     /// history (the paths would leak the local filesystem layout).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub shared_files: std::collections::BTreeMap<String, String>,
+    /// The STAMP of each of my shares at share time: chat message id (hex)
+    /// → the source file's mtime (unix seconds; 0 = unreadable). A share is
+    /// immutable (`mcp_agent_friction_fixes_round_3.md` D1) - together with
+    /// the share's own `size` this is what tells a replaced file from the
+    /// one the republic voted on. Node-local like the paths beside it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub shared_file_mtimes: std::collections::BTreeMap<String, u64>,
     /// B2 — the seat's own read state: channel key
     /// ([`ChannelRef::storage_key`]) → the [`MessageId`] (hex) this seat
     /// has read THROUGH. Id-addressed, never a position: positions shift
@@ -1693,6 +1700,7 @@ impl Default for WorkspacePrefs {
             last_backup: None,
             simulated_members: false,
             shared_files: std::collections::BTreeMap::new(),
+            shared_file_mtimes: std::collections::BTreeMap::new(),
             read_cursors: std::collections::BTreeMap::new(),
             local_copies: std::collections::BTreeMap::new(),
             last_seen: std::collections::BTreeMap::new(),
@@ -5971,6 +5979,14 @@ pub enum Reply {
         index_rev: u64,
         /// The base revision of the fold itself.
         wiki_rev: u64,
+        /// The chain height this answer was measured at (R10) - a hygiene
+        /// value is LOCAL truth, and two seats at different heights
+        /// honestly disagree. Additive.
+        #[serde(default)]
+        head: u64,
+        /// The folded base behind it, `None` until this republic has cut.
+        #[serde(default)]
+        base: Option<String>,
     },
     /// What a name could mean ([`Command::WikiResolve`]).
     WikiResolve {
@@ -6009,6 +6025,12 @@ pub enum Reply {
         /// document order.
         #[serde(default)]
         files: Vec<WikiFileRef>,
+        /// The chain height this read was measured at (R10). Additive.
+        #[serde(default)]
+        head: u64,
+        /// The folded base behind it, `None` until this republic has cut.
+        #[serde(default)]
+        base: Option<String>,
     },
     /// The member table (Organization → Members). A struct variant on
     /// purpose: the internally-tagged `reply` repr cannot serialize a bare
@@ -6651,6 +6673,12 @@ pub struct ChainBlockView {
     pub proposal_id: u64,
     /// The m signers, roster order as on the block.
     pub signers: Vec<String>,
+    /// When this node's log first carried the block (unix seconds; 0 =
+    /// not in the log any more, or below a cut). A DISPLAY stamp off the
+    /// local log - the chain itself is unstamped and consensus never
+    /// reads this. Additive.
+    #[serde(default)]
+    pub ts: u64,
 }
 
 /// One `(height, hash)` sample of a chain - what a fork-aware catch-up
@@ -6790,12 +6818,20 @@ pub struct UploadView {
     /// This node's live download of the share, if any (requester side).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download: Option<DownloadView>,
-    /// ONE status word for the relay plane (`file_transfer_nostr.md` §5.5):
-    /// `"relay-held"` (a live series stamp is known — downloads need no
-    /// live sharer), `"sharer-only"` (the first download wakes the
-    /// sharer), `"gone"` (withdrawn and not on the relays). Additive.
+    /// ONE status word for where the bytes can be had, in this
+    /// precedence: `"changed"` (the sharer's file was replaced on disk -
+    /// a share is immutable, so the row is no longer the voted file),
+    /// `"gone"` (nobody holds it any more), `"mirrored"` (a seat other
+    /// than the sharer holds the whole series), `"relay-held"` (a live
+    /// series stamp - a download needs no live sharer), `"sharer-only"`
+    /// (the first download wakes the sharer). Additive.
     #[serde(default)]
     pub availability: String,
+    /// Where THIS seat has the bytes: `"own"` · `"downloaded"` ·
+    /// `"mirrored"` · `"partial"` · `"none"` - the word half of
+    /// [`LocalCopy`] (the path stays with the seat). Additive.
+    #[serde(default)]
+    pub local: String,
     /// A vote pinned this share (`persistent_uploads.md` D1): it never
     /// expires and lists under Persistent Uploads, not Temporary.
     #[serde(default)]

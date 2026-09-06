@@ -54,11 +54,27 @@ fn row(tag: u8, checksum: &str, persistent: bool) -> UploadView {
         checksum: checksum.to_string(),
         download: None,
         availability: "relay-held".to_string(),
+        local: String::new(),
         persistent,
         mirrors: 0,
         mirror_held: 0,
         mirror_of: 4,
     }
+}
+
+/// Overwrite a share's source file but keep its SIZE and mtime - the
+/// immutability stamp cannot see this one, so the re-hash has to.
+fn swap_behind_the_stamp(path: &std::path::Path, bytes: &[u8]) {
+    let meta = std::fs::metadata(path).expect("stat the share source");
+    let was = meta.modified().expect("mtime");
+    assert_eq!(meta.len(), bytes.len() as u64, "the swap must keep the size");
+    std::fs::write(path, bytes).expect("swap");
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .expect("reopen")
+        .set_times(std::fs::FileTimes::new().set_modified(was))
+        .expect("restore the mtime");
 }
 
 fn job(count: u32, held: &[u32], complete: bool) -> MirrorJob {
@@ -346,11 +362,54 @@ fn read_upload_bytes_refuses_before_it_reads() {
         );
 
         // the file is swapped behind the share: a placeholder, never a picture
-        std::fs::write(tmp.path().join("netz.png"), b"a different file").expect("swap");
+        swap_behind_the_stamp(&tmp.path().join("netz.png"), b"a different file");
         let err = w
             .execute(Command::ReadUploadBytes { checksum: full, cap: 1 << 20 })
             .await
             .expect_err("the re-hash refuses");
         assert!(err.to_string().contains("checksum mismatch"), "{err}");
     });
+}
+
+/// R21: a share is IMMUTABLE. A source file replaced on disk is caught on
+/// the next read - the row says `changed` and stops claiming the bytes,
+/// so nothing serves or references the file the republic never voted on.
+#[test]
+fn a_replaced_share_file_reads_changed() {
+    rt().block_on(async {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let w = spawn(one_of_three(), SessionView::default());
+        let id = share_temp_file(&w, tmp.path(), "netz.png", b"not really a png").await;
+        persist(&w, id).await;
+        let row = |ups: Vec<UploadView>| ups.into_iter().find(|u| u.id == id).expect("the row");
+        let before = row(uploads(&w).await);
+        assert!(before.available && before.availability == "sharer-only", "{before:?}");
+        assert_eq!(before.local, "own");
+        let full = before.checksum.clone();
+
+        std::fs::write(tmp.path().join("netz.png"), b"an entirely different picture")
+            .expect("overwrite the share source");
+
+        let after = row(uploads(&w).await);
+        assert!(!after.available, "a replaced file is not the shared one");
+        assert_eq!(after.availability, "changed");
+        assert_eq!(after.local, "none", "the bytes here are not the voted bytes");
+
+        let (up, _, _, local) = resolve(&w, &full[..12]).await.expect("resolves");
+        assert_eq!(up.map(|u| u.id), Some(id), "the reference still NAMES the share");
+        assert!(!matches!(local, LocalCopy::Own { .. }), "but not as a local copy: {local:?}");
+        assert!(
+            w.execute(Command::ReadUploadBytes { checksum: full, cap: 1 << 20 })
+                .await
+                .is_err(),
+            "and it answers no bytes"
+        );
+    });
+}
+
+async fn uploads(w: &WalletHandle) -> Vec<UploadView> {
+    match w.execute(Command::ReadUploads).await.expect("uploads") {
+        Reply::Uploads { uploads } => uploads,
+        other => panic!("unexpected: {other:?}"),
+    }
 }

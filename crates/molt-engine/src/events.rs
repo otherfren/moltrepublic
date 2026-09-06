@@ -431,8 +431,13 @@ impl State {
                 let stamp = self.files.series.entry(*id).or_insert(*at);
                 *stamp = (*stamp).max(*at);
             }
-            WorkspaceEvent::Committed(_)
-            | WorkspaceEvent::ChainRequest { .. }
+            // D4: the block's DISPLAY stamp - the chain carries none, and
+            // the replay refills this from the same envelopes
+            WorkspaceEvent::Committed(block) => {
+                let at = self.chain.block_ts.entry(block.height).or_insert(env.ts);
+                *at = (*at).min(env.ts);
+            }
+            WorkspaceEvent::ChainRequest { .. }
             | WorkspaceEvent::CheckpointProposed { .. }
             | WorkspaceEvent::CheckpointServed { .. }
             | WorkspaceEvent::MlsCommit { .. }
@@ -733,6 +738,7 @@ impl State {
             tokio::spawn(async move { group.handle.shutdown().await });
         }
         self.chain.blocks.clear();
+        self.chain.block_ts.clear();
         self.chain.head = None;
         self.set_checkpoint_blob(None);
         self.chain.pending_served_blob = None;
@@ -784,6 +790,7 @@ impl State {
         self.compacted_at = 0;
         self.parked.clear();
         self.files.share_paths.clear();
+        self.files.share_stamps.clear();
         self.files.downloads.clear();
         self.applied.clear();
         self.bump_applied_epoch();

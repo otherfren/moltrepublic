@@ -147,6 +147,8 @@ pub(super) fn chain_block_view(block: &ChainBlock) -> molt_core::ChainBlockView 
         payload,
         proposal_id,
         signers,
+        // the display stamp is not on the block - the read fills it in
+        ts: 0,
     }
 }
 
