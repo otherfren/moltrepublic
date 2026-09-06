@@ -107,8 +107,32 @@ impl FaceState {
 
 /// What `ReadUploadBytes` refuses above (§4).
 const IMAGE_READ_CAP: u64 = 32 * 1024 * 1024;
-/// One window's budget of decoded pictures.
+/// One window's budget of decoded pictures. A page whose own pictures
+/// exceed it keeps them all (see [`ImageCache::put`]); the budget bounds
+/// what is kept from OTHER pages.
 const IMAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+thread_local! {
+    /// Test knob: the budget the current test runs under.
+    #[cfg(test)]
+    static IMAGE_BUDGET: std::cell::Cell<usize> = const { std::cell::Cell::new(IMAGE_CACHE_BYTES) };
+}
+
+fn image_budget() -> usize {
+    #[cfg(test)]
+    {
+        return IMAGE_BUDGET.with(std::cell::Cell::get);
+    }
+    #[cfg(not(test))]
+    IMAGE_CACHE_BYTES
+}
+
+/// Run the image cache under a smaller budget, so the eviction path is
+/// reachable without decoding 64 MiB.
+#[cfg(test)]
+pub(crate) fn set_image_budget(bytes: usize) {
+    IMAGE_BUDGET.with(|b| b.set(bytes));
+}
 
 /// `WikiBlock::file_state` / `WikiSpan::file_state`. State 3 with an
 /// EMPTY name is the answer still in flight: the card shows the
@@ -167,25 +191,40 @@ impl ImageCache {
         Some(img)
     }
 
-    /// Insert, then evict from the front until the budget holds. The
-    /// entry just inserted is never evicted; the checksums that were are
-    /// returned, so their references can go back to asking.
-    fn put(&mut self, checksum: &str, img: slint::Image, bytes: usize) -> Vec<String> {
+    /// Insert, then evict oldest-first until the budget holds - SKIPPING
+    /// every picture `keep` names. Forgetting one the open page still
+    /// references would have it re-asked, re-read, re-decoded and evict
+    /// the next one, forever; a page whose own pictures exceed the budget
+    /// therefore keeps them all (its own size is the bound). The
+    /// checksums actually dropped are returned, so their references go
+    /// back to asking.
+    fn put(
+        &mut self,
+        checksum: &str,
+        img: slint::Image,
+        bytes: usize,
+        keep: &HashSet<String>,
+    ) -> Vec<String> {
         self.entries.retain(|(c, _, b)| {
-            let keep = c != checksum;
-            if !keep {
+            let stay = c != checksum;
+            if !stay {
                 self.held -= b;
             }
-            keep
+            stay
         });
         self.entries.push_back((checksum.to_string(), img, bytes));
         self.held += bytes;
         let mut dropped = Vec::new();
-        while self.held > IMAGE_CACHE_BYTES && self.entries.len() > 1 {
-            if let Some((c, _, b)) = self.entries.pop_front() {
-                self.held -= b;
-                dropped.push(c);
+        let mut at = 0;
+        while self.held > image_budget() && at < self.entries.len() {
+            let (c, _, b) = &self.entries[at];
+            if c == checksum || keep.contains(c) {
+                at += 1;
+                continue;
             }
+            self.held -= b;
+            dropped.push(c.clone());
+            self.entries.remove(at);
         }
         dropped
     }
@@ -196,15 +235,16 @@ impl ImageCache {
 struct FileRefs {
     /// The wiki base revision the answers were taken at.
     rev: i32,
+    /// Workspace + language the answers were taken under: an answer
+    /// carries a foreign republic's share id and its rendered word, so
+    /// both invalidate every one of them ([`refresh_ref_scope`]).
+    scope: String,
     /// The open page's references: hex → written as a PICTURE.
     wanted: HashMap<String, bool>,
     by_hex: HashMap<String, RefFace>,
     /// Asked, no answer yet - so a sync never asks twice.
     asking: HashSet<String>,
     images: ImageCache,
-    /// The language the stored words were composed in: an answer carries
-    /// its rendered word, so a language switch has to re-resolve.
-    words: String,
 }
 
 thread_local! {
@@ -223,6 +263,27 @@ fn ref_hex(dest: &str) -> Option<String> {
 /// destination, the bridge's own re-resolve triggers hand a bare hex.
 fn ref_key(dest: &str) -> String {
     ref_hex(dest).unwrap_or_else(|| dest.trim().to_ascii_lowercase())
+}
+
+/// Drop every answer the current workspace and language did not produce.
+/// Runs at the TOP of a sync, before the page's references are collected,
+/// so a cleared claim is re-asked exactly once. The page's reference LIST
+/// stays - it is what makes the re-ask happen at all. The decoded
+/// pictures stay too: they are content-addressed and verified on read.
+pub(crate) fn refresh_ref_scope(ui: &AppWindow) {
+    let scope = format!(
+        "{}|{}",
+        ui.global::<WikiState>().get_ws_id(),
+        ui.global::<Strings>().get_mem_file_unknown()
+    );
+    FILE_REFS.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.scope != scope {
+            c.scope = scope;
+            c.by_hex.clear();
+            c.asking.clear();
+        }
+    });
 }
 
 /// The open page's references, and the ask for what is missing. Called
@@ -393,12 +454,6 @@ pub(crate) fn patch_file_rows(ui: &AppWindow) {
     let blocks = s.get_blocks();
     FILE_REFS.with(|c| {
         let mut c = c.borrow_mut();
-        // a question in flight keeps its claim: its answer composes in
-        // the NEW language by itself, and re-asking would only double it
-        if c.words != lex.unknown {
-            c.words = lex.unknown.clone();
-            c.by_hex.clear();
-        }
         for i in 0..blocks.row_count() {
             let Some(mut b) = blocks.row_data(i) else { continue };
             fill_span_faces(&mut c, &b.spans, &lex);
@@ -488,8 +543,11 @@ fn ref_face(
         );
         return (f, None);
     }
-    // an SVG share is never decoded (§4): it renders as a file link
-    let picture = as_image && !u.name.to_ascii_lowercase().ends_with(".svg");
+    // only a raster picture is ever read: a PDF written as `![…]` and an
+    // SVG (never decoded, §4) render as the file card, not as a failure
+    // the member could retry forever
+    let picture =
+        as_image && u.kind == "Image" && !u.name.to_ascii_lowercase().ends_with(".svg");
     if a.local != LocalCopy::None {
         if !picture {
             f.state = file_state::READY;
@@ -535,9 +593,17 @@ pub(crate) fn image_decoded(
         };
         match decoded {
             Some(d) => {
+                let keep: HashSet<String> = c
+                    .wanted
+                    .keys()
+                    .filter_map(|h| c.by_hex.get(h))
+                    .map(|f| f.checksum.clone())
+                    .filter(|s| !s.is_empty())
+                    .collect();
                 let bytes = d.bytes();
-                let dropped = c.images.put(&checksum, d.into_image(), bytes);
-                // an evicted picture's reference goes back to asking
+                let dropped = c.images.put(&checksum, d.into_image(), bytes, &keep);
+                // a picture of ANOTHER page: its reference goes back to
+                // asking (the open page's are never evicted)
                 c.by_hex.retain(|_, f| !dropped.contains(&f.checksum));
                 if let Some(f) = c.by_hex.get_mut(hex) {
                     f.state = file_state::READY;
@@ -772,6 +838,7 @@ fn sync_draft(ui: &AppWindow, w: &wiki::Wiki, face: &mut FaceState, forced: bool
 /// the edit mode changes (`raw_for`), never on the keystroke echo — a
 /// mid-typing rewrite fights the caret. A modal write clears it itself.
 fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, face: &mut FaceState) {
+    refresh_ref_scope(ui);
     let gen = w.generation();
     face.draft_pending = sync_draft(ui, w, face, false);
     let s = ui.global::<WikiState>();

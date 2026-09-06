@@ -516,3 +516,133 @@ fn upload_row() -> UploadRowData {
         mirror_of: 0,
     }
 }
+
+
+/// **A page whose pictures exceed the budget still settles.** Evicting
+/// one the open page references has it re-asked, re-read, re-decoded and
+/// evict the next - a livelock of resolve traffic and repaints that
+/// never ends. The open page's pictures are therefore never evicted.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_page_bigger_than_the_picture_budget_settles_instead_of_looping() {
+    let hexes = ["aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc"];
+    let body: String = hexes
+        .iter()
+        .map(|h| format!("![p](upload:{h})\n\n"))
+        .collect();
+    let (ui, asked) = page_asking(&body);
+    // one 2x2 RGBA decode is 16 bytes: a 24-byte budget holds one
+    set_image_budget(24);
+    for (i, hex) in hexes.iter().enumerate() {
+        let full = format!("{:064x}", i + 1);
+        let want = file_resolved(
+            &ui,
+            hex,
+            Some(resolved(
+                Some(molt_core::UploadView {
+                    checksum: full.clone(),
+                    ..upload("netz.png")
+                }),
+                molt_core::LocalCopy::Mirrored,
+            )),
+        );
+        assert_eq!(want.as_deref(), Some(full.as_str()));
+        image_decoded(&ui, hex, crate::images::decode_wiki_image(&png_2x2()));
+    }
+    assert_eq!(
+        asked.borrow().len(),
+        hexes.len(),
+        "each reference was asked about exactly once"
+    );
+    let blocks = ui.global::<WikiState>().get_blocks();
+    let ready = (0..blocks.row_count())
+        .filter_map(|i| blocks.row_data(i))
+        .filter(|b| b.kind == 5 && b.file_state == file_state::READY)
+        .count();
+    assert_eq!(ready, hexes.len(), "every picture of the page stays ready");
+    // …and it stays settled: another sync asks for nothing
+    for _ in 0..3 {
+        patch_file_rows(&ui);
+    }
+    assert_eq!(asked.borrow().len(), hexes.len(), "nothing is asked again");
+    set_image_budget(usize::MAX);
+}
+
+/// **A workspace switch drops every answer.** The share id in a cached
+/// answer belongs to ONE republic - the download verb would otherwise
+/// address a foreign message, and the jump would filter on a checksum
+/// this republic does not have.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_workspace_switch_re_resolves_even_at_the_same_base_revision() {
+    let (ui, asked) = page_asking(&format!("Intro\n\n![Netz](upload:{HEX})\n"));
+    let g = ui.global::<WikiState>();
+    file_resolved(
+        &ui,
+        HEX,
+        Some(resolved(
+            Some(upload("netz.png")),
+            molt_core::LocalCopy::None,
+        )),
+    );
+    assert_eq!(asked.borrow().len(), 1);
+    assert_eq!(image_block(&ui).file_name.as_str(), "netz.png");
+
+    // the same base revision, another republic
+    g.set_ws_id("other".into());
+    g.set_base_docs(ModelRc::new(VecModel::from(vec![WikiBase {
+        path: "note.md".into(),
+        content: format!("Intro\n\n![Netz](upload:{HEX})\n").into(),
+        loaded: true,
+    }])));
+    g.invoke_base_arrived();
+    let rows = g.get_nav_rows();
+    let id = (0..rows.row_count())
+        .filter_map(|i| rows.row_data(i))
+        .find(|r| r.label.as_str() == "note.md")
+        .expect("the note row")
+        .id;
+    g.invoke_nav_open(id);
+    assert_eq!(asked.borrow().len(), 2, "the other republic is asked itself");
+    assert_eq!(
+        image_block(&ui).file_name.as_str(),
+        "",
+        "the foreign answer is gone - its share id belongs to the old seat"
+    );
+}
+
+
+/// **A PDF written as `![…]` is a card, not a permanent failure.** Only a
+/// raster picture is ever read: decoding a PDF cannot work, so it would
+/// land on the `failed` card with a Reload verb that can never succeed.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_non_picture_written_as_an_image_reads_as_a_card_with_the_jump() {
+    let ui = page(&format!("Intro\n\n![Netz](upload:{HEX})\n"));
+    for (name, kind) in [("bericht.pdf", "PDF"), ("plan.svg", "Image")] {
+        let want = file_resolved(
+            &ui,
+            HEX,
+            Some(resolved(
+                Some(molt_core::UploadView {
+                    kind: kind.to_string(),
+                    ..upload(name)
+                }),
+                molt_core::LocalCopy::Mirrored,
+            )),
+        );
+        assert_eq!(want, None, "{name}: its bytes are never read");
+        let b = image_block(&ui);
+        assert_eq!(b.file_state, file_state::READY, "{name}");
+        assert_eq!(b.file_name.as_str(), name);
+        assert!(
+            i_slint_backend_testing::ElementHandle::find_by_accessible_label(
+                &ui,
+                "Show in Shared Files"
+            )
+            .next()
+            .is_some(),
+            "{name}: the card offers the jump"
+        );
+    }
+}

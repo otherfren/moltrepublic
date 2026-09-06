@@ -541,7 +541,7 @@ component FileCard inherits Rectangle {
         width: parent.width - 20px;
         spacing: 8px;
         Text {
-            text: "🖼️";
+            text: root.b.file-state == 6 ? "📎" : "🖼️";
             font-family: "Twemoji Mozilla";
             font-size: Theme.fs-editor;
             vertical-alignment: top;
@@ -594,7 +594,8 @@ component FileCard inherits Rectangle {
                     WikiState.file-retry(root.ref-hex);
                 }
             }
-            if root.b.file-state == 8: AppButton {
+            // here, or not persistent yet: the one place to look at it
+            if root.b.file-state == 6 || root.b.file-state == 8: AppButton {
                 height: 28px * Theme.ui-scale;
                 pad: 10px;
                 label: Strings.mem-file-show;
@@ -942,8 +943,10 @@ component BrainBlockView inherits HorizontalLayout {
     property <bool> linked: !root.ghost
         && (root.b.spans.length > 1
             || (root.b.spans.length == 1 && root.b.spans[0].link != ""));
-    // a picture only where the bytes are here AND the block still lives
-    property <bool> shows-image: root.b.kind == 5 && root.b.file-state == 6 && !root.ghost;
+    // a picture only where a DECODED one is here and the block still
+    // lives: a PDF or an SVG written as `![…]` reaches READY without one
+    property <bool> shows-image: root.b.kind == 5 && root.b.file-state == 6
+        && !root.ghost && root.b.image.width > 0;
     property <string> file-ref: root.b.spans.length > 0 ? root.b.spans[0].link : "";
     Rectangle {
         width: 3px;
