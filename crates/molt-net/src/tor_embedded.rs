@@ -162,25 +162,24 @@ mod tests {
 
     #[test]
     fn per_server_isolation_yields_distinct_circuits() {
-        // distinct remote hosts get distinct isolation tokens (⇒ distinct
-        // Tor circuits); the same host reuses one (concept §4/§5). Pure — no
-        // network, no bootstrap.
+        // distinct remote hosts, and distinct lanes to one host, get distinct
+        // isolation tokens (⇒ distinct Tor circuits); the same lane+host
+        // reuses one (concept §4/§5, 83d72c39). Pure — no network, no bootstrap.
         let shared = ArtiShared::new();
-        let a1 = shared.token_for("smp.a.example");
-        let a2 = shared.token_for("smp.a.example");
-        let b = shared.token_for("smp.b.example");
-        assert_eq!(a1, a2, "same host must reuse one isolation token/circuit");
-        assert_ne!(
-            a1, b,
-            "distinct hosts must get distinct isolation tokens/circuits"
-        );
+        let a1 = shared.token_for("relay", "a.example");
+        let a2 = shared.token_for("relay", "a.example");
+        let b = shared.token_for("relay", "b.example");
+        let c = shared.token_for("s3", "a.example");
+        assert_eq!(a1, a2, "same lane and host must reuse one isolation token/circuit");
+        assert_ne!(a1, b, "distinct hosts must get distinct isolation tokens/circuits");
+        assert_ne!(a1, c, "distinct lanes to one host must not share a circuit");
     }
 
     #[test]
     fn arti_bootstraps_a_client_to_a_state_dir() {
         // the bootstrap-to-state-dir wiring constructs without a live Tor
         // network: a config pinned to a tempdir state/cache builds cleanly.
-        // (The full bootstrap + dial is the #[ignore]d live-tor test below.)
+        // (The full bootstrap + dial is the #[ignore]d `tor_embedded_smoke` test.)
         let dir = tempfile::tempdir().expect("tempdir");
         let state = dir.path().join("state");
         let cache = dir.path().join("cache");
@@ -193,13 +192,4 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    #[ignore = "live tor: full bootstrap + dial needs the real Tor network"]
-    async fn dialer_arti_dials_an_smp_host() {
-        // end-to-end: bootstrap the embedded client and open a Tor circuit to a
-        // known live host. Ignored by default (needs live Tor + network egress).
-        let shared = ArtiShared::new();
-        let stream = shared.connect("smp.konkin.io", 5223).await;
-        assert!(stream.is_ok(), "arti dial failed: {stream:?}");
-    }
 }

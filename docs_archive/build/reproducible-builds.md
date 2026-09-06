@@ -45,6 +45,12 @@ These inputs determine the artifact bytes:
 - **Rust toolchain version**, pinned exactly by `rust-toolchain.toml`
   (`channel = "1.95.0"`), so the toolchain is part of the source tree rather
   than a release-note footnote.
+- **The feature set**: the script builds `molt-app` with `--features
+  embedded-tor` (release decision 2026-09-06: the published binary carries
+  the in-process arti client and needs no system Tor). That pulls arti's
+  `tor-dirmgr → rusqlite → libsqlite3-sys`, i.e. a bundled C SQLite compiled
+  by `cc` at build time - the C compiler and its flags therefore join the
+  envelope (see below).
 - **Deterministic compile flags** from `[profile.release]`
   (`codegen-units = 1`, `lto = "thin"`, `panic = "abort"`,
   `overflow-checks = true`) and `--remap-path-prefix` (set by the script), so no
@@ -58,6 +64,11 @@ These inputs determine the artifact bytes:
 
 These vary across machines and can cause hash mismatches at the same commit.
 None affect the *correctness* of the binary, only its byte representation.
+
+- **The C compiler behind `libsqlite3-sys`** (since the embedded-Tor release):
+  `cc`'s version and default flags shape the bundled SQLite object code. Two
+  hosts with different `cc` versions can differ here even with an identical
+  Rust toolchain; record `cc --version` beside the other versions in an issue.
 
 - **Host glibc version.** The binary dynamically links the host's glibc; build
   on the same Ubuntu LTS the official build used (named in the release notes). A
