@@ -336,8 +336,9 @@ fn selected_channel_org_flags_only_organization_decisions() {
     ));
 }
 
-/// The compose-collapse flag: only a DECIDED vote's patch channel is
-/// read-only. The engine's enumeration annotation is authoritative when
+/// The decided-vote flag (ballot buttons off, compose row stays): only a
+/// DECIDED vote's patch channel sets it. The engine's enumeration
+/// annotation is authoritative when
 /// present; otherwise the proposal cache decides; group/topic, open
 /// votes and unknown referents (Q4) stay writable.
 #[test]

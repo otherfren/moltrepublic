@@ -3,10 +3,7 @@
 Status: EXECUTED 2026-09-06 - Parts A (A1-A3), B, C and D are on master,
 built by three agents in parallel worktrees and merged in that order.
 Open: A4 (a decline delays the seal - a governance question for the
-republic), the GUI compose line on decided cards (`molt-ui::channels::
-selected_channel_closed` still hides it although the engine accepts the
-write - a molt-ui change with its headless tests), and a latent index race
-found on the way (`refresh_wiki_graph` takes `wiki_graph_dirty` before it
+republic) and a latent index race found on the way (`refresh_wiki_graph` takes `wiki_graph_dirty` before it
 checks that a graph exists; a build installed over a moved tree stays
 stale - one line plus a pinning test, own change-set). Source:
 `mcp_agent_friction_2026-09-06.md` (findings G1-G20). Round 1's fixes (`mcp_agent_friction_fixes.md`) held:

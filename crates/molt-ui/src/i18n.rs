@@ -911,7 +911,6 @@ lexicon! {
     pc_current: "Current", "Ist-Stand";
     pc_proposed: "Proposed", "Soll-Stand";
     pc_discuss: "Discussion", "Diskussion";
-    ch_readonly: "read-only - the vote is decided", "nur lesen - die Abstimmung ist entschieden";
     pc_proposal: "Proposal:", "Vorschlag:";
     pc_img_hint: "Click to view the proposed image", "Klicken zum Anzeigen des vorgeschlagenen Bilds";
     pc_img_missing: "The proposed image could not be decoded.", "Das vorgeschlagene Bild konnte nicht dekodiert werden.";

@@ -315,6 +315,6 @@ Accepted in the 2026-07-10 review — documented, not fixed:
   the vote's lifecycle: it says what the card is, not what the channel
   allows. A vote may carry its reasoning with it — `Approve`/`Decline
   { note }` posts the note into the patch channel BEFORE the vote lands,
-  so the tipping signature never leaves its reason behind. The GUI still
-  collapses the compose row on a decided card
-  (`selected_channel_closed`) — engine-side the write is admitted.
+  so the tipping signature never leaves its reason behind. The GUI keeps
+  the compose row on a decided card as well; `selected_channel_closed`
+  now only takes the ballot buttons and the ballot jump off the card.

@@ -157,11 +157,12 @@ pub(crate) fn channel_display_label(c: &ChannelRef, titles: &HashMap<u64, String
     }
 }
 
-/// Whether the selected channel is a DECIDED vote's discussion — the GUI
-/// collapses the compose row and shows the banner note (the ENGINE takes
-/// the write since 2026-09-06: a review of a decided change is not dead
-/// chat). The engine's channel
-/// annotation ([`ChannelInfo::state`]) is authoritative when present; a
+/// Whether the selected channel is a DECIDED vote's discussion — the
+/// decision card above the chat loses its ballot buttons and the "jump to
+/// the ballot" chip; the compose row stays (the engine takes the write
+/// since 2026-09-06: a review of a decided change is not dead chat). The
+/// engine's channel annotation ([`ChannelInfo::state`]) is authoritative
+/// when present; a
 /// channel not (yet) in the enumeration — or an unannotated ref — falls
 /// back to the UI's proposal cache ([`KnownProposal::fate`]). Group/Topic,
 /// open votes and unknown referents are writable (`false`).
