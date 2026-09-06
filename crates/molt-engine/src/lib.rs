@@ -1523,9 +1523,6 @@ impl State {
             Command::MarkRead { ids } => self.cmd_mark_read(ids),
             Command::DeleteChat { id } => self.cmd_delete_chat(id),
             Command::ShareFile { path, channel } => self.cmd_share_file(path, channel),
-            Command::ShareFileFromExchange { name, channel } => {
-                self.cmd_share_file_from_exchange(name, channel)
-            }
             Command::DownloadFile { id, dest } => self.cmd_download_file(id, dest),
             Command::RemoveFile { id } => self.cmd_remove_file(id),
             Command::MarkChannelRead { channel, up_to } => {
@@ -1881,17 +1878,13 @@ impl State {
                 self.cmd_set_workspace_backup(id, enabled)
             }
             Command::ExportWorkspace { id, dest, passphrase } => {
-                self.cmd_export_workspace(id, dest, passphrase, false)
+                self.cmd_export_workspace(id, dest, passphrase)
             }
             Command::NetExportDone { id, dest, bytes, skipped } => {
                 self.cmd_net_export_done(id, dest, bytes, skipped)
             }
             Command::NetExportFailed { id, error } => self.cmd_net_export_failed(id, error),
             Command::WikiExport { dest, proof } => self.cmd_wiki_export(dest, proof),
-            Command::WikiExportArchive { name, proof } => self.cmd_wiki_export_archive(name, proof),
-            Command::ExportWorkspaceArchive { id, name, passphrase } => {
-                self.cmd_export_workspace_archive(id, name, passphrase)
-            }
             Command::NetWikiExportDone { dest, files, bytes } => {
                 self.cmd_net_wiki_export_done(dest, files, bytes)
             }
