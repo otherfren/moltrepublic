@@ -12,6 +12,7 @@ mod files_tests;
 mod founding_tests;
 mod governance_tests;
 mod join_tests;
+mod proposal_store_tests;
 mod recovery_tests;
 mod session_tests;
 mod upload_refs_tests;

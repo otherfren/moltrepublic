@@ -352,3 +352,78 @@ pub(super) fn reopen(dir: &std::path::Path) -> molt_storage::OpenedWorkspace {
         }
     }
 }
+
+/// A chain-governed signer whose events land in a REAL workspace log —
+/// the fixture a restart test needs: a reopen sees what the log and its
+/// snapshot carried, never what RAM still held.
+pub(crate) fn stored_chain_signer(
+    b: &crate::chain::test_support::Builder,
+    member: &str,
+    roster: &[&str],
+) -> (State, tempfile::TempDir, std::path::PathBuf) {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let seed = molt_storage::seed_entropy(&molt_storage::generate_seed_phrase().expect("phrase"))
+        .expect("entropy");
+    let genesis = molt_core::EventEnvelope {
+        prev_seq: 0,
+        seq: 1,
+        ts: 10,
+        by: member.to_string(),
+        body: molt_core::WorkspaceEvent::Founded {
+            name: "Chess Club".to_string(),
+            rule_m: 2,
+            rule_n: u8::try_from(roster.len()).expect("small roster"),
+            member: member.to_string(),
+            roster: roster.iter().map(|m| (*m).to_string()).collect(),
+            identities: Vec::new(),
+            attestations: Vec::new(),
+            republic_id: b.republic_id.clone(),
+            agenda: "play chess".to_string(),
+            relays: Vec::new(),
+            features: None,
+        },
+    };
+    let ws = molt_storage::create_workspace(tmp.path(), &seed, &genesis).expect("create");
+    let dir = ws.dir().to_path_buf();
+    let mut st = plain_state();
+    st.active = Some(crate::ActiveStorage {
+        id: "w-store".to_string(),
+        dir: dir.clone(),
+        prefs: molt_core::WorkspacePrefs::default(),
+        handle: molt_storage::start_writer(ws),
+    });
+    st.apply(&genesis);
+    st.next_seq = 2;
+    st.adopt_chain(b.blocks.clone());
+    st.identity_sk = Some(b.key(member).clone());
+    (st, tmp, dir)
+}
+
+/// The reopen of a [`stored_chain_signer`] workspace, in
+/// `open_stored_workspace`'s order: snapshot, log tail, chain. Pass
+/// `with_snapshot: false` for the hard-kill shape (the log alone).
+pub(crate) fn reopen_chain_signer(
+    st: State,
+    dir: &std::path::Path,
+    b: &crate::chain::test_support::Builder,
+    member: &str,
+    with_snapshot: bool,
+) -> State {
+    let snap = st.snapshot_now();
+    if let Some(active) = &st.active {
+        active.handle.clone().close(with_snapshot.then_some(snap));
+    }
+    drop(st);
+    let (_opened, loaded) = molt_storage::open_workspace(dir).expect("reopen");
+    let mut back = plain_state();
+    if let Some(s) = loaded.snapshot {
+        back.restore_dump(s.state);
+    }
+    for env in &loaded.tail {
+        back.apply(env);
+    }
+    back.adopt_chain(b.blocks.clone());
+    back.reverify_all_pending();
+    back.identity_sk = Some(b.key(member).clone());
+    back
+}

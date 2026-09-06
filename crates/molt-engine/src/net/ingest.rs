@@ -22,6 +22,32 @@ pub(crate) const PARKED_READS_PER_FRAME: usize = 16;
 
 
 impl State {
+    /// R12: keep a peer's accepted governance event in the OWN log, under
+    /// the peer's name and at the wire stamp (`declined_at` is ts-derived
+    /// and must replay to the same value). Governance gossip used to live
+    /// in RAM alone, so a restart rebuilt it from whatever a catch-up
+    /// re-serve happened to carry. Never re-broadcast: the outbox only
+    /// wants events this node authored.
+    fn keep_peer_event(&mut self, by: MemberId, ts: u64, body: WorkspaceEvent) {
+        let env = self.make_env_at(by, ts, body);
+        self.record(env);
+    }
+
+    /// D10: is this the DECISION LINE of the proposal its channel names?
+    /// `post_decision_summary` mints the id deterministically, so every
+    /// seat that tips posts the same id under its own name — the
+    /// duplicate-id drop is the mechanism, not a finding. Recomputed, not
+    /// trusted: a foreign id in a patch channel stays an audit trail.
+    pub(crate) fn is_decision_summary(&self, msg: &molt_core::ChatMessage) -> bool {
+        let molt_core::ChannelRef::Patch { id } = msg.channel else {
+            return false;
+        };
+        let republic = self.replica.as_ref().map(|r| r.republic_id.clone()).unwrap_or_default();
+        [true, false]
+            .iter()
+            .any(|declined| crate::chat::decision_summary_id(&republic, id.0, *declined) == msg.id)
+    }
+
     /// The post-gate delivery body (the accept point + the kind match) —
     /// called for direct arrivals and for drained G7 park entries alike.
     pub(super) fn deliver_gated(
@@ -99,14 +125,17 @@ impl State {
                     return Ok(Reply::Ack);
                 }
                 if let Some(pos) = self.chat_pos.get(&msg.id) {
-                    match self.chat.get(*pos).map(|stored| stored.from.clone()) {
+                    let held_by = self.chat.get(*pos).map(|stored| stored.from.clone());
+                    match held_by {
                         // documented v1 limitation ("id squatting"): whoever
                         // lands an id first keeps it — but a cross-AUTHOR
                         // collision is either a bug or an attempt to occupy
-                        // a foreign id, so leave an audit trail at WARN
-                        Some(stored_author) if stored_author != from => tracing::warn!(
+                        // a foreign id, so leave an audit trail at WARN.
+                        // D10: unless it is the DECISION LINE, whose id every
+                        // tipping seat mints identically by design.
+                        Some(author) if author != from && !self.is_decision_summary(&msg) => tracing::warn!(
                             %from,
-                            %stored_author,
+                            stored_author = %author,
                             id = %msg.id,
                             "dropping a wire chat message whose duplicate id belongs to another author"
                         ),
@@ -312,12 +341,24 @@ impl State {
                     // wake a sleeping agent harness if this seat's vote is
                     // now awaited (debounced; no-op without a wake command)
                     self.maybe_wake_pending(&from);
-                    self.emit(molt_core::Event::Proposed { id, surface, by: from });
+                    self.emit(molt_core::Event::Proposed { id, surface, by: from.clone() });
+                    // the parked voices this card is about to make real —
+                    // read BEFORE the drain empties the park, so each can be
+                    // kept in the log under its own seat below
+                    let parked: Vec<(MemberId, u64, String)> = self
+                        .chain
+                        .pending_declines
+                        .get(&id.0)
+                        .cloned()
+                        .unwrap_or_default();
+                    let parked_withdraw =
+                        self.chain.pending_withdrawals.get(&id.0).cloned();
                     // a retraction that outran the card stands now
-                    if matches!(
+                    let retracted = matches!(
                         self.register_parked_withdrawal(id.0),
                         crate::proposals::WithdrawOutcome::Withdrawn
-                    ) {
+                    );
+                    if retracted {
                         self.emit(molt_core::Event::Withdrawn { id });
                     }
                     // votes that outran the card (parked declines) stand
@@ -326,6 +367,41 @@ impl State {
                     let drain = self.register_parked_declines(id.0);
                     for by in drain.voices {
                         self.emit(molt_core::Event::Declined { id, by });
+                    }
+                    // R12: the card goes into the OWN log under the peer who
+                    // proposed it (the Chat arm's pattern, gates first), and
+                    // the drained park with it. Without this a foreign card
+                    // lived in RAM alone and a reopen rebuilt it from the WP2
+                    // re-serve — an envelope re-authored under THIS node, so
+                    // every peer's proposal came back as our own. Recorded
+                    // AFTER the drain (the applier drains the park too) and
+                    // never re-broadcast: the outbox only wants our own.
+                    if let Some(payload) = self.proposals.get(&id.0).map(|p| p.payload.clone()) {
+                        self.keep_peer_event(
+                            from.clone(),
+                            envelope.ts,
+                            WorkspaceEvent::Proposed { id, surface, payload },
+                        );
+                    }
+                    for (member, ts, hash) in parked {
+                        let registered = self
+                            .proposals
+                            .get(&id.0)
+                            .is_some_and(|p| p.decliners.contains(&member));
+                        if registered {
+                            self.keep_peer_event(
+                                member.clone(),
+                                ts,
+                                WorkspaceEvent::Declined { id, by: member, hash },
+                            );
+                        }
+                    }
+                    if let Some((who, ts)) = parked_withdraw.filter(|_| retracted) {
+                        self.keep_peer_event(
+                            who.clone(),
+                            ts,
+                            WorkspaceEvent::Withdrawn { id, by: who },
+                        );
                     }
                     if drain.rejected {
                         self.emit(molt_core::Event::Rejected { id });
@@ -352,6 +428,22 @@ impl State {
                     }
                 }
                 self.receive_approval(id.0, &by, height, &sig);
+                // R12: a collected signature is ephemeral — keep the vote
+                // in the own log so a reopen counts it again. Only what
+                // actually landed (the plausibility gates above may have
+                // dropped it), and never re-broadcast (`wants`).
+                let landed = self
+                    .chain
+                    .pending_sigs
+                    .get(&id.0)
+                    .is_some_and(|p| p.sigs.iter().any(|a| a.member == by && a.sig == sig));
+                if landed {
+                    self.keep_peer_event(
+                        from.clone(),
+                        envelope.ts,
+                        WorkspaceEvent::Approved { id, by: by.clone(), height, sig: sig.clone() },
+                    );
+                }
                 self.emit(molt_core::Event::Approved {
                     id,
                     have: self.chain_approval_count(id.0),
@@ -376,7 +468,22 @@ impl State {
                     tracing::warn!(%from, claimed = %by, "dropping a decline claiming another member");
                     return Ok(Reply::Ack);
                 }
-                match self.register_decline(id.0, &from, envelope.ts, &hash) {
+                let outcome = self.register_decline(id.0, &from, envelope.ts, &hash);
+                // R12: a registered voice belongs in the own log (at the
+                // WIRE stamp — `declined_at` is ts-derived and must replay
+                // to the same value); a parked or refused one does not.
+                if matches!(
+                    outcome,
+                    crate::proposals::DeclineOutcome::Rejected
+                        | crate::proposals::DeclineOutcome::Voice
+                ) {
+                    self.keep_peer_event(
+                        from.clone(),
+                        envelope.ts,
+                        WorkspaceEvent::Declined { id, by: by.clone(), hash: hash.clone() },
+                    );
+                }
+                match outcome {
                     crate::proposals::DeclineOutcome::Rejected => {
                         self.emit(molt_core::Event::Rejected { id });
                         // D5: the WIRE tip posts the decision line too —
@@ -411,6 +518,12 @@ impl State {
                     self.register_withdraw(id.0, &from, envelope.ts),
                     crate::proposals::WithdrawOutcome::Withdrawn
                 ) {
+                    // R12: durable like the decline above, at the wire stamp
+                    self.keep_peer_event(
+                        from.clone(),
+                        envelope.ts,
+                        WorkspaceEvent::Withdrawn { id, by: by.clone() },
+                    );
                     self.emit(molt_core::Event::Withdrawn { id });
                 }
             }

@@ -262,6 +262,12 @@ impl State {
                 self.persist_wiki_base(None);
             }
         }
+        // R2: every walk that ran while the base was pending was a no-op
+        // (§4.9.6 demands it), so a reopen left patches the base had long
+        // invalidated sitting open forever. Re-check the moment it answers.
+        if self.chain.wiki_base.is_some() {
+            self.supersede_stale_wiki(None);
+        }
     }
 
     /// The base commitment this holder's own projection carries (K6).

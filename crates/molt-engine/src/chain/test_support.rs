@@ -14,20 +14,20 @@ use serde_json::json;
 /// by a chosen subset — exactly what the real founding + threshold path
 /// will produce.
 #[derive(Clone)]
-pub(super) struct Builder {
-    pub(super) republic_id: String,
-    pub(super) keys: Vec<(String, SigningKey)>,
-    pub(super) blocks: Vec<ChainBlock>,
-    pub(super) head_hash: String,
+pub(crate) struct Builder {
+    pub(crate) republic_id: String,
+    pub(crate) keys: Vec<(String, SigningKey)>,
+    pub(crate) blocks: Vec<ChainBlock>,
+    pub(crate) head_hash: String,
 }
 
 impl Builder {
-    pub(super) fn new(members: &[&str], rule_m: u8) -> Builder {
+    pub(crate) fn new(members: &[&str], rule_m: u8) -> Builder {
         Builder::new_on_relays(members, rule_m, Vec::new())
     }
 
     /// A founding whose genesis ratifies `relays` (R3b ledger tests).
-    pub(super) fn new_on_relays(members: &[&str], rule_m: u8, relays: Vec<String>) -> Builder {
+    pub(crate) fn new_on_relays(members: &[&str], rule_m: u8, relays: Vec<String>) -> Builder {
         let mut keys: Vec<(String, SigningKey)> = Vec::new();
         let mut identities: Vec<MemberIdentity> = Vec::new();
         for (i, m) in members.iter().enumerate() {
@@ -66,7 +66,7 @@ impl Builder {
     }
 
     /// Sign `change` at `height` with each named member and return the block.
-    pub(super) fn seal(&self, height: u64, change: ChainChange, signers: &[&str]) -> ChainBlock {
+    pub(crate) fn seal(&self, height: u64, change: ChainChange, signers: &[&str]) -> ChainBlock {
         let bytes = approval_bytes(&self.republic_id, height, &change);
         let sigs = signers
             .iter()
@@ -90,13 +90,13 @@ impl Builder {
         }
     }
 
-    pub(super) fn push(&mut self, block: ChainBlock) {
+    pub(crate) fn push(&mut self, block: ChainBlock) {
         self.head_hash = block_hash(&self.republic_id, &block);
         self.blocks.push(block);
     }
 
     /// Commit a gated Applied change signed by `signers` at the next height.
-    pub(super) fn commit_applied(&mut self, proposal_id: u64, signers: &[&str]) {
+    pub(crate) fn commit_applied(&mut self, proposal_id: u64, signers: &[&str]) {
         let height = u64::try_from(self.blocks.len()).expect("small chain");
         let change = ChainChange::Applied {
             proposal_id,
@@ -109,7 +109,7 @@ impl Builder {
 
     /// Commit a ratified wiki patch (a new document) — the Memory entries
     /// a folded cut collapses into one commitment (K6).
-    pub(super) fn commit_wiki(&mut self, proposal_id: u64, path: &str, body: &str, signers: &[&str]) {
+    pub(crate) fn commit_wiki(&mut self, proposal_id: u64, path: &str, body: &str, signers: &[&str]) {
         let height = u64::try_from(self.blocks.len()).expect("small chain");
         let lines: Vec<&str> = body.split('\n').collect();
         let mut patch = format!(
@@ -132,7 +132,7 @@ impl Builder {
 
     /// Commit an Organization edit — the surface whose ops occupy
     /// last-write-wins slots (§B.6a), so a checkpoint summarizes them.
-    pub(super) fn commit_org(&mut self, proposal_id: u64, op: &str, value: &str, signers: &[&str]) {
+    pub(crate) fn commit_org(&mut self, proposal_id: u64, op: &str, value: &str, signers: &[&str]) {
         let height = u64::try_from(self.blocks.len()).expect("small chain");
         let change = ChainChange::Applied {
             proposal_id,
@@ -145,7 +145,7 @@ impl Builder {
 
     /// Commit a `Restored` membership block — the seat keeps its anchored
     /// identity key and re-anchors its transport key.
-    pub(super) fn commit_restored(&mut self, member: &str, nostr_pk: &str, signers: &[&str]) {
+    pub(crate) fn commit_restored(&mut self, member: &str, nostr_pk: &str, signers: &[&str]) {
         let height = u64::try_from(self.blocks.len()).expect("small chain");
         let change = ChainChange::Membership {
             op: MembershipOp::Restored,
@@ -160,7 +160,7 @@ impl Builder {
     }
 
     /// A member's signing key.
-    pub(super) fn key(&self, member: &str) -> &SigningKey {
+    pub(crate) fn key(&self, member: &str) -> &SigningKey {
         &self
             .keys
             .iter()
@@ -170,7 +170,7 @@ impl Builder {
     }
 
     /// A member's anchored identity pk (from the genesis roster).
-    pub(super) fn pk(&self, member: &str) -> String {
+    pub(crate) fn pk(&self, member: &str) -> String {
         let ChainChange::Genesis { identities, .. } = &self.blocks[0].change else {
             panic!("block 0 is not a genesis");
         };
@@ -184,7 +184,7 @@ impl Builder {
 }
 
 /// A 2-member chain-governed peer holding only the genesis `b` roots.
-pub(super) fn chain_peer(member: &str, b: &Builder, chain: Vec<ChainBlock>) -> crate::State {
+pub(crate) fn chain_peer(member: &str, b: &Builder, chain: Vec<ChainBlock>) -> crate::State {
     let mut peer = crate::tests::plain_state();
     peer.replica = Some(crate::ReplicaState {
         name: "Chess Club".to_string(),
@@ -203,7 +203,7 @@ pub(super) fn chain_peer(member: &str, b: &Builder, chain: Vec<ChainBlock>) -> c
 
 /// A 2-of-3 chain peer holding the FULL three-member roster (the shared
 /// `chain_peer` pins the founding pair).
-pub(super) fn chain_peer_3(member: &str, b: &Builder) -> crate::State {
+pub(crate) fn chain_peer_3(member: &str, b: &Builder) -> crate::State {
     let mut peer = crate::tests::plain_state();
     peer.replica = Some(crate::ReplicaState {
         name: "Chess Club".to_string(),
@@ -221,7 +221,7 @@ pub(super) fn chain_peer_3(member: &str, b: &Builder) -> crate::State {
 }
 
 /// One wire envelope from `from` (per-sender seq; prev_seq 0 = unordered).
-pub(super) fn wire(peer: &mut crate::State, from: &str, seq: u64, body: WorkspaceEvent) {
+pub(crate) fn wire(peer: &mut crate::State, from: &str, seq: u64, body: WorkspaceEvent) {
     let env = molt_core::EventEnvelope {
         prev_seq: 0,
         seq,
@@ -234,7 +234,7 @@ pub(super) fn wire(peer: &mut crate::State, from: &str, seq: u64, body: Workspac
 }
 
 /// Grow a builder chain to exactly `len` blocks (genesis included).
-pub(super) fn grown_chain(len: usize) -> Builder {
+pub(crate) fn grown_chain(len: usize) -> Builder {
     let mut b = Builder::new(&["petra", "walter"], 2);
     for id in 0..len.saturating_sub(1) {
         b.commit_applied(u64::try_from(id + 100).expect("small id"), &["petra", "walter"]);
@@ -244,14 +244,14 @@ pub(super) fn grown_chain(len: usize) -> Builder {
 }
 
 /// A chain-governed member that can also SIGN (holds its identity key).
-pub(super) fn chain_signer(member: &str, b: &Builder, chain: Vec<ChainBlock>) -> crate::State {
+pub(crate) fn chain_signer(member: &str, b: &Builder, chain: Vec<ChainBlock>) -> crate::State {
     let mut s = chain_peer(member, b, chain);
     s.identity_sk = Some(b.key(member).clone());
     s
 }
 
 /// The restored member's consent bytes, signed with its own roster key.
-pub(super) fn consent_for(b: &Builder, member: &str, nostr_pk: &str) -> String {
+pub(crate) fn consent_for(b: &Builder, member: &str, nostr_pk: &str) -> String {
     molt_storage::identity_sign(
         b.key(member),
         &molt_core::chain::restore_consent_bytes(

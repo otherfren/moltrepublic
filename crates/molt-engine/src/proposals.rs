@@ -972,7 +972,11 @@ impl State {
     /// designed above): terminal on every node, converging like a decline
     /// — but no vote is forged. Proposer-gated twice: here against the own
     /// record, and on every receiver against ITS record + link identity.
-    pub(crate) fn cmd_withdraw(&mut self, proposal: ProposalId) -> Result<Reply, MoltError> {
+    pub(crate) fn cmd_withdraw(
+        &mut self,
+        proposal: ProposalId,
+        note: Option<String>,
+    ) -> Result<Reply, MoltError> {
         let me = self.member();
         {
             let p = self
@@ -986,6 +990,9 @@ impl State {
                 return Err(MoltError::NotTheProposer(proposal));
             }
         }
+        // the reason goes in FIRST, like approve/decline (A2): a retraction
+        // must not leave its reasoning behind the decision
+        self.post_vote_note(proposal, note)?;
         let env = self.make_env(
             me.clone(),
             WorkspaceEvent::Withdrawn {
@@ -1016,7 +1023,9 @@ impl State {
                 tracing::warn!(error = %e, id = proposal.0, "could not post the withdraw summary");
             }
         }
-        Ok(Reply::Ack)
+        // B3: the record as it stands now, like approve/decline — a bare
+        // ack left the caller guessing which card it hit
+        Ok(self.vote_reply(proposal))
     }
 
     /// The withdraw choke point (log applier, wire ingest, park drain) —
@@ -1420,6 +1429,17 @@ impl State {
             if let Some(payload) = self.proposals.get(&id.0).map(|p| p.payload.clone()) {
                 self.post_decision_summary(id.0, &payload, None);
             }
+        }
+    }
+
+    /// R12: re-check every signature the log replay collected. The tail
+    /// replays BEFORE the chain is adopted (`open_stored_workspace`), so
+    /// nothing was verifiable yet; called right after the adoption, this
+    /// is what makes a restored vote count again.
+    pub(crate) fn reverify_all_pending(&mut self) {
+        let ids: Vec<u64> = self.chain.pending_sigs.keys().copied().collect();
+        for id in ids {
+            self.reverify_pending(id);
         }
     }
 
@@ -2571,7 +2591,7 @@ impl State {
             )));
         }
         if let Some(old) = supersedes {
-            self.cmd_withdraw(old)?;
+            self.cmd_withdraw(old, None)?;
         }
         // the propose path recomputes the header half only; the sources
         // this call alone knows ride the reply from here

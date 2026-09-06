@@ -3862,6 +3862,11 @@ pub enum Command {
     Withdraw {
         /// The proposal to pull back.
         proposal: ProposalId,
+        /// Reasoning, posted into the proposal's discussion right BEFORE
+        /// the retraction lands (empty/absent posts nothing) — the
+        /// approve/decline rule.
+        #[serde(default)]
+        note: Option<String>,
     },
     /// Delete a chat message: its text is wiped for everyone and replaced
     /// by a deletion notice naming who deleted it (reactions are dropped).
