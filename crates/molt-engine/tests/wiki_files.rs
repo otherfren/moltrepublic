@@ -218,7 +218,7 @@ async fn an_unpersisted_share_reads_temporary() {
         true,
     )
     .await
-    .expect("a temporary reference writes");
+    .expect("a temporary reference writes under allow_warnings");
     assert_eq!(
         triples(&page_files(&w, "plan.md").await),
         vec![(prefix.clone(), "entwurf.pdf".to_string(), "temporary".to_string())]
@@ -278,14 +278,22 @@ async fn wiki_edit_warns_about_an_unresolved_reference() {
         "{refused}"
     );
 
-    // the temporary share is NOT a warning: the persist vote may follow
-    edit(
+    // D3: a temporary-only match is a refusal too - a page outlives the
+    // chat window, the share does not
+    let refused = match edit(
         &w,
         vec![content("draft.md", &format!("[Entwurf](upload:{prefix})\n"))],
         false,
     )
     .await
-    .expect("a temporary match writes without allow_warnings");
+    {
+        Err(e) => e.to_string(),
+        Ok(()) => panic!("a temporary reference must refuse"),
+    };
+    assert!(
+        refused.contains(&format!("file reference not persistent: upload:{prefix}")),
+        "{refused}"
+    );
 
     // …and the unresolved one writes once the caller accepts it
     edit(
@@ -343,4 +351,46 @@ async fn wiki_health_reports_the_rotting_references_with_their_pages() {
     let files = health(&w, 1).await;
     assert_eq!(files.dangling[0].paths.len(), 1);
     assert_eq!(files.dangling[0].paths_total, 2);
+}
+
+/// **Round 3, D3**: a reference must name a KNOWN, PERSISTENT file. The
+/// round-3 experiment - referencing a share before its persist vote -
+/// refuses, and the SAME call passes once the vote applied. A malformed
+/// hex is told apart from an unknown one.
+#[tokio::test]
+async fn a_reference_before_the_persist_vote_is_refused() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let w = spawn_solo();
+    let (id, full) = share(&w, tmp.path(), "kurve.png", b"not really a png").await;
+    let prefix = full[..12].to_string();
+    let page = vec![content("bild.md", &format!("![Kurve](upload:{prefix})\n"))];
+
+    let refused = match edit(&w, page.clone(), false).await {
+        Err(e) => e.to_string(),
+        Ok(()) => panic!("the temporary reference must refuse"),
+    };
+    assert!(
+        refused.contains(&format!("file reference not persistent: upload:{prefix}")),
+        "{refused}"
+    );
+
+    persist(&w, id).await;
+    edit(&w, page, false).await.expect("the vote makes the same page writable");
+    assert_eq!(
+        triples(&page_files(&w, "bild.md").await),
+        vec![(prefix, "kurve.png".to_string(), "local".to_string())]
+    );
+
+    // a hex the grammar cannot read is malformed, not unknown
+    let refused = match edit(
+        &w,
+        vec![content("kaputt.md", "![X](upload:zzz)\n")],
+        false,
+    )
+    .await
+    {
+        Err(e) => e.to_string(),
+        Ok(()) => panic!("a malformed reference must refuse"),
+    };
+    assert!(refused.contains("file reference malformed: upload:zzz"), "{refused}");
 }

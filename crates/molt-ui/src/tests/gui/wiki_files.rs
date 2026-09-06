@@ -26,6 +26,7 @@ fn upload(name: &str) -> molt_core::UploadView {
         checksum: FULL.to_string(),
         download: None,
         availability: "relay-held".to_string(),
+        local: String::new(),
         persistent: true,
         mirrors: 1,
         mirror_held: 0,

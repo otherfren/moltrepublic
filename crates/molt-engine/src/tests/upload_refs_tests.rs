@@ -67,7 +67,11 @@ fn row(tag: u8, checksum: &str, persistent: bool) -> UploadView {
 fn swap_behind_the_stamp(path: &std::path::Path, bytes: &[u8]) {
     let meta = std::fs::metadata(path).expect("stat the share source");
     let was = meta.modified().expect("mtime");
-    assert_eq!(meta.len(), bytes.len() as u64, "the swap must keep the size");
+    assert_eq!(
+        meta.len(),
+        u64::try_from(bytes.len()).expect("size"),
+        "the swap must keep the size"
+    );
     std::fs::write(path, bytes).expect("swap");
     std::fs::File::options()
         .write(true)

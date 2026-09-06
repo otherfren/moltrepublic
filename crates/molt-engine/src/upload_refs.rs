@@ -141,9 +141,8 @@ impl State {
     }
 
     /// Whether MY share's source file was replaced since `share_file`
-    /// hashed it (R21): size or mtime off the stamp. A share is immutable
-    /// - a new version is a new share - and re-hashing every file on
-    /// every read is not affordable, so the stamp is the cheap witness.
+    /// hashed it (R21): size or mtime off the stamp. Re-hashing every file
+    /// on every read is not affordable, so the stamp is the cheap witness;
     /// `false` for anything that is not this seat's own live share.
     pub(crate) fn share_file_changed(&self, id: &molt_core::MessageId, size: u64) -> bool {
         let Some(path) = self.files.share_paths.get(id) else {

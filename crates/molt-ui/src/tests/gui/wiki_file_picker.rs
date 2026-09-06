@@ -50,6 +50,7 @@ fn upload(name: &str, kind: &str, member: &str, sum: &str, persistent: bool) -> 
         checksum: sum.to_string(),
         download: None,
         availability: "relay-held".to_string(),
+        local: String::new(),
         persistent,
         mirrors: 0,
         mirror_held: 0,
