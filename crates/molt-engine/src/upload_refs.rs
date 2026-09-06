@@ -365,7 +365,10 @@ pub(crate) fn write_pieces(
     size: u64,
     out: &mut impl std::io::Write,
 ) -> Result<(), MoltError> {
-    let mut written: u64 = 0;
+    // `seen` is what the pieces CARRY, `written` what the file owes: one
+    // piece of slack for the padded last slice, and never a byte more
+    let slack = u64::try_from(molt_net::file_plane::PIECE_PAYLOAD_LEN).unwrap_or(u64::MAX);
+    let (mut seen, mut written) = (0u64, 0u64);
     for index in 0..count {
         let sealed = std::fs::read_to_string(dir.join(index.to_string()))
             .map_err(|e| MoltError::Engine(format!("upload bytes: piece {index}: {e}")))?;
@@ -376,12 +379,11 @@ pub(crate) fn write_pieces(
                 "upload bytes: piece {index} claims {got}"
             )));
         }
-        // the last slice is padded to the piece length: write only what
-        // the file still owes, and never more than it
-        let owed = usize::try_from(size.saturating_sub(written)).unwrap_or(usize::MAX);
-        if payload.len() > owed.saturating_add(molt_net::file_plane::PIECE_PAYLOAD_LEN) {
+        seen = seen.saturating_add(u64::try_from(payload.len()).unwrap_or(u64::MAX));
+        if seen > size.saturating_add(slack) {
             return Err(MoltError::Engine("upload bytes: the pieces exceed the file".to_string()));
         }
+        let owed = usize::try_from(size.saturating_sub(written)).unwrap_or(usize::MAX);
         let take = payload.len().min(owed);
         out.write_all(&payload[..take])
             .map_err(|e| MoltError::Engine(format!("upload bytes: piece {index}: {e}")))?;
