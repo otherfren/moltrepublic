@@ -196,8 +196,8 @@ removal, no visible change); 4-6 change behaviour or structure.
    `a_new_chat_line_grows_the_log_model_in_place`,
    `an_unchanged_surfaces_push_paints_nothing`. Measured on the same
    corpus, same flavour, in one run (`surfaces_push_frame_cost_offscreen`,
-   `#[ignore]`d): the wholesale rewrite 397/782 ms over two runs,
-   `apply_surfaces` with an unchanged bundle **drew=false**.
+   `#[ignore]`d): the wholesale rewrite 0.4-0.8 s depending on machine
+   weather, `apply_surfaces` with an unchanged bundle **drew=false**.
 3. **`sync_wiki` diet (F4, F5) - molt-ui only, no .slint change.**
    - `to_draft()` only when the 2 s guard is due AND a generation counter
      (bumped by every mutating verb) moved - never on the keystroke echo.
