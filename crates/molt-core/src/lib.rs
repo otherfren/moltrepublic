@@ -25,6 +25,7 @@ pub mod chain;
 pub mod relay;
 pub mod wiki_fold;
 pub mod wiki_patch;
+pub mod wiki_refs;
 pub use chain::{
     applied_lww_slot, approval_bytes, block_link_bytes, checkpoint_canonical_bytes, ChainBlock,
     ChainChange, CheckpointState, MembershipOp, GENESIS_PREV,
@@ -1659,6 +1660,13 @@ pub struct WorkspacePrefs {
     /// RECEIPTS are a different thing and stay in the log.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub read_cursors: std::collections::BTreeMap<String, String>,
+    /// The LOCAL-COPY registry (`wiki_files_and_images.md` §3.2): full
+    /// sha256 hex → absolute path of a VERIFIED copy on this device (a
+    /// download whose checksum matched, an own share). Read by
+    /// [`Command::ResolveUpload`], cleared per entry when the file is gone.
+    /// Paths, so never wire, never history, never serialized for an agent.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub local_copies: std::collections::BTreeMap<String, String>,
     /// Where this seat keeps the mirrored pieces (`docs_archive/files/mirroring.md`
     /// §3.5); empty = `<workspace root>/../mirror/<republic-id>/`. Private,
     /// any-path: GUI/config-only.
@@ -1686,6 +1694,7 @@ impl Default for WorkspacePrefs {
             simulated_members: false,
             shared_files: std::collections::BTreeMap::new(),
             read_cursors: std::collections::BTreeMap::new(),
+            local_copies: std::collections::BTreeMap::new(),
             last_seen: std::collections::BTreeMap::new(),
             mirror_dir: String::new(),
         }
@@ -3975,6 +3984,25 @@ pub enum Command {
     /// Read every file shared into the chat (Shared Files → Uploads): one
     /// [`UploadView`] per share, newest last (log order).
     ReadUploads,
+    /// Resolve a wiki file reference (`wiki_files_and_images.md` §3.2):
+    /// `checksum` is a sha256 hex, full or a prefix of at least
+    /// [`wiki_refs::PREFIX_MIN`] digits, matched like a git short hash
+    /// against the PERSISTENT shares first. A tool on both surfaces (Read
+    /// scope): an agent meeting `upload:…` in a page gets the pane's answer.
+    ResolveUpload {
+        /// Lowercase hex, 12..=64 digits (other cases fold).
+        checksum: String,
+    },
+    /// Read a referenced file's bytes from the best LOCAL source - the own
+    /// share, the verified download, or the mirror's pieces - re-hashed
+    /// against `checksum` before they are answered (§3.3). GUI-only
+    /// INTERNAL: an agent has `download_file` into its exchange folder.
+    ReadUploadBytes {
+        /// The FULL sha256 hex the bytes must reproduce.
+        checksum: String,
+        /// Refuse anything larger before reading (bytes).
+        cap: u64,
+    },
     /// Read who mirrors what (`docs_archive/files/mirroring.md` §3.4): this seat's
     /// switch and quota, every member's declaration, per share the holders.
     ReadMirror,
@@ -5995,6 +6023,26 @@ pub enum Reply {
     },
     /// Who mirrors what ([`Command::ReadMirror`]).
     Mirror(Box<MirrorView>),
+    /// What a wiki file reference names ([`Command::ResolveUpload`]).
+    UploadResolved {
+        /// The ONE share the prefix names, or `None` (unknown, or
+        /// ambiguous). Set on a `temporary` match too, so a jump can
+        /// show it.
+        upload: Option<UploadView>,
+        /// More than one distinct file carries the prefix - shown, never
+        /// guessed.
+        ambiguous: bool,
+        /// The only match is not persistent (Q2): the page waits for the
+        /// persist vote rather than embed something that expires.
+        temporary: bool,
+        /// Whether, and how, the bytes are on this device.
+        local: LocalCopy,
+    },
+    /// A referenced file's verified bytes ([`Command::ReadUploadBytes`]).
+    UploadBytes {
+        /// The bytes; their sha256 equals the requested checksum.
+        bytes: Vec<u8>,
+    },
     /// The whole shared session state (boxed: it is by far the largest reply).
     Session(Box<SessionView>),
     /// The persistent chain as display views (the Chain-History read),
@@ -6710,6 +6758,36 @@ pub struct UploadView {
     /// The series' data piece count (0 = a legacy share).
     #[serde(default)]
     pub mirror_of: u32,
+}
+
+/// How a referenced file's bytes are on THIS device
+/// ([`Reply::UploadResolved`], `wiki_files_and_images.md` §3.2). Paths are
+/// the seat's own business: the MCP surface presents the kind only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LocalCopy {
+    /// Not here.
+    #[default]
+    None,
+    /// This seat shared it: the source file.
+    Own {
+        /// Absolute path.
+        path: String,
+    },
+    /// A verified download (the registry, or the live one).
+    Downloaded {
+        /// Absolute path.
+        path: String,
+    },
+    /// This seat mirrors it and holds every piece.
+    Mirrored,
+    /// This seat mirrors it and holds `held` of `of` pieces.
+    Partial {
+        /// Verified data pieces held.
+        held: u32,
+        /// The series' data piece count.
+        of: u32,
+    },
 }
 
 /// Who mirrors what ([`Command::ReadMirror`], `docs_archive/files/mirroring.md`

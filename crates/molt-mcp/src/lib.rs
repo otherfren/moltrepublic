@@ -377,6 +377,13 @@ async fn call_tool(
 fn present(name: &str, args: &Value, mut value: Value) -> Result<Value, String> {
     withdrawn_is_a_state(&mut value);
     match name {
+        // the local copy's PATH is the seat's (wiki_files_and_images.md §4)
+        "resolve_upload" => {
+            if let Some(local) = value.get_mut("local").and_then(Value::as_object_mut) {
+                local.remove("path");
+            }
+            Ok(value)
+        }
         "list_proposals" => {
             let with_patch = flag_arg(args, "with_patch");
             if let Some(list) = value.get_mut("proposals").and_then(Value::as_array_mut) {
@@ -1577,6 +1584,24 @@ pub fn tools() -> Vec<ToolDef> {
             build: |_| Ok(Command::ReadUploads),
         },
         ToolDef {
+            name: "resolve_upload",
+            command: "resolve_upload",
+            scope: Scope::Read,
+            description: "What a wiki file reference `upload:<hex>` names (wiki_files_and_images.md): `checksum` is the sha256 hex, full or a prefix of at least 12 digits, matched like a git short hash against the PERSISTENT shares first. `upload` is the one share it names (null when unknown or ambiguous), `ambiguous` says more than one file carries the prefix, `temporary` that the only match is not persistent yet (a page never embeds something that expires - propose `persist` on `files`). `local.kind` says whether this seat holds the bytes (none, own, downloaded, mirrored, partial); the path stays with the seat - use download_file into the exchange folder.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "checksum": { "type": "string", "description": "sha256 hex, 12..=64 digits" }
+                },
+                "required": ["checksum"]
+            }),
+            build: |args| {
+                Ok(Command::ResolveUpload {
+                    checksum: str_arg(args, "checksum")?,
+                })
+            },
+        },
+        ToolDef {
             name: "read_ui_state",
             command: "read_ui_state",
             scope: Scope::Seat,
@@ -2474,7 +2499,11 @@ mod tests {
         // would let any MCP client execute code as the node's user, which is
         // a different thing entirely from acting inside the republic. The
         // wholesale settings paths refuse the key for the same reason.
-        const INTERNAL: [&str; 76] = [
+        const INTERNAL: [&str; 77] = [
+            // a referenced file's bytes off the local disk / mirror store
+            // (wiki_files_and_images.md §3.3): the GUI's picture, an agent
+            // gets download_file into its exchange folder
+            "read_upload_bytes",
             // the HOST POSTURE and the two secrets (MCP audit 2026-08-26 M1/H4):
             // an agent operates the seat, not the machine — GUI / config only
             "set_node_posture",
@@ -3621,6 +3650,7 @@ mod tests {
             read,
             [
                 "read_uploads",
+                "resolve_upload",
                 "wiki_changes",
                 "wiki_get",
                 "wiki_health",

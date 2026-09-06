@@ -14,4 +14,5 @@ mod governance_tests;
 mod join_tests;
 mod recovery_tests;
 mod session_tests;
+mod upload_refs_tests;
 mod workspace_tests;

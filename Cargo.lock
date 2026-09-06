@@ -4781,6 +4781,7 @@ name = "molt-core"
 version = "0.0.1"
 dependencies = [
  "hex",
+ "pulldown-cmark",
  "serde",
  "serde_json",
  "sha2",

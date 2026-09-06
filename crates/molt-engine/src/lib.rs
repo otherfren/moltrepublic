@@ -53,6 +53,7 @@ pub use relay_msg::known_headlines;
 pub use relay_msg::{known_log_shapes, LogShape};
 mod session;
 mod transfer;
+mod upload_refs;
 mod wiki_export;
 mod wiki_index;
 
@@ -1731,6 +1732,8 @@ impl State {
             Command::Status => Ok(Reply::Status(self.status())),
             Command::ReadMembers => Ok(Reply::Members { members: self.members_view() }),
             Command::ReadUploads => Ok(Reply::Uploads { uploads: self.uploads_view() }),
+            Command::ResolveUpload { checksum } => self.cmd_resolve_upload(&checksum),
+            Command::ReadUploadBytes { checksum, cap } => self.cmd_read_upload_bytes(checksum, cap),
             Command::UiPublish { snapshot } => {
                 self.ui_state = Some(snapshot);
                 Ok(Reply::Ack)
