@@ -3834,11 +3834,20 @@ pub enum Command {
     Approve {
         /// The proposal to approve.
         proposal: ProposalId,
+        /// Reasoning, posted into the proposal's discussion right BEFORE
+        /// the vote lands (empty/absent posts nothing): the tipping
+        /// signature must not leave its reason behind.
+        #[serde(default)]
+        note: Option<String>,
     },
     /// Decline a pending proposal.
     Decline {
         /// The proposal to decline.
         proposal: ProposalId,
+        /// Reasoning, posted into the proposal's discussion right BEFORE
+        /// the vote lands (empty/absent posts nothing).
+        #[serde(default)]
+        note: Option<String>,
     },
     /// Pull an OWN pending proposal back (proposer only): it turns
     /// terminal on every node without forging any vote.
@@ -7074,11 +7083,6 @@ pub enum MoltError {
     /// proposal rejects only when enough DISTINCT members decline.
     #[error("proposal {0} already carries this member's decline")]
     AlreadyDeclined(ProposalId),
-    /// A write into the discussion channel of a decided vote (the
-    /// discussion stays readable, linked from the vote's card — but the
-    /// deliberation ended with the vote).
-    #[error("discussion of proposal {0} is read-only - the vote is {1}")]
-    DiscussionClosed(ProposalId, ProposalState),
     /// A settings value failed validation (nothing was stored or written).
     #[error("settings: {0}")]
     Settings(String),

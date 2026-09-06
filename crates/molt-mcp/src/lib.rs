@@ -934,7 +934,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "chat_send",
             command: "chat",
             scope: Scope::Seat,
-            description: "Post a message to the ungated chat. Every message rides the republic's ONE broadcast stream and every member receives it; `channel` merely files it under a view of that stream - a tag, never a boundary or a room (it hides nothing and grants nothing). Kinds: {\"kind\":\"group\"} the all-hands default; {\"kind\":\"patch\",\"id\":N} discussion attached to proposal N; {\"kind\":\"topic\",\"name\":\"…\"} a free named topic, created by simply posting to it. Pass `quote` (the quoted message's 32-char hex id, from read_state) to reply - and quoting a message that lives in another channel is the cross-post idiom: the original stays where it is, the quote carries it across. A review remark on a proposal belongs in ITS patch channel (the `channel` every propose/approve reply names), not in the group.",
+            description: "Post a message to the ungated chat. Every message rides the republic's ONE broadcast stream and every member receives it; `channel` merely files it under a view of that stream - a tag, never a boundary or a room (it hides nothing and grants nothing). Kinds: {\"kind\":\"group\"} the all-hands default; {\"kind\":\"patch\",\"id\":N} discussion attached to proposal N; {\"kind\":\"topic\",\"name\":\"…\"} a free named topic, created by simply posting to it. Pass `quote` (the quoted message's 32-char hex id, from read_state) to reply - and quoting a message that lives in another channel is the cross-post idiom: the original stays where it is, the quote carries it across. A review remark on a proposal belongs in ITS patch channel (the `channel` every propose/approve reply names), not in the group - also after the vote decided. A reason for your own vote goes with it, as approve/decline `note`.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1140,28 +1140,36 @@ pub fn tools() -> Vec<ToolDef> {
             name: "approve",
             command: "approve",
             scope: Scope::Seat,
-            description: "Contribute THIS node's approval toward a pending proposal. On a chain-governed republic it is a real signature gossiped to the mesh (the block seals once m distinct members signed); elsewhere the node records at most its own single approval - it can never approve on behalf of other members. The reply is the record after the vote (state, approvals/threshold, `channel`); approving an already-applied proposal answers the same shape - a late approval is not an error.",
+            description: "Contribute THIS node's approval toward a pending proposal. On a chain-governed republic it is a real signature gossiped to the mesh (the block seals once m distinct members signed); elsewhere the node records at most its own single approval - it can never approve on behalf of other members. Pass `note` to post your reasoning into the proposal's discussion in the same call: it lands BEFORE the vote, so a tipping signature never leaves its reason behind. The reply is the record after the vote (state, approvals/threshold, `channel`); approving an already-applied proposal answers the same shape - a late approval is not an error, and its note still lands.",
             schema: || json!({
                 "type": "object",
-                "properties": { "proposal_id": { "type": "integer" } },
+                "properties": {
+                    "proposal_id": { "type": "integer" },
+                    "note": { "type": "string", "description": "optional: your reasoning, posted into the proposal's discussion before the vote" }
+                },
                 "required": ["proposal_id"]
             }),
             build: |args| Ok(Command::Approve {
                 proposal: ProposalId(u64_arg(args, "proposal_id")?),
+                note: opt_str_arg(args, "note")?,
             }),
         },
         ToolDef {
             name: "decline",
             command: "decline",
             scope: Scope::Seat,
-            description: "Cast this seat's vote AGAINST a pending proposal - ONE voice, not a veto: the proposal turns rejected for everyone only once approval can no longer reach the threshold (declines > n-m). One stance per member; declining after your own approve is allowed and is how a proposer signals retraction when withdraw is unavailable.",
+            description: "Cast this seat's vote AGAINST a pending proposal - ONE voice, not a veto: the proposal turns rejected for everyone only once approval can no longer reach the threshold (declines > n-m). One stance per member; declining after your own approve is allowed and is how a proposer signals retraction when withdraw is unavailable. Pass `note` to post the reason into the proposal's discussion in the same call: it lands BEFORE the vote.",
             schema: || json!({
                 "type": "object",
-                "properties": { "proposal_id": { "type": "integer" } },
+                "properties": {
+                    "proposal_id": { "type": "integer" },
+                    "note": { "type": "string", "description": "optional: your reasoning, posted into the proposal's discussion before the vote" }
+                },
                 "required": ["proposal_id"]
             }),
             build: |args| Ok(Command::Decline {
                 proposal: ProposalId(u64_arg(args, "proposal_id")?),
+                note: opt_str_arg(args, "note")?,
             }),
         },
         ToolDef {
@@ -1182,7 +1190,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "read_state",
             command: "read_state",
             scope: Scope::Seat,
-            description: "Read the projected state of one surface. A CHAT read sends read receipts for the messages it returns (retrieval is the agent's way of seeing them - agents and humans light the same dots; silent while this node's receipts are off), so there is no need to call mark_read after reading. Chat messages each carry their stable 32-char hex `id` - the handle for react_chat, delete_chat, download_file, remove_file and chat_send's `quote` - plus the channel they file under, and the snapshot enumerates every channel seen in the log (`channels`). Each enumerated patch channel carries the vote's lifecycle in `state` (\"proposed\"/\"applied\"/\"rejected\"; absent for group/topic channels and unknown referents): a decided vote's discussion is READ-ONLY - chat_send/share_file into it are refused - but stays readable here. Pass `channel` to get only the messages of that view; channels are tags on the one shared stream, not boundaries, and the enumeration still lists all of them. Pass `view` (chat only) to narrow the read: \"unread\" keeps only the messages after this seat's read cursor; \"today\" and omitting it both give the whole retention window. The filters compose. On gated surfaces, `applied_ids` runs positionally parallel to `applied` and names the proposal each applied entry came from (null = origin unknown: legacy data) - the back-link from an accepted change to its `{\"kind\":\"patch\",\"id\":N}` discussion channel. On `files` the applied entries are the persist/unpersist votes; the tables themselves are read_uploads. On `memory` the whole folded wiki rides along - read a large base paged with wiki_list + wiki_get instead.",
+            description: "Read the projected state of one surface. A CHAT read sends read receipts for the messages it returns (retrieval is the agent's way of seeing them - agents and humans light the same dots; silent while this node's receipts are off), so there is no need to call mark_read after reading. Chat messages each carry their stable 32-char hex `id` - the handle for react_chat, delete_chat, download_file, remove_file and chat_send's `quote` - plus the channel they file under, and the snapshot enumerates every channel seen in the log (`channels`). Each enumerated patch channel carries the vote's lifecycle in `state` (\"proposed\"/\"applied\"/\"rejected\"; absent for group/topic channels and unknown referents); a decided vote's discussion stays writable - the review of an applied change and the post-mortem of a rejected one belong there. Pass `channel` to get only the messages of that view; channels are tags on the one shared stream, not boundaries, and the enumeration still lists all of them. Pass `view` (chat only) to narrow the read: \"unread\" keeps only the messages after this seat's read cursor; \"today\" and omitting it both give the whole retention window. The filters compose. On gated surfaces, `applied_ids` runs positionally parallel to `applied` and names the proposal each applied entry came from (null = origin unknown: legacy data) - the back-link from an accepted change to its `{\"kind\":\"patch\",\"id\":N}` discussion channel. On `files` the applied entries are the persist/unpersist votes; the tables themselves are read_uploads. On `memory` the whole folded wiki rides along - read a large base paged with wiki_list + wiki_get instead.",
             schema: || json!({
                 "type": "object",
                 "properties": {

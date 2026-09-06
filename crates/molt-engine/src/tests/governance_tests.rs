@@ -35,7 +35,7 @@ fn propose_then_threshold_applies() {
             1,
             "no self-cosign: the proposal waits for this node's vote"
         );
-        w.execute(Command::Approve { proposal: id })
+        w.execute(Command::Approve { proposal: id, note: None })
             .await
             .expect("approve");
         match w
@@ -79,7 +79,7 @@ fn approve_never_counts_invented_peer_approvals() {
         };
         for _ in 0..2 {
             let err = w
-                .execute(Command::Approve { proposal: id })
+                .execute(Command::Approve { proposal: id, note: None })
                 .await
                 .expect_err("a second local approval cannot stand in for a peer");
             assert!(
@@ -120,11 +120,11 @@ fn second_local_approval_is_refused_without_chain_governance() {
             Reply::Proposed { id, .. } => id,
             other => panic!("unexpected: {other:?}"),
         };
-        w.execute(Command::Approve { proposal: id })
+        w.execute(Command::Approve { proposal: id, note: None })
             .await
             .expect("my own first approval is real");
         let err = w
-            .execute(Command::Approve { proposal: id })
+            .execute(Command::Approve { proposal: id, note: None })
             .await
             .expect_err("no second local approval");
         assert!(
@@ -253,7 +253,7 @@ fn solo_boot_group_runs_real_one_of_one_governance() {
         // a late vote on the decided proposal answers the record, not an
         // error (B6: with three reviewers it is the normal race)
         let late = w
-            .execute(Command::Approve { proposal: id })
+            .execute(Command::Approve { proposal: id, note: None })
             .await
             .expect("a late approval is not an error");
         assert!(
@@ -429,7 +429,7 @@ fn effective_identity_follows_the_applied_org_ops() {
             ("set_chat_retention", "14 days"),
         ] {
             let id = propose(op, value).await;
-            w.execute(Command::Approve { proposal: id }).await.expect("approve");
+            w.execute(Command::Approve { proposal: id, note: None }).await.expect("approve");
         }
         let st = status(&w).await;
         assert_eq!(st.name, "Neue Gilde");
@@ -442,7 +442,7 @@ fn effective_identity_follows_the_applied_org_ops() {
         assert_eq!(pending[0].proposed, "Dritte Gilde");
         // a bare number parses as days too
         let id = propose("set_chat_retention", "21").await;
-        w.execute(Command::Approve { proposal: id }).await.expect("approve");
+        w.execute(Command::Approve { proposal: id, note: None }).await.expect("approve");
         assert_eq!(status(&w).await.chat_retention_days, 21);
         // nonsense is refused at propose time — an unparseable window
         // must never reach the applied log
@@ -599,18 +599,18 @@ fn current_image_follows_the_applied_org_ops() {
         assert_eq!(status(&w).await.image, "", "no image before any change");
         // 1-of-3: this node's own approval applies the change
         let id = propose("set_image", "team.png", true).await;
-        w.execute(Command::Approve { proposal: id }).await.expect("approve");
+        w.execute(Command::Approve { proposal: id, note: None }).await.expect("approve");
         assert_eq!(status(&w).await.image, "team.png");
         // a follow-up image proposal shows the applied state as Ist-Stand
         let next = propose("set_image", "new.png", true).await;
         let pending = read_surface(&w, Surface::Organization).await.pending;
         assert_eq!(pending[0].current, "team.png");
         assert_eq!(pending[0].proposed, "new.png");
-        w.execute(Command::Approve { proposal: next }).await.expect("approve");
+        w.execute(Command::Approve { proposal: next, note: None }).await.expect("approve");
         assert_eq!(status(&w).await.image, "new.png", "last applied wins");
         // an applied remove_image clears the state again
         let rm = propose("remove_image", "", false).await;
-        w.execute(Command::Approve { proposal: rm }).await.expect("approve");
+        w.execute(Command::Approve { proposal: rm, note: None }).await.expect("approve");
         assert_eq!(status(&w).await.image, "");
         // a set_image without the actual bytes is refused — the mock
         // path-reference era is over (nothing real could be applied)
@@ -732,7 +732,7 @@ fn organization_changes_are_gated_proposals() {
         assert_eq!(pending[0].proposed, "neue Satzung");
         assert_eq!(pending[0].current, "");
         // threshold 1: this node's own approval applies the change
-        w.execute(Command::Approve { proposal: id })
+        w.execute(Command::Approve { proposal: id, note: None })
             .await
             .expect("approve");
         let snap = read_surface(&w, Surface::Organization).await;
@@ -784,7 +784,7 @@ fn pending_views_carry_per_member_votes() {
         );
         assert!(votes.iter().all(|v| v.vote == molt_core::VoteState::Open));
         // my approval flips exactly my entry (the demo member is "me")
-        w.execute(Command::Approve { proposal: id })
+        w.execute(Command::Approve { proposal: id, note: None })
             .await
             .expect("approve");
         let votes = &read_surface(&w, Surface::Memory).await.pending[0].votes;
@@ -834,10 +834,10 @@ fn pending_views_split_by_my_vote_and_count_denied() {
         let voted = propose("voted").await;
         let declined = propose("declined").await;
         // one approval of two: still pending, but no longer waiting on me
-        w.execute(Command::Approve { proposal: voted })
+        w.execute(Command::Approve { proposal: voted, note: None })
             .await
             .expect("approve");
-        w.execute(Command::Decline { proposal: declined })
+        w.execute(Command::Decline { proposal: declined, note: None })
             .await
             .expect("decline");
         let snap = read_surface(&w, Surface::Memory).await;
@@ -884,7 +884,7 @@ fn declined_proposals_surface_with_decliner_and_timestamp() {
             Reply::Proposed { id, .. } => id,
             other => panic!("unexpected: {other:?}"),
         };
-        w.execute(Command::Decline { proposal: id })
+        w.execute(Command::Decline { proposal: id, note: None })
             .await
             .expect("decline");
         let snap = read_surface(&w, Surface::Memory).await;

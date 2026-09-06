@@ -258,3 +258,30 @@ fn the_wiki_query_tools_map_their_arguments() {
     );
     assert!((wiki_neighbors.build)(&json!({ "path": "a.md", "transitive": "yes" })).is_err());
 }
+
+/// A2: the vote tools carry the seat's reasoning. `note` is optional, a
+/// non-string is a typo the caller hears about, and the engine posts it
+/// into the proposal's discussion before the vote.
+#[tokio::test]
+async fn the_vote_tools_map_their_note() {
+    for name in ["approve", "decline"] {
+        let t = tool(name);
+        let cmd = (t.build)(&json!({ "proposal_id": 3 })).expect("builds without a note");
+        let note = match cmd {
+            Command::Approve { note, .. } | Command::Decline { note, .. } => note,
+            other => panic!("{name} built {other:?}"),
+        };
+        assert_eq!(note, None, "{name} without a note");
+        let cmd = (t.build)(&json!({ "proposal_id": 3, "note": "the date is wrong" }))
+            .expect("builds with a note");
+        let note = match cmd {
+            Command::Approve { note, .. } | Command::Decline { note, .. } => note,
+            other => panic!("{name} built {other:?}"),
+        };
+        assert_eq!(note.as_deref(), Some("the date is wrong"));
+        assert!(
+            (t.build)(&json!({ "proposal_id": 3, "note": 7 })).is_err(),
+            "{name} refuses a non-string note"
+        );
+    }
+}

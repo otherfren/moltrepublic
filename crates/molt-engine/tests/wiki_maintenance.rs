@@ -78,7 +78,7 @@ async fn apply_patch(w: &WalletHandle, patch: &str) {
         Reply::Proposed { id, .. } => id,
         other => panic!("unexpected: {other:?}"),
     };
-    w.execute(Command::Approve { proposal: id })
+    w.execute(Command::Approve { proposal: id, note: None })
         .await
         .expect("approve");
 }

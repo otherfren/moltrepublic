@@ -43,14 +43,12 @@ fn a_wire_reaction_on_a_tombstone_records_no_event() {
     assert!(!st.parked.holds(&id), "a KNOWN tombstoned target parks nothing");
 }
 
-/// A wire chat message into a DECIDED vote's discussion still lands in
-/// the log: closed discussions are enforced on the local send paths
-/// only (`cmd_chat` / `cmd_share_file`) — the receive path stays
-/// permissive so every member's log converges even when a peer's
-/// message was in flight while the vote decided (convergence over
-/// enforcement, same posture as the channel-claim coercion above).
+/// A DECIDED vote's discussion takes writes from both sides: the local
+/// post-mortem (2026-09-06, G2/G6 — a review of a decided change is not
+/// dead chat) and a peer's message that was in flight while the vote
+/// decided land in the same log.
 #[test]
-fn a_wire_chat_into_a_closed_discussion_still_lands() {
+fn a_decided_discussion_takes_writes_from_both_sides() {
     // a runtime context: the delivery path may publish to a transport
     // feed / bump watch channels (spawned tasks)
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -81,21 +79,16 @@ fn a_wire_chat_into_a_closed_discussion_still_lands() {
             hash: String::new(),
         },
     });
-    // the local send path refuses…
-    assert!(matches!(
-        st.cmd_chat(
-            "too late".to_string(),
-            None,
-            molt_core::ChannelRef::Patch {
-                id: molt_core::ProposalId(1)
-            },
-        ),
-        Err(molt_core::MoltError::DiscussionClosed(
-            molt_core::ProposalId(1),
-            molt_core::ProposalState::Rejected,
-        ))
-    ));
-    // …but the same message arriving over the wire lands in the log
+    // the decided vote's own discussion takes a local post-mortem…
+    st.cmd_chat(
+        "why it was declined".to_string(),
+        None,
+        molt_core::ChannelRef::Patch {
+            id: molt_core::ProposalId(1),
+        },
+    )
+    .expect("a decided discussion stays writable");
+    // …and so does a peer's message that raced the decision
     let msg = ChatMessage::text(id(7), "peer-1", "was in flight", 102).with_channel(
         molt_core::ChannelRef::Patch {
             id: molt_core::ProposalId(1),
@@ -112,8 +105,8 @@ fn a_wire_chat_into_a_closed_discussion_still_lands() {
         None,
     )
     .expect("a wire delivery never errors");
-    assert_eq!(st.chat.len(), 1, "the wire message landed");
-    assert_eq!(st.chat[0].body, "was in flight");
+    assert_eq!(st.chat.len(), 2, "the wire message landed");
+    assert_eq!(st.chat[1].body, "was in flight");
 }
 
 /// **A hostile stamp on a wire chat never panics a read.** `ts` is the

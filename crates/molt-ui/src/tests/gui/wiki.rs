@@ -316,7 +316,7 @@ fn the_export_dialog_issues_the_command_with_the_picked_path_and_the_proof_flag(
             Reply::Proposed { id, .. } => id,
             other => panic!("unexpected: {other:?}"),
         };
-        w.execute(Command::Approve { proposal: id })
+        w.execute(Command::Approve { proposal: id, note: None })
             .await
             .expect("approve");
     });
@@ -1901,7 +1901,7 @@ fn a_vote_over_unfetched_bytes_is_queued_and_fires_on_arrival() {
             Reply::Proposed { id, .. } => id,
             other => panic!("unexpected: {other:?}"),
         };
-        w.execute(Command::Approve { proposal: id })
+        w.execute(Command::Approve { proposal: id, note: None })
             .await
             .expect("seed approve");
     });

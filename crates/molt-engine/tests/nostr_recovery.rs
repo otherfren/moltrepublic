@@ -107,7 +107,7 @@ async fn approve_value(w: &WalletHandle, value: &str) {
                 p.state == molt_core::ProposalState::Proposed
                     && p.payload.get("value").and_then(|v| v.as_str()) == Some(value)
             }) {
-                w.execute(Command::Approve { proposal: p.id })
+                w.execute(Command::Approve { proposal: p.id, note: None })
                     .await
                     .expect("approve");
                 return;

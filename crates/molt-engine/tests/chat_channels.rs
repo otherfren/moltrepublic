@@ -8,7 +8,7 @@
 //! filter equals the client-side filter of the full read on BOTH engines, a
 //! member reaction in the patch channel converges to the founder over the
 //! mesh — and then the member co-signs, the block seals, and the decided
-//! vote's discussion turns read-only. One test, because the stages build on
+//! vote's discussion still takes the review remark that follows. One test, because the stages build on
 //! one another and the founding is the expensive part. (The MCP-tool-built read equality of §5.2 lives in
 //! `molt-mcp/tests/tool_reads.rs` — mcp → engine is the legal dependency
 //! direction; the engine never depends on a surface crate, not even dev-only.)
@@ -214,8 +214,6 @@ async fn channels_govern_chat_and_filter_coequally_across_instances() {
     );
 
     // ---- (b) both sides chat in Patch(pid) AND Group -------------------
-    // (while the vote is still open: a DECIDED vote's discussion is
-    // read-only — the member co-signs at the end, part (f))
     let patch = ChannelRef::Patch { id: pid };
     a.execute(Command::Chat {
         body: "kickoff".to_string(),
@@ -404,7 +402,7 @@ async fn channels_govern_chat_and_filter_coequally_across_instances() {
     );
 
     // ---- (f) the member co-signs, the block seals — and the decided ----
-    // vote's discussion turns read-only.
+    // vote's discussion outlives the decision.
     // The member co-signs the SAME change with its own identity key (the
     // ritual salts the identity with the member's workspace-id string).
     let b_ws = molt_storage::derive_workspace_id(&b_entropy, "member");
@@ -440,37 +438,32 @@ async fn channels_govern_chat_and_filter_coequally_across_instances() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    // the deliberation ended with the vote: a new local message into the
-    // decided vote's discussion is refused on the founder's engine …
-    assert!(
-        matches!(
-            a.execute(Command::Chat {
-                body: "after the seal".to_string(),
-                quote: None,
-                channel: patch.clone(),
-            })
-            .await,
-            Err(molt_core::MoltError::DiscussionClosed(
-                id,
-                molt_core::ProposalState::Applied,
-            )) if id == pid
-        ),
-        "a committed vote's discussion must be read-only"
-    );
-    // … while the channel stays readable: the deliberation is still there
-    // (two chats + the file offer), PLUS the sealer's decision summary —
-    // the engine-authored System line every decided vote appends
-    // (2026-08-09), which is why the read-only gate is send-side only
+    // the discussion outlives the decision (2026-09-06, G2/G6): a review
+    // remark written after the seal still lands …
+    a.execute(Command::Chat {
+        body: "after the seal".to_string(),
+        quote: None,
+        channel: patch.clone(),
+    })
+    .await
+    .expect("a committed vote's discussion stays writable");
+    // … and the channel reads back whole: the deliberation (two chats +
+    // the file offer), the sealer's decision summary — the engine-authored
+    // System line every decided vote appends (2026-08-09) — and the
+    // post-seal remark last
     let decided = read_chat_snap(&a, Some(patch.clone())).await.applied;
     assert_eq!(
         decided.len(),
-        4,
-        "the decided discussion keeps its history readable, plus the summary"
+        5,
+        "the decided discussion keeps its history, the summary and the remark"
     );
     assert!(
-        decided.last().and_then(|m| m.get("body")).and_then(|b| b.as_str())
-            .is_some_and(|b| b.contains('✓')),
-        "the last line is the decision summary"
+        decided[3].get("body").and_then(|b| b.as_str()).is_some_and(|b| b.contains('✓')),
+        "the summary sits between the deliberation and the remark"
+    );
+    assert_eq!(
+        decided.last().and_then(|m| m.get("body")).and_then(|b| b.as_str()),
+        Some("after the seal")
     );
 
     // (g) of §5.2 — the MCP-tool-built read equality — lives in

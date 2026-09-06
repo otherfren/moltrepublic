@@ -149,7 +149,7 @@ async fn approve_open(w: &WalletHandle) -> usize {
     for p in proposals {
         if p.state == ProposalState::Proposed
             && !p.approved_by_me
-            && w.execute(Command::Approve { proposal: p.id }).await.is_ok()
+            && w.execute(Command::Approve { proposal: p.id, note: None }).await.is_ok()
         {
             n += 1;
         }

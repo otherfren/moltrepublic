@@ -60,6 +60,7 @@ NO_BARE_SCAN_FILES = {
     "crates/molt-core/src/lib.rs": "WikiDoc doc-comment path examples",
     "crates/molt-engine/src/chain/projection_tests.rs": "supersede-walk keystone fixtures",
     "crates/molt-engine/src/chain/checkpoint_tests.rs": "wiki-fold-across-a-cut fixtures",
+    "crates/molt-engine/src/chain/governance_tests.rs": "the superseded-card keystone's patch fixtures are wiki paths",
     "crates/molt-engine/src/chain/verify_tests.rs": "wiki export bundle fixtures",
     "crates/molt-engine/tests/wiki_export.rs": "wiki export keystone fixtures",
     "crates/molt-engine/tests/wiki_query.rs": "the search/traversal keystones' fixtures are wiki paths",

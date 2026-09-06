@@ -124,7 +124,7 @@ async fn wiki_docs(w: &WalletHandle) -> u64 {
 /// approval the threshold needs).
 async fn apply_wiki_patch(w: &WalletHandle, patch: &str) {
     let id = propose_wiki(w, patch).await;
-    w.execute(Command::Approve { proposal: id })
+    w.execute(Command::Approve { proposal: id, note: None })
         .await
         .expect("approve");
     assert!(wiki_docs(w).await > 0, "the patch applied");
@@ -242,7 +242,7 @@ async fn approve_op(w: &WalletHandle, op: &str) {
                 p.state == molt_core::ProposalState::Proposed
                     && p.payload.get("op").and_then(|v| v.as_str()) == Some(op)
             }) {
-                w.execute(Command::Approve { proposal: p.id })
+                w.execute(Command::Approve { proposal: p.id, note: None })
                     .await
                     .expect("approve");
                 return;

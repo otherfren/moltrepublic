@@ -600,7 +600,7 @@ fn a_wire_tipped_decline_posts_its_summary_exactly_once() {
             })
             .count()
     };
-    walter.cmd_decline(ProposalId(4)).expect("own voice, no tip");
+    walter.cmd_decline(ProposalId(4), None).expect("own voice, no tip");
     assert_eq!(summaries(&walter), 0, "one voice does not decide");
     wire(
         &mut walter,
@@ -773,7 +773,7 @@ fn open_governance_reserves_the_own_decline() {
             payload: json!({ "op": "set_name", "value": "Open" }),
         },
     );
-    peer.cmd_decline(ProposalId(7)).expect("decline");
+    peer.cmd_decline(ProposalId(7), None).expect("decline");
     // a card that went Rejected (petra's wire decline tips it)
     wire(
         &mut peer,
@@ -785,7 +785,7 @@ fn open_governance_reserves_the_own_decline() {
             payload: json!({ "op": "set_name", "value": "Dead" }),
         },
     );
-    peer.cmd_decline(ProposalId(8)).expect("decline");
+    peer.cmd_decline(ProposalId(8), None).expect("decline");
     wire(
         &mut peer,
         "petra",
@@ -918,10 +918,10 @@ fn a_decline_after_the_own_approval_still_works() {
             payload: json!({ "op": "set_name", "value": "Erst ja" }),
         },
     );
-    peer.cmd_approve(ProposalId(9)).expect("approve signs");
+    peer.cmd_approve(ProposalId(9), None).expect("approve signs");
     let p = peer.proposals.get(&9).cloned().expect("card");
     assert!(peer.view(9, &p).approved_by_me, "the signature is collected");
-    peer.cmd_decline(ProposalId(9)).expect("the withdrawal path stays open");
+    peer.cmd_decline(ProposalId(9), None).expect("the withdrawal path stays open");
     let p = peer.proposals.get(&9).cloned().expect("card");
     let v = peer.view(9, &p);
     assert!(v.declined_by_me, "the stance the frontend grays on");
@@ -1158,9 +1158,9 @@ fn a_declined_own_approval_is_not_re_signed_at_the_rebase() {
             payload: json!({ "op": "add_note", "id": 1 }),
         },
     );
-    walter.cmd_approve(ProposalId(1)).expect("walter approves");
+    walter.cmd_approve(ProposalId(1), None).expect("walter approves");
     assert!(walter.chain.own_approvals.contains(&1));
-    walter.cmd_decline(ProposalId(1)).expect("…then retracts");
+    walter.cmd_decline(ProposalId(1), None).expect("…then retracts");
     assert!(!walter.chain.own_approvals.contains(&1), "the register forgets");
     wire(
         &mut walter,
@@ -1389,8 +1389,8 @@ fn an_approve_retracts_the_standing_own_decline() {
         .iter()
         .find(|(m, _)| m == "walter")
         .map(|(_, sk)| sk.clone());
-    peer.cmd_decline(ProposalId(9)).expect("decline");
-    peer.cmd_approve(ProposalId(9)).expect("the newest stance wins");
+    peer.cmd_decline(ProposalId(9), None).expect("decline");
+    peer.cmd_approve(ProposalId(9), None).expect("the newest stance wins");
     let p = peer.proposals.get(&9).cloned().expect("card");
     let v = peer.view(9, &p);
     assert!(!v.declined_by_me, "the decline is retracted");
@@ -1428,7 +1428,7 @@ fn an_over_subscribed_voter_still_reads_approved_on_the_applied_card() {
             payload: json!({ "op": "add_note", "id": 1 }),
         },
     );
-    peer.cmd_approve(ProposalId(1)).expect("walter signs - 1 of 2 locally");
+    peer.cmd_approve(ProposalId(1), None).expect("walter signs - 1 of 2 locally");
     // the block seals from the other side, signed by petra and dora
     b.commit_applied(1, &["petra", "dora"]);
     peer.receive_block(b.blocks[1].clone());
@@ -1506,6 +1506,163 @@ fn an_applied_card_reports_the_block_signers() {
     assert_eq!(snap.accepted.len(), 1, "the applied card is in the snapshot");
     assert_eq!(snap.accepted[0].id, ProposalId(1));
     assert_eq!(snap.accepted[0].approvals, 2, "with its block-sourced voters");
+}
+
+/// **G17 (2026-09-06): a terminal card keeps the votes it had.** The
+/// collected signatures are ephemeral bookkeeping — dropped at the
+/// decision, swept at the next re-base — and the vote table was rebuilt
+/// from them, so every negatively decided card read `open` for everyone,
+/// the proposer included. A post-mortem could no longer see who voted
+/// how. Each terminal transition stashes the voter set now (D6), and the
+/// table reads from the stash once the card is terminal.
+#[test]
+fn a_withdrawn_card_keeps_the_votes_it_had() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut walter = chain_peer_3("walter", &b);
+    walter.identity_sk = Some(b.key("walter").clone());
+    let id = match walter
+        .cmd_propose(Surface::Memory, json!({ "op": "add_note", "title": "mine" }))
+        .expect("propose")
+    {
+        Reply::Proposed { id, .. } => id,
+        other => panic!("unexpected reply {other:?}"),
+    };
+    walter.cmd_withdraw(id).expect("withdraw");
+    let p = walter.proposals.get(&id.0).cloned().expect("card");
+    assert_eq!(p.state, ProposalState::Rejected);
+    let v = walter.view(id.0, &p);
+    let vote_of = |m: &str| {
+        v.votes
+            .iter()
+            .find(|mv| mv.member == m)
+            .map(|mv| mv.vote)
+            .expect("roster row")
+    };
+    assert_eq!(
+        vote_of("walter"),
+        molt_core::VoteState::Approved,
+        "the proposer's own vote survives the pull-back"
+    );
+    assert_eq!(vote_of("petra"), molt_core::VoteState::Open);
+    assert!(v.approved_by_me, "the withdrawing proposer had voted");
+    assert_eq!(v.approvals, 1, "the count freezes with the table");
+}
+
+/// The rejected twin of the withdraw case, and the one the field
+/// measured (G17): the re-base at the NEXT block sweeps the stale
+/// signatures, so even a card whose collection survived its own decision
+/// read `open` moments later.
+#[test]
+fn a_rejected_card_keeps_the_votes_it_had() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut walter = chain_peer_3("walter", &b);
+    walter.identity_sk = Some(b.key("walter").clone());
+    let id = match walter
+        .cmd_propose(Surface::Organization, json!({ "op": "set_name", "value": "Mine" }))
+        .expect("propose")
+    {
+        Reply::Proposed { id, .. } => id,
+        other => panic!("unexpected reply {other:?}"),
+    };
+    // 2 > n − m = 1: two declines are terminal
+    for (seq, who) in [(1, "petra"), (1, "dora")] {
+        wire(
+            &mut walter,
+            who,
+            seq,
+            WorkspaceEvent::Declined {
+                id,
+                by: who.to_string(),
+                hash: String::new(),
+            },
+        );
+    }
+    assert_eq!(
+        walter.proposals.get(&id.0).map(|p| p.state),
+        Some(ProposalState::Rejected)
+    );
+    // …and the next block re-bases every collected signature away
+    b.commit_applied(77, &["petra", "dora"]);
+    walter.receive_block(b.blocks[1].clone());
+
+    let p = walter.proposals.get(&id.0).cloned().expect("card");
+    let v = walter.view(id.0, &p);
+    let vote_of = |m: &str| {
+        v.votes
+            .iter()
+            .find(|mv| mv.member == m)
+            .map(|mv| mv.vote)
+            .expect("roster row")
+    };
+    assert_eq!(
+        vote_of("walter"),
+        molt_core::VoteState::Approved,
+        "the proposer's own vote survives the rejection"
+    );
+    assert_eq!(vote_of("petra"), molt_core::VoteState::Declined);
+    assert_eq!(vote_of("dora"), molt_core::VoteState::Declined);
+    assert_eq!(v.approvals, 1, "the count freezes with the table");
+}
+
+/// The third negative end state: a pending wiki patch the moved base
+/// retired. Its voters are display data like every other terminal
+/// card's.
+#[test]
+fn a_superseded_card_keeps_the_votes_it_had() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    b.commit_wiki(1, "a.md", "A", &["petra", "walter"]);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    let edit_aa = "diff --git a/a.md b/a.md\n--- a/a.md\n+++ b/a.md\n@@ -1,1 +1,1 @@\n-A\n+AA\n";
+    walter.receive_proposed(
+        11,
+        Surface::Memory,
+        json!({ "op": "wiki_patch", "summary": "~1", "value": edit_aa }),
+        "petra",
+    );
+    walter.cmd_approve(ProposalId(11), None).expect("walter signs - 1 of 2");
+    // the base moves under the pending patch: the same line, another value
+    let edit_ab = "diff --git a/a.md b/a.md\n--- a/a.md\n+++ b/a.md\n@@ -1,1 +1,1 @@\n-A\n+B\n";
+    let height = u64::try_from(b.blocks.len()).expect("small chain");
+    let block = b.seal(
+        height,
+        ChainChange::Applied {
+            proposal_id: 12,
+            surface: Surface::Memory,
+            payload: json!({ "op": "wiki_patch", "summary": "~1", "value": edit_ab }),
+        },
+        &["petra", "walter"],
+    );
+    b.push(block.clone());
+    walter.receive_block(block);
+
+    let p = walter.proposals.get(&11).cloned().expect("card");
+    assert!(p.superseded, "the stale patch retired");
+    let v = walter.view(11, &p);
+    assert_eq!(
+        v.votes
+            .iter()
+            .find(|mv| mv.member == "walter")
+            .map(|mv| mv.vote)
+            .expect("roster row"),
+        molt_core::VoteState::Approved,
+        "the vote stood when the base moved"
+    );
+    assert!(v.approved_by_me);
 }
 
 /// **The `seen` trap.** Once a checkpoint drops the history below the cut,
@@ -1800,6 +1957,54 @@ fn a_sealed_vote_appends_its_summary_to_the_discussion() {
     );
 }
 
+/// **A2 (2026-09-06): the tipping seat's reason rides with its vote.** At
+/// m of n the second signature seals in the same command, so a note
+/// posted after the vote would have raced the decision (G2). `approve
+/// {note}` posts it FIRST: the reason stands above the decision marker.
+#[test]
+fn a_tipping_approval_posts_its_note_before_the_decision() {
+    let b = Builder::new(&["petra", "walter"], 2);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    let mut petra = chain_signer("petra", &b, b.blocks.clone());
+    walter
+        .cmd_propose(Surface::Memory, json!({ "op": "add_note", "title": "minutes" }))
+        .expect("proposes");
+    let (id, surface, payload) = {
+        let (id, rec) = walter.proposals.iter().next().expect("open proposal");
+        (*id, rec.surface, rec.payload.clone())
+    };
+    petra.receive_proposed(id, surface, payload, "walter");
+    let walter_sig = walter
+        .chain.pending_sigs
+        .get(&id)
+        .expect("walter's pending set")
+        .sigs
+        .iter()
+        .find(|a| a.member == "walter")
+        .expect("walter signed")
+        .sig
+        .clone();
+    petra.receive_approval(id, "walter", 1, &walter_sig);
+    // petra's approval is the tipping one — it seals inside this command
+    petra
+        .cmd_approve(ProposalId(id), Some("  read the sources - correct  ".to_string()))
+        .expect("approves");
+    assert_eq!(petra.chain.head.as_ref().expect("head").height, 1, "sealed at m");
+    let lines: Vec<(molt_core::ChatKind, String)> = petra
+        .chat_visible()
+        .filter(|m| matches!(&m.channel, molt_core::ChannelRef::Patch { id: p } if p.0 == id))
+        .map(|m| (m.kind, m.body.clone()))
+        .collect();
+    assert_eq!(lines.len(), 2, "the note and the decision summary: {lines:?}");
+    assert_eq!(
+        lines[0],
+        (molt_core::ChatKind::User, "read the sources - correct".to_string()),
+        "the reason is the seat's own message, trimmed, and it comes first"
+    );
+    assert_eq!(lines[1].0, molt_core::ChatKind::System);
+    assert!(lines[1].1.contains('\u{2713}'), "the decision marker follows: {lines:?}");
+}
+
 /// The negative outcome gets the same treatment: the decline that makes
 /// approval unreachable posts the summary, naming the decliner.
 #[test]
@@ -1818,7 +2023,7 @@ fn a_terminal_decline_appends_its_summary_to_the_discussion() {
         other => panic!("unexpected reply {other:?}"),
     };
     // n = 2, m = 2: one decline makes the threshold unreachable
-    walter.cmd_decline(id).expect("declines");
+    walter.cmd_decline(id, None).expect("declines");
     let sum = walter
         .chat_visible()
         .find(|m| {

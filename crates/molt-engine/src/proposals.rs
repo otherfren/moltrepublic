@@ -818,38 +818,51 @@ impl State {
         p.approvals > 0
     }
 
-    pub(crate) fn cmd_approve(&mut self, proposal: ProposalId) -> Result<Reply, MoltError> {
-        let operator_already_voted = {
+    pub(crate) fn cmd_approve(
+        &mut self,
+        proposal: ProposalId,
+        note: Option<String>,
+    ) -> Result<Reply, MoltError> {
+        let (late, operator_already_voted) = {
             let p = self
                 .proposals
                 .get(&proposal.0)
                 .ok_or(MoltError::UnknownProposal(proposal))?;
             if p.state == ProposalState::Applied {
                 // B6: a late approval changes nothing - with three
-                // reviewers it is the normal race, not an error
-                return Ok(self.vote_reply(proposal));
+                // reviewers it is the normal race, not an error. Its NOTE
+                // still lands: the late reviewer's finding needs a room
+                // (G6), and the discussion is open (A1).
+                (true, false)
+            } else {
+                if p.state != ProposalState::Proposed {
+                    return Err(MoltError::AlreadyTerminal(proposal, p.state));
+                }
+                // D7's approve half (review 2026-08-12): the propose gate is
+                // local, a peer's proposal on a disabled surface still lands in
+                // the pool — but no signature leaves this node for a surface the
+                // charter has not enabled, so it can never reach m honest seats.
+                // (The nav hides such a surface, so a GUI member could not even
+                // SEE the card it would be co-signing.)
+                self.require_feature(p.surface)?;
+                // a Files vote is checked against THIS seat's own view of the
+                // share - the payload arrived over the wire with no such check
+                if p.surface == Surface::Files {
+                    self.check_files_vote(&p.payload)?;
+                }
+                // D2 (last vote counts, decided 2026-08-16): an approve over
+                // the own standing decline RETRACTS the decline below — the
+                // newest stance wins, mirroring the decline's signature
+                // retraction in `register_decline`.
+                (false, Self::operator_approved(p))
             }
-            if p.state != ProposalState::Proposed {
-                return Err(MoltError::AlreadyTerminal(proposal, p.state));
-            }
-            // D7's approve half (review 2026-08-12): the propose gate is
-            // local, a peer's proposal on a disabled surface still lands in
-            // the pool — but no signature leaves this node for a surface the
-            // charter has not enabled, so it can never reach m honest seats.
-            // (The nav hides such a surface, so a GUI member could not even
-            // SEE the card it would be co-signing.)
-            self.require_feature(p.surface)?;
-            // a Files vote is checked against THIS seat's own view of the
-            // share - the payload arrived over the wire with no such check
-            if p.surface == Surface::Files {
-                self.check_files_vote(&p.payload)?;
-            }
-            // D2 (last vote counts, decided 2026-08-16): an approve over
-            // the own standing decline RETRACTS the decline below — the
-            // newest stance wins, mirroring the decline's signature
-            // retraction in `register_decline`.
-            Self::operator_approved(p)
         };
+        // A2: the reason goes in FIRST — a tipping signature must never
+        // leave its reasoning behind the decision
+        self.post_vote_note(proposal, note)?;
+        if late {
+            return Ok(self.vote_reply(proposal));
+        }
         {
             let me = self.member();
             if let Some(p) = self.proposals.get_mut(&proposal.0) {
@@ -912,6 +925,23 @@ impl State {
             }
             None => Reply::Ack,
         }
+    }
+
+    /// A2 (2026-09-06): the reasoning a seat votes WITH, posted into the
+    /// proposal's discussion before the vote lands. Blank/absent posts
+    /// nothing; a note that cannot be recorded fails the whole command
+    /// rather than dropping the reason silently.
+    fn post_vote_note(
+        &mut self,
+        proposal: ProposalId,
+        note: Option<String>,
+    ) -> Result<(), MoltError> {
+        let Some(body) = note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()) else {
+            return Ok(());
+        };
+        let me = self.member();
+        self.post_message(me, body, None, molt_core::ChannelRef::Patch { id: proposal })?;
+        Ok(())
     }
 
     // WITHDRAW ("pull back", not built yet — the ProposalCard shows the
@@ -1020,6 +1050,8 @@ impl State {
         p.state = ProposalState::Rejected;
         p.withdrawn = true;
         p.declined_at = ts; // retention + the "when" label; declined_by stays empty
+        // G17: freeze the voters BEFORE the collection is dropped
+        self.stash_voted(id);
         self.chain.pending_sigs.remove(&id);
         self.chain.own_approvals.remove(&id);
         self.chain.pending_declines.remove(&id);
@@ -1034,7 +1066,11 @@ impl State {
         self.register_withdraw(id, &by, ts)
     }
 
-    pub(crate) fn cmd_decline(&mut self, proposal: ProposalId) -> Result<Reply, MoltError> {
+    pub(crate) fn cmd_decline(
+        &mut self,
+        proposal: ProposalId,
+        note: Option<String>,
+    ) -> Result<Reply, MoltError> {
         let me = self.member();
         {
             let p = self
@@ -1054,6 +1090,8 @@ impl State {
             // still stands — retraction semantics are the D2 follow-up
             // (docs_archive/reviews/decline_convergence_review_followups.md).
         }
+        // A2: the reason goes in FIRST (see `cmd_approve`)
+        self.post_vote_note(proposal, note)?;
         // D1: the voice binds the payload the decliner SAW — a receiver
         // registers it only against a record hashing identically
         let hash = self
@@ -1209,7 +1247,7 @@ impl State {
             self.chain.own_approvals.remove(&id);
         }
         p.decliners.push(by.to_string());
-        if p.decliners.len() > veto_room {
+        let outcome = if p.decliners.len() > veto_room {
             p.state = ProposalState::Rejected;
             // envelope data only (replay determinism): when and by whom
             // (the TIPPING decliner) — the Declined read view renders both
@@ -1218,7 +1256,13 @@ impl State {
             DeclineOutcome::Rejected
         } else {
             DeclineOutcome::Voice
+        };
+        if matches!(outcome, DeclineOutcome::Rejected) {
+            // G17: freeze the voters as they stood at the decision — the
+            // next re-base sweeps the collected signatures away
+            self.stash_voted(id);
         }
+        outcome
     }
 
     /// Register every parked decline for a proposal that just became known.
@@ -1513,10 +1557,15 @@ impl State {
                     }
                 }
             }
-            // D6: the record's stashed voter set upgrades the pills too —
-            // an over-subscribed voter (truncated off the block's m sigs)
-            // still reads Approved on the vote they cast. Display data,
-            // per holder; `approvals` stays the chain-proven count.
+        }
+        // D6: the record's stashed voter set upgrades the pills — an
+        // over-subscribed voter (truncated off the block's m sigs) still
+        // reads Approved on the vote they cast, and a NEGATIVE end state
+        // (declined, withdrawn, superseded) keeps the table it had at the
+        // decision (G17). Display data, per holder; on an applied card
+        // `approvals` stays the chain-proven count, on a terminal card
+        // without a block the stash is all there is.
+        if self.is_chain_governed() && p.state != ProposalState::Proposed {
             if p.voted.contains(&me) {
                 approved_by_me = true;
             }
@@ -1524,6 +1573,9 @@ impl State {
                 if p.voted.contains(&v.member) {
                     v.vote = VoteState::Approved;
                 }
+            }
+            if p.state != ProposalState::Applied {
+                approvals = p.voted.len();
             }
         }
         // every recorded decline shows on its roster row — on a PENDING
@@ -2960,6 +3012,8 @@ impl State {
                 p.state = ProposalState::Rejected;
                 p.superseded = true;
             }
+            // G17: freeze the voters as they stood at the retirement
+            self.stash_voted(id);
             self.wiki_pending.remove(&id);
         }
     }
@@ -3031,10 +3085,10 @@ impl State {
                 infos[at].unread += 1;
             }
         }
-        // annotate each patch channel with its vote's lifecycle state —
-        // the read-side twin of the write guard (`ensure_channel_writable`):
-        // a terminal state tells EVERY frontend (GUI and MCP alike) the
-        // discussion is read-only. An unknown referent stays `None` (Q4).
+        // annotate each patch channel with its vote's lifecycle state, so
+        // every frontend renders the decision from the same data. The
+        // channel stays WRITABLE either way (2026-09-06); an unknown
+        // referent stays `None` (Q4).
         for i in &mut infos {
             if let ChannelRef::Patch { id } = &i.channel {
                 i.state = self.proposals.get(&id.0).map(|p| p.state);

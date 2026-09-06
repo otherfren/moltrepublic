@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #![allow(missing_docs)]
 
-//! Discussions of decided votes are read-only: once a proposal leaves
-//! `Proposed` (declined or applied), its `Patch` discussion channel
-//! refuses new local writes — chat and file shares alike — with
-//! [`MoltError::DiscussionClosed`]. The channel stays readable (it is a
-//! view over the one log, chat_bus.md), UNKNOWN patch ids stay writable
-//! (chat-bus Q4: a ref may arrive before — or forever without — its
-//! referent), and the wire receive path stays permissive (convergence
-//! over enforcement — a slower peer's in-flight message must still land
-//! identically everywhere).
+//! A proposal's discussion outlives its decision (2026-09-06, G2/G6): a
+//! `Patch` channel stays writable after the vote applied, was declined or
+//! was pulled back — a review of a decided change is not dead chat, and
+//! at 2-of-3 the tipping reviewer's reason would otherwise race the
+//! decision. No patch channel is refused any more; an unknown referent
+//! stays writable too (chat-bus Q4). A vote carries its reasoning with
+//! it: `note` posts into the channel BEFORE the vote lands.
 
 use std::time::Duration;
 
@@ -77,69 +75,53 @@ fn patch(id: ProposalId) -> ChannelRef {
     ChannelRef::Patch { id }
 }
 
-/// The error carries the id and the terminal state — both surfaces (GUI
-/// toast, MCP error string) name exactly what closed the discussion.
-fn assert_closed(result: Result<Reply, MoltError>, id: ProposalId, state: ProposalState) {
-    match result {
-        Err(MoltError::DiscussionClosed(got_id, got_state)) => {
-            assert_eq!(got_id, id, "the error names the proposal");
-            assert_eq!(got_state, state, "the error names the decided state");
-        }
-        other => panic!("expected DiscussionClosed({id:?}, {state:?}), got {other:?}"),
-    }
-}
-
+/// The post-mortem of a REJECTED proposal has a room (G6): the channel
+/// takes the review remark, and the decision summary above it says what
+/// happened.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn chat_into_a_declined_discussion_is_refused() {
+async fn chat_into_a_declined_discussion_is_accepted() {
     let w = spawn_solo();
     let id = propose(&w, "veto me").await;
     chat(&w, "still open", patch(id)).await.expect("a Proposed discussion is writable");
-    w.execute(Command::Decline { proposal: id }).await.expect("decline");
-    assert_closed(
-        chat(&w, "too late", patch(id)).await,
-        id,
-        ProposalState::Rejected,
-    );
-    // …and the earlier message is still readable: the channel closed for
-    // writes, not for reads — plus the decliner's decision summary, the
-    // engine-authored System line every decided vote appends (2026-08-09)
+    w.execute(Command::Decline { proposal: id, note: None }).await.expect("decline");
+    chat(&w, "why I declined", patch(id))
+        .await
+        .expect("a decided vote's discussion stays writable");
     let snap = read_chat(&w).await;
     assert_eq!(
         snap.applied.len(),
-        2,
-        "the pre-decline message stays in the log, plus the summary"
+        3,
+        "the deliberation, the decline summary and the post-mortem"
     );
-    assert!(
-        snap.applied.last().and_then(|m| m.get("body")).and_then(|b| b.as_str())
-            .is_some_and(|b| b.contains('⊘')),
-        "the last line is the decline summary"
+    assert_eq!(
+        snap.applied.last().and_then(|m| m.get("body")).and_then(|b| b.as_str()),
+        Some("why I declined"),
+        "the post-mortem is the last line"
     );
 }
 
+/// The tipping reviewer's reasoning lands after the seal (G2).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn chat_into_an_applied_discussion_is_refused() {
+async fn chat_into_an_applied_discussion_is_accepted() {
     let w = spawn_solo();
     let id = propose(&w, "seal me").await;
-    w.execute(Command::Approve { proposal: id }).await.expect("approve to threshold");
-    assert_closed(
-        chat(&w, "after the seal", patch(id)).await,
-        id,
-        ProposalState::Applied,
-    );
+    w.execute(Command::Approve { proposal: id, note: None }).await.expect("approve to threshold");
+    chat(&w, "found an error after the seal", patch(id))
+        .await
+        .expect("an applied vote's discussion stays writable");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn share_file_into_a_closed_discussion_is_refused() {
+async fn share_file_into_a_decided_discussion_is_accepted() {
     let w = spawn_solo();
-    let id = propose(&w, "no more attachments").await;
-    w.execute(Command::Decline { proposal: id }).await.expect("decline");
-    let res = w
-        .execute(Command::ShareFile {
-            path: "/tmp/anything.txt".to_string(),
-            channel: patch(id),
-        })
-        .await;
-    assert_closed(res, id, ProposalState::Rejected);
+    let id = propose(&w, "attachments after the vote").await;
+    w.execute(Command::Decline { proposal: id, note: None }).await.expect("decline");
+    w.execute(Command::ShareFile {
+        path: "/tmp/anything.txt".to_string(),
+        channel: patch(id),
+    })
+    .await
+    .expect("a decided discussion still takes an attachment");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -149,19 +131,26 @@ async fn a_proposed_discussion_stays_writable() {
     chat(&w, "opinions?", patch(id)).await.expect("an open vote's discussion accepts chat");
 }
 
-/// Chat-bus Q4: a patch ref whose proposal this node never saw must keep
-/// working — channels never error on unknown ids.
+/// Chat-bus Q4: a patch ref whose proposal this node never saw keeps
+/// working — a tagged message may arrive before its referent, so channels
+/// never error on unknown ids.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unknown_patch_discussion_stays_writable() {
     let w = spawn_solo();
     chat(&w, "referent unknown here", patch(ProposalId(999)))
         .await
         .expect("an unknown patch id stays writable (Q4)");
+    w.execute(Command::ShareFile {
+        path: "/tmp/anything.txt".to_string(),
+        channel: patch(ProposalId(999)),
+    })
+    .await
+    .expect("and so does a share into it");
 }
 
 /// The read side of co-equality: `ChannelInfo.state` annotates each patch
 /// channel with its vote's lifecycle, so ANY frontend (GUI, MCP agent)
-/// renders closed-ness from the same engine-side data. Group/Topic — and
+/// renders the decision from the same engine-side data. Group/Topic — and
 /// unknown patch refs — stay `None`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn channel_enumeration_annotates_the_vote_state() {
@@ -181,8 +170,8 @@ async fn channel_enumeration_annotates_the_vote_state() {
         .await
         .expect("chat");
     // now decide two of the three votes
-    w.execute(Command::Decline { proposal: declined }).await.expect("decline");
-    w.execute(Command::Approve { proposal: applied }).await.expect("approve");
+    w.execute(Command::Decline { proposal: declined, note: None }).await.expect("decline");
+    w.execute(Command::Approve { proposal: applied, note: None }).await.expect("approve");
 
     let snap = read_chat(&w).await;
     let state_of = |c: &ChannelRef| {
@@ -232,10 +221,11 @@ async fn await_founding(w: &WalletHandle) {
     }
 }
 
-/// The guard reads `State.proposals`, which the log replay rebuilds — so a
-/// decided vote's discussion must stay closed across close/reopen.
+/// The lifecycle annotation reads `State.proposals`, which the log replay
+/// rebuilds — the decided discussion stays open across close/reopen and
+/// keeps saying what it is.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn enforcement_survives_close_and_reopen() {
+async fn a_decided_discussion_survives_close_and_reopen() {
     let tmp = tempfile::tempdir().expect("tmp");
     let session = SessionView {
         workspaces: Vec::new(),
@@ -273,21 +263,15 @@ async fn enforcement_survives_close_and_reopen() {
     // file a message while the vote is open, so the channel exists in the
     // enumeration after the replay
     chat(&w, "deliberated", patch(id)).await.expect("chat while open");
-    w.execute(Command::Decline { proposal: id }).await.expect("decline");
-    assert_closed(
-        chat(&w, "refused live", patch(id)).await,
-        id,
-        ProposalState::Rejected,
-    );
+    w.execute(Command::Decline { proposal: id, note: None }).await.expect("decline");
+    chat(&w, "post-mortem, live", patch(id)).await.expect("writable live");
 
     w.execute(Command::CloseWorkspace).await.expect("close");
     w.execute(Command::OpenWorkspace { id: ws }).await.expect("reopen");
 
-    assert_closed(
-        chat(&w, "refused after replay", patch(id)).await,
-        id,
-        ProposalState::Rejected,
-    );
+    chat(&w, "post-mortem, after the replay", patch(id))
+        .await
+        .expect("writable after the replay");
     // the annotation replays too
     let snap = read_chat(&w).await;
     let info = snap
@@ -296,4 +280,99 @@ async fn enforcement_survives_close_and_reopen() {
         .find(|i| i.channel == patch(id))
         .expect("the discussion channel replays");
     assert_eq!(info.state, Some(ProposalState::Rejected));
+}
+
+// ---- A2: the reasoning rides with the vote ---------------------------
+//
+// At 2-of-3 the window between "one vote" and "decided" is one foreign
+// action wide, so "comment first, then approve" loses the race for the
+// second reviewer (G2). `note` closes it: one command, the note first.
+
+async fn vote_with_note(
+    w: &WalletHandle,
+    approve: bool,
+    id: ProposalId,
+    note: &str,
+) -> Result<Reply, MoltError> {
+    let note = Some(note.to_string());
+    w.execute(if approve {
+        Command::Approve { proposal: id, note }
+    } else {
+        Command::Decline { proposal: id, note }
+    })
+    .await
+}
+
+async fn bodies(w: &WalletHandle, id: ProposalId) -> Vec<String> {
+    match w
+        .execute(Command::ReadState {
+            surface: Surface::Chat,
+            channel: Some(patch(id)),
+            view: None,
+        })
+        .await
+        .expect("read state")
+    {
+        Reply::State(s) => s
+            .applied
+            .iter()
+            .map(|m| {
+                m.get("body")
+                    .and_then(|b| b.as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect(),
+        other => panic!("unexpected reply: {other:?}"),
+    }
+}
+
+/// The note is posted BEFORE the vote lands, so it stands above the
+/// decision marker the seal appends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_approve_note_lands_before_the_decision() {
+    let w = spawn_solo();
+    let id = propose(&w, "with a reason").await;
+    vote_with_note(&w, true, id, "checked the sources - correct").await.expect("approve");
+    let b = bodies(&w, id).await;
+    assert_eq!(b.len(), 2, "the note and the decision summary");
+    assert_eq!(b[0], "checked the sources - correct");
+    assert!(b[1].contains('✓'), "the decision marker follows the note: {b:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_decline_note_lands_before_the_decision() {
+    let w = spawn_solo();
+    let id = propose(&w, "with a reason against").await;
+    vote_with_note(&w, false, id, "the date is wrong").await.expect("decline");
+    let b = bodies(&w, id).await;
+    assert_eq!(b.len(), 2, "the note and the decision summary");
+    assert_eq!(b[0], "the date is wrong");
+    assert!(b[1].contains('⊘'), "the decision marker follows the note: {b:?}");
+}
+
+/// G6: the third reviewer's finding lands even when the vote is already
+/// decided - a late approval is not an error, and neither is its note.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_note_lands_on_a_late_approval() {
+    let w = spawn_solo();
+    let id = propose(&w, "sealed before the review").await;
+    w.execute(Command::Approve { proposal: id, note: None }).await.expect("seal");
+    vote_with_note(&w, true, id, "reviewed after the seal - one error").await.expect("late");
+    let b = bodies(&w, id).await;
+    assert_eq!(
+        b.last().map(String::as_str),
+        Some("reviewed after the seal - one error"),
+        "the late finding has a room: {b:?}"
+    );
+}
+
+/// An absent or blank note posts nothing - the vote stays one action.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_blank_note_posts_nothing() {
+    let w = spawn_solo();
+    let id = propose(&w, "no reason given").await;
+    vote_with_note(&w, true, id, "   ").await.expect("approve");
+    let b = bodies(&w, id).await;
+    assert_eq!(b.len(), 1, "only the decision summary: {b:?}");
 }

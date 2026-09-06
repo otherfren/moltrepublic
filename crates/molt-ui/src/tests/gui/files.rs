@@ -191,7 +191,7 @@ fn a_persist_vote_moves_the_row_and_an_unpersist_vote_moves_it_back() {
         let files = surface_tab(&ui, "files").expect("the files tab");
         assert_eq!(files.pending_count, 1, "…and the nav counts it");
 
-        w.execute(Command::Approve { proposal: pid }).await.expect("approve");
+        w.execute(Command::Approve { proposal: pid, note: None }).await.expect("approve");
         mirror(&w, &ui, &last, &chat_ui).await;
         assert_eq!(ui.get_org_uploads().row_count(), 0, "left Temporary");
         let row = ui.get_org_persistent().row_data(0).expect("now persistent");
@@ -205,7 +205,7 @@ fn a_persist_vote_moves_the_row_and_an_unpersist_vote_moves_it_back() {
             serde_json::json!({"op": "unpersist", "id": id, "at": crate::labels::unix_now()}),
         )
         .await;
-        w.execute(Command::Approve { proposal: pid }).await.expect("approve");
+        w.execute(Command::Approve { proposal: pid, note: None }).await.expect("approve");
         mirror(&w, &ui, &last, &chat_ui).await;
         assert_eq!(ui.get_org_persistent().row_count(), 0);
         assert_eq!(ui.get_org_uploads().row_count(), 1, "back in Temporary");
@@ -367,7 +367,7 @@ fn the_persistent_table_carries_the_mirror_switch_quota_and_holder_count() {
         .expect("share");
         let id = listed_share(&w).await;
         let pid = propose_files(&w, serde_json::json!({"op": "persist", "id": id})).await;
-        w.execute(Command::Approve { proposal: pid }).await.expect("approve");
+        w.execute(Command::Approve { proposal: pid, note: None }).await.expect("approve");
         mirror(&w, &ui, &last, &chat_ui).await;
         let row = ui.get_org_persistent().row_data(0).expect("the persistent row");
         assert_eq!((row.mirrors, row.mirror_held, row.mirror_of), (1, 1, 1), "the sharer holds it whole");

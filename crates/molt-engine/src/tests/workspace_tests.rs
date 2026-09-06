@@ -98,7 +98,7 @@ fn workspace_state_survives_close_and_reopen() {
             Reply::Proposed { id, .. } => id,
             other => panic!("unexpected: {other:?}"),
         };
-        w.execute(Command::Approve { proposal: pid })
+        w.execute(Command::Approve { proposal: pid, note: None })
             .await
             .expect("approve");
         w.execute(Command::DeleteChat { id: second_id })

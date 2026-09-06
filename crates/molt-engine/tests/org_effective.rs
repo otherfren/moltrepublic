@@ -167,7 +167,7 @@ async fn approve_op(w: &WalletHandle, op: &str) {
                 p.state == molt_core::ProposalState::Proposed
                     && p.payload.get("op").and_then(|v| v.as_str()) == Some(op)
             }) {
-                w.execute(Command::Approve { proposal: p.id })
+                w.execute(Command::Approve { proposal: p.id, note: None })
                     .await
                     .expect("approve");
                 return;
@@ -433,7 +433,7 @@ async fn decline_op(w: &WalletHandle, op: &str) {
                 .iter()
                 .find(|p| p.payload.get("op").and_then(|v| v.as_str()) == Some(op))
                 .expect("just waited for it");
-            w.execute(Command::Decline { proposal: p.id }).await.expect("decline");
+            w.execute(Command::Decline { proposal: p.id, note: None }).await.expect("decline");
         }
         other => panic!("unexpected: {other:?}"),
     }

@@ -57,7 +57,7 @@ async fn write_doc(w: &WalletHandle, path: &str, content: &str) {
         Reply::Proposed { id, .. } => id,
         other => panic!("unexpected: {other:?}"),
     };
-    w.execute(Command::Approve { proposal: id })
+    w.execute(Command::Approve { proposal: id, note: None })
         .await
         .expect("approve");
 }

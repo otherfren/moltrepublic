@@ -157,7 +157,7 @@ async fn ratify_wiki(a: &WalletHandle, b: &WalletHandle, patch: &str) {
     };
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
-        if b.execute(Command::Approve { proposal: id }).await.is_ok() {
+        if b.execute(Command::Approve { proposal: id, note: None }).await.is_ok() {
             break;
         }
         assert!(

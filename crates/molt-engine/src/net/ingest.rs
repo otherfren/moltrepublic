@@ -72,11 +72,7 @@ impl State {
                 // dropping the message — a peer's mangled tag must not
                 // suppress content anyone was meant to see, and the log
                 // keeps its "every stored topic name is normalized"
-                // invariant. Same posture for CLOSED discussions: the
-                // local send guard (`ensure_channel_writable`) is NOT
-                // applied here — a peer's message that was in flight while
-                // the vote decided must still land identically on every
-                // member (convergence over enforcement).
+                // invariant.
                 msg.channel = msg
                     .channel
                     .normalized()

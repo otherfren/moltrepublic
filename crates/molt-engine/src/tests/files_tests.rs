@@ -69,7 +69,7 @@ fn a_persist_vote_pins_the_share_and_an_unpersist_vote_restarts_its_clock() {
             "a second persist while one is pending is refused"
         );
 
-        w.execute(Command::Approve { proposal: pid }).await.expect("approve");
+        w.execute(Command::Approve { proposal: pid, note: None }).await.expect("approve");
         let after = uploads(&w).await;
         assert_eq!(after.len(), 1, "one share, one row");
         assert!(after[0].persistent, "the vote pinned it");
@@ -87,7 +87,7 @@ fn a_persist_vote_pins_the_share_and_an_unpersist_vote_restarts_its_clock() {
         let pid = propose(&w, json!({"op": "unpersist", "id": id.to_string(), "at": at}))
             .await
             .expect("a persistent share may be unpersisted");
-        w.execute(Command::Approve { proposal: pid }).await.expect("approve");
+        w.execute(Command::Approve { proposal: pid, note: None }).await.expect("approve");
         let back = uploads(&w).await;
         assert_eq!(back.len(), 1);
         assert!(!back[0].persistent);
@@ -266,7 +266,7 @@ fn a_persistent_share_cannot_be_removed_or_deleted_by_its_sharer() {
         let pid = propose(&w, json!({"op": "persist", "id": id.to_string()}))
             .await
             .expect("persist");
-        w.execute(Command::Approve { proposal: pid }).await.expect("approve");
+        w.execute(Command::Approve { proposal: pid, note: None }).await.expect("approve");
         assert!(matches!(
             w.execute(Command::RemoveFile { id }).await,
             Err(MoltError::BadPayload(_))

@@ -1689,8 +1689,8 @@ impl State {
 
             // proposals.rs
             Command::Propose { surface, payload } => self.cmd_propose(surface, payload),
-            Command::Approve { proposal } => self.cmd_approve(proposal),
-            Command::Decline { proposal } => self.cmd_decline(proposal),
+            Command::Approve { proposal, note } => self.cmd_approve(proposal, note),
+            Command::Decline { proposal, note } => self.cmd_decline(proposal, note),
             Command::Withdraw { proposal } => self.cmd_withdraw(proposal),
             Command::ReadState { surface, channel, view } => {
                 // the view key is shared vocabulary (`Surface::views`, the

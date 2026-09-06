@@ -7,7 +7,9 @@ sidebar with unread counts and interleaved governance system lines;
 reactions/deletes/file-removes now cross the wire, converge, and park
 when they outrun their target). Executed per
 `chat_bus_implementation.md` (stages A, B1–B4, C); B5 (persisted unread)
-remains the stretch package. The decision log below is unchanged history.
+remains the stretch package. Amended 2026-09-06: a decided vote's
+discussion stays writable (see the last entry under "Known v1
+limitations"). The decision log below is unchanged history.
 
 ## The idea
 
@@ -300,5 +302,19 @@ Accepted in the 2026-07-10 review — documented, not fixed:
   UI fate probe, MCP) are untouched. This is what lets an ACCEPTED vote's
   row (gated applied logs, Organization → Accepted) reopen its patch-channel
   discussion via 💬, completing the decided-votes story: declined cards
-  already kept the link, now applied rows do too — read-only either way,
-  the engine refuses new writes into a decided discussion.
+  already kept the link, now applied rows do too.
+- **A decided vote's discussion stays writable (2026-09-06).** The
+  read-only gate on a decided `Patch` channel is gone: a review of an
+  applied change and the post-mortem of a rejected one are not dead chat,
+  and at 2-of-3 the window between "one vote" and "decided" is one foreign
+  action wide — "comment first, then approve" loses that race, so the
+  tipping reviewer's reason was lost (`mcp_agent_friction_2026-09-06.md`
+  G2/G6). No `Patch` channel is refused any more; unknown referents stay
+  writable as Q4 decided (a tagged message may arrive before — or forever
+  without — the proposal it names). `ChannelInfo.state` keeps annotating
+  the vote's lifecycle: it says what the card is, not what the channel
+  allows. A vote may carry its reasoning with it — `Approve`/`Decline
+  { note }` posts the note into the patch channel BEFORE the vote lands,
+  so the tipping signature never leaves its reason behind. The GUI still
+  collapses the compose row on a decided card
+  (`selected_channel_closed`) — engine-side the write is admitted.

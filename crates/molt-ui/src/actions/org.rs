@@ -534,6 +534,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             cx.issue(
                 Command::Approve {
                     proposal: ProposalId(id as u64),
+                    note: None,
                 },
             );
         });
@@ -545,6 +546,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             cx.issue(
                 Command::Decline {
                     proposal: ProposalId(id as u64),
+                    note: None,
                 },
             );
         });

@@ -20,7 +20,7 @@
 
 use molt_core::{
     ChannelRef, ChatKind, ChatMessage, Event, FileMeta, MemberId, MessageId, MoltError,
-    ProposalState, Reply, WorkspaceEvent,
+    Reply, WorkspaceEvent,
 };
 
 use std::collections::{BTreeMap, VecDeque};
@@ -82,25 +82,6 @@ pub(crate) fn decision_summary_id(republic_id: &str, proposal: u64, declined: bo
 }
 
 impl State {
-    /// Refuse a local write into the discussion of a DECIDED vote: a
-    /// `Patch` channel is read-only iff its proposal is known here and no
-    /// longer `Proposed` — the deliberation ended with the vote. UNKNOWN
-    /// patch ids stay writable (chat-bus Q4: a ref may arrive before — or
-    /// forever without — its referent, and must never error). Enforced on
-    /// the LOCAL send paths only (`cmd_chat`, `cmd_share_file`); the wire
-    /// receive path (`net/ingest.rs`) stays permissive so logs converge even when
-    /// a peer's message was in flight while the vote decided.
-    pub(crate) fn ensure_channel_writable(&self, channel: &ChannelRef) -> Result<(), MoltError> {
-        if let ChannelRef::Patch { id } = channel {
-            if let Some(p) = self.proposals.get(&id.0) {
-                if p.state != ProposalState::Proposed {
-                    return Err(MoltError::DiscussionClosed(*id, p.state));
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// Post as the local member.
     pub(crate) fn cmd_chat(
         &mut self,
@@ -110,7 +91,6 @@ impl State {
     ) -> Result<Reply, MoltError> {
         self.ensure_demo_net();
         let channel = channel.normalized().map_err(MoltError::BadPayload)?;
-        self.ensure_channel_writable(&channel)?;
         let from = self.member();
         self.post_message(from, body, quote, channel)?;
         Ok(Reply::Ack)
@@ -323,7 +303,6 @@ impl State {
         // lazily on the first download request
         self.ensure_demo_net();
         let channel = channel.normalized().map_err(MoltError::BadPayload)?;
-        self.ensure_channel_writable(&channel)?;
         let path = path.trim().to_string();
         if path.is_empty() {
             return Err(MoltError::BadPayload(
@@ -371,10 +350,7 @@ impl State {
     /// metadata + checksum) and remember the source path so this node can
     /// serve downloads — across restarts, via the prefs sidecar. (The arm
     /// mirrors the command's fields one-to-one; bundling them into a struct
-    /// would only rename the coupling.) Deliberately NOT re-checked against
-    /// `ensure_channel_writable`: the operator's share was admitted at
-    /// `cmd_share_file` time — a vote deciding during the hash must not
-    /// retro-refuse it (same posture as a wire arrival).
+    /// would only rename the coupling.)
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn cmd_net_file_shared(
         &mut self,

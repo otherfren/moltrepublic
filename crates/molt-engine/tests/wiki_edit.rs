@@ -47,7 +47,7 @@ async fn edit(w: &WalletHandle, edits: Vec<WikiEdit>) -> Result<(), MoltError> {
     let Reply::Proposed { id, .. } = reply else {
         panic!("unexpected: {reply:?}");
     };
-    w.execute(Command::Approve { proposal: id }).await?;
+    w.execute(Command::Approve { proposal: id, note: None }).await?;
     Ok(())
 }
 
@@ -345,7 +345,7 @@ async fn a_header_the_parser_cannot_read_refuses_the_edit() {
     let Reply::Proposed { id, .. } = reply else {
         panic!("unexpected: {reply:?}");
     };
-    w.execute(Command::Approve { proposal: id }).await.expect("applies");
+    w.execute(Command::Approve { proposal: id, note: None }).await.expect("applies");
     let got = refusal(
         &w,
         vec![WikiEdit::SetProps {
@@ -590,16 +590,16 @@ async fn a_vote_answers_with_the_record_and_late_approvals_are_fine() {
     let Reply::Proposed { id, .. } = reply else {
         panic!("unexpected: {reply:?}");
     };
-    let vote = w.execute(Command::Approve { proposal: id }).await.expect("approves");
+    let vote = w.execute(Command::Approve { proposal: id, note: None }).await.expect("approves");
     let Reply::Vote { id: vid, state, approvals, threshold, channel } = vote else {
         panic!("unexpected: {vote:?}");
     };
     assert_eq!((vid, state, approvals, threshold), (id, molt_core::ProposalState::Applied, 1, 1));
     assert_eq!(channel, molt_core::ChannelRef::Patch { id });
-    let again = w.execute(Command::Approve { proposal: id }).await.expect("a late approval is not an error");
+    let again = w.execute(Command::Approve { proposal: id, note: None }).await.expect("a late approval is not an error");
     assert!(matches!(again, Reply::Vote { state: molt_core::ProposalState::Applied, .. }));
     let err = w
-        .execute(Command::Approve { proposal: molt_core::ProposalId(99_999) })
+        .execute(Command::Approve { proposal: molt_core::ProposalId(99_999), note: None })
         .await
         .expect_err("unknown");
     assert_eq!(err.to_string(), "unknown proposal 99999");

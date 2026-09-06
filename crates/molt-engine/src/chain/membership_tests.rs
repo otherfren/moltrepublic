@@ -228,7 +228,7 @@ fn a_wire_membership_proposal_is_votable_without_hand_applying() {
         walter.proposals.contains_key(&5),
         "the receiver holds the votable card"
     );
-    walter.cmd_approve(ProposalId(5)).expect("the survivor can approve");
+    walter.cmd_approve(ProposalId(5), None).expect("the survivor can approve");
 }
 
 #[test]
@@ -318,7 +318,7 @@ fn a_membership_proposal_is_a_visible_approvable_record() {
 
     // the PUBLIC approve — the exact call that answered UnknownProposal
     // before the record existed
-    walter.cmd_approve(ProposalId(id)).expect("approve accepts the id");
+    walter.cmd_approve(ProposalId(id), None).expect("approve accepts the id");
 
     // petra + walter = 2-of-3: sealed, settled
     assert_eq!(walter.chain.head.as_ref().expect("head").height, 1);

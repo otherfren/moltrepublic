@@ -176,8 +176,11 @@ impl State {
     /// D6: keep the collected voter set as record-side DISPLAY data before
     /// the ephemeral signatures are cleared at a seal — each holder shows
     /// the voices that reached IT (over-subscribed voters included); the
-    /// block's m signatures stay the only chain truth.
-    pub(super) fn stash_voted(&mut self, id: u64) {
+    /// block's m signatures stay the only chain truth. Called at EVERY
+    /// terminal transition (G17, 2026-09-06): a decline, a withdraw and a
+    /// superseded patch lose their collection to the next re-base, and a
+    /// post-mortem must still read who voted how.
+    pub(crate) fn stash_voted(&mut self, id: u64) {
         let members: Vec<molt_core::MemberId> = self
             .chain.pending_sigs
             .get(&id)

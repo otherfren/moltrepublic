@@ -525,7 +525,7 @@ fn a_sealed_wiki_patch_supersedes_overlapping_pending_patches() {
     assert!(walter.view(12, &p12).superseded);
     assert!(
         matches!(
-            walter.cmd_approve(molt_core::ProposalId(12)),
+            walter.cmd_approve(molt_core::ProposalId(12), None),
             Err(molt_core::MoltError::AlreadyTerminal(_, _))
         ),
         "approving a superseded card is refused"
@@ -1519,7 +1519,7 @@ fn an_approval_on_a_disabled_surface_is_refused_until_enabled() {
         "peer",
     );
     let err = walter
-        .cmd_approve(molt_core::ProposalId(9))
+        .cmd_approve(molt_core::ProposalId(9), None)
         .expect_err("no signature may leave for a disabled surface");
     assert_eq!(format!("{err}"), "quests: not enabled");
     // the enabling block opens the gate for the SAME proposal
@@ -1541,7 +1541,7 @@ fn an_approval_on_a_disabled_surface_is_refused_until_enabled() {
         "peer",
     );
     walter
-        .cmd_approve(molt_core::ProposalId(9))
+        .cmd_approve(molt_core::ProposalId(9), None)
         .expect("an enabled surface accepts the approval");
 }
 
