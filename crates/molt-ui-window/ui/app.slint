@@ -1086,9 +1086,9 @@ component UploadsTable inherits Rectangle {
                             vertical-alignment: center;
                             horizontal-alignment: center;
                         }
-                        // §5.5: a relay-held series downloads WITHOUT a
-                        // live sharer — the button follows the fact, and a
-                        // gone share says the one word instead of "offline"
+                        // §5.5: a relay-held or mirrored series downloads
+                        // WITHOUT a live sharer — the button follows the
+                        // fact; a gone or replaced share says its one word
                         if (u.online || u.availability == "relay-held"
                             || u.availability == "mirrored")
                             && u.availability != "changed"

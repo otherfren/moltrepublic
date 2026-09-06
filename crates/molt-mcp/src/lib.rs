@@ -1287,7 +1287,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wiki_search",
             command: "wiki_search",
             scope: Scope::Read,
-            description: "Search the wiki. `query` is tantivy syntax (`+must -not \"phrase\" title:term`) over title, body, the header's own values and the aliases a page declares - so a page is found under its name, not only under its prose. `tags`, `type`, `folder` and `props` narrow it. `props` is an object of front-matter pairs (`{\"status\": \"draft\"}`) that must ALL match, with the value written exactly as wiki_props reports it; a value over 64 characters is not faceted and matches nothing. The hits arrive under `hits`, each with a snippet. Page with `limit` and `cursor`. An empty query with no filter finds nothing, never everything.",
+            description: "Search the wiki. `query` is tantivy syntax (`+must -not \"phrase\" title:term`) over title, body, the header's own values, the aliases a page declares and the `upload:` file references it carries - so a page is found under its name, and a file's pages under its checksum (the first 12 hex digits find every carrying page, however long the reference was written). `tags`, `type`, `folder` and `props` narrow it. `props` is an object of front-matter pairs (`{\"status\": \"draft\"}`) that must ALL match, with the value written exactly as wiki_props reports it; a value over 64 characters is not faceted and matches nothing. The hits arrive under `hits`, each with a snippet. Page with `limit` and `cursor`. An empty query with no filter finds nothing, never everything.",
             schema: || json!({
                 "type": "object",
                 "properties": {
