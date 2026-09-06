@@ -2287,14 +2287,14 @@ fn a_rewrite_of_a_foreign_page_warns() {
         content: "# XSF, rewritten\n".to_string(),
     }];
     let err = walter
-        .cmd_wiki_edit(rewrite.clone(), false, false, None)
+        .cmd_wiki_edit(rewrite.clone(), false, &molt_core::AllowWarnings::NONE, None, true)
         .expect_err("a foreign rewrite warns");
     assert!(
         err.to_string().contains("rewrites a page last written by petra (#7)"),
         "names the seat and the card: {err}"
     );
     walter
-        .cmd_wiki_edit(rewrite, false, true, None)
+        .cmd_wiki_edit(rewrite, false, &molt_core::AllowWarnings::All(true), None, true)
         .expect("allow_warnings proposes anyway");
 
     // a page that does not exist yet is a create, and creates never warn
@@ -2302,5 +2302,7 @@ fn a_rewrite_of_a_foreign_page_warns() {
         path: "notizen/walter.md".to_string(),
         content: "# Walter\n".to_string(),
     }];
-    walter.cmd_wiki_edit(fresh, false, false, None).expect("a free path is a create");
+    walter
+        .cmd_wiki_edit(fresh, false, &molt_core::AllowWarnings::NONE, None, true)
+        .expect("a free path is a create");
 }

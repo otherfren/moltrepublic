@@ -83,14 +83,24 @@ async fn apply_patch(w: &WalletHandle, patch: &str) {
         .expect("approve");
 }
 
-/// The health read, waiting out the off-actor index build (the honest
-/// refusal every graph read carries).
+/// E4: the graph reads answer `index_building: true` with empty lists
+/// instead of refusing, so a test waits that out too.
+fn still_building(reply: &Reply) -> bool {
+    matches!(
+        reply,
+        Reply::WikiHealth { index_building: true, .. }
+            | Reply::WikiNeighbors { index_building: true, .. }
+            | Reply::WikiSearch { index_building: true, .. }
+    )
+}
+
+/// The health read, waiting out the off-actor index build.
 async fn health(w: &WalletHandle, limit: u32) -> Reply {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         match w.execute(Command::WikiHealth { limit }).await {
-            Ok(reply) => return reply,
-            Err(MoltError::IndexBuilding { .. }) => {
+            Ok(reply) if !still_building(&reply) => return reply,
+            Ok(_) | Err(MoltError::IndexBuilding { .. }) => {
                 assert!(
                     tokio::time::Instant::now() < deadline,
                     "the wiki index never finished building"

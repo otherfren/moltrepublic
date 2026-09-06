@@ -1508,8 +1508,9 @@ pub fn tools() -> Vec<ToolDef> {
                     },
                     "dry_run": { "type": "boolean", "description": "optional: answer summary, warnings and paths, propose nothing" },
                     "with_patch": { "type": "boolean", "description": "optional, dry runs only: include the patch itself (default false)" },
-                    "allow_warnings": { "type": "boolean", "description": "optional: propose even with warnings (default: a warning refuses the call)" },
-                    "supersedes": { "type": "integer", "description": "optional: withdraw this own open proposal in the same step" }
+                    "allow_warnings": { "description": "optional: `true` for every warning, or the list of codes to acknowledge - header, open_path, rename_link, name_collision, foreign_rewrite, file_ref (default: a warning refuses the call)", "oneOf": [{ "type": "boolean" }, { "type": "array", "items": { "type": "string" } }] },
+                    "supersedes": { "type": "integer", "description": "optional: withdraw this own open proposal in the same step" },
+                    "repair_links": { "type": "boolean", "description": "optional: a rename rewrites the base links naming the old path (default true)" }
                 },
                 "required": ["edits"]
             }),
@@ -1523,11 +1524,20 @@ pub fn tools() -> Vec<ToolDef> {
                     None | Some(Value::Null) => None,
                     Some(_) => Some(ProposalId(u64_arg(args, "supersedes")?)),
                 };
+                let allow_warnings = match args.get("allow_warnings") {
+                    None | Some(Value::Null) => molt_core::AllowWarnings::NONE,
+                    Some(v) => serde_json::from_value(v.clone())
+                        .map_err(|_| "`allow_warnings`: a boolean or a list of codes".to_string())?,
+                };
                 Ok(Command::WikiEdit {
                     edits,
                     dry_run: flag_arg(args, "dry_run"),
-                    allow_warnings: flag_arg(args, "allow_warnings"),
+                    allow_warnings,
                     supersedes,
+                    repair_links: args
+                        .get("repair_links")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true),
                 })
             },
         },

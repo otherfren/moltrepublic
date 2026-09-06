@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use molt_core::{
-    ChannelRef, Command, GroupConfig, MoltError, ProposalId, Reply, SessionView, Surface, WikiEdit,
+    AllowWarnings, ChannelRef, Command, GroupConfig, MoltError, ProposalId, Reply, SessionView, Surface, WikiEdit,
 };
 use molt_engine::WalletHandle;
 
@@ -26,12 +26,25 @@ fn spawn_solo() -> WalletHandle {
     )
 }
 
+
+/// E4: the graph reads answer `index_building: true` with empty lists
+/// instead of refusing, so a test waits that out too.
+fn still_building(reply: &Reply) -> bool {
+    matches!(
+        reply,
+        Reply::WikiHealth { index_building: true, .. }
+            | Reply::WikiNeighbors { index_building: true, .. }
+            | Reply::WikiSearch { index_building: true, .. }
+    )
+}
+
 /// The graph is built OFF the actor, so a read may refuse until it is there.
 async fn settle(w: &WalletHandle, cmd: Command) -> Result<Reply, MoltError> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         match w.execute(cmd.clone()).await {
             Err(MoltError::IndexBuilding { .. }) => {}
+            Ok(reply) if still_building(&reply) => {}
             other => return other,
         }
         assert!(
@@ -106,7 +119,11 @@ fn content(path: &str, body: &str) -> WikiEdit {
 }
 
 /// Propose the edits and approve them (m = 1).
-async fn edit(w: &WalletHandle, edits: Vec<WikiEdit>, allow_warnings: bool) -> Result<(), MoltError> {
+async fn edit(
+    w: &WalletHandle,
+    edits: Vec<WikiEdit>,
+    allow_warnings: AllowWarnings,
+) -> Result<(), MoltError> {
     let reply = settle(
         w,
         Command::WikiEdit {
@@ -114,6 +131,7 @@ async fn edit(w: &WalletHandle, edits: Vec<WikiEdit>, allow_warnings: bool) -> R
             dry_run: false,
             allow_warnings,
             supersedes: None,
+            repair_links: true,
         },
     )
     .await?;
@@ -186,7 +204,7 @@ async fn wiki_get_answers_every_reference_with_its_state() {
                 "# Plan\n\n![Netz](upload:{prefix})\n\nSiehe [Bericht](upload:{UNKNOWN}) und\nnochmal [dasselbe](upload:{full}).\n"
             ),
         )],
-        true,
+        AllowWarnings::All(true),
     )
     .await
     .expect("the page proposes (the unknown reference is a warning)");
@@ -215,7 +233,7 @@ async fn an_unpersisted_share_reads_temporary() {
     edit(
         &w,
         vec![content("plan.md", &format!("[Entwurf](upload:{prefix})\n"))],
-        true,
+        AllowWarnings::All(true),
     )
     .await
     .expect("a temporary reference writes");
@@ -243,7 +261,7 @@ async fn a_reference_in_a_code_fence_is_no_reference() {
             "howto.md",
             &format!("# How to\n\n```\n![Netz](upload:{UNKNOWN})\n```\n\nA `[x](upload:{UNKNOWN})` span too.\n"),
         )],
-        false,
+        AllowWarnings::NONE,
     )
     .await
     .expect("no warning, so no allow_warnings");
@@ -264,7 +282,8 @@ async fn wiki_edit_warns_about_an_unresolved_reference() {
         Command::WikiEdit {
             edits: vec![content("plan.md", &format!("![Netz](upload:{UNKNOWN})\n"))],
             dry_run: false,
-            allow_warnings: false,
+            allow_warnings: AllowWarnings::NONE,
+            repair_links: true,
             supersedes: None,
         },
     )
@@ -282,7 +301,7 @@ async fn wiki_edit_warns_about_an_unresolved_reference() {
     edit(
         &w,
         vec![content("draft.md", &format!("[Entwurf](upload:{prefix})\n"))],
-        false,
+        AllowWarnings::NONE,
     )
     .await
     .expect("a temporary match writes without allow_warnings");
@@ -291,7 +310,7 @@ async fn wiki_edit_warns_about_an_unresolved_reference() {
     edit(
         &w,
         vec![content("plan.md", &format!("![Netz](upload:{UNKNOWN})\n"))],
-        true,
+        AllowWarnings::All(true),
     )
     .await
     .expect("allow_warnings proposes anyway");
@@ -318,7 +337,7 @@ async fn wiki_health_reports_the_rotting_references_with_their_pages() {
             content("a.md", &format!("![Netz](upload:{UNKNOWN})\n")),
             content("b.md", &format!("[Auch](upload:{UNKNOWN}) [Entwurf](upload:{prefix})\n")),
         ],
-        true,
+        AllowWarnings::All(true),
     )
     .await
     .expect("both pages");

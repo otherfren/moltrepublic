@@ -4160,14 +4160,20 @@ pub enum Command {
         /// Return the patch instead of proposing it (B4).
         #[serde(default)]
         dry_run: bool,
-        /// Propose even when the result leaves a header the parser reads
-        /// differently than written; without it such a result refuses (B5).
+        /// Propose even with warnings: `true` for all of them, or the
+        /// list of warning codes to acknowledge (E1). Without it a
+        /// warning refuses the call (B5).
         #[serde(default)]
-        allow_warnings: bool,
+        allow_warnings: AllowWarnings,
         /// Withdraw this own, still-open proposal in the same step - the
         /// correction path for a proposal already on the table (B4).
         #[serde(default)]
         supersedes: Option<ProposalId>,
+        /// A `rename` rewrites the base links naming the old path, in the
+        /// same patch (E2). `false` leaves them - and then a base in-link
+        /// refuses the call rather than stranding it silently.
+        #[serde(default = "default_true")]
+        repair_links: bool,
     },
     /// What a `[[Name]]` would bind to, and what else it could mean
     /// (§4.5). Name resolution is case-exact, so an agent needs a way to
@@ -5915,6 +5921,10 @@ pub enum Reply {
         index_rev: u64,
         /// The base revision of the fold itself.
         wiki_rev: u64,
+        /// The index is still being built: `hits` is empty because
+        /// nothing could be read, not because nothing matched (R7).
+        #[serde(default)]
+        index_building: bool,
     },
     /// The documents near one ([`Command::WikiNeighbors`]).
     WikiNeighbors {
@@ -5927,6 +5937,10 @@ pub enum Reply {
         index_rev: u64,
         /// The base revision of the fold itself.
         wiki_rev: u64,
+        /// The index is still being built: `docs` is empty because
+        /// nothing could be walked, not because the page is isolated (R7).
+        #[serde(default)]
+        index_building: bool,
     },
     /// What changed since a revision ([`Command::WikiChanges`]).
     WikiChanges {
@@ -5967,10 +5981,31 @@ pub enum Reply {
         /// The page references to shared files that rot.
         #[serde(default)]
         files: WikiFileHealth,
+        /// Per `type` value the header keys its pages carry (E3): the
+        /// group that shows a WRONG key (seven `person` pages on `year`
+        /// while forty carry `notable_year`), which no spelling check
+        /// can see. Types by page count, keys by page count.
+        #[serde(default)]
+        props_by_type: Vec<WikiTypeProps>,
+        /// How many types there are.
+        #[serde(default)]
+        props_by_type_total: u64,
+        /// Edges whose (subject type, object type) pair is rare for their
+        /// predicate (E3) - the reversed-relation signal. HEURISTIC: a
+        /// rare pair is not a wrong one.
+        #[serde(default)]
+        direction_outliers: Vec<WikiDirectionOutlier>,
+        /// How many such groups there are.
+        #[serde(default)]
+        direction_outliers_total: u64,
         /// The base revision the GRAPH reflects.
         index_rev: u64,
         /// The base revision of the fold itself.
         wiki_rev: u64,
+        /// The index is still being built: the lists are empty because
+        /// nothing could be read, not because the wiki is clean (R7).
+        #[serde(default)]
+        index_building: bool,
     },
     /// What a name could mean ([`Command::WikiResolve`]).
     WikiResolve {
@@ -6546,6 +6581,53 @@ pub struct WikiFileIssue {
     pub paths_total: u64,
 }
 
+/// One `type` value with the header keys its pages carry
+/// ([`Reply::WikiHealth`], E3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiTypeProps {
+    /// The `type` value.
+    pub kind: String,
+    /// How many pages carry it.
+    pub pages: u64,
+    /// Its keys, most-carried first, capped by the request's `limit`.
+    pub keys: Vec<WikiKeyCount>,
+    /// How many distinct keys its pages carry.
+    pub keys_total: u64,
+}
+
+/// One header key and how many pages of a type carry it
+/// ([`Reply::WikiHealth`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiKeyCount {
+    /// The key.
+    pub key: String,
+    /// How many pages of the type carry it.
+    pub pages: u64,
+}
+
+/// One predicate asserted between a type pair its own wiki rarely uses
+/// ([`Reply::WikiHealth`], E3). HEURISTIC: read as "check these", never
+/// as "these are wrong".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiDirectionOutlier {
+    /// The predicate.
+    pub predicate: String,
+    /// The `type` of the pages asserting it.
+    pub subject_type: String,
+    /// The `type` of the pages it points at.
+    pub object_type: String,
+    /// How many edges run that way.
+    pub count: u64,
+    /// The pair this predicate usually runs between, `"a -> b"`.
+    pub usual: String,
+    /// How many edges run the usual way.
+    pub usual_count: u64,
+    /// The asserting pages, capped by the request's `limit`.
+    pub from: Vec<String>,
+    /// How many pages assert it.
+    pub from_total: u64,
+}
+
 /// One document a name could mean ([`Reply::WikiResolve`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WikiCandidate {
@@ -6555,6 +6637,38 @@ pub struct WikiCandidate {
     /// `"case"` - a case-insensitive match the case-exact rule does NOT
     /// bind, listed so an agent can pick the real spelling.
     pub via: String,
+}
+
+/// What a [`Command::WikiEdit`] caller acknowledges (E1). `true` takes
+/// every warning, a list takes exactly the named codes - so one stale
+/// warning can be waved through without blinding the caller to the rest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AllowWarnings {
+    /// All of them, or none.
+    All(bool),
+    /// Exactly these warning codes.
+    Codes(Vec<String>),
+}
+
+impl Default for AllowWarnings {
+    fn default() -> Self {
+        AllowWarnings::All(false)
+    }
+}
+
+impl AllowWarnings {
+    /// Nothing acknowledged - the default.
+    pub const NONE: AllowWarnings = AllowWarnings::All(false);
+
+    /// Is this code acknowledged?
+    #[must_use]
+    pub fn admits(&self, code: &str) -> bool {
+        match self {
+            AllowWarnings::All(all) => *all,
+            AllowWarnings::Codes(codes) => codes.iter().any(|c| c == code),
+        }
+    }
 }
 
 /// One edit of the structured write path ([`Command::WikiEdit`]). Applied

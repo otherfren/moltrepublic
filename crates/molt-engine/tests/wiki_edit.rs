@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use molt_core::{Command, GroupConfig, MoltError, Reply, SessionView, Surface, WikiEdit};
+use molt_core::{AllowWarnings, Command, GroupConfig, MoltError, Reply, SessionView, Surface, WikiEdit};
 use molt_engine::WalletHandle;
 
 /// A single-member group: threshold 1, so one `Approve` applies a patch.
@@ -25,12 +25,25 @@ fn spawn_solo() -> WalletHandle {
 }
 
 /// The graph is built OFF the actor, so a read (and an `add_relation`,
+
+/// E4: the graph reads answer `index_building: true` with empty lists
+/// instead of refusing, so a test waits that out too.
+fn still_building(reply: &Reply) -> bool {
+    matches!(
+        reply,
+        Reply::WikiHealth { index_building: true, .. }
+            | Reply::WikiNeighbors { index_building: true, .. }
+            | Reply::WikiSearch { index_building: true, .. }
+    )
+}
+
 /// which resolves against it) may refuse until it is there.
 async fn settle(w: &WalletHandle, cmd: Command) -> Result<Reply, MoltError> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         match w.execute(cmd.clone()).await {
             Err(MoltError::IndexBuilding { .. }) => {}
+            Ok(reply) if still_building(&reply) => {}
             other => return other,
         }
         assert!(
@@ -41,9 +54,28 @@ async fn settle(w: &WalletHandle, cmd: Command) -> Result<Reply, MoltError> {
     }
 }
 
+/// Propose an edit set, nothing more.
+async fn propose(
+    w: &WalletHandle,
+    edits: Vec<WikiEdit>,
+    allow_warnings: AllowWarnings,
+) -> Result<Reply, MoltError> {
+    settle(
+        w,
+        Command::WikiEdit {
+            edits,
+            dry_run: false,
+            allow_warnings,
+            supersedes: None,
+            repair_links: true,
+        },
+    )
+    .await
+}
+
 /// Edit and approve: the proposal is a real threshold vote, m = 1 here.
 async fn edit(w: &WalletHandle, edits: Vec<WikiEdit>) -> Result<(), MoltError> {
-    let reply = settle(w, Command::WikiEdit { edits, dry_run: false, allow_warnings: false, supersedes: None }).await?;
+    let reply = propose(w, edits, AllowWarnings::NONE).await?;
     let Reply::Proposed { id, .. } = reply else {
         panic!("unexpected: {reply:?}");
     };
@@ -53,7 +85,7 @@ async fn edit(w: &WalletHandle, edits: Vec<WikiEdit>) -> Result<(), MoltError> {
 
 /// The refusal text of a rejected edit set.
 async fn refusal(w: &WalletHandle, edits: Vec<WikiEdit>) -> String {
-    match settle(w, Command::WikiEdit { edits, dry_run: false, allow_warnings: false, supersedes: None }).await {
+    match propose(w, edits, AllowWarnings::NONE).await {
         Err(e) => e.to_string(),
         Ok(other) => panic!("expected a refusal, got {other:?}"),
     }
@@ -383,7 +415,8 @@ async fn a_header_the_parser_cannot_read_refuses_the_edit() {
         Command::WikiEdit {
             edits: vec![content("a.md", "---\n- not a mapping\n---\n# A\n")],
             dry_run: false,
-            allow_warnings: true,
+            allow_warnings: AllowWarnings::All(true),
+            repair_links: true,
             supersedes: None,
         },
     )
@@ -516,7 +549,13 @@ async fn a_dry_run_shows_the_patch_and_proposes_nothing() {
     let edits = vec![content("a.md", "---\ntitle: A\n---\ntext\n")];
     let reply = settle(
         &w,
-        Command::WikiEdit { edits, dry_run: true, allow_warnings: false, supersedes: None },
+        Command::WikiEdit {
+            edits,
+            dry_run: true,
+            allow_warnings: AllowWarnings::NONE,
+            supersedes: None,
+            repair_links: true,
+        },
     )
     .await
     .expect("a dry run is fine");
@@ -544,7 +583,8 @@ async fn a_header_warning_refuses_unless_allowed() {
         Command::WikiEdit {
             edits: vec![content("a.md", body)],
             dry_run: false,
-            allow_warnings: true,
+            allow_warnings: AllowWarnings::All(true),
+            repair_links: true,
             supersedes: None,
         },
     )
@@ -568,7 +608,8 @@ async fn a_superseding_edit_withdraws_the_old_proposal() {
         Command::WikiEdit {
             edits: vec![content("a.md", "---\ntitle: A\nprice_eur: 1500\n---\n")],
             dry_run: false,
-            allow_warnings: false,
+            allow_warnings: AllowWarnings::NONE,
+            repair_links: true,
             supersedes: None,
         },
     )
@@ -582,7 +623,8 @@ async fn a_superseding_edit_withdraws_the_old_proposal() {
         Command::WikiEdit {
             edits: vec![content("a.md", "---\ntitle: A\nprice_eur: 1499\n---\n")],
             dry_run: false,
-            allow_warnings: false,
+            allow_warnings: AllowWarnings::NONE,
+            repair_links: true,
             supersedes: Some(old),
         },
     )
@@ -604,7 +646,8 @@ async fn a_superseding_edit_withdraws_the_old_proposal() {
         Command::WikiEdit {
             edits: vec![content("b.md", "text\n")],
             dry_run: false,
-            allow_warnings: false,
+            allow_warnings: AllowWarnings::NONE,
+            repair_links: true,
             supersedes: Some(old),
         },
     )
@@ -628,7 +671,8 @@ async fn a_vote_answers_with_the_record_and_late_approvals_are_fine() {
         Command::WikiEdit {
             edits: vec![content("a.md", "text\n")],
             dry_run: false,
-            allow_warnings: false,
+            allow_warnings: AllowWarnings::NONE,
+            repair_links: true,
             supersedes: None,
         },
     )
@@ -728,7 +772,8 @@ async fn a_path_in_an_open_proposal_warns() {
         Command::WikiEdit {
             edits: vec![content("standards/xep.md", "# XEP\n")],
             dry_run: false,
-            allow_warnings: false,
+            allow_warnings: AllowWarnings::NONE,
+            repair_links: true,
             supersedes: None,
         },
     )
@@ -748,7 +793,8 @@ async fn a_path_in_an_open_proposal_warns() {
         Command::WikiEdit {
             edits: vec![content("standards/xep.md", "# XEP, differently\n")],
             dry_run: true,
-            allow_warnings: false,
+            allow_warnings: AllowWarnings::NONE,
+            repair_links: true,
             supersedes: None,
         },
     )
@@ -766,7 +812,8 @@ async fn a_path_in_an_open_proposal_warns() {
         Command::WikiEdit {
             edits: vec![content("standards/xep.md", "# XEP, differently\n")],
             dry_run: false,
-            allow_warnings: true,
+            allow_warnings: AllowWarnings::All(true),
+            repair_links: true,
             supersedes: None,
         },
     )
@@ -793,7 +840,8 @@ async fn a_rename_warns_about_a_link_an_open_proposal_still_writes() {
         Command::WikiEdit {
             edits: vec![content("acme.md", "# Acme\n\nRun by [[people/anna]].\n")],
             dry_run: false,
-            allow_warnings: false,
+            allow_warnings: AllowWarnings::NONE,
+            repair_links: true,
             supersedes: None,
         },
     )
@@ -813,6 +861,241 @@ async fn a_rename_warns_about_a_link_an_open_proposal_still_writes() {
     assert!(
         text.contains(&format!("leaves a link in open proposal {}", open.0)),
         "names the card: {text}"
+    );
+}
+
+/// **E1 (R19)**: the name check reads the tree the WHOLE edit list
+/// leaves. Left's round-3 case: one call frees two aliases on one page
+/// and claims them on a page it creates in the same call - measured
+/// against the BASE that read as a collision three times over and forced
+/// `allow_warnings: true`, which then hid every other warning too.
+#[tokio::test]
+async fn an_alias_this_call_frees_is_no_collision() {
+    let w = spawn_solo();
+    edit(
+        &w,
+        vec![content(
+            "standards/atproto-repository.md",
+            "---\naliases:\n  - \"Merkle Search Tree\"\n  - \"MST\"\n---\n# Repository\n",
+        )],
+    )
+    .await
+    .expect("the page that holds the names");
+    // the graph is built off the actor; a read waits for it
+    settle(&w, Command::WikiResolve { name: "x".to_string() })
+        .await
+        .expect("the graph is there");
+
+    let reply = propose(
+        &w,
+        vec![
+            WikiEdit::SetProps {
+                path: "standards/atproto-repository.md".to_string(),
+                props: match serde_json::json!({ "aliases": ["Repository"] }) {
+                    serde_json::Value::Object(m) => m,
+                    _ => unreachable!(),
+                },
+            },
+            WikiEdit::Create {
+                path: "primitive/merkle-search-tree.md".to_string(),
+                content: "---\ntitle: Merkle Search Tree\naliases:\n  - \"MST\"\n---\n# MST\n"
+                    .to_string(),
+            },
+        ],
+        AllowWarnings::NONE,
+    )
+    .await
+    .expect("the alias moves without an acknowledgement");
+    let Reply::Proposed { warnings, .. } = reply else {
+        panic!("unexpected: {reply:?}");
+    };
+    assert!(warnings.is_empty(), "nothing to warn about: {warnings:?}");
+}
+
+/// …and a collision the SAME call really creates still warns, with the
+/// code that acknowledges it.
+#[tokio::test]
+async fn a_collision_inside_one_call_still_warns() {
+    let w = spawn_solo();
+    edit(&w, vec![content("seed.md", "# Seed\n")]).await.expect("a base");
+    // the graph is built off the actor; a read waits for it
+    settle(&w, Command::WikiResolve { name: "x".to_string() })
+        .await
+        .expect("the graph is there");
+
+    let text = refusal(
+        &w,
+        vec![
+            WikiEdit::Create {
+                path: "a.md".to_string(),
+                content: "---\naliases:\n  - \"MST\"\n---\n# A\n".to_string(),
+            },
+            WikiEdit::Create {
+                path: "b.md".to_string(),
+                content: "---\naliases:\n  - \"MST\"\n---\n# B\n".to_string(),
+            },
+        ],
+    )
+    .await;
+    assert!(
+        text.contains("name_collision: alias \"MST\" already names"),
+        "coded and named: {text}"
+    );
+}
+
+/// **E1**: `allow_warnings` takes a LIST of codes - one acknowledged
+/// warning no longer waves through the rest, which is what made a stale
+/// warning cost the caller every real one.
+#[tokio::test]
+async fn allow_warnings_takes_the_codes_it_acknowledges() {
+    let w = spawn_solo();
+    edit(
+        &w,
+        vec![content(
+            "organisationen/signal-foundation.md",
+            "---\naliases:\n  - \"Signal\"\n---\n# Signal Foundation\n",
+        )],
+    )
+    .await
+    .expect("the page that holds the name");
+    // the graph is built off the actor; a read waits for it
+    settle(&w, Command::WikiResolve { name: "x".to_string() })
+        .await
+        .expect("the graph is there");
+
+    let open = propose(&w, vec![content("standards/xep.md", "# XEP\n")], AllowWarnings::NONE)
+        .await
+        .expect("an open card");
+    let Reply::Proposed { id: open, .. } = open else {
+        panic!("unexpected: {open:?}");
+    };
+
+    // one call that trips BOTH: the open path and the alias
+    let edits = || {
+        vec![
+            content("standards/xep.md", "# XEP, differently\n"),
+            WikiEdit::Create {
+                path: "apps/signal.md".to_string(),
+                content: "---\naliases:\n  - \"Signal\"\n---\n# Signal\n".to_string(),
+            },
+        ]
+    };
+    let text = match propose(&w, edits(), AllowWarnings::Codes(vec!["open_path".to_string()])).await
+    {
+        Err(e) => e.to_string(),
+        Ok(other) => panic!("the second code is not acknowledged: {other:?}"),
+    };
+    assert!(text.contains("name_collision:"), "the unacknowledged one: {text}");
+    assert!(
+        !text.contains(&format!("open_path: standards/xep.md is in open proposal {}", open.0)),
+        "the acknowledged one is gone: {text}"
+    );
+
+    let reply = propose(
+        &w,
+        edits(),
+        AllowWarnings::Codes(vec!["open_path".to_string(), "name_collision".to_string()]),
+    )
+    .await
+    .expect("both codes acknowledged proposes");
+    let Reply::Proposed { warnings, .. } = reply else {
+        panic!("unexpected: {reply:?}");
+    };
+    assert_eq!(warnings.len(), 2, "both still ride the reply: {warnings:?}");
+}
+
+/// **E2 (R15)**: a rename carries its incoming links with it. Left's
+/// round-3 case: `standards/lexicon.md` moved and five pages that wrote
+/// the path kept pointing at nothing - `paths` named one file, `warnings`
+/// was empty, and only `wiki_links {direction: in}` could have found them.
+#[tokio::test]
+async fn a_rename_repairs_the_base_links_that_name_the_old_path() {
+    let w = spawn_solo();
+    let mut base = vec![content("standards/lexicon.md", "# Lexicon\n")];
+    for n in 0..5 {
+        base.push(content(
+            &format!("standards/x{n}.md"),
+            "See [Lexicon](standards/lexicon.md) and [[standards/lexicon.md|the lexicon]].\n",
+        ));
+    }
+    edit(&w, base).await.expect("the base");
+
+    let rename = || {
+        vec![WikiEdit::Rename {
+            from: "standards/lexicon.md".to_string(),
+            to: "standards/atproto-lexicon.md".to_string(),
+        }]
+    };
+    // it is not silent: the repair is five more pages in the patch, and
+    // the caller acknowledges that by code
+    let text = match propose(&w, rename(), AllowWarnings::NONE).await {
+        Err(e) => e.to_string(),
+        Ok(other) => panic!("the rewrite has to be acknowledged: {other:?}"),
+    };
+    assert!(
+        text.contains("rename_link: standards/lexicon.md -> standards/atproto-lexicon.md: rewrote 5 pages"),
+        "names what it rewrote: {text}"
+    );
+
+    let reply = propose(&w, rename(), AllowWarnings::Codes(vec!["rename_link".to_string()]))
+        .await
+        .expect("acknowledged");
+    let Reply::Proposed { id, .. } = reply else {
+        panic!("unexpected: {reply:?}");
+    };
+    w.execute(Command::Approve { proposal: id, note: None })
+        .await
+        .expect("approve");
+
+    for n in 0..5 {
+        let page = doc(&w, &format!("standards/x{n}.md")).await;
+        assert!(
+            page.contains("(standards/atproto-lexicon.md)")
+                && page.contains("[[standards/atproto-lexicon.md|the lexicon]]"),
+            "the link moved with the page: {page}"
+        );
+    }
+    let health = settle(&w, Command::WikiHealth { limit: 0 })
+        .await
+        .expect("health");
+    let Reply::WikiHealth { dangling, dangling_total, .. } = health else {
+        panic!("unexpected: {health:?}");
+    };
+    assert_eq!(dangling_total, 0, "nothing points at the old path: {dangling:?}");
+}
+
+/// …and `repair_links: false` is the old behaviour WITHOUT the silence:
+/// the base in-links refuse the call instead of being stranded.
+#[tokio::test]
+async fn repair_links_off_refuses_rather_than_stranding_the_links() {
+    let w = spawn_solo();
+    edit(
+        &w,
+        vec![
+            content("standards/lexicon.md", "# Lexicon\n"),
+            content("standards/x.md", "See [Lexicon](standards/lexicon.md).\n"),
+        ],
+    )
+    .await
+    .expect("the base");
+
+    let cmd = Command::WikiEdit {
+        edits: vec![WikiEdit::Rename {
+            from: "standards/lexicon.md".to_string(),
+            to: "standards/atproto-lexicon.md".to_string(),
+        }],
+        dry_run: false,
+        allow_warnings: AllowWarnings::NONE,
+        supersedes: None,
+        repair_links: false,
+    };
+    let text = match settle(&w, cmd).await {
+        Err(e) => e.to_string(),
+        Ok(other) => panic!("a stranded link has to be said: {other:?}"),
+    };
+    assert!(
+        text.contains("rename_link: standards/lexicon.md: old path kept by 1 pages (standards/x.md)"),
+        "names the page it would strand: {text}"
     );
 }
 

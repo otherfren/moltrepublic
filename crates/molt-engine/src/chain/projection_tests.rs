@@ -764,14 +764,18 @@ fn an_index_built_against_a_moved_base_is_discarded() {
     let mut walter = chain_signer("walter", &b, b.blocks.clone());
     seal_wiki(&mut walter, &b, "petra", 60, wp(add("a.md", "alpha")));
 
-    // no index yet: the read says so instead of answering empty
+    // no index yet: the read says SO - empty hits beside `index_building`,
+    // never an empty answer that reads like "nothing matched" (E4)
     walter.wiki_index_building = Some(walter.applied_epoch);
-    let err = walter
+    let reply = walter
         .cmd_wiki_search("alpha".to_string(), vec![], None, None, vec![], 0, 0)
-        .expect_err("a search with no index must refuse");
+        .expect("a search with no index answers");
     assert!(
-        matches!(err, molt_core::MoltError::IndexBuilding { .. }),
-        "the refusal has to name the reason, got {err:?}"
+        matches!(
+            reply,
+            molt_core::Reply::WikiSearch { index_building: true, ref hits, .. } if hits.is_empty()
+        ),
+        "the answer has to name the reason, got {reply:?}"
     );
 
     // a build that finished against a base that has since moved wholesale
