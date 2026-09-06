@@ -1178,6 +1178,8 @@ fn a_right_click_on_a_file_row_marks_it_and_opens_the_pane_menu() {
     assert!(g.get_has_marked(), "the right-click marked the row");
     assert!(!g.get_marked_is_folder());
     assert_eq!(g.get_marked_id(), nav_id(&ui, "beta.md"));
+    // (WHERE it opens cannot be checked here: the testing backend puts
+    // every popup in the same corner, whatever position it is handed)
     assert!(
         i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, &verb)
             .next()
@@ -1276,7 +1278,8 @@ fn a_mark_repaints_its_rows_not_the_window() {
     let win = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
     // Slint's platform is thread-local and every #[test] owns its
     // thread, so this window never meets the testing backend
-    slint::platform::set_platform(Box::new(P(win.clone()))).expect("software platform");
+    slint::platform::set_platform(Box::new(P(win.clone())))
+        .expect("software platform: this test needs a thread of its own");
     win.set_size(slint::PhysicalSize::new(W, H));
     let mut buf = vec![Rgb8Pixel::default(); (W * H) as usize];
     let ui = AppWindow::new().expect("window");
