@@ -66,6 +66,7 @@ NO_BARE_SCAN_FILES = {
     "crates/molt-engine/tests/wiki_query.rs": "the search/traversal keystones' fixtures are wiki paths",
     "crates/molt-engine/tests/wiki_edit.rs": "the write-path keystones' fixtures are wiki paths",
     "crates/molt-core/src/wiki_patch.rs": "the emitter's round-trip fixtures are wiki paths",
+    "crates/molt-core/src/wiki_refs.rs": "the upload-reference parser's fixtures are wiki paths",
     "crates/molt-engine/src/chat.rs": "the vote-wake keystone's wiki patch fixtures",
     "crates/molt-mcp/tests/tool_reads.rs": "wiki_get's path argument in the tool tests",
     "crates/molt-engine/src/wiki_index/graph.rs": "link-graph fixtures are wiki paths",

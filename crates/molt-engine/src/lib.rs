@@ -414,9 +414,14 @@ fn spawn_actor(
     state.spawn_ticker_every(Command::BackupTick, backup::BACKUP_TICK_MS);
     tokio::spawn(async move {
         while let Some(env) = cmd_rx.recv().await {
+            // A handler that answers OFF the actor TAKES the slot and
+            // sends itself; the loop then has nothing left to send.
+            state.deferred_reply = Some(env.reply);
             let res = state.handle(env.cmd);
-            // The operator may have gone away before the reply; that is fine.
-            let _ = env.reply.send(res);
+            if let Some(reply) = state.deferred_reply.take() {
+                // The operator may have gone away before the reply; fine.
+                let _ = reply.send(res);
+            }
         }
         tracing::debug!("engine actor stopped");
     });
@@ -1248,6 +1253,11 @@ pub(crate) struct State {
     /// The settings the node booted with — restart-required keys are flagged
     /// by comparing the current session against this snapshot.
     pub(crate) boot_settings: molt_core::SessionSettings,
+    /// The reply channel of the command currently in [`State::handle`].
+    /// A handler that cannot answer synchronously (`ReadUploadBytes` reads
+    /// and re-hashes off the actor) TAKES it and sends from its task; the
+    /// actor loop sends only while the slot is still occupied.
+    pub(crate) deferred_reply: Option<oneshot::Sender<Result<Reply, MoltError>>>,
 }
 
 impl State {
@@ -1423,6 +1433,7 @@ impl State {
             session,
             store,
             boot_settings,
+            deferred_reply: None,
         }
     }
 
@@ -1663,6 +1674,9 @@ impl State {
                 if !self.net_scope_current(generation) {
                     return Ok(Reply::Ack);
                 }
+                // the landed bytes hashed to the share: remember the copy
+                // by CONTENT, so a restart still finds it (§3.2, Q5)
+                self.register_local_copy(id, &path);
                 self.set_download_phase(id, molt_core::TransferPhase::Done { path });
                 Ok(Reply::Ack)
             }
