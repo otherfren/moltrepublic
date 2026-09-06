@@ -1336,6 +1336,14 @@ lexicon! {
     mem_file_retry: "Reload", "Erneut laden";
     mem_file_show: "Show in Shared Files", "In Shared Files zeigen";
     mem_file_by: "by", "von";
+    // the + Datei picker (wiki_files_and_images.md §3.6)
+    mem_tb_file: "File", "Datei";
+    mem_file_title: "Files", "Dateien";
+    mem_file_ph: "Filter files", "Dateien filtern";
+    mem_file_none: "No file is kept permanently yet", "Noch keine Datei dauerhaft abgelegt";
+    mem_file_jump: "Shared Files", "Geteilte Dateien";
+    mem_file_close: "Close", "Schließen";
+    mem_file_err_body: "The reference would sit in a code block", "Der Verweis läge in einem Code-Block";
     mem_search_ph: "Search the wiki", "Wiki durchsuchen";
     mem_search_none: "No hit", "Kein Treffer";
     mem_search_building: "Reading the wiki - search answers in a moment", "Wiki wird gelesen - die Suche antwortet gleich";

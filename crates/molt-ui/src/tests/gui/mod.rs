@@ -21,6 +21,7 @@ mod recovery_backup;
 mod snapshot;
 mod wiki;
 mod wiki_files;
+mod wiki_file_picker;
 
 use super::*;
 

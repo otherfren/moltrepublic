@@ -27,6 +27,7 @@ use crate::{
     WikiBlock,
     WikiChangeRow,
     WikiBase,
+    WikiFileRow,
     WikiHitRow,
     WikiNavRow,
     WikiProp,
@@ -648,6 +649,74 @@ fn link_error_text(ui: &AppWindow, code: &str) -> String {
     }
 }
 
+/// The kind glyph of a shared file, over [`molt_core::file_kind_label`]'s
+/// own vocabulary - the picker's only decoration.
+pub(crate) fn file_kind_glyph(kind: &str) -> &'static str {
+    match kind {
+        "Image" => "🖼️",
+        "PDF" => "📕",
+        "Text" => "📝",
+        "Spreadsheet" => "📊",
+        "Document" => "📄",
+        "Archive" => "🗜️",
+        "Audio" => "🎵",
+        "Video" => "🎬",
+        _ => "📎",
+    }
+}
+
+/// The picker's rows out of the republic's shares: PERSISTENT ones a
+/// reference can name, and nothing else. A temporary share expires under
+/// the page that references it (`wiki_files_and_images.md` Q2), and a
+/// legacy share has no checksum to be named by.
+pub(crate) fn file_picks(uploads: &[molt_core::UploadView], lang: i32) -> Vec<WikiFileRow> {
+    let by = crate::labels::strings_pick(lang == 1, "by", "von");
+    uploads
+        .iter()
+        .filter(|u| u.persistent && wiki::file_ref_hex(&u.checksum).is_some())
+        .map(|u| WikiFileRow {
+            checksum: u.checksum.as_str().into(),
+            glyph: file_kind_glyph(&u.kind).into(),
+            name: u.name.as_str().into(),
+            detail: format!("{} · {by} {}", crate::labels::file_size_label(u.size), u.member)
+                .into(),
+            member: u.member.as_str().into(),
+            kind: u.kind.as_str().into(),
+        })
+        .collect()
+}
+
+/// The `+ Datei` picker's face: the narrowed rows plus the scalars the
+/// modal reads.
+fn sync_file_picker(ui: &AppWindow, s: &WikiState<'_>, w: &wiki::Wiki) {
+    let rows: Vec<WikiFileRow> = w
+        .file_rows()
+        .into_iter()
+        .map(|f| WikiFileRow {
+            checksum: f.checksum.as_str().into(),
+            glyph: f.glyph.as_str().into(),
+            name: f.name.as_str().into(),
+            detail: f.detail.as_str().into(),
+            member: f.member.as_str().into(),
+            kind: f.kind.as_str().into(),
+        })
+        .collect();
+    sync_model(&s.get_file_rows(), rows, PartialEq::eq, |m| s.set_file_rows(m));
+    s.set_file_filter(w.file_filter().into());
+    s.set_file_loaded(w.file_loaded());
+    // the picker shares the link's refusal CODE but not its wording: an
+    // image reference is not "a link"
+    let err = if w.file_error() == wiki::LINK_ERR_BODY {
+        ui.global::<Strings>().get_mem_file_err_body().to_string()
+    } else {
+        String::new()
+    };
+    s.set_file_error(err.into());
+    if w.wants_files() {
+        s.invoke_file_wanted();
+    }
+}
+
 /// The navigator keeps ONE context menu per row KIND and builds it from
 /// the MARKED row, so the row's facts travel as scalars
 /// (`docs_archive/ui/wiki_pane_performance.md` F3).
@@ -798,6 +867,7 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, face: &mut FaceState) {
     sync_model(&s.get_link_relations(), rels, PartialEq::eq, |m| {
         s.set_link_relations(m);
     });
+    sync_file_picker(ui, &s, w);
     // the details modal shows the WHOLE change — rebuilt when the model
     // moved, not once per sync into a modal nobody opened (F4)
     if face.patch_gen != Some(gen) {
@@ -1145,6 +1215,41 @@ pub(crate) fn wire_wiki(ui: &AppWindow) -> (Rc<RefCell<wiki::Wiki>>, Rc<RefCell<
     });
     act!(on_link_toggle, |w, key: slint::SharedString| w.link_toggle(&key));
     wrote!(on_link_commit, |w| w.link_commit());
+    // ---- the + Datei picker ----
+    act!(on_file_open, |w| w.file_open());
+    act!(on_file_close, |w| w.file_close());
+    act!(on_set_file_filter, |w, v: slint::SharedString| w.set_file_filter(&v));
+    // the engine read cannot carry the UI-thread model into its task, so
+    // the answer comes back through this door (the cs-vote pattern)
+    act!(on_file_list, |w, rows: ModelRc<WikiFileRow>| {
+        w.set_file_rows(
+            rows.iter()
+                .map(|r| wiki::FilePick {
+                    name: r.name.to_string(),
+                    member: r.member.to_string(),
+                    kind: r.kind.to_string(),
+                    checksum: r.checksum.to_string(),
+                    detail: r.detail.to_string(),
+                    glyph: r.glyph.to_string(),
+                })
+                .collect(),
+        );
+    });
+    {
+        let m = model.clone();
+        let la = last.clone();
+        let weak = ui.as_weak();
+        g.on_file_pick(move |checksum| {
+            let Some(ui) = weak.upgrade() else { return };
+            let wrote = m.borrow_mut().file_pick(&checksum);
+            if wrote {
+                // the write landed UNDER an open editor: without dropping
+                // the guard the next keystroke pushes the old bytes back
+                la.borrow_mut().raw_for = None;
+            }
+            sync_after(&ui, &m, &la);
+        });
+    }
     act!(on_open_link, |w, target: slint::SharedString| {
         // a dead link is a no-op — the preview stays put
         let _ = w.open_link(&target);
@@ -1843,6 +1948,45 @@ pub(crate) fn wire_wiki_vote(
             });
         });
     });
+}
+
+/// The `+ Datei` picker's engine half: the republic's persistent files,
+/// and the jump to Shared Files when it keeps none yet.
+pub(crate) fn wire_wiki_file_picker(ui: &AppWindow, ctx: &Ctx) {
+    let g = ui.global::<WikiState>();
+    {
+        let cx = ctx.clone();
+        g.on_file_wanted(move || {
+            let wh = cx.wallet.clone();
+            let weak = cx.weak.clone();
+            cx.rt.spawn(async move {
+                let uploads = match wh.execute(Command::ReadUploads).await {
+                    Ok(Reply::Uploads { uploads }) => uploads,
+                    other => {
+                        tracing::warn!(error = ?other, "uploads unreadable");
+                        Vec::new()
+                    }
+                };
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    let rows = file_picks(&uploads, ui.get_lang_index());
+                    ui.global::<WikiState>()
+                        .invoke_file_list(ModelRc::new(VecModel::from(rows)));
+                });
+            });
+        });
+    }
+    {
+        let cx = ctx.clone();
+        // the persist VOTE lives in Shared Files; the picker only says so
+        g.on_file_jump(move || {
+            cx.issue(Command::SelectView {
+                surface: Surface::Files,
+                view: "persistent".to_string(),
+            });
+            cx.refresh_surfaces();
+        });
+    }
 }
 
 /// The engine-backed wiki READS (`knowledge_base_scale.md` §4.10): the

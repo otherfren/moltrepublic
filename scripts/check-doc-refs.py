@@ -55,6 +55,7 @@ NO_BARE_SCAN_FILES = {
     "crates/molt-ui/src/patchview.rs": "diff-viewer tests over the sample tree",
     "crates/molt-ui/src/tests/gui/wiki.rs": "the headless wiki tests drive the sample tree by name",
     "crates/molt-ui/src/tests/gui/wiki_files.rs": "the file-reference tests' one-page fixture is a wiki path",
+    "crates/molt-ui/src/tests/gui/wiki_file_picker.rs": "the picker tests' fixture tree is wiki paths",
     # the strict fold's fixtures + doc examples are WIKI paths (a.md, b.md,
     # folder/file.md), never repo docs — same class as the sample tree
     "crates/molt-core/src/wiki_fold.rs": "fold keystone fixtures",
