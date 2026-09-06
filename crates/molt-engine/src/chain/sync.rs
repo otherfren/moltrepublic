@@ -20,6 +20,9 @@ const KNOWN_HEADS_MAX: usize = 16;
 /// A5: a seat unheard-of for this long is reported silent. Two presence
 /// ticks (30 s each) plus slack - shorter and every ordinary gap rings.
 const SILENT_AFTER_SECS: u64 = 120;
+/// A5: a seat is silent once its signature is in none of the last this
+/// many blocks. One missed block is a lost race, not silence.
+const STALE_AFTER_BLOCKS: u64 = 2;
 
 impl State {
     /// Inbound: a peer broadcast (or re-served) a committed block. Extend the
@@ -616,16 +619,23 @@ impl State {
         molt_core::ChainLag { peers_ahead, silent }
     }
 
-    /// A5: the highest block each roster seat co-signed, over the blocks
-    /// this holder still keeps. A seat that stopped signing is silent, not
-    /// forked - and that is the distinction the detector could not draw.
+    /// A5: a seat's signature verified here for `height` - sealed or not.
+    pub(crate) fn note_signer(&mut self, member: &str, height: u64) {
+        let e = self.chain.seen_signing.entry(member.to_string()).or_insert(0);
+        *e = (*e).max(height);
+    }
+
+    /// A5: the highest height each roster seat signed for - in a block this
+    /// holder still keeps, or verified here before a seal. A seat that
+    /// stopped signing is silent, not forked - and that is the distinction
+    /// the detector could not draw.
     pub(crate) fn stale_signers(&self) -> Vec<molt_core::StaleSigner> {
         let Some(head) = self.chain.head.as_ref() else {
             return Vec::new();
         };
         let mut out: Vec<molt_core::StaleSigner> = Vec::new();
         for id in &head.identities {
-            let last = self
+            let sealed = self
                 .chain
                 .blocks
                 .iter()
@@ -633,7 +643,9 @@ impl State {
                 .map(|b| b.height)
                 .max()
                 .unwrap_or(0);
-            if last < head.height {
+            let seen = self.chain.seen_signing.get(&id.member).copied().unwrap_or(0);
+            let last = sealed.max(seen);
+            if last + STALE_AFTER_BLOCKS <= head.height {
                 out.push(molt_core::StaleSigner {
                     member: id.member.clone(),
                     last_signed_height: last,

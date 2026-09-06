@@ -160,6 +160,7 @@ impl State {
         if let Some(p) = self.chain.pending_sigs.get_mut(&id) {
             p.verified.insert(me.clone());
         }
+        self.note_signer(&me, height);
         let env = self.make_env(
             me.clone(),
             WorkspaceEvent::Approved {
@@ -324,8 +325,9 @@ impl State {
         for (member, sig) in candidates {
             if self.approval_verifies(id, height, &member, &sig) {
                 if let Some(p) = self.chain.pending_sigs.get_mut(&id) {
-                    p.verified.insert(member);
+                    p.verified.insert(member.clone());
                 }
+                self.note_signer(&member, height);
             }
         }
     }
@@ -1053,6 +1055,7 @@ impl State {
             if let Some(p) = self.chain.pending_sigs.get_mut(&id) {
                 p.verified.insert(by.to_string());
             }
+            self.note_signer(by, height);
         }
         self.try_commit(id);
     }

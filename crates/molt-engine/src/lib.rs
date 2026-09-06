@@ -811,6 +811,10 @@ pub(crate) struct ChainProjection {
     /// that the republic ran on without it (`diverged` reports the other
     /// failure: contradiction, not distance).
     pub(crate) peer_heights: BTreeMap<MemberId, u64>,
+    /// A5: the highest height at which each seat's signature VERIFIED here,
+    /// sealed or not - an m-of-n block keeps only the signatures it held at
+    /// the seal, so the block alone would call every late voter silent.
+    pub(crate) seen_signing: BTreeMap<MemberId, u64>,
     /// When the head last advanced (presence clock, seconds) - the A2.2
     /// seal pacing measures its propagation round from here.
     pub(crate) head_moved_at: u64,
@@ -1403,6 +1407,7 @@ impl State {
                 id_collisions: BTreeMap::new(),
                 diverged: BTreeMap::new(),
                 peer_heights: BTreeMap::new(),
+                seen_signing: BTreeMap::new(),
                 head_moved_at: 0,
                 seal_held: std::collections::BTreeSet::new(),
                 fork_candidates: BTreeMap::new(),

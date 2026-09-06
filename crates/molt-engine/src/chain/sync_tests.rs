@@ -806,7 +806,10 @@ fn a_vote_is_refused_while_the_peers_are_ahead() {
 }
 
 /// A5: a seat that stopped co-signing shows up as SILENT (stale signer),
-/// which is a different fact from a fork.
+/// which is a different fact from a fork - and a seat that merely lost the
+/// race to one seal is NOT silent: an m-of-n block keeps the signatures it
+/// held, the late ones never land, so a signature this node verified
+/// counts, sealed or not.
 #[test]
 fn a_seat_that_stopped_signing_is_reported_stale() {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -816,8 +819,14 @@ fn a_seat_that_stopped_signing_is_reported_stale() {
     let _guard = rt.enter();
     let mut b = Builder::new(&["petra", "walter", "dora"], 2);
     b.commit_applied(1, &["petra", "dora"]);
+    let one = chain_peer("walter", &b, b.blocks.clone());
+    assert!(
+        one.stale_signers().is_empty(),
+        "one missed block is a lost race, not silence: {:?}",
+        one.stale_signers()
+    );
     b.commit_applied(2, &["petra", "dora"]);
-    let walter = chain_peer("walter", &b, b.blocks.clone());
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
     let stale = walter.stale_signers();
     assert!(
         stale.iter().any(|s| s.member == "walter" && s.last_signed_height == 0),
@@ -826,5 +835,14 @@ fn a_seat_that_stopped_signing_is_reported_stale() {
     assert!(
         !stale.iter().any(|s| s.member == "petra"),
         "petra signed the head, she is not stale: {stale:?}"
+    );
+    walter.receive_proposed(7, Surface::Memory, json!({ "op": "add_note", "id": 7 }), "petra");
+    walter
+        .cmd_approve(molt_core::ProposalId(7), None)
+        .expect("level with the republic, the vote counts");
+    assert!(
+        !walter.stale_signers().iter().any(|s| s.member == "walter"),
+        "a verified signature counts before it seals: {:?}",
+        walter.stale_signers()
     );
 }
