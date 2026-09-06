@@ -417,6 +417,17 @@ impl State {
         }
     }
 
+    /// C1: how long this node's held seal for `id` still waits, `None`
+    /// when nothing is held for it. The pacing round is measured from the
+    /// last head move, so the wait shrinks with every read.
+    pub(crate) fn seal_hold_secs(&self, id: u64) -> Option<u64> {
+        if !self.chain.seal_held.contains(&id) {
+            return None;
+        }
+        let waited = self.presence_now().saturating_sub(self.chain.head_moved_at);
+        Some(self.seal_pace_secs().saturating_sub(waited))
+    }
+
     /// The delivery tick's half of the pacing: retry every held seal, which
     /// lands once the round has passed and is dropped once its proposal is
     /// no longer open (a peer sealed it, or it was withdrawn).

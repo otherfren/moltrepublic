@@ -5805,6 +5805,16 @@ pub enum Reply {
         threshold: usize,
         /// The proposal's discussion channel.
         channel: ChannelRef,
+        /// Seconds this node's ready seal still waits out its pacing
+        /// round; `None` = nothing held (C1, G14).
+        #[serde(default)]
+        held_for_secs: Option<u64>,
+        /// This node's chain height after the vote (0 without a chain).
+        /// `approvals` counts the signatures held HERE; a peer may already
+        /// have sealed the block (C2, G12), and the head is where that
+        /// shows first.
+        #[serde(default)]
+        head: u64,
     },
     /// A `wiki_edit` dry run: the patch it WOULD propose, nothing proposed.
     WikiPreview {
@@ -6107,6 +6117,12 @@ pub struct ProposalView {
     /// [`ProposalRecord::withdrawn`]) — labelled "pulled back".
     #[serde(default)]
     pub withdrawn: bool,
+    /// Threshold is reached here and the seal waits out its pacing round
+    /// (C1, G14) — "approvals 2 of 2, state proposed" read as a
+    /// contradiction. Reader-relative like `approved_by_me`: another node
+    /// holds no such seal. Additive with a default.
+    #[serde(default)]
+    pub sealing: bool,
 }
 
 /// One chat channel as the engine enumerates it for the read contract

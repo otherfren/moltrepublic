@@ -1973,6 +1973,58 @@ fn a_local_seal_waits_one_round_after_the_head_moved() {
     assert!(walter.chain.seal_held.is_empty());
 }
 
+/// C1/C2 (G14, G12): while the pacing round holds a ready seal the card
+/// carries `sealing` and the vote reply names the seconds left; both
+/// replies carry this node's head, because `approvals` counts only the
+/// signatures held HERE and the chain moves first.
+#[test]
+fn a_held_seal_shows_on_the_card_and_the_vote_reply() {
+    let b = Builder::new(&["petra", "walter"], 2);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    walter.nostr = Some(crate::NostrTransport {
+        sk: zeroize::Zeroizing::new(vec![7u8; 32]),
+        relays: vec!["ws://relay.example".to_string()],
+        rotation_seed: [0u8; 32],
+    });
+    walter.presence.clock_override = Some(1_000);
+    walter.chain.head_moved_at = 1_000;
+    // petra proposes and signs; walter's approval is the tipping one
+    let id = 4u64;
+    wire(
+        &mut walter,
+        "petra",
+        1,
+        WorkspaceEvent::Proposed {
+            id: ProposalId(id),
+            surface: Surface::Memory,
+            payload: json!({ "op": "add_note", "title": "one" }),
+        },
+    );
+    petra_signs(&mut walter, &b, 2, id, 1);
+    assert!(walter.chain.seal_held.is_empty(), "one signature seals nothing");
+
+    let reply = walter.cmd_approve(ProposalId(id)).expect("approves");
+    let Reply::Vote { state, approvals, threshold, held_for_secs, head, .. } = reply else {
+        panic!("unexpected reply {reply:?}");
+    };
+    assert_eq!((approvals, threshold), (2, 2), "the threshold is reached here");
+    assert_eq!(state, ProposalState::Proposed, "the seal has not landed");
+    assert_eq!(held_for_secs, Some(SEAL_PACE_SECS), "it waits out its round");
+    assert_eq!(head, 0, "the chain is still at the genesis");
+    assert!(walter.view(id, &walter.proposals[&id]).sealing, "the card says sealing");
+
+    walter.presence.clock_override = Some(1_000 + SEAL_PACE_SECS);
+    walter.cmd_net_delivery_tick().expect("tick");
+    assert_eq!(walter.chain.blocks.len(), 2, "the round passed, the seal lands");
+    assert!(!walter.view(id, &walter.proposals[&id]).sealing, "nothing is held any more");
+    let late = walter.cmd_approve(ProposalId(id)).expect("a late approval is no error");
+    let Reply::Vote { held_for_secs, head, .. } = late else {
+        panic!("unexpected reply {late:?}");
+    };
+    assert_eq!(held_for_secs, None);
+    assert_eq!(head, 1, "the head moved, which is where a voter sees it first");
+}
+
 /// A block a PEER sealed is never held - it extends the chain at once, and
 /// a seal this node was holding for the same proposal is simply done.
 #[test]

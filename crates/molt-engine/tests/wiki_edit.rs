@@ -261,6 +261,53 @@ async fn an_edit_that_cannot_land_is_refused_and_proposes_nothing() {
     assert_eq!(open_proposals(&w).await, before, "no edit ever proposed");
 }
 
+/// G11: `replace` matches a substring, so the `## Quellen` anchor sits
+/// inside every `### Quellen (Sitz B)` block too. A repeated one-line
+/// `old` names the lines it hit - without them the caller cannot see
+/// which occurrence is the surprise.
+#[tokio::test]
+async fn a_repeated_one_line_old_names_the_lines_it_hit() {
+    let w = spawn_solo();
+    edit(
+        &w,
+        vec![content(
+            "q.md",
+            "# Q\n\n## Quellen\n\n- a\n\n### Quellen (Sitz B)\n\n- b\n",
+        )],
+    )
+    .await
+    .expect("a document");
+
+    let got = refusal(
+        &w,
+        vec![WikiEdit::Replace {
+            path: "q.md".to_string(),
+            old: "## Quellen".to_string(),
+            new: "## Q2".to_string(),
+        }],
+    )
+    .await;
+    assert!(
+        got.contains("occurs 2 times in q.md (lines 3, 7)"),
+        "name where it hit: {got}"
+    );
+
+    // an `old` that already spans lines cannot be pinned to one of them
+    let multi = refusal(
+        &w,
+        vec![WikiEdit::Replace {
+            path: "q.md".to_string(),
+            old: "\n\n- ".to_string(),
+            new: "\nX".to_string(),
+        }],
+    )
+    .await;
+    assert!(
+        multi.contains("occurs 2 times in q.md -") && !multi.contains("lines"),
+        "no line list for a multi-line old: {multi}"
+    );
+}
+
 /// A one-key `set_props` must touch ONE line. The header is a member's
 /// text: re-emitting it whole would hand the voters a diff over the whole
 /// block for a one-key change, and they would have to read all of it to
@@ -591,11 +638,14 @@ async fn a_vote_answers_with_the_record_and_late_approvals_are_fine() {
         panic!("unexpected: {reply:?}");
     };
     let vote = w.execute(Command::Approve { proposal: id }).await.expect("approves");
-    let Reply::Vote { id: vid, state, approvals, threshold, channel } = vote else {
+    let Reply::Vote { id: vid, state, approvals, threshold, channel, held_for_secs, head } = vote else {
         panic!("unexpected: {vote:?}");
     };
     assert_eq!((vid, state, approvals, threshold), (id, molt_core::ProposalState::Applied, 1, 1));
     assert_eq!(channel, molt_core::ChannelRef::Patch { id });
+    // this solo group is not chain-governed: nothing paces a seal, and
+    // there is no chain head to name
+    assert_eq!((held_for_secs, head), (None, 0));
     let again = w.execute(Command::Approve { proposal: id }).await.expect("a late approval is not an error");
     assert!(matches!(again, Reply::Vote { state: molt_core::ProposalState::Applied, .. }));
     let err = w
