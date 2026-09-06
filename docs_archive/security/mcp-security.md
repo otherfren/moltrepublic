@@ -75,8 +75,9 @@ Auth failures come back as JSON-RPC error `-32001`:
 
 A SECOND key, `[mcp].read_token`, admits the READ tools only
 (`docs_archive/memory/knowledge_base_scale.md` §4.7). It is issued, rotated and revoked
-in the same panel as the seat key, and it is host posture like every other
-setting there — an agent can neither issue itself one nor read one back.
+in the same panel as the seat key. Like the seat key it is WRITE-ONLY: a
+seat client sets or revokes it (`patch_settings`, `set_node_posture`) but
+never reads one back, and a read-only client never sees a secret at all.
 
 * The read set is the WIKI and the SHARED FILES, nothing else (product
   decision 2026-09-04): `wiki_list`, `wiki_get`, `wiki_search`, `wiki_links`,
@@ -101,7 +102,7 @@ setting there — an agent can neither issue itself one nor read one back.
 * The key is absent from a generated config and is written only once one is
   issued, so a config this build writes still opens on a build that predates it.
 * The scope is **host-local**. The republic knows no roles and no rights; the
-  human narrows their own tool (see the host boundary below).
+  human narrows their own tool (see the machine boundary below).
 
 ## A TCP handshake, end to end
 
@@ -182,48 +183,46 @@ If a client hangs or gets a connection reset with no JSON reply, check that
 `WARN ... peer IP not on the allowlist` line first — the allowlist drops the socket
 before the protocol ever starts.
 
-## The host boundary: what an agent may NOT do (audit 2026-08-26)
+## The machine boundary (ADR-0007)
 
-**SUPERSEDED 2026-09-06 by ADR-0007 (`docs_archive/adr/0007-agent-operates-the-machine.md`):
-the agent operates the MACHINE; every item below except `ui_publish`, the
-`net_*` channels, the read-only key and the write-only secrets is reverted
-by `docs/reviews/mcp_agent_friction_fixes_round_3.md` Part F. The text is
-kept as the record of what the audit had enforced.**
+An agent driving this node over MCP with the SEAT token **operates the
+machine**: it founds, joins and recovers headless, holds the recovery
+phrase, sets the host posture, reaches any path the node's user can reach,
+and gives the clearnet consent. Whoever reaches the port with that token
+is the seat's operator, machine included — it is the human's job to let
+only a trusted client hold it (`docs_archive/adr/0007-agent-operates-the-machine.md`;
+this replaces the host boundary the audit of 2026-08-26 had drawn).
 
+What still is NOT a tool, and why — the line is WHO SPEAKS, not what is
+allowed:
 
-"Agents are seats" licenses REPUBLIC actions — propose, approve, chat,
-share, restore — not the operator's MACHINE, identity or secrets. The
-tool catalogue enforces that line at the builder and the engine keeps the
-stored values behind it:
+* **`ui_publish`** is the WINDOW reporting what it renders. A tool for it
+  would let a client forge what the GUI claims to show; reads go through
+  `read_ui_state` (`docs_archive/ui/gui_over_mcp.md`).
+* **Every `net_*` channel** is the node's own transport, ritual or export
+  task speaking to its engine. A tool would let a client forge a peer, a
+  ritual member, a relay verdict or an export success.
+* **`set_wake_command`** stays the GUI's direct door only because the value
+  itself is on the settings surface (`poke_wake_command` in
+  `patch_settings` / `save_settings`) — a second door, not a boundary.
+* **The read-only key** (`[mcp].read_token`) admits the wiki and file READ
+  tools and nothing else, and every reply it gets is stripped of `seed`,
+  `mcp_token`, `mcp_read_token` and `s3_secret_key`.
+* **The three stored secrets** stay write-only in `read_session`: reading
+  one back serves no autonomous action. `patch_settings` and
+  `set_node_posture` set them blind; a wholesale `save_settings` (whose
+  payload cannot carry them) keeps the stored values.
 
-* **Host posture is the GUI's / `config.toml`'s door** (`SetNodePosture`,
-  INTERNAL): `headless`, `workspace_dir`, `download_dir`, `mcp_port`,
-  `mcp_allow`, `mcp_token`, `mcp_read_token`, `anonymity`, `tor_mode`, `tor_port` and
-  `poke_wake_command`. `patch_settings` refuses them, `save_settings`
-  never carries them (the engine re-merges the stored values). An agent
-  therefore cannot switch the operator's Tor off, bind the endpoint to
-  `0.0.0.0`, rotate itself a token the human never learns, or repoint the
-  workspace root.
-* **Secrets never read back.** `settings.s3_secret_key`,
-  `settings.mcp_token` and `settings.mcp_read_token` are not serialized
-  (like the recovery phrase); the S3 secret is settable write-only through
-  `patch_settings`.
-* **The exchange folder is the agent's whole filesystem.** `download_file`
-  writes into `download_dir` only (a bare name), `share_file` shares a
-  bare name FROM it (`share_file_from_exchange`), `export_workspace` and
-  `wiki_export` write INTO it (`export_workspace_archive`,
-  `wiki_export_archive`). Any-path access — the file dialog — is the GUI's
-  (`ShareFile`, `ExportWorkspace`, `WikiExport` are INTERNAL).
-* **The MCP export is a knowledge archive.** It carries no recovery seed and
-  is marked phrase-sealed: an import commits it sealed, so reading it needs
-  the phrase the human holds. Blob + passphrase never becomes a seat.
-* **Clearnet consent is a human decision.** `relay_confirm` refuses
-  `accept_clearnet: true` and `relay_clearnet_session` refuses
-  `unlock: true` over MCP; switching non-onion dialing OFF and confirming
-  onion relays stay available.
-* **Founding and joining complete on a GUI node.** The recovery phrase is
-  shown in the wizard only and `confirm_seed_backup` needs it re-typed, so
-  a headless MCP client cannot attest the backup on the human's behalf.
+Consequences worth knowing before opening the port:
+
+* The endpoint is **cleartext TCP**. Loopback or an SSH tunnel; `allow`
+  beyond `127.0.0.1` hands the machine to whoever reaches it.
+* `read_session` carries the recovery phrase of a running ritual
+  (`create.seed` / `join.seed`) and of each stored workspace, so
+  `confirm_seed_backup` works headless and a founding completes without a
+  window.
+* `export_workspace` writes the same seed-carrying blob the GUI does:
+  blob + passphrase restores the seat.
 
 Still open (product): a ritual in flight is abandoned as a side effect of
 `create_start` / `join_start` / `recover_start` / `open_workspace` from
@@ -236,9 +235,9 @@ The rule is: **every state-changing action the GUI offers maps to one MCP
 tool**, because both frontends build the same `molt_core::Command` on the same
 engine handle. As of this audit the mapping is complete — chat (send incl.
 quotes, react, delete), proposals (propose / approve / decline), navigation
-(screen, surface, sub-view), language, theme, settings (the MCP tokens are
-NOT among them: they are host posture, minted by the GUI and refused by both
-settings verbs), workspaces (open / close /
+(screen, surface, sub-view), language, theme, settings (host posture included
+since ADR-0007; the three stored secrets are settable but never read back),
+workspaces (open / close /
 delete), and the three engine-run lifecycles (restore / create / join with
 their start / cancel / finish verbs). Reading is co-equal too: what the GUI
 live-mirrors, an agent reads via `read_session`, `read_state`,
@@ -264,24 +263,13 @@ cannot tell "omitted" from "set to the default" (H5, fixed 2026-08-07).
   their node process (stdio mode) stop it by closing the transport.
 * **Clipboard** (copy seed / invite / message / log, paste). The clipboard is
   a device of the GUI machine, not shared state. An agent already holds the
-  same bytes from `read_session` / `read_state` — EXCEPT the recovery
-  phrase, which no surface ever serializes (below); a clipboard tool would
+  same bytes from `read_session` / `read_state`; a clipboard tool would
   only let a remote client snoop on or overwrite the local user's clipboard.
 * **View-local state**: list sort order on the Open screen, the collapsed
   sidebar, open modals, form drafts, hold-to-peek seed reveal. None of it
   exists in the engine; the data behind it is readable over MCP (e.g.
   `workspaces[].last_sync_min` for sorting) and the *effects* (e.g. actually
   starting a restore) go through the shared commands.
-* **The recovery phrase** (`workspaces[].seed`, the wizards' `create.seed` /
-  `join.seed`) is the one exception to "the same bytes": it is private and
-  leaves the process on NO surface. Since 2026-08-26 the fields never
-  serialize (`#[serde(skip_serializing)]`), so `read_session` — and every
-  other wire form of the session — carries none of it; the GUI reads it
-  in-process for its hold-to-peek and the wizard's write-it-down step. A
-  headless operator gets the phrase from the wizard on a GUI node, or from
-  the device (`keys/seed.sealed` + the device key), never from the MCP
-  endpoint. Note that the endpoint is cleartext TCP: loopback or an SSH
-  tunnel only.
 * **Preview helpers**: the GUI's live invite parse and duplicate-name check
   are conveniences over the same rules the engine enforces — `join_start` /
   `create_start` re-validate and return the authoritative error to MCP

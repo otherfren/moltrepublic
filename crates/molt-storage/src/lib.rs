@@ -3942,12 +3942,13 @@ mod tests {
         assert_eq!(loaded.tail.len(), 3);
     }
 
-    /// A KNOWLEDGE ARCHIVE (what an MCP client may export) carries no
-    /// recovery seed and imports SEALED: reading it needs the phrase the
-    /// human holds, and blob + passphrase never becomes a seat (MCP audit
-    /// 2026-08-26 H1).
+    /// There is ONE export, and it carries the recovery seed (ADR-0007):
+    /// the MCP door and the GUI's file dialog write the same blob, so an
+    /// agent's backup restores a seat exactly like the human's. The audit
+    /// of 2026-08-26 had made the MCP form a seedless, phrase-sealed
+    /// "knowledge archive"; that split is gone.
     #[test]
-    fn an_archive_export_carries_no_seed_and_imports_sealed() {
+    fn an_export_carries_the_seed_and_imports_unsealed() {
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().to_path_buf();
         let phrase = generate_seed_phrase().expect("gen");
@@ -3960,21 +3961,19 @@ mod tests {
         };
         let pass = "a passphrase long enough for the export";
         let mut blob = Vec::new();
-        crate::export::export_archive(&root, &dir, &crate::export::ExportKey::passphrase(pass), &mut blob)
+        crate::export::export_dir(&root, &dir, &crate::export::ExportKey::passphrase(pass), &mut blob)
             .expect("export");
         let dest_root = tmp.path().join("dest-root");
         std::fs::create_dir_all(&dest_root).expect("dest root");
         let staging = crate::import::import_stage(&dest_root, &blob, pass).expect("stage");
-        assert!(staging.seed_entropy().is_none(), "no seed in an archive");
-        assert_eq!(staging.at_rest, molt_core::SEALED_PHRASE);
-        let imported = staging.commit(&dest_root, false, None).expect("commit");
+        assert!(staging.seed_entropy().is_some(), "the seed rides along");
+        assert_eq!(staging.at_rest, molt_core::SEALED_DEVICE);
+        let imported = staging.commit(&dest_root, false, None).expect("import");
         assert!(
-            is_sealed(&read_manifest(&imported).expect("manifest")),
-            "the import is sealed - the phrase opens it"
+            !is_sealed(&read_manifest(&imported).expect("manifest")),
+            "the import opens without the phrase"
         );
-        assert!(open_workspace(&imported).is_err(), "no keys on disk");
-        crate::sealing::unseal_at_rest(&dest_root, &imported, &phrase).expect("the phrase opens it");
-        let (_ws, loaded) = open_workspace(&imported).expect("open after unseal");
+        let (_ws, loaded) = open_workspace(&imported).expect("open");
         assert_eq!(loaded.tail.len(), 2, "the knowledge is all there");
     }
 

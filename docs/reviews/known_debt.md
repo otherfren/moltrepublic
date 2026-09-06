@@ -89,31 +89,16 @@ still OPEN there, by id (each carries its fix direction in the review):
   (chain-backed commits outrank at the tiebreak, design).
 - Transport: T10 residual (test-only cursor API).
 - Storage: S1 residual (`openat2` beneath the workspace).
-- Core: K4 residual (a local `--reveal-seed` for headless nodes).
 - Frontends: F7 residual (token read per accepted connection).
 - MCP privileges (section 9): P8 ritual abandon on context switch
   (product) · P10 send-side rate limits.
 
-## `scripts/gui_walk.py` cannot found a republic over MCP any more (2026-09-06)
+## `scripts/gui_walk.py` has not been re-run since ADR-0007 (2026-09-06)
 
-Fix direction changed the same day: ADR-0007 lets the agent hold the
-phrase, so the walk's seed step comes back as written; closes with
-`mcp_agent_friction_fixes_round_3.md` Part F.
-
-
-The walk (`docs_archive/ui/gui_over_mcp.md` step 5) founds a 2-of-2 over
-MCP and then reads the window back. Since the MCP audit of 2026-08-26
-two of its steps are GUI-only by design: clearnet consent
-(`relay_confirm` refuses it - fixed in the script: the dev relay is
-written into the config pre-confirmed) and the recovery phrase
-(`create.seed` / `join.seed` are never serialized, so
-`confirm_seed_backup` cannot be fed over MCP - NOT fixable in the
-script without breaking the phrase rule). Found by the exhaustive run
-of 2026-09-06; the rest of the walk (phases 3-5) is unverified since
-the audit. Fix direction: start the walk from two PRE-FOUNDED
-workspaces (a fixture the engine tests already know how to build), or
-give the ritual a testing-backend-only seed acknowledgement that the
-GUI path drives through `ui_action`.
+Both blockers are gone (the phrase is served again, `relay_confirm`
+takes the clearnet acknowledgement), but the walk needs the
+`ui-testing` window build, which the round-3 agents could not run.
+Delete this entry once one full run is green.
 
 ## Flaky: `a_broadcast_ack_moves_the_senders_proven_floor` (2026-09-05)
 

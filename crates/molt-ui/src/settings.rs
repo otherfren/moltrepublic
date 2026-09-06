@@ -145,12 +145,11 @@ pub(crate) fn read_settings_draft(ui: &AppWindow, stored: &SessionSettings) -> S
 }
 
 /// The settings draft's three doors, in ORDER and in ONE task: the wake
-/// command (a local shell hook — its own door, so no other surface can
-/// plant one), the host posture with both secrets (`SetNodePosture` —
-/// the GUI's door; MCP operates the seat, not the machine), then the
-/// wholesale save, which re-merges the stored posture and so must land
-/// LAST. "Save & continue" and "Rotate token" used to skip the wake door
-/// and lose an edited command (review 2026-08-25 F3).
+/// command, the host posture with all three secrets (`SetNodePosture` -
+/// the only door that can WRITE a secret), then the wholesale save, which
+/// keeps the stored secrets and so must land LAST. "Save & continue" and
+/// "Rotate token" used to skip the wake door and lose an edited command
+/// (review 2026-08-25 F3).
 pub(crate) async fn save_draft(
     w: &WalletHandle,
     wake: String,

@@ -351,9 +351,9 @@ pub struct SessionSettings {
     /// S3 access key id.
     #[serde(default)]
     pub s3_access_key: String,
-    /// S3 secret key. NEVER SERIALIZED (2026-08-26): a credential no
+    /// S3 secret key. WRITE-ONLY (ADR-0007 keeps this): a credential no
     /// surface needs to read back — set blind through `patch_settings` or
-    /// the GUI (`SetNodePosture`); `read_session` carries "".
+    /// `set_node_posture`; `read_session` carries "".
     #[serde(skip_serializing, default)]
     pub s3_secret_key: String,
     /// S3 bucket name. Defaults to something inconspicuous — the bucket
@@ -378,16 +378,16 @@ pub struct SessionSettings {
     pub mcp_port: u16,
     /// MCP client allowlist (`"127.0.0.1" | "0.0.0.0" | comma-separated`).
     pub mcp_allow: String,
-    /// MCP API token clients must present. NEVER SERIALIZED (2026-08-26):
-    /// the token is the whole TCP credential; a client that holds it needs
-    /// no copy, and one that rotates it must not be the only party that
-    /// learns the new one. The GUI reads it in-process; its one door is
-    /// `SetNodePosture`.
+    /// MCP API token clients must present. WRITE-ONLY (ADR-0007 keeps
+    /// this): the token is the whole TCP credential; a client that holds
+    /// it needs no copy, and one that rotates it must not be the only
+    /// party that learns the new one. Settable through `patch_settings` /
+    /// `set_node_posture`; the GUI reads it in-process.
     #[serde(skip_serializing, default)]
     pub mcp_token: String,
     /// A SECOND key admitting only the read tools
     /// (`docs_archive/memory/knowledge_base_scale.md` §4.7). Empty = OFF, never
-    /// "unauthenticated". Never serialized, for the same reason as
+    /// "unauthenticated". Write-only, for the same reason as
     /// [`SessionSettings::mcp_token`]: a credential no surface reads back.
     #[serde(skip_serializing, default)]
     pub mcp_read_token: String,
@@ -743,11 +743,10 @@ pub struct WorkspaceInfo {
     /// workspace is unsealed; cleared to "" the moment it is sealed at rest
     /// (no key material on disk means none in session memory either).
     ///
-    /// NEVER SERIALIZED: an in-process display value for the GUI's
-    /// hold-to-peek only. It rode `read_session` to every MCP client until
-    /// 2026-08-26 (review K4); a phrase is private and leaves the process on
-    /// no surface. Reads back as "" from any wire form.
-    #[serde(skip_serializing, default)]
+    /// SERVED to the SEAT (ADR-0007): an agent operates the machine, so it
+    /// holds the phrase like the human does. The READ-ONLY key never sees
+    /// it (`molt-mcp` strips it from every read-scope reply).
+    #[serde(default)]
     pub seed: String,
     /// The effective global anonymity network (`"tor" | "none"`) when this
     /// entry was founded/joined — a display label (routing always follows
@@ -3314,8 +3313,8 @@ pub struct CreateState {
     /// when the ritual opened — a read-only display value, never a choice.
     pub net: String,
     /// The founder's recovery phrase (shown during the ritual, then gone).
-    /// NEVER SERIALIZED — see `WorkspaceInfo::seed`.
-    #[serde(skip_serializing, default)]
+    /// Served to the seat — see `WorkspaceInfo::seed`.
+    #[serde(default)]
     pub seed: String,
     /// Whether the FOUNDER's own phrase backup is confirmed (the re-typed
     /// phrase matched — `seed_backup_confirmation.md` ❻½). The ritual
@@ -3353,8 +3352,8 @@ pub struct JoinState {
     pub inviter: String,
     /// The joiner's freshly generated recovery phrase, shown once during the
     /// join (its identity + own workspace derive from it). Empty while idle.
-    /// NEVER SERIALIZED — see `WorkspaceInfo::seed`.
-    #[serde(skip_serializing, default)]
+    /// Served to the seat — see `WorkspaceInfo::seed`.
+    #[serde(default)]
     pub seed: String,
     /// The founder's proposed final DAO name, surfaced when the ritual reaches
     /// the ratification step (empty until then).
@@ -3898,23 +3897,15 @@ pub enum Command {
     /// dedicated encrypted queue. A share IS a chat message, so it files
     /// under a channel view like any other (concept Q8).
     ShareFile {
-        /// Absolute path of the local file to share.
+        /// The local file to share: any ABSOLUTE path the node's user can
+        /// read (`~` expanded), or a BARE NAME, which resolves inside the
+        /// node's download directory - the exchange folder both surfaces
+        /// hand files over in. A relative path is refused (ADR-0007): it
+        /// would resolve against the daemon's working directory.
         path: String,
         /// The channel view the share files under. `Command` is never
         /// persisted, so the field is a clean swap (no serde default) —
         /// every construction site states its channel.
-        channel: ChannelRef,
-    },
-    /// [`Command::ShareFile`] for an MCP client: `name` is a bare file
-    /// name inside the node's download directory — the EXCHANGE FOLDER an
-    /// agent may read from and write into. `ShareFile` itself (any path
-    /// the node's user can read) is the GUI's file dialog only: an agent
-    /// that could name any path would publish the operator's private files
-    /// to the whole republic (MCP audit 2026-08-26 H3).
-    ShareFileFromExchange {
-        /// A bare file name (no separators) in the download directory.
-        name: String,
-        /// The channel view the share files under.
         channel: ChannelRef,
     },
     /// Download a shared file: fetch the bytes peer-to-peer from the
@@ -3924,9 +3915,11 @@ pub enum Command {
     DownloadFile {
         /// The share message's stable id.
         id: MessageId,
-        /// Destination: an existing directory (the file lands inside it,
-        /// name collisions resolve as "name (1).ext") or a full target
-        /// path. Defaults to the session's download directory.
+        /// Destination: a BARE NAME in the download directory, or an
+        /// absolute path - an existing directory takes the share's own
+        /// name (collisions resolve as "name (1).ext"). A relative path is
+        /// refused - see [`Command::ShareFile`]. Defaults to the session's
+        /// download directory.
         #[serde(default)]
         dest: Option<String>,
     },
@@ -4443,26 +4436,13 @@ pub enum Command {
     ExportWorkspace {
         /// The workspace id ([`WorkspaceInfo::id`]).
         id: WorkspaceId,
-        /// Target file path (`~` is expanded; parents are created; an
-        /// existing file is atomically replaced).
+        /// Target file path: absolute (`~` is expanded; parents are
+        /// created; an existing file is atomically replaced), or a BARE
+        /// NAME, which lands in the node's download directory. A relative
+        /// path is refused — see [`Command::ShareFile`].
         dest: String,
         /// The export passphrase (Argon2id-stretched; minimum 10
         /// characters, engine-enforced).
-        passphrase: String,
-    },
-    /// [`Command::ExportWorkspace`] for an MCP client: a KNOWLEDGE ARCHIVE
-    /// — the history, chain and snapshot, but never the recovery seed, and
-    /// marked phrase-sealed so an import needs the phrase to open it —
-    /// written as `name` into the download directory (the exchange
-    /// folder). The seed-carrying export to any path is the GUI's only:
-    /// blob + passphrase would otherwise replace the phrase, which leaves
-    /// the process on no surface (MCP audit 2026-08-26 H1).
-    ExportWorkspaceArchive {
-        /// The workspace id ([`WorkspaceInfo::id`]).
-        id: WorkspaceId,
-        /// A bare file name (no separators) in the download directory.
-        name: String,
-        /// The export passphrase (minimum 10 characters, engine-enforced).
         passphrase: String,
     },
     /// The export task confirmed the blob on disk (engine-internal, from
@@ -4499,19 +4479,11 @@ pub enum Command {
     /// anything with — a files-only export stays available). Runs off the
     /// actor; the honest outcome lands in [`SessionView::wiki_export`].
     WikiExport {
-        /// Target directory (`~` is expanded; parents are created; existing
-        /// files of the same name are overwritten).
+        /// Target directory: absolute (`~` is expanded; parents are
+        /// created; existing files of the same name are overwritten), or a
+        /// BARE NAME, which lands in the node's download directory. A
+        /// relative path is refused — see [`Command::ShareFile`].
         dest: String,
-        /// Include the verification bundle.
-        proof: bool,
-    },
-    /// [`Command::WikiExport`] for an MCP client: into `name`, a bare
-    /// directory name inside the download directory — never an arbitrary
-    /// path, which the tree would be scattered into and same-named files
-    /// overwritten at (MCP audit 2026-08-26 M3).
-    WikiExportArchive {
-        /// A bare directory name (no separators) in the download directory.
-        name: String,
         /// Include the verification bundle.
         proof: bool,
     },
@@ -5604,7 +5576,7 @@ pub enum Command {
     },
     /// Where this seat keeps the mirrored pieces of the open republic
     /// (`prefs.mirror_dir`; "" = the default folder). Any-path on the
-    /// host, so GUI/config-only - never an MCP tool (`mcp-security.md`).
+    /// host, and a tool on both surfaces (ADR-0007).
     SetMirrorDir {
         /// The folder, `~` allowed; "" restores the default.
         path: String,
@@ -5623,25 +5595,21 @@ pub enum Command {
         generation: Option<u64>,
     },
     /// Set (or clear) this node's **wake command** — the local shell hook a
-    /// poke or pending vote runs. Deliberately NOT an MCP tool: the string is
-    /// executed by the node, so an agent that could set it would grant itself
-    /// code execution on the operator's machine (the same reasoning that
-    /// keeps the clearnet switch off the settings surface). The GUI and
-    /// `config.toml` are its only doors.
+    /// poke or pending vote runs. The GUI's direct door; over MCP the key
+    /// rides the settings surface (`poke_wake_command`, ADR-0007), so this
+    /// variant stays INTERNAL only because it is a second door, not
+    /// because the value is off limits.
     SetWakeCommand {
         /// The command line, run via `sh -c`. Empty clears it.
         command: String,
     },
-    /// Set the node's HOST POSTURE — the settings that decide who can
-    /// reach this node, whether its traffic is anonymized, where it keeps
-    /// and exchanges files, and the two secrets. Deliberately NOT an MCP
-    /// tool (MCP audit 2026-08-26 M1/H4): an agent operates its human's
-    /// SEAT (the "agents are seats" decision), not the human's machine or
-    /// anonymity — `anonymity = "none"` over MCP would deanonymize the
-    /// operator, `mcp_allow = "0.0.0.0"` or a token rotation would let it
-    /// widen or take over its own access. `SaveSettings` and
-    /// `PatchSettings` keep the stored values for these keys; the GUI and
-    /// `config.toml` are the doors.
+    /// Set the node's HOST POSTURE in one call — who can reach this node,
+    /// whether its traffic is anonymized, where it keeps and exchanges
+    /// files, and the three secrets. A tool on both surfaces (ADR-0007:
+    /// the agent operates the machine); `PatchSettings` reaches the same
+    /// keys one at a time. The secrets are `Option`: `None` keeps the
+    /// stored value, which is how `SaveSettings` (whose payload never
+    /// carries them) leaves them alone.
     SetNodePosture {
         /// The posture to store.
         posture: NodePosture,
@@ -5712,8 +5680,9 @@ pub const UI_ACTION_VERBS: [&str; 5] = [
     "chat_send",
 ];
 
-/// The settings keys [`Command::SetNodePosture`] owns — refused by
-/// `PatchSettings`, re-merged from the stored values by `SaveSettings`.
+/// The HOST-POSTURE settings keys: [`Command::SetNodePosture`] sets them
+/// in one call, `PatchSettings` and `SaveSettings` reach them like any
+/// other key (ADR-0007). The three secrets among them are write-only.
 pub const NODE_POSTURE_KEYS: [&str; 11] = [
     "headless",
     "workspace_dir",

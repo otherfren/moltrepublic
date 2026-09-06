@@ -159,12 +159,14 @@ finding, the same as a bug.
   fails otherwise. Adding a `Command` means updating one of those. Network/ritual
   tasks speaking *to* the engine are INTERNAL (an MCP agent must not be able to
   forge a peer/ritual member); human decisions (approve, propose, confirm) are
-  tools on **both** surfaces. Co-equal means the SEAT, not the machine
-  (`docs_archive/security/mcp-security.md`, audit 2026-08-26): host posture
-  (`SetNodePosture`) and any-path file access are GUI/config-only INTERNAL
-  commands, an agent gets the exchange folder `download_dir`, and the
-  recovery phrase plus the two stored secrets are `skip_serializing` — they
-  leave the process on NO surface.
+  tools on **both** surfaces. Since ADR-0007 the seat token operates the
+  MACHINE (`docs_archive/security/mcp-security.md`, "The machine boundary"):
+  host posture, any path, the clearnet consent and the recovery phrase are
+  all on the surface. What stays INTERNAL is only what would let a client
+  speak AS someone else - `ui_publish` (the window) and every `net_*`
+  channel (the transport/ritual tasks). The three stored secrets
+  (`mcp_token`, `mcp_read_token`, `s3_secret_key`) stay write-only, and the
+  read-only key never sees a phrase or a secret.
 - **`WorkspaceEvent::Founded`, `SealedRoster`, and `roster_canonical_bytes`
   ripple widely.** Adding a field touches ~15 sites, many of them test harnesses
   that recompute the signed table. `roster_canonical_bytes` is versioned
