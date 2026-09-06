@@ -40,19 +40,23 @@ pub(crate) mod counters {
         PREVIEW.with(|c| c.set(c.get() + 1));
     }
 
+    #[cfg(feature = "live-preview")]
     pub(crate) fn draft() -> u32 {
         DRAFT.with(Cell::get)
     }
 
+    #[cfg(feature = "live-preview")]
     pub(crate) fn preview() -> u32 {
         PREVIEW.with(Cell::get)
     }
 
     /// Draft-flush timers armed (one per window, never one per keystroke).
+    #[cfg(feature = "live-preview")]
     pub(crate) fn flush() -> u32 {
         FLUSH.with(Cell::get)
     }
 
+    #[cfg(feature = "live-preview")]
     pub(crate) fn reset() {
         DRAFT.with(|c| c.set(0));
         PREVIEW.with(|c| c.set(0));

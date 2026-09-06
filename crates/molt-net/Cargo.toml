@@ -33,9 +33,13 @@ workspace = true
 # `static`/`static-sqlite` (`rusqlite/bundled`) would only make it worse
 # (compiles SQLite from C via cc, rather than linking the system lib). We take
 # the minimal feature set that builds: `arti-client { default-features = false,
-# features = ["tokio","rustls"] }` drops native-tls (OpenSSL) and the
-# compression codecs (zstd-sys/lzma-sys), leaving libsqlite3-sys as the only
-# C dep. Verify with `cargo tree -p molt-net --features embedded-tor -e no-dev`.
+# features = ["tokio","rustls","onion-service-client"] }` drops native-tls
+# (OpenSSL) and the compression codecs (zstd-sys/lzma-sys), leaving
+# libsqlite3-sys as the only C dep. `onion-service-client` is what reaches an
+# onion relay at all: without it arti rejects every `.onion` address (the live
+# smoke test `tests/tor_embedded_smoke.rs` found the release build blind to
+# its own default relays, 2026-09-06); it adds tor-hsclient/tor-hscrypto,
+# pure Rust. Verify with `cargo tree -p molt-net --features embedded-tor -e no-dev`.
 # The DEFAULT graph is ring-free: `cargo tree -p molt-net -e no-dev -i ring`
 # must print "nothing to print" (the dev-only Nostr relay-pool crates pin a
 # ring-provider tokio-rustls, which the runtime must never silently re-adopt
@@ -93,7 +97,7 @@ nostr.workspace = true
 # ADR-0002). Minimal feature set: `tokio` + `rustls` (drops
 # native-tls/OpenSSL and the zstd/xz compression C deps); libsqlite3-sys (via
 # tor-dirmgr) is the accepted C dep.
-arti-client = { version = "0.42", default-features = false, features = ["tokio", "rustls"], optional = true }
+arti-client = { version = "0.42", default-features = false, features = ["tokio", "rustls", "onion-service-client"], optional = true }
 tor-rtcompat = { version = "0.42", optional = true }
 
 [dev-dependencies]

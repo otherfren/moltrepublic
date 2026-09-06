@@ -130,7 +130,7 @@ fn image_budget() -> usize {
 
 /// Run the image cache under a smaller budget, so the eviction path is
 /// reachable without decoding 64 MiB.
-#[cfg(test)]
+#[cfg(all(test, feature = "live-preview"))]
 pub(crate) fn set_image_budget(bytes: usize) {
     IMAGE_BUDGET.with(|b| b.set(bytes));
 }
@@ -704,7 +704,7 @@ fn file_ref_jump(dest: &str) -> (String, &'static str) {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "live-preview"))]
 pub(crate) fn reset_file_refs() {
     FILE_REFS.with(|c| *c.borrow_mut() = FileRefs::default());
 }

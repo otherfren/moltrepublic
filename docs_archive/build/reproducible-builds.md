@@ -47,7 +47,10 @@ These inputs determine the artifact bytes:
   than a release-note footnote.
 - **The feature set**: the script builds `molt-app` with `--features
   embedded-tor` (release decision 2026-09-06: the published binary carries
-  the in-process arti client and needs no system Tor). That pulls arti's
+  the in-process arti client and needs no system Tor; its
+  `onion-service-client` feature is what reaches an onion relay - the live
+  smoke test `crates/molt-net/tests/tor_embedded_smoke.rs` proves both a
+  clearnet and an onion relay through it). That pulls arti's
   `tor-dirmgr → rusqlite → libsqlite3-sys`, i.e. a bundled C SQLite compiled
   by `cc` at build time - the C compiler and its flags therefore join the
   envelope (see below).

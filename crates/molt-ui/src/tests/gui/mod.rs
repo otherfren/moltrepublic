@@ -15,11 +15,13 @@ mod chat;
 mod files;
 mod layout;
 mod mirror;
+#[cfg(feature = "live-preview")]
 mod modals;
 mod poke;
 mod recovery_backup;
 mod snapshot;
 mod wiki;
+#[cfg(feature = "live-preview")]
 mod wiki_files;
 mod wiki_file_picker;
 
@@ -119,6 +121,7 @@ fn poke_menu_open(
 
 /// One orphan-row session for the backup-table tests (field bug
 /// 2026-08-24): a bucket-only workspace plus one foreign key.
+#[cfg(feature = "live-preview")]
 fn sv_backup_orphan() -> (SessionView, String) {
     let id = "ab".repeat(32);
     let sv = SessionView {
