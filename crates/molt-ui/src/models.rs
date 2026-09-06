@@ -6,7 +6,7 @@
 
 use slint::{Model, ModelRc, VecModel};
 
-use crate::WikiBlock;
+use crate::{LogLine, ProposalRow, WikiBlock, WorkspaceItem};
 
 /// Update a `VecModel`-backed property IN PLACE: shrink, patch the rows
 /// `eq` does not accept as unchanged, grow. Wholesale `ModelRc`
@@ -41,14 +41,34 @@ pub(crate) fn sync_model<T: Clone + 'static>(
     }
 }
 
-/// [`sync_model`] for row types without an equality: every row is
-/// rewritten (the repeater still keeps its elements - only the data moves).
-pub(crate) fn sync_rows<T: Clone + 'static>(
+/// [`sync_model`] with the row type's OWN equality: a row the engine
+/// re-derived byte-identically is not written, so an engine event that
+/// changed nothing dirties nothing. Row types carrying a nested model
+/// need a field-wise `eq` instead (see [`log_line_eq`]) - the derived
+/// `PartialEq` compares a `ModelRc` by pointer.
+pub(crate) fn sync_rows<T: Clone + PartialEq + 'static>(
     current: &ModelRc<T>,
     items: Vec<T>,
     set: impl FnOnce(ModelRc<T>),
 ) {
-    sync_model(current, items, |_, _| false, set);
+    sync_model(current, items, PartialEq::eq, set);
+}
+
+/// Patch a row's NESTED model in place and hand back that same instance.
+/// A fresh `ModelRc` per push rebuilds the whole nested repeater and
+/// (via the pointer compare) marks the parent row changed too - which is
+/// how one chat message came to repaint every surface.
+pub(crate) fn patch_nested<T: Clone + 'static>(
+    old: Option<&ModelRc<T>>,
+    items: Vec<T>,
+    eq: impl Fn(&T, &T) -> bool,
+) -> ModelRc<T> {
+    let Some(cur) = old else {
+        return ModelRc::new(VecModel::from(items));
+    };
+    let mut fresh = None;
+    sync_model(cur, items, eq, |m| fresh = Some(m));
+    fresh.unwrap_or_else(|| cur.clone())
 }
 
 /// Rebuild a `[string]` mirror in place.
@@ -64,14 +84,47 @@ pub(crate) fn sync_strings(
     );
 }
 
-/// The `eq` of the preview blocks: `WikiBlock.spans` is a nested model
-/// whose derived equality is POINTER identity, and every sync builds fresh
-/// span models - the derived compare would therefore rewrite (and
-/// re-create) every block row on every sync. Compare spans by content.
+/// Two models hold the same rows.
+pub(crate) fn models_eq<T: Clone + PartialEq + 'static>(a: &ModelRc<T>, b: &ModelRc<T>) -> bool {
+    a.row_count() == b.row_count() && a.iter().eq(b.iter())
+}
+
+/// The `eq` of a row type carrying nested models: compare those by
+/// CONTENT and let the derive cover every other field. Written this way
+/// rather than field by field because the struct is generated from
+/// `.slint` - a field added there must not silently drop out of the
+/// comparison and freeze a stale row on screen.
 pub(crate) fn wiki_block_eq(a: &WikiBlock, b: &WikiBlock) -> bool {
-    a.kind == b.kind
-        && a.status == b.status
-        && a.text == b.text
-        && a.spans.row_count() == b.spans.row_count()
-        && (0..a.spans.row_count()).all(|i| a.spans.row_data(i) == b.spans.row_data(i))
+    models_eq(&a.spans, &b.spans)
+        && *b == WikiBlock { spans: b.spans.clone(), ..a.clone() }
+}
+
+/// [`wiki_block_eq`] for a chat/log row (`reactions`, `receipts`).
+pub(crate) fn log_line_eq(a: &LogLine, b: &LogLine) -> bool {
+    models_eq(&a.reactions, &b.reactions)
+        && models_eq(&a.receipts, &b.receipts)
+        && *b
+            == LogLine {
+                reactions: b.reactions.clone(),
+                receipts: b.receipts.clone(),
+                ..a.clone()
+            }
+}
+
+/// [`wiki_block_eq`] for a vote card (`relay_changes`, `votes`).
+pub(crate) fn proposal_row_eq(a: &ProposalRow, b: &ProposalRow) -> bool {
+    models_eq(&a.relay_changes, &b.relay_changes)
+        && models_eq(&a.votes, &b.votes)
+        && *b
+            == ProposalRow {
+                relay_changes: b.relay_changes.clone(),
+                votes: b.votes.clone(),
+                ..a.clone()
+            }
+}
+
+/// [`wiki_block_eq`] for a workspace card (`members`).
+pub(crate) fn workspace_item_eq(a: &WorkspaceItem, b: &WorkspaceItem) -> bool {
+    models_eq(&a.members, &b.members)
+        && *b == WorkspaceItem { members: b.members.clone(), ..a.clone() }
 }

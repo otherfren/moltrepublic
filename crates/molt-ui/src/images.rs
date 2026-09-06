@@ -199,10 +199,11 @@ pub(crate) fn logo_needs_reload(shown_key: &str, image_ref: &str) -> Option<Stri
 
 /// The decoded member avatars, keyed by [`avatar_cache_key`].
 ///
-/// [`sync_rows`] rewrites EVERY row on EVERY mirror push, so a decode
-/// inside the row mapping would re-decode the whole roster on every engine
-/// event. This remembers the answer - the miss included, so a picture
-/// whose file is not on this device does not re-read per push either.
+/// The mirror MAPS every row on every push (only the write is skipped),
+/// so a decode inside the row mapping would re-decode the whole roster on
+/// every engine event. This remembers the answer - the miss included, so a
+/// picture whose file is not on this device does not re-read per push
+/// either.
 #[derive(Default)]
 pub(crate) struct AvatarCache {
     by_path: HashMap<String, Option<slint::Image>>,

@@ -1,8 +1,8 @@
 # Wiki pane performance - analysis and fix plan
 
-Status: **OPEN - analysis measured 2026-09-06, fix plan proposed, not
-executed.** The two user-requested items in step 1 land with this document;
-everything from step 2 on is a proposal to discuss first.
+Status: **OPEN - analysis measured 2026-09-06, fix plan partly executed.**
+The two user-requested items in step 1 landed with this document, step 2 on
+2026-09-06; everything from step 3 on is a proposal to discuss first.
 
 Reported live (2026-09-06, three `moltd` nodes on the "Second Wiki Test"
 republic, 125 pages / 9 folders / 293 KB): the wiki pane is sluggish
@@ -184,12 +184,21 @@ removal, no visible change); 4-6 change behaviour or structure.
    against it scrolls nowhere. `ScrollBody` therefore derives the content
    height from `row-count` (the model's length) whenever it is given one.
    Keystone: `reveal_scrolls_the_navigator_to_the_marked_row`.
-2. **Surfaces mirror (F7) - molt-ui only.** `sync_rows` → a `sync_model`
-   with equality on the row's scalar fields and the nested models patched
-   in place instead of re-allocated (the `VecModel` idiom every other
-   model here already uses); the memory row carries no per-event payload
-   at all. Keystone: an engine event with nothing new must not dirty the
-   memory pane (the paint probe's "surfaces rewrite" frame goes to 0).
+2. **Surfaces mirror (F7) - BUILT 2026-09-06, molt-ui only.** `sync_rows`
+   now carries the row type's own equality, and every surface row's five
+   nested models (`log`, `pending`, `declined`, `accepted`, `views`) are
+   PATCHED in place against the row already on screen, keyed by surface -
+   so a chat line grows the chat log and touches nothing else. Same
+   discipline applied to the other per-event rewrites: `chain_rows`,
+   `selected_decision`, the charter columns, the wizard's relay picks and
+   the workspace cards (nested member chips compared by content).
+   Keystones in `crates/molt-ui/src/tests/gui/mirror.rs`:
+   `an_unchanged_surfaces_push_keeps_every_model_instance`,
+   `a_new_chat_line_grows_the_log_model_in_place`,
+   `an_unchanged_surfaces_push_paints_nothing`. Measured on the same
+   corpus, same flavour, in one run (`surfaces_push_frame_cost_offscreen`,
+   `#[ignore]`d): the wholesale rewrite 782 ms, `apply_surfaces` with an
+   unchanged bundle **0.4 µs, drew=false**.
 3. **`sync_wiki` diet (F4, F5) - molt-ui only, no .slint change.**
    - `to_draft()` only when the 2 s guard is due AND a generation counter
      (bumped by every mutating verb) moved - never on the keystroke echo.

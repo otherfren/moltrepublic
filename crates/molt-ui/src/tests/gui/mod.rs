@@ -14,6 +14,7 @@
 mod chat;
 mod files;
 mod layout;
+mod mirror;
 mod modals;
 mod poke;
 mod recovery_backup;

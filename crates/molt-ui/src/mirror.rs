@@ -24,7 +24,10 @@ use crate::labels::{
     never_seen_label, orphan_remote_label, seat_state_label, seen_label, short_hex_id, size_label,
     strings_founder, sync_status_label, theme_index, unix_now, view_icon, view_label,
 };
-use crate::models::{sync_rows, sync_strings};
+use crate::models::{
+    log_line_eq, patch_nested, proposal_row_eq, sync_model, sync_rows, sync_strings,
+    workspace_item_eq,
+};
 use crate::net_tor::{net_health_pill, tor_test_detail, tor_test_tone, tor_verdict_copy_for};
 use crate::settings::{apply_settings_fields, settings_draft_differs};
 use crate::surfaces::{
@@ -447,7 +450,7 @@ pub(crate) fn apply_session(
         ui.get_ws_sort_key().as_str(),
         ui.get_ws_sort_desc(),
     );
-    sync_rows(&ui.get_ws_list(), items, |m| ui.set_ws_list(m));
+    sync_model(&ui.get_ws_list(), items, workspace_item_eq, |m| ui.set_ws_list(m));
 
     // the settings backup tab mirrors the same workspaces as a local↔bucket
     // mapping table
@@ -492,7 +495,7 @@ pub(crate) fn apply_session(
         .into_iter()
         .map(slint::SharedString::from)
         .collect();
-    ui.set_charter_cols(ModelRc::new(VecModel::from(cols)));
+    sync_rows(&ui.get_charter_cols(), cols, |m| ui.set_charter_cols(m));
     let roster: Vec<MemberSync> = active
         .map(|w| {
             w.members
@@ -727,7 +730,7 @@ pub(crate) fn apply_session(
                 .into_iter()
                 .map(|(url, picked)| RelayPick { url: url.into(), picked })
                 .collect();
-            ui.set_cw_relay_picks(slint::ModelRc::new(slint::VecModel::from(rows)));
+            sync_rows(&ui.get_cw_relay_picks(), rows, |m| ui.set_cw_relay_picks(m));
         }
     }
     let session_locked = molt_core::relay::pool_gap(&sv.settings.relays, sv.clearnet_session)
@@ -1059,7 +1062,7 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
             .iter()
             .map(|r| chain_row(b.lang, r))
             .collect();
-        ui.set_chain_rows(ModelRc::new(VecModel::from(rows)));
+        sync_rows(&ui.get_chain_rows(), rows, |m| ui.set_chain_rows(m));
         ui.set_chain_page(i32::try_from(page + 1).unwrap_or(1));
         ui.set_chain_pages(i32::try_from(pages).unwrap_or(1));
     }
@@ -1080,11 +1083,21 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         ui.get_selected_surface().as_str() == "files",
         has_votes,
     );
+    // the rows already on screen, by surface key - their nested models get
+    // PATCHED, never replaced (F7, `docs/ui/wiki_pane_performance.md`): a
+    // fresh ModelRc per event rebuilds every log/vote repeater in the pane,
+    // the most expensive frame the GUI has.
+    let shown = ui.get_surfaces();
+    let prev: std::collections::HashMap<String, SurfaceTab> = (0..shown.row_count())
+        .filter_map(|i| shown.row_data(i))
+        .map(|t| (t.key.to_string(), t))
+        .collect();
     let tabs: Vec<SurfaceTab> = b
         .surfaces
         .iter()
         .filter(|s| s.key != "files" || files_row)
         .map(|s| {
+            let was = prev.get(&s.key);
             // the paged lists (page size LIST_PAGE_SIZE, pager row in the
             // .slint side): a gated surface's log IS its applied/accepted
             // history, so it pages; chat's log is the chat pane — full.
@@ -1203,15 +1216,15 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                 declined_pages: d_pages as i32,
                 pending_page: (p_page + 1) as i32,
                 pending_pages: p_pages as i32,
-                log: ModelRc::new(VecModel::from(log)),
-                pending: ModelRc::new(VecModel::from(pending)),
-                declined: ModelRc::new(VecModel::from(declined)),
-                accepted: ModelRc::new(VecModel::from(accepted)),
-                views: ModelRc::new(VecModel::from(views)),
+                log: patch_nested(was.map(|t| &t.log), log, log_line_eq),
+                pending: patch_nested(was.map(|t| &t.pending), pending, proposal_row_eq),
+                declined: patch_nested(was.map(|t| &t.declined), declined, proposal_row_eq),
+                accepted: patch_nested(was.map(|t| &t.accepted), accepted, proposal_row_eq),
+                views: patch_nested(was.map(|t| &t.views), views, PartialEq::eq),
             }
         })
         .collect();
-    sync_rows(&ui.get_surfaces(), tabs, |m| ui.set_surfaces(m));
+    sync_rows(&shown, tabs, |m| ui.set_surfaces(m));
 
     // the Shared-Memory base MOVED: say so and let the bridge read it
     // paged (§4.10). The tree no longer rides the snapshot, so this is a
@@ -1273,7 +1286,10 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     // Either way the parse refreshes only when the OWNING id changes, so
     // the user's file selection survives the mirror ticks.
     let decision_changed = ui.get_selected_decision().id != b.selected_decision.id;
-    ui.set_selected_decision(to_proposal_row(&b.selected_decision));
+    let decision = to_proposal_row(&b.selected_decision);
+    if !proposal_row_eq(&ui.get_selected_decision(), &decision) {
+        ui.set_selected_decision(decision);
+    }
     if b.selected_decision.patch_op {
         if decision_changed {
             patch_view_sync(
@@ -1298,8 +1314,9 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     }
 
     // the Members / Uploads tables. The avatars go through
-    // the path-keyed cache: `sync_rows` below rewrites EVERY row on EVERY
-    // push, so decoding here would re-decode the whole roster per tick
+    // the path-keyed cache: the mapping below runs on EVERY push (only the
+    // write is skipped), so decoding here would re-decode the whole roster
+    // per tick
     let members: Vec<MemberRow> = AVATARS.with_borrow_mut(|cache| {
         cache.retain_live(&b.members.iter().map(|m| m.image_key.as_str()).collect());
         b.members
