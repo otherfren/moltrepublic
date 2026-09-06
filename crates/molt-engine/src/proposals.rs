@@ -2664,24 +2664,26 @@ impl State {
         // B5: a warning is a refusal by default - it used to arrive once the
         // patch was already in the vote, and the only way out was withdraw
         // + refile
-        let held: Vec<String> = found
+        let held: Vec<&(&str, String)> = found
             .iter()
             .filter(|(code, _)| !allow_warnings.admits(code))
-            .map(|(c, m)| format!("{c}: {m}"))
             .collect();
         if !held.is_empty() {
-            let mut codes: Vec<&str> = found
-                .iter()
-                .map(|(c, _)| *c)
-                .filter(|c| !allow_warnings.admits(c))
-                .collect();
+            let mut codes: Vec<&str> = held.iter().map(|(c, _)| *c).collect();
             codes.sort_unstable();
             codes.dedup();
-            let codes: Vec<String> = codes.iter().map(|c| format!("\"{c}\"")).collect();
+            // the faults, then the remedy ONCE - naming the codes it takes
             return Err(MoltError::BadPayload(format!(
                 "{}; allow_warnings: [{}] proposes anyway",
-                held.join("; "),
-                codes.join(", ")
+                held.iter()
+                    .map(|(c, m)| format!("{c}: {m}"))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+                codes
+                    .iter()
+                    .map(|c| format!("\"{c}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )));
         }
         if let Some(old) = supersedes {
@@ -4032,10 +4034,6 @@ impl State {
     }
 }
 
-/// One patch file as the change history records it (§4.11): the path the
-/// change LEFT behind, what it did, and - on a rename - where it moved
-/// from. Coalescing across revisions happens at read time, not here.
-/// Every path one edit names — the restriction the working copy needs.
 /// The warning codes `wiki_edit` answers with and `allow_warnings` takes
 /// (E1). One per FAMILY: acknowledging a stale name collision must not
 /// also wave through a foreign rewrite.
@@ -4072,6 +4070,10 @@ fn name_a_few(paths: &[String]) -> String {
     format!("{n} page{plural} ({}{tail})", shown.join(", "))
 }
 
+/// One patch file as the change history records it (§4.11): the path the
+/// change LEFT behind, what it did, and - on a rename - where it moved
+/// from. Coalescing across revisions happens at read time, not here.
+/// Every path one edit names — the restriction the working copy needs.
 fn edit_paths(edit: &molt_core::WikiEdit) -> Vec<String> {
     use molt_core::WikiEdit;
     match edit {
