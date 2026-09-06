@@ -921,11 +921,14 @@ pub(crate) struct WikiCache {
     /// O(entries since its `since_rev`) instead of a refold per call. It
     /// holds paths, never content, and a folded cut clears it.
     pub(crate) history: Vec<WikiRevChanges>,
-    /// The folded base underneath (K6), if the republic has cut. A cut
-    /// RE-BASES the revision counter, and the extension loop refolds
-    /// whenever one appears, so this only ever changes with the whole
-    /// cache.
+    /// The folded base underneath (K6), if the republic has cut. The
+    /// extension loop refolds whenever one appears, so this only ever
+    /// changes with the whole cache.
     pub(crate) base: Option<String>,
+    /// The revision the folded base itself stands at (A3): `rev` counts ON
+    /// from here, and `history` reaches back no further, so a `since_rev`
+    /// below it is answered `truncated`.
+    pub(crate) rev_at_cut: u64,
 }
 
 /// What ONE applied revision touched (§4.11), as the fold derives it.

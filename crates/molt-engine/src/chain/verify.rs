@@ -429,10 +429,6 @@ pub(crate) struct ChainWalk {
     /// How many blocks this walk covers, the seed block included — the
     /// holder's cheap check that a cached walk still describes its chain.
     folded: usize,
-    /// K6: the ratified wiki tree this walk's BASE commits to (empty on a
-    /// walk from the genesis, where the fold starts at nothing). A folded
-    /// cut's state hash cannot be recomputed without it.
-    wiki_base: BTreeMap<String, String>,
     /// Has a folded cut been folded in? Once one has, a legacy cut is
     /// refused: what a node hashes must not depend on whether it pruned.
     folded_cut: bool,
@@ -446,7 +442,16 @@ impl ChainWalk {
     /// what makes a CACHED walk safe to reuse after a rejection — and
     /// `apply_membership`, the last thing that can fail, is check-then-mutate
     /// for the same reason.
-    pub(super) fn step(&mut self, block: &ChainBlock) -> Result<(), String> {
+    /// `base` is the ratified wiki tree the CALLER holds right now (K6) -
+    /// a parameter, never a field: a walk that had cached the base it was
+    /// built with kept verifying against an empty tree after the holder
+    /// adopted its real one, and refused the very cut it had co-signed
+    /// (round 3, D9).
+    pub(super) fn step(
+        &mut self,
+        block: &ChainBlock,
+        base: Option<&BTreeMap<String, String>>,
+    ) -> Result<(), String> {
         let (head, consumed) = verify_next(&self.head, block, &self.seen)?;
         let cut = match &block.change {
             ChainChange::Checkpoint { upto, state_hash } => {
@@ -471,8 +476,7 @@ impl ChainWalk {
             }
             // the running state IS the state at `upto` (upto == height - 1,
             // enforced in verify_next), so the content check needs no refold
-            let base = folds.then_some(&self.wiki_base);
-            if &hash_walk_state(&self.running, upto, base)? != state_hash {
+            if &hash_walk_state(&self.running, upto, folds, base)? != state_hash {
                 return Err(format!(
                     "checkpoint at upto {upto} does not match this chain's own projection"
                 ));
@@ -673,15 +677,13 @@ pub(crate) fn fold_one(state: &mut molt_core::CheckpointState, block: &ChainBloc
 fn hash_walk_state(
     state: &molt_core::CheckpointState,
     upto: u64,
+    folded: bool,
     base: Option<&BTreeMap<String, String>>,
 ) -> Result<String, String> {
     let mut at = state.clone();
     at.upto = upto;
     at.consumed_ids.sort_unstable();
-    if let Some(base) = base {
-        let _ = super::wiki_base::summarize_state(&mut at, base)?;
-    }
-    Ok(checkpoint_state_hash(&at))
+    Ok(super::wiki_base::fold_cut(&mut at, folded, base)?.1)
 }
 
 /// Fold further verified blocks (heights `<= upto`) onto a base state —
@@ -927,11 +929,12 @@ pub(crate) fn walk_chain(blocks: &[ChainBlock]) -> Result<ChainWalk, String> {
         ),
         floor: None,
         folded: 1,
-        wiki_base: BTreeMap::new(),
         folded_cut: false,
     };
     for block in rest {
-        walk.step(block)?;
+        // a genesis-rooted projection carries no base commitment, so there
+        // is no tree to fold onto
+        walk.step(block, None)?;
     }
     Ok(walk)
 }
@@ -1148,13 +1151,12 @@ pub(crate) fn walk_suffix_chain(
         running: blob.clone(),
         floor: Some(blob.upto),
         folded: 1,
-        wiki_base: wiki_base.cloned().unwrap_or_default(),
         // the anchor itself may already be a folded cut — from then on a
         // legacy one is refused for the rest of the walk
         folded_cut: matches!(anchor.change, ChainChange::CheckpointFolded { .. }),
     };
     for block in rest {
-        walk.step(block)?;
+        walk.step(block, wiki_base)?;
     }
     Ok(walk)
 }

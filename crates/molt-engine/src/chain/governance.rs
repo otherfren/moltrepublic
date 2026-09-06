@@ -386,7 +386,18 @@ impl State {
             }
             _ => 0,
         };
-        let need = usize::from(head.rule_m);
+        // A2 (user, 2026-09-06): a CUT seals n-of-n, like the genesis. It
+        // drops history every seat has to be able to reproduce, and it has
+        // no hurry - a silent seat leaves the cut pending, and the next
+        // committed block re-proposes it at the new head.
+        let need = if matches!(
+            change,
+            ChainChange::Checkpoint { .. } | ChainChange::CheckpointFolded { .. }
+        ) {
+            head.identities.len()
+        } else {
+            usize::from(head.rule_m)
+        };
         if valid.len() >= need {
             // enough survivor signatures on their own — the consent still
             // rides the change, but never displaces a survivor's voice
@@ -670,12 +681,12 @@ impl State {
                     // patches that produce it are dropped. Losing that
                     // order once loses the wiki: the blocks are gone and
                     // the commitment names bytes nobody kept.
-                    Ok((_, Some(tree))) if !self.persist_wiki_base(Some(&tree)) => {
+                    Ok((_, Some(tree), _)) if !self.persist_wiki_base(Some(&tree)) => {
                         tracing::error!(
                             "the folded wiki base did not reach the disk - keeping full history"
                         );
                     }
-                    Ok((blob, tree)) => {
+                    Ok((blob, tree, _)) => {
                         if let Some(tree) = tree {
                             self.chain.wiki_base = Some(tree);
                         }
@@ -829,7 +840,9 @@ impl State {
             Some(w) if w.describes(&self.chain.blocks, self.chain.checkpoint_blob.as_ref()) => w,
             _ => self.walk_own(&self.chain.blocks)?,
         };
-        let stepped = walk.step(block);
+        // the base as this holder holds it NOW, not as the cached walk once
+        // saw it (D9)
+        let stepped = walk.step(block, self.chain.wiki_base.as_ref());
         let head = walk.head.clone();
         self.chain.walk = Some(walk);
         stepped.map(|()| head)
@@ -846,9 +859,22 @@ impl State {
         Ok(self.own_cut_state(upto, folded)?.0)
     }
 
-    /// The cut's state AND, for a folded one, the tree it commits to - the
-    /// bytes this holder has to keep once the patches that produce them are
-    /// dropped (K6).
+    /// The state hash this holder attests for a cut at `upto` - the value
+    /// the propose announces and the co-sign compares against.
+    ///
+    /// # Errors
+    /// See [`State::own_cut_state`].
+    pub(crate) fn own_cut_hash(&self, upto: u64, folded: bool) -> Result<String, String> {
+        Ok(self.own_cut_state(upto, folded)?.2)
+    }
+
+    /// The cut's state, the tree a folded one commits to - the bytes this
+    /// holder has to keep once the patches that produce them are dropped
+    /// (K6) - and the state hash a signer attests.
+    ///
+    /// Every cut path (propose, co-sign, receive-verify, apply) reaches the
+    /// fold through here and through [`super::wiki_base::fold_cut`], over
+    /// the base this holder holds RIGHT NOW.
     ///
     /// # Errors
     /// The projection cannot be recomputed, or the fold needs a base this
@@ -857,22 +883,15 @@ impl State {
         &self,
         upto: u64,
         folded: bool,
-    ) -> Result<(molt_core::CheckpointState, Option<WikiTree>), String> {
+    ) -> Result<(molt_core::CheckpointState, Option<WikiTree>, String), String> {
         let mut state = match &self.chain.checkpoint_blob {
             None => checkpoint_state(&self.chain.blocks, upto)?,
             // the anchor block in chain[0] is state-neutral for the fold
             Some(blob) => fold_state(blob.clone(), &self.chain.blocks, upto)?,
         };
-        if !folded {
-            return Ok((state, None));
-        }
-        // K6: the shared memory as ONE commitment. Every signer runs this
-        // same summary over its own projection, which is what makes a
-        // folded cut sign-what-you-see.
-        let empty = WikiTree::new();
-        let tree =
-            super::wiki_base::summarize_state(&mut state, self.held_wiki_base().unwrap_or(&empty))?;
-        Ok((state, tree))
+        let (tree, hash) =
+            super::wiki_base::fold_cut(&mut state, folded, self.held_wiki_base())?;
+        Ok((state, tree, hash))
     }
 
     /// The ratified wiki tree this holder keeps for its blob's commitment
@@ -1131,6 +1150,28 @@ impl State {
                 by: me.clone(),
                 hash,
             });
+        }
+        // A2: a cut needs EVERY seat, so the seat that was away must still
+        // be able to co-sign the one on the table - it lost the announce
+        // with its RAM like any other open card. At most one entry: a cut
+        // is registered only at the current head ("ONE cut per head").
+        if let Some(head) = self.chain.head.as_ref() {
+            for (id, change) in &self.chain.proposal_changes {
+                let (upto, state_hash, folded) = match change {
+                    ChainChange::Checkpoint { upto, state_hash } => (*upto, state_hash, false),
+                    ChainChange::CheckpointFolded { upto, state_hash } => (*upto, state_hash, true),
+                    _ => continue,
+                };
+                if upto != head.height {
+                    continue;
+                }
+                events.push(WorkspaceEvent::CheckpointProposed {
+                    id: ProposalId(*id),
+                    upto,
+                    state_hash: state_hash.clone(),
+                    folded,
+                });
+            }
         }
         events
     }

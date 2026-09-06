@@ -589,13 +589,31 @@ the next open fails with "this workspace's chain is unreadable" - on the
 UPGRADED nodes. Both `walk_suffix_chain` and `verify_suffix_chain` accept
 either variant.
 
-#### 4.9.5 The summary runs at THREE hash sites or the republic cannot cut
+#### 4.9.5 The summary runs at ONE site, over the base held RIGHT NOW
 
-`hash_walk_state` (the running walk), `own_checkpoint_state` (the propose
-hash AND the verify-before-sign hash) and the blob actually persisted at
-`governance.rs:~597` must reach identical bytes. `own_checkpoint_state`
-takes the variant. A keystone drives all three over one chain and asserts
-one hash.
+The invariant: **a full holder folds from its blob, a suffix holder from
+its fetched base, and both reach the proposer's commitment.** Propose,
+co-sign, receive-verify and apply therefore all go through ONE function -
+`chain::wiki_base::fold_cut(state, folded, held)` - and every one of them
+passes the base this holder holds at that moment.
+
+That last clause is the fix of round 3 (D9). The verifier used to keep the
+base as a FIELD of the cached `ChainWalk`, captured when the walk was
+built; at a reopen the walk is built by `adopt_chain` BEFORE
+`adopt_wiki_base` runs, so it captured the empty tree, and `describes()`
+never compared it. The seat co-signed the next folded cut (that path reads
+the live base), then refused the sealed block with
+`have = d947f7bf…` - the commitment of the EMPTY tree - and sat
+partitioned at its old height. The base is a parameter of `ChainWalk::step`
+now, so a stale one is not representable. Keystone:
+`crates/molt-engine/tests/checkpoint_under_load.rs`.
+
+The base entry also records `rev_at_cut` (A3): the fold revision the tree
+stands at, so `wiki_rev` counts on across a cut instead of restarting at 0.
+It is derived from the group alone (previous `rev_at_cut` + the patches
+this cut folds away), so every signer computes the same number; a pre-A3
+cut carries none and reads 0. `wiki_changes` answers `truncated` for any
+`since_rev` below it - below the cut there is a tree and no history.
 
 #### 4.9.6 Base-pending: adoption and readability decouple
 

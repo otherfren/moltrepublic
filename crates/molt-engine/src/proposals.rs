@@ -2335,7 +2335,8 @@ impl State {
         // so a caller asking from the start of history, or from a revision
         // this base never reached, is TOLD rather than handed a short
         // answer that reads as complete
-        let truncated = (base.is_some() && since_rev == 0) || since_rev > wiki_rev;
+        let truncated = (base.is_some() && (since_rev == 0 || since_rev < cache.rev_at_cut))
+            || since_rev > wiki_rev;
         Ok(Reply::WikiChanges {
             changes: changes.into_iter().skip(start).take(page).collect(),
             next_cursor,
@@ -3141,6 +3142,7 @@ impl State {
             epoch: self.applied_epoch,
             history: Vec::new(),
             base: None,
+            rev_at_cut: 0,
         };
         for payload in self.applied_payloads(Surface::Memory) {
             if let Some((want, size)) = crate::chain::base_commitment_of(payload) {
@@ -3156,11 +3158,14 @@ impl State {
                         want,
                     });
                 };
-                // the commitment is a base, not a patch: `rev` counts
-                // applied patches and must not move for it - and the
-                // revisions it folded away stop being answerable
+                // the commitment is a base, not a patch: the counter
+                // RESUMES at the revision the cut recorded (A3) - a cut is
+                // not a reset - while the revisions it folded away stop
+                // being answerable
                 cache.tree.clone_from(held);
                 cache.history.clear();
+                cache.rev = crate::chain::rev_at_cut_of(payload);
+                cache.rev_at_cut = cache.rev;
                 cache.base = Some(want);
                 continue;
             }

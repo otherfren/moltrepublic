@@ -1003,9 +1003,8 @@ fn a_folded_cut_without_its_base_is_refused_by_name() {
     let mut suffix = vec![anchor];
     suffix.push(b.blocks[3].clone());
     let mut folded_state = fold_state(blob.clone(), &suffix, 3).expect("fold the suffix");
-    super::wiki_base::summarize_state(&mut folded_state, &with_base)
+    let (_, second) = super::wiki_base::fold_cut(&mut folded_state, true, Some(&with_base))
         .expect("the holder that has the base can fold");
-    let second = checkpoint_state_hash(&folded_state);
     let cut = b.seal(
         4,
         ChainChange::CheckpointFolded {

@@ -106,18 +106,16 @@ impl State {
             return Err(molt_core::MoltError::BadPayload("no chain head".into()));
         };
         let upto = head.height;
-        let mut state = self
+        let unfolded = self
             .own_checkpoint_state(upto, false)
             .map_err(molt_core::MoltError::BadPayload)?;
         // K6: a republic with a wiki folds it into one commitment; one
         // without has nothing to fold and keeps the legacy bytes
-        let folded = super::wiki_base::FOLD_CUTS && super::wiki_base::worth_folding(&state);
-        if folded {
-            let empty = std::collections::BTreeMap::new();
-            super::wiki_base::summarize_state(&mut state, self.held_wiki_base().unwrap_or(&empty))
-                .map_err(molt_core::MoltError::BadPayload)?;
-        }
-        let state_hash = checkpoint_state_hash(&state);
+        let folded = super::wiki_base::FOLD_CUTS && super::wiki_base::worth_folding(&unfolded);
+        // the SAME fold every co-signer and the receive path run (D9)
+        let state_hash = self
+            .own_cut_hash(upto, folded)
+            .map_err(molt_core::MoltError::BadPayload)?;
         let id = self.mint_proposal_id();
         self.chain.proposal_changes.insert(
             id,
@@ -183,8 +181,8 @@ impl State {
             tracing::debug!(%id, upto, head = head.height, "ignoring a checkpoint cut that is not our head");
             return;
         }
-        let ours = match self.own_checkpoint_state(upto, folded) {
-            Ok(state) => checkpoint_state_hash(&state),
+        let ours = match self.own_cut_hash(upto, folded) {
+            Ok(hash) => hash,
             Err(e) => {
                 tracing::warn!(%id, error = %e, "cannot recompute the proposed checkpoint state");
                 return;
@@ -261,6 +259,19 @@ impl State {
                 tracing::warn!(error = %e, "the stored wiki base does not parse - dropping it");
                 self.persist_wiki_base(None);
             }
+        }
+    }
+
+    /// Forget a held tree the projection no longer commits to - the fetch
+    /// tick then gets the right one. Silent by design: a re-anchor onto a
+    /// newer cut is the normal way here.
+    pub(crate) fn drop_a_stale_wiki_base(&mut self) {
+        let want = self.wiki_base_committed().map(|(h, _)| h);
+        let stale = self
+            .held_wiki_base()
+            .is_some_and(|t| Some(super::wiki_base::commitment(t).0) != want);
+        if stale {
+            self.chain.wiki_base = None;
         }
     }
 
@@ -359,6 +370,10 @@ impl State {
                 self.chain.pending_served_blob = None;
                 self.chain.pending_blocks.retain(|h, _| *h > new_height);
                 self.apply_chain_to_state();
+                // the re-anchor may commit to a DIFFERENT tree than the one
+                // held here; keeping that one would leave a base answering
+                // no commitment (D9) where a fetch belongs
+                self.drop_a_stale_wiki_base();
                 // The cards are settled: `apply_chain_to_state` folded the
                 // blob's consumed ids (else they zombie as Proposed and the
                 // re-base re-signs them into dead gossip — review finding)

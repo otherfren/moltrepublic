@@ -271,6 +271,18 @@ Having verified a chain, a member knows — not trusts — that:
   the manifest version so older binaries refuse the workspace instead
   of running chainless. Design + v1 limits: `docs_archive/chain/log_compaction.md`
   Teil B.
+- **A cut seals n-of-n, and folds through ONE function** (round 3, D9/A2).
+  Unlike a governance block, a checkpoint needs EVERY roster member's
+  co-signature: it drops history each seat has to be able to reproduce, and
+  a cut has no hurry - a silent seat leaves it pending, the catch-up answer
+  re-serves it, and the next committed block re-proposes it at the new
+  head. And the fold that produces a folded cut's bytes
+  (`knowledge_base_scale.md` §4.9) runs at ONE site for propose, co-sign,
+  receive-verify and apply, over the shared-memory base the holder holds at
+  that moment: **a full holder folds from its blob, a suffix holder from
+  its fetched base, and both reach the proposer's commitment.** A verifier
+  that kept the base as a cached field instead partitioned the seat that
+  had just co-signed the cut.
 - **Real (Phase 4).** Recovery as catch-up-from-genesis + MLS re-key: a
   `Membership{Restored}` block re-admits the seat by threshold, the coordinator
   re-keys the group (`restore_member`) and broadcasts the raw commit over the

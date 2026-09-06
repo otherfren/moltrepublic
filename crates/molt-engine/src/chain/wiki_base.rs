@@ -23,8 +23,9 @@ use serde_json::{json, Value};
 /// locally and can fetch a missing one.
 pub(crate) const FOLD_CUTS: bool = true;
 
-/// A memory group in its folded form, and the tree it commits to.
-type Folded = (Vec<(u64, Value)>, BTreeMap<String, String>);
+/// A memory group in its folded form, the tree it commits to, and the fold
+/// revision that tree stands at.
+type Folded = (Vec<(u64, Value)>, BTreeMap<String, String>, u64);
 
 /// The op a folded cut writes in place of the memory group's patches.
 pub(crate) const WIKI_BASE_OP: &str = "wiki_base";
@@ -41,6 +42,13 @@ pub(crate) fn commitment(tree: &BTreeMap<String, String>) -> (String, u64) {
     let size = u64::try_from(bytes.len())
         .expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written");
     (molt_storage::content_hash(&bytes), size)
+}
+
+/// The fold revision a base entry stands at (A3): a cut records where the
+/// counter had got to, so `wiki_rev` counts on instead of restarting. Absent
+/// on a pre-A3 cut, which reads as 0 - exactly the old behaviour.
+pub(crate) fn rev_at_cut_of(payload: &Value) -> u64 {
+    payload.get("rev_at_cut").and_then(Value::as_u64).unwrap_or(0)
 }
 
 /// The commitment an applied Memory payload carries, if it is a folded
@@ -64,7 +72,9 @@ pub(crate) fn base_commitment_of(payload: &Value) -> Option<(String, u64)> {
 /// carries none) - a suffix holder folds onto what it fetched, a full
 /// holder folds from nothing, and both reach the same tree.
 ///
-/// Returns the new group and the tree it commits to.
+/// Returns the new group, the tree it commits to, and the fold revision
+/// that tree stands at (the previous cut's revision plus every patch this
+/// one folds away - A3: the counter never restarts).
 ///
 /// # Errors
 /// The group commits to a base this node does not hold, or carries two
@@ -76,6 +86,7 @@ pub(crate) fn summarize(
     let mut tree = BTreeMap::new();
     let mut kept: Vec<(u64, Value)> = Vec::new();
     let mut seeded = false;
+    let mut rev = 0u64;
     for (id, payload) in group {
         match payload.get("op").and_then(Value::as_str) {
             Some(WIKI_BASE_OP) => {
@@ -90,11 +101,14 @@ pub(crate) fn summarize(
                     ));
                 }
                 tree.clone_from(base);
+                rev = rev_at_cut_of(payload);
                 seeded = true;
             }
             // the patches this cut folds away — their ids stay consumed
             Some("wiki_patch") => {
-                molt_core::wiki_fold::fold_one(&mut tree, payload);
+                if molt_core::wiki_fold::fold_one(&mut tree, payload) {
+                    rev = rev.saturating_add(1);
+                }
             }
             _ => kept.push((*id, payload.clone())),
         }
@@ -103,17 +117,16 @@ pub(crate) fn summarize(
     let mut out = Vec::with_capacity(kept.len() + 1);
     out.push((
         BASE_ENTRY_ID,
-        json!({ "op": WIKI_BASE_OP, "hash": hash, "size": size }),
+        json!({ "op": WIKI_BASE_OP, "hash": hash, "size": size, "rev_at_cut": rev }),
     ));
     out.extend(kept);
-    Ok((out, tree))
+    Ok((out, tree, rev))
 }
 
-/// Summarize the memory group of a checkpoint state in place (the three
-/// hash sites all go through here, so they cannot drift apart). A state
-/// with no memory group is left alone: a republic that never wrote a wiki
-/// has nothing to fold, and must keep hashing as it always did.
-pub(crate) fn summarize_state(
+/// Summarize the memory group of a checkpoint state in place. A state with
+/// no memory group is left alone: a republic that never wrote a wiki has
+/// nothing to fold, and must keep hashing as it always did.
+fn summarize_state(
     state: &mut molt_core::CheckpointState,
     base: &BTreeMap<String, String>,
 ) -> Result<Option<BTreeMap<String, String>>, String> {
@@ -126,9 +139,33 @@ pub(crate) fn summarize_state(
         // commits to nothing, and must not persist a base file for it
         return Ok(None);
     };
-    let (folded, tree) = summarize(group, base)?;
+    let (folded, tree, _) = summarize(group, base)?;
     *group = folded;
     Ok(Some(tree))
+}
+
+/// **THE cut fold** - the one place a state becomes a folded cut and a hash
+/// (round 3, D9). Propose, co-sign, receive-verify and apply all call this
+/// with the base the holder holds RIGHT NOW; four sites each folding over
+/// their own idea of the base is what let a seat co-sign a commitment it
+/// then refused, and sit partitioned for the rest of the run.
+///
+/// `held` is `None` where this holder keeps no tree - the fold then refuses
+/// any group that commits to one instead of inventing an empty base.
+///
+/// # Errors
+/// The group commits to a base this holder does not hold, or is malformed.
+pub(crate) fn fold_cut(
+    state: &mut molt_core::CheckpointState,
+    folded: bool,
+    held: Option<&BTreeMap<String, String>>,
+) -> Result<(Option<BTreeMap<String, String>>, String), String> {
+    if !folded {
+        return Ok((None, super::checkpoint_state_hash(state)));
+    }
+    let empty = BTreeMap::new();
+    let tree = summarize_state(state, held.unwrap_or(&empty))?;
+    Ok((tree, super::checkpoint_state_hash(state)))
 }
 
 /// Is there anything to fold? A cut proposes the folded variant only when
@@ -176,8 +213,9 @@ mod tests {
             (2, json!({ "op": "add_note", "title": "keep me" })),
             (3, patch("b.md", "B")),
         ];
-        let (folded, tree) = summarize(&group, &BTreeMap::new()).expect("folds");
+        let (folded, tree, rev) = summarize(&group, &BTreeMap::new()).expect("folds");
         assert_eq!(tree.len(), 2, "both documents are in the tree");
+        assert_eq!(rev, 2, "two patches applied, two revisions");
         assert_eq!(folded.len(), 2, "one commitment, one kept entry");
         assert_eq!(folded[0].0, 0);
         assert_eq!(
@@ -196,22 +234,25 @@ mod tests {
     #[test]
     fn folding_from_the_genesis_and_from_a_fetched_base_agree() {
         let all = vec![(1, patch("a.md", "A")), (2, patch("b.md", "B"))];
-        let (full, full_tree) = summarize(&all, &BTreeMap::new()).expect("folds");
+        let (full, full_tree, full_rev) = summarize(&all, &BTreeMap::new()).expect("folds");
 
         // the suffix holder: cut after the first patch, then the second
-        let (first_cut, base) = summarize(&all[..1], &BTreeMap::new()).expect("folds");
+        let (first_cut, base, _) = summarize(&all[..1], &BTreeMap::new()).expect("folds");
         let mut group = first_cut;
         group.push((2, patch("b.md", "B")));
-        let (suffix, suffix_tree) = summarize(&group, &base).expect("folds onto the fetched base");
+        let (suffix, suffix_tree, suffix_rev) =
+            summarize(&group, &base).expect("folds onto the fetched base");
         assert_eq!(full_tree, suffix_tree);
         assert_eq!(full, suffix);
+        assert_eq!(full_rev, suffix_rev, "A3: the revision counts on across a cut");
+        assert_eq!(full_rev, 2);
     }
 
     /// A node that does not hold the committed base cannot fold - and says
     /// so, rather than committing to a tree it invented.
     #[test]
     fn a_missing_base_refuses_the_fold() {
-        let (cut, base) = summarize(&[(1, patch("a.md", "A"))], &BTreeMap::new()).expect("folds");
+        let (cut, base, _) = summarize(&[(1, patch("a.md", "A"))], &BTreeMap::new()).expect("folds");
         assert!(summarize(&cut, &BTreeMap::new()).is_err(), "empty is not the base");
         assert!(summarize(&cut, &base).is_ok());
         let twice: Vec<(u64, Value)> = vec![cut[0].clone(), cut[0].clone()];
