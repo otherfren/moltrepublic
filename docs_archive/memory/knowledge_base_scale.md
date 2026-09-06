@@ -973,6 +973,45 @@ half: `wiki_edit` is Seat and a read-only key is refused it
 (`a_read_token_reads_but_cannot_propose`), `wiki_resolve` joins the Read
 set (`the_read_scope_is_exactly_this_set`).
 
+### 4.13 File references
+
+BUILT 2026-09-06 (`docs_archive/ui/wiki_files_and_images.md`). A page names a
+shared file by its CONTENT: `upload:<sha256 hex>`, full or a prefix of at
+least 12 digits, written `![alt](upload:...)` for an image and
+`[text](upload:...)` for anything else. Plain markdown - the link graph
+ignores it by construction (no `.md`), and a reference inside a code span
+or fence is an example, not a dependency.
+
+The three agent answers, all off ONE `uploads_view()` per call:
+
+- **`wiki_get.files`**: one entry per distinct hex, in document order -
+  `{ hex, name, state }`, `state` one of `unknown` (nothing carries the
+  prefix, or it is malformed), `ambiguous` (more than one file does),
+  `temporary` (the only match is not persisted yet), `remote` (persisted,
+  bytes elsewhere) or `local` (the bytes are on this node). `name` is
+  empty exactly when nothing resolved. An agent learns what a page depends
+  on without a second call.
+- **`wiki_edit` warns** per offending hex (`file reference unresolved:
+  upload:<hex>` / `file reference ambiguous: upload:<hex>`) on the B5
+  channel: a refusal unless `allow_warnings: true`. A `temporary` match is
+  NOT a warning - the page may reference a file the persist vote is about
+  to pin.
+- **`wiki_health.files`**: `{ dangling, temporary, ambiguous }`, each a
+  list of `{ hex, paths, paths_total }` naming the pages that carry the
+  reference, capped by `limit` like the other three lists. Computed over
+  the folded base with each distinct hex resolved once - a hygiene pass
+  over a large wiki is one table read, not one per reference.
+
+`resolve_upload` (Read) answers a single reference the same way for an
+agent that meets one mid-page.
+
+**Security.** A reference is content-addressed: no path, no host, nothing
+that could point outside the republic's own shares. The resolution never
+hands an agent a path - `local` says only THAT the bytes are here (the
+MCP layer strips `local.path`), and bytes reach an agent solely through
+`download_file` into the exchange folder. Nothing here writes to the
+chain; a file's persistence stays the `persist` vote's business.
+
 ## 5. Work packages (build order, each red-first, each green on master)
 
 - **K0 Fold cache + cheap superseding** — BUILT 2026-09-04. §4.1-4.2.
