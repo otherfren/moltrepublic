@@ -5007,4 +5007,47 @@ mod wiki_maintenance_tests {
         };
         assert!(index_building && docs.is_empty());
     }
+
+    /// **E1 (R19's second half)**: a card the moved base already retired
+    /// is DEAD, not contended. It stays in `proposals` for the record, and
+    /// re-proposing over its paths must not need an acknowledgement -
+    /// round 3 measured the opposite, on a base-pending node where the
+    /// supersede walk is a no-op and the retired card still reads open.
+    #[test]
+    fn the_callers_own_retired_card_is_not_an_open_proposal() {
+        let mut st = crate::tests::plain_state();
+        apply(&mut st, &[ADD_A]);
+        let me = st.member();
+        let mut dead = molt_core::ProposalRecord {
+            surface: Surface::Memory,
+            payload: json!({ "op": "wiki_patch", "value": ADD_B }),
+            approvals: 0,
+            state: molt_core::ProposalState::Proposed,
+            declined_at: 0,
+            declined_by: String::new(),
+            decliners: Vec::new(),
+            voted: Vec::new(),
+            by: me.clone(),
+            superseded: false,
+            withdrawn: false,
+        };
+        st.proposals.insert(9, dead.clone());
+        assert_eq!(
+            st.open_wiki_proposals(None).len(),
+            1,
+            "an open card of ours is contended"
+        );
+
+        dead.superseded = true;
+        st.proposals.insert(9, dead.clone());
+        assert!(
+            st.open_wiki_proposals(None).is_empty(),
+            "our own retired card is not"
+        );
+
+        // …but a FOREIGN retired card still is: its proposer may re-file it
+        dead.by = "petra".to_string();
+        st.proposals.insert(9, dead);
+        assert_eq!(st.open_wiki_proposals(None).len(), 1);
+    }
 }
