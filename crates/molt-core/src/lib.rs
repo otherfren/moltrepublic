@@ -6616,7 +6616,8 @@ pub struct WikiDirectionOutlier {
     pub subject_type: String,
     /// The `type` of the pages it points at.
     pub object_type: String,
-    /// How many edges run that way.
+    /// How many edges run that way (a claim written both in the header
+    /// and inline counts once).
     pub count: u64,
     /// The pair this predicate usually runs between, `"a -> b"`.
     pub usual: String,

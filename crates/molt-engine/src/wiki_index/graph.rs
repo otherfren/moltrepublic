@@ -117,6 +117,12 @@ impl<'a> NameIndex<'a> {
     }
 }
 
+/// A predicate's (subject type, object type).
+type TypePair<'a> = (&'a str, &'a str);
+
+/// How often a type pair carries a predicate, and from which pages.
+type PairUse<'a> = (u64, BTreeSet<&'a str>);
+
 /// One `type` value with the header keys its pages carry (E3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TypeProps {
@@ -138,7 +144,7 @@ pub(crate) struct DirectionOutlier {
     pub(crate) subject_type: String,
     /// The `type` of the pages it points at.
     pub(crate) object_type: String,
-    /// How many edges run that way.
+    /// How many edges run that way (a claim written twice counts once).
     pub(crate) count: u64,
     /// The pair the predicate usually runs between.
     pub(crate) usual: (String, String),
@@ -497,11 +503,15 @@ impl WikiGraph {
         const MIN_EDGES: u64 = 5;
         /// The dominant pair must outnumber the flagged one this far.
         const FACTOR: u64 = 4;
-        let mut per: BTreeMap<&str, BTreeMap<(&str, &str), BTreeSet<&str>>> = BTreeMap::new();
+        // predicate -> (subject type, object type) -> (edges, the pages
+        // asserting them). One claim written BOTH in the header and inline
+        // is one edge here, exactly as `wiki_props` counts it.
+        let mut per: BTreeMap<&str, BTreeMap<TypePair<'_>, PairUse<'_>>> = BTreeMap::new();
         for (src, edges) in &self.out {
             let Some(from) = self.docs.get(src).and_then(|m| m.kind.as_deref()) else {
                 continue;
             };
+            let mut seen: BTreeSet<(&str, &str)> = BTreeSet::new();
             for edge in edges {
                 let Some(pred) = edge.predicate.as_deref() else {
                     continue;
@@ -509,26 +519,25 @@ impl WikiGraph {
                 let Some(to) = self.docs.get(&edge.to).and_then(|m| m.kind.as_deref()) else {
                     continue;
                 };
-                per.entry(pred)
-                    .or_default()
-                    .entry((from, to))
-                    .or_default()
-                    .insert(src.as_str());
+                if !seen.insert((pred, edge.to.as_str())) {
+                    continue;
+                }
+                let slot = per.entry(pred).or_default().entry((from, to)).or_default();
+                slot.0 = slot.0.saturating_add(1);
+                slot.1.insert(src.as_str());
             }
         }
         let mut out = Vec::new();
         for (pred, pairs) in per {
-            let count_of = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
-            let total: u64 = pairs.values().map(|v| count_of(v.len())).sum();
+            let total: u64 = pairs.values().map(|(n, _)| *n).sum();
             if total < MIN_EDGES || pairs.len() < 2 {
                 continue;
             }
-            let Some((usual, usual_pages)) = pairs.iter().max_by_key(|(_, v)| v.len()) else {
+            let Some((usual, (usual_count, _))) = pairs.iter().max_by_key(|(_, (n, _))| *n) else {
                 continue;
             };
-            let usual_count = count_of(usual_pages.len());
-            for (pair, pages) in &pairs {
-                let count = count_of(pages.len());
+            let usual_count = *usual_count;
+            for (pair, (count, pages)) in &pairs {
                 if pair == usual || count.saturating_mul(FACTOR) > usual_count {
                     continue;
                 }
@@ -536,7 +545,7 @@ impl WikiGraph {
                     predicate: pred.to_string(),
                     subject_type: pair.0.to_string(),
                     object_type: pair.1.to_string(),
-                    count,
+                    count: *count,
                     usual: (usual.0.to_string(), usual.1.to_string()),
                     usual_count,
                     from: pages.iter().map(|p| (*p).to_string()).collect(),
