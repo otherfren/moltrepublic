@@ -1,6 +1,8 @@
 # Briefing v2: "Protocol Republic" - the decentralised-messaging knowledge net
 
-Status: OPEN - the agent briefing for the second three-agent wiki round.
+Status: CONSUMED 2026-09-06 - the briefing of the second three-agent wiki
+round, which ran; its findings are `mcp_agent_friction_2026-09-06.md`.
+Originally: the agent briefing for the second three-agent wiki round.
 Runs after A1/A2 and B1-B9 of `mcp_agent_friction_fixes.md` have landed;
 before that it only re-measures the known defects. The orchestrator hands
 each agent this text, its seat, its `./mcp` wrapper and three random

@@ -4,7 +4,7 @@ Status: BUILT 2026-09-06 (`chain/sync.rs`: `try_reorg`, `fork_candidates`,
 `known_heads`, `serve_from_for`; tests in `chain/sync_tests.rs`, the E2E in
 `tests/chain_convergence.rs`). Open: R6 (signing `prev`), which stays a
 design question. Companion pieces: the divergence detector (A2.1) and the seal
-pacing (A2.2), both in `docs/reviews/mcp_agent_friction_fixes.md`.
+pacing (A2.2), both in `docs_archive/reviews/mcp_agent_friction_fixes.md`.
 
 ## The defect
 

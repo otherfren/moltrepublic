@@ -929,6 +929,235 @@ fn a_caret_move_does_not_resync_the_whole_face() {
     assert_ne!(g.get_doc_meta().as_str(), "sentinel");
 }
 
+/// **A keystroke renders nothing** (`docs/ui/wiki_pane_performance.md`
+/// F4): the block view is off screen while the editor is up
+/// (surfaces.slint gates it on `!editing`), so the markdown parse of
+/// working AND base text plus the Myers diff must not run per keystroke -
+/// it was 27 ms of model work per character on a held base. Leaving the
+/// editor still shows what was typed.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_keystroke_does_not_rebuild_the_block_view() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    let _wiki = wire_wiki(&ui);
+    let g = ui.global::<WikiState>();
+    g.set_base_docs(ModelRc::new(VecModel::from(vec![WikiBase {
+        path: "a.md".into(),
+        content: "# A\n\nfirst\n\nsecond\n".into(),
+        loaded: true,
+    }])));
+    g.set_base_rev(1);
+    g.invoke_base_arrived();
+    g.invoke_nav_open(nav_id(&ui, "a.md"));
+    let blocks = g.get_blocks();
+    let rows_before: Vec<slint::SharedString> = (0..blocks.row_count())
+        .filter_map(|i| blocks.row_data(i))
+        .map(|b| b.text)
+        .collect();
+    assert!(rows_before.len() > 1, "the document renders");
+
+    g.invoke_edit_toggle();
+    crate::wiki::counters::reset();
+    let mut text = g.get_raw().to_string();
+    for _ in 0..20 {
+        text.push('x');
+        g.invoke_edited(text.as_str().into());
+    }
+    assert_eq!(
+        crate::wiki::counters::preview(),
+        0,
+        "the editor's echo parses and diffs nothing"
+    );
+    let after = g.get_blocks();
+    assert!(
+        std::ptr::eq(
+            blocks
+                .as_any()
+                .downcast_ref::<VecModel<WikiBlock>>()
+                .expect("blocks are a VecModel") as *const _,
+            after
+                .as_any()
+                .downcast_ref::<VecModel<WikiBlock>>()
+                .expect("still a VecModel") as *const _,
+        ),
+        "…and never touches the model"
+    );
+    let rows_after: Vec<slint::SharedString> = (0..after.row_count())
+        .filter_map(|i| after.row_data(i))
+        .map(|b| b.text)
+        .collect();
+    assert_eq!(rows_after, rows_before, "the rows stand still");
+
+    // leaving the editor is a key change: the blocks are fresh the moment
+    // they are visible again
+    g.invoke_edit_toggle();
+    assert!(crate::wiki::counters::preview() > 0);
+    let shown = g.get_blocks();
+    assert!(
+        (0..shown.row_count())
+            .filter_map(|i| shown.row_data(i))
+            .any(|b| b.text.as_str().contains("xxxxxxxxxxxxxxxxxxxx")),
+        "what was typed is on screen"
+    );
+}
+
+/// **The draft is serialized once per change window, not per keystroke**
+/// (F4a). It is the WHOLE model as JSON - 21 ms on a held base - compared
+/// against a string that is thrown away 2 s out of 2 s. The 2 s contract
+/// itself stands: a hard kill loses at most that window (WP-D).
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_draft_is_serialized_once_per_change_window() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    let saved = Rc::new(RefCell::new(Vec::<String>::new()));
+    {
+        let s = saved.clone();
+        ui.on_wiki_draft_save(move |d| s.borrow_mut().push(d.to_string()));
+    }
+    let _wiki = wire_wiki(&ui);
+    let g = ui.global::<WikiState>();
+    g.set_base_docs(ModelRc::new(VecModel::from(vec![WikiBase {
+        path: "a.md".into(),
+        content: "# A\n".into(),
+        loaded: true,
+    }])));
+    g.set_base_rev(1);
+    g.invoke_base_arrived();
+    g.invoke_nav_open(nav_id(&ui, "a.md"));
+    g.invoke_edit_toggle();
+
+    crate::wiki::counters::reset();
+    let mut text = g.get_raw().to_string();
+    for _ in 0..20 {
+        text.push('x');
+        g.invoke_edited(text.as_str().into());
+    }
+    assert_eq!(
+        crate::wiki::counters::draft(),
+        0,
+        "inside the window nothing is serialized"
+    );
+    assert!(saved.borrow().is_empty(), "…and nothing reaches the engine");
+
+    // the window is over: the next keystroke saves, the 19 after it do not
+    std::thread::sleep(std::time::Duration::from_millis(2_050));
+    for _ in 0..20 {
+        text.push('y');
+        g.invoke_edited(text.as_str().into());
+    }
+    assert_eq!(crate::wiki::counters::draft(), 1, "exactly one serialization");
+    assert_eq!(saved.borrow().len(), 1, "…and exactly one engine hop");
+    assert!(
+        saved.borrow()[0].contains("xxxxxxxxxxxxxxxxxxxxy"),
+        "the saved draft carries the work"
+    );
+}
+
+/// **…and the last change of a burst is not lost.** A change made INSIDE
+/// the window has no sync of its own to save it: a member who types once
+/// and walks away used to leave the edit sitting there until a callback
+/// that never comes, which is not "a hard kill loses at most that window"
+/// - it is a window with no end. One timer per window closes it.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_change_inside_the_window_is_flushed_when_it_closes() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    let saved = Rc::new(RefCell::new(Vec::<String>::new()));
+    {
+        let s = saved.clone();
+        ui.on_wiki_draft_save(move |d| s.borrow_mut().push(d.to_string()));
+    }
+    let _wiki = wire_wiki(&ui);
+    let g = ui.global::<WikiState>();
+    g.set_base_docs(ModelRc::new(VecModel::from(vec![WikiBase {
+        path: "a.md".into(),
+        content: "# A\n".into(),
+        loaded: true,
+    }])));
+    g.set_base_rev(1);
+    g.invoke_base_arrived();
+    g.invoke_nav_open(nav_id(&ui, "a.md"));
+    g.invoke_edit_toggle();
+
+    // ONE keystroke, then the member walks away
+    let mut text = g.get_raw().to_string();
+    text.push('z');
+    g.invoke_edited(text.as_str().into());
+    assert!(saved.borrow().is_empty(), "the window is still open");
+
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(2_100));
+    assert_eq!(saved.borrow().len(), 1, "the window closing saves it");
+    assert!(
+        saved.borrow()[0].contains("# A\\nz"),
+        "the flushed draft carries the keystroke: {}",
+        saved.borrow()[0]
+    );
+
+    // …and a burst arms ONE timer, not one per keystroke
+    crate::wiki::counters::reset();
+    for _ in 0..20 {
+        text.push('q');
+        g.invoke_edited(text.as_str().into());
+    }
+    assert_eq!(
+        crate::wiki::counters::flush(),
+        1,
+        "twenty keystrokes, one armed flush"
+    );
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(2_100));
+    assert_eq!(saved.borrow().len(), 2, "one hop per window, not per keystroke");
+    assert_eq!(
+        crate::wiki::counters::draft(),
+        1,
+        "…and one serialization with it"
+    );
+}
+
+/// **A document's bytes are asked for once per attempt** (F5). Every sync
+/// used to re-ask while the fetch was still running - 45 `wiki_get` round
+/// trips in a 60-interaction flow, each reply re-syncing the face. A
+/// failure makes the path askable again; an arrival ends it.
+#[test]
+fn the_bytes_in_flight_are_not_asked_for_again_on_every_sync() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    let _wiki = wire_wiki(&ui);
+    let g = ui.global::<WikiState>();
+    let wanted = lazy_base(&ui, &["a.md"]);
+    let id = nav_id(&ui, "a.md");
+
+    g.invoke_nav_open(id);
+    assert_eq!(wanted.borrow().as_slice(), ["a.md".to_string()]);
+    for _ in 0..10 {
+        g.invoke_nav_mark(id);
+    }
+    assert_eq!(
+        wanted.borrow().len(),
+        1,
+        "a sync per click is not a wiki_get per click"
+    );
+
+    // the fetch gave up: the next member action retries it, and once
+    g.invoke_content_failed("a.md".into());
+    g.invoke_nav_mark(id);
+    g.invoke_nav_mark(id);
+    assert_eq!(wanted.borrow().len(), 2, "a failure makes it askable again");
+
+    // …and the bytes arriving end it
+    g.invoke_content_arrived("a.md".into(), "# A\n".into());
+    for _ in 0..10 {
+        g.invoke_nav_mark(id);
+    }
+    assert_eq!(wanted.borrow().len(), 2, "an arrival ends the asking");
+}
+
 /// The header stays reachable, as a DELIBERATE second option: the
 /// qualified relation `{to, since, role}` has no inline shape, and a
 /// refusal keeps the modal up with its reason rather than writing.

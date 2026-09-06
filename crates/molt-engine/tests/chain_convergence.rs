@@ -2,7 +2,7 @@
 #![allow(missing_docs)]
 
 //! **F00 keystone - concurrent writers end on ONE chain**
-//! (`docs/chain/chain_reorg.md`, `docs/reviews/mcp_agent_friction_fixes.md`
+//! (`docs_archive/chain/chain_reorg.md`, `docs_archive/reviews/mcp_agent_friction_fixes.md`
 //! A2): two seats of a real 2-of-2 republic propose in bursts over a real
 //! relay and approve each other's cards as they appear. Whatever order the
 //! seals happen in on either side, both seats end with identical blocks,

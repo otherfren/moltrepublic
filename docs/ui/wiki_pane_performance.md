@@ -216,13 +216,16 @@ removal, no visible change); 4-6 change behaviour or structure.
    `ListView` (std-widgets) so off-screen rows do not exist. The drag/drop
    gesture reads row indices from `mouse-y / stride`, which a `ListView`
    keeps.
-5. **Renderer choice on a GPU-less box (F1, F2).** Try
-   `SLINT_BACKEND=winit-software` on the live nodes (measure with
-   `SLINT_DEBUG_PERFORMANCE=refresh_lazy,console,overlay`); if it wins, a
-   `[ui] renderer = "software" | "gl"` config key that
-   `molt-app` applies through `slint::BackendSelector` before the window
-   exists - a runtime choice, like headless. Partial repaint only pays
-   with step 6; without it the software renderer still repaints the
+5. **Renderer choice on a GPU-less box (F1, F2).** The choice is BUILT
+   (2026-09-06): `[ui] renderer = "auto" | "software" | "gl"`, default
+   `auto`, applied by `molt-app` through `slint::BackendSelector` before
+   the window exists - a runtime choice, like headless. A set
+   `SLINT_BACKEND` still wins (the selection is then skipped), so the
+   one-off trial needs no file edit. STILL OPEN: the measurement itself -
+   run the live nodes with `SLINT_BACKEND=winit-software` and
+   `SLINT_DEBUG_PERFORMANCE=refresh_lazy,console,overlay`, then decide
+   what a GPU-less box should carry in its config. Partial repaint only
+   pays with step 6; without it the software renderer still repaints the
    window on every mark (§2.2), just without the GL round trip.
 6. **Marks without relayout (F2).** Keep row text metrics constant (weight
    via colour only, or a fixed-width label) so a mark dirties two rows, not
@@ -236,7 +239,9 @@ removal, no visible change); 4-6 change behaviour or structure.
   baseline - and the product numbers are unmeasured until then.
 - **Q2 - Software renderer as the default on Qubes?** Partial repaint is
   its edge; it needs step 6 to matter for marks, and the text rendering
-  differs slightly (no subpixel AA). Config key or env var?
+  differs slightly (no subpixel AA). Config key or env var? *Answered: a
+  config key* (`[ui] renderer`, built 2026-09-06), default `auto` - whether
+  a GPU-less box should ship `software` stays open until step 6.
 - **Q3 - `ListView` for the navigator** changes the drag/drop and inline
   rename code paths (row elements are recycled). Worth it at 125 pages; at
   a 1000-page wiki it is the only thing that keeps the pane usable.

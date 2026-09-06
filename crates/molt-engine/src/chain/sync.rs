@@ -223,7 +223,7 @@ impl State {
         }
     }
 
-    /// The deep tie-break (`docs/chain/chain_reorg.md`): once the fork
+    /// The deep tie-break (`docs_archive/chain/chain_reorg.md`): once the fork
     /// candidates link into our chain at some height f, compare the two
     /// blocks at f (R1); if theirs is smaller, verify our prefix + their
     /// suffix as a whole (R3) and adopt it, returning the displaced

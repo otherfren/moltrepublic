@@ -16,6 +16,50 @@ use similar::{capture_diff_slices, Algorithm, DiffOp};
 
 pub type DocId = u32;
 
+/// Test seam for the sync diet (`docs/ui/wiki_pane_performance.md` F4):
+/// how often the expensive rebuilds and the draft flush actually ran.
+#[cfg(test)]
+pub(crate) mod counters {
+    use std::cell::Cell;
+
+    thread_local! {
+        static DRAFT: Cell<u32> = const { Cell::new(0) };
+        static PREVIEW: Cell<u32> = const { Cell::new(0) };
+        static FLUSH: Cell<u32> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn bump_draft() {
+        DRAFT.with(|c| c.set(c.get() + 1));
+    }
+
+    pub(crate) fn bump_flush() {
+        FLUSH.with(|c| c.set(c.get() + 1));
+    }
+
+    pub(crate) fn bump_preview() {
+        PREVIEW.with(|c| c.set(c.get() + 1));
+    }
+
+    pub(crate) fn draft() -> u32 {
+        DRAFT.with(Cell::get)
+    }
+
+    pub(crate) fn preview() -> u32 {
+        PREVIEW.with(Cell::get)
+    }
+
+    /// Draft-flush timers armed (one per window, never one per keystroke).
+    pub(crate) fn flush() -> u32 {
+        FLUSH.with(Cell::get)
+    }
+
+    pub(crate) fn reset() {
+        DRAFT.with(|c| c.set(0));
+        PREVIEW.with(|c| c.set(0));
+        FLUSH.with(|c| c.set(0));
+    }
+}
+
 /// A document's pending-change state vs the ratified base snapshot.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Status {
@@ -340,6 +384,15 @@ pub struct Wiki {
     /// on their way (`knowledge_base_scale.md` §4.10): the changeset it
     /// was fired over. It fires itself when they land.
     vote_pending: Option<Vec<Change>>,
+    /// Bumped once per callback by the bridge ([`Wiki::touch`]): the face
+    /// sync's "has anything moved at all" key
+    /// (`docs/ui/wiki_pane_performance.md` F4).
+    gen: u64,
+    /// Base paths already asked for and not answered yet (§4.10). Without
+    /// it every sync re-asks while the bytes are in flight - 45 `wiki_get`
+    /// round trips in a 60-interaction flow (F5). `RefCell` because the
+    /// face sync only borrows the model.
+    in_flight: std::cell::RefCell<std::collections::BTreeSet<String>>,
 }
 
 /// The `+ Tag` and "semantic link" modals while they are open.
@@ -468,6 +521,8 @@ impl Wiki {
             relation_vocab: Vec::new(),
             cursor: None,
             vote_pending: None,
+            gen: 0,
+            in_flight: std::cell::RefCell::new(std::collections::BTreeSet::new()),
         }
     }
 
@@ -493,7 +548,44 @@ impl Wiki {
             relation_vocab: Vec::new(),
             cursor: None,
             vote_pending: None,
+            gen: 0,
+            in_flight: std::cell::RefCell::new(std::collections::BTreeSet::new()),
         }
+    }
+
+    /// The model moved. The bridge calls this once per callback - every
+    /// wiki verb is a mutation by construction, and one choke point
+    /// cannot be forgotten the way sixty verbs can
+    /// (`docs/ui/wiki_pane_performance.md` F4).
+    pub fn touch(&mut self) {
+        self.gen = self.gen.wrapping_add(1);
+    }
+
+    /// What [`Wiki::touch`] counts: an unmoved value means nothing has
+    /// happened since the last sync read it.
+    pub fn generation(&self) -> u64 {
+        self.gen
+    }
+
+    /// Everything the pane derives from the ACTIVE document - the block
+    /// view, the infobox and the link list. A sync whose key stands still
+    /// rebuilds none of them (F4).
+    pub fn face_key(&self) -> Option<(DocId, u64)> {
+        use std::hash::{Hash, Hasher};
+        let d = self.active()?;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        d.path.hash(&mut h);
+        d.raw.hash(&mut h);
+        d.deleted.hash(&mut h);
+        match &d.base {
+            None => 0u8.hash(&mut h),
+            Some(b) => {
+                1u8.hash(&mut h);
+                b.path.hash(&mut h);
+                b.raw.hash(&mut h);
+            }
+        }
+        Some((d.id, h.finish()))
     }
 
     /// The folded engine base lands (`shared_memory_real.md` WP-C): every
@@ -507,6 +599,11 @@ impl Wiki {
         // this document too, so held bytes are dropped and re-fetched
         let moved = self.base_rev != rev;
         self.base_rev = rev;
+        if moved {
+            // the bytes in flight belong to the old revision: whatever
+            // lands is stale, and every path is askable again (F5)
+            self.in_flight.get_mut().clear();
+        }
         for (path, content) in base {
             if let Some(d) = self
                 .docs
@@ -919,6 +1016,8 @@ impl Wiki {
     /// undo stack and the base revision. Returns "" when there is nothing
     /// local (clean tree, no tabs) — the caller then REMOVES the file.
     pub fn to_draft(&self) -> String {
+        #[cfg(test)]
+        counters::bump_draft();
         let clean = self.stack.is_empty()
             && self.tabs.is_empty()
             && self.docs.iter().all(|d| d.status() == Status::Unchanged);
@@ -958,6 +1057,7 @@ impl Wiki {
         self.base_rev = d.base_rev;
         self.editing = false;
         self.renaming = None;
+        self.in_flight.get_mut().clear();
         true
     }
 
@@ -1649,6 +1749,8 @@ impl Wiki {
     /// The active doc's preview: working blocks with their diff verdicts,
     /// plus struck ghosts for base blocks the working copy dropped.
     pub fn preview(&self, id: DocId) -> Vec<(Block, BlockStatus)> {
+        #[cfg(test)]
+        counters::bump_preview();
         let Some(d) = self.doc(id) else {
             return Vec::new();
         };
@@ -2530,6 +2632,8 @@ impl Wiki {
     /// follows them; an edited one keeps its working copy and now has
     /// something to diff against.
     pub fn load_base(&mut self, path: &str, content: &str) {
+        // the attempt is over whatever the answer says about this path
+        self.in_flight.get_mut().remove(path);
         let Some(d) = self
             .docs
             .iter_mut()
@@ -2553,13 +2657,39 @@ impl Wiki {
     /// BASE path: a locally renamed document's working path is one the
     /// ratified base does not carry, and `load_base` keys on the base
     /// path, so the answer could not land under anything else.
+    ///
+    /// The answer is CLAIMED: a path already in flight is skipped until
+    /// its bytes land ([`Wiki::load_base`]) or the fetch gives up
+    /// ([`Wiki::content_failed`]), so a sync per keystroke no longer means
+    /// a `wiki_get` per keystroke (F5).
     pub fn wants_content(&self) -> Option<String> {
-        if let Some(d) = self.active() {
-            if let Some(b) = d.base.as_ref().filter(|_| !d.loaded()) {
-                return Some(b.path.clone());
-            }
-        }
-        self.unloaded_changes().into_iter().next()
+        let mut flight = self.in_flight.borrow_mut();
+        let want = self
+            .active()
+            .and_then(|d| d.base.as_ref().filter(|_| !d.loaded()))
+            .map(|b| b.path.clone())
+            .filter(|p| !flight.contains(p))
+            .or_else(|| {
+                self.unloaded_changes()
+                    .into_iter()
+                    .find(|p| !flight.contains(p))
+            })?;
+        flight.insert(want.clone());
+        Some(want)
+    }
+
+    /// The fetch gave up on this path (`content-failed`): it is askable
+    /// again, so the next sync retries it.
+    pub fn content_failed(&mut self, path: &str) {
+        self.in_flight.get_mut().remove(path);
+    }
+
+    /// Distrust every fetch in progress and ask again - what the VOTE
+    /// click does over bytes still in flight (§4.10): the member is
+    /// waiting on them, and a request that was dropped somewhere would
+    /// otherwise keep the queued vote waiting forever.
+    pub fn requeue_content(&mut self) {
+        self.in_flight.get_mut().clear();
     }
 
     /// A vote was fired over bytes that are still on their way: it is
@@ -3632,9 +3762,11 @@ mod tests {
         assert_eq!(w.unloaded_changes(), vec!["a.md".to_string()]);
         assert_eq!(w.wants_content().as_deref(), Some("a.md"));
 
-        // the OPEN document asks under its base path too
+        // …and ONCE: while the bytes are in flight every sync used to ask
+        // again (F5), 45 `wiki_get` round trips in a 60-interaction flow
+        assert_eq!(w.wants_content(), None, "the request is still in flight");
         w.open(id);
-        assert_eq!(w.wants_content().as_deref(), Some("a.md"));
+        assert_eq!(w.wants_content(), None, "opening it does not re-ask");
 
         w.load_base("a.md", "alpha\n");
         assert!(w.unloaded_changes().is_empty(), "the reply landed");
@@ -3671,6 +3803,96 @@ mod tests {
         assert!(w.vote_pending());
         w.clear_vote();
         assert!(!w.vote_pending(), "a fired vote does not fire twice");
+    }
+
+    /// **The bytes of a document are asked for ONCE per attempt**
+    /// (`docs/ui/wiki_pane_performance.md` F5). `wants_content` used to be
+    /// stateless, so every face sync re-asked for a fetch already running:
+    /// 45 `wiki_get` round trips in a 60-interaction flow, each reply
+    /// re-syncing the face. A failure and a base that moved make the path
+    /// askable again; an arrival ends it.
+    #[test]
+    fn the_bytes_of_a_document_are_asked_for_once_per_attempt() {
+        let mut w = Wiki::empty();
+        w.set_base(
+            &[("a.md".to_string(), None), ("b.md".to_string(), None)],
+            1,
+        );
+        let a = w.docs.iter().find(|d| d.path == "a.md").expect("a.md").id;
+        w.open(a);
+        assert_eq!(w.wants_content().as_deref(), Some("a.md"));
+        assert_eq!(w.wants_content(), None, "a flight in progress is not re-asked");
+
+        // a second changed document is a different path, and asked for
+        let b = w.docs.iter().find(|d| d.path == "b.md").expect("b.md").id;
+        w.delete(b);
+        assert_eq!(w.wants_content().as_deref(), Some("b.md"));
+        assert_eq!(w.wants_content(), None);
+
+        // the fetch gave up: the path is askable again
+        w.content_failed("a.md");
+        assert_eq!(w.wants_content().as_deref(), Some("a.md"));
+        assert_eq!(w.wants_content(), None);
+
+        // …and the bytes arriving end it for good
+        w.load_base("a.md", "alpha\n");
+        w.load_base("b.md", "beta\n");
+        assert_eq!(w.wants_content(), None, "nothing is missing any more");
+    }
+
+    /// A base that MOVED drops the bytes this node held, so every request
+    /// in flight belongs to the old revision - and every path is asked for
+    /// again rather than waiting on an answer that can no longer land.
+    #[test]
+    fn a_moved_base_asks_again_for_the_bytes_it_dropped() {
+        let mut w = Wiki::empty();
+        w.set_base(&[("a.md".to_string(), None)], 1);
+        let a = w.docs.first().expect("a.md").id;
+        w.open(a);
+        assert_eq!(w.wants_content().as_deref(), Some("a.md"));
+
+        w.set_base(&[("a.md".to_string(), None)], 2);
+        assert_eq!(
+            w.wants_content().as_deref(),
+            Some("a.md"),
+            "a new revision re-asks"
+        );
+
+        // the VOTE click distrusts the flight too (§4.10): it is what the
+        // member is waiting on
+        w.requeue_content();
+        assert_eq!(w.wants_content().as_deref(), Some("a.md"));
+    }
+
+    /// **The pane's rendered face is keyed on the document's BYTES.** The
+    /// blocks, the infobox and the link list are rebuilt when this key
+    /// moves and never otherwise (F4) - so a mark, a folder toggle or a
+    /// second tab must not move it.
+    #[test]
+    fn the_face_key_follows_the_active_documents_bytes() {
+        let mut w = Wiki::empty();
+        w.set_base(
+            &[
+                ("a.md".to_string(), Some("# A\n".to_string())),
+                ("b.md".to_string(), Some("# B\n".to_string())),
+            ],
+            1,
+        );
+        assert_eq!(w.face_key(), None, "no document, no face");
+        let a = w.docs.iter().find(|d| d.path == "a.md").expect("a.md").id;
+        let b = w.docs.iter().find(|d| d.path == "b.md").expect("b.md").id;
+        w.open(a);
+        let key = w.face_key().expect("an open document has a face");
+
+        w.mark(b);
+        w.set_all_folders(true);
+        assert_eq!(w.face_key(), Some(key), "a navigator verb renders nothing new");
+
+        w.set_raw(a, "# A\n\nmore\n");
+        let edited = w.face_key().expect("still open");
+        assert_ne!(edited, key, "a keystroke does");
+        w.open(b);
+        assert_ne!(w.face_key(), Some(edited), "…and so does another document");
     }
 
     /// **A folder-only changeset has nothing to propose - and must keep

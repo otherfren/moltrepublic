@@ -14,6 +14,14 @@ their concept docs (`docs/kanban/kanban_workflows.md` §2–§5+§7,
 `docs/vault/vault_threshold_disclosure.md`) — both docs carry open
 questions that gate any real build.
 
+## A reasoned decline delays the seal (agent round 2, A4)
+
+From `docs_archive/reviews/mcp_agent_friction_fixes_round_2.md` §A4: a
+decline with a reason should hold the seal for a moment so the other
+voters see it before the threshold closes - a governance question the
+republic has to decide (how long, and whether a decline can hold at all).
+Not built; everything else of that round is on master.
+
 ## Charter features are a hand-rolled column per feature
 
 Every feature key is wired by hand at ~19 sites (wizard grid, both
@@ -43,7 +51,7 @@ a downgraded seat.
 
 ## Review 2026-08-25 — the deferred findings
 
-`docs/reviews/code_review_2026-08-25.md` holds the full review (every crate,
+`docs_archive/reviews/code_review_2026-08-25.md` holds the full review (every crate,
 eight passes); its CRITICAL/HIGH items were fixed the same night. The items
 still OPEN there, by id (each carries its fix direction in the review):
 

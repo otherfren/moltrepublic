@@ -4757,6 +4757,7 @@ dependencies = [
  "molt-storage",
  "molt-ui",
  "serde_json",
+ "slint",
  "tempfile",
  "tokio",
  "tracing",

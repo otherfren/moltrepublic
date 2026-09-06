@@ -796,7 +796,7 @@ pub(crate) struct ChainProjection {
     /// Proposals that reached m while the head was younger than one round:
     /// sealed on the delivery tick once the round has passed.
     pub(crate) seal_held: std::collections::BTreeSet<u64>,
-    /// Blocks of ANOTHER branch, by height (`docs/chain/chain_reorg.md`
+    /// Blocks of ANOTHER branch, by height (`docs_archive/chain/chain_reorg.md`
     /// R5): kept until they link into our chain below the fork point and
     /// the deep tie-break decides. Bounded like the catch-up buffer.
     pub(crate) fork_candidates: BTreeMap<u64, molt_core::ChainBlock>,

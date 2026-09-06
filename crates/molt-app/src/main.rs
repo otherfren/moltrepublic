@@ -20,8 +20,9 @@
 //!   fields, fill the rest with defaults, back the original up to `<PATH>.bak`.
 //!
 //! The config carries: whether to start headless (`[node].headless`), where
-//! workspaces are stored (`[storage].workspace_dir`), and how/whether an
-//! anonymity network is used (`[transport.anonymity]`). It is parsed strictly:
+//! workspaces are stored (`[storage].workspace_dir`), how/whether an
+//! anonymity network is used (`[transport.anonymity]`), and which renderer
+//! the GUI starts with (`[ui].renderer`). It is parsed strictly:
 //! `deny_unknown_fields` makes typos and unknown fields hard errors. The schema,
 //! rendering and lenient salvage all live in the `molt-config` crate, shared
 //! with the GUI so a runtime settings change round-trips through the same
@@ -38,7 +39,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use clap::Parser;
-use molt_config::{backup_path, is_well_formed, parse, render, salvage, Config, Settings};
+use molt_config::{
+    backup_path, is_well_formed, parse, render, salvage, Config, Renderer, Settings,
+};
 use molt_engine::WalletHandle;
 use tokio::runtime::Runtime;
 use tracing_subscriber::EnvFilter;
@@ -380,14 +383,21 @@ fn main() -> anyhow::Result<()> {
     } else {
         // UI mode (default): GUI on main thread; fall back to headless stdio
         // MCP if it can't start.
+        let testing_backend = cfg!(feature = "ui-testing")
+            && std::env::var_os("MOLT_UI_TESTING").is_some_and(|v| v == "1");
         #[cfg(feature = "ui-testing")]
-        if std::env::var_os("MOLT_UI_TESTING").is_some_and(|v| v == "1") {
+        if testing_backend {
             // docs_archive/ui/gui_over_mcp.md step 2: the real window on the Slint
             // testing backend — no display, but the full event loop, so the
             // live mirror publishes and `ui_action` drives it over MCP.
             // Must run on this (main) thread, before the window is created.
             i_slint_backend_testing::init_integration_test_with_system_time();
             tracing::info!("mode: UI (testing backend, no display)");
+        }
+        // Before the first Slint object exists, and never on top of the
+        // testing backend, which owns the platform already.
+        if !testing_backend {
+            select_renderer(config.ui.renderer);
         }
         tracing::info!("mode: UI (GUI on main thread)");
         // The GUI greys the embedded tor-mode row unless this binary was built
@@ -741,6 +751,49 @@ fn run_headless(
 /// diagnostics; `RUST_LOG` brings those back).
 const DEFAULT_LOG_FILTER: &str = "info,zbus=error,openmls=off";
 
+/// Install the renderer `[ui] renderer` asks for. Must run before any Slint
+/// object exists (the platform is set once per process) and never when
+/// another backend already owns it. A refused selection is a warning, not a
+/// stop: Slint then picks for itself, exactly as `auto` does.
+fn select_renderer(renderer: Renderer) {
+    let env = std::env::var("SLINT_BACKEND").ok();
+    let Some((backend, name)) = renderer_selection(renderer, env.as_deref()) else {
+        return;
+    };
+    match slint::BackendSelector::new()
+        .backend_name(backend.to_string())
+        .renderer_name(name.to_string())
+        .select()
+    {
+        Ok(()) => tracing::info!(backend, renderer = name, "renderer selected (ui.renderer)"),
+        Err(e) => {
+            tracing::warn!(backend, renderer = name, error = %e, "renderer unavailable")
+        }
+    }
+}
+
+/// The `(backend, renderer)` pair to select, or `None` to let Slint decide.
+///
+/// `SLINT_BACKEND` wins over the config key, and that needs this early exit:
+/// an explicit `BackendSelector` choice would OVERRIDE the variable, because
+/// `select_internal` only fills the selector's *empty* slots from it
+/// (`get_or_insert_with`, i-slint-backend-selector 1.17 `api.rs`). Skipping
+/// the selection hands the choice back to Slint's own `create_backend`, which
+/// reads the variable - so a one-off trial stays a one-off trial.
+fn renderer_selection(
+    renderer: Renderer,
+    slint_backend: Option<&str>,
+) -> Option<(&'static str, &'static str)> {
+    if slint_backend.is_some_and(|v| !v.is_empty()) {
+        return None;
+    }
+    match renderer {
+        Renderer::Auto => None,
+        Renderer::Software => Some(("winit", "software")),
+        Renderer::Gl => Some(("winit", "femtovg")),
+    }
+}
+
 /// Logs go to stderr — in headless/stdio mode, stdout is the MCP channel.
 ///
 /// zbus is capped at ERROR by default: the XDG-portal request pattern
@@ -813,6 +866,42 @@ mod tests {
         let (_, all, list) = parse_mcp_allow(" , not-an-ip, 192.168.0.2 ,");
         assert!(!all);
         assert_eq!(list, vec![ip("192.168.0.2")]);
+    }
+
+    /// `auto` installs nothing: Slint keeps its own choice.
+    #[test]
+    fn auto_leaves_the_backend_to_slint() {
+        assert_eq!(renderer_selection(Renderer::Auto, None), None);
+    }
+
+    #[test]
+    fn software_and_gl_name_a_winit_renderer() {
+        assert_eq!(
+            renderer_selection(Renderer::Software, None),
+            Some(("winit", "software"))
+        );
+        assert_eq!(
+            renderer_selection(Renderer::Gl, None),
+            Some(("winit", "femtovg"))
+        );
+    }
+
+    /// A set `SLINT_BACKEND` must stay a one-off trial. Selecting explicitly
+    /// would beat it (the selector only fills its empty slots from the
+    /// variable), so a set variable skips the selection entirely.
+    #[test]
+    fn the_env_var_wins_over_the_config_key() {
+        assert_eq!(
+            renderer_selection(Renderer::Software, Some("winit-femtovg")),
+            None
+        );
+        assert_eq!(renderer_selection(Renderer::Gl, Some("winit-software")), None);
+        assert_eq!(renderer_selection(Renderer::Auto, Some("winit-software")), None);
+        // an empty variable is not a choice
+        assert_eq!(
+            renderer_selection(Renderer::Software, Some("")),
+            Some(("winit", "software"))
+        );
     }
 
     /// **L5: a list we cannot read binds loopback, not the world.**
