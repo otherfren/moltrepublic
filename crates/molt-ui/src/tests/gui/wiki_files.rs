@@ -285,12 +285,18 @@ fn a_file_links_click_filters_shared_files_to_that_one_file() {
         FULL,
         "the needle is the FULL checksum, not the reference prefix"
     );
+    // the view switch rides `Ctx::issue`, which SPAWNS - the read has to
+    // wait for it, or the assertion races the command it just fired
     rt.block_on(async {
-        let Ok(Reply::Session(sv)) = w.execute(Command::ReadSession).await else {
-            panic!("session");
-        };
-        assert_eq!(sv.surface, Surface::Files);
-        assert_eq!(sv.view, "persistent");
+        for _ in 0..200 {
+            if let Ok(Reply::Session(sv)) = w.execute(Command::ReadSession).await {
+                if sv.surface == Surface::Files && sv.view == "persistent" {
+                    return;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("the click never selected Files/persistent");
     });
 }
 
