@@ -462,6 +462,150 @@ component LinkRun inherits Rectangle {
     }
 }
 
+// ---- file references (images + file links) --------------------------------
+// wiki_files_and_images.md §3.4. `file-state`: 0 none · 1 unknown ·
+// 2 ambiguous · 3 remote · 4 fetching · 5 decoding · 6 ready · 7 failed ·
+// 8 temporary. A resolved reference reads normally; an unresolvable one
+// says the ONE word in the bad tone, a temporary one in the warn tone.
+
+// The tone every file reference paints in.
+global FileTone {
+    public pure function ink(state: int) -> color {
+        return state == 1 || state == 2 || state == 7 ? Theme.bad
+            : state == 8 ? Theme.warn
+            : Theme.accent;
+    }
+}
+
+// One file LINK run: the clip, the name, and its size in the dim tone.
+// A click jumps to Shared Files with the table filtered to this file.
+component FileRun inherits Rectangle {
+    in property <string> label;
+    in property <string> target; // the `upload:` destination
+    in property <int> state;
+    in property <string> size;
+    in property <length> fsize: Theme.fs-editor;
+    width: fl.preferred-width + 6px;
+    height: fl.preferred-height;
+    border-radius: 3px;
+    background: fa.has-hover ? Theme.accent-soft : transparent;
+    accessible-role: button;
+    accessible-label: root.label;
+    fl := HorizontalLayout {
+        x: 3px;
+        spacing: 4px;
+        Text {
+            text: "📎";
+            font-family: "Twemoji Mozilla";
+            font-size: root.fsize - 1px;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.label;
+            color: FileTone.ink(root.state);
+            font-size: root.fsize;
+        }
+        if root.size != "": Text {
+            text: "(" + root.size + ")";
+            color: Theme.dim;
+            font-size: root.fsize - 1px;
+            vertical-alignment: center;
+        }
+    }
+    fa := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            WikiState.jump-upload(root.target);
+        }
+    }
+}
+
+// One file/image reference that is NOT a picture on screen: the kind
+// glyph, `name · size · von <member>`, the state word, and at most ONE
+// verb. A card whose name is still empty is an answer in flight - it
+// shows the reference and no verb.
+component FileCard inherits Rectangle {
+    in property <WikiBlock> b;
+    in property <bool> ghost;
+    property <string> ref-hex: root.b.spans.length > 0 ? root.b.spans[0].link : "";
+    height: fc.preferred-height + 16px;
+    border-radius: Theme.win95 ? 0px : 6px;
+    border-width: Theme.border-w;
+    border-color: root.b.file-state == 1 || root.b.file-state == 2 || root.b.file-state == 7
+        ? Theme.bad
+        : (root.b.file-state == 8 ? Theme.warn : Theme.line);
+    background: Theme.bg;
+    fc := HorizontalLayout {
+        x: 10px;
+        y: 8px;
+        width: parent.width - 20px;
+        spacing: 8px;
+        Text {
+            text: "🖼️";
+            font-family: "Twemoji Mozilla";
+            font-size: Theme.fs-editor;
+            vertical-alignment: top;
+        }
+        VerticalLayout {
+            spacing: 2px;
+            horizontal-stretch: 1;
+            Text {
+                text: root.b.file-name == ""
+                    ? root.b.spans[0].link
+                    : root.b.file-name + " · " + root.b.file-size + " · "
+                        + Strings.mem-file-by + " " + root.b.file-member;
+                color: FileTone.ink(root.b.file-state);
+                font-size: Theme.fs-editor - 1px;
+                overflow: elide;
+            }
+            if root.b.text != "": Text {
+                text: root.b.text;
+                color: Theme.dim;
+                font-size: Theme.fs-cap;
+                wrap: word-wrap;
+            }
+            if root.b.file-avail != "": Text {
+                text: root.b.file-avail;
+                color: FileTone.ink(root.b.file-state);
+                font-size: Theme.fs-cap;
+            }
+        }
+        // a ghost is history, not navigation: no verb, nothing fetched
+        if !root.ghost: VerticalLayout {
+            alignment: center;
+            // remote and resolved: the ONE verb, gated by availability
+            if root.b.file-state == 3 && root.b.file-name != "": AppButton {
+                height: 28px * Theme.ui-scale;
+                pad: 10px;
+                label: Strings.mem-file-fetch;
+                enabled: root.b.file-can-fetch;
+                // why it is dead, only where it IS dead
+                tooltip: root.b.file-can-fetch ? "" : root.b.file-avail;
+                tooltip-left: true;
+                clicked => {
+                    WikiState.file-fetch(root.ref-hex);
+                }
+            }
+            if root.b.file-state == 7: AppButton {
+                height: 28px * Theme.ui-scale;
+                pad: 10px;
+                label: Strings.mem-file-retry;
+                clicked => {
+                    WikiState.file-retry(root.ref-hex);
+                }
+            }
+            if root.b.file-state == 8: AppButton {
+                height: 28px * Theme.ui-scale;
+                pad: 10px;
+                label: Strings.mem-file-show;
+                clicked => {
+                    WikiState.jump-upload(root.ref-hex);
+                }
+            }
+        }
+    }
+}
+
 // One offered header key. The republic's ontology has no schema and no
 // dialog, so a header-less document is where a member meets it: a click
 // writes the syntax, the value stays theirs.
@@ -736,10 +880,17 @@ component SpanFlow inherits Rectangle {
                 color: root.ink;
                 font-size: root.fsize;
             }
-            if sp.link != "": LinkRun {
+            if sp.link != "" && sp.file-state == 0: LinkRun {
                 label: sp.text;
                 target: sp.link;
                 rel: sp.rel;
+                fsize: root.fsize;
+            }
+            if sp.file-state != 0: FileRun {
+                label: sp.text;
+                target: sp.link;
+                state: sp.file-state;
+                size: sp.file-size;
                 fsize: root.fsize;
             }
         }
@@ -756,12 +907,22 @@ component SpanFlow inherits Rectangle {
                 font-size: root.fsize;
                 wrap: word-wrap;
             }
-            if sp.link != "": HorizontalLayout {
+            if sp.link != "" && sp.file-state == 0: HorizontalLayout {
                 alignment: start;
                 LinkRun {
                     label: sp.text;
                     target: sp.link;
                     rel: sp.rel;
+                    fsize: root.fsize;
+                }
+            }
+            if sp.file-state != 0: HorizontalLayout {
+                alignment: start;
+                FileRun {
+                    label: sp.text;
+                    target: sp.link;
+                    state: sp.file-state;
+                    size: sp.file-size;
                     fsize: root.fsize;
                 }
             }
@@ -781,6 +942,8 @@ component BrainBlockView inherits HorizontalLayout {
     property <bool> linked: !root.ghost
         && (root.b.spans.length > 1
             || (root.b.spans.length == 1 && root.b.spans[0].link != ""));
+    // a picture only where the bytes are here AND the block still lives
+    property <bool> shows-image: root.b.kind == 5 && root.b.file-state == 6 && !root.ghost;
     Rectangle {
         width: 3px;
         border-radius: 1.5px;
@@ -839,6 +1002,64 @@ component BrainBlockView inherits HorizontalLayout {
                 flat: root.b.text;
                 ink: root.ink;
                 horizontal-stretch: 1;
+            }
+        }
+        // an `upload:` picture: the card until the bytes are here, then
+        // the picture itself (a click opens it large - Q3)
+        if root.b.kind == 5 && !root.shows-image: FileCard {
+            b: root.b;
+            ghost: root.ghost;
+        }
+        if root.shows-image: VerticalLayout {
+            spacing: 3px;
+            Rectangle {
+                height: min(root.b.image.height * 1px * (parent.width / max(root.b.image.width * 1px, 1px)),
+                    520px);
+                pic := Image {
+                    source: root.b.image;
+                    width: 100%;
+                    height: 100%;
+                    image-fit: contain;
+                }
+                pica := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        WikiState.file-view-image = root.b.image;
+                        WikiState.file-view-caption = root.b.file-name + " · "
+                            + root.b.file-size + " · " + Strings.mem-file-by + " "
+                            + root.b.file-member;
+                        WikiState.file-view-ref = root.b.spans[0].link;
+                        WikiState.file-view-open = true;
+                    }
+                    property <int> tip-gen;
+                    changed has-hover => {
+                        if (self.has-hover) {
+                            self.tip-gen = HintTip.show(root.b.file-name + " · "
+                                + root.b.file-size + " · " + Strings.mem-file-by
+                                + " " + root.b.file-member,
+                                root.absolute-position.x,
+                                root.absolute-position.y + root.height + 6px);
+                        } else {
+                            HintTip.hide(self.tip-gen);
+                        }
+                    }
+                }
+                ContextMenuArea {
+                    Menu {
+                        MenuItem {
+                            title: Strings.mem-file-show;
+                            activated => {
+                                WikiState.jump-upload(root.b.spans[0].link);
+                            }
+                        }
+                    }
+                }
+            }
+            if root.b.text != "": Text {
+                text: root.b.text;
+                color: Theme.dim;
+                font-size: Theme.fs-cap;
+                wrap: word-wrap;
             }
         }
         if root.b.kind == 4: Rectangle {

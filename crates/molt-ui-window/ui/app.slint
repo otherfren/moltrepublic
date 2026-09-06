@@ -1536,6 +1536,7 @@ export component AppWindow inherits Window {
         || root.mem-cs-stack-open
         || WikiState.tag-modal-open
         || WikiState.link-modal-open
+        || WikiState.file-view-open
         || root.mem-export-open
         || root.patch-view-open
         || root.relay-clearnet-modal-open
@@ -2442,6 +2443,8 @@ export component AppWindow inherits Window {
             root.mem-cs-stack-open = false;
         } else if (WikiState.tag-modal-open) {
             WikiState.tag-modal-open = false;
+        } else if (WikiState.file-view-open) {
+            WikiState.file-view-open = false;
         } else if (WikiState.link-modal-open) {
             WikiState.link-close();
             WikiState.link-modal-open = false;
@@ -9701,6 +9704,62 @@ export component AppWindow inherits Window {
                         clicked => {
                             WikiState.tag-add(v);
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    // The LARGE view of a ready wiki picture (wiki_files_and_images.md
+    // §3.4, Q3): window-wide, the ConfirmModal idiom - dimmed ground,
+    // Escape and a click outside close it.
+    if WikiState.file-view-open: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #0000008c;
+        fv-kb := FocusScope {
+            width: 0;
+            height: 0;
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    WikiState.file-view-open = false;
+                    return accept;
+                }
+                reject
+            }
+        }
+        init => {
+            fv-kb.focus();
+        }
+        // scrim: absorbs clicks to the app behind; a click anywhere but
+        // the verb closes the view
+        TouchArea {
+            clicked => {
+                WikiState.file-view-open = false;
+            }
+        }
+        VerticalLayout {
+            padding: 40px;
+            spacing: 10px;
+            Image {
+                source: WikiState.file-view-image;
+                image-fit: contain;
+                vertical-stretch: 1;
+            }
+            HorizontalLayout {
+                spacing: 14px;
+                alignment: center;
+                Text {
+                    text: WikiState.file-view-caption;
+                    color: #ffffff;
+                    font-size: Theme.fs-cap;
+                    vertical-alignment: center;
+                }
+                AppButton {
+                    label: Strings.mem-file-show;
+                    clicked => {
+                        WikiState.file-view-open = false;
+                        WikiState.jump-upload(WikiState.file-view-ref);
                     }
                 }
             }

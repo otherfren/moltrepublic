@@ -20,6 +20,7 @@ mod poke;
 mod recovery_backup;
 mod snapshot;
 mod wiki;
+mod wiki_files;
 
 use super::*;
 

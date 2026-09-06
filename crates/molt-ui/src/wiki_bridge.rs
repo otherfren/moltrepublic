@@ -201,6 +201,9 @@ struct FileRefs {
     /// Asked, no answer yet - so a sync never asks twice.
     asking: HashSet<String>,
     images: ImageCache,
+    /// The language the stored words were composed in: an answer carries
+    /// its rendered word, so a language switch has to re-resolve.
+    words: String,
 }
 
 thread_local! {
@@ -228,11 +231,10 @@ fn want_file_refs(s: &WikiState<'_>, body: &str, rev: i32) {
             c.by_hex.clear();
             c.asking.clear();
         }
+        // EVERY reference, malformed ones included - the pane renders
+        // those as `unknown` and must not skip its own row walk for them
         c.wanted.clear();
         for r in refs {
-            if !r.valid() {
-                continue;
-            }
             let entry = c.wanted.entry(r.hex).or_insert(false);
             *entry |= r.image;
         }
@@ -248,6 +250,7 @@ fn ask_missing(s: &WikiState<'_>) {
         let fresh: Vec<String> = c
             .wanted
             .keys()
+            .filter(|h| molt_core::wiki_refs::valid_hex(h))
             .filter(|h| !c.by_hex.contains_key(*h) && !c.asking.contains(*h))
             .cloned()
             .collect();
@@ -373,11 +376,21 @@ fn fill_span_faces(c: &mut FileRefs, spans: &ModelRc<WikiSpan>, lex: &WikiFileWo
 /// Apply the cache to the blocks already on screen, then ask for what is
 /// still missing. Never a model swap: a resolve must not rebuild the page.
 pub(crate) fn patch_file_rows(ui: &AppWindow) {
+    // the common page has no reference at all: every sync would otherwise
+    // walk its spans and compose nine words for nothing
+    if FILE_REFS.with(|c| c.borrow().wanted.is_empty()) {
+        return;
+    }
     let s = ui.global::<WikiState>();
     let lex = WikiFileWords::of(ui);
     let blocks = s.get_blocks();
     FILE_REFS.with(|c| {
         let mut c = c.borrow_mut();
+        if c.words != lex.unknown {
+            c.words = lex.unknown.clone();
+            c.by_hex.clear();
+            c.asking.clear();
+        }
         for i in 0..blocks.row_count() {
             let Some(mut b) = blocks.row_data(i) else { continue };
             fill_span_faces(&mut c, &b.spans, &lex);
@@ -460,7 +473,11 @@ fn ref_face(
     if let LocalCopy::Partial { held, of } = a.local {
         // the mirror brings it by itself: the progress, and no verb (Q4)
         f.state = file_state::FETCHING;
-        f.avail = format!("{} {} %", lex.mirroring, if of == 0 { 0 } else { held * 100 / of });
+        f.avail = format!(
+            "{} {} %",
+            lex.mirroring,
+            held.saturating_mul(100).checked_div(of).unwrap_or(0)
+        );
         return (f, None);
     }
     // an SVG share is never decoded (§4): it renders as a file link
