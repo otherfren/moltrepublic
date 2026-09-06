@@ -94,6 +94,22 @@ still OPEN there, by id (each carries its fix direction in the review):
 - MCP privileges (section 9): P8 ritual abandon on context switch
   (product) · P10 send-side rate limits.
 
+## `scripts/gui_walk.py` cannot found a republic over MCP any more (2026-09-06)
+
+The walk (`docs_archive/ui/gui_over_mcp.md` step 5) founds a 2-of-2 over
+MCP and then reads the window back. Since the MCP audit of 2026-08-26
+two of its steps are GUI-only by design: clearnet consent
+(`relay_confirm` refuses it - fixed in the script: the dev relay is
+written into the config pre-confirmed) and the recovery phrase
+(`create.seed` / `join.seed` are never serialized, so
+`confirm_seed_backup` cannot be fed over MCP - NOT fixable in the
+script without breaking the phrase rule). Found by the exhaustive run
+of 2026-09-06; the rest of the walk (phases 3-5) is unverified since
+the audit. Fix direction: start the walk from two PRE-FOUNDED
+workspaces (a fixture the engine tests already know how to build), or
+give the ritual a testing-backend-only seed acknowledgement that the
+GUI path drives through `ui_action`.
+
 ## Flaky: `a_broadcast_ack_moves_the_senders_proven_floor` (2026-09-05)
 
 Failed once on `cursor.ack_seen` during a fully parallel `cargo test

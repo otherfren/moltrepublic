@@ -139,13 +139,18 @@ class Node:
         )
 
 
-def spawn_moltd(tag, tmp, port):
+def spawn_moltd(tag, tmp, port, relay_url):
     cfg = os.path.join(tmp, f"{tag}.toml")
     ws = os.path.join(tmp, f"ws-{tag}")
+    # the dev relay is loopback, and clearnet consent is a GUI decision,
+    # never an MCP call (mcp-security.md, audit 2026-08-26): the config
+    # carries it the way the GUI would have written it
     with open(cfg, "w", encoding="utf-8") as f:
         f.write(
             f'[node]\nheadless = false\n[storage]\nworkspace_dir = "{ws}"\n'
             f'[mcp]\nport = {port}\nallow = "127.0.0.1"\ntoken = "{TOKEN}"\n'
+            f'[transport.nostr]\nclearnet_enabled = true\n'
+            f'[[transport.nostr.relay]]\nurl = "{relay_url}"\nconfirmed = true\n'
         )
     log = open(os.path.join(tmp, f"{tag}.log"), "w", encoding="utf-8")
     env = dict(os.environ, MOLT_UI_TESTING="1", RUST_LOG="molt_ui=debug")
@@ -176,8 +181,8 @@ def main():
         print(f"relay {relay_url}")
 
         pa, pb = free_port(), free_port()
-        procs.append(spawn_moltd("a", tmp, pa))
-        procs.append(spawn_moltd("b", tmp, pb))
+        procs.append(spawn_moltd("a", tmp, pa, relay_url))
+        procs.append(spawn_moltd("b", tmp, pb, relay_url))
         a, b = Node("a", pa), Node("b", pb)
 
         # phase 0: both windows are up, on the choice screen
@@ -187,11 +192,10 @@ def main():
                 fail("phase 0", f"{n.name} screen={snap.get('screen')}")
         print("phase 0: both windows publish (choice screen)")
 
-        # phase 1: relay into both pools, then the founding wizard - the
-        # engine drives, the WINDOW must follow into the create screen
+        # phase 1: the pre-confirmed relay probes on start, then the
+        # founding wizard - the engine drives, the WINDOW must follow into
+        # the create screen
         for n in (a, b):
-            n.tool("relay_add", {"url": relay_url})
-            n.tool("relay_confirm", {"url": relay_url, "accept_clearnet": True})
             n.wait_session(
                 lambda s: any(
                     r.get("confirmed") for r in s["settings"]["relays"]
