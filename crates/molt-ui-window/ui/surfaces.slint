@@ -1900,10 +1900,11 @@ export component MemoryPane inherits VerticalLayout {
                             color: Theme.faint;
                             font-size: 11px;
                         }
-                        // cross-links — what makes the tree a wiki. One
-                        // chip per line: paths are long and the chips
-                        // neither wrap nor elide, so a row would clip at
-                        // the content pane's minimum width.
+                        // cross-links — what makes the tree a wiki. The
+                        // same clickable run as the backlinks below: a
+                        // list you cannot follow is decoration. One per
+                        // line, because paths are long and a run neither
+                        // wraps nor elides.
                         if WikiState.links.length > 0: VerticalLayout {
                             padding-top: 10px;
                             spacing: 6px;
@@ -1919,9 +1920,10 @@ export component MemoryPane inherits VerticalLayout {
                             }
                             for l in WikiState.links: HorizontalLayout {
                                 alignment: start;
-                                TagChip {
-                                    glyph: "🔗";
+                                LinkRun {
                                     label: l;
+                                    target: l;
+                                    fsize: Theme.fs-cap;
                                 }
                             }
                         }
