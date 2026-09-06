@@ -5964,6 +5964,9 @@ pub enum Reply {
         key_drift: Vec<Vec<String>>,
         /// How many such groups there are.
         key_drift_total: u64,
+        /// The page references to shared files that rot.
+        #[serde(default)]
+        files: WikiFileHealth,
         /// The base revision the GRAPH reflects.
         index_rev: u64,
         /// The base revision of the fold itself.
@@ -6002,6 +6005,10 @@ pub enum Reply {
         /// How many links point at it; `None` like [`Self::links_out`].
         #[serde(default)]
         links_in: Option<u32>,
+        /// The `upload:` file references it carries, distinct per hex, in
+        /// document order.
+        #[serde(default)]
+        files: Vec<WikiFileRef>,
     },
     /// The member table (Organization → Members). A struct variant on
     /// purpose: the internally-tagged `reply` repr cannot serialize a bare
@@ -6492,6 +6499,51 @@ pub struct WikiDangling {
     pub from: Vec<String>,
     /// How many documents reference it in total.
     pub from_total: u64,
+}
+
+/// One `upload:` file reference of a page ([`Reply::WikiDocument`],
+/// `wiki_files_and_images.md` §3.7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiFileRef {
+    /// The hex as the page wrote it, lowercased.
+    pub hex: String,
+    /// The share it names, `""` when nothing does.
+    pub name: String,
+    /// `unknown` (nothing carries the prefix, or it is malformed),
+    /// `ambiguous` (more than one file does), `temporary` (the match is
+    /// not persisted yet), `remote` (persisted, bytes elsewhere) or
+    /// `local` (the bytes are on this device).
+    pub state: String,
+}
+
+/// The wiki's file references that rot ([`Reply::WikiHealth`], §3.7).
+/// Each list is capped by the request's `limit` and carries its total.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WikiFileHealth {
+    /// References nothing carries.
+    pub dangling: Vec<WikiFileIssue>,
+    /// How many such references there are.
+    pub dangling_total: u64,
+    /// References whose only match is not persisted yet.
+    pub temporary: Vec<WikiFileIssue>,
+    /// How many such references there are.
+    pub temporary_total: u64,
+    /// References more than one file carries.
+    pub ambiguous: Vec<WikiFileIssue>,
+    /// How many such references there are.
+    pub ambiguous_total: u64,
+}
+
+/// One rotting file reference and the pages that carry it
+/// ([`Reply::WikiHealth`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiFileIssue {
+    /// The hex as the pages wrote it.
+    pub hex: String,
+    /// The documents that reference it, capped by the request's `limit`.
+    pub paths: Vec<String>,
+    /// How many documents reference it in total.
+    pub paths_total: u64,
 }
 
 /// One document a name could mean ([`Reply::WikiResolve`]).
