@@ -58,6 +58,7 @@ fn upload(name: &str, kind: &str, member: &str, sum: &str, persistent: bool) -> 
 }
 
 /// The two rows every modal test starts from: an image and a PDF.
+#[cfg(feature = "live-preview")]
 fn rows() -> ModelRc<WikiFileRow> {
     let ups = vec![
         upload("Netzplan.png", "Image", "petra", &"1".repeat(64), true),
@@ -81,7 +82,7 @@ fn shown(ui: &AppWindow) -> Vec<String> {
 /// file by its CONTENT, so a missing or too-short checksum is no target
 /// either.
 #[test]
-fn only_a_persistent_share_with_a_checksum_reaches_the_picker() {
+fn only_a_persistent_share_the_grammar_can_name_reaches_the_picker() {
     let ups = vec![
         upload("Netzplan.png", "Image", "petra", &"1".repeat(64), true),
         upload("scratch.txt", "Text", "petra", &"3".repeat(64), false),
@@ -151,6 +152,34 @@ fn escape_cancels_the_picker_and_drops_its_needle() {
     g.set_file_modal_open(true);
     assert_eq!(g.get_file_filter().as_str(), "", "the needle went with it");
     assert!(shown(&ui).is_empty(), "…and so did the stale list");
+}
+
+/// Enter in the search field takes the TOP row - the dialog's own button
+/// only closes, so confirming from the field must not throw the search
+/// away. An empty list has nothing to take, and Enter does nothing.
+#[cfg(feature = "live-preview")]
+#[test]
+fn enter_in_the_search_field_takes_the_top_row() {
+    let ui = picker_window("# A\n\nprose.\n");
+    let g = ui.global::<WikiState>();
+    g.invoke_file_open();
+    g.set_file_modal_open(true);
+    g.invoke_file_list(ModelRc::new(VecModel::from(Vec::<WikiFileRow>::new())));
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
+    press(&ui, slint::platform::Key::Return);
+    assert!(g.get_file_modal_open(), "nothing to take, nothing happens");
+
+    g.invoke_file_list(rows());
+    type_char(&ui, "b");
+    type_char(&ui, "e");
+    assert_eq!(shown(&ui), ["Bericht.pdf"]);
+    press(&ui, slint::platform::Key::Return);
+    assert!(!g.get_file_modal_open(), "Enter picked and closed");
+    assert!(
+        g.get_raw().as_str().contains("[Bericht.pdf](upload:222222222222)"),
+        "{}",
+        g.get_raw()
+    );
 }
 
 /// Typing narrows the list over the name AND the sharer, in Rust - the

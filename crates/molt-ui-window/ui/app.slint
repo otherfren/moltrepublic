@@ -9960,7 +9960,7 @@ export component AppWindow inherits Window {
     // Modal: the + Datei picker. A page points at a file by its CONTENT
     // (`wiki_files_and_images.md` §3.1), so the list offers only files a
     // vote made permanent - a temporary share expires under the page.
-    if WikiState.file-modal-open: file-dlg := ConfirmModal {
+    if WikiState.file-modal-open: ConfirmModal {
         dialog-width: 560px;
         child-focus: true;
         title: Strings.mem-file-title;
@@ -9988,6 +9988,16 @@ export component AppWindow inherits Window {
                 }
                 edited => {
                     WikiState.set-file-filter(self.text);
+                }
+                // Enter takes the top row - the dialog's own button only
+                // closes, so confirm-from-field would throw the search away
+                accepted => {
+                    if (WikiState.file-rows.length > 0) {
+                        WikiState.file-pick(WikiState.file-rows[0].checksum);
+                        if (WikiState.file-error == "") {
+                            WikiState.file-modal-open = false;
+                        }
+                    }
                 }
             }
             Rectangle {
