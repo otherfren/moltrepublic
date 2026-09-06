@@ -28,8 +28,8 @@ impl State {
     /// in RAM alone, so a restart rebuilt it from whatever a catch-up
     /// re-serve happened to carry. Never re-broadcast: the outbox only
     /// wants events this node authored.
-    fn keep_peer_event(&mut self, by: &MemberId, ts: u64, body: WorkspaceEvent) {
-        let env = self.make_env_at(by.clone(), ts, body);
+    fn keep_peer_event(&mut self, by: MemberId, ts: u64, body: WorkspaceEvent) {
+        let env = self.make_env_at(by, ts, body);
         self.record(env);
     }
 
@@ -125,17 +125,17 @@ impl State {
                     return Ok(Reply::Ack);
                 }
                 if let Some(pos) = self.chat_pos.get(&msg.id) {
-                    let stored_author = self.chat.get(*pos).map(|stored| stored.from.clone());
-                    match stored_author {
+                    let held_by = self.chat.get(*pos).map(|stored| stored.from.clone());
+                    match held_by {
                         // documented v1 limitation ("id squatting"): whoever
                         // lands an id first keeps it — but a cross-AUTHOR
                         // collision is either a bug or an attempt to occupy
                         // a foreign id, so leave an audit trail at WARN.
                         // D10: unless it is the DECISION LINE, whose id every
                         // tipping seat mints identically by design.
-                        Some(a) if a != from && !self.is_decision_summary(&msg) => tracing::warn!(
+                        Some(author) if author != from && !self.is_decision_summary(&msg) => tracing::warn!(
                             %from,
-                            stored_author = %a,
+                            stored_author = %author,
                             id = %msg.id,
                             "dropping a wire chat message whose duplicate id belongs to another author"
                         ),
@@ -337,7 +337,6 @@ impl State {
                 }
                 // announce only a genuinely NEW proposal: a WP2 re-serve or
                 // an id-collision refusal must not (re-)ring frontends
-                let stored = payload.clone();
                 if self.receive_proposed(id.0, surface, payload, &from) {
                     // wake a sleeping agent harness if this seat's vote is
                     // now awaited (debounced; no-op without a wake command)
@@ -377,11 +376,13 @@ impl State {
                     // every peer's proposal came back as our own. Recorded
                     // AFTER the drain (the applier drains the park too) and
                     // never re-broadcast: the outbox only wants our own.
-                    self.keep_peer_event(
-                        &from,
-                        envelope.ts,
-                        WorkspaceEvent::Proposed { id, surface, payload: stored },
-                    );
+                    if let Some(payload) = self.proposals.get(&id.0).map(|p| p.payload.clone()) {
+                        self.keep_peer_event(
+                            from.clone(),
+                            envelope.ts,
+                            WorkspaceEvent::Proposed { id, surface, payload },
+                        );
+                    }
                     for (member, ts, hash) in parked {
                         let registered = self
                             .proposals
@@ -389,7 +390,7 @@ impl State {
                             .is_some_and(|p| p.decliners.contains(&member));
                         if registered {
                             self.keep_peer_event(
-                                &member.clone(),
+                                member.clone(),
                                 ts,
                                 WorkspaceEvent::Declined { id, by: member, hash },
                             );
@@ -397,7 +398,7 @@ impl State {
                     }
                     if let Some((who, ts)) = parked_withdraw.filter(|_| retracted) {
                         self.keep_peer_event(
-                            &who.clone(),
+                            who.clone(),
                             ts,
                             WorkspaceEvent::Withdrawn { id, by: who },
                         );
@@ -438,7 +439,7 @@ impl State {
                     .is_some_and(|p| p.sigs.iter().any(|a| a.member == by && a.sig == sig));
                 if landed {
                     self.keep_peer_event(
-                        &from.clone(),
+                        from.clone(),
                         envelope.ts,
                         WorkspaceEvent::Approved { id, by: by.clone(), height, sig: sig.clone() },
                     );
@@ -477,7 +478,7 @@ impl State {
                         | crate::proposals::DeclineOutcome::Voice
                 ) {
                     self.keep_peer_event(
-                        &from.clone(),
+                        from.clone(),
                         envelope.ts,
                         WorkspaceEvent::Declined { id, by: by.clone(), hash: hash.clone() },
                     );
@@ -519,7 +520,7 @@ impl State {
                 ) {
                     // R12: durable like the decline above, at the wire stamp
                     self.keep_peer_event(
-                        &from.clone(),
+                        from.clone(),
                         envelope.ts,
                         WorkspaceEvent::Withdrawn { id, by: by.clone() },
                     );
