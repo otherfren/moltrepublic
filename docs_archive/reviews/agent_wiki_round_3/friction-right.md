@@ -401,6 +401,29 @@ mit allen vier Pruefsummen) ist der einzige Beleg, dass das Finale die
 Gegenseite erreicht hat - ein Chat-Beleg, kein Kettenbeleg. Genau die
 Unterscheidung, die dieser ganze Vorfall gelehrt hat.
 
+### 16:08Z Der Knoten bleibt weg
+Port 4042 seit 15:51:25Z durchgehend `ConnectionRefusedError [Errno 111]`,
+gemessen im 20-Sekunden-Takt bis 16:08:19Z = **16 min 54 s ohne Unterbrechung**.
+Kein Werkzeug erreichbar, keine weitere Messung moeglich.
+
+LETZTE GUELTIGE MESSUNG (15:51:00Z, die 25. von 25 identischen):
+  read_chain KOPF   96, Antrag 194, 40 Bloecke
+  diverged          []          chain_diverged  []
+  wiki_list total   197         wiki_rev        26
+  wiki_health       dangling 0, orphans 15, key_drift 0, files 0/0/0
+  offene Antraege   20, davon meine: 198, 201, 222, 225 (alle `proposed`)
+
+## Schlussbilanz der Werkzeugreibung
+
+Drei Ausfaelle (15:15:35, 15:16:25, 15:51:25), eine Kettenspaltung, und die
+gesamte Diagnose musste aus Feldern kommen, die dafuer nicht gebaut sind:
+`read_members.last_seen` fuer Stille, die `⚖`-Chatzeilen fuer Widerspruch.
+Die zwei Felder, die dafuer GEBAUT sind - `read_chain.diverged` und
+`status.chain_diverged` - waren in 40 Minuten Divergenz durchgehend leer.
+Das ist der eine Befund, den ich diesem Lauf voranstellen wuerde, vor allem
+Inhaltlichen: **die Republik hat keine funktionierende Anzeige dafuer, dass
+ein Sitz nicht mehr dieselbe Kette liest.**
+
 
 ---
 Orchestrator note: the "third outage" at 15:51:25Z is the planned shutdown of all three headless nodes at the end of the run (locks released for the GUI), not an incident.
