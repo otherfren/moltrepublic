@@ -3,6 +3,8 @@
 //! what an `upload:<hex>` names, whether its bytes are on this device,
 //! and the verified read of those bytes.
 
+use std::io::Read as _;
+
 use sha2::Digest as _;
 
 use molt_core::{wiki_refs, LocalCopy, MessageId, MoltError, Reply, UploadView};
@@ -273,7 +275,18 @@ pub(crate) fn read_verified(source: &ByteSource, want: &str, cap: u64) -> Result
                     "upload bytes: {len} bytes over the {cap} cap"
                 )));
             }
-            std::fs::read(path).map_err(|e| MoltError::Engine(format!("upload bytes: {e}")))?
+            // read through the cap as well: the file may grow between the
+            // stat and the read
+            let file = std::fs::File::open(path)
+                .map_err(|e| MoltError::Engine(format!("upload bytes: {e}")))?;
+            let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+            std::io::Read::take(file, cap.saturating_add(1))
+                .read_to_end(&mut bytes)
+                .map_err(|e| MoltError::Engine(format!("upload bytes: {e}")))?;
+            if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > cap {
+                return Err(MoltError::BadPayload(format!("upload bytes: over the {cap} cap")));
+            }
+            bytes
         }
         ByteSource::Pieces { dir, key, count, size } => {
             if *size > cap {
@@ -312,6 +325,11 @@ fn open_pieces(
             )));
         }
         out.extend_from_slice(&payload);
+        // one piece of slack: a padded last slice is trimmed below, a
+        // series claiming more than its manifest size is not read on
+        if out.len() > want.saturating_add(molt_net::file_plane::PIECE_PAYLOAD_LEN) {
+            return Err(MoltError::Engine("upload bytes: the pieces exceed the file".to_string()));
+        }
     }
     if out.len() < want {
         return Err(MoltError::Engine("upload bytes: the mirror is incomplete".to_string()));
