@@ -154,6 +154,7 @@ fn system_lines_interleave_by_time_and_tolerate_unknown_proposals() {
         by: String::new(),
         mine: false,
         superseded: false,
+        superseded_kind: None,
         withdrawn: false,
         sealing: false,
     };

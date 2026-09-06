@@ -155,6 +155,7 @@ fn patch_title_and_state_survive_the_proposal_leaving_pending() {
         by: String::new(),
         mine: false,
         superseded: false,
+        superseded_kind: None,
         withdrawn: false,
         sealing: false,
     };
@@ -247,6 +248,7 @@ pub(super) fn view_of(id: u64, title: &str, state: ProposalState) -> ProposalVie
         by: String::new(),
         mine: false,
         superseded: false,
+        superseded_kind: None,
         withdrawn: false,
         sealing: false,
     }

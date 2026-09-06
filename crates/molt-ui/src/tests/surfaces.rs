@@ -30,6 +30,7 @@ fn a_feature_diff_never_shows_a_removal_and_renders_labels() {
         by: String::new(),
         mine: false,
         superseded: false,
+        superseded_kind: None,
         withdrawn: false,
         sealing: false,
     };
@@ -180,6 +181,7 @@ fn applied_log_lines_carry_their_patch_id() {
             by: String::new(),
             mine: false,
             superseded: false,
+            superseded_kind: None,
             withdrawn: false,
             sealing: false,
         }],
@@ -658,6 +660,7 @@ fn outcome_snapshot(pending: usize, applied: usize, declined: usize) -> molt_cor
                 by: String::new(),
                 mine: false,
                 superseded: false,
+                superseded_kind: None,
                 withdrawn: false,
                 sealing: false,
             })
