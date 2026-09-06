@@ -1947,6 +1947,7 @@ impl State {
             ),
             None => (None, None),
         };
+        let files = self.wiki_file_refs(content);
         Ok(Reply::WikiDocument {
             path: path.clone(),
             content: content.clone(),
@@ -1954,7 +1955,47 @@ impl State {
             props,
             links_out,
             links_in,
+            files,
         })
+    }
+
+    /// Every DISTINCT `upload:` reference of a page with what it names
+    /// today (`wiki_files_and_images.md` §3.7), in document order. A page
+    /// without one never builds the uploads table.
+    fn wiki_file_refs(&self, content: &str) -> Vec<molt_core::WikiFileRef> {
+        let refs = molt_core::wiki_refs::file_refs(content);
+        if refs.is_empty() {
+            return Vec::new();
+        }
+        let rows = self.uploads_view();
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        for r in refs {
+            if !seen.insert(r.hex.clone()) {
+                continue;
+            }
+            let (name, state) = self.upload_ref_state(&rows, &r.hex);
+            out.push(molt_core::WikiFileRef {
+                hex: r.hex,
+                name,
+                state: state.to_string(),
+            });
+        }
+        out
+    }
+
+    /// The share's name (`""` when none) and the ONE word the agent reads
+    /// give a reference. `rows` is one `uploads_view()` for the whole
+    /// pass - a health run over 100 pages must not rebuild the table per
+    /// reference. A malformed hex resolves to nothing, like a prefix no
+    /// file carries.
+    fn upload_ref_state(&self, rows: &[UploadView], hex: &str) -> (String, &'static str) {
+        if !molt_core::wiki_refs::valid_hex(hex) {
+            return (String::new(), "unknown");
+        }
+        let r = self.resolve_upload_in(rows, hex);
+        let name = r.upload.as_ref().map(|u| u.name.clone()).unwrap_or_default();
+        (name, upload_ref_state_word(&r))
     }
 
     /// [`Command::WikiLinks`] (§4.5): one document's edges, in either
@@ -2331,6 +2372,7 @@ impl State {
         let orphans = graph.orphans();
         let drift = graph.key_drift();
         let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+        let files = self.wiki_file_health(cap)?;
         Ok(Reply::WikiHealth {
             dangling_total: count(dangling.len()),
             dangling: dangling
@@ -2346,9 +2388,51 @@ impl State {
             orphans: orphans.into_iter().take(cap).collect(),
             key_drift_total: count(drift.len()),
             key_drift: drift.into_iter().take(cap).collect(),
+            files,
             index_rev: wiki_rev,
             wiki_rev,
         })
+    }
+
+    /// The file references the whole base carries that rot (§3.7): the
+    /// folded tree once, the uploads table once, and each distinct hex
+    /// resolved once - the rest is bucketing.
+    fn wiki_file_health(&self, cap: usize) -> Result<molt_core::WikiFileHealth, MoltError> {
+        let (tree, _) = self.wiki_base()?;
+        // hex -> the pages that carry it, path-ordered
+        let mut seen: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for (path, content) in tree.iter() {
+            let mut here: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            for r in molt_core::wiki_refs::file_refs(content) {
+                if here.insert(r.hex.clone()) {
+                    seen.entry(r.hex).or_default().push(path.clone());
+                }
+            }
+        }
+        let mut out = molt_core::WikiFileHealth::default();
+        if seen.is_empty() {
+            return Ok(out);
+        }
+        let rows = self.uploads_view();
+        let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+        for (hex, paths) in seen {
+            let (list, total) = match self.upload_ref_state(&rows, &hex).1 {
+                "unknown" => (&mut out.dangling, &mut out.dangling_total),
+                "temporary" => (&mut out.temporary, &mut out.temporary_total),
+                "ambiguous" => (&mut out.ambiguous, &mut out.ambiguous_total),
+                _ => continue,
+            };
+            *total = total.saturating_add(1);
+            if list.len() < cap {
+                list.push(molt_core::WikiFileIssue {
+                    hex,
+                    paths_total: count(paths.len()),
+                    paths: paths.into_iter().take(cap).collect(),
+                });
+            }
+        }
+        Ok(out)
     }
 
     /// [`Command::WikiResolve`] (§4.5): what a `[[name]]` binds to, and
@@ -2473,6 +2557,7 @@ impl State {
         // stale-index race `refresh_wiki_graph` drops the dirty set into.
         warnings.extend(self.name_collision_warnings(&base, &after, &renames));
         warnings.extend(self.foreign_rewrite_warnings(&edits, &base));
+        warnings.extend(self.file_ref_warnings(&after));
         if dry_run {
             return Ok(Reply::WikiPreview { patch, summary, warnings });
         }
@@ -2494,6 +2579,31 @@ impl State {
             Reply::Proposed { id, channel, .. } => Ok(Reply::Proposed { id, warnings, channel }),
             other => Ok(other),
         }
+    }
+
+    /// A page that would reference a file nothing carries, or a prefix
+    /// more than one file carries (§3.7). A `temporary` match is NOT a
+    /// warning: the persist vote may follow the page.
+    fn file_ref_warnings(
+        &self,
+        after: &std::collections::BTreeMap<String, String>,
+    ) -> Vec<String> {
+        let mut hexes: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for content in after.values() {
+            hexes.extend(molt_core::wiki_refs::file_refs(content).into_iter().map(|r| r.hex));
+        }
+        if hexes.is_empty() {
+            return Vec::new();
+        }
+        let rows = self.uploads_view();
+        hexes
+            .into_iter()
+            .filter_map(|hex| match self.upload_ref_state(&rows, &hex).1 {
+                "unknown" => Some(format!("file reference unresolved: upload:{hex}")),
+                "ambiguous" => Some(format!("file reference ambiguous: upload:{hex}")),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Every OPEN wiki proposal, id-ordered: its proposer and its patch.
@@ -3861,6 +3971,96 @@ fn coalesce_wiki_changes(
             Some(c)
         })
         .collect()
+}
+
+/// The ONE word `wiki_get`, `wiki_edit` and `wiki_health` give a resolved
+/// file reference (`wiki_files_and_images.md` §3.7). `ambiguous` outranks
+/// the rest: nothing was named, so there is nothing else to say.
+fn upload_ref_state_word(r: &crate::upload_refs::UploadResolution) -> &'static str {
+    if r.ambiguous {
+        "ambiguous"
+    } else if r.upload.is_none() {
+        "unknown"
+    } else if r.temporary {
+        "temporary"
+    } else if matches!(
+        r.local,
+        molt_core::LocalCopy::None | molt_core::LocalCopy::Partial { .. }
+    ) {
+        "remote"
+    } else {
+        "local"
+    }
+}
+
+#[cfg(test)]
+mod upload_ref_state_tests {
+    use molt_core::LocalCopy;
+
+    use super::upload_ref_state_word;
+    use crate::upload_refs::UploadResolution;
+
+    fn view() -> molt_core::UploadView {
+        molt_core::UploadView {
+            id: molt_core::MessageId::default(),
+            member: "me".to_string(),
+            ts: 0,
+            name: "netz.png".to_string(),
+            kind: "Image".to_string(),
+            size: 1,
+            available: true,
+            expires_ts: 0,
+            online: true,
+            checksum: "3f9a2c1b7e04".to_string(),
+            download: None,
+            availability: "sharer-only".to_string(),
+            persistent: true,
+            mirrors: 0,
+            mirror_held: 0,
+            mirror_of: 0,
+        }
+    }
+
+    fn res(upload: bool, ambiguous: bool, temporary: bool, local: LocalCopy) -> UploadResolution {
+        UploadResolution {
+            upload: upload.then(view),
+            ambiguous,
+            temporary,
+            local,
+        }
+    }
+
+    /// The five words, including the one no real share table can produce:
+    /// two PERSISTENT files sharing a 12-hex prefix is a 48-bit collision,
+    /// so the `ambiguous` branch is pinned here and nowhere else.
+    #[test]
+    fn every_resolution_gets_its_word() {
+        assert_eq!(upload_ref_state_word(&res(false, false, false, LocalCopy::None)), "unknown");
+        assert_eq!(upload_ref_state_word(&res(false, true, false, LocalCopy::None)), "ambiguous");
+        assert_eq!(
+            upload_ref_state_word(&res(true, true, false, LocalCopy::None)),
+            "ambiguous",
+            "an ambiguous prefix names nothing, whatever else is set"
+        );
+        assert_eq!(
+            upload_ref_state_word(&res(true, false, true, LocalCopy::Own { path: "/x".into() })),
+            "temporary",
+            "the bytes being here does not make an expiring share embeddable"
+        );
+        assert_eq!(upload_ref_state_word(&res(true, false, false, LocalCopy::None)), "remote");
+        assert_eq!(
+            upload_ref_state_word(&res(true, false, false, LocalCopy::Partial { held: 1, of: 4 })),
+            "remote",
+            "half a mirror is not a local copy"
+        );
+        for local in [
+            LocalCopy::Own { path: "/x".into() },
+            LocalCopy::Downloaded { path: "/x".into() },
+            LocalCopy::Mirrored,
+        ] {
+            assert_eq!(upload_ref_state_word(&res(true, false, false, local)), "local");
+        }
+    }
 }
 
 #[cfg(test)]

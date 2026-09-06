@@ -1,12 +1,39 @@
 # Wiki: images and references to persisted files
 
-Status: **RATIFIED 2026-09-06, not built.** The user decided Q1-Q5 (§6)
-the same day: the grammar as proposed, PERSISTENT files only, a click on a
-ready image opens it large, downloads are explicit in the wiki unless the
-mirror brings the file by itself, the registry lives in the workspace
-prefs. Execution starts AFTER the wiki pane performance wave
-(`wiki_pane_performance.md` §4 steps 2-6) has merged: this plan builds on
-its preview cache and block equality (§3.4).
+Status: **EXECUTED 2026-09-06.** Built as designed, Q1-Q5 (§6) as the user
+decided them; the sections below are the specification of what ships.
+
+**What was built.** `molt_core::wiki_refs` parses the grammar
+(`file_refs(markdown) -> Vec<FileRef { hex, alt, image, span }>`,
+`valid_hex`, `checksum_of`, `PREFIX_MIN` 12), masking code spans and
+fences. `Command::ResolveUpload` answers `Reply::UploadResolved { upload,
+ambiguous, temporary, local }` with `LocalCopy = None | Own | Downloaded |
+Mirrored | Partial`, off `molt-engine/src/upload_refs.rs`
+(`resolve_upload` for one reference, `resolve_upload_in` for a pass over
+many against ONE `uploads_view()`); the local-copy registry rides
+`prefs.local_copies`. `Command::ReadUploadBytes` (INTERNAL) reads the
+bytes off the best local source and answers them only after the sha256
+matched. The pane renders the reference states, the `+ Datei` modal
+inserts the markup at the caret, and the three agent reads answer the
+reference: `Reply::WikiDocument.files` (`WikiFileRef { hex, name, state }`,
+`state` one of `unknown` · `ambiguous` · `temporary` · `remote` · `local`),
+a `wiki_edit` warning per unresolved or ambiguous hex (a `temporary` match
+writes), and `Reply::WikiHealth.files` (`WikiFileHealth { dangling,
+temporary, ambiguous }` of `WikiFileIssue { hex, paths, paths_total }`).
+The MCP tools `wiki_get`, `wiki_edit`, `wiki_health` and `resolve_upload`
+carry the grammar in their text.
+
+Keystones per stage: 1 `molt_core::wiki_refs` mod tests +
+`molt-engine/src/tests/upload_refs_tests.rs::a_reference_resolves_against_the_persistent_shares_first`;
+2 `<E: ...>`; 3 `<P: ...>`; 4 `<W: ...>`; 5
+`crates/molt-engine/tests/wiki_files.rs` (five keystones: every reference
+with its state, a temporary share before and after its persist vote, a
+fenced reference is no reference, the write warns and writes under
+`allow_warnings`, the hygiene pass names the carrying pages) plus
+`proposals.rs::upload_ref_state_tests` (the `ambiguous` word, which no
+real share table can produce - two persistent files sharing a 12-hex
+prefix is a 48-bit collision) and
+`molt-mcp::every_tool_that_touches_a_file_reference_names_the_grammar`.
 
 ## 1. The ask (user, 2026-09-06)
 

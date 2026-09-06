@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Wiki file references (`docs/ui/wiki_files_and_images.md` §3.2/§3.3):
+//! Wiki file references (`docs_archive/ui/wiki_files_and_images.md` §3.2/§3.3):
 //! what an `upload:<hex>` names, whether its bytes are on this device,
 //! and the verified read of those bytes.
 

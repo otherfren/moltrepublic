@@ -1364,7 +1364,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wiki_get",
             command: "wiki_get",
             scope: Scope::Read,
-            description: "One wiki document in full, front matter included. An unknown path is an error, never an empty document.",
+            description: "One wiki document in full, front matter included. An unknown path is an error, never an empty document. `files` lists the page's file references - `upload:<sha256 hex, 12..64>` names a PERSISTENT shared file, written `![alt](upload:...)` for an image and `[text](upload:...)` otherwise - one entry per distinct hex in document order, each with the `name` it resolves to (empty when none) and its `state`: unknown, ambiguous, temporary, remote or local (the bytes are on this node). resolve_upload answers one such reference on its own.",
             schema: || json!({
                 "type": "object",
                 "properties": { "path": { "type": "string", "description": "the document's path, e.g. \"people/anna.md\"" } },
@@ -1397,7 +1397,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wiki_health",
             command: "wiki_health",
             scope: Scope::Read,
-            description: "The wiki's hygiene in one read. `dangling` = names some document links to and no document carries, each with who references them - the best \"what should I write next\" signal; `orphans` = documents nothing links to; `key_drift` = groups of front-matter keys that differ only in case or separator (`status` and `Status` are two fields to every property query). `limit` caps each list on its own, 1..=500 (default 100), and each carries its own total.",
+            description: "The wiki's hygiene in one read. `dangling` = names some document links to and no document carries, each with who references them - the best \"what should I write next\" signal; `orphans` = documents nothing links to; `key_drift` = groups of front-matter keys that differ only in case or separator (`status` and `Status` are two fields to every property query). `files` = the file references that rot: `dangling` (no shared file carries the `upload:<sha256 hex, 12..64>` prefix), `temporary` (the only match is not persisted yet) and `ambiguous` (more than one file carries the prefix), each naming the `paths` that reference it. `limit` caps each list on its own, 1..=500 (default 100), and each carries its own total.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1428,7 +1428,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wiki_edit",
             command: "wiki_edit",
             scope: Scope::Seat,
-            description: "Write the wiki. `edits` apply IN ORDER to a working copy of the current base; the engine diffs the result and puts THAT patch to the members as a normal changeset vote - propose, not save, and the reply is the proposal id. Ops (fields in the schema): create, content, replace, set_props, add_relation, rename, delete. `create` writes a NEW page and refuses an occupied path; `content` writes a whole document, creating it when the path is free and OVERWRITING it when it is not. An edit that cannot land refuses the whole call with the reason and proposes nothing: a create onto an occupied path, a path that does not exist, an `old` that is absent or occurs more than once, a header the parser would not read back, a relation target that does not resolve uniquely, a rename onto an existing path. A path another OPEN proposal also touches is no refusal by itself (it is a warning, see below): that patch goes to the vote and reads `superseded` once the other one seals and moves the base. `replace` matches a SUBSTRING, not a line: `## Quellen` also sits inside `### Quellen (Sitz B)`, so anchor on `\\n## Quellen\\n`; a repeated one-line `old` is refused with the line numbers it hit. A relation reads better in the sentence that asserts it - write `[[predicate::Name]]` inside a content or replace edit; add_relation is for when there is no such sentence. An edge asserted BOTH in the header and in the prose survives set_props removing the header key - the inline link still asserts it (wiki_links marks each edge `header: true/false`). Check a target with wiki_resolve, and wiki_props for the relation names this republic already uses. The proposer's own signature is the first of m. The vote card's `summary` counts `+` `-` `→` in FILES added, deleted and renamed, `~` in changed LINES. `dry_run: true` proposes nothing and answers `summary`, `warnings` and the `paths` it would touch; `with_patch: true` adds the patch itself. A warning REFUSES the call, naming each one; `allow_warnings: true` proposes anyway. The warnings: a header the parser reads differently than written (an unquoted `[[link]]` value is a nested list), a touched path an open proposal already touches, a rename that leaves a link in an open proposal, a new title or alias that already names another page, and `content` over a page another seat last wrote. `supersedes: <id>` withdraws that own, still-open proposal in the same step - the way to correct one already on the table. The header dialect is the YAML 1.2 core schema in a flat subset: `no`, `yes`, `on` stay strings. The reply names the proposal's `channel`, where review remarks belong.",
+            description: "Write the wiki. `edits` apply IN ORDER to a working copy of the current base; the engine diffs the result and puts THAT patch to the members as a normal changeset vote - propose, not save, and the reply is the proposal id. Ops (fields in the schema): create, content, replace, set_props, add_relation, rename, delete. `create` writes a NEW page and refuses an occupied path; `content` writes a whole document, creating it when the path is free and OVERWRITING it when it is not. An edit that cannot land refuses the whole call with the reason and proposes nothing: a create onto an occupied path, a path that does not exist, an `old` that is absent or occurs more than once, a header the parser would not read back, a relation target that does not resolve uniquely, a rename onto an existing path. A path another OPEN proposal also touches is no refusal by itself (it is a warning, see below): that patch goes to the vote and reads `superseded` once the other one seals and moves the base. `replace` matches a SUBSTRING, not a line: `## Quellen` also sits inside `### Quellen (Sitz B)`, so anchor on `\\n## Quellen\\n`; a repeated one-line `old` is refused with the line numbers it hit. A relation reads better in the sentence that asserts it - write `[[predicate::Name]]` inside a content or replace edit; add_relation is for when there is no such sentence. An edge asserted BOTH in the header and in the prose survives set_props removing the header key - the inline link still asserts it (wiki_links marks each edge `header: true/false`). Check a target with wiki_resolve, and wiki_props for the relation names this republic already uses. The proposer's own signature is the first of m. The vote card's `summary` counts `+` `-` `→` in FILES added, deleted and renamed, `~` in changed LINES. `dry_run: true` proposes nothing and answers `summary`, `warnings` and the `paths` it would touch; `with_patch: true` adds the patch itself. A warning REFUSES the call, naming each one; `allow_warnings: true` proposes anyway. The warnings: a header the parser reads differently than written (an unquoted `[[link]]` value is a nested list), a touched path an open proposal already touches, a rename that leaves a link in an open proposal, a new title or alias that already names another page, `content` over a page another seat last wrote, and a file reference `upload:<sha256 hex, 12..64>` that resolves to nothing or to more than one file (a match that is only TEMPORARY does not warn: the page may reference a file the persist vote is about to pin). `supersedes: <id>` withdraws that own, still-open proposal in the same step - the way to correct one already on the table. The header dialect is the YAML 1.2 core schema in a flat subset: `no`, `yes`, `on` stay strings. The reply names the proposal's `channel`, where review remarks belong.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1587,7 +1587,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "resolve_upload",
             command: "resolve_upload",
             scope: Scope::Read,
-            description: "What a wiki file reference `upload:<hex>` names (wiki_files_and_images.md): `checksum` is the sha256 hex, full or a prefix of at least 12 digits, matched like a git short hash against the PERSISTENT shares first. `upload` is the one share it names (null when unknown or ambiguous), `ambiguous` says more than one file carries the prefix, `temporary` that the only match is not persistent yet (a page never embeds something that expires - propose `persist` on `files`). `local.kind` says whether this seat holds the bytes (none, own, downloaded, mirrored, partial); the path stays with the seat - use download_file into the exchange folder.",
+            description: "What a wiki file reference names (wiki_files_and_images.md): a page writes `![alt](upload:<hex>)` for an image and `[text](upload:<hex>)` for any other file, where `<hex>` is a sha256 of 12..=64 digits naming a PERSISTENT shared file. `checksum` is that hex, matched like a git short hash against the persistent shares first. `upload` is the one share it names (null when unknown or ambiguous), `ambiguous` says more than one file carries the prefix, `temporary` that the only match is not persistent yet (a page never embeds something that expires - propose `persist` on `files`). `local.kind` says whether this seat holds the bytes (none, own, downloaded, mirrored, partial); the path stays with the seat - use download_file into the exchange folder.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -3666,6 +3666,29 @@ mod tests {
             .await
             .expect("tools/list replies");
         assert_eq!(names(&resp).len(), tools().len(), "the seat sees them all");
+    }
+
+    /// An agent that meets `upload:3f9a2c1b7e04` in a page must be able to
+    /// read what it is off the tool text alone - all four tools that touch
+    /// a file reference say the grammar.
+    #[test]
+    fn every_tool_that_touches_a_file_reference_names_the_grammar() {
+        for name in ["wiki_get", "wiki_edit", "wiki_health", "resolve_upload"] {
+            let d = tool_named(name).description;
+            assert!(d.contains("upload:"), "{name} never names the scheme");
+            assert!(
+                d.contains("12..64") || d.contains("12..=64"),
+                "{name} never says how long the hex may be"
+            );
+        }
+        let get = tool_named("wiki_get").description;
+        for state in ["unknown", "ambiguous", "temporary", "remote", "local"] {
+            assert!(get.contains(state), "wiki_get never names the {state} state");
+        }
+        assert!(
+            tool_named("wiki_edit").description.contains("TEMPORARY"),
+            "the write path must say that a temporary match is no warning"
+        );
     }
 
     /// The read scope is a LIST, not a guess: a new tool lands in the seat

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The wiki's references to the republic's PERSISTED files
-//! (`docs/ui/wiki_files_and_images.md` §3.1): `![alt](upload:<hex>)`
+//! (`docs_archive/ui/wiki_files_and_images.md` §3.1): `![alt](upload:<hex>)`
 //! renders inline, `[text](upload:<hex>)` as a link. A file is named by
 //! its content - the sha256 in hex, full or a prefix of at least
 //! [`PREFIX_MIN`] digits - never by a path or a message id. The link
