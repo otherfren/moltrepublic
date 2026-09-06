@@ -59,6 +59,7 @@ struct Fields {
     alias: Field,
     folder: Field,
     facet: Field,
+    files: Field,
 }
 
 /// The index and everything needed to query it.
@@ -85,6 +86,9 @@ impl WikiSearch {
         let alias = sb.add_text_field("alias", TEXT);
         let folder = sb.add_text_field("folder", STRING);
         let facet = sb.add_facet_field("facet", FacetOptions::default());
+        // R22: the `upload:` destinations, so "which pages reference this
+        // file" is a search and not a sweep over every page
+        let files = sb.add_text_field("files", TEXT);
         let index = Index::create_in_ram(sb.build());
         // one worker: the index is small and the actor is not waiting on
         // throughput, it is waiting on latency
@@ -105,6 +109,7 @@ impl WikiSearch {
                 alias,
                 folder,
                 facet,
+                files,
             },
         })
     }
@@ -156,6 +161,7 @@ impl WikiSearch {
             self.f.header => header.join(" "),
             self.f.alias => aliases.join(" "),
             self.f.folder => folder_of(path),
+            self.f.files => file_hexes(content),
         );
         for facet in facets_of(&props) {
             d.add_facet(self.f.facet, facet);
@@ -186,7 +192,13 @@ impl WikiSearch {
         if !text.is_empty() {
             let parser = QueryParser::for_index(
                 &self.index,
-                vec![self.f.title, self.f.body, self.f.header, self.f.alias],
+                vec![
+                    self.f.title,
+                    self.f.body,
+                    self.f.header,
+                    self.f.alias,
+                    self.f.files,
+                ],
             );
             clauses.push((Occur::Must, parser.parse_query(text)?));
         }
@@ -243,6 +255,21 @@ impl WikiSearch {
         }
         Ok((hits, more))
     }
+}
+
+/// The page's `upload:` destinations as search tokens: each reference as
+/// written AND its 12-digit prefix, so a search by the short form finds a
+/// page that spelled the hex out. Malformed destinations index too - a
+/// dangling reference must stay findable.
+fn file_hexes(content: &str) -> String {
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    for r in molt_core::wiki_refs::file_refs(content) {
+        if r.hex.len() > molt_core::wiki_refs::PREFIX_MIN {
+            out.insert(r.hex[..molt_core::wiki_refs::PREFIX_MIN].to_string());
+        }
+        out.insert(r.hex);
+    }
+    out.into_iter().collect::<Vec<_>>().join(" ")
 }
 
 /// A facet segment cannot carry the separator.

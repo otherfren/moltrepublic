@@ -528,6 +528,10 @@ impl State {
                 }
             }
             WorkspaceEvent::Committed(block) if self.is_chain_governed() => {
+                // D4: the block's DISPLAY stamp is the sender's, so every
+                // node names the same moment for the same height
+                let at = self.chain.block_ts.entry(block.height).or_insert(envelope.ts);
+                *at = (*at).min(envelope.ts);
                 self.receive_block_from(&from, block);
             }
             WorkspaceEvent::ChainRequest { from_height, known } if self.is_chain_governed() => {

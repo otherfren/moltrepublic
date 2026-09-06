@@ -618,6 +618,10 @@ pub(crate) struct FilePlane {
     /// `prefs.shared_files`; NEVER wire, NEVER log — the paths would leak
     /// this node's filesystem layout).
     pub(crate) share_paths: HashMap<MessageId, std::path::PathBuf>,
+    /// The mtime each of my shares had when it was hashed (runtime mirror
+    /// of `prefs.shared_file_mtimes`). With the share's size it is the
+    /// immutability check: a replaced file is not the voted one.
+    pub(crate) share_stamps: HashMap<MessageId, u64>,
     /// Requester-side live download status per share (runtime-only; feeds
     /// [`molt_core::UploadView::download`]).
     pub(crate) downloads: HashMap<MessageId, molt_core::DownloadView>,
@@ -700,6 +704,11 @@ pub(crate) struct ChainProjection {
     /// governance record (`docs_archive/chain/persistent_chain.md`). Block 0 is the
     /// founding; empty when no chain-aware workspace is open.
     pub(crate) blocks: Vec<molt_core::ChainBlock>,
+    /// DISPLAY stamps: block height → the unix seconds its `Committed`
+    /// envelope carried in this node's log (refilled by the replay, empty
+    /// for history the log no longer holds). Never consensus input - the
+    /// chain itself is unstamped.
+    pub(crate) block_ts: HashMap<u64, u64>,
     /// The verified head of [`ChainProjection::blocks`] (`None` = empty chain).
     pub(crate) head: Option<chain::ChainHead>,
     /// The verification walk over [`ChainProjection::blocks`], kept so appending a block
@@ -1292,6 +1301,7 @@ impl State {
                 wiki_base_next_try: 0,
                 wiki_base_fetching: None,
                 share_paths: HashMap::new(),
+                share_stamps: HashMap::new(),
                 downloads: HashMap::new(),
                 serve_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
                 series: HashMap::new(),
@@ -1366,6 +1376,7 @@ impl State {
             },
             chain: ChainProjection {
                 blocks: Vec::new(),
+                block_ts: HashMap::new(),
                 head: None,
                 walk: None,
                 pending_served_blob: None,

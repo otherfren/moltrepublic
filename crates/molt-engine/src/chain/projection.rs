@@ -610,8 +610,18 @@ impl State {
     /// loses the cross-surface interleaving, so the synthetic ordering is
     /// per-surface block order, best-effort.
     pub(crate) fn cmd_read_chain(&self) -> Result<molt_core::Reply, molt_core::MoltError> {
-        let mut blocks: Vec<molt_core::ChainBlockView> =
-            self.chain.blocks.iter().rev().map(chain_block_view).collect();
+        // D4: the display stamp per height, off the local log's `Committed`
+        // envelopes (the chain itself is unstamped)
+        let mut blocks: Vec<molt_core::ChainBlockView> = self
+            .chain
+            .blocks
+            .iter()
+            .rev()
+            .map(|b| molt_core::ChainBlockView {
+                ts: self.chain.block_ts.get(&b.height).copied().unwrap_or(0),
+                ..chain_block_view(b)
+            })
+            .collect();
         if let Some(blob) = &self.chain.checkpoint_blob {
             let mut pre: Vec<molt_core::ChainBlockView> = Vec::new();
             for (surface, entries) in &blob.applied {
@@ -623,6 +633,7 @@ impl State {
                         payload: payload.clone(),
                         proposal_id: *id,
                         signers: Vec::new(),
+                        ts: 0,
                     });
                 }
             }
@@ -643,6 +654,7 @@ impl State {
                     .iter()
                     .map(|i| i.member.clone())
                     .collect(),
+                ts: 0,
             });
         }
         Ok(molt_core::Reply::Chain {

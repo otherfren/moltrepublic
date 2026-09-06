@@ -470,6 +470,10 @@ impl ImportStaging {
             prefs.shared_files.clear();
             changed = true;
         }
+        if !prefs.shared_file_mtimes.is_empty() {
+            prefs.shared_file_mtimes.clear();
+            changed = true;
+        }
         if changed {
             crate::write_prefs(&self.dir, &prefs)?;
         }

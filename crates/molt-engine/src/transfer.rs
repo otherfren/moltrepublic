@@ -1745,6 +1745,56 @@ pub(crate) fn spawn_local_copy(
     });
 }
 
+/// D2: the bytes are already here as MIRROR pieces - assemble them into
+/// the exchange folder instead of fetching the file over the network. The
+/// landing is the same one every fetch uses, so the re-hash against the
+/// share happens exactly as it does for a real download.
+pub(crate) fn spawn_mirror_assembly(
+    source: crate::upload_refs::ByteSource,
+    id: MessageId,
+    target: FetchTarget,
+    dest: DestSpec,
+    scope: u64,
+    cmd_tx: mpsc::Sender<Envelope>,
+) {
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
+            let crate::upload_refs::ByteSource::Pieces { dir, key, count, size } = source else {
+                return Err("the mirror is gone".to_string());
+            };
+            let landing = prepare_landing(&dest, &target.name, &target.id_hex)?;
+            let write = std::fs::File::create(&landing.part)
+                .map_err(|e| format!("opening the landing: {e}"))
+                .and_then(|f| {
+                    let mut w = std::io::BufWriter::new(f);
+                    crate::upload_refs::write_pieces(&dir, &key, count, size, &mut w)
+                        .map_err(|e| e.to_string())?;
+                    std::io::Write::flush(&mut w).map_err(|e| format!("writing: {e}"))
+                });
+            if let Err(e) = write {
+                let _ = std::fs::remove_file(&landing.part);
+                return Err(e);
+            }
+            verify_and_finish(&landing, &target.checksum, None)
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("mirror assembly failed: {e}")));
+        let cmd = match result {
+            Ok(path) => Command::NetFileDone {
+                id,
+                path: path.display().to_string(),
+                generation: Some(scope),
+            },
+            Err(reason) => Command::NetFileFailed {
+                id,
+                reason,
+                generation: Some(scope),
+            },
+        };
+        feed(&cmd_tx, cmd).await;
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

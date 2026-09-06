@@ -1507,6 +1507,13 @@ impl State {
             };
             if ident.by == me && available {
                 self.files.share_paths.insert(id, std::path::PathBuf::from(path));
+                if let Some(stamp) = self
+                    .active
+                    .as_ref()
+                    .and_then(|a| a.prefs.shared_file_mtimes.get(&id_hex).copied())
+                {
+                    self.files.share_stamps.insert(id, stamp);
+                }
             }
         }
     }

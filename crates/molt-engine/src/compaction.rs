@@ -113,6 +113,9 @@ impl State {
         self.files
             .share_paths
             .retain(|id, _| self.chat_pos.contains_key(id) || pinned.contains(&id.to_string()));
+        self.files
+            .share_stamps
+            .retain(|id, _| self.chat_pos.contains_key(id) || pinned.contains(&id.to_string()));
         if let Some(active) = self.active.as_mut() {
             let before = active.prefs.shared_files.len();
             let live: std::collections::HashSet<String> =
@@ -120,6 +123,10 @@ impl State {
             active
                 .prefs
                 .shared_files
+                .retain(|id, _| live.contains(id) || pinned.contains(id));
+            active
+                .prefs
+                .shared_file_mtimes
                 .retain(|id, _| live.contains(id) || pinned.contains(id));
             if active.prefs.shared_files.len() != before {
                 active.handle.set_prefs(active.prefs.clone());

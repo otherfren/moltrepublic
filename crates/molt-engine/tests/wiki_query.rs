@@ -240,3 +240,45 @@ async fn a_traversal_says_under_which_relation_it_reached_a_document() {
         .await
         .is_err());
 }
+
+
+/// **Round 3, R22**: the reverse lookup "which pages reference this file".
+/// `upload:` destinations are index tokens, so a checksum prefix finds
+/// every carrying page - and the short form finds a page that spelled the
+/// hex out in full.
+#[tokio::test]
+async fn a_file_reference_is_found_by_its_checksum() {
+    let short = "3f9a2c1b7e04";
+    let long = format!("{short}{}", "5".repeat(20));
+    let w = spawn_solo();
+    write_doc(
+        &w,
+        "diagramme/stack.md",
+        &format!("# Stack\n\n![Stack](upload:{short})\n"),
+    )
+    .await;
+    write_doc(
+        &w,
+        "diagramme/pfad.md",
+        &format!("# Pfad\n\n[Rohdaten](upload:{long})\n"),
+    )
+    .await;
+    write_doc(&w, "diagramme/leer.md", "# Leer\n\nKein Bild.\n").await;
+
+    let mut found = hits(read(&w, search(short, &[])).await);
+    found.sort();
+    assert_eq!(
+        found,
+        vec!["diagramme/pfad.md", "diagramme/stack.md"],
+        "the short form finds the long reference too"
+    );
+    assert_eq!(
+        hits(read(&w, search(&long, &[])).await),
+        vec!["diagramme/pfad.md"],
+        "the exact hex names one page"
+    );
+    assert!(
+        hits(read(&w, search("000000000000", &[])).await).is_empty(),
+        "a checksum nothing carries finds nothing"
+    );
+}

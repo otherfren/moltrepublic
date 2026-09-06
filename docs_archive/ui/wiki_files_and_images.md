@@ -17,8 +17,9 @@ matched. The pane renders the reference states, the `+ Datei` modal
 inserts the markup at the caret, and the three agent reads answer the
 reference: `Reply::WikiDocument.files` (`WikiFileRef { hex, name, state }`,
 `state` one of `unknown` · `ambiguous` · `temporary` · `remote` · `local`),
-a `wiki_edit` warning per unresolved or ambiguous hex (a `temporary` match
-writes), and `Reply::WikiHealth.files` (`WikiFileHealth { dangling,
+a `wiki_edit` warning per unresolved, ambiguous, malformed or only
+TEMPORARY hex (round 3, D3 - Q2 revisited: the write refuses without
+`allow_warnings`), and `Reply::WikiHealth.files` (`WikiFileHealth { dangling,
 temporary, ambiguous }` of `WikiFileIssue { hex, paths, paths_total }`).
 The MCP tools `wiki_get`, `wiki_edit`, `wiki_health` and `resolve_upload`
 carry the grammar in their text.
@@ -74,7 +75,9 @@ entries are pruned at read time. `ReadUploadBytes` answers through a
 deferred-reply slot on the actor (the handler takes the reply channel
 into its blocking task; every refusal still answers synchronously).
 `wiki_edit`'s warning follows the B5 channel: a refusal unless
-`allow_warnings`, a `temporary` match never warns. The picker's
+`allow_warnings`; a `temporary` match warns too since round 3
+(`mcp_agent_friction_fixes_round_3.md` D3), and `wiki_get`/`wiki_health`
+answer the `head` and `base` they measured on. The picker's
 `+ Datei` button sits in the document toolbar beside the link button;
 its rows carry `member` and `kind` unshown (the read's way back into the
 model).
@@ -317,7 +320,11 @@ pane-local gesture we already avoid).
 - **Q1 Grammar.** `upload:<hex>` with a 12-hex minimum prefix - as
   proposed.
 - **Q2 Temporary shares.** NOT allowed: persistent files only, in the
-  picker and in the renderer (the `temporary` card, §3.4).
+  picker and in the renderer (the `temporary` card, §3.4). **Round 3
+  (2026-09-06) closed the last hole:** the WRITE refuses a
+  temporary-only match as well, so a reference can only be filed for a
+  file the republic has voted persistent. The `temporary` card stays -
+  pages written before a persist vote moved still render.
 - **Q3 A click on a READY image** opens it large (the overlay, §3.4);
   the jump to Shared Files is the card's verb and the overlay's.
 - **Q4 Auto-fetch.** Explicit: the card's `Herunterladen` verb, unless

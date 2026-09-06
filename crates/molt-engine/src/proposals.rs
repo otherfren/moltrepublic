@@ -1968,6 +1968,7 @@ impl State {
             None => (None, None),
         };
         let files = self.wiki_file_refs(content);
+        let (head, base) = self.measured_at();
         Ok(Reply::WikiDocument {
             path: path.clone(),
             content: content.clone(),
@@ -1976,7 +1977,20 @@ impl State {
             links_out,
             links_in,
             files,
+            head,
+            base,
         })
+    }
+
+    /// WHICH chain this read was measured on (R10): the head height and
+    /// the folded base behind the tree. Two seats at different heights
+    /// honestly answer different hygiene - without this the difference
+    /// reads as a bug.
+    fn measured_at(&self) -> (u64, Option<String>) {
+        (
+            self.chain.head.as_ref().map(|h| h.height).unwrap_or(0),
+            self.wiki_cache.as_ref().and_then(|c| c.base.clone()),
+        )
     }
 
     /// Every DISTINCT `upload:` reference of a page with what it names
@@ -2393,6 +2407,7 @@ impl State {
         let drift = graph.key_drift();
         let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
         let files = self.wiki_file_health(cap)?;
+        let (head, base) = self.measured_at();
         Ok(Reply::WikiHealth {
             dangling_total: count(dangling.len()),
             dangling: dangling
@@ -2411,6 +2426,8 @@ impl State {
             files,
             index_rev: wiki_rev,
             wiki_rev,
+            head,
+            base,
         })
     }
 
@@ -2601,9 +2618,11 @@ impl State {
         }
     }
 
-    /// A page that would reference a file nothing carries, or a prefix
-    /// more than one file carries (§3.7). A `temporary` match is NOT a
-    /// warning: the persist vote may follow the page.
+    /// A page may only reference a KNOWN, PERSISTENT file (round 3, D3):
+    /// a malformed hex, a prefix nothing carries, a prefix more than one
+    /// file carries, and a match that is only a temporary share each
+    /// warn - and a warning refuses without `allow_warnings`. A page
+    /// outlives the chat window; a temporary share does not.
     fn file_ref_warnings(
         &self,
         after: &std::collections::BTreeMap<String, String>,
@@ -2618,10 +2637,16 @@ impl State {
         let rows = self.uploads_view();
         hexes
             .into_iter()
-            .filter_map(|hex| match self.upload_ref_state(&rows, &hex).1 {
-                "unknown" => Some(format!("file reference unresolved: upload:{hex}")),
-                "ambiguous" => Some(format!("file reference ambiguous: upload:{hex}")),
-                _ => None,
+            .filter_map(|hex| {
+                if !molt_core::wiki_refs::valid_hex(&hex) {
+                    return Some(format!("file reference malformed: upload:{hex}"));
+                }
+                match self.upload_ref_state(&rows, &hex).1 {
+                    "unknown" => Some(format!("file reference unresolved: upload:{hex}")),
+                    "ambiguous" => Some(format!("file reference ambiguous: upload:{hex}")),
+                    "temporary" => Some(format!("file reference not persistent: upload:{hex}")),
+                    _ => None,
+                }
             })
             .collect()
     }
@@ -3672,7 +3697,17 @@ impl State {
         let row = |id: molt_core::MessageId, ident: ShareIdentity, available: bool, expires_ts: u64, persistent: bool| {
             let mine = ident.by == me;
             let pieces = ident.pieces;
-            UploadView {
+            // R21: my own share whose file was replaced on disk is no
+            // longer the file the republic knows - it is not available
+            // and it does not serve
+            let changed = mine && self.share_file_changed(&id, ident.size);
+            let available = available && !changed;
+            // a holder OTHER than the sharer means the bytes survive the
+            // sharer going offline; the sharer holding its own file does not
+            let mirrored = holders
+                .get(&id)
+                .is_some_and(|h| h.iter().any(|m| *m != ident.by));
+            let mut u = UploadView {
                 id,
                 member: ident.by.clone(),
                 ts: ident.shared_ts,
@@ -3686,15 +3721,19 @@ impl State {
                 // honestly unknown) — what a download must reproduce
                 checksum: ident.checksum,
                 download: self.files.downloads.get(&id).cloned(),
-                // §5.5: ONE derived word, no extra state — a live stamp
-                // outranks `available` (relay copies outlive a removal
-                // until retention prunes them)
-                availability: if self.files.series.contains_key(&id) {
-                    "relay-held"
-                } else if available {
-                    "sharer-only"
-                } else {
+                // §5.5 + D4: ONE derived word, in the precedence
+                // changed > gone > mirrored > relay-held > sharer-only
+                // ("gone" is nowhere, so it cannot outrank a holder)
+                availability: if changed {
+                    "changed"
+                } else if !available && !mirrored && !self.files.series.contains_key(&id) {
                     "gone"
+                } else if mirrored {
+                    "mirrored"
+                } else if self.files.series.contains_key(&id) {
+                    "relay-held"
+                } else {
+                    "sharer-only"
                 }
                 .to_string(),
                 persistent,
@@ -3703,7 +3742,10 @@ impl State {
                 mirrors: u32::try_from(holders.get(&id).map_or(0, Vec::len)).unwrap_or(u32::MAX),
                 mirror_held: self.mirror_held_of(&id, mine, pieces).0,
                 mirror_of: self.mirror_held_of(&id, mine, pieces).1,
-            }
+                local: String::new(),
+            };
+            u.local = crate::upload_refs::local_word(&self.local_copy_of(&u)).to_string();
+            u
         };
         // the plain shares: chat messages inside the window that no vote
         // touched (a voted share renders from its block below)
@@ -4034,6 +4076,7 @@ mod upload_ref_state_tests {
             checksum: "3f9a2c1b7e04".to_string(),
             download: None,
             availability: "sharer-only".to_string(),
+            local: "own".to_string(),
             persistent: true,
             mirrors: 0,
             mirror_held: 0,

@@ -1086,10 +1086,12 @@ component UploadsTable inherits Rectangle {
                             vertical-alignment: center;
                             horizontal-alignment: center;
                         }
-                        // §5.5: a relay-held series downloads WITHOUT a
-                        // live sharer — the button follows the fact, and a
-                        // gone share says the one word instead of "offline"
-                        if (u.online || u.availability == "relay-held")
+                        // §5.5: a relay-held or mirrored series downloads
+                        // WITHOUT a live sharer — the button follows the
+                        // fact; a gone or replaced share says its one word
+                        if (u.online || u.availability == "relay-held"
+                            || u.availability == "mirrored")
+                            && u.availability != "changed"
                             && u.status-kind != 1: AppButton {
                             height: 28px * Theme.ui-scale;
                             pad: 10px;
@@ -1100,9 +1102,13 @@ component UploadsTable inherits Rectangle {
                                 root.download(u.id);
                             }
                         }
-                        if !u.online && u.availability != "relay-held"
+                        if (u.availability == "changed"
+                            || (!u.online && u.availability != "relay-held"
+                                && u.availability != "mirrored"))
                             && u.status-kind != 1: Text {
-                            text: u.availability == "gone" ? Strings.ou-gone : Strings.ou-offline;
+                            text: u.availability == "gone" ? Strings.ou-gone
+                                : u.availability == "changed" ? Strings.ou-changed
+                                : Strings.ou-offline;
                             color: Theme.faint;
                             font-size: Theme.fs-cap;
                             vertical-alignment: center;
