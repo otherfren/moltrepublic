@@ -237,7 +237,12 @@ impl Store {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => self.last_good.clone(),
             Err(e) => return Err(format!("reading {}: {e}", self.path.display())),
         };
-        let new_text = molt_config::update(&base, settings).map_err(|_| {
+        // `[ui] renderer` is file-owned - a boot choice the session never
+        // carries - so a save must keep the file's value instead of writing
+        // the placeholder `file_settings` had to put there.
+        let mut settings = settings.clone();
+        settings.renderer = molt_config::salvage(&base).renderer;
+        let new_text = molt_config::update(&base, &settings).map_err(|_| {
             "config.toml on disk is invalid; fix it or run --repair-config".to_string()
         })?;
         atomic_write(&self.path, &new_text).map_err(|e| e.to_string())?;
@@ -367,6 +372,9 @@ pub(crate) fn file_settings(s: &SessionSettings, language: &str, theme: &str) ->
         font_app: s.font_app,
         font_nav: s.font_nav,
         font_editor: s.font_editor,
+        // File-owned: the session never carries it, so `write_inner` puts the
+        // file's own value back before writing.
+        renderer: molt_config::default_renderer(),
         relays: s
             .relays
             .iter()
@@ -694,6 +702,44 @@ mod tests {
                     "mcp.port".to_string(),
                     "transport.anonymity.network".to_string()
                 ]
+            );
+        });
+    }
+
+    /// The renderer is a boot-only, file-owned key (`[ui] renderer`): the
+    /// session does not carry it, so a settings save must leave it alone
+    /// instead of resetting a hand-set value to the default.
+    #[test]
+    fn a_save_keeps_the_file_owned_renderer() {
+        rt().block_on(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("config.toml");
+            std::fs::write(
+                &path,
+                molt_config::render(&Settings {
+                    renderer: "software".to_string(),
+                    ..Settings::default()
+                }),
+            )
+            .expect("seed config");
+            let (wallet, _store) =
+                spawn_with_config(GroupConfig::demo(), SessionView::default(), path.clone())
+                    .expect("spawn with config");
+
+            wallet
+                .execute(Command::SetNodePosture {
+                    posture: molt_core::NodePosture::of(&SessionSettings {
+                        mcp_port: 5555,
+                        ..SessionSettings::default()
+                    }),
+                })
+                .await
+                .expect("posture");
+
+            let text = wait_for_file(&path, |t| t.contains("port = 5555")).await;
+            assert!(
+                text.contains("renderer = \"software\""),
+                "a save reset the renderer:\n{text}"
             );
         });
     }
