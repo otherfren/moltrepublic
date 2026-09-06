@@ -14,6 +14,22 @@ their concept docs (`docs/kanban/kanban_workflows.md` §2–§5+§7,
 `docs/vault/vault_threshold_disclosure.md`) — both docs carry open
 questions that gate any real build.
 
+## The live-preview GUI suite keeps every headless window until the process ends
+
+Measured 2026-09-06 (`cargo test -p molt-ui --lib --features
+molt-ui/live-preview`, single-threaded, RSS sampled per test): the test
+process grows by roughly 50-100 MB per headless `AppWindow` and never
+shrinks - 25 GUI tests in, 0.7 GiB; the whole 283-test suite in one
+process reached 12.4 GiB and was OOM-killed on the 15.9 GiB box. Each
+test drops its window, so something outside the test retains the
+interpreter's compiled component or the testing backend's window
+(suspects: the live-preview stub's hot-reload registry,
+`i-slint-backend-testing`'s window list). Until the retainer is found the
+suite runs in SHARDS, one process per GUI module (CLAUDE.md, build
+section). Fix direction: reproduce with two windows in one test and
+`Rc::strong_count` on the adapter, then look at what the stub generated
+under `target/dev-ui/.../out/app.rs` holds after `AppWindow` drops.
+
 ## Which renderer a GPU-less box should ship
 
 From `docs_archive/ui/wiki_pane_performance.md` §4 step 5 / §5 Q1-Q2: the
