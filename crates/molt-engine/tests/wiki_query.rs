@@ -69,6 +69,7 @@ async fn read(w: &WalletHandle, cmd: Command) -> Reply {
     loop {
         match w.execute(cmd.clone()).await {
             Err(MoltError::IndexBuilding { .. }) => {}
+            Ok(reply) if still_building(&reply) => {}
             other => return other.expect("the wiki read answers"),
         }
         assert!(
@@ -77,6 +78,17 @@ async fn read(w: &WalletHandle, cmd: Command) -> Reply {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+/// E4: the graph reads answer `index_building: true` with empty lists
+/// instead of refusing, so a test waits that out too.
+fn still_building(reply: &Reply) -> bool {
+    matches!(
+        reply,
+        Reply::WikiHealth { index_building: true, .. }
+            | Reply::WikiNeighbors { index_building: true, .. }
+            | Reply::WikiSearch { index_building: true, .. }
+    )
 }
 
 fn hits(reply: Reply) -> Vec<String> {

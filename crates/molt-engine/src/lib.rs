@@ -1781,7 +1781,8 @@ impl State {
                 dry_run,
                 allow_warnings,
                 supersedes,
-            } => self.cmd_wiki_edit(edits, dry_run, allow_warnings, supersedes),
+                repair_links,
+            } => self.cmd_wiki_edit(edits, dry_run, &allow_warnings, supersedes, repair_links),
             Command::WikiResolve { name } => self.cmd_wiki_resolve(name),
             Command::WikiProps => self.cmd_wiki_props(),
             Command::WikiLinks {

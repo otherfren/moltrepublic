@@ -10,6 +10,7 @@
 //! than by careful edge surgery.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
 
 use pulldown_cmark::{Event, Parser, Tag};
 use serde_json::Value;
@@ -116,6 +117,43 @@ impl<'a> NameIndex<'a> {
     }
 }
 
+/// A predicate's (subject type, object type).
+type TypePair<'a> = (&'a str, &'a str);
+
+/// How often a type pair carries a predicate, and from which pages.
+type PairUse<'a> = (u64, BTreeSet<&'a str>);
+
+/// One `type` value with the header keys its pages carry (E3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TypeProps {
+    /// The `type` value.
+    pub(crate) kind: String,
+    /// How many pages carry it.
+    pub(crate) pages: u64,
+    /// Its keys with the page count each, most-carried first.
+    pub(crate) keys: Vec<(String, u64)>,
+}
+
+/// One predicate asserted between a type pair its own wiki rarely uses
+/// (E3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DirectionOutlier {
+    /// The predicate.
+    pub(crate) predicate: String,
+    /// The `type` of the pages asserting it.
+    pub(crate) subject_type: String,
+    /// The `type` of the pages it points at.
+    pub(crate) object_type: String,
+    /// How many edges run that way (a claim written twice counts once).
+    pub(crate) count: u64,
+    /// The pair the predicate usually runs between.
+    pub(crate) usual: (String, String),
+    /// How many edges run the usual way.
+    pub(crate) usual_count: u64,
+    /// The asserting pages, path-sorted.
+    pub(crate) from: Vec<String>,
+}
+
 /// One resolved edge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Edge {
@@ -205,24 +243,7 @@ impl WikiGraph {
         };
         let (props, _) = front_matter::properties(content);
         let props = props.unwrap_or_default();
-        let aliases = string_list(props.get("aliases"));
-        self.docs.insert(
-            path.to_string(),
-            DocMeta {
-                title: front_matter::title(content),
-                header_title: props
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|t| !t.is_empty())
-                    .map(str::to_string),
-                kind: props
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                aliases,
-            },
-        );
+        self.docs.insert(path.to_string(), doc_meta(content));
         let mut edges: Vec<RawEdge> = Vec::new();
         // the header's typed relations: the KEY is the predicate
         for (key, value) in &props {
@@ -260,25 +281,26 @@ impl WikiGraph {
         self.props.insert(path.to_string(), pairs);
     }
 
-    /// Which documents each name ALREADY denotes - by path, basename,
-    /// stem, alias or header title. The case-fold "did you mean" route is
-    /// left out: a collision is what the resolver would really confuse.
-    pub(crate) fn name_owners(&self, names: &BTreeSet<String>) -> BTreeMap<String, Vec<String>> {
-        let index = NameIndex::build(&self.docs);
-        names
-            .iter()
-            .map(|name| {
-                let mut owners: Vec<String> = index
-                    .candidates(name)
-                    .into_iter()
-                    .filter(|(_, via)| *via != "case")
-                    .map(|(path, _)| path)
-                    .collect();
-                owners.sort();
-                owners.dedup();
-                (name.clone(), owners)
-            })
-            .collect()
+    /// Which documents each name denotes - by path, basename, stem,
+    /// alias or header title - over the tree a `wiki_edit` WOULD leave
+    /// (E1): `after` replaces (or adds) those documents, `gone` drops
+    /// them. The case-fold "did you mean" route is left out: a collision
+    /// is what the resolver would really confuse. Computed off the base
+    /// alone, the check refuses an alias this very call moves.
+    pub(crate) fn name_owners_after(
+        &self,
+        names: &BTreeSet<String>,
+        after: &BTreeMap<String, String>,
+        gone: &BTreeSet<String>,
+    ) -> BTreeMap<String, Vec<String>> {
+        let mut docs = self.docs.clone();
+        for path in gone {
+            docs.remove(path);
+        }
+        for (path, content) in after {
+            docs.insert(path.clone(), doc_meta(content));
+        }
+        owners_in(&docs, names)
     }
 
     /// What a `[[name]]` binds to, and everything else it could mean -
@@ -431,6 +453,113 @@ impl WikiGraph {
             .collect()
     }
 
+    /// **Hygiene, part 4** (E3): per `type` value, how many pages carry
+    /// it and how many of them carry each header key. `key_drift` sees
+    /// two SPELLINGS of one key; this sees a page of the same type
+    /// carrying an entirely different key from its peers.
+    pub(crate) fn props_by_type(&self) -> Vec<TypeProps> {
+        let mut per: BTreeMap<&str, (u64, BTreeMap<&str, u64>)> = BTreeMap::new();
+        for (path, meta) in &self.docs {
+            let Some(kind) = meta.kind.as_deref().map(str::trim).filter(|k| !k.is_empty()) else {
+                continue;
+            };
+            let slot = per.entry(kind).or_default();
+            slot.0 = slot.0.saturating_add(1);
+            let mut seen: BTreeSet<&str> = BTreeSet::new();
+            for (key, _) in self.props.get(path).into_iter().flatten() {
+                if seen.insert(key.as_str()) {
+                    let n: &mut u64 = slot.1.entry(key.as_str()).or_default();
+                    *n = n.saturating_add(1);
+                }
+            }
+        }
+        let mut out: Vec<TypeProps> = per
+            .into_iter()
+            .map(|(kind, (pages, keys))| {
+                let mut keys: Vec<(String, u64)> =
+                    keys.into_iter().map(|(k, n)| (k.to_string(), n)).collect();
+                keys.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                TypeProps {
+                    kind: kind.to_string(),
+                    pages,
+                    keys,
+                }
+            })
+            .collect();
+        out.sort_by(|a, b| b.pages.cmp(&a.pages).then_with(|| a.kind.cmp(&b.kind)));
+        out
+    }
+
+    /// **Hygiene, part 5** (E3): a predicate whose (subject type, object
+    /// type) pair is RARE beside the pair the same predicate usually
+    /// runs between - the reversed-relation signal (13 `authored_by`
+    /// edges pointing person → work while the norm is work → person).
+    ///
+    /// HEURISTIC, and deliberately a blunt one: the wiki's own
+    /// distribution is the only norm there is, so a pair is flagged only
+    /// when a dominant pair dwarfs it.
+    pub(crate) fn direction_outliers(&self) -> Vec<DirectionOutlier> {
+        /// Below this many typed edges a predicate has no distribution.
+        const MIN_EDGES: u64 = 5;
+        /// The dominant pair must outnumber the flagged one this far.
+        const FACTOR: u64 = 4;
+        // predicate -> (subject type, object type) -> (edges, the pages
+        // asserting them). One claim written BOTH in the header and inline
+        // is one edge here, exactly as `wiki_props` counts it.
+        let mut per: BTreeMap<&str, BTreeMap<TypePair<'_>, PairUse<'_>>> = BTreeMap::new();
+        for (src, edges) in &self.out {
+            let Some(from) = self.docs.get(src).and_then(|m| m.kind.as_deref()) else {
+                continue;
+            };
+            let mut seen: BTreeSet<(&str, &str)> = BTreeSet::new();
+            for edge in edges {
+                let Some(pred) = edge.predicate.as_deref() else {
+                    continue;
+                };
+                let Some(to) = self.docs.get(&edge.to).and_then(|m| m.kind.as_deref()) else {
+                    continue;
+                };
+                if !seen.insert((pred, edge.to.as_str())) {
+                    continue;
+                }
+                let slot = per.entry(pred).or_default().entry((from, to)).or_default();
+                slot.0 = slot.0.saturating_add(1);
+                slot.1.insert(src.as_str());
+            }
+        }
+        let mut out = Vec::new();
+        for (pred, pairs) in per {
+            let total: u64 = pairs.values().map(|(n, _)| *n).sum();
+            if total < MIN_EDGES || pairs.len() < 2 {
+                continue;
+            }
+            let Some((usual, (usual_count, _))) = pairs.iter().max_by_key(|(_, (n, _))| *n) else {
+                continue;
+            };
+            let usual_count = *usual_count;
+            for (pair, (count, pages)) in &pairs {
+                if pair == usual || count.saturating_mul(FACTOR) > usual_count {
+                    continue;
+                }
+                out.push(DirectionOutlier {
+                    predicate: pred.to_string(),
+                    subject_type: pair.0.to_string(),
+                    object_type: pair.1.to_string(),
+                    count: *count,
+                    usual: (usual.0.to_string(), usual.1.to_string()),
+                    usual_count,
+                    from: pages.iter().map(|p| (*p).to_string()).collect(),
+                });
+            }
+        }
+        out.sort_by(|a, b| {
+            b.count
+                .cmp(&a.count)
+                .then_with(|| a.predicate.cmp(&b.predicate))
+        });
+        out
+    }
+
     /// **Hygiene, part 3**: keys that differ only in case or separator.
     /// `status` and `Status` are two fields to every property query, and
     /// nothing else in the tool set says so. Read off the INVENTORY, not
@@ -563,6 +692,46 @@ fn collect_typed(key: &str, value: &Value, out: &mut Vec<RawEdge>) {
     }
 }
 
+/// What the name index needs about one document. A free function so a
+/// WORKING COPY can be measured with the same rule the index uses (E1).
+pub(crate) fn doc_meta(content: &str) -> DocMeta {
+    let (props, _) = front_matter::properties(content);
+    let props = props.unwrap_or_default();
+    DocMeta {
+        title: front_matter::title(content),
+        header_title: props
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string),
+        kind: props.get("type").and_then(Value::as_str).map(str::to_string),
+        aliases: string_list(props.get("aliases")),
+    }
+}
+
+/// Which documents each name already denotes, over a given document set.
+fn owners_in(
+    docs: &BTreeMap<String, DocMeta>,
+    names: &BTreeSet<String>,
+) -> BTreeMap<String, Vec<String>> {
+    let index = NameIndex::build(docs);
+    names
+        .iter()
+        .map(|name| {
+            let mut owners: Vec<String> = index
+                .candidates(name)
+                .into_iter()
+                .filter(|(_, via)| *via != "case")
+                .map(|(path, _)| path)
+                .collect();
+            owners.sort();
+            owners.dedup();
+            (name.clone(), owners)
+        })
+        .collect()
+}
+
 /// One link a body wrote, before resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BodyLink {
@@ -624,24 +793,45 @@ pub fn link_parts(inner: &str) -> LinkParts<'_> {
 /// about the graph. Deduped by the whole link, so two predicates onto one
 /// target stay two claims.
 pub fn body_links(markdown: &str) -> Vec<BodyLink> {
+    let (dests, code) = scan(markdown);
     let mut out: Vec<BodyLink> = Vec::new();
+    for (_, target) in dests {
+        let link = BodyLink {
+            target,
+            predicate: None,
+        };
+        // a URL that happens to end in `.md` (a NIP on GitHub) is a
+        // source, not a wiki path (G15, round 2)
+        if link.target.ends_with(".md") && !link.target.contains("://") && !out.contains(&link) {
+            out.push(link);
+        }
+    }
+    for span in bracket_spans(markdown, &code) {
+        let parts = link_parts(&markdown[span]);
+        let link = BodyLink {
+            target: parts.name.to_string(),
+            predicate: parts.predicate.map(str::to_string),
+        };
+        if !link.target.is_empty() && !link.target.contains('\n') && !out.contains(&link) {
+            out.push(link);
+        }
+    }
+    out
+}
+
+/// A markdown link's destination with the span of its whole `[text](dest)`.
+type Dest = (Range<usize>, String);
+
+/// ONE parse: every markdown link destination with its span, and the code
+/// spans a `[[…]]` inside must be masked by.
+fn scan(markdown: &str) -> (Vec<Dest>, Vec<(usize, usize)>) {
+    let mut dests: Vec<Dest> = Vec::new();
     let mut code: Vec<(usize, usize)> = Vec::new();
     let mut depth = 0u32;
     for (event, range) in Parser::new(markdown).into_offset_iter() {
         match event {
             Event::Start(Tag::Link { dest_url, .. }) => {
-                let link = BodyLink {
-                    target: dest_url.to_string(),
-                    predicate: None,
-                };
-                // a URL that happens to end in `.md` (a NIP on GitHub) is a
-                // source, not a wiki path (G15, round 2)
-                if link.target.ends_with(".md")
-                    && !link.target.contains("://")
-                    && !out.contains(&link)
-                {
-                    out.push(link);
-                }
+                dests.push((range, dest_url.to_string()));
             }
             Event::Start(Tag::CodeBlock(_)) => depth += 1,
             Event::End(pulldown_cmark::TagEnd::CodeBlock) => depth = depth.saturating_sub(1),
@@ -650,20 +840,19 @@ pub fn body_links(markdown: &str) -> Vec<BodyLink> {
             _ => {}
         }
     }
+    (dests, code)
+}
+
+/// The INSIDE of every `[[…]]` the body writes, code masked out.
+fn bracket_spans(markdown: &str, code: &[(usize, usize)]) -> Vec<Range<usize>> {
     let masked = |at: usize| code.iter().any(|(s, e)| at >= *s && at < *e);
     let bytes = markdown.as_bytes();
+    let mut out: Vec<Range<usize>> = Vec::new();
     let mut i = 0usize;
     while i + 3 < bytes.len() {
         if bytes[i] == b'[' && bytes[i + 1] == b'[' && !masked(i) {
             if let Some(end) = markdown[i + 2..].find("]]") {
-                let parts = link_parts(&markdown[i + 2..i + 2 + end]);
-                let link = BodyLink {
-                    target: parts.name.to_string(),
-                    predicate: parts.predicate.map(str::to_string),
-                };
-                if !link.target.is_empty() && !link.target.contains('\n') && !out.contains(&link) {
-                    out.push(link);
-                }
+                out.push(i + 2..i + 2 + end);
                 i += end + 4;
                 continue;
             }
@@ -671,6 +860,55 @@ pub fn body_links(markdown: &str) -> Vec<BodyLink> {
         i += 1;
     }
     out
+}
+
+/// **E2**: every link that names the path `from`, rewritten to `to` -
+/// markdown destinations and the `[[path]]` form. A `[[Name]]` binds by
+/// title or alias and names no path, so it is left alone. `None` = the
+/// document carries none.
+pub fn rewrite_link_target(markdown: &str, from: &str, to: &str) -> Option<String> {
+    if !markdown.contains(from) {
+        return None;
+    }
+    let (dests, code) = scan(markdown);
+    let mut spans: Vec<Range<usize>> = Vec::new();
+    for (span, dest) in dests {
+        if dest != from {
+            continue;
+        }
+        // the destination sits AFTER the link text, so the last hit in
+        // the span is it (a reference link carries none and is skipped)
+        if let Some(at) = markdown[span.clone()].rfind(from) {
+            spans.push(span.start + at..span.start + at + from.len());
+        }
+    }
+    for span in bracket_spans(markdown, &code) {
+        let inner = &markdown[span.clone()];
+        if link_parts(inner).name != from {
+            continue;
+        }
+        // the predicate half carries no slash, so the first hit is the name
+        if let Some(at) = inner.find(from) {
+            spans.push(span.start + at..span.start + at + from.len());
+        }
+    }
+    if spans.is_empty() {
+        return None;
+    }
+    spans.sort_by_key(|s| s.start);
+    spans.dedup();
+    let mut out = String::with_capacity(markdown.len());
+    let mut at = 0usize;
+    for span in spans {
+        if span.start < at {
+            continue; // overlapping hits: the first one wins
+        }
+        out.push_str(&markdown[at..span.start]);
+        out.push_str(to);
+        at = span.end;
+    }
+    out.push_str(&markdown[at..]);
+    Some(out)
 }
 
 /// Just the targets, deduped in order of first appearance: what a
@@ -1141,5 +1379,76 @@ mod tests {
             ],
             "a key nobody else spells differently is not drift"
         );
+    }
+
+    /// **E2**: a rename carries its in-links. Only what NAMES THE PATH
+    /// moves - a `[[Name]]` binds by title or alias and survives the move
+    /// untouched, a URL that happens to end in `.md` is a source, and an
+    /// example in a code span is not a claim about the graph.
+    #[test]
+    fn a_rename_rewrites_only_the_links_that_name_the_path() {
+        let doc = "See [Lexicon](standards/lexicon.md), [[standards/lexicon.md|the one]],\n\
+                   [[Lexicon]] and <https://x.test/standards/lexicon.md>.\n\
+                   A `[x](standards/lexicon.md)` span stays.\n";
+        let out = rewrite_link_target(doc, "standards/lexicon.md", "standards/atproto-lexicon.md")
+            .expect("three of them name the path");
+        assert!(out.contains("[Lexicon](standards/atproto-lexicon.md)"));
+        assert!(out.contains("[[standards/atproto-lexicon.md|the one]]"));
+        assert!(out.contains("[[Lexicon]]"), "a name link is not a path link");
+        assert!(
+            out.contains("`[x](standards/lexicon.md)`"),
+            "a code span is no claim: {out}"
+        );
+        assert_eq!(
+            rewrite_link_target("nothing here\n", "standards/lexicon.md", "x.md"),
+            None
+        );
+    }
+
+    /// **E3**: the per-type key histogram, and a predicate whose direction
+    /// the wiki itself contradicts.
+    #[test]
+    fn the_type_histogram_and_the_direction_check_read_the_distribution() {
+        let mut docs: Vec<(String, String)> = vec![(
+            "menschen/anna.md".to_string(),
+            "---\ntype: person\nnotable_year: 1970\n---\n# Anna\n".to_string(),
+        )];
+        for n in 0..8 {
+            docs.push((
+                format!("werke/w{n}.md"),
+                "---\ntype: work\n---\nby [[authored_by::menschen/anna.md]]\n".to_string(),
+            ));
+        }
+        docs.push((
+            "menschen/odd.md".to_string(),
+            "---\ntype: person\nyear: 1970\n---\nwrote [[authored_by::werke/w0.md]]\n".to_string(),
+        ));
+        let pairs: Vec<(&str, &str)> = docs
+            .iter()
+            .map(|(p, c)| (p.as_str(), c.as_str()))
+            .collect();
+        let g = WikiGraph::build(&tree(&pairs));
+
+        let by_type = g.props_by_type();
+        let person = by_type
+            .iter()
+            .find(|t| t.kind == "person")
+            .expect("the person group");
+        assert_eq!(person.pages, 2);
+        assert!(person.keys.contains(&("notable_year".to_string(), 1)), "{person:?}");
+        assert!(
+            person.keys.contains(&("year".to_string(), 1)),
+            "the wrong key shows: {person:?}"
+        );
+
+        let odd = g.direction_outliers();
+        assert_eq!(odd.len(), 1, "{odd:?}");
+        assert_eq!(odd[0].predicate, "authored_by");
+        assert_eq!(
+            (odd[0].subject_type.as_str(), odd[0].object_type.as_str()),
+            ("person", "work")
+        );
+        assert_eq!(odd[0].count, 1, "one edge runs the other way");
+        assert_eq!(odd[0].usual_count, 8, "against eight that run the usual way");
     }
 }

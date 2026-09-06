@@ -160,7 +160,7 @@ D5 **Reverse lookup:** the search index tokenizes `upload:` destinations
 as a `files` field, so `wiki_search "<hex>"` finds the pages; `wiki_get.files`
 stays.
 
-## Part E - wiki hygiene (R19, R15, R6, R25, R7)
+## Part E - wiki hygiene (R19, R15, R6, R25, R7) - BUILT
 
 E1 `wiki_edit`'s title/alias and open-path warnings are computed against
 the WORKING COPY after the whole edit list (not the base); a warning names

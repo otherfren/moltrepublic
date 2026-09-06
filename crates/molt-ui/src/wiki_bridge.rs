@@ -2334,6 +2334,7 @@ pub(crate) fn wire_wiki_index(ui: &AppWindow, ctx: &Ctx) {
                 let building = matches!(
                     outcome,
                     Err(molt_core::MoltError::IndexBuilding { .. })
+                        | Ok(Reply::WikiSearch { index_building: true, .. })
                 );
                 let hits = match outcome {
                     Ok(Reply::WikiSearch { hits, .. }) => hits,
