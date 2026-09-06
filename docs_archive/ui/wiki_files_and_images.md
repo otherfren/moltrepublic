@@ -25,7 +25,30 @@ carry the grammar in their text.
 
 Keystones per stage: 1 `molt_core::wiki_refs` mod tests +
 `molt-engine/src/tests/upload_refs_tests.rs::a_reference_resolves_against_the_persistent_shares_first`;
-2 `<E: ...>`; 3 `<P: ...>`; 4 `<W: ...>`; 5
+2 `crates/molt-engine/tests/upload_bytes.rs::a_mirrored_file_reads_its_bytes_without_a_download`
+(a real 2-of-2 over `MockRelay`: the second seat's mirror completes and
+`ReadUploadBytes` assembles the sealed pieces without a download; a cap
+below the size refuses first; the sharer's swapped source answers a
+checksum mismatch, never bytes) plus
+`molt-engine/src/tests/upload_refs_tests.rs` (the registry survives a
+reopen and forgets a deleted copy, an ambiguous prefix answers nothing,
+a partial mirror is no source, the pieces assemble and a tampered one is
+refused, `ReadUploadBytes` refuses before it reads);
+3 `crates/molt-ui/src/tests/gui/wiki_files.rs` (eleven, headless: every
+state renders its word, a malformed reference never asks, a file link's
+click filters Shared Files to that one file, a ready picture opens large
+and Escape closes it, an arriving picture patches its row in place, a
+reference is asked about once, a ghost offers no verb, a transfer and a
+completed mirror re-resolve, a page over the picture budget settles, a
+workspace switch re-resolves, a non-picture written as `![…]` is a card)
+plus the parser tests in `molt-ui/src/wiki.rs` (`an_upload_image_is_its_own_block…`);
+4 `crates/molt-ui/src/tests/gui/wiki_file_picker.rs` (nine: only a
+persistent share the grammar can name is offered, the button opens on the
+search field, Escape cancels, Enter takes the top row, typing filters over
+name and sharer, a click writes at the caret, the written reference reads
+back through the grammar, the empty picker offers the jump, the modal fits
+at every font size) plus `file_ref_markup`'s unit tests in `wiki.rs`;
+5
 `crates/molt-engine/tests/wiki_files.rs` (five keystones: every reference
 with its state, a temporary share before and after its persist vote, a
 fenced reference is no reference, the write warns and writes under
@@ -34,6 +57,27 @@ fenced reference is no reference, the write warns and writes under
 real share table can produce - two persistent files sharing a 12-hex
 prefix is a 48-bit collision) and
 `molt-mcp::every_tool_that_touches_a_file_reference_names_the_grammar`.
+
+**Where the build differs from the sections below.** The reply names the
+share `upload` (`match` is a keyword). The pane's state code: 0 none · 1
+unknown · 2 ambiguous · 3 remote · 4 fetching · 5 decoding · 6 ready ·
+7 failed · 8 temporary - state 3 with an empty name is the answer still
+in flight (no verb), state 4 also carries the mirror's progress (§3.4
+listed it under `remote`), and a share that is not a raster picture
+(PDF, SVG, a legacy share without a checksum) written as `![…]` is never
+read: it renders as the READY card with the jump, never as a failure to
+retry. `Herunterladen` is gated by the uploads table's own rule
+(`available && (online || relay-held)`). The registry
+(`prefs.local_copies`) is fed by every verified download, own shares
+included (the source file may leave; the exchange copy stays); stale
+entries are pruned at read time. `ReadUploadBytes` answers through a
+deferred-reply slot on the actor (the handler takes the reply channel
+into its blocking task; every refusal still answers synchronously).
+`wiki_edit`'s warning follows the B5 channel: a refusal unless
+`allow_warnings`, a `temporary` match never warns. The picker's
+`+ Datei` button sits in the document toolbar beside the link button;
+its rows carry `member` and `kind` unshown (the read's way back into the
+model).
 
 ## 1. The ask (user, 2026-09-06)
 

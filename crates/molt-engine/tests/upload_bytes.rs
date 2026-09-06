@@ -2,7 +2,7 @@
 #![allow(missing_docs)]
 
 //! **Stage-2 keystone - `ReadUploadBytes` over a real 2-of-2 republic**
-//! (`docs/ui/wiki_files_and_images.md` §3.3/§4): the second seat reads a
+//! (`docs_archive/ui/wiki_files_and_images.md` §3.3/§4): the second seat reads a
 //! persisted file's bytes out of its MIRROR without ever downloading it,
 //! a cap below the size refuses before any read, and a source file
 //! swapped behind the share answers a mismatch - never bytes.

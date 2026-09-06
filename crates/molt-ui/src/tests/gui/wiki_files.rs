@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Wiki file references (`docs/ui/wiki_files_and_images.md` §3.4/§3.5),
+//! Wiki file references (`docs_archive/ui/wiki_files_and_images.md` §3.4/§3.5),
 //! headless: every resolution state renders its word, a file link jumps
 //! to Shared Files, a ready picture opens large, and an arriving picture
 //! patches the row it belongs to - never the whole page.
