@@ -1018,7 +1018,8 @@ edit kind, the file order, the summary) and
 round 3's (an alias this call frees is no collision while one it creates
 inside the call still is; `allow_warnings` takes the codes it
 acknowledges; a rename repairs the base links naming the old path and
-`repair_links: false` refuses instead;
+`repair_links: false` refuses instead; the caller's own retired card is
+no longer contended;
 `graph::a_rename_rewrites_only_the_links_that_name_the_path`;
 `proposals::the_graph_reads_answer_while_the_index_builds`). The MCP
 half: `wiki_edit` is Seat and a read-only key is refused it
