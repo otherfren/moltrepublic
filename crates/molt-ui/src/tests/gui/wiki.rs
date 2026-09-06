@@ -544,6 +544,69 @@ fn the_backlink_request_rides_the_document_change() {
     assert_eq!(asked.borrow().as_slice(), ["a.md", "b.md"]);
 }
 
+/// **The Linked section is navigation, not decoration.** Its entries
+/// rendered as passive pills while the Backlinks right below them were
+/// live links, so the one list that walks the graph FORWARD was dead
+/// (reported 2026-09-06).
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_linked_entry_opens_its_target() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    ui.set_screen(AppScreen::Main);
+    ui.set_selected_surface("memory".into());
+    ui.set_selected_view("brain".into());
+    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: "memory".into(),
+        ..SurfaceTab::default()
+    }])));
+    let _wiki = wire_wiki(&ui);
+    let g = ui.global::<WikiState>();
+    // the display text differs from the target, so the entry's label is
+    // the only thing in the pane reading "notes/b.md"
+    g.set_base_docs(ModelRc::new(VecModel::from(vec![
+        WikiBase {
+            path: "a.md".into(),
+            content: "# A\n\nsee [Bee](notes/b.md)\n".into(),
+            loaded: true,
+        },
+        WikiBase {
+            path: "notes/b.md".into(),
+            content: "# B\n".into(),
+            loaded: true,
+        },
+    ])));
+    g.set_base_rev(1);
+    g.invoke_base_arrived();
+    let rows = g.get_nav_rows();
+    let id = (0..rows.row_count())
+        .filter_map(|i| rows.row_data(i))
+        .find(|r| r.label.as_str() == "a.md")
+        .expect("nav row")
+        .id;
+    ui.window().set_size(slint::PhysicalSize::new(1400, 900));
+    ui.show().expect("show headless");
+    g.invoke_nav_open(id);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
+    let links: Vec<String> = (0..g.get_links().row_count())
+        .filter_map(|i| g.get_links().row_data(i))
+        .map(|l| l.to_string())
+        .collect();
+    assert_eq!(links, ["notes/b.md"], "the outgoing target is listed");
+
+    let entry =
+        i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, "notes/b.md")
+            .next()
+            .expect("the Linked section renders the target");
+    click(&ui, &entry);
+    assert_eq!(
+        g.get_doc_path().as_str(),
+        "notes/b.md",
+        "a Linked entry opens its document"
+    );
+}
+
 /// **The changeset panel is ONE row, however long the stack gets.** It
 /// used to list the actions themselves, so a long editing session grew
 /// the panel until it owned the pane; the stack reads in the Changes
