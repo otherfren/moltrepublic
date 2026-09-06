@@ -1851,6 +1851,18 @@ export component MemoryPane inherits VerticalLayout {
                                 WikiState.link-modal-open = true;
                             }
                         }
+                        // 📎 — point at a file the republic KEEPS. Same
+                        // gate as the link: the reference is prose, and
+                        // prose needs the document's bytes.
+                        ToolBtn {
+                            glyph: "📎";
+                            name: "+ " + Strings.mem-tb-file;
+                            enabled: WikiState.can-write-body;
+                            clicked => {
+                                WikiState.file-open();
+                                WikiState.file-modal-open = true;
+                            }
+                        }
                         // the open file changed vs base: a plain hint plus
                         // its own revert — the numeric summary lives in the
                         // changeset panel, not here
