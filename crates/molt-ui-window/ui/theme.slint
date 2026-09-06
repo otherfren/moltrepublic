@@ -549,6 +549,9 @@ export global WikiState {
     in-out property <string> raw; // the raw editor's buffer (two-way)
     in-out property <bool> editing;
     in-out property <bool> can-reveal;
+    // reveal's answer: the navigator row to scroll into view (-1 = none);
+    // the navigator consumes it
+    in-out property <int> nav-scroll-to: -1;
     in-out property <bool> has-marked;
     // the changeset panel: NET counts + the action stack. The panel is
     // visible while the stack is non-empty.

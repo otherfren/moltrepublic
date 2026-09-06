@@ -971,6 +971,63 @@ fn a_pending_base_replaces_the_empty_state() {
 /// below the window edge cannot be confirmed at all, and the app font is
 /// a setting (9..28px).
 #[cfg(feature = "live-preview")]
+/// Reveal used to mark a row the member could not see: nothing scrolled
+/// the navigator. Now the marked row lands inside the pane, and the button
+/// stays enabled while a document is active (the row can be marked AND
+/// out of view).
+#[test]
+fn reveal_scrolls_the_navigator_to_the_marked_row() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    ui.set_screen(AppScreen::Main);
+    ui.set_selected_surface("memory".into());
+    ui.set_selected_view("brain".into());
+    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: "memory".into(),
+        ..SurfaceTab::default()
+    }])));
+    let _wiki = wire_wiki(&ui);
+    let g = ui.global::<WikiState>();
+    // one folder of 60 files: far more than a 700 px navigator shows
+    let docs: Vec<WikiBase> = (0..60)
+        .map(|i| WikiBase {
+            path: format!("people/person-{i:02}.md").into(),
+            content: format!("# Person {i}\n\nprose.\n").into(),
+            loaded: true,
+        })
+        .collect();
+    g.set_base_docs(ModelRc::new(VecModel::from(docs)));
+    g.set_base_rev(1);
+    g.invoke_base_arrived();
+    assert_eq!(g.get_nav_rows().row_count(), 1, "a base folder starts closed");
+    ui.window().set_size(slint::PhysicalSize::new(1400, 900));
+    ui.show().expect("show headless");
+    g.invoke_open_link("people/person-55.md".into());
+    assert!(g.get_doc_open());
+    assert!(g.get_can_reveal(), "a document is active: reveal is on");
+    g.invoke_reveal();
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
+    assert_eq!(g.get_nav_rows().row_count(), 61, "reveal unfolded people/");
+    assert_eq!(g.get_nav_scroll_to(), -1, "the request was consumed");
+    // the open tab carries the same label; the navigator's row is the
+    // leftmost match
+    let row = i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, "person-55.md")
+        .min_by(|a, b| a.absolute_position().x.total_cmp(&b.absolute_position().x))
+        .expect("the revealed row exists");
+    let nav = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "ScrollBody::fl")
+        .min_by(|a, b| a.absolute_position().x.total_cmp(&b.absolute_position().x))
+        .expect("the navigator's flickable");
+    let (top, bottom) = (nav.absolute_position().y, nav.absolute_position().y + nav.size().height);
+    let y = row.absolute_position().y;
+    assert!(
+        y > top && y < bottom,
+        "the marked row sits inside the navigator ({top}..{bottom}), y={y}"
+    );
+    // marked AND active: still revealable (it may be scrolled away again)
+    assert!(g.get_can_reveal());
+}
+
 #[test]
 fn the_authoring_modals_fit_the_window_at_every_font_size() {
     i_slint_backend_testing::init_no_event_loop();
@@ -2073,4 +2130,276 @@ fn a_few_tag_pills_stay_on_one_row_at_natural_widths() {
         widths[0] < widths[1],
         "the pills keep their natural widths: {widths:?}"
     );
+}
+
+/// Timing probe, not an assertion: what ONE face sync costs on a real
+/// corpus. `MOLT_WIKI_BENCH_CORPUS=<json [{path,content}]>` prints the
+/// per-step timings; `MOLT_WIKI_BENCH_LAZY=1` leaves the bytes unfetched
+/// (the production shape, K7).
+#[test]
+#[ignore]
+fn wiki_face_sync_cost_on_a_real_corpus() {
+    let Ok(path) = std::env::var("MOLT_WIKI_BENCH_CORPUS") else {
+        return;
+    };
+    let raw = std::fs::read_to_string(&path).expect("corpus file");
+    let corpus: Vec<serde_json::Value> = serde_json::from_str(&raw).expect("corpus json");
+    let lazy = std::env::var("MOLT_WIKI_BENCH_LAZY").is_ok();
+    fn time<T>(label: &str, f: impl Fn() -> T) {
+        let t = std::time::Instant::now();
+        for _ in 0..10 {
+            std::hint::black_box(f());
+        }
+        println!("  {label}: {:?}", t.elapsed() / 10);
+    }
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    let (model, _last) = wire_wiki(&ui);
+    let g = ui.global::<WikiState>();
+    let wanted = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    {
+        let w = wanted.clone();
+        g.on_content_wanted(move |_| w.set(w.get() + 1));
+    }
+    let docs: Vec<WikiBase> = corpus
+        .iter()
+        .map(|d| WikiBase {
+            path: d["path"].as_str().unwrap_or("").into(),
+            content: if lazy {
+                "".into()
+            } else {
+                d["content"].as_str().unwrap_or("").into()
+            },
+            loaded: !lazy,
+        })
+        .collect();
+    let t = std::time::Instant::now();
+    g.set_base_docs(ModelRc::new(VecModel::from(docs)));
+    g.set_base_rev(1);
+    g.invoke_base_arrived();
+    g.invoke_fold_all(true); // base folders start closed; the probe wants every row
+    println!(
+        "base_arrived + fold_all(true): {:?} rows={} lazy={lazy}",
+        t.elapsed(),
+        g.get_nav_rows().row_count()
+    );
+    {
+        let w = model.borrow();
+        time("nav_rows", || w.nav_rows());
+        time("to_draft", || w.to_draft());
+        time("build_patch", || w.build_patch());
+        time("link_targets", || w.link_targets());
+    }
+    let rows = g.get_nav_rows();
+    let files: Vec<i32> = (0..rows.row_count())
+        .filter_map(|i| rows.row_data(i))
+        .filter(|r| !r.is_folder)
+        .map(|r| r.id)
+        .collect();
+    let t = std::time::Instant::now();
+    for id in files.iter().take(20) {
+        g.invoke_nav_mark(*id);
+    }
+    println!("nav_mark (no doc open) avg: {:?}", t.elapsed() / 20);
+    let big = corpus
+        .iter()
+        .max_by_key(|d| d["content"].as_str().map_or(0, str::len))
+        .expect("a document");
+    let big_path = big["path"].as_str().unwrap_or("");
+    let big_text = big["content"].as_str().unwrap_or("").to_string();
+    let t = std::time::Instant::now();
+    g.invoke_open_link(big_path.into());
+    println!(
+        "open_link(biggest, {} bytes): {:?} blocks={}",
+        big_text.len(),
+        t.elapsed(),
+        g.get_blocks().row_count()
+    );
+    {
+        let w = model.borrow();
+        let id = w.active_id().expect("active doc");
+        time("preview", || w.preview(id));
+        time("infobox", || w.infobox(id));
+        time("links", || w.links(id));
+        time("to_draft (tab open)", || w.to_draft());
+    }
+    let t = std::time::Instant::now();
+    for id in files.iter().skip(20).take(20) {
+        g.invoke_nav_mark(*id);
+    }
+    println!("nav_mark (doc open) avg: {:?}", t.elapsed() / 20);
+    let t = std::time::Instant::now();
+    g.invoke_fold_all(false);
+    println!(
+        "fold_all(false): {:?} rows={}",
+        t.elapsed(),
+        g.get_nav_rows().row_count()
+    );
+    let t = std::time::Instant::now();
+    g.invoke_reveal();
+    println!(
+        "reveal: {:?} rows={} can_reveal={}",
+        t.elapsed(),
+        g.get_nav_rows().row_count(),
+        g.get_can_reveal()
+    );
+    let t = std::time::Instant::now();
+    g.invoke_fold_all(true);
+    println!(
+        "fold_all(true): {:?} rows={}",
+        t.elapsed(),
+        g.get_nav_rows().row_count()
+    );
+    g.invoke_edit_toggle();
+    let mut text = big_text.clone();
+    let t = std::time::Instant::now();
+    for _ in 0..20 {
+        text.push('x');
+        g.invoke_edited(text.as_str().into());
+    }
+    println!("edited (keystroke) avg: {:?}", t.elapsed() / 20);
+    {
+        let w = model.borrow();
+        let id = w.active_id().expect("active doc");
+        time("preview (dirty)", || w.preview(id));
+        time("build_patch (dirty)", || w.build_patch());
+        time("to_draft (dirty)", || w.to_draft());
+    }
+    println!("content_wanted fired {} times", wanted.get());
+}
+
+/// Paint probe, not an assertion: the wiki pane rendered OFFSCREEN through
+/// Slint's software renderer, so the cost of a frame - layout plus
+/// rasterization - is measured, not only the model side. Runs alone (it
+/// installs its own platform): `MOLT_WIKI_BENCH_CORPUS=<json>`,
+/// `MOLT_PAINT_MODE=full|partial` (a fresh buffer every frame, or the
+/// dirty-region repaint the software renderer offers).
+#[test]
+#[ignore]
+fn wiki_pane_paint_cost_offscreen() {
+    use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
+    use slint::Rgb8Pixel;
+    let Ok(path) = std::env::var("MOLT_WIKI_BENCH_CORPUS") else {
+        return;
+    };
+    let raw = std::fs::read_to_string(&path).expect("corpus file");
+    let corpus: Vec<serde_json::Value> = serde_json::from_str(&raw).expect("corpus json");
+    let lazy = std::env::var("MOLT_WIKI_BENCH_LAZY").is_ok();
+    let partial = std::env::var("MOLT_PAINT_MODE").map_or(true, |m| m != "full");
+    struct P(std::rc::Rc<MinimalSoftwareWindow>);
+    impl slint::platform::Platform for P {
+        fn create_window_adapter(
+            &self,
+        ) -> Result<std::rc::Rc<dyn slint::platform::WindowAdapter>, slint::PlatformError> {
+            Ok(self.0.clone())
+        }
+    }
+    const W: u32 = 1600;
+    const H: u32 = 1000;
+    let win = MinimalSoftwareWindow::new(if partial {
+        RepaintBufferType::ReusedBuffer
+    } else {
+        RepaintBufferType::NewBuffer
+    });
+    slint::platform::set_platform(Box::new(P(win.clone()))).expect("platform");
+    win.set_size(slint::PhysicalSize::new(W, H));
+    let mut buf = vec![Rgb8Pixel::default(); (W * H) as usize];
+    let ui = AppWindow::new().expect("window");
+    apply_strings(&ui, 0);
+    ui.set_screen(AppScreen::Main);
+    ui.set_selected_surface("memory".into());
+    ui.set_selected_view("brain".into());
+    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: "memory".into(),
+        ..SurfaceTab::default()
+    }])));
+    let (_model, _last) = wire_wiki(&ui);
+    let g = ui.global::<WikiState>();
+    let docs: Vec<WikiBase> = corpus
+        .iter()
+        .map(|d| WikiBase {
+            path: d["path"].as_str().unwrap_or("").into(),
+            content: if lazy {
+                "".into()
+            } else {
+                d["content"].as_str().unwrap_or("").into()
+            },
+            loaded: !lazy,
+        })
+        .collect();
+    g.set_base_docs(ModelRc::new(VecModel::from(docs)));
+    g.set_base_rev(1);
+    g.invoke_base_arrived();
+    g.invoke_fold_all(true); // base folders start closed; the probe wants every row
+    ui.show().expect("show");
+    let mut frame = |label: &str| {
+        let t = std::time::Instant::now();
+        let mut region = None;
+        let drew = win.draw_if_needed(|r| {
+            region = Some(r.render(&mut buf, W as usize));
+        });
+        let dims = region.map(|r| r.bounding_box_size());
+        println!(
+            "  frame {label}: {:?} drew={drew} dirty={}x{}",
+            t.elapsed(),
+            dims.map_or(0, |d| d.width),
+            dims.map_or(0, |d| d.height)
+        );
+    };
+    println!("mode={} lazy={lazy} rows={}", if partial { "partial" } else { "full" }, g.get_nav_rows().row_count());
+    frame("first (cold)");
+    frame("idle (nothing changed)");
+    let rows = g.get_nav_rows();
+    let files: Vec<i32> = (0..rows.row_count())
+        .filter_map(|i| rows.row_data(i))
+        .filter(|r| !r.is_folder)
+        .map(|r| r.id)
+        .collect();
+    g.invoke_nav_mark(files[3]);
+    frame("after nav_mark");
+    g.invoke_nav_mark(files[40]);
+    frame("after nav_mark #2");
+    // hover: the pointer crossing three navigator rows
+    for y in [200.0f32, 226.0, 252.0] {
+        ui.window().dispatch_event(slint::platform::WindowEvent::PointerMoved {
+            position: slint::LogicalPosition::new(120.0, y),
+        });
+        frame("after pointer move over nav");
+    }
+    let big = corpus
+        .iter()
+        .max_by_key(|d| d["content"].as_str().map_or(0, str::len))
+        .expect("a document");
+    g.invoke_open_link(big["path"].as_str().unwrap_or("").into());
+    frame("after open_link(biggest)");
+    frame("idle");
+    g.invoke_nav_mark(files[7]);
+    frame("after nav_mark (doc open)");
+    g.invoke_fold_all(false);
+    frame("after fold_all(false)");
+    g.invoke_reveal();
+    frame("after reveal");
+    g.invoke_fold_all(true);
+    frame("after fold_all(true)");
+    // hover over the document body
+    for y in [300.0f32, 340.0, 380.0] {
+        ui.window().dispatch_event(slint::platform::WindowEvent::PointerMoved {
+            position: slint::LogicalPosition::new(900.0, y),
+        });
+        frame("after pointer move over doc");
+    }
+    // what every engine event does: the surfaces model rewritten
+    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: "memory".into(),
+        ..SurfaceTab::default()
+    }])));
+    frame("after surfaces rewrite (engine event)");
+    g.invoke_edit_toggle();
+    frame("after edit_toggle");
+    let mut text = big["content"].as_str().unwrap_or("").to_string();
+    for _ in 0..3 {
+        text.push('x');
+        g.invoke_edited(text.as_str().into());
+        frame("after keystroke");
+    }
 }

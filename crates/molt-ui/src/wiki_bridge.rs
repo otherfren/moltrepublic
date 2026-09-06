@@ -123,7 +123,9 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
     sync_model(&s.get_tabs(), tabs, PartialEq::eq, |m| s.set_tabs(m));
     s.set_has_marked(w.has_marked());
     s.set_editing(w.editing);
-    s.set_can_reveal(w.active_id().is_some() && w.active_id() != w.marked());
+    // reveal also SCROLLS to the row, so it stays useful once the row is
+    // marked but out of view
+    s.set_can_reveal(w.active_id().is_some());
     // the changeset panel: NET counts + the action stack (visibility is
     // the stack's non-emptiness, .slint-side)
     let c = w.changeset_counts();
@@ -376,7 +378,22 @@ pub(crate) fn wire_wiki(
         let _ = w.new_folder();
     });
     act!(on_fold_all, |w, open: bool| w.set_all_folders(open));
-    act!(on_reveal, |w| w.reveal());
+    // hand-wired: the row index goes to the navigator AFTER the rows it
+    // indexes are in the model
+    {
+        let m = model.clone();
+        let la = last.clone();
+        let weak = ui.as_weak();
+        g.on_reveal(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let at = m.borrow_mut().reveal();
+            sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            if let Some(at) = at {
+                ui.global::<WikiState>()
+                    .set_nav_scroll_to(i32::try_from(at).unwrap_or(-1));
+            }
+        });
+    }
     act!(on_open_marked, |w| w.open_marked());
     act!(on_delete_marked, |w| w.delete_marked());
     act!(on_rename_marked, |w| w.rename_marked());

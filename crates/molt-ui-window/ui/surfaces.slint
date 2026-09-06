@@ -360,13 +360,35 @@ component ToolBtn inherits Rectangle {
 component ScrollBody inherits Rectangle {
     in property <length> pad: 8px;
     in property <length> gap: 2px;
+    // scroll row N (fixed-stride rows) to the middle of the view, then
+    // forget it - a request, not a state. The content height comes from
+    // `row-count`, not the viewport: rows that arrived with the request
+    // are not laid out yet when this runs, and clamping against the old
+    // height scrolled nowhere.
+    in-out property <int> scroll-to-row: -1;
+    in property <length> row-stride: 28px;
+    in property <int> row-count: 0;
     vertical-stretch: 1;
     clip: true;
+    // the content height as the MODEL knows it: rows that arrived with a
+    // scroll request are not laid out yet when the request is handled,
+    // and a viewport clamped against the old height scrolls nowhere
+    property <length> content-h: root.row-count > 0
+        ? 2 * root.pad + root.row-count * root.row-stride - root.gap
+        : body.preferred-height;
+    changed scroll-to-row => {
+        if (self.scroll-to-row >= 0) {
+            fl.viewport-y = clamp(
+                fl.height / 2 - root.pad - self.scroll-to-row * self.row-stride - self.row-stride / 2,
+                min(0px, fl.height - root.content-h), 0px);
+            self.scroll-to-row = -1;
+        }
+    }
     fl := Flickable {
         width: 100%;
         height: 100%;
         viewport-width: self.width;
-        viewport-height: body.preferred-height;
+        viewport-height: root.content-h;
         body := VerticalLayout {
             padding: root.pad;
             spacing: root.gap;
@@ -1177,6 +1199,9 @@ export component MemoryPane inherits VerticalLayout {
                     if WikiState.search-query == "": ScrollBody {
                         pad: 6px;
                         gap: 2px;
+                        row-stride: 26px + self.gap;
+                        row-count: WikiState.nav-rows.length;
+                        scroll-to-row <=> WikiState.nav-scroll-to;
                         for r[idx] in WikiState.nav-rows: Rectangle {
                             height: 26px;
                             border-radius: Theme.win95 ? 0px : 5px;

@@ -647,6 +647,7 @@ impl Wiki {
         self.active.and_then(|id| self.doc(id))
     }
 
+    #[cfg(test)]
     pub fn marked(&self) -> Option<DocId> {
         self.marked
     }
@@ -1087,15 +1088,18 @@ impl Wiki {
         true
     }
 
-    /// 🎯 — re-align the navigator with the active tab: mark it and unfold
-    /// its folder.
-    pub fn reveal(&mut self) {
-        let Some(a) = self.active else { return };
+    /// 🎯 — re-align the navigator with the active tab: mark it, unfold
+    /// its folder, and say WHERE it is - the row's index in
+    /// [`Wiki::nav_rows`], so the navigator can scroll to it (a row below
+    /// the fold was "revealed" invisibly before).
+    pub fn reveal(&mut self) -> Option<usize> {
+        let a = self.active?;
         let folder = self.doc(a).and_then(|d| d.folder().map(String::from));
         if let Some(f) = folder {
             self.open_chain(&f); // ancestors too, or the row stays hidden
         }
         self.marked = Some(a);
+        self.nav_rows().iter().position(|r| r.kind == RowKind::File && r.id == a)
     }
 
     /// Insert every missing ancestor of `folder` (a deep path needs its
@@ -1113,7 +1117,10 @@ impl Wiki {
             if !self.folders.iter().any(|f| f.name == path) {
                 self.folders.push(Folder {
                     name: path.clone(),
-                    open: true,
+                    // a folder the base brings starts CLOSED - the tree is
+                    // a place to look things up, not a wall of 130 rows;
+                    // one the member just made is where they are working
+                    open: added,
                     added,
                 });
                 created.push(path.clone());
@@ -3564,6 +3571,7 @@ mod tests {
             ],
             1,
         );
+        w.set_all_folders(true); // base folders start closed
         assert_eq!(w.nav_rows().len(), 3, "two documents and their folder");
         let a = w.docs.iter().find(|d| d.path == "a.md").expect("a.md");
         assert_eq!(a.status(), Status::Unchanged, "unfetched is not Added");
@@ -5072,6 +5080,56 @@ diff --git a/gone.md b/gone.md\n--- a/gone.md\n+++ b/gone.md\n@@ -1,1 +1,1 @@\n-
         );
     }
 
+    #[test]
+    fn reveal_says_where_the_row_is() {
+        let mut w = Wiki::sample();
+        let recovery = id_of(&w, "node-recovery.md");
+        w.open(recovery);
+        w.set_all_folders(false);
+        let at = w.reveal().expect("a row index");
+        let rows = w.nav_rows();
+        assert_eq!(rows[at].id, recovery, "the index names the marked row");
+        assert!(at > 0, "runbooks/ sorts after decisions/ and quests/");
+        // nothing active: nothing to reveal
+        assert!(Wiki::empty().reveal().is_none());
+    }
+
+    #[test]
+    fn base_folders_start_closed_and_a_new_folder_starts_open() {
+        let mut w = Wiki::empty();
+        w.set_base(
+            &[
+                ("a/x.md".to_string(), Some("# x".to_string())),
+                ("a/b/y.md".to_string(), Some("# y".to_string())),
+                ("top.md".to_string(), Some("# top".to_string())),
+            ],
+            1,
+        );
+        let rows = w.nav_rows();
+        assert_eq!(
+            rows.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(),
+            vec!["a", "top.md"],
+            "closed: the folder row and the root file, nothing under a/"
+        );
+        assert!(rows.iter().all(|r| !r.open));
+        // a base that moves keeps the member's fold state
+        w.toggle_folder("a");
+        w.set_base(
+            &[
+                ("a/x.md".to_string(), Some("# x".to_string())),
+                ("a/b/y.md".to_string(), Some("# y".to_string())),
+                ("a/c/z.md".to_string(), Some("# z".to_string())),
+            ],
+            2,
+        );
+        let rows = w.nav_rows();
+        assert!(rows.iter().any(|r| r.label == "a" && r.open), "a/ stays open");
+        assert!(rows.iter().any(|r| r.label == "c" && !r.open), "the new a/c/ arrives closed");
+        // a folder the member creates is where they work: open
+        let name = w.new_folder();
+        assert!(w.nav_rows().iter().any(|r| r.label == name && r.open));
+    }
+
     // ---- folder verbs (rename / move / delete / new-file-in) --------------
 
     /// The 2026-08-15 live-crash sequence, pinned at the model level:
@@ -5315,6 +5373,7 @@ diff --git a/gone.md b/gone.md\n--- a/gone.md\n+++ b/gone.md\n@@ -1,1 +1,1 @@\n-
         w.set_base(&[("a/b/c.md".to_string(), Some("x\n".to_string()))], 1);
         assert!(w.folders_named().contains(&"a".to_string()));
         assert!(w.folders_named().contains(&"a/b".to_string()));
+        w.set_all_folders(true); // base folders start closed
         let rows = w.nav_rows();
         assert_eq!(rows.len(), 3, "a/, a/b/, c.md");
         assert_eq!(rows[2].depth, 2);
