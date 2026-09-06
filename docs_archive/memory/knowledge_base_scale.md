@@ -904,10 +904,13 @@ the vote.
 
 **`wiki_edit { edits }` (Seat).** The edits apply IN ORDER to a working
 copy of the current base, so a `rename` followed by a `replace` on the new
-path is legal. Six ops, and no seventh: `content { path, content }` (a
-whole document; a free path CREATES it, which is why there is no separate
-create), `replace { path, old, new }` (one exact occurrence - the form
-coding-agent scaffolds converged on), `set_props { path, props }`,
+path is legal. Seven ops: `create { path, content }` (a NEW document; an
+occupied path refuses, in the base and in this call's own working copy -
+added 2026-09-06, `docs/reviews/mcp_agent_friction_fixes_round_2.md` B1),
+`content { path, content }` (a whole document; it CREATES a free path and
+OVERWRITES an occupied one), `replace { path, old, new }` (one exact
+occurrence - the form coding-agent scaffolds converged on),
+`set_props { path, props }`,
 `add_relation { path, predicate, target, display }`, `rename { from, to }`,
 `delete { path }`.
 
@@ -927,7 +930,8 @@ coding-agent scaffolds converged on), `set_props { path, props }`,
   value outside the header subset`; `header unreadable: <err>`; `the header
   would not read back as asked`; `not a relation key: <pred>`; `no document
   named <target>` / `<target> is ambiguous: <paths>`; `already exists:
-  <to>`; `invalid path: <p>`; `<p>: moved and re-created - two votes` (that
+  <path>` (a `create` onto an occupied path, a `rename` onto one);
+  `invalid path: <p>`; `<p>: moved and re-created - two votes` (that
   patch would name one path twice and the strict applier voids it);
   `nothing to change`; `no edits`. Base-pending refuses by name like every
   read.
@@ -939,6 +943,16 @@ coding-agent scaffolds converged on), `set_props { path, props }`,
   because a relation belongs in the sentence that asserts it
   (`wiki_semantic_gaps.md` §6); `add_relation` is for when there is no such
   sentence.
+- **What the engine knows before the vote is minted** (round 2, B2-B4,
+  `docs/reviews/mcp_agent_friction_fixes_round_2.md`): beside the header
+  check it warns about a touched path an OPEN proposal already touches
+  (`<path> is in open proposal N by <seat>`), a rename that leaves a link
+  in an open proposal, a new title or alias that already names another
+  page, and `content` over a page another seat last wrote. ONE list under
+  ONE rule: a warning refuses by default, `allow_warnings: true` proposes
+  anyway, `dry_run: true` answers them without proposing. The name check
+  is SKIPPED while the index is unavailable - a write is never blocked on
+  it, and no index build is kicked off from the write path.
 - **`propose` now refuses a raw `wiki_patch` that does not apply**
   (`wiki_semantic_gaps.md` §1.1) with `patch does not apply: <reason>`,
   checked over the touched paths exactly as the header warnings are. A

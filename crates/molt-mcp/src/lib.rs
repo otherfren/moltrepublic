@@ -1386,7 +1386,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wiki_edit",
             command: "wiki_edit",
             scope: Scope::Seat,
-            description: "Write the wiki. `edits` apply IN ORDER to a working copy of the current base; the engine diffs the result and puts THAT patch to the members as a normal changeset vote - propose, not save, and the reply is the proposal id. Ops (fields in the schema): content, replace, set_props, add_relation, rename, delete - content also CREATES a document when the path is free. An edit that cannot land refuses the whole call with the reason and proposes nothing: a path that does not exist, an `old` that is absent or occurs more than once, a header the parser would not read back, a relation target that does not resolve uniquely, a rename onto an existing path. A relation reads better in the sentence that asserts it - write `[[predicate::Name]]` inside a content or replace edit; add_relation is for when there is no such sentence. Check a target with wiki_resolve, and wiki_props for the relation names this republic already uses. The proposer's own signature is the first of m. `dry_run: true` returns the patch, its summary and the header warnings without proposing. A result whose header the parser reads differently than written (an unquoted `[[link]]` value is a nested list) is REFUSED with the key named; `allow_warnings: true` proposes it anyway. `supersedes: <id>` withdraws that own, still-open proposal in the same step - the way to correct one already on the table. The header dialect is the YAML 1.2 core schema in a flat subset: `no`, `yes`, `on` stay strings. The reply names the proposal's `channel`, where review remarks belong.",
+            description: "Write the wiki. `edits` apply IN ORDER to a working copy of the current base; the engine diffs the result and puts THAT patch to the members as a normal changeset vote - propose, not save, and the reply is the proposal id. Ops (fields in the schema): create, content, replace, set_props, add_relation, rename, delete. `create` writes a NEW page and refuses an occupied path; `content` writes a whole document, creating it when the path is free and OVERWRITING it when it is not. An edit that cannot land refuses the whole call with the reason and proposes nothing: a create onto an occupied path, a path that does not exist, an `old` that is absent or occurs more than once, a header the parser would not read back, a relation target that does not resolve uniquely, a rename onto an existing path. A relation reads better in the sentence that asserts it - write `[[predicate::Name]]` inside a content or replace edit; add_relation is for when there is no such sentence. Check a target with wiki_resolve, and wiki_props for the relation names this republic already uses. The proposer's own signature is the first of m. `dry_run: true` returns the patch, its summary and the warnings without proposing. A warning REFUSES the call, naming each one; `allow_warnings: true` proposes anyway. The warnings: a header the parser reads differently than written (an unquoted `[[link]]` value is a nested list), a touched path an open proposal already touches, a rename that leaves a link in an open proposal, a new title or alias that already names another page, and `content` over a page another seat last wrote. `supersedes: <id>` withdraws that own, still-open proposal in the same step - the way to correct one already on the table. The header dialect is the YAML 1.2 core schema in a flat subset: `no`, `yes`, `on` stay strings. The reply names the proposal's `channel`, where review remarks belong.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1397,11 +1397,20 @@ pub fn tools() -> Vec<ToolDef> {
                             "type": "object",
                             "oneOf": [
                                 {
+                                    "title": "create",
+                                    "properties": {
+                                        "op": { "const": "create" },
+                                        "path": { "type": "string", "description": "the new document's path, e.g. \"people/anna.md\"; an occupied path refuses" },
+                                        "content": { "type": "string", "description": "the whole document, front matter included" }
+                                    },
+                                    "required": ["op", "path", "content"]
+                                },
+                                {
                                     "title": "content",
                                     "properties": {
                                         "op": { "const": "content" },
                                         "path": { "type": "string", "description": "the document's path, e.g. \"people/anna.md\"" },
-                                        "content": { "type": "string", "description": "the whole document, front matter included; a free path creates it" }
+                                        "content": { "type": "string", "description": "the whole document, front matter included; it creates a free path and OVERWRITES an occupied one" }
                                     },
                                     "required": ["op", "path", "content"]
                                 },
@@ -1456,7 +1465,7 @@ pub fn tools() -> Vec<ToolDef> {
                         }
                     },
                     "dry_run": { "type": "boolean", "description": "optional: return the patch and its warnings, propose nothing" },
-                    "allow_warnings": { "type": "boolean", "description": "optional: propose even with header warnings (default: such a result is refused)" },
+                    "allow_warnings": { "type": "boolean", "description": "optional: propose even with warnings (default: a warning refuses the call)" },
                     "supersedes": { "type": "integer", "description": "optional: withdraw this own open proposal in the same step" }
                 },
                 "required": ["edits"]

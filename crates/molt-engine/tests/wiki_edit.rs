@@ -604,3 +604,203 @@ async fn a_vote_answers_with_the_record_and_late_approvals_are_fine() {
         .expect_err("unknown");
     assert_eq!(err.to_string(), "unknown proposal 99999");
 }
+
+/// B1 (`mcp_agent_friction_fixes_round_2.md`): `create` is the op that
+/// cannot become a rewrite. A free path lands; an occupied one refuses,
+/// in the base and in the working copy this call built.
+#[tokio::test]
+async fn a_create_refuses_an_occupied_path() {
+    let w = spawn_solo();
+    edit(
+        &w,
+        vec![WikiEdit::Create {
+            path: "a.md".to_string(),
+            content: "# A\n".to_string(),
+        }],
+    )
+    .await
+    .expect("a free path creates");
+    assert_eq!(doc(&w, "a.md").await, "# A\n");
+
+    let text = refusal(
+        &w,
+        vec![WikiEdit::Create {
+            path: "a.md".to_string(),
+            content: "# Other\n".to_string(),
+        }],
+    )
+    .await;
+    assert!(text.contains("already exists: a.md"), "with the reason: {text}");
+    assert_eq!(open_proposals(&w).await, 1, "only the create landed");
+
+    // …and the working copy counts too: a create after this call's own
+    // delete of the same path is still a rewrite in disguise
+    let text = refusal(
+        &w,
+        vec![
+            WikiEdit::Delete {
+                path: "a.md".to_string(),
+            },
+            WikiEdit::Create {
+                path: "a.md".to_string(),
+                content: "# Other\n".to_string(),
+            },
+        ],
+    )
+    .await;
+    assert!(text.contains("already exists: a.md"), "with the reason: {text}");
+    // a second create in one batch collides with the first
+    let text = refusal(
+        &w,
+        vec![
+            WikiEdit::Create {
+                path: "b.md".to_string(),
+                content: "# B\n".to_string(),
+            },
+            WikiEdit::Create {
+                path: "b.md".to_string(),
+                content: "# B again\n".to_string(),
+            },
+        ],
+    )
+    .await;
+    assert!(text.contains("already exists: b.md"), "with the reason: {text}");
+}
+
+/// B2 (G10): the engine holds every open proposal's paths, so a second
+/// writer hears about the collision at the call instead of as a phantom
+/// rejection once the other card seals.
+#[tokio::test]
+async fn a_path_in_an_open_proposal_warns() {
+    let w = spawn_solo();
+    let first = settle(
+        &w,
+        Command::WikiEdit {
+            edits: vec![content("standards/xep.md", "# XEP\n")],
+            dry_run: false,
+            allow_warnings: false,
+            supersedes: None,
+        },
+    )
+    .await
+    .expect("proposes");
+    let Reply::Proposed { id: open, .. } = first else {
+        panic!("unexpected: {first:?}");
+    };
+
+    let want = format!("standards/xep.md is in open proposal {} by me", open.0);
+    let text = refusal(&w, vec![content("standards/xep.md", "# XEP, differently\n")]).await;
+    assert!(text.contains(&want), "names the card and its proposer: {text}");
+
+    // a dry run answers the same warning and proposes nothing
+    let preview = settle(
+        &w,
+        Command::WikiEdit {
+            edits: vec![content("standards/xep.md", "# XEP, differently\n")],
+            dry_run: true,
+            allow_warnings: false,
+            supersedes: None,
+        },
+    )
+    .await
+    .expect("a dry run is fine");
+    let Reply::WikiPreview { warnings, .. } = preview else {
+        panic!("unexpected: {preview:?}");
+    };
+    assert!(warnings.iter().any(|s| s.contains(&want)), "{warnings:?}");
+    assert_eq!(open_proposals(&w).await, 1, "nothing new was proposed");
+
+    // …and `allow_warnings` writes it anyway
+    let reply = settle(
+        &w,
+        Command::WikiEdit {
+            edits: vec![content("standards/xep.md", "# XEP, differently\n")],
+            dry_run: false,
+            allow_warnings: true,
+            supersedes: None,
+        },
+    )
+    .await
+    .expect("allowed");
+    let Reply::Proposed { warnings, .. } = reply else {
+        panic!("unexpected: {reply:?}");
+    };
+    assert!(warnings.iter().any(|s| s.contains(&want)), "the warning rides the reply: {warnings:?}");
+    assert_eq!(open_proposals(&w).await, 2);
+}
+
+/// B2's rename half (G19): no-new-dangling-edge is a property of a state,
+/// not of one proposal - an open card still writing the old path is what
+/// the renamer cannot see.
+#[tokio::test]
+async fn a_rename_warns_about_a_link_an_open_proposal_still_writes() {
+    let w = spawn_solo();
+    edit(&w, vec![content("people/anna.md", "# Anna\n"), content("acme.md", "# Acme\n")])
+        .await
+        .expect("the base");
+    let reply = settle(
+        &w,
+        Command::WikiEdit {
+            edits: vec![content("acme.md", "# Acme\n\nRun by [[people/anna]].\n")],
+            dry_run: false,
+            allow_warnings: false,
+            supersedes: None,
+        },
+    )
+    .await
+    .expect("proposes");
+    let Reply::Proposed { id: open, .. } = reply else {
+        panic!("unexpected: {reply:?}");
+    };
+    let text = refusal(
+        &w,
+        vec![WikiEdit::Rename {
+            from: "people/anna.md".to_string(),
+            to: "menschen/anna.md".to_string(),
+        }],
+    )
+    .await;
+    assert!(
+        text.contains(&format!("leaves a link in open proposal {}", open.0)),
+        "names the card: {text}"
+    );
+}
+
+/// B3 (G7): an alias that already names another page takes the name from
+/// both - the check the agents wrote by hand, now at the call.
+#[tokio::test]
+async fn a_colliding_alias_warns() {
+    let w = spawn_solo();
+    edit(
+        &w,
+        vec![content(
+            "organisationen/signal-foundation.md",
+            "---\naliases:\n  - \"Signal\"\n---\n# Signal Foundation\n",
+        )],
+    )
+    .await
+    .expect("the first page");
+    // the graph is built off the actor; a read waits for it
+    settle(
+        &w,
+        Command::WikiResolve {
+            name: "Signal".to_string(),
+        },
+    )
+    .await
+    .expect("resolves");
+
+    let text = refusal(
+        &w,
+        vec![content(
+            "software/signal.md",
+            "---\naliases:\n  - \"Signal\"\n---\n# Signal\n",
+        )],
+    )
+    .await;
+    assert!(
+        text.contains("alias \"Signal\" already names organisationen/signal-foundation.md"),
+        "names the name and the page: {text}"
+    );
+    assert_eq!(open_proposals(&w).await, 1, "only the first page landed");
+}
