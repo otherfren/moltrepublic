@@ -1,8 +1,9 @@
 # MCP friction log, round 2: three agents build a protocol knowledge net (2026-09-06)
 
-Status: OPEN - observation log of the second run, stopped by the user at
-04:4x after Left's and Center's DONE. Proposed fixes:
-`mcp_agent_friction_fixes_round_2.md`. Round 1 and its fixes:
+Status: CLOSED - observation log of the second run, stopped by the user at
+04:4x after Left's and Center's DONE. Its fixes are built:
+`mcp_agent_friction_fixes_round_2.md` (EXECUTED, with the three open
+items named there). Round 1 and its fixes:
 `mcp_agent_friction_2026-09-05.md`, `mcp_agent_friction_fixes.md`.
 Briefing: `agent_wiki_round_2_briefing.md`.
 

@@ -1,8 +1,15 @@
 # Fixes from the second three-agent wiki round (2026-09-06)
 
-Status: OPEN - proposal for the next fix wave, nothing decided beyond what
-"landed during the run" says. Source: `mcp_agent_friction_2026-09-06.md`
-(findings G1-G20). Round 1's fixes (`mcp_agent_friction_fixes.md`) held:
+Status: EXECUTED 2026-09-06 - Parts A (A1-A3), B, C and D are on master,
+built by three agents in parallel worktrees and merged in that order.
+Open: A4 (a decline delays the seal - a governance question for the
+republic), the GUI compose line on decided cards (`molt-ui::channels::
+selected_channel_closed` still hides it although the engine accepts the
+write - a molt-ui change with its headless tests), and a latent index race
+found on the way (`refresh_wiki_graph` takes `wiki_graph_dirty` before it
+checks that a graph exists; a build installed over a moved tree stays
+stale - one line plus a pinning test, own change-set). Source:
+`mcp_agent_friction_2026-09-06.md` (findings G1-G20). Round 1's fixes (`mcp_agent_friction_fixes.md`) held:
 over 100 proposals from three writers, no fork, no lost proposal, one tip
 tie healed in four minutes, chains and wikis identical on every check. The
 friction that remains is VISIBILITY, not correctness: the engine is right
@@ -27,11 +34,12 @@ end state. All from one decision - a decided patch channel is read-only.
 
 A1 **A decided patch channel stays writable.** Read-only was chosen to stop
 chat on dead cards; a review of an applied or rejected change is not dead
-chat. Keep the channel open; the GUI already shows the decision marker, so
-the state is visible in the thread. `chat_send`/`share_file` drop the
-`Applied`/`Rejected` refusal for `Patch` channels. Engine: the check in
-`chat.rs` that answers "discussion of proposal N is read-only"; keep the
-refusal for channels of proposals this node never heard of.
+chat. Built: the local send path refuses NO patch channel any more -
+including one whose proposal this node has not seen yet, per chat_bus.md
+Q4 (a tagged message may arrive before the Proposed it references, so an
+unknown id was never an error; the briefing's "keep that refusal" collided
+with Q4 and the cross-instance keystone and was dropped). `chat_bus.md`
+carries the amendment, dated.
 
 A2 **`note` on a vote.** `approve {proposal_id, note?}` and `decline
 {proposal_id, note?}` post the note into the patch channel BEFORE the vote
