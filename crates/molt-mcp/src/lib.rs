@@ -2784,6 +2784,38 @@ mod tests {
         assert_eq!(proposed["id"], 4, "a real proposal is not a preview");
     }
 
+    /// `wiki_files_and_images.md` §4: an agent gets the local copy's
+    /// KIND, never its path - and the bytes door is not a tool at all.
+    #[test]
+    fn a_resolved_upload_carries_no_path_and_the_bytes_are_no_tool() {
+        let reply = json!({
+            "reply": "upload_resolved",
+            "upload": { "id": "0".repeat(32), "name": "netz.png", "checksum": "ab".repeat(32) },
+            "ambiguous": false,
+            "temporary": false,
+            "local": { "kind": "downloaded", "path": "/home/petra/exchange/netz.png" }
+        });
+        let shown = present("resolve_upload", &json!({}), reply).expect("presents");
+        assert_eq!(shown["local"]["kind"], "downloaded", "the kind stays");
+        assert!(shown["local"].get("path").is_none(), "the path is the seat's");
+        assert_eq!(shown["upload"]["name"], "netz.png", "the row is untouched");
+
+        let ambiguous = present(
+            "resolve_upload",
+            &json!({}),
+            json!({ "reply": "upload_resolved", "upload": Value::Null, "ambiguous": true,
+                    "temporary": false, "local": { "kind": "none" } }),
+        )
+        .expect("presents");
+        assert_eq!(ambiguous["ambiguous"], true);
+        assert_eq!(ambiguous["local"]["kind"], "none");
+
+        assert!(
+            !tools().iter().any(|t| t.name == "read_upload_bytes"),
+            "the bytes door is INTERNAL - an agent has download_file"
+        );
+    }
+
     #[test]
     fn tool_names_are_unique() {
         let mut names: Vec<&str> = tools().iter().map(|t| t.name).collect();
