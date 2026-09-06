@@ -409,7 +409,9 @@ both verified red-without/green-with).
   2026-09-04 were separated from the successful run by ~1 GiB of machine
   weather. If a build dies here, it is capacity, not your change; the cheap
   lever is more SWAP (the peak is one process, and swap keeps the authoritative
-  build) — shrinking the module is the weakest one. That cost is paid ONLY when
+  build) — shrinking the module is the weakest one. The RELEASE profile
+  (`scripts/build-release.sh`, measured 2026-09-06) sampled 13.97 GiB on the
+  same step and needed 8 of the 9 GiB swap; 29m34s end to end. That cost is paid ONLY when
   a `.slint` file changes; GUI-logic edits (`molt-ui`) rebuild in ~2 s at <1 GiB.
   A SIGKILL during the window compile is the kernel OOM-killer. Three things
   keep it survivable, and only one of them is yours to remember:

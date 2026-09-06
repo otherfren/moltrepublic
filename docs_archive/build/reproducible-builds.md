@@ -50,7 +50,13 @@ These inputs determine the artifact bytes:
   the in-process arti client and needs no system Tor; its
   `onion-service-client` feature is what reaches an onion relay - the live
   smoke test `crates/molt-net/tests/tor_embedded_smoke.rs` proves both a
-  clearnet and an onion relay through it). That pulls arti's
+  clearnet and an onion relay through it). Measured 2026-09-06 on the
+  15.9 GiB box with 9 GiB swap: the whole script took 29m34s, of which the
+  release-profile window rustc (`molt-ui-window`, opt-level 3, one codegen
+  unit, thin LTO) ~24 min with a sampled peak of 13.97 GiB RSS and 8 of the
+  9 GiB swap in use at the peak - do not run it beside anything else, and
+  add swap before a bigger window. The stripped `moltd` is 90.2 MiB, the
+  tarball 21.9 MiB. That pulls arti's
   `tor-dirmgr → rusqlite → libsqlite3-sys`, i.e. a bundled C SQLite compiled
   by `cc` at build time - the C compiler and its flags therefore join the
   envelope (see below).
