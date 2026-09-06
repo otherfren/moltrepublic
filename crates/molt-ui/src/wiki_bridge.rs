@@ -50,12 +50,50 @@ fn wiki_doc_id(id: i32) -> wiki::DocId {
     u32::try_from(id).unwrap_or(0)
 }
 
-thread_local! {
-    /// The wiki auto-save guard: the last draft handed to the engine and
-    /// when — `sync_wiki` saves only what CHANGED, at most every 2 s (a
-    /// hard kill loses at most that window; WP-D).
-    static DRAFT_SAVE_GUARD: std::cell::RefCell<(String, std::time::Instant)> =
-        std::cell::RefCell::new((String::new(), std::time::Instant::now()));
+/// At most one draft hop per this much traffic (WP-D): a hard kill loses
+/// at most that window.
+const DRAFT_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// What ONE wiring's face sync carries between calls: the editor-buffer
+/// guard, plus the keys that say which parts of the face have to be
+/// rebuilt at all (`docs/ui/wiki_pane_performance.md` F4 - the sync used
+/// to rebuild everything after every callback, 85 % of it a draft
+/// serialization of a model nothing had touched).
+pub(crate) struct FaceState {
+    /// The (doc, edit mode) `raw` was written for. `None` forces the next
+    /// sync to rewrite the editor buffer (a modal wrote under the caret);
+    /// otherwise the keystroke echo never rewrites it.
+    raw_for: Option<(wiki::DocId, bool)>,
+    /// The draft last handed to the engine, when, and the model
+    /// generation it was taken at.
+    draft: String,
+    draft_at: std::time::Instant,
+    draft_gen: u64,
+    /// A change is waiting for the 2 s window to close, and a timer is
+    /// armed to save it there: without one, a member who types once and
+    /// walks away has no next sync, and the window would never end.
+    draft_pending: bool,
+    flush_armed: bool,
+    /// The generation `cs-patch` was built at.
+    patch_gen: Option<u64>,
+    /// The active document the block view, infobox and link list were
+    /// built from ([`wiki::Wiki::face_key`]).
+    doc_key: Option<(wiki::DocId, u64)>,
+}
+
+impl FaceState {
+    fn new() -> Self {
+        FaceState {
+            raw_for: None,
+            draft: String::new(),
+            draft_at: std::time::Instant::now(),
+            draft_gen: 0,
+            draft_pending: false,
+            flush_armed: false,
+            patch_gen: None,
+            doc_key: None,
+        }
+    }
 }
 
 /// The refusal a failed link commit left, in the ACTIVE language: the
@@ -71,28 +109,43 @@ fn link_error_text(ui: &AppWindow, code: &str) -> String {
     }
 }
 
-/// Push the wiki model into the `WikiState` global — the whole face, after
-/// every mutation (the models are small, and rows patch in place). EXCEPT
-/// the editor buffer: `raw` is rewritten only when the active doc or the
-/// edit mode changes (`last`), never on the keystroke echo — a mid-typing
-/// rewrite fights the caret. A modal write clears `last` itself.
-fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, bool)>) {
-    // the debounced draft persist rides every sync (every model mutation
-    // lands here) — cheap: serialize, compare, at most one engine hop/2 s
+/// The debounced draft persist (WP-D), the half of a sync that talks to
+/// the engine. The WHOLE model as JSON (21 ms on a held base) is
+/// serialized only when the model actually moved and the window is over:
+/// the keystroke echo never pays for a comparison that is thrown away
+/// 2 s out of 2 s (F4a). Returns whether a change is still WAITING for
+/// the window to close - [`arm_draft_flush`] is what ends that wait.
+/// `forced` is the flush timer speaking: the window is over by
+/// construction there, and the mocked clock the GUI tests run on never
+/// moves an `Instant`.
+fn sync_draft(ui: &AppWindow, w: &wiki::Wiki, face: &mut FaceState, forced: bool) -> bool {
+    let gen = w.generation();
+    if gen == face.draft_gen {
+        return false;
+    }
+    if !forced && face.draft_at.elapsed() < DRAFT_WINDOW {
+        return true;
+    }
+    face.draft_gen = gen;
     let draft = w.to_draft();
-    let due = DRAFT_SAVE_GUARD.with(|g| {
-        let mut g = g.borrow_mut();
-        if g.0 != draft && g.1.elapsed() >= std::time::Duration::from_secs(2) {
-            g.0 = draft.clone();
-            g.1 = std::time::Instant::now();
-            true
-        } else {
-            false
-        }
-    });
-    if due {
+    if draft != face.draft {
+        face.draft = draft.clone();
+        face.draft_at = std::time::Instant::now();
         ui.invoke_wiki_draft_save(draft.into());
     }
+    false
+}
+
+/// Push the wiki model into the `WikiState` global after every mutation:
+/// the small models patch in place, and the parts that are neither cheap
+/// nor on screen are skipped on the keys `face` carries
+/// (`docs/ui/wiki_pane_performance.md` F4). The editor buffer is the
+/// oldest of those keys: `raw` is rewritten only when the active doc or
+/// the edit mode changes (`raw_for`), never on the keystroke echo — a
+/// mid-typing rewrite fights the caret. A modal write clears it itself.
+fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, face: &mut FaceState) {
+    let gen = w.generation();
+    face.draft_pending = sync_draft(ui, w, face, false);
     let s = ui.global::<WikiState>();
     let nav: Vec<WikiNavRow> = w
         .nav_rows()
@@ -185,14 +238,18 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
     sync_model(&s.get_link_relations(), rels, PartialEq::eq, |m| {
         s.set_link_relations(m);
     });
-    // the details modal shows the WHOLE change; the panel list is capped
-    s.set_cs_patch(w.build_patch().unwrap_or_default().into());
+    // the details modal shows the WHOLE change — rebuilt when the model
+    // moved, not once per sync into a modal nobody opened (F4)
+    if face.patch_gen != Some(gen) {
+        face.patch_gen = Some(gen);
+        s.set_cs_patch(w.build_patch().unwrap_or_default().into());
+    }
     s.set_cs_vote_queued(w.vote_pending());
     // …and the BYTES any changed document still lacks (§4.10), whether or
     // not a tab is open: a delete or move made in the navigator needs the
     // ratified text just as much, and asking only for the OPEN document
-    // left those waiting forever. Idempotent: the reply fills the model
-    // and the next sync asks for nothing.
+    // left those waiting forever. CLAIMED, not repeated: a path in flight
+    // is skipped until it lands or the fetch gives up (F5).
     if let Some(want) = w.wants_content() {
         s.invoke_content_wanted(want.into());
     }
@@ -213,62 +270,32 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
         };
         s.set_doc_meta(meta.into());
         s.set_doc_status(wiki_status_code(doc.status()));
-        let blocks: Vec<WikiBlock> = w
-            .preview(id)
-            .into_iter()
-            .map(|(b, st)| WikiBlock {
-                kind: i32::from(b.kind),
-                text: b.text.into(),
-                status: match st {
-                    wiki::BlockStatus::Same => 0,
-                    wiki::BlockStatus::Added => 1,
-                    wiki::BlockStatus::Changed => 2,
-                    wiki::BlockStatus::Removed => 3,
-                },
-                spans: ModelRc::new(VecModel::from(
-                    b.spans
-                        .into_iter()
-                        .map(|sp| WikiSpan {
-                            text: sp.text.into(),
-                            link: sp.link.into(),
-                            rel: sp.rel.into(),
-                        })
-                        .collect::<Vec<_>>(),
-                )),
-            })
-            .collect();
-        sync_model(&s.get_blocks(), blocks, wiki_block_eq, |m| s.set_blocks(m));
-        let links: Vec<slint::SharedString> = w.links(id).into_iter().map(Into::into).collect();
-        sync_model(&s.get_links(), links, PartialEq::eq, |m| s.set_links(m));
-        let rows: Vec<WikiProp> = w
-            .infobox(id)
-            .into_iter()
-            .map(|r| WikiProp {
-                key: r.key.into(),
-                value: r.value.into(),
-                link: r.link.into(),
-                status: i32::from(r.status),
-                hue: i32::from(r.hue),
-            })
-            .collect();
-        // tags read as pills, every other key as a labelled row - two
-        // models, so each band knows whether it has anything to show
-        let (tags, props): (Vec<WikiProp>, Vec<WikiProp>) =
-            rows.into_iter().partition(|r| r.hue >= 0);
-        sync_model(&s.get_props(), props, PartialEq::eq, |m| s.set_props(m));
-        sync_model(&s.get_tag_pills(), tags, PartialEq::eq, |m| s.set_tag_pills(m));
-        s.set_can_add_tags(w.can_add_tags());
+        // The block view, the infobox and the link list are ONE face over
+        // the document's bytes, and surfaces.slint shows it only while
+        // `doc-open && !editing`. So it is rebuilt when that key moved -
+        // never per keystroke, where the markdown parse of working AND
+        // base text plus a Myers diff went into a view that is off screen
+        // (F4). Leaving the editor is a key change, so the blocks are
+        // fresh the moment they are visible again.
+        let doc_key = if w.editing { None } else { w.face_key() };
+        if let Some(key) = doc_key {
+            if face.doc_key != Some(key) {
+                face.doc_key = Some(key);
+                sync_doc_face(&s, w, id);
+            }
+        }
         // the in-edges come from the engine, so they are fetched only when
         // the open document actually changed
         if path_changed {
             s.set_backlinks(ModelRc::new(VecModel::from(Vec::<slint::SharedString>::new())));
             s.invoke_backlinks_wanted(doc.path.clone().into());
         }
-        if *last != Some((id, w.editing)) {
+        if face.raw_for != Some((id, w.editing)) {
             s.set_raw(doc.raw.clone().into());
-            *last = Some((id, w.editing));
+            face.raw_for = Some((id, w.editing));
         }
     } else {
+        face.doc_key = None;
         s.set_doc_open(false);
         s.set_doc_path("".into());
         s.set_doc_title("".into());
@@ -282,27 +309,109 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
         sync_model(&s.get_backlinks(), Vec::new(), PartialEq::eq, |m| {
             s.set_backlinks(m);
         });
-        *last = None;
+        face.raw_for = None;
     }
+}
+
+/// The open document's rendered face: the diffed blocks, its links and
+/// its header as infobox rows. Split out of [`sync_wiki`] because it is
+/// the expensive half and runs only when the document's bytes moved.
+fn sync_doc_face(s: &WikiState<'_>, w: &wiki::Wiki, id: wiki::DocId) {
+    let blocks: Vec<WikiBlock> = w
+        .preview(id)
+        .into_iter()
+        .map(|(b, st)| WikiBlock {
+            kind: i32::from(b.kind),
+            text: b.text.into(),
+            status: match st {
+                wiki::BlockStatus::Same => 0,
+                wiki::BlockStatus::Added => 1,
+                wiki::BlockStatus::Changed => 2,
+                wiki::BlockStatus::Removed => 3,
+            },
+            spans: ModelRc::new(VecModel::from(
+                b.spans
+                    .into_iter()
+                    .map(|sp| WikiSpan {
+                        text: sp.text.into(),
+                        link: sp.link.into(),
+                        rel: sp.rel.into(),
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+        })
+        .collect();
+    sync_model(&s.get_blocks(), blocks, wiki_block_eq, |m| s.set_blocks(m));
+    let links: Vec<slint::SharedString> = w.links(id).into_iter().map(Into::into).collect();
+    sync_model(&s.get_links(), links, PartialEq::eq, |m| s.set_links(m));
+    let rows: Vec<WikiProp> = w
+        .infobox(id)
+        .into_iter()
+        .map(|r| WikiProp {
+            key: r.key.into(),
+            value: r.value.into(),
+            link: r.link.into(),
+            status: i32::from(r.status),
+            hue: i32::from(r.hue),
+        })
+        .collect();
+    // tags read as pills, every other key as a labelled row - two
+    // models, so each band knows whether it has anything to show
+    let (tags, props): (Vec<WikiProp>, Vec<WikiProp>) = rows.into_iter().partition(|r| r.hue >= 0);
+    sync_model(&s.get_props(), props, PartialEq::eq, |m| s.set_props(m));
+    sync_model(&s.get_tag_pills(), tags, PartialEq::eq, |m| s.set_tag_pills(m));
+    s.set_can_add_tags(w.can_add_tags());
+}
+
+/// A callback ran: the model moved, so bump its generation and push the
+/// face. Every wiki verb is a mutation by construction, which makes this
+/// the ONE place the sync's "has anything changed" key has to be kept
+/// honest (`docs/ui/wiki_pane_performance.md` F4).
+fn sync_after(ui: &AppWindow, m: &Rc<RefCell<wiki::Wiki>>, face: &Rc<RefCell<FaceState>>) {
+    m.borrow_mut().touch();
+    sync_wiki(ui, &m.borrow(), &mut face.borrow_mut());
+    arm_draft_flush(ui, m, face);
+}
+
+/// End the 2 s draft window even when nothing else happens: ONE timer per
+/// window (`flush_armed`), so a burst of keystrokes arms one and not
+/// twenty, and the change a member typed before walking away still lands.
+/// The face itself needs no re-push - nothing mutated - so the timer runs
+/// the draft half alone.
+fn arm_draft_flush(ui: &AppWindow, m: &Rc<RefCell<wiki::Wiki>>, face: &Rc<RefCell<FaceState>>) {
+    let left = {
+        let mut f = face.borrow_mut();
+        if !f.draft_pending || f.flush_armed {
+            return;
+        }
+        f.flush_armed = true;
+        DRAFT_WINDOW.saturating_sub(f.draft_at.elapsed())
+    };
+    #[cfg(test)]
+    wiki::counters::bump_flush();
+    let weak = ui.as_weak();
+    let m = m.clone();
+    let face = face.clone();
+    slint::Timer::single_shot(left, move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let w = m.borrow();
+        let mut f = face.borrow_mut();
+        f.flush_armed = false;
+        f.draft_pending = sync_draft(&ui, &w, &mut f, true);
+    });
 }
 
 /// Wire the Multisig-Wiki's Rust state machine ([`wiki`]) to the
 /// `WikiState` global: every action callback mutates the model, then
-/// re-syncs the whole face. UI-local by design — of the wiki verbs only
-/// the changeset VOTE talks to the engine, and that one is wired
-/// separately ([`wire_wiki_vote`]) where the handles live. Returns the
-/// shared model + raw-guard for that wiring.
-#[allow(clippy::type_complexity)]
-pub(crate) fn wire_wiki(
-    ui: &AppWindow,
-) -> (
-    Rc<RefCell<wiki::Wiki>>,
-    Rc<RefCell<Option<(wiki::DocId, bool)>>>,
-) {
+/// re-syncs the face ([`sync_after`]). UI-local by design — of the wiki
+/// verbs only the changeset VOTE talks to the engine, and that one is
+/// wired separately ([`wire_wiki_vote`]) where the handles live. Returns
+/// the shared model + face state for that wiring.
+pub(crate) fn wire_wiki(ui: &AppWindow) -> (Rc<RefCell<wiki::Wiki>>, Rc<RefCell<FaceState>>) {
     // the REAL base arrives from the engine read (set_base) — until then
     // the honest empty state shows; the sample stays a test fixture
     let model = Rc::new(RefCell::new(wiki::Wiki::empty()));
-    let last: Rc<RefCell<Option<(wiki::DocId, bool)>>> = Rc::new(RefCell::new(None));
+    let last: Rc<RefCell<FaceState>> = Rc::new(RefCell::new(FaceState::new()));
     sync_wiki(ui, &model.borrow(), &mut last.borrow_mut());
     let g = ui.global::<WikiState>();
 
@@ -319,7 +428,7 @@ pub(crate) fn wire_wiki(
                     let mut $w = m.borrow_mut();
                     $body;
                 }
-                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+                sync_after(&ui, &m, &la);
             });
         }};
     }
@@ -342,7 +451,7 @@ pub(crate) fn wire_wiki(
             slint::Timer::single_shot(std::time::Duration::ZERO, move || {
                 let Some(ui) = weak.upgrade() else { return };
                 m.borrow_mut().rename_cancel();
-                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+                sync_after(&ui, &m, &la);
             });
         });
     }
@@ -359,7 +468,7 @@ pub(crate) fn wire_wiki(
             slint::Timer::single_shot(std::time::Duration::ZERO, move || {
                 let Some(ui) = weak.upgrade() else { return };
                 m.borrow_mut().delete(wiki_doc_id(id));
-                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+                sync_after(&ui, &m, &la);
             });
         });
     }
@@ -387,7 +496,7 @@ pub(crate) fn wire_wiki(
         g.on_reveal(move || {
             let Some(ui) = weak.upgrade() else { return };
             let at = m.borrow_mut().reveal();
-            sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            sync_after(&ui, &m, &la);
             if let Some(at) = at {
                 ui.global::<WikiState>()
                     .set_nav_scroll_to(i32::try_from(at).unwrap_or(-1));
@@ -434,9 +543,9 @@ pub(crate) fn wire_wiki(
                     $body
                 };
                 if wrote {
-                    *la.borrow_mut() = None;
+                    la.borrow_mut().raw_for = None;
                 }
-                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+                sync_after(&ui, &m, &la);
             });
         }};
     }
@@ -481,8 +590,8 @@ pub(crate) fn wire_wiki(
         g.on_workspace_changed(move || {
             let Some(ui) = weak.upgrade() else { return };
             *m.borrow_mut() = wiki::Wiki::empty();
-            *la.borrow_mut() = None;
-            sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            la.borrow_mut().raw_for = None;
+            sync_after(&ui, &m, &la);
             ui.invoke_wiki_draft_load();
         });
     }
@@ -511,7 +620,11 @@ pub(crate) fn wire_wiki(
                     .collect();
                 let rev = u64::try_from(gs.get_base_rev()).unwrap_or(0);
                 w.set_base(&base, rev);
-                DRAFT_SAVE_GUARD.with(|g| *g.borrow_mut() = (w.to_draft(), std::time::Instant::now()));
+                w.touch();
+                let mut f = la.borrow_mut();
+                f.draft = w.to_draft();
+                f.draft_at = std::time::Instant::now();
+                f.draft_gen = w.generation();
             }
             sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
         });
@@ -527,7 +640,7 @@ pub(crate) fn wire_wiki(
         ui.on_wiki_rescue(move |patch| {
             let Some(ui) = weak.upgrade() else { return };
             let (applied, skipped) = m.borrow_mut().rescue_patch(&patch);
-            sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            sync_after(&ui, &m, &la);
             let word = ui.global::<Strings>().get_mem_toast_rescued();
             ui.invoke_show_toast(format!("⤵ {word} {applied}/{}", applied + skipped).into());
             ui.invoke_select_view("memory".into(), "brain".into());
@@ -552,7 +665,7 @@ pub(crate) fn wire_wiki(
                 }
                 fire
             };
-            sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            sync_after(&ui, &m, &la);
             if fire {
                 ui.global::<WikiState>().invoke_cs_vote();
             }
@@ -565,13 +678,17 @@ pub(crate) fn wire_wiki(
         let m = model.clone();
         let la = last.clone();
         let weak = ui.as_weak();
-        g.on_content_failed(move |_path| {
+        g.on_content_failed(move |path| {
             let Some(ui) = weak.upgrade() else { return };
+            // the attempt is over: the path is askable again, and the next
+            // sync (a member action) retries it - re-asking from HERE
+            // would be a fetch loop nobody started (F5)
+            m.borrow_mut().content_failed(&path);
             if !m.borrow().vote_pending() {
                 return;
             }
             m.borrow_mut().clear_vote();
-            sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            sync_after(&ui, &m, &la);
             let msg = ui.global::<Strings>().get_mem_toast_content_failed();
             ui.invoke_show_toast_error(msg);
         });
@@ -602,7 +719,7 @@ pub(crate) fn wire_wiki(
                 let rev = u64::try_from(gs.get_base_rev()).unwrap_or(0);
                 m.borrow_mut().set_base(&base, rev);
             }
-            sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            sync_after(&ui, &m, &la);
         });
     }
 
@@ -619,7 +736,7 @@ pub(crate) fn wire_wiki(
             slint::Timer::single_shot(std::time::Duration::ZERO, move || {
                 let Some(ui) = weak.upgrade() else { return };
                 m.borrow_mut().new_file_in(&folder);
-                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+                sync_after(&ui, &m, &la);
             });
         });
     }
@@ -634,7 +751,7 @@ pub(crate) fn wire_wiki(
             slint::Timer::single_shot(std::time::Duration::ZERO, move || {
                 let Some(ui) = weak.upgrade() else { return };
                 m.borrow_mut().rename_folder_start(&folder);
-                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+                sync_after(&ui, &m, &la);
             });
         });
     }
@@ -658,7 +775,7 @@ pub(crate) fn wire_wiki(
                         }
                     }
                 }
-                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+                sync_after(&ui, &m, &la);
             });
         });
     }
@@ -673,7 +790,7 @@ pub(crate) fn wire_wiki(
             slint::Timer::single_shot(std::time::Duration::ZERO, move || {
                 let Some(ui) = weak.upgrade() else { return };
                 m.borrow_mut().delete_folder(&folder);
-                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+                sync_after(&ui, &m, &la);
             });
         });
     }
@@ -696,7 +813,7 @@ pub(crate) fn wire_wiki(
                         ui.invoke_show_toast_error(localize_wiki_err(ui.get_lang_index(), &e).into());
                     }
                 }
-                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+                sync_after(&ui, &m, &la);
             });
         });
     }
@@ -717,7 +834,7 @@ pub(crate) fn wire_wiki(
                         ui.invoke_show_toast_error(localize_wiki_err(ui.get_lang_index(), &e).into());
                     }
                 }
-                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+                sync_after(&ui, &m, &la);
             });
         });
     }
@@ -738,7 +855,7 @@ pub(crate) fn wire_wiki(
                         ui.invoke_show_toast_error(localize_wiki_err(ui.get_lang_index(), &e).into());
                     }
                 }
-                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+                sync_after(&ui, &m, &la);
             });
         });
     }
@@ -758,7 +875,7 @@ pub(crate) fn wire_wiki(
                         ui.invoke_show_toast_error(localize_wiki_err(ui.get_lang_index(), &e).into());
                     }
                 }
-                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+                sync_after(&ui, &m, &la);
             });
         });
     }
@@ -787,7 +904,7 @@ pub(crate) fn wire_wiki(
                         }
                     }
                 }
-                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+                sync_after(&ui, &m, &la);
             });
         });
     }
@@ -814,7 +931,7 @@ pub(crate) fn wire_wiki(
                         ui.invoke_show_toast_error(localize_wiki_err(ui.get_lang_index(), &e).into());
                     }
                 }
-                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+                sync_after(&ui, &m, &la);
             });
         });
     }
@@ -832,8 +949,8 @@ pub(crate) fn wire_wiki(
             if let Err(e) = m.borrow_mut().undo() {
                 ui.invoke_show_toast_error(localize_wiki_err(ui.get_lang_index(), &e).into());
             }
-            *la.borrow_mut() = None;
-            sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            la.borrow_mut().raw_for = None;
+            sync_after(&ui, &m, &la);
         });
     }
     {
@@ -843,8 +960,8 @@ pub(crate) fn wire_wiki(
         g.on_cs_revert(move || {
             let Some(ui) = weak.upgrade() else { return };
             m.borrow_mut().revert_all();
-            *la.borrow_mut() = None;
-            sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            la.borrow_mut().raw_for = None;
+            sync_after(&ui, &m, &la);
         });
     }
     {
@@ -856,8 +973,8 @@ pub(crate) fn wire_wiki(
             if let Err(e) = m.borrow_mut().revert_doc(wiki_doc_id(id)) {
                 ui.invoke_show_toast_error(localize_wiki_err(ui.get_lang_index(), &e).into());
             }
-            *la.borrow_mut() = None;
-            sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            la.borrow_mut().raw_for = None;
+            sync_after(&ui, &m, &la);
         });
     }
     {
@@ -872,8 +989,8 @@ pub(crate) fn wire_wiki(
                     ui.invoke_show_toast_error(localize_wiki_err(ui.get_lang_index(), &e).into());
                 }
             }
-            *la.borrow_mut() = None;
-            sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            la.borrow_mut().raw_for = None;
+            sync_after(&ui, &m, &la);
         });
     }
     // copy-link: markdown link markup for the file, ready to paste into
@@ -1065,7 +1182,7 @@ pub(crate) fn wire_wiki_vote(
     ui: &AppWindow,
     cx: &Ctx,
     model: &Rc<RefCell<wiki::Wiki>>,
-    last: &Rc<RefCell<Option<(wiki::DocId, bool)>>>,
+    last: &Rc<RefCell<FaceState>>,
 ) {
     let m = model.clone();
     let la = last.clone();
@@ -1080,8 +1197,15 @@ pub(crate) fn wire_wiki_vote(
             // used to say "try again in a moment" over a request nobody
             // had made - a refusal the member could hit forever.
             if !m.borrow().unloaded_changes().is_empty() {
-                m.borrow_mut().queue_vote();
-                sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+                {
+                    let mut w = m.borrow_mut();
+                    w.queue_vote();
+                    // the click distrusts every fetch in progress: a
+                    // request dropped somewhere would keep the queued vote
+                    // waiting forever
+                    w.requeue_content();
+                }
+                sync_after(&ui, &m, &la);
                 let msg = ui.global::<Strings>().get_mem_toast_vote_queued();
                 ui.invoke_show_toast(msg);
                 return;
@@ -1097,8 +1221,8 @@ pub(crate) fn wire_wiki_vote(
                 return;
             }
             m.borrow_mut().revert_all();
-            *la.borrow_mut() = None;
-            sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
+            la.borrow_mut().raw_for = None;
+            sync_after(&ui, &m, &la);
             let msg = ui.global::<Strings>().get_mem_toast_net_empty();
             ui.invoke_show_toast(msg);
             return;
