@@ -20,6 +20,7 @@ Exit status is non-zero when something does not resolve.
 
 import pathlib
 import re
+import subprocess
 import sys
 
 SCAN_SUFFIXES = {".rs", ".md", ".slint", ".sh", ".toml"}
@@ -101,14 +102,31 @@ def keep(path: pathlib.Path) -> bool:
     return not s.startswith(SKIP_PREFIXES) and "/target/" not in s
 
 
+def candidates(root: pathlib.Path) -> list[pathlib.Path]:
+    """Every file git would show: tracked plus untracked, never ignored.
+
+    An ignored scratch note at the repo root is not a reference (G3, round
+    3); outside a checkout the walk falls back to the tree."""
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+            capture_output=True,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return [p for p in root.rglob("*") if p.is_file()]
+    return [pathlib.Path(x) for x in out.decode(errors="replace").split("\0") if x]
+
+
 def main() -> int:
     root = pathlib.Path(".")
     index: dict[str, list[str]] = {}
-    for p in root.rglob("*.md"):
-        if keep(p):
+    listed = [p for p in candidates(root) if keep(p)]
+    for p in listed:
+        if p.suffix == ".md":
             index.setdefault(p.name, []).append(str(p))
 
-    files = sorted({p for p in root.rglob("*") if p.suffix in SCAN_SUFFIXES and p.is_file() and keep(p)})
+    files = sorted({p for p in listed if p.suffix in SCAN_SUFFIXES and p.is_file()})
     broken: list[tuple[str, str, str]] = []
     ambiguous: list[tuple[str, str, list[str]]] = []
     resolved = 0
