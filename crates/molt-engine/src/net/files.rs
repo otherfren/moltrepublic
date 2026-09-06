@@ -397,7 +397,13 @@ impl State {
             return;
         };
         if !available {
-            refuse("the sharer removed the file - no longer available");
+            // R21: told apart, because the remedy differs - a removed file
+            // is gone, a replaced one needs a new share
+            refuse(if self.share_file_changed(&id, ident.size) {
+                "the file behind this share was replaced"
+            } else {
+                "the sharer removed the file - no longer available"
+            });
             return;
         }
         // a share past its window is not served, even to a requester whose
