@@ -1091,6 +1091,286 @@ fn reveal_scrolls_the_navigator_to_the_marked_row() {
     assert!(g.get_can_reveal());
 }
 
+/// The wiki pane shown headless over a base of `paths` - the fixture the
+/// navigator tests below drive with real mouse events.
+#[cfg(feature = "live-preview")]
+fn nav_window(paths: &[&str]) -> AppWindow {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    ui.set_screen(AppScreen::Main);
+    ui.set_selected_surface("memory".into());
+    ui.set_selected_view("brain".into());
+    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: "memory".into(),
+        ..SurfaceTab::default()
+    }])));
+    let _wiki = wire_wiki(&ui);
+    let g = ui.global::<WikiState>();
+    let docs: Vec<WikiBase> = paths
+        .iter()
+        .map(|p| WikiBase {
+            path: (*p).into(),
+            content: "prose\n".into(),
+            loaded: true,
+        })
+        .collect();
+    g.set_base_docs(ModelRc::new(VecModel::from(docs)));
+    g.set_base_rev(1);
+    g.invoke_base_arrived();
+    ui.window().set_size(slint::PhysicalSize::new(1400, 900));
+    ui.show().expect("show headless");
+    settle();
+    ui
+}
+
+/// Every element tree of a navigator row (by its named parts).
+#[cfg(feature = "live-preview")]
+fn nav_row_trees(ui: &AppWindow, id: &str) -> Vec<i_slint_backend_testing::ElementHandle> {
+    i_slint_backend_testing::ElementHandle::find_by_element_id(ui, id).collect()
+}
+
+/// The navigator renders a VIEWPORT's worth of rows, never one per
+/// document. (The windowing behind it - `live` on each row - cannot be
+/// counted here: the testing search API skips anything the flickable
+/// clips, so an eager tree and a windowed one look identical from
+/// outside. What windowing buys is measured by the paint probe.)
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_navigator_renders_a_viewports_worth_of_rows() {
+    let paths: Vec<String> = (0..200).map(|i| format!("note-{i:03}.md")).collect();
+    let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+    let ui = nav_window(&refs);
+    let g = ui.global::<WikiState>();
+    assert_eq!(g.get_nav_rows().row_count(), 200, "every file is a row");
+    let nav = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "ScrollBody::fl")
+        .min_by(|a, b| a.absolute_position().x.total_cmp(&b.absolute_position().x))
+        .expect("the navigator's flickable");
+    let fits = (nav.size().height / 28.0).ceil() as usize;
+    let live = nav_row_trees(&ui, "MemoryPane::filerow").len();
+    assert!(live > 0, "the visible rows exist");
+    assert!(
+        live <= fits + 8,
+        "{live} row trees for a {fits}-row viewport"
+    );
+}
+
+/// **A right-click marks the row and opens the pane's ONE menu.** The
+/// per-row `ContextMenuArea` (a seven-item `Menu` per row) is gone; the
+/// entries are built from the marked row, so the click has to mark first.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_right_click_on_a_file_row_marks_it_and_opens_the_pane_menu() {
+    let ui = nav_window(&["alpha.md", "beta.md", "gamma.md"]);
+    let g = ui.global::<WikiState>();
+    let verb = ui.global::<Strings>().get_mem_menu_copy_link().to_string();
+    assert!(!verb.is_empty(), "the fixture must carry the menu title");
+    assert!(
+        i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, &verb)
+            .next()
+            .is_none(),
+        "no menu may be findable before the click"
+    );
+    let rows = nav_row_trees(&ui, "MemoryPane::filerow");
+    assert_eq!(rows.len(), 3, "three file rows render");
+    right_click(&ui, &rows[1], 0.5);
+    settle();
+    assert!(g.get_has_marked(), "the right-click marked the row");
+    assert!(!g.get_marked_is_folder());
+    assert_eq!(g.get_marked_id(), nav_id(&ui, "beta.md"));
+    assert!(
+        i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, &verb)
+            .next()
+            .is_some(),
+        "right-click opened no menu carrying {verb:?}"
+    );
+}
+
+/// The same for a FOLDER row: it marks the folder and offers the folder
+/// verbs - never the file ones.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_right_click_on_a_folder_row_marks_it_and_opens_the_folder_menu() {
+    let ui = nav_window(&["team/roles.md", "note.md"]);
+    let g = ui.global::<WikiState>();
+    let s = ui.global::<Strings>();
+    let folder_verb = s.get_mem_tb_new_file().to_string();
+    let file_verb = s.get_mem_menu_copy_link().to_string();
+    assert!(!folder_verb.is_empty() && !file_verb.is_empty());
+    let rows = nav_row_trees(&ui, "MemoryPane::frow");
+    assert_eq!(rows.len(), 1, "one folder row renders");
+    right_click(&ui, &rows[0], 0.5);
+    settle();
+    assert!(g.get_marked_is_folder(), "the folder row is the marked one");
+    assert_eq!(g.get_marked_path().as_str(), "team");
+    assert!(
+        i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, &folder_verb)
+            .next()
+            .is_some(),
+        "the folder menu is missing {folder_verb:?}"
+    );
+    assert!(
+        i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, &file_verb)
+            .next()
+            .is_none(),
+        "a folder row must not offer {file_verb:?}"
+    );
+}
+
+/// **A mark must not move a glyph** (`wiki_pane_performance.md` F2): the
+/// weight used to switch 400 → 600, which changes the label's text
+/// metrics, invalidates the layout above it and repaints the whole
+/// window instead of two rows. The strike-through of a deleted row is
+/// measured off `nlabel.preferred-width`, so it reads that metric back.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_mark_leaves_the_row_label_metrics_alone() {
+    let ui = nav_window(&["deleted-note.md", "keeper.md"]);
+    let g = ui.global::<WikiState>();
+    let id = nav_id(&ui, "deleted-note.md");
+    g.invoke_nav_delete(id);
+    settle();
+    let strike = || {
+        i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "MemoryPane::strike")
+            .next()
+            .expect("the deleted row is struck")
+            .size()
+            .width
+    };
+    let label = || {
+        i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "MemoryPane::nlabel")
+            .next()
+            .expect("the row label")
+            .size()
+    };
+    let (before, lbefore) = (strike(), label());
+    assert!(before > 0.0, "the strike is measured off the text");
+    g.invoke_nav_mark(id);
+    settle();
+    assert!(g.get_has_marked(), "the row is marked");
+    assert_eq!(strike(), before, "the mark changed the label's metrics");
+    assert_eq!(label(), lbefore, "the mark resized the label");
+}
+
+/// **A mark repaints its rows, not the window** (`wiki_pane_performance.md`
+/// F2). The weight switch changed the label's metrics and the accent bar
+/// was created and destroyed per mark; both invalidated the pane, so a
+/// mark dirtied 1600x1000. This renders the pane offscreen through the
+/// software renderer - the only thing that can read a dirty region back -
+/// and asserts the second mark touches a few rows.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_mark_repaints_its_rows_not_the_window() {
+    use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
+    use slint::Rgb8Pixel;
+    struct P(std::rc::Rc<MinimalSoftwareWindow>);
+    impl slint::platform::Platform for P {
+        fn create_window_adapter(
+            &self,
+        ) -> Result<std::rc::Rc<dyn slint::platform::WindowAdapter>, slint::PlatformError> {
+            Ok(self.0.clone())
+        }
+    }
+    const W: u32 = 1200;
+    const H: u32 = 800;
+    let win = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+    // Slint's platform is thread-local and every #[test] owns its
+    // thread, so this window never meets the testing backend
+    slint::platform::set_platform(Box::new(P(win.clone()))).expect("software platform");
+    win.set_size(slint::PhysicalSize::new(W, H));
+    let mut buf = vec![Rgb8Pixel::default(); (W * H) as usize];
+    let ui = AppWindow::new().expect("window");
+    apply_strings(&ui, 0);
+    ui.set_screen(AppScreen::Main);
+    ui.set_selected_surface("memory".into());
+    ui.set_selected_view("brain".into());
+    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: "memory".into(),
+        ..SurfaceTab::default()
+    }])));
+    let _wiki = wire_wiki(&ui);
+    let g = ui.global::<WikiState>();
+    let docs: Vec<WikiBase> = (0..60)
+        .map(|i| WikiBase {
+            path: format!("note-{i:02}.md").into(),
+            content: "prose\n".into(),
+            loaded: true,
+        })
+        .collect();
+    g.set_base_docs(ModelRc::new(VecModel::from(docs)));
+    g.set_base_rev(1);
+    g.invoke_base_arrived();
+    ui.show().expect("show");
+    let mut frame = || {
+        let mut region = None;
+        win.draw_if_needed(|r| {
+            region = Some(r.render(&mut buf, W as usize));
+        });
+        region.map(|r| r.bounding_box_size())
+    };
+    frame().expect("the cold frame paints");
+    let rows = g.get_nav_rows();
+    let ids: Vec<i32> = (0..rows.row_count())
+        .filter_map(|i| rows.row_data(i))
+        .filter(|r| !r.is_folder)
+        .map(|r| r.id)
+        .collect();
+    g.invoke_nav_mark(ids[1]);
+    // the first mark also enables the toolbar's delete button, so its
+    // region spans both - the second one is the mark alone
+    frame().expect("the mark paints");
+    g.invoke_nav_mark(ids[4]);
+    let moved = frame().expect("the moved mark paints");
+    assert!(
+        moved.height < 200 && moved.width < W / 2,
+        "a mark dirtied {}x{} - the pane, not two rows",
+        moved.width,
+        moved.height
+    );
+}
+
+/// A row that starts renaming has to be REACHABLE: its inline input only
+/// exists while the row is inside the navigator's window, and a new file
+/// lands at the foot of a long tree.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_new_file_brings_its_rename_input_into_view() {
+    let paths: Vec<String> = (0..200).map(|i| format!("note-{i:03}.md")).collect();
+    let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+    let ui = nav_window(&refs);
+    let g = ui.global::<WikiState>();
+    g.invoke_new_file();
+    settle();
+    assert_eq!(g.get_nav_rows().row_count(), 201, "the new row is listed");
+    let nav = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "ScrollBody::fl")
+        .min_by(|a, b| a.absolute_position().x.total_cmp(&b.absolute_position().x))
+        .expect("the navigator's flickable");
+    let rin = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "MemoryPane::rin")
+        .next()
+        .expect("the rename input is in view");
+    let (top, bottom) = (nav.absolute_position().y, nav.absolute_position().y + nav.size().height);
+    let y = rin.absolute_position().y;
+    assert!(
+        y >= top && y < bottom,
+        "the rename input sits outside the navigator ({top}..{bottom}), y={y}"
+    );
+}
+
+/// The double-click route stays open with one pane-level menu (the
+/// per-row menu used to host the TouchArea that carries it).
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_double_click_on_a_navigator_row_still_opens_the_document() {
+    let ui = nav_window(&["alpha.md", "beta.md"]);
+    let g = ui.global::<WikiState>();
+    let rows = nav_row_trees(&ui, "MemoryPane::filerow");
+    click(&ui, &rows[0]);
+    click(&ui, &rows[0]);
+    settle();
+    assert!(g.get_doc_open(), "the double-click opened nothing");
+    assert_eq!(g.get_doc_path().as_str(), "alpha.md");
+}
+
 #[test]
 fn the_authoring_modals_fit_the_window_at_every_font_size() {
     i_slint_backend_testing::init_no_event_loop();

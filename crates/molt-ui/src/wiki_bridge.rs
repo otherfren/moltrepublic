@@ -71,6 +71,26 @@ fn link_error_text(ui: &AppWindow, code: &str) -> String {
     }
 }
 
+/// The navigator keeps ONE context menu per row KIND and builds it from
+/// the MARKED row, so the row's facts travel as scalars
+/// (`docs/ui/wiki_pane_performance.md` F3).
+fn sync_nav_menu(s: &WikiState<'_>, nav: &[WikiNavRow]) {
+    let m = nav.iter().find(|r| r.marked);
+    s.set_marked_is_folder(m.is_some_and(|r| r.is_folder));
+    s.set_marked_id(m.map_or(0, |r| r.id));
+    s.set_marked_path(m.map(|r| r.path.clone()).unwrap_or_default());
+    s.set_marked_depth(m.map_or(0, |r| r.depth));
+    s.set_marked_status(m.map_or(0, |r| r.status));
+    // the windowed navigator holds no element for an off-screen row, so
+    // the row that starts renaming has to be scrolled to
+    s.set_nav_renaming_row(
+        nav.iter()
+            .position(|r| r.renaming)
+            .and_then(|p| i32::try_from(p).ok())
+            .unwrap_or(-1),
+    );
+}
+
 /// Push the wiki model into the `WikiState` global — the whole face, after
 /// every mutation (the models are small, and rows patch in place). EXCEPT
 /// the editor buffer: `raw` is rewritten only when the active doc or the
@@ -109,6 +129,7 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, last: &mut Option<(wiki::DocId, boo
             renaming: r.renaming,
         })
         .collect();
+    sync_nav_menu(&s, &nav);
     sync_model(&s.get_nav_rows(), nav, PartialEq::eq, |m| s.set_nav_rows(m));
     let tabs: Vec<WikiTabRow> = w
         .tab_rows()
