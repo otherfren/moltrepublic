@@ -293,14 +293,14 @@ impl State {
         // lazily on the first download request
         self.ensure_demo_net();
         let channel = channel.normalized().map_err(MoltError::BadPayload)?;
-        // a bare name is the exchange folder's; any path the node's user
-        // can read is fair game on both surfaces (ADR-0007)
-        let path = self.host_path(&path);
-        if path.is_empty() {
+        if path.trim().is_empty() {
             return Err(MoltError::BadPayload(
                 "the file path must not be empty".into(),
             ));
         }
+        // a bare name is the exchange folder's; any absolute path the
+        // node's user can read is fair game on both surfaces (ADR-0007)
+        let path = self.host_path(&path)?;
         let p = std::path::PathBuf::from(&path);
         if p.file_name().is_none() {
             return Err(MoltError::BadPayload(format!(
@@ -440,8 +440,14 @@ impl State {
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return Err(MoltError::Engine("the engine is shutting down".into()));
         };
+        // one destination rule for every door (ADR-0007): a bare name is
+        // the exchange folder's, an absolute path is itself
+        let explicit = match dest {
+            Some(d) => Some(self.host_path(&d)?),
+            None => None,
+        };
         let dest = crate::transfer::DestSpec {
-            explicit: dest,
+            explicit,
             default_dir: self.session.settings.download_dir.clone(),
         };
         let me = self.member();

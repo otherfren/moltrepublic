@@ -498,10 +498,10 @@ impl State {
         Ok(Reply::Ack)
     }
 
-    /// A destination on the host: any path the node's user can reach
-    /// (ADR-0007), with a BARE NAME resolved inside the download directory
-    /// — the exchange folder both surfaces hand files over in.
-    pub(crate) fn host_path(&self, dest: &str) -> String {
+    /// A destination on the host: any ABSOLUTE path the node's user can
+    /// reach (ADR-0007), with a BARE NAME resolved inside the download
+    /// directory — the exchange folder both surfaces hand files over in.
+    pub(crate) fn host_path(&self, dest: &str) -> Result<String, MoltError> {
         resolve_host_path(dest, &self.session.settings.download_dir)
     }
 
@@ -1977,7 +1977,7 @@ impl State {
             .as_ref()
             .filter(|a| a.id == id)
             .map(|a| a.handle.clone());
-        let dest_path = molt_storage::expand_tilde(&self.host_path(&dest));
+        let dest_path = molt_storage::expand_tilde(&self.host_path(&dest)?);
         let dest_str = dest_path.display().to_string();
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return Err(MoltError::Engine("engine is shutting down".to_string()));
@@ -2105,7 +2105,7 @@ impl State {
         } else {
             None
         };
-        let dest_path = molt_storage::expand_tilde(&self.host_path(dest));
+        let dest_path = molt_storage::expand_tilde(&self.host_path(dest)?);
         let dest_str = dest_path.display().to_string();
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return Err(MoltError::Engine("engine is shutting down".to_string()));
@@ -2393,16 +2393,23 @@ fn keep_stored_secrets(target: &mut SessionSettings, stored: &SessionSettings) {
     target.s3_secret_key = stored.s3_secret_key.clone();
 }
 
-/// See [`State::host_path`].
-fn resolve_host_path(dest: &str, download_dir: &str) -> String {
+/// See [`State::host_path`]. A RELATIVE path with separators is refused:
+/// it would land wherever the daemon happens to have been started, which
+/// is an accident of the launch, not a place anybody chose.
+fn resolve_host_path(dest: &str, download_dir: &str) -> Result<String, MoltError> {
     let dest = dest.trim();
     if is_bare_name(dest) {
-        return molt_storage::expand_tilde(download_dir)
+        return Ok(molt_storage::expand_tilde(download_dir)
             .join(dest)
             .to_string_lossy()
-            .into_owned();
+            .into_owned());
     }
-    dest.to_string()
+    if dest.starts_with('/') || dest.starts_with('~') {
+        return Ok(dest.to_string());
+    }
+    Err(MoltError::BadPayload(
+        "a destination is a bare name in the download directory or an absolute path".to_string(),
+    ))
 }
 
 /// One path component and nothing else — the exchange-folder form of a
@@ -2655,25 +2662,28 @@ two" }),
         }
     }
 
-    /// A destination is any path the node's user can reach; a BARE NAME
-    /// still means the exchange folder, which is what keeps the agent's
-    /// hand-over convenience working (ADR-0007).
+    /// A destination is any ABSOLUTE path the node's user can reach; a
+    /// BARE NAME still means the exchange folder, which keeps the agent's
+    /// hand-over convenience working (ADR-0007). A relative path with
+    /// separators is refused - it would resolve against the daemon's
+    /// working directory, an accident of how the node was started.
     #[test]
     fn a_bare_destination_is_the_exchange_folder_a_path_is_itself() {
+        let at = |d: &str| super::resolve_host_path(d, "/srv/exchange");
+        assert_eq!(at("report.pdf").expect("bare"), "/srv/exchange/report.pdf");
         assert_eq!(
-            super::resolve_host_path("report.pdf", "/srv/exchange"),
-            "/srv/exchange/report.pdf"
-        );
-        assert_eq!(
-            super::resolve_host_path("  report.pdf  ", "/srv/exchange"),
+            at("  report.pdf  ").expect("bare"),
             "/srv/exchange/report.pdf",
             "the bare form is trimmed"
         );
-        for path in ["/etc/passwd", "../up", "sub/dir", ".", "..", ""] {
-            assert_eq!(
-                super::resolve_host_path(path, "/srv/exchange"),
-                path.to_string(),
-                "a path is itself"
+        for path in ["/etc/passwd", "/srv/incoming", "~/backups/w.molt.enc"] {
+            assert_eq!(at(path).expect("absolute"), path.to_string(), "a path is itself");
+        }
+        for bad in ["sub/dir", "../up", "./y", ".", "..", ""] {
+            let err = at(bad).expect_err("relative");
+            assert!(
+                matches!(err, molt_core::MoltError::BadPayload(_)),
+                "{bad:?} -> {err:?}"
             );
         }
     }

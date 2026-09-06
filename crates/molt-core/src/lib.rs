@@ -3897,10 +3897,11 @@ pub enum Command {
     /// dedicated encrypted queue. A share IS a chat message, so it files
     /// under a channel view like any other (concept Q8).
     ShareFile {
-        /// The local file to share: any path the node's user can read
-        /// (`~` expanded). A BARE NAME (no separator) resolves inside the
-        /// node's download directory - the exchange folder an agent drops
-        /// files into (ADR-0007).
+        /// The local file to share: any ABSOLUTE path the node's user can
+        /// read (`~` expanded), or a BARE NAME, which resolves inside the
+        /// node's download directory - the exchange folder both surfaces
+        /// hand files over in. A relative path is refused (ADR-0007): it
+        /// would resolve against the daemon's working directory.
         path: String,
         /// The channel view the share files under. `Command` is never
         /// persisted, so the field is a clean swap (no serde default) —
@@ -3914,9 +3915,11 @@ pub enum Command {
     DownloadFile {
         /// The share message's stable id.
         id: MessageId,
-        /// Destination: an existing directory (the file lands inside it,
-        /// name collisions resolve as "name (1).ext") or a full target
-        /// path. Defaults to the session's download directory.
+        /// Destination: a BARE NAME in the download directory, or an
+        /// absolute path - an existing directory takes the share's own
+        /// name (collisions resolve as "name (1).ext"). A relative path is
+        /// refused - see [`Command::ShareFile`]. Defaults to the session's
+        /// download directory.
         #[serde(default)]
         dest: Option<String>,
     },
@@ -4433,9 +4436,10 @@ pub enum Command {
     ExportWorkspace {
         /// The workspace id ([`WorkspaceInfo::id`]).
         id: WorkspaceId,
-        /// Target file path (`~` is expanded; parents are created; an
-        /// existing file is atomically replaced). A BARE NAME (no
-        /// separator) lands in the node's download directory.
+        /// Target file path: absolute (`~` is expanded; parents are
+        /// created; an existing file is atomically replaced), or a BARE
+        /// NAME, which lands in the node's download directory. A relative
+        /// path is refused — see [`Command::ShareFile`].
         dest: String,
         /// The export passphrase (Argon2id-stretched; minimum 10
         /// characters, engine-enforced).
@@ -4475,9 +4479,10 @@ pub enum Command {
     /// anything with — a files-only export stays available). Runs off the
     /// actor; the honest outcome lands in [`SessionView::wiki_export`].
     WikiExport {
-        /// Target directory (`~` is expanded; parents are created; existing
-        /// files of the same name are overwritten). A BARE NAME (no
-        /// separator) lands in the node's download directory.
+        /// Target directory: absolute (`~` is expanded; parents are
+        /// created; existing files of the same name are overwritten), or a
+        /// BARE NAME, which lands in the node's download directory. A
+        /// relative path is refused — see [`Command::ShareFile`].
         dest: String,
         /// Include the verification bundle.
         proof: bool,

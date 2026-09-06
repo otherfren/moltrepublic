@@ -1147,11 +1147,11 @@ pub fn tools() -> Vec<ToolDef> {
             name: "share_file",
             command: "share_file",
             scope: Scope::Seat,
-            description: "Share a local file into the ungated chat: the engine derives the metadata and streams the real sha256 off the actor, then posts the share message (async - it appears in read_state once hashing completes). Only metadata enters the chat; the bytes move per-download over a dedicated encrypted queue. Name the file with `path` (any path this node's user can read) or with `name` (a bare name inside the download directory - read_session.settings.download_dir, the exchange folder). A share is a chat message, so `channel` files it under a view of the one stream exactly like chat_send (omit for the all-hands group).",
+            description: "Share a local file into the ungated chat: the engine derives the metadata and streams the real sha256 off the actor, then posts the share message (async - it appears in read_state once hashing completes). Only metadata enters the chat; the bytes move per-download over a dedicated encrypted queue. Name the file with `path` (any ABSOLUTE path this node's user can read; a relative one is refused - it would resolve against the daemon's working directory) or with `name` (a bare name inside the download directory - read_session.settings.download_dir, the exchange folder). A share is a chat message, so `channel` files it under a view of the one stream exactly like chat_send (omit for the all-hands group).",
             schema: || json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "any path the node's user can read (~ expanded)" },
+                    "path": { "type": "string", "description": "an absolute path the node's user can read (~ expanded)" },
                     "name": { "type": "string", "description": "a bare file name inside the download directory" },
                     "channel": channel_schema("optional: the channel view this share files under (omit for the all-hands group)")
                 }
@@ -1165,12 +1165,12 @@ pub fn tools() -> Vec<ToolDef> {
             name: "download_file",
             command: "download_file",
             scope: Scope::Seat,
-            description: "Download a shared file: fetches the BYTES peer-to-peer from the sharer's device over a dedicated encrypted queue (the sharer must be online), verifies size + sha256 against the share, and writes it to `dest`: a bare name lands in the node's download directory (the EXCHANGE FOLDER), a full path is that path, an existing directory takes the share's own name; omitted = the share's name in the download directory. Async kickoff - poll read_uploads for the download's phase/percent/path/error. Addressed by the share message's stable id (32-char lowercase hex, from read_state). Fails honestly once the sharer deleted the file or stays offline.",
+            description: "Download a shared file: fetches the BYTES peer-to-peer from the sharer's device over a dedicated encrypted queue (the sharer must be online), verifies size + sha256 against the share, and writes it to `dest`: a bare name lands in the node's download directory (the EXCHANGE FOLDER), an ABSOLUTE path is that path, an existing directory takes the share's own name; omitted = the share's name in the download directory. A relative path is refused - it would resolve against the daemon's working directory. Async kickoff - poll read_uploads for the download's phase/percent/path/error. Addressed by the share message's stable id (32-char lowercase hex, from read_state). Fails honestly once the sharer deleted the file or stays offline.",
             schema: || json!({
                 "type": "object",
                 "properties": {
                     "id": { "type": "string", "description": "share message id (32-char lowercase hex, from read_state)" },
-                    "dest": { "type": "string", "description": "optional: a bare file name in the download directory, or any path / directory (~ expanded); omit = the share's own name" }
+                    "dest": { "type": "string", "description": "optional: a bare file name in the download directory, or an absolute path / directory (~ expanded); omit = the share's own name" }
                 },
                 "required": ["id"]
             }),
@@ -2229,12 +2229,12 @@ pub fn tools() -> Vec<ToolDef> {
             name: "export_workspace",
             command: "export_workspace",
             scope: Scope::Seat,
-            description: "Export a workspace as ONE encrypted *.molt.enc blob (format molt-export-v1): manifest, the encrypted history, the threshold-signed chain, the newest snapshot, the logo and - when this device stores it - the recovery seed. CAUTION: blob + passphrase then restores the seat like the recovery phrase itself; guard both. Live MLS/transport state is NEVER exported: the blob restores knowledge, rejoining the live republic goes through the recovery ritual. Write it with `path` (any path) or `name` (a bare name in the download directory). Protection: Argon2id-stretched passphrase (minimum 10 characters) + XChaCha20-Poly1305. Async kickoff - the honest outcome (ok with byte count and skipped files, or the real error) lands in read_session's `export` state; there is no fake success.",
+            description: "Export a workspace as ONE encrypted *.molt.enc blob (format molt-export-v1): manifest, the encrypted history, the threshold-signed chain, the newest snapshot, the logo and - when this device stores it - the recovery seed. CAUTION: blob + passphrase then restores the seat like the recovery phrase itself; guard both. Live MLS/transport state is NEVER exported: the blob restores knowledge, rejoining the live republic goes through the recovery ritual. Write it with `path` (an ABSOLUTE path; a relative one is refused) or `name` (a bare name in the download directory). Protection: Argon2id-stretched passphrase (minimum 10 characters) + XChaCha20-Poly1305. Async kickoff - the honest outcome (ok with byte count and skipped files, or the real error) lands in read_session's `export` state; there is no fake success.",
             schema: || json!({
                 "type": "object",
                 "properties": {
                     "id": { "type": "string", "description": "the workspace id from read_session" },
-                    "path": { "type": "string", "description": "any target path (~ expanded; an existing file is replaced)" },
+                    "path": { "type": "string", "description": "an absolute target path (~ expanded; an existing file is replaced)" },
                     "name": { "type": "string", "description": "a bare file name inside the download directory" },
                     "passphrase": { "type": "string", "description": "export passphrase, minimum 10 characters" }
                 },
@@ -2250,11 +2250,11 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wiki_export",
             command: "wiki_export",
             scope: Scope::Seat,
-            description: "Export the wiki (every applied page) as files into a directory, optionally with the verification bundle (the threshold-signed patches that prove every page). Name it with `path` (any directory) or `name` (a bare name in the node's download directory). Existing files of the same name are overwritten. Async kickoff - the outcome lands in read_session's `wiki_export` state.",
+            description: "Export the wiki (every applied page) as files into a directory, optionally with the verification bundle (the threshold-signed patches that prove every page). Name it with `path` (an ABSOLUTE directory; a relative one is refused) or `name` (a bare name in the node's download directory). Existing files of the same name are overwritten. Async kickoff - the outcome lands in read_session's `wiki_export` state.",
             schema: || json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "any target directory (~ expanded; parents are created)" },
+                    "path": { "type": "string", "description": "an absolute target directory (~ expanded; parents are created)" },
                     "name": { "type": "string", "description": "a bare directory name inside the download directory" },
                     "proof": { "type": "boolean", "description": "include the verification bundle (default true)" }
                 }
