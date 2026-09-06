@@ -487,6 +487,7 @@ fn a_material_less_open_vote_does_not_block_a_current_re_propose() {
         voted: Vec::new(),
         by: "peer-2".to_string(),
         superseded: false,
+        superseded_kind: None,
         withdrawn: false,
     };
     st.proposals.insert(1, stale);

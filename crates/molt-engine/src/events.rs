@@ -310,6 +310,7 @@ impl State {
                     // stays deterministic)
                     by: env.by.clone(),
                     superseded: false,
+                superseded_kind: None,
                     withdrawn: false,
                 });
                 self.next_id = self.next_id.max(id.0.saturating_add(1));
@@ -414,6 +415,7 @@ impl State {
                 voted: Vec::new(),
                     by: env.by.clone(),
                     superseded: false,
+                superseded_kind: None,
                     withdrawn: false,
                 });
                 // within the wire id window only: a pre-gate log entry (or a
@@ -432,6 +434,7 @@ impl State {
                 *stamp = (*stamp).max(*at);
             }
             WorkspaceEvent::Committed(_)
+            | WorkspaceEvent::VoteRefused { .. }
             | WorkspaceEvent::ChainRequest { .. }
             | WorkspaceEvent::CheckpointProposed { .. }
             | WorkspaceEvent::CheckpointServed { .. }

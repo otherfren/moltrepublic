@@ -731,3 +731,100 @@ fn a_chain_request_names_the_fork_point() {
     assert_eq!(server.serve_from_for(5, &known), 3, "serve from the block above the last shared one");
     assert_eq!(server.serve_from_for(5, &[]), 5, "a plain request keeps its estimate");
 }
+
+/// A5 KEYSTONE (round 3, D9/R3): a seat the republic ran on without reads
+/// its DISTANCE, not a divergence - the peers' blocks arrive and are
+/// refused, and `peers_ahead` says how far behind this node is.
+#[test]
+fn a_seat_the_republic_ran_past_reads_the_distance() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    b.commit_applied(1, &["petra", "dora"]);
+    // this seat stops here; the others run on
+    let mut walter = chain_peer("walter", &b, b.blocks.clone());
+    let head_here = walter.chain.head.as_ref().expect("a head").height;
+    b.commit_applied(2, &["petra", "dora"]);
+    b.commit_applied(3, &["petra", "dora"]);
+    assert_eq!(walter.chain_lag().peers_ahead, 0, "nothing heard yet, nothing claimed");
+    for block in &b.blocks[2..] {
+        wire(&mut walter, "petra", 10 + block.height, WorkspaceEvent::Committed(block.clone()));
+    }
+    let lag = walter.chain_lag();
+    assert_eq!(
+        walter.chain.head.as_ref().expect("a head").height - head_here,
+        2,
+        "these blocks fit - the seat catches up and the lag is the point of the FIELD, not the test transport"
+    );
+    assert_eq!(lag.peers_ahead, 0, "having applied them, it is level again");
+
+    // now a block it CANNOT apply (a gap): the claim still counts
+    b.commit_applied(4, &["petra", "dora"]);
+    b.commit_applied(5, &["petra", "dora"]);
+    let far = b.blocks.last().expect("a block").clone();
+    wire(&mut walter, "petra", 40, WorkspaceEvent::Committed(far));
+    assert!(
+        walter.chain_lag().peers_ahead >= 2,
+        "a peer two blocks up is two blocks ahead: {:?}",
+        walter.chain_lag()
+    );
+    assert!(
+        walter.chain.diverged.is_empty(),
+        "distance is not contradiction - `diverged` must stay empty"
+    );
+}
+
+/// A6 KEYSTONE: while the peers are ahead, this seat's vote would be
+/// signed at a height the republic has left - so the vote is REFUSED here
+/// instead of answering like a success (round 3: eleven approvals into a
+/// void).
+#[test]
+fn a_vote_is_refused_while_the_peers_are_ahead() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut walter = chain_peer("walter", &b, b.blocks.clone());
+    walter.receive_proposed(7, Surface::Memory, json!({ "op": "add_note", "id": 7 }), "petra");
+    assert!(
+        walter.cmd_approve(molt_core::ProposalId(7), None).is_ok(),
+        "level with the republic, the vote counts"
+    );
+    walter.note_peer_height("petra", 3);
+    let err = walter
+        .cmd_decline(molt_core::ProposalId(7), None)
+        .expect_err("a lagging vote is refused");
+    assert!(
+        matches!(err, molt_core::MoltError::ChainLagging { peers_ahead } if peers_ahead >= 2),
+        "the refusal names the distance: {err:?}"
+    );
+}
+
+/// A5: a seat that stopped co-signing shows up as SILENT (stale signer),
+/// which is a different fact from a fork.
+#[test]
+fn a_seat_that_stopped_signing_is_reported_stale() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    b.commit_applied(1, &["petra", "dora"]);
+    b.commit_applied(2, &["petra", "dora"]);
+    let walter = chain_peer("walter", &b, b.blocks.clone());
+    let stale = walter.stale_signers();
+    assert!(
+        stale.iter().any(|s| s.member == "walter" && s.last_signed_height == 0),
+        "walter signed only the genesis: {stale:?}"
+    );
+    assert!(
+        !stale.iter().any(|s| s.member == "petra"),
+        "petra signed the head, she is not stale: {stale:?}"
+    );
+}

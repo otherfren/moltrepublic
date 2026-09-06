@@ -17,6 +17,10 @@ const CATCHUP_BUFFER_WINDOW: u64 = 4096;
 /// How many `(height, hash)` samples a fork-aware catch-up request carries.
 const KNOWN_HEADS_MAX: usize = 16;
 
+/// A5: a seat unheard-of for this long is reported silent. Two presence
+/// ticks (30 s each) plus slack - shorter and every ordinary gap rings.
+const SILENT_AFTER_SECS: u64 = 120;
+
 impl State {
     /// Inbound: a peer broadcast (or re-served) a committed block. Extend the
     /// single branch when it is the next height, tie-break a contended slot we
@@ -32,6 +36,7 @@ impl State {
     /// head+1, a tip contender on a foreign `prev`, or any contender below
     /// the tip. A block from that peer that extends the chain clears it.
     pub(crate) fn receive_block_from(&mut self, from: &str, block: ChainBlock) {
+        self.note_peer_height(from, block.height);
         let Some(head) = self.chain.head.clone() else {
             // a headless rejoiner (total device loss) bootstraps its chain from
             // the genesis a survivor serves, then drains whatever else arrived
@@ -565,6 +570,77 @@ impl State {
             self.session.notice = format!("chain-diverged:{from}:{since_height}");
             self.emit_session(crate::SessionScope::Full);
         }
+    }
+
+    /// A5: remember the highest height `from` has claimed. Monotone per
+    /// peer, so one late re-serve of an old block cannot make a peer look
+    /// like it fell behind.
+    pub(crate) fn note_peer_height(&mut self, from: &str, height: u64) {
+        if from.is_empty() || from == self.member() {
+            return;
+        }
+        let e = self.chain.peer_heights.entry(from.to_string()).or_insert(0);
+        *e = (*e).max(height);
+    }
+
+    /// A5: how far the peers are ahead, and who has gone quiet. The two
+    /// facts a partitioned seat cannot see for itself - `chain_diverged`
+    /// answers a different question (contradiction, not distance).
+    pub(crate) fn chain_lag(&self) -> molt_core::ChainLag {
+        let head = self.chain.head.as_ref().map_or(0, |h| h.height);
+        let peers_ahead = self
+            .chain
+            .peer_heights
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(0)
+            .saturating_sub(head);
+        let now = self.presence_now();
+        let founded = self.replica.as_ref().map_or(0, |r| r.founded_ts);
+        let me = self.member();
+        let silent = self
+            .roster()
+            .into_iter()
+            .filter(|m| *m != me)
+            .filter_map(|member| {
+                let seen = self.member_last_seen(&member);
+                let secs = if seen == molt_core::MemberInfo::NEVER {
+                    now.saturating_sub(founded)
+                } else {
+                    now.saturating_sub(seen)
+                };
+                (secs >= SILENT_AFTER_SECS).then_some(molt_core::SilentMember { member, secs })
+            })
+            .collect();
+        molt_core::ChainLag { peers_ahead, silent }
+    }
+
+    /// A5: the highest block each roster seat co-signed, over the blocks
+    /// this holder still keeps. A seat that stopped signing is silent, not
+    /// forked - and that is the distinction the detector could not draw.
+    pub(crate) fn stale_signers(&self) -> Vec<molt_core::StaleSigner> {
+        let Some(head) = self.chain.head.as_ref() else {
+            return Vec::new();
+        };
+        let mut out: Vec<molt_core::StaleSigner> = Vec::new();
+        for id in &head.identities {
+            let last = self
+                .chain
+                .blocks
+                .iter()
+                .filter(|b| b.sigs.iter().any(|a| a.member == id.member))
+                .map(|b| b.height)
+                .max()
+                .unwrap_or(0);
+            if last < head.height {
+                out.push(molt_core::StaleSigner {
+                    member: id.member.clone(),
+                    last_signed_height: last,
+                });
+            }
+        }
+        out
     }
 
     /// A block from `from` that fits our chain: whatever it was on, it is

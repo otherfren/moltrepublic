@@ -453,6 +453,19 @@ fn withdrawn_is_a_state(v: &mut Value) {
             } else if proposed && held {
                 o.insert("state".to_string(), Value::String("sealing".to_string()));
             }
+            // A4: `superseded` READS as the reason - "rebase" (the base moved,
+            // still votable, votes kept) or "conflict" (dead). A bare `true`
+            // told a caller nothing about whether to keep waiting for votes.
+            // AFTER the state rewrite above, which still reads the bool.
+            if o.contains_key("superseded") {
+                let was = o.get("superseded") == Some(&Value::Bool(true));
+                let kind = match o.remove("superseded_kind") {
+                    Some(Value::String(k)) => Value::String(k),
+                    _ if was => Value::String("conflict".to_string()),
+                    _ => Value::Null,
+                };
+                o.insert("superseded".to_string(), kind);
+            }
             for child in o.values_mut() {
                 withdrawn_is_a_state(child);
             }
@@ -1174,7 +1187,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "approve",
             command: "approve",
             scope: Scope::Seat,
-            description: "Contribute THIS node's approval toward a pending proposal. On a chain-governed republic it is a real signature gossiped to the mesh (the block seals once m distinct members signed); elsewhere the node records at most its own single approval - it can never approve on behalf of other members. Pass `note` to post your reasoning into the proposal's discussion in the same call: it lands BEFORE the vote, so a tipping signature never leaves its reason behind. The reply is the record after the vote (state, approvals/threshold, `head`, `channel`); approving an already-applied proposal answers the same shape - a late approval is not an error, and its note still lands. `approvals` counts the signatures THIS node holds; the block may already be sealed on a peer - read_chain shows the head. `state: \"sealing\"` with `held_for_secs` means the threshold is reached here and the seal waits out one propagation round.",
+            description: "Contribute THIS node's approval toward a pending proposal. On a chain-governed republic it is a real signature gossiped to the mesh (the block seals once m distinct members signed); elsewhere the node records at most its own single approval - it can never approve on behalf of other members. Pass `note` to post your reasoning into the proposal's discussion in the same call: it lands BEFORE the vote, so a tipping signature never leaves its reason behind. The reply is the record after the vote (state, approvals/threshold, `head`, `channel`); approving an already-applied proposal answers the same shape - a late approval is not an error, and its note still lands. `approvals` counts the signatures THIS node holds; the block may already be sealed on a peer - read_chain shows the head. `state: \"sealing\"` with `held_for_secs` means the threshold is reached here and the seal waits out one propagation round. Refused while the peers are ahead (status.chain_lag.peers_ahead > 0): the signature would be bound to a height the republic has left and every peer would drop it.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1192,7 +1205,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "decline",
             command: "decline",
             scope: Scope::Seat,
-            description: "Cast this seat's vote AGAINST a pending proposal - ONE voice, not a veto: the proposal turns rejected for everyone only once approval can no longer reach the threshold (declines > n-m). One stance per member; declining after your own approve is allowed and is how a proposer signals retraction when withdraw is unavailable. Pass `note` to post the reason into the proposal's discussion in the same call: it lands BEFORE the vote. `approvals` counts the signatures THIS node holds; the block may already be sealed on a peer - read_chain shows the head.",
+            description: "Cast this seat's vote AGAINST a pending proposal - ONE voice, not a veto: the proposal turns rejected for everyone only once approval can no longer reach the threshold (declines > n-m). One stance per member; declining after your own approve is allowed and is how a proposer signals retraction when withdraw is unavailable. Pass `note` to post the reason into the proposal's discussion in the same call: it lands BEFORE the vote. `approvals` counts the signatures THIS node holds; the block may already be sealed on a peer - read_chain shows the head. Refused while the peers are ahead (status.chain_lag.peers_ahead > 0), like approve.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1252,7 +1265,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "read_chain",
             command: "read_chain",
             scope: Scope::Seat,
-            description: "The persistent chain as display data (Chain-History): every committed block of the open republic, newest first - genesis, applied changes, membership transitions, and checkpoint compaction cuts - each with its height, kind, target surface, display payload, consumed proposal id, and the m signers. On a pruned holder the history below the last checkpoint cut appears as summarized entries rebuilt from the checkpoint blob (height 0 - the per-block positions and signatures were dropped with the history).",
+            description: "The persistent chain as display data (Chain-History): every committed block of the open republic, newest first - genesis, applied changes, membership transitions, and checkpoint compaction cuts - each with its height, kind, target surface, display payload, consumed proposal id, and the m signers. On a pruned holder the history below the last checkpoint cut appears as summarized entries rebuilt from the checkpoint blob (height 0 - the per-block positions and signatures were dropped with the history). Two fields report the two ways a seat loses the republic, and they are NOT the same thing: `diverged` means CONTRADICTION - that peer is on another branch and the two refuse each other's blocks; `stale_signers` means SILENCE - the seat is on this branch but has stopped co-signing since `last_signed_height`. For distance (the peers running ahead of this node) read status.chain_lag.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ReadChain),
         },
@@ -1535,7 +1548,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "list_proposals",
             command: "list_proposals",
             scope: Scope::Seat,
-            description: "List every proposal the engine currently knows about - HEADERS: id, surface, by, state (`withdrawn` when the proposer pulled it back), approvals/threshold, the votes, `summary`, the `paths` a wiki patch touches, `channel`. The patch and the before/after texts are left out (a 9 KB patch was answered three times over); `with_patch: true` includes them, read_proposal {id} fetches ONE in full. Ids are minted per seat (seat k of n takes every n-th number), so gaps in the sequence are normal, not lost proposals.",
+            description: "List every proposal the engine currently knows about - HEADERS: id, surface, by, state (`withdrawn` when the proposer pulled it back), approvals/threshold, the votes, `summary`, the `paths` a wiki patch touches, `channel`. The patch and the before/after texts are left out (a 9 KB patch was answered three times over); `with_patch: true` includes them, read_proposal {id} fetches ONE in full. Ids are minted per seat (seat k of n takes every n-th number), so gaps in the sequence are normal, not lost proposals. `superseded` says what the moved base did to a wiki patch: `\"rebase\"` = it still applies - open, votable, its votes kept, re-anchored by the engine; `\"conflict\"` = a committed change touched its paths and it no longer applies (dead, `state: \"superseded\"`); `null` = nothing moved under it.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1548,7 +1561,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "read_proposal",
             command: "list_proposals",
             scope: Scope::Seat,
-            description: "ONE proposal in full: the payload (a wiki patch under `payload.value`), the before/after texts `current` and `proposed`, the votes and the state. An unknown id is an error.",
+            description: "ONE proposal in full: the payload (a wiki patch under `payload.value`), the before/after texts `current` and `proposed`, the votes and the state. `superseded` reads `\"rebase\"` (the base moved, still votable, votes kept), `\"conflict\"` (dead) or `null` - see list_proposals. An unknown id is an error.",
             schema: || json!({
                 "type": "object",
                 "properties": { "id": { "type": "integer", "description": "the proposal id" } },
@@ -1563,7 +1576,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "status",
             command: "status",
             scope: Scope::Seat,
-            description: "Read a one-shot status summary of the group and surfaces.",
+            description: "Read a one-shot status summary of the group and surfaces. `chain_lag.peers_ahead` = how many blocks the furthest peer claims beyond this node's head (0 = level; anything else means votes cast here would not count, and approve/decline refuse); `chain_lag.silent` lists seats unheard-of, with the age of the last sighting. `chain_diverged` is the other failure and a different one: a peer on another branch.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::Status),
         },
@@ -2499,7 +2512,7 @@ mod tests {
         // would let any MCP client execute code as the node's user, which is
         // a different thing entirely from acting inside the republic. The
         // wholesale settings paths refuse the key for the same reason.
-        const INTERNAL: [&str; 77] = [
+        const INTERNAL: [&str; 78] = [
             // a referenced file's bytes off the local disk / mirror store
             // (wiki_files_and_images.md §3.3): the GUI's picture, an agent
             // gets download_file into its exchange folder
@@ -2621,6 +2634,10 @@ mod tests {
             "net_mesh_announced",
             "net_mesh_ready",
             "net_poked",
+            // A6: a peer telling this seat that a vote it cast was dropped
+            // for the wrong height - a transport CONDITION, not a decision.
+            // An agent that could forge it would fake a partition.
+            "net_vote_refused",
             "set_wake_command",
             "reload_settings",
             "config_notice",
@@ -2697,13 +2714,21 @@ mod tests {
             "list_proposals",
             &json!({}),
             json!({ "reply": "proposals", "proposals": [
-                { "id": 6, "state": "rejected", "withdrawn": false, "superseded": true, "payload": {} },
-                { "id": 7, "state": "applied", "withdrawn": false, "superseded": true, "payload": {} }
+                { "id": 6, "state": "rejected", "withdrawn": false, "superseded": true,
+                  "superseded_kind": "conflict", "payload": {} },
+                { "id": 7, "state": "applied", "withdrawn": false, "superseded": true, "payload": {} },
+                { "id": 8, "state": "proposed", "withdrawn": false, "superseded": false,
+                  "superseded_kind": "rebase", "payload": {} }
             ] }),
         )
         .expect("presents");
         assert_eq!(stale["proposals"][0]["state"], "superseded", "a stale patch says so, not rejected");
         assert_eq!(stale["proposals"][1]["state"], "applied", "an applied card keeps its state");
+        // A4: the flag READS as the reason, and a re-based patch stays open
+        assert_eq!(stale["proposals"][0]["superseded"], "conflict");
+        assert_eq!(stale["proposals"][1]["superseded"], "conflict", "no kind, but the bool was set");
+        assert_eq!(stale["proposals"][2]["state"], "proposed", "a re-based patch is still votable");
+        assert_eq!(stale["proposals"][2]["superseded"], "rebase");
         assert_eq!(p4["paths"], json!(["a.md", "b/c.md"]));
         assert_eq!(p4["channel"], json!({ "kind": "patch", "id": 4 }));
         assert!(p4.get("current").is_none() && p4.get("proposed").is_none());

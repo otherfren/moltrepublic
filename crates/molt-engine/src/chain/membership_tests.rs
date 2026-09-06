@@ -88,6 +88,7 @@ fn an_applied_membership_card_reports_the_block_signers() {
             voted: Vec::new(),
             by: String::new(),
             superseded: false,
+        superseded_kind: None,
             withdrawn: false,
         },
     );

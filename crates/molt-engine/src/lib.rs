@@ -796,6 +796,12 @@ pub(crate) struct ChainProjection {
     /// divergence detector), keyed by wire sender. Ephemeral; an entry
     /// clears when a block from that peer extends the chain again.
     pub(crate) diverged: BTreeMap<MemberId, molt_core::ChainDivergence>,
+    /// A5: the highest height each peer has CLAIMED - from its blocks
+    /// (accepted or refused), its catch-up samples and its cut proposals.
+    /// Ephemeral; it is the only thing that can tell a partitioned seat
+    /// that the republic ran on without it (`diverged` reports the other
+    /// failure: contradiction, not distance).
+    pub(crate) peer_heights: BTreeMap<MemberId, u64>,
     /// When the head last advanced (presence clock, seconds) - the A2.2
     /// seal pacing measures its propagation round from here.
     pub(crate) head_moved_at: u64,
@@ -1385,6 +1391,7 @@ impl State {
                 pending_declines: HashMap::new(),
                 id_collisions: BTreeMap::new(),
                 diverged: BTreeMap::new(),
+                peer_heights: BTreeMap::new(),
                 head_moved_at: 0,
                 seal_held: std::collections::BTreeSet::new(),
                 fork_candidates: BTreeMap::new(),
@@ -1540,6 +1547,9 @@ impl State {
                 Ok(Reply::Ack)
             }
             Command::Poke { member } => self.cmd_poke(member),
+            Command::NetVoteRefused { proposal, by, head } => {
+                self.cmd_net_vote_refused(proposal, &by, head)
+            }
             Command::NetPoked {
                 from,
                 to,

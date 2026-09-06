@@ -2732,6 +2732,21 @@ pub enum WorkspaceEvent {
         #[serde(default)]
         sig: String,
     },
+    /// A6: a vote arrived for a height this republic has already left, so
+    /// this node dropped it. Told, not swallowed - a partitioned seat spent
+    /// round 3 approving into a void that answered like a success.
+    VoteRefused {
+        /// The proposal the vote was cast on.
+        id: ProposalId,
+        /// Whose vote was dropped.
+        voter: MemberId,
+        /// The height the dropped signature was bound to.
+        #[serde(default)]
+        height: u64,
+        /// This node's head - what a counting signature must build on.
+        #[serde(default)]
+        head: u64,
+    },
     /// A pending proposal was declined.
     Declined {
         /// The proposal.
@@ -2992,6 +3007,12 @@ pub struct ProposalRecord {
     /// so pre-field dumps stay byte-identical.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub superseded: bool,
+    /// WHY the base moved past it (A4, round 3 R1/R20). `Rebase` = the base
+    /// moved but the patch still applies: the proposal stays open and keeps
+    /// its votes. `Conflict` = it no longer applies, and `superseded` is
+    /// set with it. `None` = nothing moved under it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_kind: Option<SupersededKind>,
     /// The proposer pulled the proposal back ("pull back"): terminal like
     /// a rejection but its OWN verdict — no decline vote is forged, and
     /// the card renders "pulled back", never "declined by". Additive,
@@ -5609,6 +5630,17 @@ pub enum Command {
         /// The folder, `~` allowed; "" restores the default.
         path: String,
     },
+    /// INTERNAL (A6): a peer told this node that a vote it cast was dropped
+    /// for the wrong height. Surfaced as a notice - the seat has to learn
+    /// that its voice did not count.
+    NetVoteRefused {
+        /// The proposal the refused vote was cast on.
+        proposal: ProposalId,
+        /// The peer that dropped it.
+        by: MemberId,
+        /// That peer's head.
+        head: u64,
+    },
     /// An authenticated poke arrived over the transport (engine-internal —
     /// the transport speaks to the engine; an MCP agent must not be able to
     /// forge a nudge from another member). `from` is the MLS-authenticated
@@ -6063,6 +6095,11 @@ pub enum Reply {
         /// Peers on another branch (A2.1); empty when the chain is whole.
         #[serde(default)]
         diverged: Vec<ChainDivergence>,
+        /// Seats whose signature is missing from the recent blocks (A5) -
+        /// silence, not contradiction: a seat that stopped co-signing is
+        /// still on this branch.
+        #[serde(default)]
+        stale_signers: Vec<StaleSigner>,
     },
 }
 
@@ -6177,6 +6214,12 @@ pub struct ProposalView {
     /// labels it "superseded", never "declined by".
     #[serde(default)]
     pub superseded: bool,
+    /// WHY the base moved (see [`ProposalRecord::superseded_kind`]): the MCP
+    /// surface serves this as `superseded: "rebase" | "conflict" | null`,
+    /// because "the base moved" and "this patch is dead" are different news
+    /// for a caller counting votes.
+    #[serde(default)]
+    pub superseded_kind: Option<SupersededKind>,
     /// Whether the proposer pulled it back (see
     /// [`ProposalRecord::withdrawn`]) — labelled "pulled back".
     #[serde(default)]
@@ -6973,6 +7016,51 @@ pub struct StatusView {
     /// picture before proposing — the engine stays the authority.
     #[serde(default)]
     pub image_budget: u64,
+    /// Distance and silence (A5). `chain_diverged` reports CONTRADICTION -
+    /// two branches that refuse each other; this reports the other way a
+    /// seat goes dark: peers running ahead, and members nobody has heard
+    /// from. A partitioned seat shows up here, not there.
+    #[serde(default)]
+    pub chain_lag: ChainLag,
+}
+
+/// How far this node trails its peers, and who has gone quiet (A5).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainLag {
+    /// Highest height any peer claimed, minus this node's head. 0 = level.
+    pub peers_ahead: u64,
+    /// Roster seats this node has not heard from lately.
+    pub silent: Vec<SilentMember>,
+}
+
+/// One seat nobody has heard from (A5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SilentMember {
+    /// The member.
+    pub member: MemberId,
+    /// Age of the last sighting in seconds - since the founding for a seat
+    /// this node has never seen at all.
+    pub secs: u64,
+}
+
+/// A roster seat that has stopped co-signing ([`Reply::Chain`], A5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StaleSigner {
+    /// The member.
+    pub member: MemberId,
+    /// The highest block height its signature appears on, over the blocks
+    /// this holder still keeps. 0 = none of them.
+    pub last_signed_height: u64,
+}
+
+/// Why a wiki patch's base moved under it (A4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupersededKind {
+    /// The base moved, the patch still applies: still votable, votes kept.
+    Rebase,
+    /// A committed change touched its paths and it no longer applies: dead.
+    Conflict,
 }
 
 /// The chat-retention default: 7 days, the window every republic starts
@@ -7323,6 +7411,15 @@ pub enum MoltError {
         /// Documents in the base.
         total: u64,
     },
+    /// A vote at a height the republic has already left (A6): the peers are
+    /// ahead, so the signature would be dropped as stale by everyone else -
+    /// which is exactly how a partitioned seat spent round 3 approving into
+    /// the void.
+    #[error("the peers are {peers_ahead} block(s) ahead - this vote would not count")]
+    ChainLagging {
+        /// How far ahead the peers are.
+        peers_ahead: u64,
+    },
     /// The engine task is gone or did not answer.
     #[error("engine: {0}")]
     Engine(String),
@@ -7603,7 +7700,7 @@ mod tests {
             Reply::Members { members: vec![] },
             Reply::Uploads { uploads: vec![] },
             Reply::Session(Box::default()),
-            Reply::Chain { blocks: vec![], diverged: vec![] },
+            Reply::Chain { blocks: vec![], diverged: vec![], stale_signers: vec![] },
         ];
         for r in replies {
             let json = serde_json::to_string(&r);

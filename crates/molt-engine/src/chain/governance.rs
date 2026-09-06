@@ -693,6 +693,8 @@ impl State {
                         self.set_checkpoint_blob(Some(blob));
                         self.chain.blocks.retain(|b| b.height >= anchor_height);
                         self.apply_chain_to_state();
+                        // A4: the cut re-based every open patch; it killed none
+                        self.mark_open_wiki_patches_rebased();
                         self.emit(Event::CheckpointSealed {
                             height: anchor_height,
                             upto,
@@ -992,6 +994,7 @@ impl State {
                 voted: Vec::new(),
                 by: by.to_string(),
                 superseded: false,
+                superseded_kind: None,
                 withdrawn: false,
             }
         });
@@ -1022,6 +1025,9 @@ impl State {
         let target = self.chain.head.as_ref().map(|h| h.height + 1);
         if target.is_some_and(|t| height > t) {
             tracing::warn!(%id, height, "dropping an approval for an implausible future height");
+            // A6: tell the sender. A seat whose votes are silently dropped
+            // reads its own local count as progress and waits forever.
+            self.tell_the_voter_it_was_dropped(id, by, height);
             return;
         }
         // L3: an approval may OUTRUN its card (collected, displayed once it
@@ -1039,6 +1045,41 @@ impl State {
             }
         }
         self.try_commit(id);
+    }
+
+    /// A6: answer a dropped vote with the one fact its sender is missing -
+    /// this node's head. Only for a member of the roster, and never for our
+    /// own signature.
+    fn tell_the_voter_it_was_dropped(&mut self, id: u64, voter: &str, height: u64) {
+        let me = self.member();
+        if voter == me || !self.roster().iter().any(|m| m == voter) {
+            return;
+        }
+        let head = self.chain.head.as_ref().map_or(0, |h| h.height);
+        let env = self.make_env(
+            me,
+            WorkspaceEvent::VoteRefused {
+                id: ProposalId(id),
+                voter: voter.to_string(),
+                height,
+                head,
+            },
+        );
+        self.record(env);
+    }
+
+    /// INTERNAL (A6): a peer dropped a vote this seat cast. Surface it - the
+    /// vote reply already reported this node's own head, and now the seat
+    /// learns the republic's.
+    pub(crate) fn cmd_net_vote_refused(
+        &mut self,
+        proposal: ProposalId,
+        by: &str,
+        head: u64,
+    ) -> Result<molt_core::Reply, molt_core::MoltError> {
+        self.session.notice = format!("vote-refused:{}:{by}:{head}", proposal.0);
+        self.emit_session(crate::SessionScope::Full);
+        Ok(molt_core::Reply::Ack)
     }
 
     /// The event bodies a catch-up answer re-gossips (WP2): per OPEN surface

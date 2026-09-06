@@ -337,6 +337,8 @@ pub(crate) fn crosses_wire(event: &WorkspaceEvent) -> bool {
             // replicas would show Rejected while everyone else keeps the
             // proposal pending forever — votes must converge like approvals
             | WorkspaceEvent::Declined { .. }
+            // A6: the refusal a dropped vote earns its sender
+            | WorkspaceEvent::VoteRefused { .. }
             | WorkspaceEvent::Withdrawn { .. }
             | WorkspaceEvent::Committed(_)
             | WorkspaceEvent::ChainRequest { .. }

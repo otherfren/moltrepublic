@@ -238,7 +238,21 @@ async fn a_folded_cut_survives_a_lost_base_over_the_relay() {
         assert!(tokio::time::Instant::now() < deadline, "the cut never sealed");
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    // the patches are gone from the chain; the documents are not
+    // the patches are gone from the chain; the documents are not. Walter's
+    // OWN cut is what the base file below depends on - his document count
+    // reads the same before and after it, so wait for the block, not for it.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let cut = match b.execute(Command::ReadChain).await.expect("read chain") {
+            Reply::Chain { blocks, .. } => blocks.iter().any(|v| v.kind == "checkpoint"),
+            other => panic!("unexpected: {other:?}"),
+        };
+        if cut {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "walter never applied the cut");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
     wait_wiki(&a, "the wiki after the cut", 30, |docs, p| docs == 2 && p.is_none()).await;
     wait_wiki(&b, "walter's wiki after the cut", 30, |docs, p| docs == 2 && p.is_none()).await;
 

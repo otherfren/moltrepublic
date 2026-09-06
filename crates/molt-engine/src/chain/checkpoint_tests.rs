@@ -1131,3 +1131,90 @@ fn the_supersede_walk_is_a_no_op_while_the_base_is_missing() {
     );
     assert!(!p11.superseded);
 }
+
+/// A4 KEYSTONE (round 3, R1/R20): the cut's wave. A cut moves the base
+/// under every open wiki patch - and kills none of them, because the tree
+/// is the same tree. They read `rebase` and stay votable; only a patch a
+/// COMMITTED change made inapplicable reads `conflict`.
+#[test]
+fn a_cut_re_bases_an_open_patch_and_a_conflict_kills_one() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    b.commit_wiki(1, "a.md", "A", &["petra", "walter"]);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+
+    // an open patch on a document the cut folds away, and one on a fresh path
+    let edit_a = "diff --git a/a.md b/a.md\n--- a/a.md\n+++ b/a.md\n@@ -1,1 +1,1 @@\n-A\n+A edited\n";
+    let add_b = "diff --git a/b.md b/b.md\nnew file mode 100644\n--- /dev/null\n+++ b/b.md\n@@ -0,0 +1,1 @@\n+B\n";
+    for (id, patch) in [(11u64, edit_a), (13, add_b)] {
+        walter.receive_proposed(
+            id,
+            Surface::Memory,
+            json!({"op": "wiki_patch", "summary": "x", "value": patch}),
+            "petra",
+        );
+    }
+
+    // the cut seals (n-of-n)
+    let hash = walter.own_cut_hash(1, true).expect("folded projection");
+    walter.receive_checkpoint_proposal(40, 1, &hash, true);
+    let change = ChainChange::CheckpointFolded {
+        upto: 1,
+        state_hash: hash,
+    };
+    let bytes = approval_bytes(&b.republic_id, 2, &change);
+    let petra_sig = identity_sign(b.key("petra"), &bytes);
+    walter.receive_approval(40, "petra", 2, &petra_sig);
+    assert!(
+        walter.chain.checkpoint_blob.is_some(),
+        "the cut sealed at n-of-n"
+    );
+
+    for id in [11u64, 13] {
+        let p = walter.proposals.get(&id).cloned().expect("the card");
+        assert_eq!(p.state, ProposalState::Proposed, "#{id} is still votable");
+        assert!(!p.superseded, "#{id} is not dead");
+        assert_eq!(
+            p.superseded_kind,
+            Some(molt_core::SupersededKind::Rebase),
+            "#{id} reads the base move as a re-base"
+        );
+    }
+
+    // …and now a committed change that really does kill one: a.md is deleted
+    let del_a = "diff --git a/a.md b/a.md\ndeleted file mode 100644\n--- a/a.md\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-A\n";
+    let height = walter.chain.head.as_ref().expect("a head").height + 1;
+    let kill = ChainChange::Applied {
+        proposal_id: 21,
+        surface: Surface::Memory,
+        payload: json!({ "op": "wiki_patch", "value": del_a }),
+    };
+    let bytes = approval_bytes(&b.republic_id, height, &kill);
+    let block = ChainBlock {
+        height,
+        prev: walter.chain.head.as_ref().expect("a head").hash.clone(),
+        change: kill,
+        sigs: ["petra", "walter"]
+            .iter()
+            .map(|m| RosterAttestation {
+                member: (*m).to_string(),
+                sig: identity_sign(b.key(m), &bytes),
+            })
+            .collect(),
+    };
+    walter.receive_block(block);
+    let dead = walter.proposals.get(&11).cloned().expect("card 11");
+    assert_eq!(dead.state, ProposalState::Rejected, "the edit cannot apply any more");
+    assert!(dead.superseded);
+    assert_eq!(
+        dead.superseded_kind,
+        Some(molt_core::SupersededKind::Conflict),
+        "a real conflict says conflict, not rebase"
+    );
+    let alive = walter.proposals.get(&13).cloned().expect("card 13");
+    assert_eq!(alive.state, ProposalState::Proposed, "b.md was never touched");
+}

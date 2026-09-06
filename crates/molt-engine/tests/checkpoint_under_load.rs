@@ -387,6 +387,12 @@ async fn a_second_cut_lands_on_every_seat_after_a_reopen() {
         "a cut re-bases an open patch, it does not kill it"
     );
     assert!(view.approvals >= 1, "the proposer's own signature survives the cut");
+    assert_eq!(
+        view.superseded_kind,
+        Some(molt_core::SupersededKind::Rebase),
+        "the cut re-based it - that is not the same news as a conflict"
+    );
+    assert!(!view.superseded, "a re-based patch is not dead");
 
     // and the next patch counts on from there on every seat
     ratify(&a, &b, &add("g.md", "after the cut")).await;

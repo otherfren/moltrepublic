@@ -412,6 +412,7 @@ impl State {
                 voted: Vec::new(),
                 by: molt_core::MemberId::new(),
                 superseded: false,
+                superseded_kind: None,
                 withdrawn: false,
             });
     }
@@ -648,6 +649,7 @@ impl State {
         Ok(molt_core::Reply::Chain {
             blocks,
             diverged: self.chain.diverged.values().cloned().collect(),
+            stale_signers: self.stale_signers(),
         })
     }
 }

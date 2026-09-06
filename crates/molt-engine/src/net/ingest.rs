@@ -417,8 +417,20 @@ impl State {
             WorkspaceEvent::Committed(block) if self.is_chain_governed() => {
                 self.receive_block_from(&from, block);
             }
+            // A6: a peer dropped a vote of OURS - only that (a frame naming
+            // another member's vote is that member's business, never ours)
+            WorkspaceEvent::VoteRefused { id, voter, head, .. }
+                if self.is_chain_governed() && voter == self.member() =>
+            {
+                self.note_peer_height(&from, head);
+                let _ = self.cmd_net_vote_refused(id, &from, head);
+            }
             WorkspaceEvent::ChainRequest { from_height, known } if self.is_chain_governed() => {
                 tracing::debug!(me = %self.member(), %from, from_height, "chain catch-up request arrived");
+                // A5: the requester's own samples say where it stands
+                if let Some(top) = known.iter().map(|h| h.height).max() {
+                    self.note_peer_height(&from, top);
+                }
                 // R5: a requester on another branch names what it holds; serve
                 // from the fork point it lets us find, not from its estimate
                 let from_height = self.serve_from_for(from_height, &known);
@@ -504,6 +516,7 @@ impl State {
             WorkspaceEvent::CheckpointProposed { id, upto, state_hash, folded }
                 if self.is_chain_governed() =>
             {
+                self.note_peer_height(&from, upto);
                 self.receive_checkpoint_proposal(id.0, upto, &state_hash, folded);
             }
             // WP4b: a pruned peer served its blob ahead of the anchor —

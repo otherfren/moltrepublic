@@ -175,6 +175,21 @@ pub(crate) fn chain_diverged_copy(lang: i32, rest: &str) -> String {
     }
 }
 
+/// A6: a peer dropped a vote this seat cast, because the republic had
+/// already moved past the height it was signed at. Rust-side copy, like
+/// [`chain_diverged_copy`] - no window rebuild for a toast.
+pub(crate) fn vote_refused_copy(lang: i32, rest: &str) -> String {
+    let mut parts = rest.splitn(3, ':');
+    let id = parts.next().unwrap_or("?");
+    let peer = parts.next().unwrap_or("?");
+    let head = parts.next().unwrap_or("?");
+    if lang == 1 {
+        format!("Stimme zu #{id} zaehlt bei {peer} nicht - dort steht die Chain auf {head}.")
+    } else {
+        format!("The vote on #{id} did not count at {peer} - its chain stands at {head}.")
+    }
+}
+
 /// Render a chat timestamp as `2026-06-02 13:37 (~20 minutes ago)` in the
 /// local timezone. The relative part refreshes with every surfaces push.
 pub(crate) fn when_label(lang: i32, ts: u64) -> String {

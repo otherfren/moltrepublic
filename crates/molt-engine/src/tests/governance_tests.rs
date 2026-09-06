@@ -310,6 +310,7 @@ fn org_pending_cards_carry_current_and_proposed_state() {
             voted: Vec::new(),
         by: String::new(),
         superseded: false,
+        superseded_kind: None,
         withdrawn: false,
     };
     assert_eq!(

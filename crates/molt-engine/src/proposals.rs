@@ -818,11 +818,24 @@ impl State {
         p.approvals > 0
     }
 
+    /// A6: a vote cast while the peers are ahead is signed at a height the
+    /// republic has left, so every other node drops it. Refuse it here
+    /// rather than answer like a success - round 3's partitioned seat cast
+    /// eleven approvals into that void.
+    fn refuse_a_lagging_vote(&self) -> Result<(), MoltError> {
+        let peers_ahead = self.chain_lag().peers_ahead;
+        if peers_ahead > 0 {
+            return Err(MoltError::ChainLagging { peers_ahead });
+        }
+        Ok(())
+    }
+
     pub(crate) fn cmd_approve(
         &mut self,
         proposal: ProposalId,
         note: Option<String>,
     ) -> Result<Reply, MoltError> {
+        self.refuse_a_lagging_vote()?;
         let (late, operator_already_voted) = {
             let p = self
                 .proposals
@@ -1073,6 +1086,7 @@ impl State {
         proposal: ProposalId,
         note: Option<String>,
     ) -> Result<Reply, MoltError> {
+        self.refuse_a_lagging_vote()?;
         let me = self.member();
         {
             let p = self
@@ -1615,6 +1629,7 @@ impl State {
             // "" never matches — an unknown proposer is nobody's
             mine: !p.by.is_empty() && p.by == me,
             superseded: p.superseded,
+            superseded_kind: p.superseded_kind,
             withdrawn: p.withdrawn,
             sealing: self.chain.seal_held.contains(&id),
         }
@@ -3332,31 +3347,59 @@ impl State {
         let Ok((tree, _)) = self.wiki_base() else {
             return;
         };
-        let stale: Vec<u64> = {
-            cands
-                .iter()
-                .copied()
-                .filter(|id| {
-                    let Some(pending) = self.wiki_pending.get(id) else {
-                        return false;
-                    };
-                    // a patch naming none of the moved paths kept its verdict:
-                    // nothing it reads changed
-                    if moved.is_some_and(|m| pending.paths.is_disjoint(m)) {
-                        return false;
-                    }
-                    !Self::wiki_patch_applies(&tree, pending)
-                })
-                .collect()
-        };
+        // A4: the base moving is TWO different pieces of news. A patch it
+        // still applies to is only RE-BASED - open, votable, votes kept;
+        // one it no longer applies to is dead. Round 3 read both as
+        // "superseded" and left three seats counting votes on corpses.
+        let mut stale: Vec<u64> = Vec::new();
+        let mut rebased: Vec<u64> = Vec::new();
+        for id in &cands {
+            let Some(pending) = self.wiki_pending.get(id) else {
+                continue;
+            };
+            // a patch naming none of the moved paths kept its verdict:
+            // nothing it reads changed
+            if moved.is_some_and(|m| pending.paths.is_disjoint(m)) {
+                continue;
+            }
+            if Self::wiki_patch_applies(&tree, pending) {
+                // only a REAL move re-bases: a full re-check (registration,
+                // rebuild) names no moved paths and decides nothing
+                if moved.is_some() {
+                    rebased.push(*id);
+                }
+            } else {
+                stale.push(*id);
+            }
+        }
+        for id in rebased {
+            if let Some(p) = self.proposals.get_mut(&id) {
+                p.superseded_kind = Some(molt_core::SupersededKind::Rebase);
+            }
+        }
         for id in stale {
             if let Some(p) = self.proposals.get_mut(&id) {
                 p.state = ProposalState::Rejected;
                 p.superseded = true;
+                p.superseded_kind = Some(molt_core::SupersededKind::Conflict);
             }
             // G17: freeze the voters as they stood at the retirement
             self.stash_voted(id);
             self.wiki_pending.remove(&id);
+        }
+    }
+
+    /// A4: a cut moved the base under every open wiki patch. None of them
+    /// died of it (the tree is the same tree), so they are RE-BASED, not
+    /// superseded - the flag says which, and the votes stay.
+    pub(crate) fn mark_open_wiki_patches_rebased(&mut self) {
+        for p in self.proposals.values_mut() {
+            if p.surface == Surface::Memory
+                && p.state == ProposalState::Proposed
+                && p.payload.get("op").and_then(Value::as_str) == Some("wiki_patch")
+            {
+                p.superseded_kind = Some(molt_core::SupersededKind::Rebase);
+            }
         }
     }
 
@@ -3822,6 +3865,8 @@ impl State {
             // the honest downscale target a frontend fits a picture to
             // before proposing — this republic's own derived headroom
             image_budget: u64::try_from(member_image_budget(&me, &self.roster())).unwrap_or(0),
+            // A5: distance and silence, beside the contradiction detector
+            chain_lag: self.chain_lag(),
         }
     }
 }
@@ -4117,6 +4162,7 @@ mod size_gate_tests {
             voted: Vec::new(),
             by: String::new(),
             superseded: false,
+                superseded_kind: None,
             withdrawn: false,
         };
         let (current, proposed) = change_summary(&eff, &rec);
