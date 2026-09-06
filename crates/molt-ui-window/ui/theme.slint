@@ -440,6 +440,20 @@ export struct WikiBase {
     loaded: bool,
 }
 
+// One PERSISTENT file the wiki's + Datei picker offers. Everything is
+// pre-rendered in Rust - the pane never formats and never filters.
+export struct WikiFileRow {
+    checksum: string, // the full sha256 - what file-pick takes
+    glyph: string,
+    name: string,
+    detail: string, // "1.2 MiB · by petra"
+    // carried, not shown: the row is also how the read hands the file's
+    // facts back to the Rust model (the filter needs the sharer, the
+    // markup the kind)
+    member: string,
+    kind: string,
+}
+
 export global WikiState {
     in-out property <[WikiNavRow]> nav-rows;
     // the engine-folded BASE + its revision, written by the surfaces
@@ -511,6 +525,26 @@ export global WikiState {
     // is writing
     callback set-cursor(int);
     callback link-commit();
+    // ---- the + Datei picker ----
+    in-out property <bool> file-modal-open;
+    // the republic's PERSISTENT files, already narrowed in Rust
+    in-out property <[WikiFileRow]> file-rows;
+    in-out property <string> file-filter;
+    // the rows ARRIVED - an empty list before that is "still reading"
+    in-out property <bool> file-loaded;
+    // why the last pick wrote nothing ("" = it wrote)
+    in-out property <string> file-error;
+    callback file-open();
+    callback file-close();
+    callback set-file-filter(string);
+    // the picker's rows are wanted…
+    callback file-wanted();
+    // …and here they are
+    callback file-list([WikiFileRow]);
+    // one click: the reference lands at the caret
+    callback file-pick(string);
+    // nothing persisted yet - over to Shared Files, where the vote is
+    callback file-jump();
     // the ACTIVE workspace id (drafts are per workspace): a change resets
     // the model and loads that workspace's stored draft (WP-D)
     in-out property <string> ws-id;
@@ -1419,6 +1453,14 @@ export global Strings {
     in property <string> mem-link-err-qual;
     in property <string> mem-link-err-qsyntax;
     in property <string> mem-link-err-body;
+    // ---- the + Datei picker ----
+    in property <string> mem-tb-file;
+    in property <string> mem-file-title;
+    in property <string> mem-file-ph;
+    in property <string> mem-file-none;
+    in property <string> mem-file-jump;
+    in property <string> mem-file-close;
+    in property <string> mem-file-err-body;
     in property <string> mem-prop-hint;
     in property <string> tip-settings;
     in property <string> quit-title;

@@ -388,6 +388,8 @@ pub struct Wiki {
     /// sync's "has anything moved at all" key
     /// (`docs_archive/ui/wiki_pane_performance.md` F4).
     gen: u64,
+    /// The `+ Datei` picker's rows and needle while it is open.
+    files: FilePicker,
     /// Base paths already asked for and not answered yet (§4.10). Without
     /// it every sync re-asks while the bytes are in flight - 45 `wiki_get`
     /// round trips in a 60-interaction flow (F5). `RefCell` because the
@@ -440,6 +442,42 @@ pub const LINK_ERR_QUAL_SYNTAX: &str = "qual_syntax";
 /// Nowhere in the prose where the link would assert anything (a code
 /// block swallows it).
 pub const LINK_ERR_BODY: &str = "body";
+
+/// One PERSISTENT file the `+ Datei` picker offers. Built by the bridge
+/// from [`molt_core::UploadView`]; `detail` and `glyph` are already
+/// rendered, so the model stays free of formatting and language.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FilePick {
+    pub name: String,
+    /// Who shared it - filter material beside the name.
+    pub member: String,
+    /// [`molt_core::file_kind_label`]'s word; `"Image"` decides the form.
+    pub kind: String,
+    /// The full sha256 hex - the picker's own address for the row.
+    pub checksum: String,
+    /// `size · by member`, ready to render.
+    pub detail: String,
+    pub glyph: String,
+}
+
+/// The `+ Datei` picker while it is open (`wiki_files_and_images.md`
+/// §3.6). Re-read on every open: a file persisted a minute ago has to
+/// show up without a restart.
+#[derive(Debug, Default)]
+struct FilePicker {
+    open: bool,
+    /// The republic's persistent files, as the bridge read them.
+    rows: Vec<FilePick>,
+    /// The rows ARRIVED - an empty list then means an empty republic, not
+    /// "still reading", and only then does the modal say so.
+    loaded: bool,
+    /// Asked for and not answered yet: the face sync runs after every
+    /// callback, and without this every one of them would re-read.
+    asked: std::cell::Cell<bool>,
+    filter: String,
+    /// Why the last pick wrote nothing (a `LINK_ERR_*` code).
+    error: &'static str,
+}
 
 /// How many target rows the link modal offers at once. The list is a
 /// picker, not a catalogue: past this the filter is the way to find one.
@@ -522,6 +560,7 @@ impl Wiki {
             cursor: None,
             vote_pending: None,
             gen: 0,
+            files: FilePicker::default(),
             in_flight: std::cell::RefCell::new(std::collections::BTreeSet::new()),
         }
     }
@@ -549,6 +588,7 @@ impl Wiki {
             cursor: None,
             vote_pending: None,
             gen: 0,
+            files: FilePicker::default(),
             in_flight: std::cell::RefCell::new(std::collections::BTreeSet::new()),
         }
     }
@@ -2555,6 +2595,133 @@ impl Wiki {
         Ok(())
     }
 
+    // ---- the + Datei picker (`wiki_files_and_images.md` §3.6) -------------
+
+    /// The picker opened: re-read the republic's persistent files. A
+    /// stale list would hide a file the members persisted a minute ago.
+    pub fn file_open(&mut self) {
+        self.files = FilePicker { open: true, ..FilePicker::default() };
+    }
+
+    /// The picker closed without inserting anything.
+    pub fn file_close(&mut self) {
+        self.files = FilePicker::default();
+    }
+
+    pub fn set_file_filter(&mut self, needle: &str) {
+        self.files.filter = needle.to_string();
+        self.files.error = "";
+    }
+
+    pub fn file_filter(&self) -> &str {
+        &self.files.filter
+    }
+
+    pub fn file_error(&self) -> &str {
+        self.files.error
+    }
+
+    /// The rows arrived. Before this an empty list means "still reading"
+    /// ([`Wiki::file_loaded`]), which is a different sentence.
+    pub fn set_file_rows(&mut self, rows: Vec<FilePick>) {
+        self.files.asked.set(false);
+        self.files.rows = rows;
+        self.files.loaded = true;
+    }
+
+    pub fn file_loaded(&self) -> bool {
+        self.files.loaded
+    }
+
+    /// The rows on offer, narrowed by the needle over name AND sharer.
+    /// Filtering lives here, never in the .slint - the pane is a view.
+    pub fn file_rows(&self) -> Vec<&FilePick> {
+        if !self.files.open {
+            return Vec::new();
+        }
+        let needle = self.files.filter.to_lowercase();
+        self.files
+            .rows
+            .iter()
+            .filter(|r| {
+                needle.is_empty()
+                    || r.name.to_lowercase().contains(&needle)
+                    || r.member.to_lowercase().contains(&needle)
+            })
+            .take(MAX_LINK_TARGETS)
+            .collect()
+    }
+
+    /// The picker wants the republic's files. CLAIMED like
+    /// [`Wiki::wants_content`]: the face sync runs after every callback,
+    /// and an unclaimed answer would mean a `ReadUploads` per keystroke.
+    pub fn wants_files(&self) -> bool {
+        if !self.files.open || self.files.loaded || self.files.asked.get() {
+            return false;
+        }
+        self.files.asked.set(true);
+        true
+    }
+
+    /// One click on a row: its reference lands in the open document and
+    /// the picker closes. A refusal keeps it up, carrying the reason.
+    pub fn file_pick(&mut self, checksum: &str) -> bool {
+        self.files.error = "";
+        let Some(id) = self.active_id() else {
+            return false;
+        };
+        let Some(row) = self.files.rows.iter().find(|r| r.checksum == checksum) else {
+            return false;
+        };
+        let Some(markup) = file_ref_markup(&row.name, &row.kind, &row.checksum) else {
+            return false;
+        };
+        let Some(hex) = file_ref_hex(&row.checksum) else {
+            return false;
+        };
+        match self.insert_file_ref(id, &markup, &hex) {
+            Ok(()) => {
+                self.files = FilePicker::default();
+                true
+            }
+            Err(code) => {
+                self.files.error = code;
+                false
+            }
+        }
+    }
+
+    /// The semantic link's insertion path, over a file reference: the raw
+    /// editor's caret while it is open on THIS document, else a new
+    /// paragraph at the end - and the write is kept only where the
+    /// GRAMMAR reads the reference back (a code fence swallows it).
+    fn insert_file_ref(
+        &mut self,
+        id: DocId,
+        markup: &str,
+        hex: &str,
+    ) -> Result<(), &'static str> {
+        let Some(d) = self.doc(id) else {
+            return Err(LINK_ERR_BODY);
+        };
+        if !d.loaded() || d.deleted {
+            return Err(LINK_ERR_BODY);
+        }
+        let raw = d.raw.clone();
+        let before = refs_to(&raw, hex);
+        let landed = |doc: &str| refs_to(doc, hex) > before;
+        let at_caret = self
+            .cursor
+            .filter(|(c, _)| *c == id && self.editing)
+            .and_then(|(_, at)| splice_at(&raw, at, markup));
+        let next = at_caret
+            .filter(|s| landed(s))
+            .or_else(|| Some(appended(&raw, markup)).filter(|s| landed(s)))
+            .ok_or(LINK_ERR_BODY)?;
+        self.set_raw_discrete(id, &next);
+        Ok(())
+    }
+
     /// Write the QUALIFIED relation - `key: { to, since, … }` - into the
     /// header, the one form the prose has no shape for. Same discipline as
     /// [`with_relation`]: the parser has to read back the old header plus
@@ -3006,6 +3173,61 @@ fn link_display(pred: Option<&str>, target: &str, name: &str) -> String {
     } else {
         format!("[[{lead}{target}|{name}]]")
     }
+}
+
+/// How many references to `hex` the document's BODY carries - the read-back
+/// that decides whether an insertion landed where the grammar sees it.
+fn refs_to(raw: &str, hex: &str) -> usize {
+    molt_core::wiki_refs::file_refs(body_of(raw))
+        .iter()
+        .filter(|r| r.hex == hex)
+        .count()
+}
+
+/// The link text of a file reference. Markdown's own escapes, so a
+/// bracket in a file name closes nothing; the parens need none inside the
+/// brackets, and a control character would end the link.
+fn file_ref_text(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        match c {
+            '\\' | '[' | ']' => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if c.is_control() => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out.trim().to_string()
+}
+
+/// The prefix a reference names this checksum by - the ONE derivation the
+/// picker, the markup and the read-back share. `None` = the share cannot
+/// be named by its content (legacy, or not hex).
+#[must_use]
+pub fn file_ref_hex(checksum: &str) -> Option<String> {
+    let hex: String = checksum
+        .trim()
+        .chars()
+        .take(molt_core::wiki_refs::PREFIX_MIN)
+        .flat_map(char::to_lowercase)
+        .collect();
+    molt_core::wiki_refs::valid_hex(&hex).then_some(hex)
+}
+
+/// The markup one picked file becomes (`wiki_files_and_images.md` §3.6):
+/// `![name](upload:<12 hex>)` for an image, `[name](upload:<12 hex>)` for
+/// anything else. `None` where the share carries no usable checksum - a
+/// legacy share the picker never offers.
+#[must_use]
+pub fn file_ref_markup(name: &str, kind: &str, checksum: &str) -> Option<String> {
+    let hex = file_ref_hex(checksum)?;
+    let text = file_ref_text(name);
+    // a name that escapes to nothing still names the file - by its hex
+    let text = if text.is_empty() { hex.clone() } else { text };
+    let bang = if kind == "Image" { "!" } else { "" };
+    Some(format!("{bang}[{text}](upload:{hex})"))
 }
 
 /// `raw` with `markup` spliced in at byte offset `at`, or `None` when the
@@ -5655,5 +5877,144 @@ diff --git a/gone.md b/gone.md\n--- a/gone.md\n+++ b/gone.md\n@@ -1,1 +1,1 @@\n-
             w.nav_rows().iter().any(|r| r.id == id),
             "the draft file is back under its chain"
         );
+    }
+    // ---- the + Datei picker ------------------------------------------------
+
+    #[test]
+    fn an_image_becomes_an_inline_reference_and_anything_else_a_link() {
+        let sum = "3f9a2c1b7e04d5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0";
+        assert_eq!(
+            file_ref_markup("Netzplan.png", "Image", sum).expect("markup"),
+            "![Netzplan.png](upload:3f9a2c1b7e04)"
+        );
+        assert_eq!(
+            file_ref_markup("Bericht Q3.pdf", "PDF", sum).expect("markup"),
+            "[Bericht Q3.pdf](upload:3f9a2c1b7e04)"
+        );
+    }
+
+    #[test]
+    fn the_markup_reads_back_as_the_reference_it_names() {
+        let sum = "ABCDEF0123456789".to_string() + &"0".repeat(48);
+        let md = file_ref_markup("plan.png", "Image", &sum).expect("markup");
+        let refs = molt_core::wiki_refs::file_refs(&md);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].hex, "abcdef012345", "the prefix folds to canonical hex");
+        assert!(refs[0].image);
+        assert!(refs[0].valid());
+    }
+
+    #[test]
+    fn a_bracket_in_the_name_cannot_close_the_link_early() {
+        let sum = "a".repeat(64);
+        let md = file_ref_markup("re[dact]ed (v2).pdf", "PDF", &sum).expect("markup");
+        let refs = molt_core::wiki_refs::file_refs(&md);
+        assert_eq!(refs.len(), 1, "{md}");
+        assert_eq!(refs[0].alt, "re[dact]ed (v2).pdf");
+        assert_eq!(refs[0].hex, "aaaaaaaaaaaa");
+    }
+
+    #[test]
+    fn a_share_without_a_usable_checksum_has_no_markup() {
+        assert_eq!(file_ref_markup("a.png", "Image", ""), None, "a legacy share");
+        assert_eq!(file_ref_markup("a.png", "Image", "3f9a2c1b"), None, "too short");
+        assert_eq!(file_ref_markup("a.png", "Image", &"z".repeat(64)), None, "not hex");
+        // a name that escapes to nothing still names the file by its hex
+        assert_eq!(
+            file_ref_markup("  ", "File", &"b".repeat(64)).expect("markup"),
+            "[bbbbbbbbbbbb](upload:bbbbbbbbbbbb)"
+        );
+    }
+
+    fn picker_doc(raw: &str) -> (Wiki, DocId) {
+        let mut w = Wiki::empty();
+        w.set_base(&[("a.md".to_string(), Some(raw.to_string()))], 1);
+        let id = w.docs.first().expect("a.md").id;
+        w.open(id);
+        (w, id)
+    }
+
+    fn picks() -> Vec<FilePick> {
+        vec![
+            FilePick {
+                name: "Netzplan.png".to_string(),
+                member: "petra".to_string(),
+                kind: "Image".to_string(),
+                checksum: "1".repeat(64),
+                detail: "12 KiB · by petra".to_string(),
+                glyph: "🖼️".to_string(),
+            },
+            FilePick {
+                name: "Bericht.pdf".to_string(),
+                member: "walter".to_string(),
+                kind: "PDF".to_string(),
+                checksum: "2".repeat(64),
+                detail: "1.2 MiB · by walter".to_string(),
+                glyph: "📕".to_string(),
+            },
+        ]
+    }
+
+    #[test]
+    fn the_picker_asks_once_and_filters_over_name_and_sharer() {
+        let (mut w, _) = picker_doc("# A\n");
+        assert!(!w.wants_files(), "closed, nothing to read");
+        w.file_open();
+        assert!(w.wants_files(), "open and empty: ask");
+        assert!(!w.wants_files(), "…once - the answer is claimed");
+        assert!(!w.file_loaded(), "no answer yet is not an empty republic");
+        w.set_file_rows(picks());
+        assert!(w.file_loaded());
+        assert_eq!(w.file_rows().len(), 2);
+        w.set_file_filter("bericht");
+        assert_eq!(w.file_rows().len(), 1);
+        assert_eq!(w.file_rows()[0].name, "Bericht.pdf");
+        w.set_file_filter("PETRA");
+        assert_eq!(w.file_rows()[0].name, "Netzplan.png", "the sharer filters too");
+        w.file_close();
+        assert!(!w.wants_files(), "closed again");
+    }
+
+    #[test]
+    fn a_pick_lands_at_the_caret_and_closes_the_picker() {
+        let (mut w, id) = picker_doc("# A\n\nSiehe hier.\n");
+        w.editing = true;
+        // right after "Siehe"
+        w.set_cursor("# A\n\nSiehe".len());
+        w.file_open();
+        w.set_file_rows(picks());
+        assert!(w.file_pick(&"1".repeat(64)));
+        assert_eq!(
+            w.doc(id).expect("doc").raw,
+            "# A\n\nSiehe ![Netzplan.png](upload:111111111111) hier.\n"
+        );
+        assert_eq!(w.file_error(), "");
+        assert!(!w.wants_files(), "the pick closed the picker");
+    }
+
+    #[test]
+    fn a_pick_without_a_caret_lands_at_the_end_as_a_link() {
+        let (mut w, id) = picker_doc("# A\n");
+        w.file_open();
+        w.set_file_rows(picks());
+        assert!(w.file_pick(&"2".repeat(64)));
+        assert_eq!(
+            w.doc(id).expect("doc").raw,
+            "# A\n\n[Bericht.pdf](upload:222222222222)\n"
+        );
+    }
+
+    #[test]
+    fn a_reference_the_parser_would_not_see_is_refused() {
+        // an unclosed fence swallows the caret AND the end of the document
+        let (mut w, id) = picker_doc("# A\n\n```\ncode\n");
+        let before = w.doc(id).expect("doc").raw.clone();
+        w.editing = true;
+        w.set_cursor(before.len());
+        w.file_open();
+        w.set_file_rows(picks());
+        assert!(!w.file_pick(&"1".repeat(64)));
+        assert_eq!(w.file_error(), LINK_ERR_BODY);
+        assert_eq!(w.doc(id).expect("doc").raw, before, "nothing was written");
     }
 }
