@@ -357,6 +357,36 @@ pub struct UiConfig {
     /// Editor/document font size in px.
     #[serde(default = "default_font_editor")]
     pub font_editor: u16,
+    /// Which Slint renderer the GUI starts with.
+    #[serde(default)]
+    pub renderer: Renderer,
+}
+
+/// The GUI's renderer, chosen at start. Unknown values are rejected by the
+/// parser. `SLINT_BACKEND` still wins over this key, so a one-off trial needs
+/// no edit (`docs/ui/wiki_pane_performance.md` §4 step 5).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Renderer {
+    /// Let Slint pick — the shipped default.
+    #[default]
+    Auto,
+    /// The CPU renderer, which repaints only the dirty region. For machines
+    /// without a GPU, where OpenGL is a software rasterizer anyway.
+    Software,
+    /// OpenGL via femtovg.
+    Gl,
+}
+
+impl Renderer {
+    /// The lowercase wire/config name (`"auto" | "software" | "gl"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Renderer::Auto => "auto",
+            Renderer::Software => "software",
+            Renderer::Gl => "gl",
+        }
+    }
 }
 
 impl Default for UiConfig {
@@ -367,6 +397,7 @@ impl Default for UiConfig {
             font_app: default_font_app(),
             font_nav: default_font_nav(),
             font_editor: default_font_editor(),
+            renderer: Renderer::default(),
         }
     }
 }
@@ -436,6 +467,11 @@ pub fn default_font_editor() -> u16 {
 /// Default GUI theme.
 pub fn default_theme() -> String {
     "classic".to_string()
+}
+
+/// Default GUI renderer: Slint's own choice.
+pub fn default_renderer() -> String {
+    Renderer::Auto.as_str().to_string()
 }
 
 /// A fresh random MCP API token: 24 bytes from the OS CSPRNG, hex-encoded.
@@ -540,6 +576,9 @@ pub struct Settings {
     pub font_nav: u16,
     /// Editor/document font size in px.
     pub font_editor: u16,
+    /// GUI renderer: `"auto" | "software" | "gl"`. File-owned - the session
+    /// never carries it, so a runtime save keeps whatever the file says.
+    pub renderer: String,
     /// The Nostr relay pool in dial-priority order. Empty by default — the
     /// node connects to no relay until its operator adds and confirms one.
     pub relays: Vec<RelayConfig>,
@@ -582,6 +621,7 @@ impl Default for Settings {
             font_app: default_font_app(),
             font_nav: default_font_nav(),
             font_editor: default_font_editor(),
+            renderer: default_renderer(),
             relays: Vec::new(),
             clearnet_relays_enabled: false,
         }
@@ -648,6 +688,7 @@ impl From<&Config> for Settings {
             font_app: c.ui.font_app,
             font_nav: c.ui.font_nav,
             font_editor: c.ui.font_editor,
+            renderer: c.ui.renderer.as_str().to_string(),
         }
     }
 }
@@ -760,6 +801,10 @@ theme = {theme}
 font_app = {font_app}
 font_nav = {font_nav}
 font_editor = {font_editor}
+# GUI renderer: "auto" = Slint's default, "software" = CPU renderer with
+# partial repaint (no GPU), "gl" = OpenGL via femtovg. Applied at start;
+# SLINT_BACKEND overrides it.
+renderer = {renderer}
 "#,
         headless = settings.headless,
         poke_enabled = settings.poke_enabled,
@@ -798,6 +843,7 @@ font_editor = {font_editor}
         font_app = settings.font_app,
         font_nav = settings.font_nav,
         font_editor = settings.font_editor,
+        renderer = toml_str(&settings.renderer),
     )
 }
 
@@ -1011,6 +1057,11 @@ pub fn salvage(text: &str) -> Settings {
         }
         if let Some(v) = ui.get("font_editor").and_then(toml::Value::as_integer) {
             s.font_editor = u16::try_from(v).unwrap_or_else(|_| default_font_editor());
+        }
+        if let Some(r) = ui.get("renderer").and_then(toml::Value::as_str) {
+            if matches!(r, "auto" | "software" | "gl") {
+                s.renderer = r.to_string();
+            }
         }
     }
     s
@@ -1250,6 +1301,7 @@ pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
     set_int(ui, "font_app", i64::from(settings.font_app));
     set_int(ui, "font_nav", i64::from(settings.font_nav));
     set_int(ui, "font_editor", i64::from(settings.font_editor));
+    set_str(ui, "renderer", &settings.renderer);
 }
 
 /// Write the relay pool as `[[transport.nostr.relay]]` tables in pool order.
@@ -1416,6 +1468,78 @@ mod tests {
         assert_eq!(salvaged.font_editor, 15);
     }
 
+    /// §4 step 5 of `docs/ui/wiki_pane_performance.md` (F1/F2): the renderer
+    /// is a config key, not an env var somebody has to remember. An older
+    /// config has none and keeps its default; a typo is a hard error like
+    /// every other unknown value.
+    #[test]
+    fn renderer_defaults_to_auto_and_an_old_config_keeps_parsing() {
+        let old = "[ui]\nlang = \"de\"\n";
+        let config = parse(old).expect("a pre-renderer config still parses");
+        assert_eq!(config.ui.renderer, Renderer::Auto);
+        assert_eq!(Settings::default().renderer, "auto");
+    }
+
+    #[test]
+    fn every_renderer_value_round_trips_through_render_salvage_and_update() {
+        for (value, parsed) in [
+            ("auto", Renderer::Auto),
+            ("software", Renderer::Software),
+            ("gl", Renderer::Gl),
+        ] {
+            let s = Settings {
+                renderer: value.to_string(),
+                ..Settings::default()
+            };
+            let text = render(&s);
+            assert_eq!(
+                parse(&text).expect("rendered config parses").ui.renderer,
+                parsed
+            );
+            assert_eq!(salvage(&text).renderer, value, "salvage keeps {value}");
+            let updated = update("[ui]\nlang = \"de\"\n", &s).expect("runtime save");
+            assert_eq!(
+                parse(&updated).expect("updated file parses").ui.renderer,
+                parsed
+            );
+        }
+        // the lenient path drops a value the strict parser would refuse
+        assert_eq!(
+            salvage("[ui]\nrenderer = \"vulkan\"\n").renderer,
+            "auto",
+            "salvage defaults an unreadable renderer"
+        );
+    }
+
+    #[test]
+    fn an_unknown_renderer_is_a_hard_config_error() {
+        assert!(parse("[ui]\nrenderer = \"vulkan\"\n").is_err());
+        assert!(
+            parse("[ui]\nrenderer = \"GL\"\n").is_err(),
+            "values are lowercase"
+        );
+        assert!(parse("[ui]\nrenderer = 1\n").is_err());
+    }
+
+    /// The generated config is where an operator meets the key, so it ships
+    /// with the choice spelled out.
+    #[test]
+    fn the_generated_config_documents_the_renderer_key() {
+        let text = render(&Settings::default());
+        assert!(text.contains("renderer = \"auto\""), "{text}");
+        let comment: String = text
+            .lines()
+            .filter(|l| l.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for word in ["\"auto\"", "\"software\"", "\"gl\"", "SLINT_BACKEND"] {
+            assert!(
+                comment.contains(word),
+                "the renderer comment must name {word}:\n{comment}"
+            );
+        }
+    }
+
     /// The media bucket was REMOVED on 2026-09-04 (nothing ever wrote to
     /// it). A config.toml in the field still carries its two keys, and
     /// `deny_unknown_fields` would refuse the whole file over them - so a
@@ -1575,6 +1699,7 @@ mod tests {
             mcp_read_token: "0ddba11feed1eaf5".to_string(),
             lang: "de".to_string(),
             theme: "brutalism".to_string(),
+            renderer: "software".to_string(),
             font_app: 16,
             font_nav: 12,
             font_editor: 15,

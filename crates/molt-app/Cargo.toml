@@ -38,6 +38,10 @@ molt-net.workspace = true
 molt-engine.workspace = true
 molt-mcp.workspace = true
 molt-ui.workspace = true
+# the renderer selection ([ui] renderer): the platform is installed once per
+# process, before the GUI builds its first Slint object. Same workspace dep
+# molt-ui already pulls, so the feature set is unchanged.
+slint.workspace = true
 tokio.workspace = true
 clap.workspace = true
 anyhow.workspace = true
