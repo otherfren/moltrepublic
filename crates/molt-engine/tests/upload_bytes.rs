@@ -385,6 +385,16 @@ async fn a_mirrored_file_downloads_with_the_relay_stopped() {
         Err(molt_core::MoltError::IndexBuilding { .. }) => {}
         other => panic!("unexpected: {other:?}"),
     }
+    // D4: the chain rows carry the moment this node's log took the block
+    for (who, w) in [("petra", &a), ("walter", &b)] {
+        match w.execute(Command::ReadChain).await.expect("read chain") {
+            Reply::Chain { blocks, .. } => assert!(
+                blocks.iter().any(|bl| bl.ts > 0),
+                "{who} has no stamped block: {blocks:?}"
+            ),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
 
     a.execute(Command::CloseWorkspace).await.expect("close a");
     b.execute(Command::CloseWorkspace).await.expect("close b");

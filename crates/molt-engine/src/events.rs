@@ -445,9 +445,9 @@ impl State {
             | WorkspaceEvent::FileRequested { .. }
             | WorkspaceEvent::FileWanted { .. }
             | WorkspaceEvent::FileServed { .. } => {
-                // chain transport/coordination frames (a broadcast block, a
-                // catch-up request, a raw MLS re-key commit, a relayed mesh
-                // announce, a file fetch request) ride the log only to reach
+                // chain transport/coordination frames (a catch-up request, a
+                // raw MLS re-key commit, a relayed mesh announce, a file
+                // fetch request) ride the log only to reach
                 // the outbox; the chain lives in chain.state, the MLS ratchet
                 // in the group, the mesh in transport.state and a file
                 // transfer on its dedicated queue, none rebuilt from the log,
