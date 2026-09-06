@@ -906,7 +906,7 @@ the vote.
 copy of the current base, so a `rename` followed by a `replace` on the new
 path is legal. Seven ops: `create { path, content }` (a NEW document; an
 occupied path refuses, in the base and in this call's own working copy -
-added 2026-09-06, `docs/reviews/mcp_agent_friction_fixes_round_2.md` B1),
+added 2026-09-06, `docs_archive/reviews/mcp_agent_friction_fixes_round_2.md` B1),
 `content { path, content }` (a whole document; it CREATES a free path and
 OVERWRITES an occupied one), `replace { path, old, new }` (one exact
 occurrence - the form coding-agent scaffolds converged on),
@@ -944,7 +944,7 @@ occurrence - the form coding-agent scaffolds converged on),
   (`wiki_semantic_gaps.md` §6); `add_relation` is for when there is no such
   sentence.
 - **What the engine knows before the vote is minted** (round 2, B2-B4,
-  `docs/reviews/mcp_agent_friction_fixes_round_2.md`): beside the header
+  `docs_archive/reviews/mcp_agent_friction_fixes_round_2.md`): beside the header
   check it warns about a touched path an OPEN proposal already touches
   (`<path> is in open proposal N by <seat>`), a rename that leaves a link
   in an open proposal, a new title or alias that already names another

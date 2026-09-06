@@ -2768,7 +2768,7 @@ pub enum WorkspaceEvent {
         /// on a fork, its estimate of the fork point.
         from_height: u64,
         /// The requester's own `(height, hash)` samples, head first, going
-        /// back geometrically (`docs/chain/chain_reorg.md` R5): a server
+        /// back geometrically (`docs_archive/chain/chain_reorg.md` R5): a server
         /// that holds another branch serves from the highest matching
         /// sample instead of `from_height`. Empty on a plain catch-up; an
         /// older server ignores it.
@@ -5795,7 +5795,7 @@ pub enum Reply {
         #[serde(default)]
         warnings: Vec<String>,
         /// The proposal's own discussion channel - where review remarks
-        /// belong (B10, `docs/reviews/mcp_agent_friction_fixes.md`).
+        /// belong (B10, `docs_archive/reviews/mcp_agent_friction_fixes.md`).
         #[serde(default)]
         channel: ChannelRef,
     },
@@ -6564,7 +6564,7 @@ pub struct HeightHash {
 }
 
 /// A peer whose chain parted from this node's (A2.1,
-/// `docs/reviews/mcp_agent_friction_fixes.md`): a block it sent links to a
+/// `docs_archive/reviews/mcp_agent_friction_fixes.md`): a block it sent links to a
 /// history this node does not hold, or contends a slot below the tip.
 /// `since_height` is the lowest height the two chains can still share;
 /// the flag clears when a block from that peer extends this chain again.

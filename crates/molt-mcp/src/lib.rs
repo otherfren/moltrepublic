@@ -371,7 +371,7 @@ async fn call_tool(
 }
 
 /// The agent-facing shape of a reply, where it differs from the engine's
-/// (`docs/reviews/mcp_agent_friction_fixes.md` B1/B2): `withdrawn` reads
+/// (`docs_archive/reviews/mcp_agent_friction_fixes.md` B1/B2): `withdrawn` reads
 /// as a state of its own, `list_proposals` answers headers unless asked
 /// for the patch, and `read_proposal` is that list narrowed to one id.
 fn present(name: &str, args: &Value, mut value: Value) -> Result<Value, String> {

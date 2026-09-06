@@ -1,6 +1,7 @@
 # MCP friction log: three agents build a wiki (2026-09-05)
 
-Status: OPEN - observation log of the experiment, aborted 2026-09-06 00:45
+Status: CLOSED - consumed by `mcp_agent_friction_fixes.md` (executed).
+Originally: observation log of the experiment, aborted 2026-09-06 00:45
 after the chain fork (F00). Proposed fixes: `mcp_agent_friction_fixes.md`.
 
 ## Setup

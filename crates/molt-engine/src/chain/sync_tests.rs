@@ -560,7 +560,7 @@ fn a_tip_tie_on_a_shared_prev_is_not_divergence() {
     assert_eq!(walter.chain.blocks.len(), 2, "one of the two tip blocks stands");
 }
 
-/// A2.3 (`docs/chain/chain_reorg.md` R1-R4): two branches fork at height 1
+/// A2.3 (`docs_archive/chain/chain_reorg.md` R1-R4): two branches fork at height 1
 /// and both grow to 3. The holder of the LARGER-hash branch receives the
 /// other branch block by block, in any order, and re-bases onto it: the
 /// smaller hash at the first divergent height wins, displaced proposals
