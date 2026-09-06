@@ -1,8 +1,7 @@
 # Wiki pane performance - analysis and fix plan
 
 Status: **OPEN - analysis measured 2026-09-06, fix plan partly executed.**
-The two user-requested items in step 1 landed with this document, step 2 on
-2026-09-06; everything from step 3 on is a proposal to discuss first.
+A step marked BUILT below is done; the rest is a proposal to discuss first.
 
 Reported live (2026-09-06, three `moltd` nodes on the "Second Wiki Test"
 republic, 125 pages / 9 folders / 293 KB): the wiki pane is sluggish
@@ -171,7 +170,7 @@ nodes gossiping, this alone reads as "the pane is sluggish".
 Ordered by payoff over effort. Steps 1-3 need no discussion (pure waste
 removal, no visible change); 4-6 change behaviour or structure.
 
-1. **Requested, landed with this doc (2026-09-06).** Base folders start
+1. **BUILT 2026-09-06 (requested, landed with this doc).** Base folders start
    CLOSED (a folder the member creates opens; the draft keeps whatever
    state they left - `Wiki::ensure_folder_chain`); reveal returns the
    marked row's index, the bridge hands it to `WikiState.nav-scroll-to`,
@@ -197,8 +196,8 @@ removal, no visible change); 4-6 change behaviour or structure.
    `a_new_chat_line_grows_the_log_model_in_place`,
    `an_unchanged_surfaces_push_paints_nothing`. Measured on the same
    corpus, same flavour, in one run (`surfaces_push_frame_cost_offscreen`,
-   `#[ignore]`d): the wholesale rewrite 782 ms, `apply_surfaces` with an
-   unchanged bundle **0.4 µs, drew=false**.
+   `#[ignore]`d): the wholesale rewrite 397/782 ms over two runs,
+   `apply_surfaces` with an unchanged bundle **drew=false**.
 3. **`sync_wiki` diet (F4, F5) - molt-ui only, no .slint change.**
    - `to_draft()` only when the 2 s guard is due AND a generation counter
      (bumped by every mutating verb) moved - never on the keystroke echo.
