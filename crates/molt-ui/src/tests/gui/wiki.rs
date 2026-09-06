@@ -1057,6 +1057,68 @@ fn the_draft_is_serialized_once_per_change_window() {
     );
 }
 
+/// **…and the last change of a burst is not lost.** A change made INSIDE
+/// the window has no sync of its own to save it: a member who types once
+/// and walks away used to leave the edit sitting there until a callback
+/// that never comes, which is not "a hard kill loses at most that window"
+/// - it is a window with no end. One timer per window closes it.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_change_inside_the_window_is_flushed_when_it_closes() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    let saved = Rc::new(RefCell::new(Vec::<String>::new()));
+    {
+        let s = saved.clone();
+        ui.on_wiki_draft_save(move |d| s.borrow_mut().push(d.to_string()));
+    }
+    let _wiki = wire_wiki(&ui);
+    let g = ui.global::<WikiState>();
+    g.set_base_docs(ModelRc::new(VecModel::from(vec![WikiBase {
+        path: "a.md".into(),
+        content: "# A\n".into(),
+        loaded: true,
+    }])));
+    g.set_base_rev(1);
+    g.invoke_base_arrived();
+    g.invoke_nav_open(nav_id(&ui, "a.md"));
+    g.invoke_edit_toggle();
+
+    // ONE keystroke, then the member walks away
+    let mut text = g.get_raw().to_string();
+    text.push('z');
+    g.invoke_edited(text.as_str().into());
+    assert!(saved.borrow().is_empty(), "the window is still open");
+
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(2_100));
+    assert_eq!(saved.borrow().len(), 1, "the window closing saves it");
+    assert!(
+        saved.borrow()[0].contains("# A\\nz"),
+        "the flushed draft carries the keystroke: {}",
+        saved.borrow()[0]
+    );
+
+    // …and a burst arms ONE timer, not one per keystroke
+    crate::wiki::counters::reset();
+    for _ in 0..20 {
+        text.push('q');
+        g.invoke_edited(text.as_str().into());
+    }
+    assert_eq!(
+        crate::wiki::counters::flush(),
+        1,
+        "twenty keystrokes, one armed flush"
+    );
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(2_100));
+    assert_eq!(saved.borrow().len(), 2, "one hop per window, not per keystroke");
+    assert_eq!(
+        crate::wiki::counters::draft(),
+        1,
+        "…and one serialization with it"
+    );
+}
+
 /// **A document's bytes are asked for once per attempt** (F5). Every sync
 /// used to re-ask while the fetch was still running - 45 `wiki_get` round
 /// trips in a 60-interaction flow, each reply re-syncing the face. A

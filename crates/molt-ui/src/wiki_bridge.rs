@@ -69,6 +69,11 @@ pub(crate) struct FaceState {
     draft: String,
     draft_at: std::time::Instant,
     draft_gen: u64,
+    /// A change is waiting for the 2 s window to close, and a timer is
+    /// armed to save it there: without one, a member who types once and
+    /// walks away has no next sync, and the window would never end.
+    draft_pending: bool,
+    flush_armed: bool,
     /// The generation `cs-patch` was built at.
     patch_gen: Option<u64>,
     /// The active document the block view, infobox and link list were
@@ -83,6 +88,8 @@ impl FaceState {
             draft: String::new(),
             draft_at: std::time::Instant::now(),
             draft_gen: 0,
+            draft_pending: false,
+            flush_armed: false,
             patch_gen: None,
             doc_key: None,
         }
@@ -102,6 +109,33 @@ fn link_error_text(ui: &AppWindow, code: &str) -> String {
     }
 }
 
+/// The debounced draft persist (WP-D), the half of a sync that talks to
+/// the engine. The WHOLE model as JSON (21 ms on a held base) is
+/// serialized only when the model actually moved and the window is over:
+/// the keystroke echo never pays for a comparison that is thrown away
+/// 2 s out of 2 s (F4a). Returns whether a change is still WAITING for
+/// the window to close - [`arm_draft_flush`] is what ends that wait.
+/// `forced` is the flush timer speaking: the window is over by
+/// construction there, and the mocked clock the GUI tests run on never
+/// moves an `Instant`.
+fn sync_draft(ui: &AppWindow, w: &wiki::Wiki, face: &mut FaceState, forced: bool) -> bool {
+    let gen = w.generation();
+    if gen == face.draft_gen {
+        return false;
+    }
+    if !forced && face.draft_at.elapsed() < DRAFT_WINDOW {
+        return true;
+    }
+    face.draft_gen = gen;
+    let draft = w.to_draft();
+    if draft != face.draft {
+        face.draft = draft.clone();
+        face.draft_at = std::time::Instant::now();
+        ui.invoke_wiki_draft_save(draft.into());
+    }
+    false
+}
+
 /// Push the wiki model into the `WikiState` global after every mutation:
 /// the small models patch in place, and the parts that are neither cheap
 /// nor on screen are skipped on the keys `face` carries
@@ -110,20 +144,8 @@ fn link_error_text(ui: &AppWindow, code: &str) -> String {
 /// the edit mode changes (`raw_for`), never on the keystroke echo — a
 /// mid-typing rewrite fights the caret. A modal write clears it itself.
 fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, face: &mut FaceState) {
-    // the debounced draft persist rides every sync — but the WHOLE model
-    // as JSON (21 ms on a held base) is serialized only when the model
-    // actually moved and the window is open: the keystroke echo never
-    // pays for a comparison that is thrown away 2 s out of 2 s (F4a)
     let gen = w.generation();
-    if gen != face.draft_gen && face.draft_at.elapsed() >= DRAFT_WINDOW {
-        face.draft_gen = gen;
-        let draft = w.to_draft();
-        if draft != face.draft {
-            face.draft = draft.clone();
-            face.draft_at = std::time::Instant::now();
-            ui.invoke_wiki_draft_save(draft.into());
-        }
-    }
+    face.draft_pending = sync_draft(ui, w, face, false);
     let s = ui.global::<WikiState>();
     let nav: Vec<WikiNavRow> = w
         .nav_rows()
@@ -348,6 +370,35 @@ fn sync_doc_face(s: &WikiState<'_>, w: &wiki::Wiki, id: wiki::DocId) {
 fn sync_after(ui: &AppWindow, m: &Rc<RefCell<wiki::Wiki>>, face: &Rc<RefCell<FaceState>>) {
     m.borrow_mut().touch();
     sync_wiki(ui, &m.borrow(), &mut face.borrow_mut());
+    arm_draft_flush(ui, m, face);
+}
+
+/// End the 2 s draft window even when nothing else happens: ONE timer per
+/// window (`flush_armed`), so a burst of keystrokes arms one and not
+/// twenty, and the change a member typed before walking away still lands.
+/// The face itself needs no re-push - nothing mutated - so the timer runs
+/// the draft half alone.
+fn arm_draft_flush(ui: &AppWindow, m: &Rc<RefCell<wiki::Wiki>>, face: &Rc<RefCell<FaceState>>) {
+    let left = {
+        let mut f = face.borrow_mut();
+        if !f.draft_pending || f.flush_armed {
+            return;
+        }
+        f.flush_armed = true;
+        DRAFT_WINDOW.saturating_sub(f.draft_at.elapsed())
+    };
+    #[cfg(test)]
+    wiki::counters::bump_flush();
+    let weak = ui.as_weak();
+    let m = m.clone();
+    let face = face.clone();
+    slint::Timer::single_shot(left, move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let w = m.borrow();
+        let mut f = face.borrow_mut();
+        f.flush_armed = false;
+        f.draft_pending = sync_draft(&ui, &w, &mut f, true);
+    });
 }
 
 /// Wire the Multisig-Wiki's Rust state machine ([`wiki`]) to the

@@ -17,7 +17,7 @@ use similar::{capture_diff_slices, Algorithm, DiffOp};
 pub type DocId = u32;
 
 /// Test seam for the sync diet (`docs/ui/wiki_pane_performance.md` F4):
-/// how often the two expensive rebuilds actually ran.
+/// how often the expensive rebuilds and the draft flush actually ran.
 #[cfg(test)]
 pub(crate) mod counters {
     use std::cell::Cell;
@@ -25,10 +25,15 @@ pub(crate) mod counters {
     thread_local! {
         static DRAFT: Cell<u32> = const { Cell::new(0) };
         static PREVIEW: Cell<u32> = const { Cell::new(0) };
+        static FLUSH: Cell<u32> = const { Cell::new(0) };
     }
 
     pub(crate) fn bump_draft() {
         DRAFT.with(|c| c.set(c.get() + 1));
+    }
+
+    pub(crate) fn bump_flush() {
+        FLUSH.with(|c| c.set(c.get() + 1));
     }
 
     pub(crate) fn bump_preview() {
@@ -43,9 +48,15 @@ pub(crate) mod counters {
         PREVIEW.with(Cell::get)
     }
 
+    /// Draft-flush timers armed (one per window, never one per keystroke).
+    pub(crate) fn flush() -> u32 {
+        FLUSH.with(Cell::get)
+    }
+
     pub(crate) fn reset() {
         DRAFT.with(|c| c.set(0));
         PREVIEW.with(|c| c.set(0));
+        FLUSH.with(|c| c.set(0));
     }
 }
 
