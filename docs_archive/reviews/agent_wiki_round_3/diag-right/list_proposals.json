@@ -1,0 +1,3449 @@
+{
+ "proposals": [
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "",
+   "channel": {
+    "id": 0,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 0,
+   "mine": false,
+   "payload": {
+    "hash": "28d288058b3183541755794c590e2551fc22fd98071e8d641349646d7ff89325",
+    "op": "wiki_base",
+    "size": 297994
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": false,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 3,
+    "kind": "patch"
+   },
+   "declined_at": 1788705319,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 3,
+   "mine": true,
+   "paths": [
+    "organisationen/signal-foundation.md",
+    "primitive/double-ratchet.md",
+    "primitive/pqxdh.md",
+    "primitive/x3dh.md",
+    "protokolle/signal-protokoll.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+5"
+   },
+   "sealing": false,
+   "state": "withdrawn",
+   "superseded": false,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": true
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 12,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 12,
+   "mine": true,
+   "paths": [
+    "organisationen/ietf.md",
+    "primitive/treekem.md",
+    "protokolle/mls.md",
+    "protokolle/noise.md",
+    "standards/mls-rfc.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+5"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": false,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 18,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 18,
+   "mine": true,
+   "paths": [
+    "organisationen/signal-foundation.md",
+    "primitive/double-ratchet.md",
+    "primitive/pqxdh.md",
+    "primitive/x3dh.md",
+    "protokolle/signal-protokoll.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+5"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": false,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 30,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 30,
+   "mine": true,
+   "paths": [
+    "ereignisse/signal-foundation-darlehen.md",
+    "personen/brian-acton.md",
+    "personen/meredith-whittaker.md",
+    "personen/moxie-marlinspike.md",
+    "personen/trevor-perrin.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+5"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": false,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 39,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 39,
+   "mine": true,
+   "paths": [
+    "implementierungen/openmls.md",
+    "organisationen/signal-foundation.md",
+    "primitive/art.md",
+    "primitive/otr.md",
+    "protokolle/signal-protokoll.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+3 ~27"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 45,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 45,
+   "mine": true,
+   "paths": [
+    "ereignisse/omemo-urheberschaft.md",
+    "organisationen/element.md",
+    "organisationen/xsf.md",
+    "personen/andreas-straub.md",
+    "standards/xep-0384.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+4 ~33"
+   },
+   "sealing": false,
+   "state": "superseded",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 48,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 48,
+   "mine": true,
+   "paths": [
+    "organisationen/element.md",
+    "organisationen/xsf.md",
+    "personen/andreas-straub.md",
+    "protokolle/openpgp.md",
+    "standards/openpgp-rfc.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+4 ~33"
+   },
+   "sealing": false,
+   "state": "superseded",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 51,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 51,
+   "mine": true,
+   "paths": [
+    "ereignisse/openpgp-spaltung.md",
+    "personen/phil-zimmermann.md",
+    "personen/werner-koch.md",
+    "protokolle/librepgp.md",
+    "standards/rfc-4880.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+5"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": false,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 54,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 54,
+   "mine": true,
+   "paths": [
+    "implementierungen/vodozemac.md",
+    "primitive/megolm.md",
+    "primitive/olm.md",
+    "protokolle/nostr.md",
+    "standards/xep-0384.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "~182"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 55,
+    "kind": "patch"
+   },
+   "declined_at": 1788705319,
+   "declined_by": "",
+   "declined_by_me": true,
+   "id": 55,
+   "mine": true,
+   "paths": [
+    "implementierungen/akkoma.md",
+    "implementierungen/lemmy.md",
+    "implementierungen/mastodon.md",
+    "implementierungen/misskey.md",
+    "implementierungen/pleroma.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+5"
+   },
+   "sealing": false,
+   "state": "withdrawn",
+   "superseded": false,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "declined"
+    }
+   ],
+   "withdrawn": true
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 56,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 56,
+   "mine": true,
+   "paths": [
+    "personen/fiatjaf.md",
+    "protokolle/marmot.md",
+    "standards/nip-05.md",
+    "standards/nip-17.md",
+    "standards/nip-65.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+3 ~2"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 57,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 57,
+   "mine": true,
+   "paths": [
+    "organisationen/element.md",
+    "organisationen/xsf.md",
+    "personen/andreas-straub.md",
+    "protokolle/openpgp.md",
+    "standards/openpgp-rfc.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+4 ~34"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 58,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 58,
+   "mine": true,
+   "paths": [
+    "standards/xep-0001.md",
+    "standards/xep-0045.md",
+    "standards/xep-0060.md",
+    "standards/xep-0198.md",
+    "standards/xep-0313.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+5"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": false,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 60,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 60,
+   "mine": true,
+   "paths": [
+    "implementierungen/openmls.md",
+    "organisationen/ietf.md",
+    "primitive/art.md",
+    "protokolle/mls.md",
+    "standards/mls-rfc.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "→1 ~7"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 63,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 63,
+   "mine": true,
+   "paths": [
+    "implementierungen/vodozemac.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "~4"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 72,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 72,
+   "mine": true,
+   "paths": [
+    "uebersicht/vergleich.md",
+    "uebersicht/zeitachse.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+2"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": false,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 75,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 75,
+   "mine": true,
+   "paths": [
+    "ereignisse/openpgp-spaltung.md",
+    "organisationen/ietf.md",
+    "protokolle/librepgp.md",
+    "protokolle/openpgp.md",
+    "standards/rfc-4880.md",
+    "standards/openpgp-rfc.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "→1 ~7"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 81,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 81,
+   "mine": true,
+   "paths": [
+    "organisationen/xsf.md",
+    "personen/raphael-robert.md",
+    "personen/richard-barnes.md",
+    "protokolle/openpgp.md",
+    "standards/rfc-2440.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+3 ~2"
+   },
+   "sealing": false,
+   "state": "superseded",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 87,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 87,
+   "mine": true,
+   "paths": [
+    "personen/raphael-robert.md",
+    "personen/richard-barnes.md",
+    "protokolle/openpgp.md",
+    "standards/rfc-2440.md",
+    "uebersicht/vergleich.md",
+    "uebersicht/zeitachse.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+3 ~10"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 89,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 89,
+   "mine": true,
+   "paths": [
+    "primitive/megolm.md",
+    "primitive/treekem.md",
+    "protokolle/matrix.md",
+    "protokolle/xmpp.md",
+    "standards/rfc-9420.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "~10"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 96,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 96,
+   "mine": true,
+   "paths": [
+    "uebersicht/kryptoschicht.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+1"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": false,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 97,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 97,
+   "mine": true,
+   "paths": [
+    "personen/daniel-gultsch.md",
+    "personen/jeremie-miller.md",
+    "personen/matthew-hodgson.md",
+    "personen/matthew-wild.md",
+    "personen/peter-saint-andre.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "~9"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 102,
+    "kind": "patch"
+   },
+   "declined_at": 1788705319,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 102,
+   "mine": true,
+   "paths": [
+    "personen/benjamin-beurdouche.md",
+    "personen/daniel-huigens.md",
+    "personen/jon-millican.md",
+    "personen/katriel-cohn-gordon.md",
+    "personen/paul-wouters.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+5"
+   },
+   "sealing": false,
+   "state": "withdrawn",
+   "superseded": false,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": true
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 106,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 106,
+   "mine": true,
+   "paths": [
+    "uebersicht/matrix-xmpp-activitypub.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+1"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": false,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 109,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 109,
+   "mine": true,
+   "paths": [
+    "personen/alexey-shchepin.md",
+    "personen/christine-lemmer-webber.md",
+    "personen/eugen-rochko.md",
+    "personen/evan-prodromou.md",
+    "personen/timo-koesters.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "~6"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 111,
+    "kind": "patch"
+   },
+   "declined_at": 1788705319,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 111,
+   "mine": true,
+   "paths": [
+    "uebersicht/kryptoschicht.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+1"
+   },
+   "sealing": false,
+   "state": "withdrawn",
+   "superseded": false,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": true
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 117,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 117,
+   "mine": true,
+   "paths": [
+    "personen/benjamin-beurdouche.md",
+    "personen/daniel-huigens.md",
+    "personen/jon-millican.md",
+    "personen/katriel-cohn-gordon.md",
+    "personen/paul-wouters.md",
+    "personen/raphael-robert.md",
+    "personen/richard-barnes.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+5 ~2"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 120,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 120,
+   "mine": true,
+   "paths": [
+    "primitive/megolm.md",
+    "primitive/olm.md",
+    "protokolle/nostr.md",
+    "standards/xep-0384.md",
+    "uebersicht/kryptoschicht.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "~27"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 123,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 123,
+   "mine": true,
+   "paths": [
+    "organisationen/protocol-labs.md",
+    "personen/ehren-kret.md",
+    "personen/rolfe-schmidt.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+3"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": false,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 126,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 126,
+   "mine": true,
+   "paths": [
+    "uebersicht/vergleich.md",
+    "uebersicht/zeitachse.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "~8"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": true,
+   "by": "Mr. Center",
+   "channel": {
+    "id": 127,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 127,
+   "mine": false,
+   "paths": [
+    "meta/ontologie.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "~52"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "approved"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": false,
+   "by": "Mr. Left",
+   "channel": {
+    "id": 128,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 128,
+   "mine": false,
+   "paths": [
+    "standards/nip-07.md",
+    "standards/nip-11.md",
+    "standards/nip-19.md",
+    "standards/nip-42.md",
+    "standards/nip-57.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+5"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": false,
+   "by": "Mr. Center",
+   "channel": {
+    "id": 130,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 130,
+   "mine": false,
+   "payload": {
+    "by": "Mr. Center",
+    "checksum": "2db745a887c79ec3a01033abfef86becc785edd9cbcf4c4591478f3b934b18bc",
+    "id": "6cb4e687131264cbe0ee896079fc2d3e",
+    "key_b64": "y9PdlmR/lwoKtSLpfl18D4BQi/dw3j8qf5okql+YA/s=",
+    "kind": "Image",
+    "name": "B-protokollstapel.png",
+    "op": "persist",
+    "pieces": 3,
+    "root": "a9cbda38a654141217b6fa6285a0706a0df31e2414d6cd1258ffb70fc5cdca4f",
+    "shared_ts": 1788705662,
+    "size": 102817
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": false,
+   "surface": "files",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": false,
+   "by": "Mr. Center",
+   "channel": {
+    "id": 133,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 133,
+   "mine": false,
+   "payload": {
+    "by": "Mr. Center",
+    "checksum": "4454feac3f71152e347db4feb85e0f3fdcb1d87d9b9650af35123bafee2253bd",
+    "id": "2d525df0699f0909192bd6204d364a06",
+    "key_b64": "dCK0KJ99vqCNiGonGxgup18iJuECOdXkP7O/NF9JRZM=",
+    "kind": "Image",
+    "name": "B-ap-zustellweg.png",
+    "op": "persist",
+    "pieces": 2,
+    "root": "a54b9d3b7e5bfe94725e4746d1b8a9d2c4cd62174e6bafb37aba411c724dda82",
+    "shared_ts": 1788705662,
+    "size": 82295
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": false,
+   "surface": "files",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": false,
+   "by": "Mr. Center",
+   "channel": {
+    "id": 136,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 136,
+   "mine": false,
+   "payload": {
+    "by": "Mr. Center",
+    "checksum": "b42402af341465731f4a9c74690fc910fdcf87087baabf86b3fb59ea81d6bb4b",
+    "id": "0ad2e66efa19976f51948d3d9f9bb7d7",
+    "key_b64": "1nMOjv/pZOrsACAvWacbwGjJAou4ajWEkPKBOf/Na8M=",
+    "kind": "Image",
+    "name": "B-zeitachse-segment.png",
+    "op": "persist",
+    "pieces": 3,
+    "root": "c6aa1d6e21eaa020c67887d6850163583a0e5d192d2d2fce0fdfb69c1c632674",
+    "shared_ts": 1788705662,
+    "size": 104637
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": false,
+   "surface": "files",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": false,
+   "by": "Mr. Center",
+   "channel": {
+    "id": 139,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 139,
+   "mine": false,
+   "payload": {
+    "by": "Mr. Center",
+    "checksum": "b8ecea4ac9493ce5cd8cb3750f59bed347b6f802a7c02cc8343ee32ab780662a",
+    "id": "54b68e5ec6c51c29aa8152c4eb903a3a",
+    "key_b64": "LXTk4rKPsDg9gOA8r9W0+gYrasp9v2AP2rEwFf7eapQ=",
+    "kind": "Image",
+    "name": "B-implementierungen-balken.png",
+    "op": "persist",
+    "pieces": 2,
+    "root": "027c9a9ceccb31ba12a7ae519b2c941bbd58fcdb1948d6fdc841ad2f38625317",
+    "shared_ts": 1788705663,
+    "size": 73039
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": false,
+   "surface": "files",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": false,
+   "by": "Mr. Center",
+   "channel": {
+    "id": 142,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 142,
+   "mine": false,
+   "payload": {
+    "by": "Mr. Center",
+    "checksum": "f61af5e091611d1d20458ee1c5041d902665d2d54b69bbf0b0e10d8750410e64",
+    "id": "1799de414b940fbadbc04fe03b8b85f7",
+    "key_b64": "zjLFehvP1tFtW8F2Nw2Sn+74hU+jv2f7QkOKG7VQxaA=",
+    "kind": "Spreadsheet",
+    "name": "B-implementierungen.csv",
+    "op": "persist",
+    "pieces": 1,
+    "root": "e65e80d61fdedef0447b13ac58304c35205d31bd25b943bcd16405f2e52f2ac8",
+    "shared_ts": 1788705663,
+    "size": 1572
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": false,
+   "surface": "files",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": false,
+   "by": "Mr. Left",
+   "channel": {
+    "id": 143,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 143,
+   "mine": false,
+   "payload": {
+    "by": "Mr. Left",
+    "checksum": "468c7f697f993373db5590a9cebc4ce299929d368da7d38a72b0225aa0641d6b",
+    "id": "944f8c561548089006ab230a5dc51944",
+    "key_b64": "17wXceTxJKnr07eT4OI5hT50wvkJcKCH35JESDgUnDw=",
+    "kind": "Image",
+    "name": "left-nostr-verschluesselungslinie.png",
+    "op": "persist",
+    "pieces": 2,
+    "root": "2526aa3d5f32a1be7fe14aa925c3595688d59007c187a748378ce06873d4ead2",
+    "shared_ts": 1788705698,
+    "size": 87814
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": false,
+   "surface": "files",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": true,
+   "by": "Mr. Center",
+   "channel": {
+    "id": 145,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 145,
+   "mine": false,
+   "paths": [
+    "uebersicht/matrix-xmpp-activitypub.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "~7"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "approved"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 1,
+   "approved_by_me": true,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 147,
+    "kind": "patch"
+   },
+   "declined_at": 1788706257,
+   "declined_by": "Mr. Left",
+   "declined_by_me": false,
+   "id": 147,
+   "mine": true,
+   "paths": [
+    "personen/emad-omara.md",
+    "standards/rfc-5869.md",
+    "standards/rfc-7748.md",
+    "standards/rfc-9180.md",
+    "standards/rfc-9750.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+5"
+   },
+   "sealing": false,
+   "state": "rejected",
+   "superseded": false,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "declined"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "declined"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "approved"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": true,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 150,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 150,
+   "mine": true,
+   "payload": {
+    "by": "Mr. Right",
+    "checksum": "7bc4de227768b8282906f12df98876d1257bc419d90a0dbae45afb2bb7683ea9",
+    "id": "99148677df0bbe84a1fefdbb957a35af",
+    "key_b64": "Lu85YnmzruQ19OQjfdYgmDNHx8fnaUJOjdrMJQ42y48=",
+    "kind": "Image",
+    "name": "mr-right-kryptoschicht-stapel.png",
+    "op": "persist",
+    "pieces": 3,
+    "root": "a3aabd595418eb4a6ffa2146cb71cf6826178443532e3f69c902132263925025",
+    "shared_ts": 1788705925,
+    "size": 121299
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": false,
+   "surface": "files",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "approved"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": true,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 153,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 153,
+   "mine": true,
+   "payload": {
+    "by": "Mr. Right",
+    "checksum": "d7153750c78a3b34455c3f46153d31c37f31efa85071b87de241f63790bc719e",
+    "id": "fbdc2f477152884a4ca933cd07e94a7c",
+    "key_b64": "747xviiNkPZfnt+PURosrgWzRN29qtP30PUw4xoc2CQ=",
+    "kind": "Image",
+    "name": "mr-right-abloeseketten.png",
+    "op": "persist",
+    "pieces": 3,
+    "root": "bf10c31cde9411776c5bd3903f4abd3740c8d505207f0e7a88c32c01d9f8f105",
+    "shared_ts": 1788706063,
+    "size": 88171
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": false,
+   "surface": "files",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "approved"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": true,
+   "by": "Mr. Center",
+   "channel": {
+    "id": 154,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 154,
+   "mine": false,
+   "paths": [
+    "ereignisse/synapse-relizenzierung-agpl.md",
+    "implementierungen/matrix-authentication-service.md",
+    "implementierungen/synapse.md",
+    "personen/amandine-le-pape.md",
+    "personen/erik-johnston.md",
+    "standards/msc-3861.md",
+    "standards/sliding-sync.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+5 ~4"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "approved"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": true,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 156,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 156,
+   "mine": true,
+   "paths": [
+    "implementierungen/libsignal.md",
+    "implementierungen/mls-rs.md",
+    "primitive/sender-keys.md",
+    "primitive/sesame.md",
+    "primitive/xeddsa.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+5"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "approved"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": false,
+   "by": "Mr. Left",
+   "channel": {
+    "id": 158,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 158,
+   "mine": false,
+   "payload": {
+    "by": "Mr. Left",
+    "checksum": "67876dd1b3b32b702afc0544cc0debbeb91d31eebcdad8c689092a8df8964681",
+    "id": "043048f13b99eae20770d42c826e653e",
+    "key_b64": "rgqEgMf54doC4Rx2awJam7NuwxXeY/ZrM0FtatLuHJQ=",
+    "kind": "Image",
+    "name": "left-nostr-kind-baender.png",
+    "op": "persist",
+    "pieces": 3,
+    "root": "34162fdb4ab74d529685a0675b6acd84ec18b1bf08131cac92ef327692849483",
+    "shared_ts": 1788706176,
+    "size": 103959
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": false,
+   "surface": "files",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": false,
+   "by": "Mr. Left",
+   "channel": {
+    "id": 161,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 161,
+   "mine": false,
+   "payload": {
+    "by": "Mr. Left",
+    "checksum": "121018f74aac830f27d41b025eabfe893d0106eb82fc014f6db8c88dd8089d76",
+    "id": "12be5669cc483c40a3f3230c95010508",
+    "key_b64": "yR6xqy7l+beHTgTO0IY1lHH1XJkf7uJvPWwKOrWslKE=",
+    "kind": "Image",
+    "name": "left-at-protocol-weg.png",
+    "op": "persist",
+    "pieces": 4,
+    "root": "f20ca29d7ca6b2bd595fd9723a7b944031e33edfeeda06fc5f120e1e62768d39",
+    "shared_ts": 1788706176,
+    "size": 145459
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": false,
+   "surface": "files",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": false,
+   "by": "Mr. Left",
+   "channel": {
+    "id": 164,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 164,
+   "mine": false,
+   "paths": [
+    "protokolle/at-protocol.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "~4"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": false,
+   "by": "Mr. Center",
+   "channel": {
+    "id": 166,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 166,
+   "mine": false,
+   "paths": [
+    "protokolle/xmpp.md",
+    "standards/rfc-6121.md",
+    "standards/xep-0030.md",
+    "standards/xep-0045.md",
+    "standards/xep-0280.md",
+    "standards/xep-0363.md",
+    "standards/xep-0369.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+5 ~7"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": true,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 168,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 168,
+   "mine": true,
+   "paths": [
+    "personen/emad-omara.md",
+    "standards/rfc-5869.md",
+    "standards/rfc-7748.md",
+    "standards/rfc-9180.md",
+    "standards/rfc-9750.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+5"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "approved"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": false,
+   "by": "Mr. Left",
+   "channel": {
+    "id": 170,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 170,
+   "mine": false,
+   "paths": [
+    "standards/nip-09.md",
+    "standards/nip-29.md",
+    "standards/nip-46.md",
+    "standards/nip-50.md",
+    "uebersicht/nostr-und-at.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+4 ~11"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": true,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 171,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 171,
+   "mine": true,
+   "paths": [
+    "personen/andreas-straub.md",
+    "personen/brian-acton.md",
+    "personen/meredith-whittaker.md",
+    "personen/moxie-marlinspike.md",
+    "personen/phil-zimmermann.md",
+    "personen/trevor-perrin.md",
+    "personen/werner-koch.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "~10"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "approved"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": true,
+   "by": "Mr. Center",
+   "channel": {
+    "id": 172,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 172,
+   "mine": false,
+   "paths": [
+    "ereignisse/google-talk-foederation-ende.md",
+    "implementierungen/dino.md",
+    "implementierungen/gajim.md",
+    "implementierungen/snikket.md",
+    "personen/georg-lukas.md",
+    "personen/matthew-wild.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+5 ~17"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "approved"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": true,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 174,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 174,
+   "mine": true,
+   "paths": [
+    "implementierungen/gnupg.md",
+    "implementierungen/mlspp.md",
+    "implementierungen/openpgp-js.md",
+    "implementierungen/sequoia-pgp.md",
+    "organisationen/g10-code.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+5"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "approved"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": false,
+   "by": "Mr. Left",
+   "channel": {
+    "id": 176,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 176,
+   "mine": false,
+   "paths": [
+    "primitive/merkle-search-tree.md",
+    "standards/atproto-repository.md",
+    "standards/atproto-sync.md",
+    "standards/nsid.md",
+    "standards/tid.md",
+    "standards/xrpc.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+5 ~23"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": true,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 177,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 177,
+   "mine": true,
+   "paths": [
+    "primitive/double-ratchet.md",
+    "protokolle/signal-protokoll.md",
+    "standards/rfc-9420.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "~50"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "approved"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": false,
+   "by": "Mr. Center",
+   "channel": {
+    "id": 178,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 178,
+   "mine": false,
+   "paths": [
+    "organisationen/social-web-foundation.md",
+    "standards/fep-8b32.md",
+    "standards/http-signatures.md",
+    "standards/nodeinfo.md",
+    "standards/rfc-9421.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+5"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": true,
+   "by": "Mr. Center",
+   "channel": {
+    "id": 181,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 181,
+   "mine": false,
+   "paths": [
+    "protokolle/openpgp.md",
+    "standards/nip-29.md",
+    "standards/nip-46.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "~93"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "approved"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": true,
+   "by": "Mr. Left",
+   "channel": {
+    "id": 182,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 182,
+   "mine": false,
+   "paths": [
+    "organisationen/bluesky-social-pbc.md",
+    "personen/bryan-newbold.md",
+    "personen/daniel-holmgren.md",
+    "personen/jay-graber.md",
+    "personen/paul-frazee.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+5"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "approved"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": true,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 183,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 183,
+   "mine": true,
+   "paths": [
+    "ereignisse/triple-ratchet-2025.md",
+    "personen/graeme-connell.md",
+    "personen/ian-goldberg.md",
+    "personen/nikita-borisov.md",
+    "primitive/otr.md",
+    "primitive/spqr.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+5 ~19"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "approved"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": false,
+   "by": "Mr. Center",
+   "channel": {
+    "id": 184,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 184,
+   "mine": false,
+   "paths": [
+    "ereignisse/threads-foederation.md",
+    "implementierungen/gotosocial.md",
+    "implementierungen/peertube.md",
+    "implementierungen/pixelfed.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+4"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": false,
+   "by": "Mr. Left",
+   "channel": {
+    "id": 185,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 185,
+   "mine": false,
+   "paths": [
+    "implementierungen/khatru.md",
+    "implementierungen/nostr-development-kit.md",
+    "implementierungen/nostr-tools.md",
+    "implementierungen/rust-nostr.md",
+    "personen/pablof7z.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+5"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": true,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 186,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 186,
+   "mine": true,
+   "paths": [
+    "organisationen/signal-foundation.md",
+    "primitive/double-ratchet.md",
+    "primitive/pqxdh.md",
+    "primitive/x3dh.md",
+    "protokolle/signal-protokoll.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "~48"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "approved"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": true,
+   "by": "Mr. Center",
+   "channel": {
+    "id": 187,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 187,
+   "mine": false,
+   "paths": [
+    "protokolle/activitypub.md",
+    "standards/xep-0280.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "~24"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "approved"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": false,
+   "by": "Mr. Left",
+   "channel": {
+    "id": 188,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 188,
+   "mine": false,
+   "paths": [
+    "standards/rfc-5869.md",
+    "standards/xep-0045.md",
+    "uebersicht/kryptoschicht.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "~101"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": true,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 189,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 189,
+   "mine": true,
+   "paths": [
+    "uebersicht/zeitachse.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "~9"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "declined"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "approved"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": true,
+   "by": "Mr. Center",
+   "channel": {
+    "id": 190,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 190,
+   "mine": false,
+   "paths": [
+    "implementierungen/conduit.md",
+    "implementierungen/misskey.md",
+    "implementierungen/pleroma.md",
+    "personen/amy-guy.md",
+    "personen/timo-koesters.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+1 ~47"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "approved"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": true,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 192,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 192,
+   "mine": true,
+   "payload": {
+    "by": "Mr. Right",
+    "checksum": "dd0cc8f18ae7d144601b67749225a9d7edf9aec0a231d7592e3ecc7e3d57126a",
+    "id": "2ef39e5b5194ddd835c46d780e341ba2",
+    "key_b64": "h80Qjw3+fQ2ABXBsYGA8Rq/QS8J0y0O/lEDrgHXh3M0=",
+    "kind": "Image",
+    "name": "mr-right-zeitachse-jahre.png",
+    "op": "persist",
+    "pieces": 3,
+    "root": "997233139eb0de5a67645fe0988b13f92ae0a92e1fa24e97c9f4f960982e31f5",
+    "shared_ts": 1788707128,
+    "size": 88068
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": false,
+   "surface": "files",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "approved"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 2,
+   "approved_by_me": false,
+   "by": "Mr. Left",
+   "channel": {
+    "id": 194,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 194,
+   "mine": false,
+   "paths": [
+    "ereignisse/bluesky-nutzerzahlen.md",
+    "ereignisse/nostr-spende-2022.md",
+    "implementierungen/bluesky.md",
+    "organisationen/opensats.md",
+    "protokolle/nostr.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "+3 ~21"
+   },
+   "sealing": false,
+   "state": "applied",
+   "superseded": true,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "approved"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 1,
+   "approved_by_me": true,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 198,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 198,
+   "mine": true,
+   "payload": {
+    "by": "Mr. Right",
+    "checksum": "41146e6d82f006629eab7c7c124910fb0e34474af9888bc789612058ce9f2d2f",
+    "id": "6b0c31937f17ab73e39f2a60b2266bde",
+    "key_b64": "ZnvAe74PBOiIWpY0f6nW9iqIK8BTzJ4tqkeZKM52EmY=",
+    "kind": "Image",
+    "name": "mr-right-vergleich-balken.png",
+    "op": "persist",
+    "pieces": 3,
+    "root": "7ed6e3c4811a807f943c0a5e62e5ab7595f0de3d9dd8d888318d92bf1478cf0e",
+    "shared_ts": 1788707380,
+    "size": 106246
+   },
+   "sealing": false,
+   "state": "proposed",
+   "superseded": false,
+   "surface": "files",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "approved"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 1,
+   "approved_by_me": true,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 201,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 201,
+   "mine": true,
+   "payload": {
+    "by": "Mr. Right",
+    "checksum": "5a1adc377442eeb0f2ef6eb8d363a80b805555b6062a4dee4837f5a755e6c0cb",
+    "id": "97a1bcce8f673c32f93a5525f3ba196b",
+    "key_b64": "Bq9nXTpRNJqQMyA67ng8Zkxunq8xo/zrBi2sNYXElaw=",
+    "kind": "Spreadsheet",
+    "name": "mr-right-facetten.csv",
+    "op": "persist",
+    "pieces": 1,
+    "root": "6b66726dfed50b4d922beb732e2c2508b5f97f05c6268f83e14790f0036be31c",
+    "shared_ts": 1788707380,
+    "size": 725
+   },
+   "sealing": false,
+   "state": "proposed",
+   "superseded": false,
+   "surface": "files",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "approved"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 1,
+   "approved_by_me": true,
+   "by": "Mr. Center",
+   "channel": {
+    "id": 202,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 202,
+   "mine": false,
+   "paths": [
+    "ereignisse/threads-foederation.md",
+    "protokolle/activitypub.md",
+    "standards/http-signatures.md",
+    "standards/fep-8b32.md",
+    "standards/rfc-9421.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "→1 ~34"
+   },
+   "sealing": false,
+   "state": "proposed",
+   "superseded": false,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "approved"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 1,
+   "approved_by_me": true,
+   "by": "Mr. Left",
+   "channel": {
+    "id": 203,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 203,
+   "mine": false,
+   "paths": [
+    "personen/bryan-newbold.md",
+    "personen/jay-graber.md",
+    "protokolle/at-protocol.md",
+    "standards/lexicon.md",
+    "standards/xrpc.md",
+    "uebersicht/nostr-und-at.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "→1 ~41"
+   },
+   "sealing": false,
+   "state": "proposed",
+   "superseded": false,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "approved"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 1,
+   "approved_by_me": true,
+   "by": "Mr. Center",
+   "channel": {
+    "id": 205,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 205,
+   "mine": false,
+   "paths": [
+    "implementierungen/mastodon.md",
+    "organisationen/matrix-org-foundation.md",
+    "personen/christine-lemmer-webber.md",
+    "protokolle/xmpp.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "~31"
+   },
+   "sealing": false,
+   "state": "proposed",
+   "superseded": false,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "approved"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 1,
+   "approved_by_me": true,
+   "by": "Mr. Right",
+   "channel": {
+    "id": 207,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 207,
+   "mine": true,
+   "paths": [
+    "protokolle/marmot.md",
+    "standards/nip-44.md",
+    "standards/xep-0384.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "~124"
+   },
+   "sealing": false,
+   "state": "proposed",
+   "superseded": false,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "approved"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Left",
+   "channel": {
+    "id": 209,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 209,
+   "mine": false,
+   "payload": {
+    "by": "Mr. Left",
+    "checksum": "6f094cbe51f198ce763720cef2cea7a5130bb1b23cf16fe28ec4e7635ac9e6a5",
+    "id": "a65babe820d282572d60313119b18d37",
+    "key_b64": "HibaPRM9qsvobrw7px18Upzx3PbEeKc0gpkWzDSbshI=",
+    "kind": "Image",
+    "name": "left-facetten-wachstum.png",
+    "op": "persist",
+    "pieces": 3,
+    "root": "c4e20d366b3ba293619f7dba3c77e973965ab98c68cdde4775c0f50d9b34180f",
+    "shared_ts": 1788707587,
+    "size": 110228
+   },
+   "sealing": false,
+   "state": "proposed",
+   "superseded": false,
+   "surface": "files",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  },
+  {
+   "approvals": 0,
+   "approved_by_me": false,
+   "by": "Mr. Left",
+   "channel": {
+    "id": 212,
+    "kind": "patch"
+   },
+   "declined_at": 0,
+   "declined_by": "",
+   "declined_by_me": false,
+   "id": 212,
+   "mine": false,
+   "paths": [
+    "standards/nip-01.md"
+   ],
+   "payload": {
+    "op": "wiki_patch",
+    "summary": "~20"
+   },
+   "sealing": false,
+   "state": "proposed",
+   "superseded": false,
+   "surface": "memory",
+   "threshold": 2,
+   "votes": [
+    {
+     "member": "Mr. Left",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Center",
+     "vote": "open"
+    },
+    {
+     "member": "Mr. Right",
+     "vote": "open"
+    }
+   ],
+   "withdrawn": false
+  }
+ ],
+ "reply": "proposals"
+}

@@ -1,0 +1,646 @@
+{
+ "base": "28d288058b3183541755794c590e2551fc22fd98071e8d641349646d7ff89325",
+ "changes": [
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "meta/ontologie.md",
+   "rev": 1
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "standards/nip-07.md",
+   "rev": 2
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "standards/nip-11.md",
+   "rev": 2
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "standards/nip-19.md",
+   "rev": 2
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "standards/nip-42.md",
+   "rev": 2
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "standards/nip-57.md",
+   "rev": 2
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "uebersicht/matrix-xmpp-activitypub.md",
+   "rev": 3
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "ereignisse/synapse-relizenzierung-agpl.md",
+   "rev": 4
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "implementierungen/matrix-authentication-service.md",
+   "rev": 4
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "implementierungen/synapse.md",
+   "rev": 4
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "personen/amandine-le-pape.md",
+   "rev": 4
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "personen/erik-johnston.md",
+   "rev": 4
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "standards/msc-3861.md",
+   "rev": 4
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "standards/sliding-sync.md",
+   "rev": 4
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "implementierungen/libsignal.md",
+   "rev": 5
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "implementierungen/mls-rs.md",
+   "rev": 5
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "primitive/sender-keys.md",
+   "rev": 5
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "primitive/sesame.md",
+   "rev": 5
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "primitive/xeddsa.md",
+   "rev": 5
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "personen/emad-omara.md",
+   "rev": 6
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "standards/rfc-7748.md",
+   "rev": 6
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "standards/rfc-9180.md",
+   "rev": 6
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "standards/rfc-9750.md",
+   "rev": 6
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "personen/andreas-straub.md",
+   "rev": 7
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "personen/brian-acton.md",
+   "rev": 7
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "personen/meredith-whittaker.md",
+   "rev": 7
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "personen/moxie-marlinspike.md",
+   "rev": 7
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "personen/phil-zimmermann.md",
+   "rev": 7
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "personen/trevor-perrin.md",
+   "rev": 7
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "personen/werner-koch.md",
+   "rev": 7
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "protokolle/xmpp.md",
+   "rev": 8
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "standards/rfc-6121.md",
+   "rev": 8
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "standards/xep-0030.md",
+   "rev": 8
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "standards/xep-0363.md",
+   "rev": 8
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "standards/xep-0369.md",
+   "rev": 8
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "protokolle/at-protocol.md",
+   "rev": 9
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "standards/nip-09.md",
+   "rev": 10
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "standards/nip-50.md",
+   "rev": 10
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "uebersicht/nostr-und-at.md",
+   "rev": 10
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "ereignisse/google-talk-foederation-ende.md",
+   "rev": 11
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "implementierungen/dino.md",
+   "rev": 11
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "implementierungen/gajim.md",
+   "rev": 11
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "implementierungen/snikket.md",
+   "rev": 11
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "personen/georg-lukas.md",
+   "rev": 11
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "personen/matthew-wild.md",
+   "rev": 11
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "implementierungen/gnupg.md",
+   "rev": 12
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "implementierungen/mlspp.md",
+   "rev": 12
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "implementierungen/openpgp-js.md",
+   "rev": 12
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "implementierungen/sequoia-pgp.md",
+   "rev": 12
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "organisationen/g10-code.md",
+   "rev": 12
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "standards/rfc-9420.md",
+   "rev": 13
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "organisationen/social-web-foundation.md",
+   "rev": 14
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "standards/fep-8b32.md",
+   "rev": 14
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "standards/http-signatures.md",
+   "rev": 14
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "standards/nodeinfo.md",
+   "rev": 14
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "standards/rfc-9421.md",
+   "rev": 14
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "primitive/merkle-search-tree.md",
+   "rev": 15
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "standards/atproto-repository.md",
+   "rev": 15
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "standards/atproto-sync.md",
+   "rev": 15
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "standards/nsid.md",
+   "rev": 15
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "standards/tid.md",
+   "rev": 15
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "standards/xrpc.md",
+   "rev": 15
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "protokolle/openpgp.md",
+   "rev": 16
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "standards/nip-29.md",
+   "rev": 16
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "standards/nip-46.md",
+   "rev": 16
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "organisationen/bluesky-social-pbc.md",
+   "rev": 17
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "personen/bryan-newbold.md",
+   "rev": 17
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "personen/daniel-holmgren.md",
+   "rev": 17
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "personen/jay-graber.md",
+   "rev": 17
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "personen/paul-frazee.md",
+   "rev": 17
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "ereignisse/triple-ratchet-2025.md",
+   "rev": 18
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "personen/graeme-connell.md",
+   "rev": 18
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "personen/ian-goldberg.md",
+   "rev": 18
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "personen/nikita-borisov.md",
+   "rev": 18
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "primitive/otr.md",
+   "rev": 18
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "primitive/spqr.md",
+   "rev": 18
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "ereignisse/threads-foederation.md",
+   "rev": 19
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "implementierungen/gotosocial.md",
+   "rev": 19
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "implementierungen/peertube.md",
+   "rev": 19
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "implementierungen/pixelfed.md",
+   "rev": 19
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "implementierungen/khatru.md",
+   "rev": 20
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "implementierungen/nostr-development-kit.md",
+   "rev": 20
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "implementierungen/nostr-tools.md",
+   "rev": 20
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "implementierungen/rust-nostr.md",
+   "rev": 20
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "personen/pablof7z.md",
+   "rev": 20
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "organisationen/signal-foundation.md",
+   "rev": 21
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "primitive/double-ratchet.md",
+   "rev": 21
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "primitive/pqxdh.md",
+   "rev": 21
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "primitive/x3dh.md",
+   "rev": 21
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "protokolle/signal-protokoll.md",
+   "rev": 21
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "standards/rfc-5869.md",
+   "rev": 22
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "standards/xep-0045.md",
+   "rev": 22
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "uebersicht/kryptoschicht.md",
+   "rev": 22
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "protokolle/activitypub.md",
+   "rev": 23
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "standards/xep-0280.md",
+   "rev": 23
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "implementierungen/conduit.md",
+   "rev": 24
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "implementierungen/misskey.md",
+   "rev": 24
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "implementierungen/pleroma.md",
+   "rev": 24
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "personen/amy-guy.md",
+   "rev": 24
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "personen/timo-koesters.md",
+   "rev": 24
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "uebersicht/zeitachse.md",
+   "rev": 25
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "ereignisse/bluesky-nutzerzahlen.md",
+   "rev": 26
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "ereignisse/nostr-spende-2022.md",
+   "rev": 26
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "implementierungen/bluesky.md",
+   "rev": 26
+  },
+  {
+   "from": null,
+   "kind": "added",
+   "path": "organisationen/opensats.md",
+   "rev": 26
+  },
+  {
+   "from": null,
+   "kind": "modified",
+   "path": "protokolle/nostr.md",
+   "rev": 26
+  }
+ ],
+ "next_cursor": null,
+ "reply": "wiki_changes",
+ "total": 106,
+ "truncated": true,
+ "wiki_rev": 26
+}

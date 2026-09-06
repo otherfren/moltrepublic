@@ -310,3 +310,9 @@ dropped them silently - `read_proposal` on 209/198/201/222/260 showed
    direction check (R6/R25), `withdraw` with `note`.
 8. **Build and docs:** D2 (find out whether the two normal-profile GUI tests
    ever passed), D1/D5 (the walk and the seed text), D6/D8 in CLAUDE.md, D7.
+
+Discussed with the user the same evening: 1-7 approved as proposed (6 with
+"a reference to an unknown OR temporary file is refused"); 8 answered by a
+concept change - ADR-0007, the agent operates the machine, founding over
+MCP comes back. The execution plan is
+`docs/reviews/mcp_agent_friction_fixes_round_3.md`.

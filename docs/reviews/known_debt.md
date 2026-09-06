@@ -96,6 +96,11 @@ still OPEN there, by id (each carries its fix direction in the review):
 
 ## `scripts/gui_walk.py` cannot found a republic over MCP any more (2026-09-06)
 
+Fix direction changed the same day: ADR-0007 lets the agent hold the
+phrase, so the walk's seed step comes back as written; closes with
+`mcp_agent_friction_fixes_round_3.md` Part F.
+
+
 The walk (`docs_archive/ui/gui_over_mcp.md` step 5) founds a 2-of-2 over
 MCP and then reads the window back. Since the MCP audit of 2026-08-26
 two of its steps are GUI-only by design: clearnet consent

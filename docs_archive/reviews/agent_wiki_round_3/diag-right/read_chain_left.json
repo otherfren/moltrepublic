@@ -1,0 +1,261 @@
+{
+ "blocks": [
+  {
+   "height": 97,
+   "kind": "checkpoint",
+   "payload": 96,
+   "proposal_id": 0,
+   "signers": [
+    "Mr. Center",
+    "Mr. Right"
+   ],
+   "surface": ""
+  },
+  {
+   "height": 0,
+   "kind": "applied",
+   "payload": {
+    "by": "Mr. Right",
+    "checksum": "dd0cc8f18ae7d144601b67749225a9d7edf9aec0a231d7592e3ecc7e3d57126a",
+    "id": "2ef39e5b5194ddd835c46d780e341ba2",
+    "key_b64": "h80Qjw3+fQ2ABXBsYGA8Rq/QS8J0y0O/lEDrgHXh3M0=",
+    "kind": "Image",
+    "name": "mr-right-zeitachse-jahre.png",
+    "op": "persist",
+    "pieces": 3,
+    "root": "997233139eb0de5a67645fe0988b13f92ae0a92e1fa24e97c9f4f960982e31f5",
+    "shared_ts": 1788707128,
+    "size": 88068
+   },
+   "proposal_id": 192,
+   "signers": [],
+   "surface": "files"
+  },
+  {
+   "height": 0,
+   "kind": "applied",
+   "payload": {
+    "by": "Mr. Left",
+    "checksum": "121018f74aac830f27d41b025eabfe893d0106eb82fc014f6db8c88dd8089d76",
+    "id": "12be5669cc483c40a3f3230c95010508",
+    "key_b64": "yR6xqy7l+beHTgTO0IY1lHH1XJkf7uJvPWwKOrWslKE=",
+    "kind": "Image",
+    "name": "left-at-protocol-weg.png",
+    "op": "persist",
+    "pieces": 4,
+    "root": "f20ca29d7ca6b2bd595fd9723a7b944031e33edfeeda06fc5f120e1e62768d39",
+    "shared_ts": 1788706176,
+    "size": 145459
+   },
+   "proposal_id": 161,
+   "signers": [],
+   "surface": "files"
+  },
+  {
+   "height": 0,
+   "kind": "applied",
+   "payload": {
+    "by": "Mr. Left",
+    "checksum": "67876dd1b3b32b702afc0544cc0debbeb91d31eebcdad8c689092a8df8964681",
+    "id": "043048f13b99eae20770d42c826e653e",
+    "key_b64": "rgqEgMf54doC4Rx2awJam7NuwxXeY/ZrM0FtatLuHJQ=",
+    "kind": "Image",
+    "name": "left-nostr-kind-baender.png",
+    "op": "persist",
+    "pieces": 3,
+    "root": "34162fdb4ab74d529685a0675b6acd84ec18b1bf08131cac92ef327692849483",
+    "shared_ts": 1788706176,
+    "size": 103959
+   },
+   "proposal_id": 158,
+   "signers": [],
+   "surface": "files"
+  },
+  {
+   "height": 0,
+   "kind": "applied",
+   "payload": {
+    "by": "Mr. Right",
+    "checksum": "d7153750c78a3b34455c3f46153d31c37f31efa85071b87de241f63790bc719e",
+    "id": "fbdc2f477152884a4ca933cd07e94a7c",
+    "key_b64": "747xviiNkPZfnt+PURosrgWzRN29qtP30PUw4xoc2CQ=",
+    "kind": "Image",
+    "name": "mr-right-abloeseketten.png",
+    "op": "persist",
+    "pieces": 3,
+    "root": "bf10c31cde9411776c5bd3903f4abd3740c8d505207f0e7a88c32c01d9f8f105",
+    "shared_ts": 1788706063,
+    "size": 88171
+   },
+   "proposal_id": 153,
+   "signers": [],
+   "surface": "files"
+  },
+  {
+   "height": 0,
+   "kind": "applied",
+   "payload": {
+    "by": "Mr. Right",
+    "checksum": "7bc4de227768b8282906f12df98876d1257bc419d90a0dbae45afb2bb7683ea9",
+    "id": "99148677df0bbe84a1fefdbb957a35af",
+    "key_b64": "Lu85YnmzruQ19OQjfdYgmDNHx8fnaUJOjdrMJQ42y48=",
+    "kind": "Image",
+    "name": "mr-right-kryptoschicht-stapel.png",
+    "op": "persist",
+    "pieces": 3,
+    "root": "a3aabd595418eb4a6ffa2146cb71cf6826178443532e3f69c902132263925025",
+    "shared_ts": 1788705925,
+    "size": 121299
+   },
+   "proposal_id": 150,
+   "signers": [],
+   "surface": "files"
+  },
+  {
+   "height": 0,
+   "kind": "applied",
+   "payload": {
+    "by": "Mr. Center",
+    "checksum": "f61af5e091611d1d20458ee1c5041d902665d2d54b69bbf0b0e10d8750410e64",
+    "id": "1799de414b940fbadbc04fe03b8b85f7",
+    "key_b64": "zjLFehvP1tFtW8F2Nw2Sn+74hU+jv2f7QkOKG7VQxaA=",
+    "kind": "Spreadsheet",
+    "name": "B-implementierungen.csv",
+    "op": "persist",
+    "pieces": 1,
+    "root": "e65e80d61fdedef0447b13ac58304c35205d31bd25b943bcd16405f2e52f2ac8",
+    "shared_ts": 1788705663,
+    "size": 1572
+   },
+   "proposal_id": 142,
+   "signers": [],
+   "surface": "files"
+  },
+  {
+   "height": 0,
+   "kind": "applied",
+   "payload": {
+    "by": "Mr. Center",
+    "checksum": "b8ecea4ac9493ce5cd8cb3750f59bed347b6f802a7c02cc8343ee32ab780662a",
+    "id": "54b68e5ec6c51c29aa8152c4eb903a3a",
+    "key_b64": "LXTk4rKPsDg9gOA8r9W0+gYrasp9v2AP2rEwFf7eapQ=",
+    "kind": "Image",
+    "name": "B-implementierungen-balken.png",
+    "op": "persist",
+    "pieces": 2,
+    "root": "027c9a9ceccb31ba12a7ae519b2c941bbd58fcdb1948d6fdc841ad2f38625317",
+    "shared_ts": 1788705663,
+    "size": 73039
+   },
+   "proposal_id": 139,
+   "signers": [],
+   "surface": "files"
+  },
+  {
+   "height": 0,
+   "kind": "applied",
+   "payload": {
+    "by": "Mr. Center",
+    "checksum": "b42402af341465731f4a9c74690fc910fdcf87087baabf86b3fb59ea81d6bb4b",
+    "id": "0ad2e66efa19976f51948d3d9f9bb7d7",
+    "key_b64": "1nMOjv/pZOrsACAvWacbwGjJAou4ajWEkPKBOf/Na8M=",
+    "kind": "Image",
+    "name": "B-zeitachse-segment.png",
+    "op": "persist",
+    "pieces": 3,
+    "root": "c6aa1d6e21eaa020c67887d6850163583a0e5d192d2d2fce0fdfb69c1c632674",
+    "shared_ts": 1788705662,
+    "size": 104637
+   },
+   "proposal_id": 136,
+   "signers": [],
+   "surface": "files"
+  },
+  {
+   "height": 0,
+   "kind": "applied",
+   "payload": {
+    "by": "Mr. Center",
+    "checksum": "4454feac3f71152e347db4feb85e0f3fdcb1d87d9b9650af35123bafee2253bd",
+    "id": "2d525df0699f0909192bd6204d364a06",
+    "key_b64": "dCK0KJ99vqCNiGonGxgup18iJuECOdXkP7O/NF9JRZM=",
+    "kind": "Image",
+    "name": "B-ap-zustellweg.png",
+    "op": "persist",
+    "pieces": 2,
+    "root": "a54b9d3b7e5bfe94725e4746d1b8a9d2c4cd62174e6bafb37aba411c724dda82",
+    "shared_ts": 1788705662,
+    "size": 82295
+   },
+   "proposal_id": 133,
+   "signers": [],
+   "surface": "files"
+  },
+  {
+   "height": 0,
+   "kind": "applied",
+   "payload": {
+    "by": "Mr. Left",
+    "checksum": "468c7f697f993373db5590a9cebc4ce299929d368da7d38a72b0225aa0641d6b",
+    "id": "944f8c561548089006ab230a5dc51944",
+    "key_b64": "17wXceTxJKnr07eT4OI5hT50wvkJcKCH35JESDgUnDw=",
+    "kind": "Image",
+    "name": "left-nostr-verschluesselungslinie.png",
+    "op": "persist",
+    "pieces": 2,
+    "root": "2526aa3d5f32a1be7fe14aa925c3595688d59007c187a748378ce06873d4ead2",
+    "shared_ts": 1788705698,
+    "size": 87814
+   },
+   "proposal_id": 143,
+   "signers": [],
+   "surface": "files"
+  },
+  {
+   "height": 0,
+   "kind": "applied",
+   "payload": {
+    "by": "Mr. Center",
+    "checksum": "2db745a887c79ec3a01033abfef86becc785edd9cbcf4c4591478f3b934b18bc",
+    "id": "6cb4e687131264cbe0ee896079fc2d3e",
+    "key_b64": "y9PdlmR/lwoKtSLpfl18D4BQi/dw3j8qf5okql+YA/s=",
+    "kind": "Image",
+    "name": "B-protokollstapel.png",
+    "op": "persist",
+    "pieces": 3,
+    "root": "a9cbda38a654141217b6fa6285a0706a0df31e2414d6cd1258ffb70fc5cdca4f",
+    "shared_ts": 1788705662,
+    "size": 102817
+   },
+   "proposal_id": 130,
+   "signers": [],
+   "surface": "files"
+  },
+  {
+   "height": 0,
+   "kind": "applied",
+   "payload": {
+    "hash": "2334dce161b1758e1c66e18c4b094ee4338544a765c1990311d66a10624f5d00",
+    "op": "wiki_base",
+    "size": 470614
+   },
+   "proposal_id": 0,
+   "signers": [],
+   "surface": "memory"
+  },
+  {
+   "height": 0,
+   "kind": "genesis",
+   "payload": "Second Wiki Test",
+   "proposal_id": 0,
+   "signers": [
+    "Mr. Left",
+    "Mr. Center",
+    "Mr. Right"
+   ],
+   "surface": ""
+  }
+ ],
+ "diverged": [],
+ "reply": "chain"
+}

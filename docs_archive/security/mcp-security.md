@@ -184,6 +184,13 @@ before the protocol ever starts.
 
 ## The host boundary: what an agent may NOT do (audit 2026-08-26)
 
+**SUPERSEDED 2026-09-06 by ADR-0007 (`docs_archive/adr/0007-agent-operates-the-machine.md`):
+the agent operates the MACHINE; every item below except `ui_publish`, the
+`net_*` channels, the read-only key and the write-only secrets is reverted
+by `docs/reviews/mcp_agent_friction_fixes_round_3.md` Part F. The text is
+kept as the record of what the audit had enforced.**
+
+
 "Agents are seats" licenses REPUBLIC actions — propose, approve, chat,
 share, restore — not the operator's MACHINE, identity or secrets. The
 tool catalogue enforces that line at the builder and the engine keeps the
