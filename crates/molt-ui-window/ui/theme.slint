@@ -349,13 +349,34 @@ export struct WikiSpan {
     // the predicate an inline `[[works_at::Acme]]` declared - shown as a
     // tooltip, never as text
     rel: string,
+    // ---- file references (images + file links) ----
+    // `link` is an `upload:` destination and this is what it resolved to
+    // (WikiBlock.file-state below). 0 = this run is no file reference.
+    file-state: int,
+    file-name: string,
+    file-size: string,
 }
 
 export struct WikiBlock {
-    kind: int, // 0 h1 · 1 h2 · 2 paragraph · 3 bullet · 4 code
+    kind: int, // 0 h1 · 1 h2 · 2 paragraph · 3 bullet · 4 code · 5 upload image
     text: string,
     status: int, // 0 same · 1 added · 2 changed · 3 removed ghost
     spans: [WikiSpan],
+    // ---- file references (images + file links) ----
+    // wiki_files_and_images.md §3.4. `file-state`:
+    // 0 none · 1 unknown · 2 ambiguous · 3 remote · 4 fetching ·
+    // 5 decoding · 6 ready · 7 failed · 8 temporary.
+    // State 3 with an EMPTY file-name is the answer still in flight: the
+    // card shows the reference and no verb.
+    file-state: int,
+    file-name: string,
+    file-size: string, // already formatted
+    file-member: string,
+    // the availability word, the mirror/download progress, or the state
+    // word - composed once, in the active language, by the bridge
+    file-avail: string,
+    file-can-fetch: bool,
+    image: image,
 }
 
 // One changeset-panel stack row: the action log, oldest first.
@@ -630,6 +651,24 @@ export global WikiState {
     callback backlinks-wanted(string);
     // run the navigator's search ("" clears it)
     callback search(string);
+
+    // ---- file references (images + file links) ----
+    // wiki_files_and_images.md §3.4/§3.5: an `upload:` reference resolves
+    // through the engine, its bytes decode off the UI thread, and the
+    // answer patches the block row in place.
+    // the open page's references the bridge has not asked about yet
+    callback file-refs-wanted([string]);
+    // the card's one verb: fetch this file into the exchange folder
+    callback file-fetch(string);
+    // a failed read: forget the answer and ask again
+    callback file-retry(string);
+    // Shared Files, filtered to this file (the reference, prefix or full)
+    callback jump-upload(string);
+    // the LARGE view of a ready picture (Q3): window-wide, Escape closes
+    in-out property <bool> file-view-open;
+    in-out property <image> file-view-image;
+    in-out property <string> file-view-caption;
+    in-out property <string> file-view-ref;
 }
 
 // A full theme palette. Three are defined in `Palettes`; `Theme.active` picks one.
@@ -1419,6 +1458,18 @@ export global Strings {
     in property <string> mem-link-err-qual;
     in property <string> mem-link-err-qsyntax;
     in property <string> mem-link-err-body;
+    // ---- file references (images + file links) ----
+    in property <string> mem-file-unknown;
+    in property <string> mem-file-ambiguous;
+    in property <string> mem-file-temporary;
+    in property <string> mem-file-failed;
+    in property <string> mem-file-decoding;
+    in property <string> mem-file-loading;
+    in property <string> mem-file-mirroring;
+    in property <string> mem-file-fetch;
+    in property <string> mem-file-retry;
+    in property <string> mem-file-show;
+    in property <string> mem-file-by;
     in property <string> mem-prop-hint;
     in property <string> tip-settings;
     in property <string> quit-title;

@@ -2798,14 +2798,20 @@ impl Wiki {
 // ---- markdown → blocks ----------------------------------------------------
 
 /// Pseudo-render markdown into the pane's block primitives. H1 → 0, deeper
-/// headings → 1, paragraphs → 2, list items → 3, code blocks → 4; inline
+/// headings → 1, paragraphs → 2, list items → 3, code blocks → 4,
+/// an `upload:` image → 5 (`wiki_files_and_images.md` §3.4); inline
 /// markup flattens to its text.
 pub fn parse_blocks(raw: &str) -> Vec<Block> {
     let mut out = Vec::new();
     let mut cur: Option<Block> = None;
     let mut in_item = false;
-    // the `.md` target while inside a link — non-.md links stay plain runs
+    // the `.md` or `upload:` target while inside a link — every other
+    // destination stays a plain run
     let mut link = String::new();
+    // the open `upload:` image: its destination and the alt collected so
+    // far. A picture is a block of its own, so the text around it is cut
+    // at the markup and resumes after it.
+    let mut img: Option<(String, String)> = None;
     for ev in Parser::new(raw) {
         match ev {
             Event::Start(Tag::Heading { level, .. }) => {
@@ -2825,12 +2831,39 @@ pub fn parse_blocks(raw: &str) -> Vec<Block> {
             }
             Event::Start(Tag::Link { dest_url, .. }) => {
                 let dest = dest_url.to_string();
-                if dest.ends_with(".md") {
+                if dest.ends_with(".md") || molt_core::wiki_refs::checksum_of(&dest).is_some() {
                     link = dest;
                 }
             }
             Event::End(TagEnd::Link) => {
                 link.clear();
+            }
+            // inside a link the picture is part of the run: splitting
+            // there would tear the enclosing sentence apart
+            Event::Start(Tag::Image { dest_url, .. }) if link.is_empty() => {
+                let dest = dest_url.to_string();
+                if molt_core::wiki_refs::checksum_of(&dest).is_some() {
+                    img = Some((dest, String::new()));
+                }
+            }
+            Event::End(TagEnd::Image) => {
+                if let Some((dest, alt)) = img.take() {
+                    let kind = cur.as_ref().map_or(2, |b| b.kind);
+                    if let Some(b) = cur.take() {
+                        finish_block(b, &mut out);
+                    }
+                    let alt = alt.trim().to_string();
+                    out.push(Block {
+                        kind: 5,
+                        text: alt.clone(),
+                        spans: vec![Span {
+                            text: alt,
+                            link: dest,
+                            rel: String::new(),
+                        }],
+                    });
+                    cur = Some(Block::new(kind));
+                }
             }
             Event::End(TagEnd::Heading(_) | TagEnd::CodeBlock | TagEnd::Item)
             | Event::End(TagEnd::Paragraph) => {
@@ -2840,28 +2873,14 @@ pub fn parse_blocks(raw: &str) -> Vec<Block> {
                     // paragraph end inside a loose item: keep the bullet
                     continue;
                 }
-                if let Some(mut b) = cur.take() {
-                    // a fenced block is verbatim: no link scan there
-                    if b.kind != 4 {
-                        expand_wiki_links(&mut b);
-                    }
-                    if b.kind == 4 {
-                        b.text = b.text.trim_end_matches('\n').to_string();
-                        b.spans = if b.text.is_empty() {
-                            Vec::new()
-                        } else {
-                            vec![Span {
-                                text: b.text.clone(),
-                                link: String::new(),
-                                rel: String::new(),
-                            }]
-                        };
-                    }
-                    out.push(b);
+                if let Some(b) = cur.take() {
+                    finish_block(b, &mut out);
                 }
             }
             Event::Text(t) => {
-                if let Some(b) = &mut cur {
+                if let Some(i) = &mut img {
+                    i.1.push_str(&t);
+                } else if let Some(b) = &mut cur {
                     b.push_run(&t, &link);
                 }
             }
@@ -2869,12 +2888,16 @@ pub fn parse_blocks(raw: &str) -> Vec<Block> {
             // `[[Name]]` scan below can leave it alone: a link in an
             // example is not navigation (the rule the index follows)
             Event::Code(t) => {
-                if let Some(b) = &mut cur {
+                if let Some(i) = &mut img {
+                    i.1.push_str(&t);
+                } else if let Some(b) = &mut cur {
                     b.push_run(&t, if link.is_empty() { CODE_RUN } else { &link });
                 }
             }
             Event::SoftBreak | Event::HardBreak => {
-                if let Some(b) = &mut cur {
+                if let Some(i) = &mut img {
+                    i.1.push(' ');
+                } else if let Some(b) = &mut cur {
                     b.push_run(" ", &link);
                 }
             }
@@ -2882,6 +2905,31 @@ pub fn parse_blocks(raw: &str) -> Vec<Block> {
         }
     }
     out
+}
+
+/// Close a collected block: expand its `[[…]]` forms (never inside a
+/// fence, where a link is an example) and drop it when the markup left
+/// nothing behind - an image alone in its paragraph would otherwise
+/// leave an empty shell before and after itself.
+fn finish_block(mut b: Block, out: &mut Vec<Block>) {
+    if b.kind == 4 {
+        b.text = b.text.trim_end_matches('\n').to_string();
+        b.spans = if b.text.is_empty() {
+            Vec::new()
+        } else {
+            vec![Span {
+                text: b.text.clone(),
+                link: String::new(),
+                rel: String::new(),
+            }]
+        };
+    } else {
+        expand_wiki_links(&mut b);
+        if b.text.is_empty() {
+            return;
+        }
+    }
+    out.push(b);
 }
 
 /// `.md` link targets in order of first appearance, deduped. The
@@ -3593,6 +3641,64 @@ mod tests {
         assert_eq!(blocks[0].text, "Title");
         assert_eq!(blocks[3].text, "bullet one");
         assert_eq!(blocks[5].text, "code line");
+    }
+
+    #[test]
+    fn an_upload_image_is_its_own_block_and_carries_the_destination() {
+        let blocks =
+            parse_blocks("Intro.\n\n![Netzdiagramm](upload:3f9a2c1b7e04)\n\nAfter.\n");
+        let kinds: Vec<u8> = blocks.iter().map(|b| b.kind).collect();
+        assert_eq!(kinds, vec![2, 5, 2]);
+        assert_eq!(blocks[1].text, "Netzdiagramm");
+        assert_eq!(blocks[1].spans.len(), 1);
+        assert_eq!(blocks[1].spans[0].link, "upload:3f9a2c1b7e04");
+    }
+
+    #[test]
+    fn an_upload_image_beside_prose_splits_the_paragraph_and_keeps_both_halves() {
+        let blocks = parse_blocks("See ![Plan](upload:aaaaaaaaaaaa) for the layout.");
+        let kinds: Vec<u8> = blocks.iter().map(|b| b.kind).collect();
+        assert_eq!(kinds, vec![2, 5, 2]);
+        assert_eq!(blocks[0].text, "See ");
+        assert_eq!(blocks[2].text, " for the layout.");
+    }
+
+    #[test]
+    fn an_upload_link_stays_a_span_with_its_destination() {
+        let blocks = parse_blocks("Read [Bericht Q3](upload:3f9a2c1b7e04) today.");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].text, "Read Bericht Q3 today.");
+        let file: Vec<&Span> = blocks[0]
+            .spans
+            .iter()
+            .filter(|s| s.link.starts_with("upload:"))
+            .collect();
+        assert_eq!(file.len(), 1);
+        assert_eq!(file[0].text, "Bericht Q3");
+        assert_eq!(file[0].link, "upload:3f9a2c1b7e04");
+    }
+
+    #[test]
+    fn a_foreign_image_still_flattens_into_its_paragraph() {
+        let blocks = parse_blocks("Look ![shot](https://x.example/a.png) here.");
+        assert_eq!(blocks.len(), 1, "only an upload: image gets a block");
+        assert_eq!(blocks[0].kind, 2);
+        assert_eq!(blocks[0].text, "Look shot here.");
+    }
+
+    #[test]
+    fn an_upload_image_inside_a_link_stays_inside_it() {
+        // splitting there would break the enclosing run apart
+        let blocks = parse_blocks("[![alt](upload:aaaaaaaaaaaa)](charter.md)");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].spans[0].link, "charter.md");
+    }
+
+    #[test]
+    fn an_upload_reference_inside_a_fence_is_no_reference() {
+        let blocks = parse_blocks("```\n![a](upload:3f9a2c1b7e04)\n```\n");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, 4);
     }
 
     #[test]

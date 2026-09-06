@@ -44,6 +44,64 @@ pub(crate) fn image_from_bytes(bytes: &[u8]) -> Option<slint::Image> {
     slint::Image::load_from_svg_data(bytes).ok()
 }
 
+/// The longest edge a wiki picture is decoded down to: ONE decode serves
+/// the text column and the large view (`wiki_files_and_images.md` §4).
+const WIKI_IMAGE_EDGE: u32 = 2048;
+
+/// A decoded wiki picture on its way to the UI thread: raw RGBA, so the
+/// worker never touches a `slint::Image` (which is not `Send`).
+pub(crate) struct DecodedImage {
+    pub(crate) rgba: Vec<u8>,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
+impl DecodedImage {
+    /// What this decode costs the image cache.
+    pub(crate) fn bytes(&self) -> usize {
+        self.rgba.len()
+    }
+
+    /// Build the `slint::Image` - UI thread only.
+    pub(crate) fn into_image(self) -> slint::Image {
+        let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+            &self.rgba,
+            self.width,
+            self.height,
+        );
+        slint::Image::from_rgba8(buf)
+    }
+}
+
+/// Decode a referenced file's verified bytes for the wiki, off the UI
+/// thread: the same 8192² ceiling as every other untrusted picture here,
+/// then down to [`WIKI_IMAGE_EDGE`]. SVG is never decoded (an SVG share
+/// renders as a file link) - it carries no magic number, so an
+/// unsniffable payload is simply refused.
+pub(crate) fn decode_wiki_image(bytes: &[u8]) -> Option<DecodedImage> {
+    let img = decode_capped(bytes)?;
+    let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let img = if w.max(h) > WIKI_IMAGE_EDGE {
+        img.resize(
+            WIKI_IMAGE_EDGE,
+            WIKI_IMAGE_EDGE,
+            image::imageops::FilterType::Triangle,
+        )
+    } else {
+        img
+    };
+    let rgba = img.into_rgba8();
+    let (width, height) = rgba.dimensions();
+    Some(DecodedImage {
+        rgba: rgba.into_raw(),
+        width,
+        height,
+    })
+}
+
 /// Why a picked picture cannot become a member-picture proposal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ImageFitError {

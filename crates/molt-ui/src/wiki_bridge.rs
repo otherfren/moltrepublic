@@ -4,12 +4,14 @@
 //! sync, the callback wiring, the diff viewer and the export dialog.
 
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
-use molt_core::{Command, Reply, Surface};
+use molt_core::{Command, LocalCopy, Reply, Surface, UploadView};
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 use crate::i18n::{error_toast, localize_wiki_err, Lexicon};
+use crate::labels::file_size_label;
 use crate::models::{sync_model, wiki_block_eq};
 use crate::settings::browse_start_dir;
 use crate::app::Ctx;
@@ -94,6 +96,517 @@ impl FaceState {
             doc_key: None,
         }
     }
+}
+
+// ---- file references (images + file links) ---------------------------------
+// `wiki_files_and_images.md` §3.4/§3.5. One cache per window thread, keyed
+// by the reference's hex: the engine's answer, the decoded picture and the
+// in-flight set. An answer PATCHES the rows it touches - it never re-syncs
+// the face (`docs_archive/ui/wiki_pane_performance.md` F4).
+
+/// What `ReadUploadBytes` refuses above (§4).
+const IMAGE_READ_CAP: u64 = 32 * 1024 * 1024;
+/// One window's budget of decoded pictures.
+const IMAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+/// `WikiBlock::file_state` / `WikiSpan::file_state`. State 3 with an
+/// EMPTY name is the answer still in flight: the card shows the
+/// reference and no verb.
+pub(crate) mod file_state {
+    pub(crate) const NONE: i32 = 0;
+    pub(crate) const UNKNOWN: i32 = 1;
+    pub(crate) const AMBIGUOUS: i32 = 2;
+    pub(crate) const REMOTE: i32 = 3;
+    pub(crate) const FETCHING: i32 = 4;
+    pub(crate) const DECODING: i32 = 5;
+    pub(crate) const READY: i32 = 6;
+    pub(crate) const FAILED: i32 = 7;
+    pub(crate) const TEMPORARY: i32 = 8;
+}
+
+/// The engine's answer to one reference ([`Reply::UploadResolved`]).
+pub(crate) struct RefAnswer {
+    pub(crate) upload: Option<UploadView>,
+    pub(crate) ambiguous: bool,
+    pub(crate) temporary: bool,
+    pub(crate) local: LocalCopy,
+}
+
+/// One reference as the pane renders it.
+#[derive(Clone, Default, PartialEq, Eq)]
+struct RefFace {
+    state: i32,
+    name: String,
+    size: String,
+    member: String,
+    /// The availability word, the progress, or the state word - composed
+    /// once here, in the active language.
+    avail: String,
+    can_fetch: bool,
+    /// The share the `Herunterladen` verb addresses.
+    id: Option<molt_core::MessageId>,
+    /// The FULL checksum: the jump's needle and the byte read's argument.
+    checksum: String,
+}
+
+/// The decoded pictures of one window, oldest first, bounded by
+/// [`IMAGE_CACHE_BYTES`] of decoded RGBA.
+#[derive(Default)]
+struct ImageCache {
+    entries: VecDeque<(String, slint::Image, usize)>,
+    held: usize,
+}
+
+impl ImageCache {
+    fn get(&mut self, checksum: &str) -> Option<slint::Image> {
+        let at = self.entries.iter().position(|(c, ..)| c == checksum)?;
+        let hit = self.entries.remove(at)?;
+        let img = hit.1.clone();
+        self.entries.push_back(hit);
+        Some(img)
+    }
+
+    /// Insert, then evict from the front until the budget holds. The
+    /// entry just inserted is never evicted; the checksums that were are
+    /// returned, so their references can go back to asking.
+    fn put(&mut self, checksum: &str, img: slint::Image, bytes: usize) -> Vec<String> {
+        self.entries.retain(|(c, _, b)| {
+            let keep = c != checksum;
+            if !keep {
+                self.held -= b;
+            }
+            keep
+        });
+        self.entries.push_back((checksum.to_string(), img, bytes));
+        self.held += bytes;
+        let mut dropped = Vec::new();
+        while self.held > IMAGE_CACHE_BYTES && self.entries.len() > 1 {
+            if let Some((c, _, b)) = self.entries.pop_front() {
+                self.held -= b;
+                dropped.push(c);
+            }
+        }
+        dropped
+    }
+}
+
+/// The window's file-reference cache.
+#[derive(Default)]
+struct FileRefs {
+    /// The wiki base revision the answers were taken at.
+    rev: i32,
+    /// The open page's references: hex → written as a PICTURE.
+    wanted: HashMap<String, bool>,
+    by_hex: HashMap<String, RefFace>,
+    /// Asked, no answer yet - so a sync never asks twice.
+    asking: HashSet<String>,
+    images: ImageCache,
+}
+
+thread_local! {
+    /// One cache per window thread; every entry point below runs on the
+    /// UI thread, so it needs no lock.
+    static FILE_REFS: RefCell<FileRefs> = RefCell::new(FileRefs::default());
+}
+
+/// The hex a span's destination names, or `None` when the run is no file
+/// reference at all.
+fn ref_hex(dest: &str) -> Option<String> {
+    molt_core::wiki_refs::checksum_of(dest)
+}
+
+/// The open page's references, and the ask for what is missing. Called
+/// from [`sync_doc_face`], which runs only when the document's bytes
+/// moved - so a keystroke never re-parses the page.
+fn want_file_refs(s: &WikiState<'_>, body: &str, rev: i32) {
+    let refs = molt_core::wiki_refs::file_refs(body);
+    FILE_REFS.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.rev != rev {
+            // another base revision may name other files
+            c.rev = rev;
+            c.by_hex.clear();
+            c.asking.clear();
+        }
+        c.wanted.clear();
+        for r in refs {
+            if !r.valid() {
+                continue;
+            }
+            let entry = c.wanted.entry(r.hex).or_insert(false);
+            *entry |= r.image;
+        }
+    });
+    ask_missing(s);
+}
+
+/// Ask the engine for every reference of the open page that has neither
+/// an answer nor a question in flight.
+fn ask_missing(s: &WikiState<'_>) {
+    let ask: Vec<slint::SharedString> = FILE_REFS.with(|c| {
+        let mut c = c.borrow_mut();
+        let fresh: Vec<String> = c
+            .wanted
+            .keys()
+            .filter(|h| !c.by_hex.contains_key(*h) && !c.asking.contains(*h))
+            .cloned()
+            .collect();
+        for h in &fresh {
+            c.asking.insert(h.clone());
+        }
+        fresh.into_iter().map(Into::into).collect()
+    });
+    if !ask.is_empty() {
+        s.invoke_file_refs_wanted(ModelRc::new(VecModel::from(ask)));
+    }
+}
+
+/// The cached face of one destination. An unresolved reference is
+/// `REMOTE` with an empty name (the card then shows no verb); a
+/// malformed hex is `UNKNOWN` and never reaches the engine.
+fn face_of(c: &FileRefs, dest: &str, lex: &WikiFileWords) -> RefFace {
+    let Some(hex) = ref_hex(dest) else {
+        return RefFace {
+            state: file_state::NONE,
+            ..RefFace::default()
+        };
+    };
+    if !molt_core::wiki_refs::valid_hex(&hex) {
+        return RefFace {
+            state: file_state::UNKNOWN,
+            avail: lex.unknown.clone(),
+            ..RefFace::default()
+        };
+    }
+    c.by_hex.get(&hex).cloned().unwrap_or(RefFace {
+        state: file_state::REMOTE,
+        ..RefFace::default()
+    })
+}
+
+/// The state words this layer composes, read once per pass out of the
+/// Slint `Strings` global (the model itself stays language-free).
+struct WikiFileWords {
+    unknown: String,
+    ambiguous: String,
+    temporary: String,
+    failed: String,
+    decoding: String,
+    loading: String,
+    mirroring: String,
+    gone: String,
+    offline: String,
+}
+
+impl WikiFileWords {
+    fn of(ui: &AppWindow) -> Self {
+        let s = ui.global::<Strings>();
+        WikiFileWords {
+            unknown: s.get_mem_file_unknown().to_string(),
+            ambiguous: s.get_mem_file_ambiguous().to_string(),
+            temporary: s.get_mem_file_temporary().to_string(),
+            failed: s.get_mem_file_failed().to_string(),
+            decoding: s.get_mem_file_decoding().to_string(),
+            loading: s.get_mem_file_loading().to_string(),
+            mirroring: s.get_mem_file_mirroring().to_string(),
+            gone: s.get_ou_gone().to_string(),
+            offline: s.get_ou_offline().to_string(),
+        }
+    }
+}
+
+/// Write a block's file face. Returns whether anything moved.
+fn fill_block_face(c: &mut FileRefs, b: &mut WikiBlock, lex: &WikiFileWords) -> bool {
+    if b.kind != 5 {
+        return false;
+    }
+    let dest = b.spans.row_data(0).map(|sp| sp.link.to_string()).unwrap_or_default();
+    let f = face_of(c, &dest, lex);
+    let img = (f.state == file_state::READY)
+        .then(|| c.images.get(&f.checksum))
+        .flatten()
+        .unwrap_or_default();
+    let moved = b.file_state != f.state
+        || b.file_name != f.name.as_str()
+        || b.file_size != f.size.as_str()
+        || b.file_member != f.member.as_str()
+        || b.file_avail != f.avail.as_str()
+        || b.file_can_fetch != f.can_fetch
+        || b.image != img;
+    b.file_state = f.state;
+    b.file_name = f.name.into();
+    b.file_size = f.size.into();
+    b.file_member = f.member.into();
+    b.file_avail = f.avail.into();
+    b.file_can_fetch = f.can_fetch;
+    b.image = img;
+    moved
+}
+
+/// Patch a block's file-link RUNS in place - the span model instance
+/// survives, so the runs on screen are not re-created.
+fn fill_span_faces(c: &mut FileRefs, spans: &ModelRc<WikiSpan>, lex: &WikiFileWords) {
+    for i in 0..spans.row_count() {
+        let Some(sp) = spans.row_data(i) else { continue };
+        if ref_hex(sp.link.as_str()).is_none() {
+            continue;
+        }
+        let f = face_of(c, sp.link.as_str(), lex);
+        if sp.file_state == f.state
+            && sp.file_name == f.name.as_str()
+            && sp.file_size == f.size.as_str()
+        {
+            continue;
+        }
+        spans.set_row_data(
+            i,
+            WikiSpan {
+                file_state: f.state,
+                file_name: f.name.into(),
+                file_size: f.size.into(),
+                ..sp
+            },
+        );
+    }
+}
+
+/// Apply the cache to the blocks already on screen, then ask for what is
+/// still missing. Never a model swap: a resolve must not rebuild the page.
+pub(crate) fn patch_file_rows(ui: &AppWindow) {
+    let s = ui.global::<WikiState>();
+    let lex = WikiFileWords::of(ui);
+    let blocks = s.get_blocks();
+    FILE_REFS.with(|c| {
+        let mut c = c.borrow_mut();
+        for i in 0..blocks.row_count() {
+            let Some(mut b) = blocks.row_data(i) else { continue };
+            fill_span_faces(&mut c, &b.spans, &lex);
+            if fill_block_face(&mut c, &mut b, &lex) {
+                blocks.set_row_data(i, b);
+            }
+        }
+    });
+    ask_missing(&s);
+}
+
+/// One reference's answer. Returns the FULL checksum whose bytes the
+/// picture now wants.
+pub(crate) fn file_resolved(
+    ui: &AppWindow,
+    hex: &str,
+    answer: Option<RefAnswer>,
+) -> Option<String> {
+    let lex = WikiFileWords::of(ui);
+    let read = FILE_REFS.with(|c| {
+        let mut c = c.borrow_mut();
+        c.asking.remove(hex);
+        let as_image = c.wanted.get(hex).copied().unwrap_or(false);
+        let (face, read) = ref_face(&mut c, answer, as_image, &lex);
+        c.by_hex.insert(hex.to_string(), face);
+        read
+    });
+    patch_file_rows(ui);
+    read
+}
+
+/// The engine's answer, turned into the card the member sees.
+fn ref_face(
+    c: &mut FileRefs,
+    answer: Option<RefAnswer>,
+    as_image: bool,
+    lex: &WikiFileWords,
+) -> (RefFace, Option<String>) {
+    let bad = |state: i32, word: &str| RefFace {
+        state,
+        avail: word.to_string(),
+        ..RefFace::default()
+    };
+    // the engine refused: the read itself is the failure the card names
+    let Some(a) = answer else {
+        return (bad(file_state::FAILED, &lex.failed), None);
+    };
+    if a.ambiguous {
+        return (bad(file_state::AMBIGUOUS, &lex.ambiguous), None);
+    }
+    let Some(u) = a.upload else {
+        return (bad(file_state::UNKNOWN, &lex.unknown), None);
+    };
+    let mut f = RefFace {
+        name: u.name.clone(),
+        size: file_size_label(u.size),
+        member: u.member.clone(),
+        id: Some(u.id),
+        checksum: u.checksum.clone(),
+        ..RefFace::default()
+    };
+    if a.temporary {
+        f.state = file_state::TEMPORARY;
+        f.avail = lex.temporary.clone();
+        return (f, None);
+    }
+    match u.download.as_ref().map(|d| (d.phase.as_str(), d.percent)) {
+        Some(("requested" | "transferring", pct)) => {
+            f.state = file_state::FETCHING;
+            f.avail = format!("{} {pct} %", lex.loading);
+            return (f, None);
+        }
+        Some(("failed", _)) => {
+            f.state = file_state::FAILED;
+            f.avail = lex.failed.clone();
+            return (f, None);
+        }
+        _ => {}
+    }
+    if let LocalCopy::Partial { held, of } = a.local {
+        // the mirror brings it by itself: the progress, and no verb (Q4)
+        f.state = file_state::FETCHING;
+        f.avail = format!("{} {} %", lex.mirroring, if of == 0 { 0 } else { held * 100 / of });
+        return (f, None);
+    }
+    // an SVG share is never decoded (§4): it renders as a file link
+    let picture = as_image && !u.name.to_ascii_lowercase().ends_with(".svg");
+    if a.local != LocalCopy::None {
+        if !picture {
+            f.state = file_state::READY;
+            return (f, None);
+        }
+        if c.images.get(&f.checksum).is_some() {
+            f.state = file_state::READY;
+            return (f, None);
+        }
+        // a legacy share carries no checksum - there is nothing the bytes
+        // could be verified against, so they are never read
+        if u.checksum.len() == molt_core::wiki_refs::HEX_FULL {
+            f.state = file_state::DECODING;
+            f.avail = lex.decoding.clone();
+            let want = f.checksum.clone();
+            return (f, Some(want));
+        }
+    }
+    f.state = file_state::REMOTE;
+    let relay_held = u.availability == "relay-held";
+    f.can_fetch = u.available && (u.online || relay_held);
+    f.avail = if u.availability == "gone" {
+        lex.gone.clone()
+    } else if !u.online && !relay_held {
+        lex.offline.clone()
+    } else {
+        String::new()
+    };
+    (f, None)
+}
+
+/// The decoded picture (or its failure) for a reference.
+pub(crate) fn image_decoded(
+    ui: &AppWindow,
+    hex: &str,
+    decoded: Option<crate::images::DecodedImage>,
+) {
+    let lex = WikiFileWords::of(ui);
+    FILE_REFS.with(|c| {
+        let mut c = c.borrow_mut();
+        let Some(checksum) = c.by_hex.get(hex).map(|f| f.checksum.clone()) else {
+            return;
+        };
+        match decoded {
+            Some(d) => {
+                let bytes = d.bytes();
+                let dropped = c.images.put(&checksum, d.into_image(), bytes);
+                // an evicted picture's reference goes back to asking
+                c.by_hex.retain(|_, f| !dropped.contains(&f.checksum));
+                if let Some(f) = c.by_hex.get_mut(hex) {
+                    f.state = file_state::READY;
+                    f.avail.clear();
+                }
+            }
+            None => {
+                if let Some(f) = c.by_hex.get_mut(hex) {
+                    f.state = file_state::FAILED;
+                    f.avail = lex.failed.clone();
+                }
+            }
+        }
+    });
+    patch_file_rows(ui);
+}
+
+/// Forget one reference's answer and ask again (the `failed` card's verb,
+/// and every re-resolve trigger below).
+pub(crate) fn forget_file_ref(ui: &AppWindow, dest: &str) {
+    let Some(hex) = ref_hex(dest) else { return };
+    FILE_REFS.with(|c| {
+        let mut c = c.borrow_mut();
+        c.by_hex.remove(&hex);
+        c.asking.remove(&hex);
+    });
+    patch_file_rows(ui);
+}
+
+/// A transfer moved: the reference naming that share resolves again.
+pub(crate) fn transfer_touched(ui: &AppWindow, id: molt_core::MessageId) {
+    let hit = FILE_REFS.with(|c| {
+        c.borrow()
+            .by_hex
+            .iter()
+            .find(|(_, f)| f.id == Some(id))
+            .map(|(h, _)| h.clone())
+    });
+    if let Some(hex) = hit {
+        forget_file_ref(ui, &hex);
+    }
+}
+
+/// A surfaces push: a mirror that completed brings a referenced file's
+/// bytes without the wiki asking for them.
+pub(crate) fn uploads_pushed(ui: &AppWindow, uploads: &[crate::surfaces::UploadRowData]) {
+    let stale: Vec<String> = FILE_REFS.with(|c| {
+        let c = c.borrow();
+        uploads
+            .iter()
+            .filter(|u| u.mirror_of > 0 && u.mirror_held == u.mirror_of)
+            .filter_map(|u| {
+                c.by_hex
+                    .iter()
+                    .find(|(_, f)| {
+                        f.checksum == u.checksum_full
+                            && matches!(f.state, file_state::REMOTE | file_state::FETCHING)
+                    })
+                    .map(|(h, _)| h.clone())
+            })
+            .collect()
+    });
+    for hex in stale {
+        forget_file_ref(ui, &hex);
+    }
+}
+
+/// The share a reference names, for the `Herunterladen` verb.
+fn file_ref_share(dest: &str) -> Option<molt_core::MessageId> {
+    let hex = ref_hex(dest)?;
+    FILE_REFS.with(|c| c.borrow().by_hex.get(&hex).and_then(|f| f.id))
+}
+
+/// The jump's needle and view (§3.5): the FULL checksum where the answer
+/// carries one, and the table the row actually lives in.
+fn file_ref_jump(dest: &str) -> (String, &'static str) {
+    let Some(hex) = ref_hex(dest) else {
+        return (dest.to_string(), "persistent");
+    };
+    FILE_REFS.with(|c| {
+        let c = c.borrow();
+        match c.by_hex.get(&hex) {
+            Some(f) if !f.checksum.is_empty() => (
+                f.checksum.clone(),
+                if f.state == file_state::TEMPORARY { "uploads" } else { "persistent" },
+            ),
+            _ => (hex, "persistent"),
+        }
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn reset_file_refs() {
+    FILE_REFS.with(|c| *c.borrow_mut() = FileRefs::default());
 }
 
 /// The refusal a failed link commit left, in the ACTIVE language: the
@@ -315,6 +828,7 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, face: &mut FaceState) {
             s.set_raw(doc.raw.clone().into());
             face.raw_for = Some((id, w.editing));
         }
+        patch_file_rows(ui);
     } else {
         face.doc_key = None;
         s.set_doc_open(false);
@@ -357,12 +871,19 @@ fn sync_doc_face(s: &WikiState<'_>, w: &wiki::Wiki, id: wiki::DocId) {
                         text: sp.text.into(),
                         link: sp.link.into(),
                         rel: sp.rel.into(),
+                        ..WikiSpan::default()
                     })
                     .collect::<Vec<_>>(),
             )),
+            ..WikiBlock::default()
         })
         .collect();
     sync_model(&s.get_blocks(), blocks, wiki_block_eq, |m| s.set_blocks(m));
+    // the page's `upload:` references, once per bytes change - the face
+    // itself is patched by `patch_file_rows` on every sync
+    if let Some(doc) = w.active() {
+        want_file_refs(s, wiki::body_of(&doc.raw), s.get_base_rev());
+    }
     let links: Vec<slint::SharedString> = w.links(id).into_iter().map(Into::into).collect();
     sync_model(&s.get_links(), links, PartialEq::eq, |m| s.set_links(m));
     let rows: Vec<WikiProp> = w
@@ -1453,6 +1974,47 @@ pub(crate) fn wire_wiki_index(ui: &AppWindow, ctx: &Ctx) {
         });
     }
     {
+        // the page's file references (§3.2): ONE resolve per distinct hex,
+        // and the byte read the answer asks for
+        let cx = ctx.clone();
+        g.on_file_refs_wanted(move |hexes| {
+            for hex in hexes.iter().map(|h| h.to_string()) {
+                spawn_ref_resolve(&cx, hex);
+            }
+        });
+    }
+    {
+        let cx = ctx.clone();
+        g.on_file_fetch(move |dest| {
+            if let Some(id) = file_ref_share(&dest) {
+                cx.issue(Command::DownloadFile { id, dest: None });
+            }
+        });
+    }
+    {
+        let cx = ctx.clone();
+        g.on_file_retry(move |dest| {
+            if let Some(ui) = cx.weak.upgrade() {
+                forget_file_ref(&ui, &dest);
+            }
+        });
+    }
+    {
+        // §3.5: the uploads table, pre-filtered to this ONE file
+        let cx = ctx.clone();
+        g.on_jump_upload(move |dest| {
+            let (needle, view) = file_ref_jump(&dest);
+            if let Ok(mut st) = cx.chat_ui.lock() {
+                st.set_uploads_filter(needle);
+            }
+            cx.issue(Command::SelectView {
+                surface: Surface::Files,
+                view: view.to_string(),
+            });
+            cx.refresh_surfaces();
+        });
+    }
+    {
         let cx = ctx.clone();
         g.on_backlinks_wanted(move |path| {
             let wh = cx.wallet.clone();
@@ -1562,6 +2124,71 @@ pub(crate) fn wire_wiki_index(ui: &AppWindow, ctx: &Ctx) {
 
 /// The debounced wiki-draft persist (WP-D) and its load on workspace
 /// entry: the two draft doors the wiki model reaches the engine through.
+/// Resolve ONE reference off the actor, then hand the answer to the UI
+/// thread; a picture whose bytes are here reads them next.
+fn spawn_ref_resolve(cx: &Ctx, hex: String) {
+    let cx2 = cx.clone();
+    let wh = cx.wallet.clone();
+    let weak = cx.weak.clone();
+    cx.rt.spawn(async move {
+        let answer = match wh
+            .execute(Command::ResolveUpload {
+                checksum: hex.clone(),
+            })
+            .await
+        {
+            Ok(Reply::UploadResolved {
+                upload,
+                ambiguous,
+                temporary,
+                local,
+            }) => Some(RefAnswer {
+                upload,
+                ambiguous,
+                temporary,
+                local,
+            }),
+            _ => None,
+        };
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if let Some(checksum) = file_resolved(&ui, &hex, answer) {
+                spawn_upload_read(&cx2, hex, checksum);
+            }
+        });
+    });
+}
+
+/// Read a referenced picture's verified bytes and decode them on a
+/// worker - a 12 MB photo must never touch the UI thread (§3.4).
+fn spawn_upload_read(cx: &Ctx, hex: String, checksum: String) {
+    let wh = cx.wallet.clone();
+    let weak = cx.weak.clone();
+    cx.rt.spawn(async move {
+        let bytes = match wh
+            .execute(Command::ReadUploadBytes {
+                checksum,
+                cap: IMAGE_READ_CAP,
+            })
+            .await
+        {
+            Ok(Reply::UploadBytes { bytes }) => Some(bytes),
+            _ => None,
+        };
+        let decoded = match bytes {
+            Some(b) => tokio::task::spawn_blocking(move || crate::images::decode_wiki_image(&b))
+                .await
+                .ok()
+                .flatten(),
+            None => None,
+        };
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            image_decoded(&ui, &hex, decoded);
+        });
+    });
+}
+
 pub(crate) fn wire_wiki_draft(ui: &AppWindow, ctx: &Ctx) {
     {
         let cx = ctx.clone();

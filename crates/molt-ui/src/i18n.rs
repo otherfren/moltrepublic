@@ -1324,6 +1324,18 @@ lexicon! {
     mem_link_err_qual: "This relation already holds a plain value", "Diese Beziehung hat schon einen einfachen Wert";
     mem_link_err_qsyntax: "Details read as key: value", "Angaben lauten schlüssel: wert";
     mem_link_err_body: "The link would sit in a code block", "Der Link läge in einem Code-Block";
+    // file references in a page (wiki_files_and_images.md §3.4)
+    mem_file_unknown: "unknown file", "unbekannte Datei";
+    mem_file_ambiguous: "ambiguous reference", "mehrdeutige Referenz";
+    mem_file_temporary: "not persistent yet", "noch nicht dauerhaft";
+    mem_file_failed: "unreadable", "nicht lesbar";
+    mem_file_decoding: "reading", "wird gelesen";
+    mem_file_loading: "loading", "lädt";
+    mem_file_mirroring: "mirroring", "spiegelt";
+    mem_file_fetch: "Download", "Herunterladen";
+    mem_file_retry: "Reload", "Erneut laden";
+    mem_file_show: "Show in Shared Files", "In Shared Files zeigen";
+    mem_file_by: "by", "von";
     mem_search_ph: "Search the wiki", "Wiki durchsuchen";
     mem_search_none: "No hit", "Kein Treffer";
     mem_search_building: "Reading the wiki - search answers in a moment", "Wiki wird gelesen - die Suche antwortet gleich";

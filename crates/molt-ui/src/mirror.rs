@@ -1049,6 +1049,9 @@ pub(crate) async fn push_surfaces(
 /// whole model would recreate every main-view element on each engine event —
 /// and with it drop the keyboard focus out of the chat compose box mid-typing.
 pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
+    // a mirror that completed brings a referenced file's bytes without
+    // the wiki asking for them (wiki_files_and_images.md §3.4)
+    crate::wiki_bridge::uploads_pushed(ui, &b.uploads);
     ui.set_node_member(b.member.clone().into());
     // the poke menus need the own seat too: every site gates "never myself"
     // through Poke.can()
@@ -1553,10 +1556,12 @@ pub(crate) fn spawn_mirror(ctx: &Ctx) {
                 Ok(Event::CheckpointStale { .. }) => {
                     push_surfaces(&w, &weak, &chat_ui).await;
                 }
-                Ok(Event::FileTransfer { phase, .. }) => {
+                Ok(Event::FileTransfer { id, phase }) => {
                     let weak2 = weak.clone();
                     let _ = slint::invoke_from_event_loop(move || {
                         let Some(ui) = weak2.upgrade() else { return };
+                        // a wiki reference to this share resolves again
+                        crate::wiki_bridge::transfer_touched(&ui, id);
                         let st = ui.global::<Strings>();
                         match &phase {
                             molt_core::TransferPhase::Done { path } => {
