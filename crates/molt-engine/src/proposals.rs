@@ -2431,11 +2431,12 @@ impl State {
             props_by_type: by_type
                 .into_iter()
                 .take(cap)
-                .map(|(kind, pages, keys)| molt_core::WikiTypeProps {
-                    kind,
-                    pages,
-                    keys_total: count(keys.len()),
-                    keys: keys
+                .map(|t| molt_core::WikiTypeProps {
+                    kind: t.kind,
+                    pages: t.pages,
+                    keys_total: count(t.keys.len()),
+                    keys: t
+                        .keys
                         .into_iter()
                         .take(cap)
                         .map(|(key, pages)| molt_core::WikiKeyCount { key, pages })
@@ -2446,20 +2447,16 @@ impl State {
             direction_outliers: outliers
                 .into_iter()
                 .take(cap)
-                .map(
-                    |(predicate, subject_type, object_type, count_, usual, usual_count, from)| {
-                        molt_core::WikiDirectionOutlier {
-                            predicate,
-                            subject_type,
-                            object_type,
-                            count: count_,
-                            usual: format!("{} -> {}", usual.0, usual.1),
-                            usual_count,
-                            from_total: count(from.len()),
-                            from: from.into_iter().take(cap).collect(),
-                        }
-                    },
-                )
+                .map(|o| molt_core::WikiDirectionOutlier {
+                    predicate: o.predicate,
+                    subject_type: o.subject_type,
+                    object_type: o.object_type,
+                    count: o.count,
+                    usual: format!("{} -> {}", o.usual.0, o.usual.1),
+                    usual_count: o.usual_count,
+                    from_total: count(o.from.len()),
+                    from: o.from.into_iter().take(cap).collect(),
+                })
                 .collect(),
             index_rev: wiki_rev,
             wiki_rev,
@@ -4059,8 +4056,7 @@ fn coded(code: &'static str, msgs: Vec<String>) -> impl Iterator<Item = (&'stati
     msgs.into_iter().map(move |m| (code, m))
 }
 
-/// `3 pages (a.md, b.md, +1)` - the count always, the names while they
-/// still fit on a line.
+/// The count always, the names while they still fit on a line.
 fn name_a_few(paths: &[String]) -> String {
     /// Beyond this the list stops being scannable.
     const SHOW: usize = 5;
@@ -4071,7 +4067,9 @@ fn name_a_few(paths: &[String]) -> String {
     } else {
         format!(", +{rest}")
     };
-    format!("{} pages ({}{tail})", paths.len(), shown.join(", "))
+    let n = paths.len();
+    let plural = if n == 1 { "" } else { "s" };
+    format!("{n} page{plural} ({}{tail})", shown.join(", "))
 }
 
 fn edit_paths(edit: &molt_core::WikiEdit) -> Vec<String> {
@@ -4968,5 +4966,43 @@ mod wiki_maintenance_tests {
         assert_eq!(wiki_rev, 1, "the second add cannot apply");
         assert_eq!(wiki_rev, st.wiki_base().expect("a tree").1);
         assert_eq!(list.len(), 1);
+    }
+
+    /// **E4 (R7)**: a build in flight is a STATE, not a fault. The three
+    /// reads a maintainer runs right after a multi-page apply answer
+    /// empty AND say why - a hard error on the one call that reports
+    /// faults cost every seat a retry loop it had to learn from a
+    /// refusal.
+    #[test]
+    fn the_graph_reads_answer_while_the_index_builds() {
+        let mut st = crate::tests::plain_state();
+        apply(&mut st, &[ADD_A]);
+        st.wiki_graph = None;
+        st.wiki_search = None;
+        // the guard a running build holds: nothing is built inline here
+        st.wiki_index_building = Some(st.applied_epoch);
+
+        let Reply::WikiHealth { index_building, dangling_total, wiki_rev, .. } =
+            st.cmd_wiki_health(0).expect("health answers")
+        else {
+            panic!("not a health reply");
+        };
+        assert!(index_building && dangling_total == 0 && wiki_rev == 1);
+
+        let Reply::WikiSearch { index_building, hits, .. } = st
+            .cmd_wiki_search("A".to_string(), vec![], None, None, vec![], 0, 0)
+            .expect("search answers")
+        else {
+            panic!("not a search reply");
+        };
+        assert!(index_building && hits.is_empty());
+
+        let Reply::WikiNeighbors { index_building, docs, .. } = st
+            .cmd_wiki_neighbors("notes/a.md".to_string(), 1, 0, None, None, false)
+            .expect("neighbors answers")
+        else {
+            panic!("not a neighbors reply");
+        };
+        assert!(index_building && docs.is_empty());
     }
 }

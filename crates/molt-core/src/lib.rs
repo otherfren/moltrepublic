@@ -7446,6 +7446,48 @@ pub enum MoltError {
 mod tests {
     use super::*;
 
+    // ---- wiki_edit's acknowledgement (E1) --------------------------------
+
+    /// The wire shape has to take BOTH: the bool every caller already
+    /// sends, and the code list that acknowledges one warning without
+    /// waving through the rest.
+    #[test]
+    fn allow_warnings_reads_a_bool_or_a_list_of_codes() {
+        let all: AllowWarnings = serde_json::from_value(serde_json::json!(true)).expect("bool");
+        assert!(all.admits("name_collision") && all.admits("anything"));
+        let none: AllowWarnings = serde_json::from_value(serde_json::json!(false)).expect("bool");
+        assert!(!none.admits("name_collision"));
+        assert_eq!(none, AllowWarnings::default());
+        let some: AllowWarnings =
+            serde_json::from_value(serde_json::json!(["open_path"])).expect("list");
+        assert!(some.admits("open_path") && !some.admits("name_collision"));
+        assert_eq!(
+            serde_json::to_value(&some).expect("back"),
+            serde_json::json!(["open_path"])
+        );
+        assert_eq!(
+            serde_json::to_value(AllowWarnings::NONE).expect("back"),
+            serde_json::json!(false),
+            "an untouched command still writes the legacy shape"
+        );
+    }
+
+    /// A pre-E2 caller sends no `repair_links`, and a rename must then
+    /// carry its in-links - the default is the SAFE half.
+    #[test]
+    fn a_wiki_edit_without_repair_links_repairs() {
+        let cmd: Command = serde_json::from_value(serde_json::json!({
+            "cmd": "wiki_edit",
+            "edits": []
+        }))
+        .expect("the legacy shape loads");
+        let Command::WikiEdit { repair_links, allow_warnings, .. } = cmd else {
+            panic!("not a wiki_edit");
+        };
+        assert!(repair_links);
+        assert_eq!(allow_warnings, AllowWarnings::NONE);
+    }
+
     // ---- TransportState v4 (N4: the Nostr transport shape) ----------------
 
     /// A v3-era `transport.state` (no `kind`, no relay fields) must load with

@@ -24,8 +24,6 @@ fn spawn_solo() -> WalletHandle {
     )
 }
 
-/// The graph is built OFF the actor, so a read (and an `add_relation`,
-
 /// E4: the graph reads answer `index_building: true` with empty lists
 /// instead of refusing, so a test waits that out too.
 fn still_building(reply: &Reply) -> bool {
@@ -37,6 +35,7 @@ fn still_building(reply: &Reply) -> bool {
     )
 }
 
+/// The graph is built OFF the actor, so a read (and an `add_relation`,
 /// which resolves against it) may refuse until it is there.
 async fn settle(w: &WalletHandle, cmd: Command) -> Result<Reply, MoltError> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
@@ -1094,7 +1093,7 @@ async fn repair_links_off_refuses_rather_than_stranding_the_links() {
         Ok(other) => panic!("a stranded link has to be said: {other:?}"),
     };
     assert!(
-        text.contains("rename_link: standards/lexicon.md: old path kept by 1 pages (standards/x.md)"),
+        text.contains("rename_link: standards/lexicon.md: old path kept by 1 page (standards/x.md)"),
         "names the page it would strand: {text}"
     );
 }

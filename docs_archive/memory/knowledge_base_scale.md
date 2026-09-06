@@ -877,13 +877,37 @@ that silently empties property queries (`status` and `Status` are two
 fields). Each list is capped by `limit` (1..=500, default 100) and carries
 its own total, and `from` is capped the same way. The helpers read
 `graph.inventory`, so an inline predicate counts like a header key.
-`index_rev` / `wiki_rev` and the `index building` answer are the other
-graph reads'.
+`index_rev` / `wiki_rev` are the other graph reads'.
+
+- **Two more groups since round 3** (E3, R6/R25): `key_drift` sees two
+  SPELLINGS of one key and nothing else, so a WRONG key and a relation
+  asserted BACKWARDS both read as clean. `props_by_type`
+  (`[{ kind, pages, keys: [{ key, pages }], keys_total }]`) is the key
+  histogram per `type` value - seven `person` pages carrying `year` beside
+  forty carrying `notable_year` are one read apart. `direction_outliers`
+  (`[{ predicate, subject_type, object_type, count, usual, usual_count,
+  from, from_total }]`) flags an edge whose (subject type, object type)
+  pair is rare for its predicate: the wiki's own distribution is the only
+  norm there is, so a predicate needs 5 typed edges and two pairs, and a
+  pair is flagged only when the dominant one outnumbers it fourfold. It is
+  a HEURISTIC and says so in the tool text - "check these", never "these
+  are wrong". Round 2's 13 reversed `authored_by` edges are the shape it
+  was built against.
+- **A build in flight is a STATE, not a fault** (E4, R7): `wiki_health`,
+  `wiki_neighbors` and `wiki_search` answer `index_building: true` with
+  empty lists instead of the hard `IndexBuilding` refusal - a maintainer
+  reading health right after a multi-page apply used to have to handle an
+  error on the one call that reports errors. The other graph reads
+  (`wiki_resolve`, `wiki_props`, `wiki_links`, `add_relation`) keep the
+  refusal: they answer about ONE name, where an empty answer would be a
+  wrong one.
 
 Keystones: `crates/molt-engine/tests/wiki_maintenance.rs` (a deleted
 target turns its in-edges dangling and the report says so; a rename moves
 a path out of the orphan list; `since_rev` answers exactly the paths the
-fold touched; both reads page and report their totals) plus
+fold touched; both reads page and report their totals; the per-type key
+histogram shows the odd key out and the direction check flags the
+backwards `authored_by`) plus
 `proposals.rs::wiki_maintenance_tests` (a folded cut answers what it can
 and flags the rest and reaches the same answer as a fresh fold; the
 history is answered from the CACHE, proven by a rewrite of the applied
@@ -953,6 +977,28 @@ occurrence - the form coding-agent scaffolds converged on),
   anyway, `dry_run: true` answers them without proposing. The name check
   is SKIPPED while the index is unavailable - a write is never blocked on
   it, and no index build is kicked off from the write path.
+- **Every warning carries a CODE, and it is measured against the WORKING
+  COPY** (round 3, E1, R19). The codes are `header`, `open_path`,
+  `rename_link`, `name_collision`, `foreign_rewrite`, `file_ref`, the
+  message reads `<code>: <what>`, and `allow_warnings` takes a bool OR a
+  list of codes - acknowledging one stale warning used to disable every
+  other, which is worse than the warning. The name check runs over
+  `name_owners_after`, the base index with this call's own result laid
+  over it: an alias one edit frees and a later one claims is no collision
+  (Left's round-3 case), while two pages claiming one name INSIDE the call
+  still are. The caller's OWN card the moved base already retired is not
+  an open proposal, so re-proposing over it needs no acknowledgement.
+- **`rename` carries its incoming links** (round 3, E2, R15). Every base
+  page whose markdown destination or `[[path]]` names the old path is
+  rewritten onto the new one IN THE SAME PATCH - the emitter takes the
+  whole after-tree, so a repaired page is one more entry in it, and
+  `paths` names them. A `[[Name]]` binds by title or alias and needs no
+  rewrite; a code span and a URL ending in `.md` are no claims about the
+  graph and are left alone. The repair is a `rename_link` warning (it is
+  five more pages in the vote than the caller named, and that is worth
+  acknowledging), and `repair_links: false` restores the old behaviour
+  WITHOUT the silence: base in-links then refuse the call, naming the
+  pages that would keep the old path.
 - **`propose` now refuses a raw `wiki_patch` that does not apply**
   (`wiki_semantic_gaps.md` §1.1) with `patch does not apply: <reason>`,
   checked over the touched paths exactly as the header warnings are. A
@@ -968,7 +1014,13 @@ an ambiguous basename and offers the real spelling for a wrong case; a
 stale raw patch is refused at propose and a good one still proposes),
 `molt_core::wiki_patch` (`apply_patch(build_patch(x)) == x` over every
 edit kind, the file order, the summary) and
-`front_matter::the_emitter_round_trips_every_shape_of_the_subset`. The MCP
+`front_matter::the_emitter_round_trips_every_shape_of_the_subset`, plus
+round 3's (an alias this call frees is no collision while one it creates
+inside the call still is; `allow_warnings` takes the codes it
+acknowledges; a rename repairs the base links naming the old path and
+`repair_links: false` refuses instead;
+`graph::a_rename_rewrites_only_the_links_that_name_the_path`;
+`proposals::the_graph_reads_answer_while_the_index_builds`). The MCP
 half: `wiki_edit` is Seat and a read-only key is refused it
 (`a_read_token_reads_but_cannot_propose`), `wiki_resolve` joins the Read
 set (`the_read_scope_is_exactly_this_set`).

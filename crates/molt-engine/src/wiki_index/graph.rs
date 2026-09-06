@@ -117,6 +117,37 @@ impl<'a> NameIndex<'a> {
     }
 }
 
+/// One `type` value with the header keys its pages carry (E3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TypeProps {
+    /// The `type` value.
+    pub(crate) kind: String,
+    /// How many pages carry it.
+    pub(crate) pages: u64,
+    /// Its keys with the page count each, most-carried first.
+    pub(crate) keys: Vec<(String, u64)>,
+}
+
+/// One predicate asserted between a type pair its own wiki rarely uses
+/// (E3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DirectionOutlier {
+    /// The predicate.
+    pub(crate) predicate: String,
+    /// The `type` of the pages asserting it.
+    pub(crate) subject_type: String,
+    /// The `type` of the pages it points at.
+    pub(crate) object_type: String,
+    /// How many edges run that way.
+    pub(crate) count: u64,
+    /// The pair the predicate usually runs between.
+    pub(crate) usual: (String, String),
+    /// How many edges run the usual way.
+    pub(crate) usual_count: u64,
+    /// The asserting pages, path-sorted.
+    pub(crate) from: Vec<String>,
+}
+
 /// One resolved edge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Edge {
@@ -420,7 +451,7 @@ impl WikiGraph {
     /// it and how many of them carry each header key. `key_drift` sees
     /// two SPELLINGS of one key; this sees a page of the same type
     /// carrying an entirely different key from its peers.
-    pub(crate) fn props_by_type(&self) -> Vec<(String, u64, Vec<(String, u64)>)> {
+    pub(crate) fn props_by_type(&self) -> Vec<TypeProps> {
         let mut per: BTreeMap<&str, (u64, BTreeMap<&str, u64>)> = BTreeMap::new();
         for (path, meta) in &self.docs {
             let Some(kind) = meta.kind.as_deref().map(str::trim).filter(|k| !k.is_empty()) else {
@@ -436,16 +467,20 @@ impl WikiGraph {
                 }
             }
         }
-        let mut out: Vec<(String, u64, Vec<(String, u64)>)> = per
+        let mut out: Vec<TypeProps> = per
             .into_iter()
             .map(|(kind, (pages, keys))| {
                 let mut keys: Vec<(String, u64)> =
                     keys.into_iter().map(|(k, n)| (k.to_string(), n)).collect();
                 keys.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-                (kind.to_string(), pages, keys)
+                TypeProps {
+                    kind: kind.to_string(),
+                    pages,
+                    keys,
+                }
             })
             .collect();
-        out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        out.sort_by(|a, b| b.pages.cmp(&a.pages).then_with(|| a.kind.cmp(&b.kind)));
         out
     }
 
@@ -456,13 +491,8 @@ impl WikiGraph {
     ///
     /// HEURISTIC, and deliberately a blunt one: the wiki's own
     /// distribution is the only norm there is, so a pair is flagged only
-    /// when a dominant pair dwarfs it. Returns
-    /// (predicate, subject type, object type, count, usual pair, usual
-    /// count, the asserting pages).
-    #[allow(clippy::type_complexity)]
-    pub(crate) fn direction_outliers(
-        &self,
-    ) -> Vec<(String, String, String, u64, (String, String), u64, Vec<String>)> {
+    /// when a dominant pair dwarfs it.
+    pub(crate) fn direction_outliers(&self) -> Vec<DirectionOutlier> {
         /// Below this many typed edges a predicate has no distribution.
         const MIN_EDGES: u64 = 5;
         /// The dominant pair must outnumber the flagged one this far.
@@ -502,18 +532,22 @@ impl WikiGraph {
                 if pair == usual || count.saturating_mul(FACTOR) > usual_count {
                     continue;
                 }
-                out.push((
-                    pred.to_string(),
-                    pair.0.to_string(),
-                    pair.1.to_string(),
+                out.push(DirectionOutlier {
+                    predicate: pred.to_string(),
+                    subject_type: pair.0.to_string(),
+                    object_type: pair.1.to_string(),
                     count,
-                    (usual.0.to_string(), usual.1.to_string()),
+                    usual: (usual.0.to_string(), usual.1.to_string()),
                     usual_count,
-                    pages.iter().map(|p| (*p).to_string()).collect(),
-                ));
+                    from: pages.iter().map(|p| (*p).to_string()).collect(),
+                });
             }
         }
-        out.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| a.0.cmp(&b.0)));
+        out.sort_by(|a, b| {
+            b.count
+                .cmp(&a.count)
+                .then_with(|| a.predicate.cmp(&b.predicate))
+        });
         out
     }
 
@@ -776,10 +810,13 @@ pub fn body_links(markdown: &str) -> Vec<BodyLink> {
     out
 }
 
-/// ONE parse: every markdown link destination with the span of its whole
-/// `[text](dest)`, and the code spans a `[[…]]` inside must be masked by.
-fn scan(markdown: &str) -> (Vec<(Range<usize>, String)>, Vec<(usize, usize)>) {
-    let mut dests: Vec<(Range<usize>, String)> = Vec::new();
+/// A markdown link's destination with the span of its whole `[text](dest)`.
+type Dest = (Range<usize>, String);
+
+/// ONE parse: every markdown link destination with its span, and the code
+/// spans a `[[…]]` inside must be masked by.
+fn scan(markdown: &str) -> (Vec<Dest>, Vec<(usize, usize)>) {
+    let mut dests: Vec<Dest> = Vec::new();
     let mut code: Vec<(usize, usize)> = Vec::new();
     let mut depth = 0u32;
     for (event, range) in Parser::new(markdown).into_offset_iter() {
@@ -1333,5 +1370,76 @@ mod tests {
             ],
             "a key nobody else spells differently is not drift"
         );
+    }
+
+    /// **E2**: a rename carries its in-links. Only what NAMES THE PATH
+    /// moves - a `[[Name]]` binds by title or alias and survives the move
+    /// untouched, a URL that happens to end in `.md` is a source, and an
+    /// example in a code span is not a claim about the graph.
+    #[test]
+    fn a_rename_rewrites_only_the_links_that_name_the_path() {
+        let doc = "See [Lexicon](standards/lexicon.md), [[standards/lexicon.md|the one]],\n\
+                   [[Lexicon]] and <https://x.test/standards/lexicon.md>.\n\
+                   A `[x](standards/lexicon.md)` span stays.\n";
+        let out = rewrite_link_target(doc, "standards/lexicon.md", "standards/atproto-lexicon.md")
+            .expect("three of them name the path");
+        assert!(out.contains("[Lexicon](standards/atproto-lexicon.md)"));
+        assert!(out.contains("[[standards/atproto-lexicon.md|the one]]"));
+        assert!(out.contains("[[Lexicon]]"), "a name link is not a path link");
+        assert!(
+            out.contains("`[x](standards/lexicon.md)`"),
+            "a code span is no claim: {out}"
+        );
+        assert_eq!(
+            rewrite_link_target("nothing here\n", "standards/lexicon.md", "x.md"),
+            None
+        );
+    }
+
+    /// **E3**: the per-type key histogram, and a predicate whose direction
+    /// the wiki itself contradicts.
+    #[test]
+    fn the_type_histogram_and_the_direction_check_read_the_distribution() {
+        let mut docs: Vec<(String, String)> = vec![(
+            "menschen/anna.md".to_string(),
+            "---\ntype: person\nnotable_year: 1970\n---\n# Anna\n".to_string(),
+        )];
+        for n in 0..8 {
+            docs.push((
+                format!("werke/w{n}.md"),
+                "---\ntype: work\n---\nby [[authored_by::menschen/anna.md]]\n".to_string(),
+            ));
+        }
+        docs.push((
+            "menschen/odd.md".to_string(),
+            "---\ntype: person\nyear: 1970\n---\nwrote [[authored_by::werke/w0.md]]\n".to_string(),
+        ));
+        let pairs: Vec<(&str, &str)> = docs
+            .iter()
+            .map(|(p, c)| (p.as_str(), c.as_str()))
+            .collect();
+        let g = WikiGraph::build(&tree(&pairs));
+
+        let by_type = g.props_by_type();
+        let person = by_type
+            .iter()
+            .find(|t| t.kind == "person")
+            .expect("the person group");
+        assert_eq!(person.pages, 2);
+        assert!(person.keys.contains(&("notable_year".to_string(), 1)), "{person:?}");
+        assert!(
+            person.keys.contains(&("year".to_string(), 1)),
+            "the wrong key shows: {person:?}"
+        );
+
+        let odd = g.direction_outliers();
+        assert_eq!(odd.len(), 1, "{odd:?}");
+        assert_eq!(odd[0].predicate, "authored_by");
+        assert_eq!(
+            (odd[0].subject_type.as_str(), odd[0].object_type.as_str()),
+            ("person", "work")
+        );
+        assert_eq!(odd[0].count, 1, "one edge runs the other way");
+        assert_eq!(odd[0].usual_count, 8, "against eight that run the usual way");
     }
 }

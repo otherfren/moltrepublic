@@ -348,3 +348,95 @@ async fn the_maintenance_reads_page_and_report_their_totals() {
         other => panic!("unexpected: {other:?}"),
     }
 }
+
+/// **E3 (R6/R25)**: `key_drift` sees two SPELLINGS of one key. It cannot
+/// see a WRONG key - seven `person` pages carrying `year` while the rest
+/// carry `notable_year` read as clean. `props_by_type` is the histogram
+/// that shows it in one call.
+#[tokio::test]
+async fn wiki_health_counts_the_keys_each_type_carries() {
+    let w = spawn_solo();
+    for n in 0..3 {
+        apply_patch(
+            &w,
+            &add(
+                &format!("menschen/a{n}.md"),
+                "---\ntype: person\nnotable_year: 1970\n---\n# A\n",
+            ),
+        )
+        .await;
+    }
+    apply_patch(
+        &w,
+        &add("menschen/odd.md", "---\ntype: person\nyear: 1970\n---\n# Odd\n"),
+    )
+    .await;
+    apply_patch(
+        &w,
+        &add("orgs/x.md", "---\ntype: org\nfounded: 1999\n---\n# X\n"),
+    )
+    .await;
+
+    let Reply::WikiHealth { props_by_type, props_by_type_total, .. } = health(&w, 0).await else {
+        panic!("not a health reply");
+    };
+    assert_eq!(props_by_type_total, 2, "person and org");
+    let person = props_by_type
+        .iter()
+        .find(|t| t.kind == "person")
+        .expect("the person group");
+    assert_eq!(person.pages, 4);
+    let keys: Vec<(&str, u64)> = person.keys.iter().map(|k| (k.key.as_str(), k.pages)).collect();
+    assert!(keys.contains(&("notable_year", 3)), "{keys:?}");
+    assert!(keys.contains(&("year", 1)), "the odd one out is visible: {keys:?}");
+    assert!(keys.contains(&("type", 4)), "{keys:?}");
+}
+
+/// **E3 (R25)**: a relation asserted in the wrong DIRECTION reads
+/// correctly in prose and is invisible to every other check. The wiki's
+/// own distribution is the only norm there is, so the group is a
+/// HEURISTIC: `authored_by` runs work -> person eight times and
+/// person -> work twice, and the two are what a maintainer looks at.
+#[tokio::test]
+async fn wiki_health_flags_a_relation_asserted_backwards() {
+    let w = spawn_solo();
+    apply_patch(&w, &add("menschen/anna.md", "---\ntype: person\n---\n# Anna\n")).await;
+    for n in 0..8 {
+        apply_patch(
+            &w,
+            &add(
+                &format!("werke/w{n}.md"),
+                "---\ntype: work\n---\nWritten by [[authored_by::menschen/anna.md]].\n",
+            ),
+        )
+        .await;
+    }
+    // …and two person pages that assert it the other way round
+    for n in 0..2 {
+        apply_patch(
+            &w,
+            &add(
+                &format!("menschen/b{n}.md"),
+                "---\ntype: person\n---\nWrote [[authored_by::werke/w0.md]].\n",
+            ),
+        )
+        .await;
+    }
+
+    let Reply::WikiHealth { direction_outliers, direction_outliers_total, .. } = health(&w, 0).await
+    else {
+        panic!("not a health reply");
+    };
+    assert_eq!(direction_outliers_total, 1, "{direction_outliers:?}");
+    let odd = &direction_outliers[0];
+    assert_eq!(odd.predicate, "authored_by");
+    assert_eq!(odd.subject_type, "person");
+    assert_eq!(odd.object_type, "work");
+    assert_eq!(odd.count, 2);
+    assert_eq!(odd.usual, "work -> person");
+    assert_eq!(odd.usual_count, 8);
+    assert_eq!(
+        odd.from,
+        vec!["menschen/b0.md".to_string(), "menschen/b1.md".to_string()]
+    );
+}
