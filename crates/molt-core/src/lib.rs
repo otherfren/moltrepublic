@@ -6447,8 +6447,18 @@ pub struct WikiCandidate {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum WikiEdit {
-    /// Write a whole document. Creates it when the path is free - which is
-    /// how an agent adds a page; there is no separate create op.
+    /// Write a NEW document. An occupied path refuses - in the base or in
+    /// this call's own working copy - so a create can never turn into a
+    /// rewrite of a page that appeared meanwhile.
+    Create {
+        /// The document's path.
+        path: String,
+        /// Its full markdown, front matter included.
+        content: String,
+    },
+    /// Write a whole document: it CREATES the page when the path is free
+    /// and OVERWRITES it when it is not. Use `create` when only the first
+    /// is meant.
     Content {
         /// The document's path.
         path: String,

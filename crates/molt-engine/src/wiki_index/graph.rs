@@ -260,6 +260,27 @@ impl WikiGraph {
         self.props.insert(path.to_string(), pairs);
     }
 
+    /// Which documents each name ALREADY denotes - by path, basename,
+    /// stem, alias or header title. The case-fold "did you mean" route is
+    /// left out: a collision is what the resolver would really confuse.
+    pub(crate) fn name_owners(&self, names: &BTreeSet<String>) -> BTreeMap<String, Vec<String>> {
+        let index = NameIndex::build(&self.docs);
+        names
+            .iter()
+            .map(|name| {
+                let mut owners: Vec<String> = index
+                    .candidates(name)
+                    .into_iter()
+                    .filter(|(_, via)| *via != "case")
+                    .map(|(path, _)| path)
+                    .collect();
+                owners.sort();
+                owners.dedup();
+                (name.clone(), owners)
+            })
+            .collect()
+    }
+
     /// What a `[[name]]` binds to, and everything else it could mean -
     /// THE lookup, so `wiki_resolve` cannot drift from what [`Self::resolve`]
     /// actually binds.
@@ -490,7 +511,7 @@ pub(crate) fn scalar_strings(value: &Value) -> Vec<String> {
 }
 
 /// A header value's strings, one or many.
-fn string_list(v: Option<&Value>) -> Vec<String> {
+pub(crate) fn string_list(v: Option<&Value>) -> Vec<String> {
     match v {
         Some(Value::String(s)) => vec![s.clone()],
         Some(Value::Array(items)) => items

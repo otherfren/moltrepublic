@@ -2458,23 +2458,221 @@ impl State {
             .ok_or_else(|| MoltError::BadPayload("nothing to change".to_string()))?;
         let summary = molt_core::wiki_patch::count_changes(&base, &after, &renames).summary();
         let payload = serde_json::json!({ "op": "wiki_patch", "summary": summary, "value": patch });
-        let warnings = self.wiki_patch_check(Surface::Memory, &payload)?;
+        // ONE list, from every source the engine can see before the vote is
+        // minted (`mcp_agent_friction_fixes_round_2.md` B2-B4): the header
+        // check, the open-proposal queue, the name index and the applied
+        // projection's authorship.
+        let mut warnings = self.wiki_patch_check(Surface::Memory, &payload)?;
+        warnings.extend(self.open_proposal_warnings(&touched, &edits, supersedes));
+        // the name check needs the index and is SKIPPED without one - a
+        // write is never blocked on it, and no build is kicked off here:
+        // a graph installed over a tree an append has since moved is the
+        // stale-index race `refresh_wiki_graph` drops the dirty set into.
+        warnings.extend(self.name_collision_warnings(&base, &after, &renames));
+        warnings.extend(self.foreign_rewrite_warnings(&edits, &base));
         if dry_run {
             return Ok(Reply::WikiPreview { patch, summary, warnings });
         }
-        // B5: a header the parser reads differently than written is a
-        // refusal by default - the warning used to arrive once the patch
-        // was already in the vote, and the only way out was withdraw + refile
+        // B5: a warning is a refusal by default - it used to arrive once the
+        // patch was already in the vote, and the only way out was withdraw
+        // + refile
         if !warnings.is_empty() && !allow_warnings {
             return Err(MoltError::BadPayload(format!(
-                "header warnings (allow_warnings: true proposes anyway): {}",
+                "warnings (allow_warnings: true proposes anyway): {}",
                 warnings.join("; ")
             )));
         }
         if let Some(old) = supersedes {
             self.cmd_withdraw(old)?;
         }
-        self.cmd_propose(Surface::Memory, payload)
+        // the propose path recomputes the header half only; the sources
+        // this call alone knows ride the reply from here
+        match self.cmd_propose(Surface::Memory, payload)? {
+            Reply::Proposed { id, channel, .. } => Ok(Reply::Proposed { id, warnings, channel }),
+            other => Ok(other),
+        }
+    }
+
+    /// Every OPEN wiki proposal, id-ordered: its proposer and its patch.
+    /// `except` drops the one this call supersedes - it is about to be
+    /// withdrawn, so its paths are not contended.
+    fn open_wiki_proposals(&self, except: Option<ProposalId>) -> Vec<(u64, String, &str)> {
+        let mut open: Vec<(u64, String, &str)> = self
+            .proposals
+            .iter()
+            .filter(|(id, p)| {
+                p.surface == Surface::Memory
+                    && p.state == ProposalState::Proposed
+                    && except != Some(ProposalId(**id))
+                    && p.payload.get("op").and_then(Value::as_str) == Some("wiki_patch")
+            })
+            .filter_map(|(id, p)| {
+                p.payload
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .map(|patch| (*id, p.by.clone(), patch))
+            })
+            .collect();
+        open.sort_by_key(|(id, _, _)| *id);
+        open
+    }
+
+    /// B2 (G10/G19): the queue this call cannot see. A path an open
+    /// proposal already touches collides once that card seals - the loser
+    /// used to learn it as a phantom rejection - and a rename strands
+    /// every link an open card still writes to the old path.
+    fn open_proposal_warnings(
+        &self,
+        touched: &std::collections::BTreeSet<String>,
+        edits: &[molt_core::WikiEdit],
+        except: Option<ProposalId>,
+    ) -> Vec<String> {
+        let open = self.open_wiki_proposals(except);
+        if open.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for (id, by, patch) in &open {
+            let paths = molt_core::wiki_fold::touched_paths(
+                &molt_core::wiki_fold::parse_patch(patch),
+            );
+            for path in touched.intersection(&paths) {
+                out.push(if by.is_empty() {
+                    format!("{path} is in open proposal {id}")
+                } else {
+                    format!("{path} is in open proposal {id} by {by}")
+                });
+            }
+        }
+        for edit in edits {
+            let molt_core::WikiEdit::Rename { from, .. } = edit else {
+                continue;
+            };
+            let stem = from.strip_suffix(".md").unwrap_or(from);
+            let needles = [format!("[[{stem}"), from.clone()];
+            for (id, _, patch) in &open {
+                if patch_writes_any(patch, &needles) {
+                    out.push(format!("rename of {from} leaves a link in open proposal {id}"));
+                }
+            }
+        }
+        out
+    }
+
+    /// B3 (G7): a title or alias this call newly claims that already names
+    /// ANOTHER page - both pages lose the name, and `wiki_resolve` answers
+    /// neither. Skipped while the name index is unavailable: a missing
+    /// index is no verdict, and a fabricated one would be worse than none.
+    fn name_collision_warnings(
+        &self,
+        base: &std::collections::BTreeMap<String, String>,
+        after: &std::collections::BTreeMap<String, String>,
+        renames: &std::collections::BTreeMap<String, String>,
+    ) -> Vec<String> {
+        let Some(graph) = self.wiki_graph.as_ref() else {
+            return Vec::new();
+        };
+        // a renamed page keeps its names: they are measured against the
+        // path it came FROM, and that path is not a foreign owner
+        let mut claims: Vec<(&String, String, &'static str, String)> = Vec::new();
+        for (path, content) in after {
+            let origin = renames.get(path).unwrap_or(path).clone();
+            let had = base
+                .get(&origin)
+                .map(String::as_str)
+                .map(declared_wiki_names)
+                .unwrap_or_default();
+            for (kind, name) in declared_wiki_names(content) {
+                if had.iter().any(|(_, n)| *n == name) {
+                    continue;
+                }
+                claims.push((path, origin.clone(), kind, name));
+            }
+        }
+        if claims.is_empty() {
+            return Vec::new();
+        }
+        let names: std::collections::BTreeSet<String> =
+            claims.iter().map(|(_, _, _, n)| n.clone()).collect();
+        let owners = graph.name_owners(&names);
+        let mut out = Vec::new();
+        for (path, origin, kind, name) in claims {
+            for owner in owners.get(&name).into_iter().flatten() {
+                if owner == path || owner == &origin {
+                    continue;
+                }
+                out.push(format!("{kind} \"{name}\" already names {owner} - both pages lose it"));
+            }
+        }
+        out
+    }
+
+    /// B4 (G13): `content` over an EXISTING page another seat last wrote is
+    /// a rewrite, and the tool used to be unable to tell one from a create.
+    fn foreign_rewrite_warnings(
+        &self,
+        edits: &[molt_core::WikiEdit],
+        base: &std::collections::BTreeMap<String, String>,
+    ) -> Vec<String> {
+        let rewritten: std::collections::BTreeSet<&str> = edits
+            .iter()
+            .filter_map(|e| match e {
+                molt_core::WikiEdit::Content { path, .. } if base.contains_key(path) => {
+                    Some(path.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        if rewritten.is_empty() {
+            return Vec::new();
+        }
+        let last = self.wiki_last_writers(&rewritten);
+        let me = self.member();
+        rewritten
+            .iter()
+            .filter_map(|path| {
+                let (id, by) = last.get(*path)?;
+                (!by.is_empty() && *by != me)
+                    .then(|| format!("{path}: rewrites a page last written by {by} (#{id})"))
+            })
+            .collect()
+    }
+
+    /// For each wanted path the LAST applied proposal that touched it,
+    /// with its proposer. The applied Memory log IS the fold order, so the
+    /// walk runs backwards and stops once every path is answered; a card
+    /// materialized from a block alone stays unattributed (empty), and an
+    /// unattributed page is nobody's.
+    fn wiki_last_writers(
+        &self,
+        want: &std::collections::BTreeSet<&str>,
+    ) -> std::collections::BTreeMap<String, (u64, String)> {
+        let entries: Vec<&(Option<u64>, Value)> = self
+            .applied
+            .get(&Surface::Memory)
+            .into_iter()
+            .flatten()
+            .chain(self.chain.applied.get(&Surface::Memory).into_iter().flatten())
+            .collect();
+        let mut out: std::collections::BTreeMap<String, (u64, String)> =
+            std::collections::BTreeMap::new();
+        for (id, payload) in entries.iter().rev() {
+            if out.len() == want.len() {
+                break;
+            }
+            let Some(id) = id else { continue };
+            let Some(paths) = Self::wiki_payload_paths(payload) else {
+                continue;
+            };
+            for path in paths {
+                if !want.contains(path.as_str()) || out.contains_key(&path) {
+                    continue;
+                }
+                let by = self.proposals.get(id).map(|p| p.by.clone()).unwrap_or_default();
+                out.insert(path, (*id, by));
+            }
+        }
+        out
     }
 
     /// One edit onto the working copy. Every refusal names the fault and,
@@ -2490,9 +2688,20 @@ impl State {
         let bad = |m: String| MoltError::BadPayload(m);
         let missing = |p: &str| MoltError::BadPayload(format!("no such document: {p}"));
         match edit {
+            WikiEdit::Create { path, content } => {
+                if !molt_core::wiki_fold::valid_path(path) {
+                    return Err(bad(format!("invalid path: {path}")));
+                }
+                // B1: the base AND the working copy - a create after this
+                // call's own delete is the rewrite the op exists to refuse
+                if base.contains_key(path) || after.contains_key(path) {
+                    return Err(bad(format!("already exists: {path}")));
+                }
+                after.insert(path.clone(), content.clone());
+            }
             WikiEdit::Content { path, content } => {
-                // the create op too: a whole document at a free path IS the
-                // new page, so an agent needs no second verb for it
+                // creates OR overwrites; `create` is the op that refuses
+                // the second half
                 if !molt_core::wiki_fold::valid_path(path) {
                     return Err(bad(format!("invalid path: {path}")));
                 }
@@ -3491,13 +3700,46 @@ impl State {
 fn edit_paths(edit: &molt_core::WikiEdit) -> Vec<String> {
     use molt_core::WikiEdit;
     match edit {
-        WikiEdit::Content { path, .. }
+        WikiEdit::Create { path, .. }
+        | WikiEdit::Content { path, .. }
         | WikiEdit::Replace { path, .. }
         | WikiEdit::SetProps { path, .. }
         | WikiEdit::AddRelation { path, .. }
         | WikiEdit::Delete { path } => vec![path.clone()],
         WikiEdit::Rename { from, to } => vec![from.clone(), to.clone()],
     }
+}
+
+/// Does a patch WRITE any of these needles? Added and kept body lines
+/// only, so the `+++ b/path` and `diff --git` headers of a patch that
+/// merely touches the path are not read as a link to it.
+fn patch_writes_any(patch: &str, needles: &[String]) -> bool {
+    patch
+        .lines()
+        .filter(|l| !l.starts_with("+++"))
+        .filter_map(|l| l.strip_prefix('+').or_else(|| l.strip_prefix(' ')))
+        .any(|body| needles.iter().any(|n| body.contains(n.as_str())))
+}
+
+/// The names a document CLAIMS besides its path: the header `title` and
+/// its aliases - the two routes the name index binds by (B3).
+fn declared_wiki_names(doc: &str) -> Vec<(&'static str, String)> {
+    let Some(props) = wiki_index::front_matter::properties(doc).0 else {
+        return Vec::new();
+    };
+    let mut out: Vec<(&'static str, String)> = props
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(|t| vec![("title", t.to_string())])
+        .unwrap_or_default();
+    out.extend(
+        wiki_index::graph::string_list(props.get("aliases"))
+            .into_iter()
+            .map(|a| ("alias", a)),
+    );
+    out
 }
 
 fn wiki_touch_of(f: &molt_core::wiki_fold::PatchFile) -> crate::WikiTouch {

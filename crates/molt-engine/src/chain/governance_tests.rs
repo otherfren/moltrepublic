@@ -2211,3 +2211,44 @@ fn a_foreign_block_is_not_paced_and_settles_the_held_seal() {
     assert_eq!(walter.chain.blocks.len(), 2, "nothing sealed twice");
     assert!(walter.chain.seal_held.is_empty(), "the hold is settled, not leaked");
 }
+
+/// **B4 (`mcp_agent_friction_2026-09-06.md` G13): a `content` edit over a
+/// page ANOTHER seat last wrote is a rewrite, and the tool says so before
+/// the vote is minted.** The applied projection carries the proposal id
+/// per path, the card its proposer - the two facts the reviewer had to
+/// reconstruct from the diff.
+#[test]
+fn a_rewrite_of_a_foreign_page_warns() {
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    b.commit_wiki(7, "organisationen/xsf.md", "# XSF", &["petra", "walter"]);
+    let ChainChange::Applied { payload, .. } = b.blocks[1].change.clone() else {
+        panic!("block 1 is the wiki commit");
+    };
+    let mut walter = chain_signer("walter", &b, vec![b.blocks[0].clone()]);
+    // petra's card as gossip: a block alone materializes an UNATTRIBUTED
+    // record, and an unattributed page is nobody's to warn about
+    assert!(walter.receive_proposed(7, Surface::Memory, payload, "petra"));
+    walter.adopt_chain(b.blocks.clone());
+
+    let rewrite = vec![molt_core::WikiEdit::Content {
+        path: "organisationen/xsf.md".to_string(),
+        content: "# XSF, rewritten\n".to_string(),
+    }];
+    let err = walter
+        .cmd_wiki_edit(rewrite.clone(), false, false, None)
+        .expect_err("a foreign rewrite warns");
+    assert!(
+        err.to_string().contains("rewrites a page last written by petra (#7)"),
+        "names the seat and the card: {err}"
+    );
+    walter
+        .cmd_wiki_edit(rewrite, false, true, None)
+        .expect("allow_warnings proposes anyway");
+
+    // a page that does not exist yet is a create, and creates never warn
+    let fresh = vec![molt_core::WikiEdit::Content {
+        path: "notizen/walter.md".to_string(),
+        content: "# Walter\n".to_string(),
+    }];
+    walter.cmd_wiki_edit(fresh, false, false, None).expect("a free path is a create");
+}
