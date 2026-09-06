@@ -62,5 +62,5 @@ The co-equality test and the read-scope pin list remain the guards: every
 
 ## Execution
 
-`docs/reviews/mcp_agent_friction_fixes_round_3.md` Part F; the audit
+`docs_archive/reviews/mcp_agent_friction_fixes_round_3.md` Part F; the audit
 section of `mcp-security.md` is rewritten in that change.

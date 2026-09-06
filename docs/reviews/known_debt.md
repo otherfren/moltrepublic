@@ -93,6 +93,20 @@ still OPEN there, by id (each carries its fix direction in the review):
 - MCP privileges (section 9): P8 ritual abandon on context switch
   (product) · P10 send-side rate limits.
 
+## The compiled window is invisible to `ElementHandle` (2026-09-06)
+
+`i-slint-backend-testing`'s element queries answer NOTHING against the
+generated window: ids, type names, accessible labels and the descendant
+walk all read as empty (measured with a diagnostic test in the normal
+profile, round-3 fix G1), because the compiled flavour emits element
+info only under `SLINT_EMIT_DEBUG_INFO`. So the 73 GUI tests that look
+an element up are `#[cfg(feature = "live-preview")]` and prove the
+INTERPRETED window, never the shipped one. Fix direction:
+`slint_build::CompilerConfiguration::with_debug_info(true)` in
+`crates/molt-ui-window/build.rs` for the dev profile only, then drop the
+gates; unmeasured cost on a window build that has no RSS headroom left
+(CLAUDE.md, build section) - measure once, alone, before adopting.
+
 ## `scripts/gui_walk.py` has not been re-run since ADR-0007 (2026-09-06)
 
 Both blockers are gone (the phrase is served again, `relay_confirm`

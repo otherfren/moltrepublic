@@ -492,7 +492,12 @@ both verified red-without/green-with).
   without pixels: the Slint compiler (a clean `cargo build -p molt-ui-window
   -p molt-ui`), the headless GUI tests in `crates/molt-ui/src/tests/gui/`
   (the real `AppWindow` against a real engine on `i-slint-backend-testing`
-  — element geometry and real mouse events, part of the ordinary suite),
+  — element geometry and real mouse events; every test that looks an
+  element up — id, type name, accessible label, a click on it — is
+  `#[cfg(feature = "live-preview")]`, because the compiled window carries
+  no Slint element info (`SLINT_EMIT_DEBUG_INFO` is not set; measured
+  2026-09-06: the element tree reads as EMPTY there), so the normal
+  profile runs only the property/model tests),
   and `scripts/gui_walk.py`, which brings two real `moltd` nodes up on the
   testing backend (`ui-testing` feature) and reads the window back over MCP
   (`docs_archive/ui/gui_over_mcp.md`).

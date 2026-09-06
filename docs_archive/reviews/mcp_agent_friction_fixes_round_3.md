@@ -1,6 +1,6 @@
 # Fix plan, round 3: the cut that partitions, and the machine the agent operates
 
-Status: **OPEN WORK - ratified 2026-09-06 evening; B-F and G2/G3 built the same night, A and G1 in progress.** The user
+Status: **EXECUTED 2026-09-06 - every part built the same night; the leftovers are in "What stays open" at the end.** The user
 approved the proposals of the round-3 discussion as written
 (`docs_archive/reviews/mcp_agent_friction_2026-09-06_r3.md` §6, items 1-7)
 and decided item 8 by ADR-0007
@@ -14,7 +14,7 @@ Evidence for Part A: `docs_archive/reviews/agent_wiki_round_3/diag-right/`
 (Right's `wiki_changes`, `read_chain`, `list_proposals` and its node log,
 dumped BEFORE the restart) and the three friction logs beside it.
 
-## Part A - the cut (D9, D3, R1, R20, R3, R11, R24)
+## Part A - the cut (D9, D3, R1, R20, R3, R11, R24) - BUILT 2026-09-06 (0cbd6bd5; stale-signer threshold 82a54968)
 
 A1 **Root cause of the fold divergence, pinned red first.** Facts: at
 equal height 94 Right's fold counted 26 applied patches, Left's and
@@ -232,12 +232,18 @@ INTERNAL and why; `scripts/gui_walk.py` runs end to end again (its relay
 step may use `relay_confirm` again or keep the config form); phases 3-5
 re-verified; the known-debt entry closes.
 
-## Part G - build and docs (D2, D6, D7, D8) - G2 and G3 BUILT 2026-09-06 (60d4bf13, 2e50f046); G1 open
+## Part G - build and docs (D2, D6, D7, D8) - BUILT 2026-09-06 (G2/G3 60d4bf13, 2e50f046; G1 with the archive commit)
 
 G1 The two GUI tests red in the normal profile: run them at `df798858`
 once (one window build); then fix either the element lookup in the
 testing backend usage or the tests, so the ordinary suite is true in
 both flavours; the normal-profile GUI shard joins the exhaustive run.
+BUILT 2026-09-06: not a lookup bug but the suite's own convention - the
+compiled window carries no Slint element info, so EVERY `ElementHandle`
+test is live-preview-only (73 of them; a diagnostic in the normal
+profile read 0 descendants); these two had lost their gate (b37a3dbe
+slid it onto the neighbouring test). Gated, the rule is in CLAUDE.md,
+the way to test the generated window is in `known_debt.md`.
 
 G2 CLAUDE.md: `cargo build -p molt-app --features ui-testing` is a second
 window build; `cargo clippy` on molt-ui in the normal profile check-builds
@@ -273,3 +279,22 @@ A → F → B/C → D → E → G:
 Rules as in the previous rounds (`AGENT_RULES.md`): own worktree, own
 branch, no window build, live-preview flavour only for molt-ui, TDD,
 clippy 0, compact user-facing text, report with numbers.
+
+## What stays open (2026-09-06, after the archive)
+
+- `wiki_edit`: a re-proposal after a conflict still needs `allow_warnings`
+  for the caller's OWN dead proposal (R19's second half, Part E).
+- A card that reaches a node ONLY through a catch-up re-serve is attributed
+  to the serving peer, not to its author (Part B).
+- A bare `touch` on a shared file reads `changed` (Part D).
+- `set_mirror_dir` stores its path raw; every other path tool resolves
+  through `resolve_host_path` (Part F).
+- `stale_signers` on a holder without history below its anchor (a fresh
+  recovery, a pruned cut) reads a seat's last height as 0 until that seat
+  signs again - a false "silent" for the first two blocks (Part A).
+- `rev_at_cut` rides in the folded base entry and changes the fold
+  commitment: a mixed fleet cannot co-sign a cut until every seat runs a
+  build that folds the same way (Part A; a cut needs n-of-n, so the older
+  seat holds it back rather than forking).
+- The compiled window is invisible to the testing backend's element
+  queries (`known_debt.md`, "The compiled window is invisible").

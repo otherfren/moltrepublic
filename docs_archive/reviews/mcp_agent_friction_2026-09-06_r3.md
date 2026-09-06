@@ -316,4 +316,4 @@ Discussed with the user the same evening: 1-7 approved as proposed (6 with
 "a reference to an unknown OR temporary file is refused"); 8 answered by a
 concept change - ADR-0007, the agent operates the machine, founding over
 MCP comes back. The execution plan is
-`docs/reviews/mcp_agent_friction_fixes_round_3.md`.
+`docs_archive/reviews/mcp_agent_friction_fixes_round_3.md`.

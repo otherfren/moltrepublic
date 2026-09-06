@@ -1228,6 +1228,7 @@ fn the_link_modal_switches_to_a_qualified_header_write() {
 /// **K6 §4.9.6 in the window**: while the folded base is being fetched the
 /// pane must not read as an empty knowledge base. "Nothing here yet" and
 /// "not here YET" are different claims, and the second one is the true one.
+#[cfg(feature = "live-preview")]
 #[test]
 fn a_pending_base_replaces_the_empty_state() {
     i_slint_backend_testing::init_no_event_loop();
@@ -1259,14 +1260,11 @@ fn a_pending_base_replaces_the_empty_state() {
     assert!(!seen(&empty), "…and the empty claim is gone");
 }
 
-/// Polish: both authoring modals have to FIT - a dialog whose buttons sit
-/// below the window edge cannot be confirmed at all, and the app font is
-/// a setting (9..28px).
-#[cfg(feature = "live-preview")]
 /// Reveal used to mark a row the member could not see: nothing scrolled
 /// the navigator. Now the marked row lands inside the pane, and the button
 /// stays enabled while a document is active (the row can be marked AND
 /// out of view).
+#[cfg(feature = "live-preview")]
 #[test]
 fn reveal_scrolls_the_navigator_to_the_marked_row() {
     i_slint_backend_testing::init_no_event_loop();
@@ -1603,6 +1601,10 @@ fn a_double_click_on_a_navigator_row_still_opens_the_document() {
     assert_eq!(g.get_doc_path().as_str(), "alpha.md");
 }
 
+/// Polish: both authoring modals have to FIT - a dialog whose buttons sit
+/// below the window edge cannot be confirmed at all, and the app font is
+/// a setting (9..28px).
+#[cfg(feature = "live-preview")]
 #[test]
 fn the_authoring_modals_fit_the_window_at_every_font_size() {
     i_slint_backend_testing::init_no_event_loop();
@@ -2978,3 +2980,4 @@ fn wiki_pane_paint_cost_offscreen() {
         frame("after keystroke");
     }
 }
+
