@@ -921,6 +921,8 @@ impl State {
                     approvals: v.approvals,
                     threshold: v.threshold,
                     channel: molt_core::ChannelRef::Patch { id },
+                    held_for_secs: self.seal_hold_secs(id.0),
+                    head: self.chain.head.as_ref().map_or(0, |h| h.height),
                 }
             }
             None => Reply::Ack,
@@ -1614,6 +1616,7 @@ impl State {
             mine: !p.by.is_empty() && p.by == me,
             superseded: p.superseded,
             withdrawn: p.withdrawn,
+            sealing: self.chain.seal_held.contains(&id),
         }
     }
 
@@ -2715,6 +2718,15 @@ impl State {
                 match doc.matches(old.as_str()).count() {
                     0 => return Err(bad(format!("old not found in {path}"))),
                     1 => {}
+                    // G11: a one-line `old` names WHERE it hit - the
+                    // section-anchor idiom (`## Quellen` also sits inside
+                    // `### Quellen (Sitz B)`) leaves no other way to see it
+                    n if !old.contains('\n') => {
+                        return Err(bad(format!(
+                            "old occurs {n} times in {path} ({}) - widen it",
+                            match_lines(doc, old)
+                        )))
+                    }
                     n => return Err(bad(format!("old occurs {n} times in {path} - widen it"))),
                 }
                 let next = doc.replacen(old.as_str(), new, 1);
@@ -3740,6 +3752,29 @@ fn declared_wiki_names(doc: &str) -> Vec<(&'static str, String)> {
             .map(|a| ("alias", a)),
     );
     out
+}
+
+/// Where a repeated `old` hit, as 1-based line numbers (G11). Non-empty
+/// needle, non-overlapping like `str::matches`; ten are enough to widen it.
+fn match_lines(doc: &str, needle: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut from = 0usize;
+    let mut extra = 0usize;
+    while let Some(at) = doc[from..].find(needle) {
+        let abs = from + at;
+        if lines.len() < 10 {
+            lines.push((doc[..abs].matches('\n').count() + 1).to_string());
+        } else {
+            extra += 1;
+        }
+        from = abs + needle.len();
+    }
+    let shown = lines.join(", ");
+    if extra > 0 {
+        format!("lines {shown} +{extra} more")
+    } else {
+        format!("lines {shown}")
+    }
 }
 
 fn wiki_touch_of(f: &molt_core::wiki_fold::PatchFile) -> crate::WikiTouch {

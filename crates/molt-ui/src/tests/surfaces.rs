@@ -31,6 +31,7 @@ fn a_feature_diff_never_shows_a_removal_and_renders_labels() {
         mine: false,
         superseded: false,
         withdrawn: false,
+        sealing: false,
     };
     let row = proposal_row(0, &pv);
     assert!(
@@ -180,6 +181,7 @@ fn applied_log_lines_carry_their_patch_id() {
             mine: false,
             superseded: false,
             withdrawn: false,
+            sealing: false,
         }],
         channels: Vec::new(),
         has_archive: false,
@@ -657,6 +659,7 @@ fn outcome_snapshot(pending: usize, applied: usize, declined: usize) -> molt_cor
                 mine: false,
                 superseded: false,
                 withdrawn: false,
+                sealing: false,
             })
             .collect()
     };

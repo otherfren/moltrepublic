@@ -406,22 +406,45 @@ fn present(name: &str, args: &Value, mut value: Value) -> Result<Value, String> 
                 None => Err(format!("unknown proposal {id}")),
             }
         }
+        // G3: a dry run answers the verdict - summary, warnings and the
+        // paths it would touch. The patch itself was 13 KB of answer for a
+        // caller that only wanted the header.
+        "wiki_edit" if value.get("reply") == Some(&Value::String("wiki_preview".to_string())) => {
+            let with_patch = flag_arg(args, "with_patch");
+            if let Some(o) = value.as_object_mut() {
+                let paths = o.get("patch").and_then(Value::as_str).map(patch_paths);
+                if let Some(paths) = paths {
+                    o.insert("paths".to_string(), Value::Array(paths));
+                }
+                if !with_patch {
+                    o.remove("patch");
+                }
+            }
+            Ok(value)
+        }
         _ => Ok(value),
     }
 }
 
-/// A proposer pulled it back, or the base moved under a wiki patch:
-/// `state` says so, instead of the engine's terminal `rejected` beside a
-/// `withdrawn` / `superseded` flag (F4, G9) - "rejected with nobody
-/// declining" sent a proposer hunting for a phantom decliner.
+/// A proposer pulled it back, the base moved under a wiki patch, or a
+/// ready seal is waiting out its pacing round: `state` says so, instead of
+/// the engine's terminal `rejected` beside a `withdrawn` / `superseded`
+/// flag (F4, G9) or a `proposed` beside a full approval count (G14) -
+/// "rejected with nobody declining" sent a proposer hunting for a phantom
+/// decliner, "2 of 2, proposed" read as a contradiction.
 fn withdrawn_is_a_state(v: &mut Value) {
     match v {
         Value::Object(o) => {
             let rejected = o.get("state") == Some(&Value::String("rejected".to_string()));
+            let proposed = o.get("state") == Some(&Value::String("proposed".to_string()));
+            let held = o.get("sealing") == Some(&Value::Bool(true))
+                || o.get("held_for_secs").is_some_and(Value::is_number);
             if o.get("withdrawn") == Some(&Value::Bool(true)) && o.contains_key("state") {
                 o.insert("state".to_string(), Value::String("withdrawn".to_string()));
             } else if rejected && o.get("superseded") == Some(&Value::Bool(true)) {
                 o.insert("state".to_string(), Value::String("superseded".to_string()));
+            } else if proposed && held {
+                o.insert("state".to_string(), Value::String("sealing".to_string()));
             }
             for child in o.values_mut() {
                 withdrawn_is_a_state(child);
@@ -430,6 +453,16 @@ fn withdrawn_is_a_state(v: &mut Value) {
         Value::Array(a) => a.iter_mut().for_each(withdrawn_is_a_state),
         _ => {}
     }
+}
+
+/// The paths a git-format patch touches, from its diff headers.
+fn patch_paths(patch: &str) -> Vec<Value> {
+    patch
+        .lines()
+        .filter_map(|l| l.strip_prefix("diff --git a/"))
+        .filter_map(|rest| rest.split(" b/").next())
+        .map(|p| Value::String(p.to_string()))
+        .collect()
 }
 
 /// One proposal as a list header: the patch, its summary and the paths it
@@ -442,13 +475,7 @@ fn compact_proposal(p: &mut Value, with_patch: bool) {
         .and_then(Value::as_str)
         .map(str::to_string);
     if let Some(patch) = &patch {
-        let paths: Vec<Value> = patch
-            .lines()
-            .filter_map(|l| l.strip_prefix("diff --git a/"))
-            .filter_map(|rest| rest.split(" b/").next())
-            .map(|p| Value::String(p.to_string()))
-            .collect();
-        o.insert("paths".to_string(), Value::Array(paths));
+        o.insert("paths".to_string(), Value::Array(patch_paths(patch)));
     }
     if let Some(id) = o.get("id").and_then(Value::as_u64) {
         o.insert("channel".to_string(), json!({ "kind": "patch", "id": id }));
@@ -1122,7 +1149,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "propose",
             command: "propose",
             scope: Scope::Seat,
-            description: "Put an object forward for threshold approval on a gated surface. An Organization set_image payload must embed the actual image as base64 `bytes_b64` and the bytes must DECODE as a picture (png/jpeg/webp/gif/bmp, ≤8192x8192; svg is refused) - sign-what-you-see: members vote on the image, so undecodable bytes are refused here and dropped by every peer. Payload size is capped at what one relay message can carry (about 64 KiB of image for a small roster); an over-size proposal is refused with the exact figure that fits. Organization op set_features enables charter features: value = space-separated keys among memory/quests/vault/wallet, the FULL target set - it must keep every enabled feature (enable-only, never off again) and add at least one. Proposing on a surface whose feature is not enabled is refused (status.features lists the enabled set). Memory op wiki_patch is a wiki changeset vote: `value` carries a raw git-format patch (unified diffs; rename/new/deleted headers), `summary` a short count string like \"+2 -1 →1 ~34\" - the GUI's changeset vote emits exactly this shape and renders the patch in its diff viewer. It is the RAW form, for a caller that already holds a patch, and it is refused when the patch does not apply to the current base; wiki_edit writes the wiki without one. The proposer's own signature is the first of m; the reply names the proposal's `channel`. Ids are minted per seat, so the sequence has gaps by design.",
+            description: "Put an object forward for threshold approval on a gated surface. An Organization set_image payload must embed the actual image as base64 `bytes_b64` and the bytes must DECODE as a picture (png/jpeg/webp/gif/bmp, ≤8192x8192; svg is refused) - sign-what-you-see: members vote on the image, so undecodable bytes are refused here and dropped by every peer. Payload size is capped at what one relay message can carry (about 64 KiB of image for a small roster); an over-size proposal is refused with the exact figure that fits. Organization op set_features enables charter features: value = space-separated keys among memory/quests/vault/wallet, the FULL target set - it must keep every enabled feature (enable-only, never off again) and add at least one. Proposing on a surface whose feature is not enabled is refused (status.features lists the enabled set). Memory op wiki_patch is a wiki changeset vote: `value` carries a raw git-format patch (unified diffs; rename/new/deleted headers), `summary` a short count string like \"+2 -1 →1 ~34\" where `+` `-` `→` count FILES added, deleted and renamed and `~` counts changed LINES - the GUI's changeset vote emits exactly this shape and renders the patch in its diff viewer. It is the RAW form, for a caller that already holds a patch, and it is refused when the patch does not apply to the base it is proposed against; wiki_edit writes the wiki without one. A path another OPEN proposal also touches is NOT that refusal: the patch goes to the vote and reads `superseded` once the other one seals and moves the base. The proposer's own signature is the first of m; the reply names the proposal's `channel`. Ids are minted per seat, so the sequence has gaps by design.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1140,7 +1167,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "approve",
             command: "approve",
             scope: Scope::Seat,
-            description: "Contribute THIS node's approval toward a pending proposal. On a chain-governed republic it is a real signature gossiped to the mesh (the block seals once m distinct members signed); elsewhere the node records at most its own single approval - it can never approve on behalf of other members. Pass `note` to post your reasoning into the proposal's discussion in the same call: it lands BEFORE the vote, so a tipping signature never leaves its reason behind. The reply is the record after the vote (state, approvals/threshold, `channel`); approving an already-applied proposal answers the same shape - a late approval is not an error, and its note still lands.",
+            description: "Contribute THIS node's approval toward a pending proposal. On a chain-governed republic it is a real signature gossiped to the mesh (the block seals once m distinct members signed); elsewhere the node records at most its own single approval - it can never approve on behalf of other members. Pass `note` to post your reasoning into the proposal's discussion in the same call: it lands BEFORE the vote, so a tipping signature never leaves its reason behind. The reply is the record after the vote (state, approvals/threshold, `head`, `channel`); approving an already-applied proposal answers the same shape - a late approval is not an error, and its note still lands. `approvals` counts the signatures THIS node holds; the block may already be sealed on a peer - read_chain shows the head. `state: \"sealing\"` with `held_for_secs` means the threshold is reached here and the seal waits out one propagation round.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1158,7 +1185,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "decline",
             command: "decline",
             scope: Scope::Seat,
-            description: "Cast this seat's vote AGAINST a pending proposal - ONE voice, not a veto: the proposal turns rejected for everyone only once approval can no longer reach the threshold (declines > n-m). One stance per member; declining after your own approve is allowed and is how a proposer signals retraction when withdraw is unavailable. Pass `note` to post the reason into the proposal's discussion in the same call: it lands BEFORE the vote.",
+            description: "Cast this seat's vote AGAINST a pending proposal - ONE voice, not a veto: the proposal turns rejected for everyone only once approval can no longer reach the threshold (declines > n-m). One stance per member; declining after your own approve is allowed and is how a proposer signals retraction when withdraw is unavailable. Pass `note` to post the reason into the proposal's discussion in the same call: it lands BEFORE the vote. `approvals` counts the signatures THIS node holds; the block may already be sealed on a peer - read_chain shows the head.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1190,7 +1217,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "read_state",
             command: "read_state",
             scope: Scope::Seat,
-            description: "Read the projected state of one surface. A CHAT read sends read receipts for the messages it returns (retrieval is the agent's way of seeing them - agents and humans light the same dots; silent while this node's receipts are off), so there is no need to call mark_read after reading. Chat messages each carry their stable 32-char hex `id` - the handle for react_chat, delete_chat, download_file, remove_file and chat_send's `quote` - plus the channel they file under, and the snapshot enumerates every channel seen in the log (`channels`). Each enumerated patch channel carries the vote's lifecycle in `state` (\"proposed\"/\"applied\"/\"rejected\"; absent for group/topic channels and unknown referents); a decided vote's discussion stays writable - the review of an applied change and the post-mortem of a rejected one belong there. Pass `channel` to get only the messages of that view; channels are tags on the one shared stream, not boundaries, and the enumeration still lists all of them. Pass `view` (chat only) to narrow the read: \"unread\" keeps only the messages after this seat's read cursor; \"today\" and omitting it both give the whole retention window. The filters compose. On gated surfaces, `applied_ids` runs positionally parallel to `applied` and names the proposal each applied entry came from (null = origin unknown: legacy data) - the back-link from an accepted change to its `{\"kind\":\"patch\",\"id\":N}` discussion channel. On `files` the applied entries are the persist/unpersist votes; the tables themselves are read_uploads. On `memory` the whole folded wiki rides along - read a large base paged with wiki_list + wiki_get instead.",
+            description: "Read the projected state of one surface. The entries come back under `applied` on EVERY surface, chat included - a chat message is one entry there, there is no `messages` key. A CHAT read sends read receipts for the messages it returns (retrieval is the agent's way of seeing them - agents and humans light the same dots; silent while this node's receipts are off), so there is no need to call mark_read after reading. Chat messages each carry their stable 32-char hex `id` - the handle for react_chat, delete_chat, download_file, remove_file and chat_send's `quote` - plus the channel they file under, and the snapshot enumerates every channel seen in the log (`channels`). Each enumerated patch channel carries the vote's lifecycle in `state` (\"proposed\"/\"applied\"/\"rejected\"; absent for group/topic channels and unknown referents); a decided vote's discussion stays writable - the review of an applied change and the post-mortem of a rejected one belong there. Pass `channel` to get only the messages of that view; channels are tags on the one shared stream, not boundaries, and the enumeration still lists all of them. Pass `view` (chat only) to narrow the read: \"unread\" keeps only the messages after this seat's read cursor; \"today\" and omitting it both give the whole retention window. The filters compose. On gated surfaces, `applied_ids` runs positionally parallel to `applied` and names the proposal each applied entry came from (null = origin unknown: legacy data) - the back-link from an accepted change to its `{\"kind\":\"patch\",\"id\":N}` discussion channel. On `files` the applied entries are the persist/unpersist votes; the tables themselves are read_uploads. On `memory` the whole folded wiki rides along - read a large base paged with wiki_list + wiki_get instead.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1226,7 +1253,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wiki_list",
             command: "wiki_list",
             scope: Scope::Read,
-            description: "List the shared wiki's documents - path, `bytes` and title (the header's `title`, else the first heading), no content - one page at a time. `prefix` narrows to a folder, `cursor` continues a page (pass the previous reply's `next_cursor`), `limit` is clamped to 1..=500 (default 100). `total` counts everything under the prefix. Fetch a document with wiki_get.",
+            description: "List the shared wiki's documents under `docs` - path, `bytes` and title (the header's `title`, else the first heading), no content - one page at a time. `prefix` narrows to a folder, `cursor` continues a page (pass the previous reply's `next_cursor`), `limit` is clamped to 1..=500 (default 100). `total` counts everything under the prefix. Fetch a document with wiki_get.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1245,7 +1272,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wiki_props",
             command: "wiki_props",
             scope: Scope::Read,
-            description: "Every relation this republic's wiki actually uses - header keys and inline `[[predicate::Name]]` alike - each with its values and how often each occurs. The ontology as it IS: read it before writing a header or a relation, it answers \"what is usual here\" without a schema. It governs nothing; the ontology is content.",
+            description: "Every relation this republic's wiki actually uses - header keys and inline `[[predicate::Name]]` alike - one entry per key under `keys`, each with its values and how often each occurs. The ontology as it IS: read it before writing a header or a relation, it answers \"what is usual here\" without a schema. It governs nothing; the ontology is content.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::WikiProps),
         },
@@ -1253,7 +1280,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wiki_search",
             command: "wiki_search",
             scope: Scope::Read,
-            description: "Search the wiki. `query` is tantivy syntax (`+must -not \"phrase\" title:term`) over title, body, the header's own values and the aliases a page declares - so a page is found under its name, not only under its prose. `tags`, `type`, `folder` and `props` narrow it. `props` is an object of front-matter pairs (`{\"status\": \"draft\"}`) that must ALL match, with the value written exactly as wiki_props reports it; a value over 64 characters is not faceted and matches nothing. Hits carry a snippet. Page with `limit` and `cursor`. An empty query with no filter finds nothing, never everything.",
+            description: "Search the wiki. `query` is tantivy syntax (`+must -not \"phrase\" title:term`) over title, body, the header's own values and the aliases a page declares - so a page is found under its name, not only under its prose. `tags`, `type`, `folder` and `props` narrow it. `props` is an object of front-matter pairs (`{\"status\": \"draft\"}`) that must ALL match, with the value written exactly as wiki_props reports it; a value over 64 characters is not faceted and matches nothing. The hits arrive under `hits`, each with a snippet. Page with `limit` and `cursor`. An empty query with no filter finds nothing, never everything.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1280,7 +1307,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wiki_links",
             command: "wiki_links",
             scope: Scope::Read,
-            description: "One document's links. `direction` out|in|both (default both); `predicate` narrows to one relation - a header value that is a link is typed by its key, a body link by writing `[[predicate::Name]]` in the prose. Page with `limit` and `cursor`.",
+            description: "One document's links, under `edges`. `direction` out|in|both (default both); `predicate` narrows to one relation - a header value that is a link is typed by its key, a body link by writing `[[predicate::Name]]` in the prose. Each edge says which source it came from (`header: true/false`); the two are one SET, so a relation asserted in both places survives the header key being removed. Page with `limit` and `cursor`.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1304,7 +1331,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wiki_neighbors",
             command: "wiki_neighbors",
             scope: Scope::Read,
-            description: "The documents within one or two hops of a document, nearest first. Each hit says HOW it was reached: `predicate` (the relation of the edge that reached it, null for a plain link), `direction` (out|in, seen from the document it was reached from) and `via` (the documents in between, empty at distance 1). `predicate` narrows the walk to one relation, `direction` picks which way it runs (default both). `transitive` walks that ONE predicate to a fixpoint (cap 500) instead of `depth` hops - it is the caller's assumption about the predicate, the republic declares no vocabulary - and needs a `predicate`. `capped` says the cap cut the walk short.",
+            description: "The documents within one or two hops of a document, under `docs`, nearest first. Each hit says HOW it was reached: `predicate` (the relation of the edge that reached it, null for a plain link), `direction` (out|in, seen from the document it was reached from) and `via` (the documents in between, empty at distance 1). `predicate` narrows the walk to one relation, `direction` picks which way it runs (default both). `transitive` walks that ONE predicate to a fixpoint (cap 500) instead of `depth` hops - it is the caller's assumption about the predicate, the republic declares no vocabulary - and needs a `predicate`. `capped` says the cap cut the walk short.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1344,7 +1371,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wiki_changes",
             command: "wiki_changes",
             scope: Scope::Read,
-            description: "What the wiki's documents did since a revision - one entry per path, so a maintaining agent re-reads only what moved. `since_rev` is a `wiki_rev` from an earlier read (0 = from the start); `limit` is clamped to 1..=500 (default 100) and `cursor` continues a page. Each entry carries `kind` (added, modified, deleted, renamed), the `rev` it last changed at, and on a rename the path it came `from`. A document first seen inside the window reads `added` at its final path whatever happened to it in between, and one that came and went inside the window is left out - what you get is the work, not the log. `base` names the folded base the revisions count from - a checkpoint re-bases the counter, so a `since_rev` taken under a different `base` is not comparable - and `truncated` says the answer does not reach as far back as asked: re-read the tree with wiki_list.",
+            description: "What the wiki's documents did since a revision - one entry per path under `changes`, so a maintaining agent re-reads only what moved. `since_rev` is a `wiki_rev` from an earlier read (0 = from the start); `limit` is clamped to 1..=500 (default 100) and `cursor` continues a page. Each entry carries `kind` (added, modified, deleted, renamed), the `rev` it last changed at, and on a rename the path it came `from`. A document first seen inside the window reads `added` at its final path whatever happened to it in between, and one that came and went inside the window is left out - what you get is the work, not the log. `base` names the folded base the revisions count from - a checkpoint re-bases the counter, so a `since_rev` taken under a different `base` is not comparable - and `truncated` says the answer does not reach as far back as asked: re-read the tree with wiki_list.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1394,7 +1421,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wiki_edit",
             command: "wiki_edit",
             scope: Scope::Seat,
-            description: "Write the wiki. `edits` apply IN ORDER to a working copy of the current base; the engine diffs the result and puts THAT patch to the members as a normal changeset vote - propose, not save, and the reply is the proposal id. Ops (fields in the schema): create, content, replace, set_props, add_relation, rename, delete. `create` writes a NEW page and refuses an occupied path; `content` writes a whole document, creating it when the path is free and OVERWRITING it when it is not. An edit that cannot land refuses the whole call with the reason and proposes nothing: a create onto an occupied path, a path that does not exist, an `old` that is absent or occurs more than once, a header the parser would not read back, a relation target that does not resolve uniquely, a rename onto an existing path. A relation reads better in the sentence that asserts it - write `[[predicate::Name]]` inside a content or replace edit; add_relation is for when there is no such sentence. Check a target with wiki_resolve, and wiki_props for the relation names this republic already uses. The proposer's own signature is the first of m. `dry_run: true` returns the patch, its summary and the warnings without proposing. A warning REFUSES the call, naming each one; `allow_warnings: true` proposes anyway. The warnings: a header the parser reads differently than written (an unquoted `[[link]]` value is a nested list), a touched path an open proposal already touches, a rename that leaves a link in an open proposal, a new title or alias that already names another page, and `content` over a page another seat last wrote. `supersedes: <id>` withdraws that own, still-open proposal in the same step - the way to correct one already on the table. The header dialect is the YAML 1.2 core schema in a flat subset: `no`, `yes`, `on` stay strings. The reply names the proposal's `channel`, where review remarks belong.",
+            description: "Write the wiki. `edits` apply IN ORDER to a working copy of the current base; the engine diffs the result and puts THAT patch to the members as a normal changeset vote - propose, not save, and the reply is the proposal id. Ops (fields in the schema): create, content, replace, set_props, add_relation, rename, delete. `create` writes a NEW page and refuses an occupied path; `content` writes a whole document, creating it when the path is free and OVERWRITING it when it is not. An edit that cannot land refuses the whole call with the reason and proposes nothing: a create onto an occupied path, a path that does not exist, an `old` that is absent or occurs more than once, a header the parser would not read back, a relation target that does not resolve uniquely, a rename onto an existing path. A path another OPEN proposal also touches is no refusal by itself (it is a warning, see below): that patch goes to the vote and reads `superseded` once the other one seals and moves the base. `replace` matches a SUBSTRING, not a line: `## Quellen` also sits inside `### Quellen (Sitz B)`, so anchor on `\\n## Quellen\\n`; a repeated one-line `old` is refused with the line numbers it hit. A relation reads better in the sentence that asserts it - write `[[predicate::Name]]` inside a content or replace edit; add_relation is for when there is no such sentence. An edge asserted BOTH in the header and in the prose survives set_props removing the header key - the inline link still asserts it (wiki_links marks each edge `header: true/false`). Check a target with wiki_resolve, and wiki_props for the relation names this republic already uses. The proposer's own signature is the first of m. The vote card's `summary` counts `+` `-` `→` in FILES added, deleted and renamed, `~` in changed LINES. `dry_run: true` proposes nothing and answers `summary`, `warnings` and the `paths` it would touch; `with_patch: true` adds the patch itself. A warning REFUSES the call, naming each one; `allow_warnings: true` proposes anyway. The warnings: a header the parser reads differently than written (an unquoted `[[link]]` value is a nested list), a touched path an open proposal already touches, a rename that leaves a link in an open proposal, a new title or alias that already names another page, and `content` over a page another seat last wrote. `supersedes: <id>` withdraws that own, still-open proposal in the same step - the way to correct one already on the table. The header dialect is the YAML 1.2 core schema in a flat subset: `no`, `yes`, `on` stay strings. The reply names the proposal's `channel`, where review remarks belong.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1427,7 +1454,7 @@ pub fn tools() -> Vec<ToolDef> {
                                     "properties": {
                                         "op": { "const": "replace" },
                                         "path": { "type": "string", "description": "the document's path" },
-                                        "old": { "type": "string", "description": "the exact text to find; it must occur exactly once" },
+                                        "old": { "type": "string", "description": "the exact text to find, matched as a SUBSTRING anywhere in the document; it must occur exactly once - anchor a heading as \"\\n## Quellen\\n\"" },
                                         "new": { "type": "string", "description": "what takes its place" }
                                     },
                                     "required": ["op", "path", "old", "new"]
@@ -1437,7 +1464,7 @@ pub fn tools() -> Vec<ToolDef> {
                                     "properties": {
                                         "op": { "const": "set_props" },
                                         "path": { "type": "string", "description": "the document's path" },
-                                        "props": { "type": "object", "description": "header keys to set; null removes one. A value is a string, an integer, a list of those, a flat mapping of them, or a list of such mappings" }
+                                        "props": { "type": "object", "description": "header keys to set; null removes one. A value is a string, an integer, a list of those, a flat mapping of them, or a list of such mappings. Removing a relation key does not remove the same relation asserted in the prose - that edge stands until its `[[predicate::Name]]` link goes" }
                                     },
                                     "required": ["op", "path", "props"]
                                 },
@@ -1472,7 +1499,8 @@ pub fn tools() -> Vec<ToolDef> {
                             ]
                         }
                     },
-                    "dry_run": { "type": "boolean", "description": "optional: return the patch and its warnings, propose nothing" },
+                    "dry_run": { "type": "boolean", "description": "optional: answer summary, warnings and paths, propose nothing" },
+                    "with_patch": { "type": "boolean", "description": "optional, dry runs only: include the patch itself (default false)" },
                     "allow_warnings": { "type": "boolean", "description": "optional: propose even with warnings (default: a warning refuses the call)" },
                     "supersedes": { "type": "integer", "description": "optional: withdraw this own open proposal in the same step" }
                 },
@@ -2660,6 +2688,71 @@ mod tests {
         assert_eq!(one["payload"]["value"], patch, "read_proposal is the full record");
         assert_eq!(one["state"], "proposed");
         assert!(present("read_proposal", &json!({ "id": 9 }), reply).is_err(), "an unknown id is an error");
+    }
+
+    /// C1 (G14): a proposal whose ready seal waits out its pacing round
+    /// reads `sealing`, not "2 of 2 and still proposed" - on the card and
+    /// on the vote reply, which also carries the seconds left.
+    #[test]
+    fn a_held_seal_reads_as_sealing() {
+        let list = present(
+            "list_proposals",
+            &json!({}),
+            json!({ "reply": "proposals", "proposals": [
+                { "id": 8, "state": "proposed", "approvals": 2, "threshold": 2, "sealing": true, "payload": {} },
+                { "id": 9, "state": "proposed", "approvals": 1, "threshold": 2, "sealing": false, "payload": {} },
+                { "id": 10, "state": "applied", "sealing": true, "payload": {} }
+            ] }),
+        )
+        .expect("presents");
+        assert_eq!(list["proposals"][0]["state"], "sealing", "the held seal says so");
+        assert_eq!(list["proposals"][1]["state"], "proposed", "an open vote is untouched");
+        assert_eq!(list["proposals"][2]["state"], "applied", "a sealed card keeps its state");
+        let vote = present(
+            "approve",
+            &json!({ "proposal_id": 8 }),
+            json!({ "reply": "vote", "id": 8, "state": "proposed", "approvals": 2,
+                    "threshold": 2, "held_for_secs": 3, "head": 11 }),
+        )
+        .expect("presents");
+        assert_eq!(vote["state"], "sealing");
+        assert_eq!(vote["held_for_secs"], 3);
+        assert_eq!(vote["head"], 11, "the chain height the count belongs to");
+        let landed = present(
+            "approve",
+            &json!({ "proposal_id": 9 }),
+            json!({ "reply": "vote", "id": 9, "state": "proposed", "approvals": 1,
+                    "threshold": 2, "held_for_secs": Value::Null, "head": 11 }),
+        )
+        .expect("presents");
+        assert_eq!(landed["state"], "proposed", "nothing held, nothing renamed");
+    }
+
+    /// G3: a dry run answers the verdict - summary, warnings and the paths
+    /// it would touch; the 13 KB patch only when asked for.
+    #[test]
+    fn a_dry_run_answers_the_header_unless_the_patch_is_asked_for() {
+        let patch = "diff --git a/a.md b/a.md\nnew file mode 100644\n--- /dev/null\n+++ b/a.md\n@@ -0,0 +1 @@\n+x\ndiff --git a/b/c.md b/b/c.md\n--- a/b/c.md\n+++ b/b/c.md\n@@ -1 +1 @@\n-y\n+z\n";
+        let preview = json!({ "reply": "wiki_preview", "patch": patch, "summary": "+1 ~1", "warnings": [] });
+        let short = present("wiki_edit", &json!({ "dry_run": true }), preview.clone()).expect("presents");
+        assert!(short.get("patch").is_none(), "the patch body is out");
+        assert_eq!(short["paths"], json!(["a.md", "b/c.md"]), "the paths take its place");
+        assert_eq!(short["summary"], "+1 ~1");
+        assert_eq!(short["warnings"], json!([]));
+        let full = present(
+            "wiki_edit",
+            &json!({ "dry_run": true, "with_patch": true }),
+            preview,
+        )
+        .expect("presents");
+        assert_eq!(full["patch"], patch, "asked for, answered");
+        let proposed = present(
+            "wiki_edit",
+            &json!({}),
+            json!({ "reply": "proposed", "id": 4, "warnings": [] }),
+        )
+        .expect("presents");
+        assert_eq!(proposed["id"], 4, "a real proposal is not a preview");
     }
 
     #[test]
