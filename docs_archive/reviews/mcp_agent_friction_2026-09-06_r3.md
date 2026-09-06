@@ -258,7 +258,8 @@ dropped them silently - `read_proposal` on 209/198/201/222/260 showed
   window build (10m44s) - the feature changes the window crate's unit hash;
   CLAUDE.md does not say so.
 - D7 [V] `scripts/check-doc-refs.py` scans IGNORED files at the repo root
-  (an untracked `deleteme.md` makes it exit 1 in the main checkout).
+  (the user's git-ignored scratch note there made it exit 1 in the main
+  checkout).
 - D8 [V] `cargo clippy -p molt-ui --all-targets` in the normal profile
   check-builds the 400k-line window module (~11 GiB); killed at 16:33 to
   protect the round's nodes. The live-preview clippy is clean; the
