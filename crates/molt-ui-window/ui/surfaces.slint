@@ -551,7 +551,7 @@ component FileCard inherits Rectangle {
             horizontal-stretch: 1;
             Text {
                 text: root.b.file-name == ""
-                    ? root.b.spans[0].link
+                    ? root.ref-hex
                     : root.b.file-name + " · " + root.b.file-size + " · "
                         + Strings.mem-file-by + " " + root.b.file-member;
                 color: FileTone.ink(root.b.file-state);
@@ -944,6 +944,7 @@ component BrainBlockView inherits HorizontalLayout {
             || (root.b.spans.length == 1 && root.b.spans[0].link != ""));
     // a picture only where the bytes are here AND the block still lives
     property <bool> shows-image: root.b.kind == 5 && root.b.file-state == 6 && !root.ghost;
+    property <string> file-ref: root.b.spans.length > 0 ? root.b.spans[0].link : "";
     Rectangle {
         width: 3px;
         border-radius: 1.5px;
@@ -1028,7 +1029,7 @@ component BrainBlockView inherits HorizontalLayout {
                         WikiState.file-view-caption = root.b.file-name + " · "
                             + root.b.file-size + " · " + Strings.mem-file-by + " "
                             + root.b.file-member;
-                        WikiState.file-view-ref = root.b.spans[0].link;
+                        WikiState.file-view-ref = root.file-ref;
                         WikiState.file-view-open = true;
                     }
                     property <int> tip-gen;
@@ -1049,7 +1050,7 @@ component BrainBlockView inherits HorizontalLayout {
                         MenuItem {
                             title: Strings.mem-file-show;
                             activated => {
-                                WikiState.jump-upload(root.b.spans[0].link);
+                                WikiState.jump-upload(root.file-ref);
                             }
                         }
                     }
