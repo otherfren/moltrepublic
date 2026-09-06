@@ -33,6 +33,21 @@ impl State {
         self.record(env);
     }
 
+    /// D10: is this the DECISION LINE of the proposal its channel names?
+    /// `post_decision_summary` mints the id deterministically, so every
+    /// seat that tips posts the same id under its own name — the
+    /// duplicate-id drop is the mechanism, not a finding. Recomputed, not
+    /// trusted: a foreign id in a patch channel stays an audit trail.
+    pub(crate) fn is_decision_summary(&self, msg: &molt_core::ChatMessage) -> bool {
+        let molt_core::ChannelRef::Patch { id } = msg.channel else {
+            return false;
+        };
+        let republic = self.replica.as_ref().map(|r| r.republic_id.clone()).unwrap_or_default();
+        [true, false]
+            .iter()
+            .any(|declined| crate::chat::decision_summary_id(&republic, id.0, *declined) == msg.id)
+    }
+
     /// The post-gate delivery body (the accept point + the kind match) —
     /// called for direct arrivals and for drained G7 park entries alike.
     pub(super) fn deliver_gated(
@@ -110,14 +125,17 @@ impl State {
                     return Ok(Reply::Ack);
                 }
                 if let Some(pos) = self.chat_pos.get(&msg.id) {
-                    match self.chat.get(*pos).map(|stored| stored.from.clone()) {
+                    let stored_author = self.chat.get(*pos).map(|stored| stored.from.clone());
+                    match stored_author {
                         // documented v1 limitation ("id squatting"): whoever
                         // lands an id first keeps it — but a cross-AUTHOR
                         // collision is either a bug or an attempt to occupy
-                        // a foreign id, so leave an audit trail at WARN
-                        Some(stored_author) if stored_author != from => tracing::warn!(
+                        // a foreign id, so leave an audit trail at WARN.
+                        // D10: unless it is the DECISION LINE, whose id every
+                        // tipping seat mints identically by design.
+                        Some(a) if a != from && !self.is_decision_summary(&msg) => tracing::warn!(
                             %from,
-                            %stored_author,
+                            stored_author = %a,
                             id = %msg.id,
                             "dropping a wire chat message whose duplicate id belongs to another author"
                         ),

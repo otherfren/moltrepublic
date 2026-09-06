@@ -114,6 +114,17 @@ fn classify_process_error<E: std::fmt::Debug>(e: ProcessMessageError<E>) -> MlsE
         ProcessMessageError::ValidationError(ValidationError::UnableToDecrypt(
             MessageDecryptionError::SecretTreeError(SecretTreeError::TooDistantInThePast),
         )) => MlsError::Stale("generation behind the window"),
+        // D11: the rest of "this ratchet cannot serve that generation".
+        // A hard restart resumes from a ratchet up to 10 s old, so the
+        // peers' rewind-resend lands OUTSIDE the window in both
+        // directions and openmls answers with either of these - routine
+        // after a kill, and not the operator's business.
+        ProcessMessageError::ValidationError(ValidationError::UnableToDecrypt(
+            MessageDecryptionError::SecretTreeError(SecretTreeError::TooDistantInTheFuture),
+        )) => MlsError::Stale("generation ahead of the window"),
+        ProcessMessageError::ValidationError(ValidationError::UnableToDecrypt(
+            MessageDecryptionError::GenerationOutOfBound,
+        )) => MlsError::Stale("generation out of bounds"),
         ProcessMessageError::ValidationError(ValidationError::CannotDecryptOwnMessage) => {
             MlsError::OwnEcho
         }
@@ -1113,6 +1124,45 @@ mod tests {
         let ct = founder.encrypt(b"once").expect("encrypt");
         assert_app(bob.decrypt(&ct).expect("first decrypt"), "founder", b"once");
         assert!(matches!(bob.decrypt(&ct), Err(MlsError::Stale(_))));
+    }
+
+    /// D11: every "the ratchet cannot serve that generation" answer is
+    /// the same class - a resent frame after a hard restart, which the
+    /// group runtime logs at debug. A real decrypt failure stays a wire
+    /// error and keeps its one WARN line.
+    #[test]
+    fn every_out_of_bounds_generation_is_stale_not_a_wire_error() {
+        let stale = |e: SecretTreeError| {
+            classify_process_error::<std::convert::Infallible>(
+                ProcessMessageError::ValidationError(ValidationError::UnableToDecrypt(
+                    MessageDecryptionError::SecretTreeError(e),
+                )),
+            )
+        };
+        for e in [
+            SecretTreeError::SecretReuseError,
+            SecretTreeError::TooDistantInThePast,
+            SecretTreeError::TooDistantInTheFuture,
+        ] {
+            assert!(matches!(stale(e.clone()), MlsError::Stale(_)), "{e:?}");
+        }
+        assert!(matches!(
+            classify_process_error::<std::convert::Infallible>(
+                ProcessMessageError::ValidationError(ValidationError::UnableToDecrypt(
+                    MessageDecryptionError::GenerationOutOfBound,
+                )),
+            ),
+            MlsError::Stale(_)
+        ));
+        // …and the genuine failure is still a wire error
+        assert!(matches!(
+            classify_process_error::<std::convert::Infallible>(
+                ProcessMessageError::ValidationError(ValidationError::UnableToDecrypt(
+                    MessageDecryptionError::AeadError,
+                )),
+            ),
+            MlsError::Wire(_)
+        ));
     }
 
     /// The transport hands a member its own frames back (a relay replays

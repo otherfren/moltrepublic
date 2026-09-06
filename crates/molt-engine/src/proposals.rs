@@ -972,7 +972,11 @@ impl State {
     /// designed above): terminal on every node, converging like a decline
     /// — but no vote is forged. Proposer-gated twice: here against the own
     /// record, and on every receiver against ITS record + link identity.
-    pub(crate) fn cmd_withdraw(&mut self, proposal: ProposalId) -> Result<Reply, MoltError> {
+    pub(crate) fn cmd_withdraw(
+        &mut self,
+        proposal: ProposalId,
+        note: Option<String>,
+    ) -> Result<Reply, MoltError> {
         let me = self.member();
         {
             let p = self
@@ -986,6 +990,9 @@ impl State {
                 return Err(MoltError::NotTheProposer(proposal));
             }
         }
+        // the reason goes in FIRST, like approve/decline (A2): a retraction
+        // must not leave its reasoning behind the decision
+        self.post_vote_note(proposal, note)?;
         let env = self.make_env(
             me.clone(),
             WorkspaceEvent::Withdrawn {
@@ -1016,7 +1023,9 @@ impl State {
                 tracing::warn!(error = %e, id = proposal.0, "could not post the withdraw summary");
             }
         }
-        Ok(Reply::Ack)
+        // B3: the record as it stands now, like approve/decline — a bare
+        // ack left the caller guessing which card it hit
+        Ok(self.vote_reply(proposal))
     }
 
     /// The withdraw choke point (log applier, wire ingest, park drain) —
@@ -2582,7 +2591,7 @@ impl State {
             )));
         }
         if let Some(old) = supersedes {
-            self.cmd_withdraw(old)?;
+            self.cmd_withdraw(old, None)?;
         }
         // the propose path recomputes the header half only; the sources
         // this call alone knows ride the reply from here

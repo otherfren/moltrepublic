@@ -1210,14 +1210,18 @@ pub fn tools() -> Vec<ToolDef> {
             name: "withdraw",
             command: "withdraw",
             scope: Scope::Seat,
-            description: "Pull back a proposal THIS seat proposed (proposer only - anyone else is refused): it turns terminal on every node without forging any vote, and the card reads \"pulled back\". Only works while the vote is still pending.",
+            description: "Pull back a proposal THIS seat proposed (proposer only - anyone else is refused): it turns terminal on every node without forging any vote, and the card reads \"pulled back\". Only works while the vote is still pending. Pass `note` to post the reason into the proposal's discussion in the same call: it lands BEFORE the retraction. The reply is the record, like approve/decline.",
             schema: || json!({
                 "type": "object",
-                "properties": { "proposal_id": { "type": "integer" } },
+                "properties": {
+                    "proposal_id": { "type": "integer" },
+                    "note": { "type": "string", "description": "optional: your reasoning, posted into the proposal's discussion before the retraction" }
+                },
                 "required": ["proposal_id"]
             }),
             build: |args| Ok(Command::Withdraw {
                 proposal: ProposalId(u64_arg(args, "proposal_id")?),
+                note: opt_str_arg(args, "note")?,
             }),
         },
         ToolDef {
