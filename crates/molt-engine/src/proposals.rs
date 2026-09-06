@@ -1947,7 +1947,7 @@ impl State {
             ),
             None => (None, None),
         };
-        let files = self.wiki_file_refs(&self.uploads_view(), content);
+        let files = self.wiki_file_refs(content);
         Ok(Reply::WikiDocument {
             path: path.clone(),
             content: content.clone(),
@@ -1960,21 +1960,21 @@ impl State {
     }
 
     /// Every DISTINCT `upload:` reference of a page with what it names
-    /// today (`wiki_files_and_images.md` §3.7), in document order. `rows`
-    /// is one `uploads_view()` for the whole pass - a health run over 100
-    /// pages must not rebuild the table per reference.
-    pub(crate) fn wiki_file_refs(
-        &self,
-        rows: &[UploadView],
-        content: &str,
-    ) -> Vec<molt_core::WikiFileRef> {
+    /// today (`wiki_files_and_images.md` §3.7), in document order. A page
+    /// without one never builds the uploads table.
+    fn wiki_file_refs(&self, content: &str) -> Vec<molt_core::WikiFileRef> {
+        let refs = molt_core::wiki_refs::file_refs(content);
+        if refs.is_empty() {
+            return Vec::new();
+        }
+        let rows = self.uploads_view();
         let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut out = Vec::new();
-        for r in molt_core::wiki_refs::file_refs(content) {
+        for r in refs {
             if !seen.insert(r.hex.clone()) {
                 continue;
             }
-            let (name, state) = self.upload_ref_state(rows, &r.hex);
+            let (name, state) = self.upload_ref_state(&rows, &r.hex);
             out.push(molt_core::WikiFileRef {
                 hex: r.hex,
                 name,
@@ -1984,9 +1984,11 @@ impl State {
         out
     }
 
-    /// The share's name (`""` when none) and the ONE word both agent reads
-    /// give a reference. A malformed hex resolves to nothing, like a
-    /// prefix no file carries.
+    /// The share's name (`""` when none) and the ONE word the agent reads
+    /// give a reference. `rows` is one `uploads_view()` for the whole
+    /// pass - a health run over 100 pages must not rebuild the table per
+    /// reference. A malformed hex resolves to nothing, like a prefix no
+    /// file carries.
     fn upload_ref_state(&self, rows: &[UploadView], hex: &str) -> (String, &'static str) {
         if !molt_core::wiki_refs::valid_hex(hex) {
             return (String::new(), "unknown");
@@ -2397,26 +2399,25 @@ impl State {
     /// resolved once - the rest is bucketing.
     fn wiki_file_health(&self, cap: usize) -> Result<molt_core::WikiFileHealth, MoltError> {
         let (tree, _) = self.wiki_base()?;
-        let rows = self.uploads_view();
-        // hex -> (word, the pages that carry it, path-ordered)
-        let mut seen: std::collections::BTreeMap<String, (&'static str, Vec<String>)> =
+        // hex -> the pages that carry it, path-ordered
+        let mut seen: std::collections::BTreeMap<String, Vec<String>> =
             std::collections::BTreeMap::new();
         for (path, content) in tree.iter() {
             let mut here: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
             for r in molt_core::wiki_refs::file_refs(content) {
-                if !here.insert(r.hex.clone()) {
-                    continue;
+                if here.insert(r.hex.clone()) {
+                    seen.entry(r.hex).or_default().push(path.clone());
                 }
-                let entry = seen.entry(r.hex).or_insert_with_key(|hex| {
-                    (self.upload_ref_state(&rows, hex).1, Vec::new())
-                });
-                entry.1.push(path.clone());
             }
         }
         let mut out = molt_core::WikiFileHealth::default();
+        if seen.is_empty() {
+            return Ok(out);
+        }
+        let rows = self.uploads_view();
         let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
-        for (hex, (word, paths)) in seen {
-            let (list, total) = match word {
+        for (hex, paths) in seen {
+            let (list, total) = match self.upload_ref_state(&rows, &hex).1 {
                 "unknown" => (&mut out.dangling, &mut out.dangling_total),
                 "temporary" => (&mut out.temporary, &mut out.temporary_total),
                 "ambiguous" => (&mut out.ambiguous, &mut out.ambiguous_total),
