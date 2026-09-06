@@ -2939,8 +2939,14 @@ impl State {
             // no longer exists, and there is no delta to it
             self.wiki_graph = None;
         }
+        // no graph yet: the dirty paths WAIT for the build that is under
+        // way - taking them here lost every append that landed while the
+        // build ran, and the installed graph stayed stale for good
+        if self.wiki_graph.is_none() {
+            return;
+        }
         let dirty = std::mem::take(&mut self.wiki_graph_dirty);
-        if self.wiki_graph.is_none() || dirty.is_empty() {
+        if dirty.is_empty() {
             return;
         }
         // taken, not cloned - `into_owned()` would copy the whole base
@@ -3855,6 +3861,25 @@ fn coalesce_wiki_changes(
             Some(c)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod wiki_graph_dirty_tests {
+    /// The dirty paths outlive a refresh that finds no graph: they are the
+    /// delta the off-actor build's result still has to fold on (round 2,
+    /// found by the Part B agent). Taking them early left the installed
+    /// graph stale for good.
+    #[test]
+    fn a_refresh_without_a_graph_keeps_the_dirty_paths() {
+        let mut st = crate::tests::plain_state();
+        st.wiki_graph = None;
+        st.wiki_graph_dirty.insert("people/anna.md".to_string());
+        st.refresh_wiki_graph();
+        assert!(
+            st.wiki_graph_dirty.contains("people/anna.md"),
+            "the delta waits for the build"
+        );
+    }
 }
 
 #[cfg(test)]

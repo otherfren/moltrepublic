@@ -3,9 +3,10 @@
 Status: EXECUTED 2026-09-06 - Parts A (A1-A3), B, C and D are on master,
 built by three agents in parallel worktrees and merged in that order.
 Open: A4 (a decline delays the seal - a governance question for the
-republic) and a latent index race found on the way (`refresh_wiki_graph` takes `wiki_graph_dirty` before it
-checks that a graph exists; a build installed over a moved tree stays
-stale - one line plus a pinning test, own change-set). Source:
+republic). The latent index race the Part B agent found on the way
+(`refresh_wiki_graph` took `wiki_graph_dirty` before checking that a graph
+exists, so a build installed over a moved tree stayed stale) is fixed and
+pinned in the same wave. Source:
 `mcp_agent_friction_2026-09-06.md` (findings G1-G20). Round 1's fixes (`mcp_agent_friction_fixes.md`) held:
 over 100 proposals from three writers, no fork, no lost proposal, one tip
 tie healed in four minutes, chains and wikis identical on every check. The
