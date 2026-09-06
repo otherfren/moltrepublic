@@ -1024,6 +1024,12 @@ component BrainBlockView inherits HorizontalLayout {
                 }
                 pica := TouchArea {
                     mouse-cursor: MouseCursor.pointer;
+                    pointer-event(ev) => {
+                        if (ev.kind == PointerEventKind.down
+                            && ev.button == PointerEventButton.right) {
+                            picmenu.show({ x: self.mouse-x, y: self.mouse-y });
+                        }
+                    }
                     clicked => {
                         WikiState.file-view-image = root.b.image;
                         WikiState.file-view-caption = root.b.file-name + " · "
@@ -1045,7 +1051,12 @@ component BrainBlockView inherits HorizontalLayout {
                         }
                     }
                 }
-                ContextMenuArea {
+                // the picture's own TouchArea eats the right click, so
+                // the menu claims no area and is opened at the pointer
+                picmenu := ContextMenuArea {
+                    width: 0px;
+                    height: 0px;
+                    enabled: false;
                     Menu {
                         MenuItem {
                             title: Strings.mem-file-show;

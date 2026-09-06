@@ -213,9 +213,15 @@ thread_local! {
 }
 
 /// The hex a span's destination names, or `None` when the run is no file
-/// reference at all.
+/// reference at all - the ONE test for "is this a file reference".
 fn ref_hex(dest: &str) -> Option<String> {
     molt_core::wiki_refs::checksum_of(dest)
+}
+
+/// The cache key an ARGUMENT names: the pane hands the `upload:`
+/// destination, the bridge's own re-resolve triggers hand a bare hex.
+fn ref_key(dest: &str) -> String {
+    ref_hex(dest).unwrap_or_else(|| dest.trim().to_ascii_lowercase())
 }
 
 /// The open page's references, and the ask for what is missing. Called
@@ -386,10 +392,11 @@ pub(crate) fn patch_file_rows(ui: &AppWindow) {
     let blocks = s.get_blocks();
     FILE_REFS.with(|c| {
         let mut c = c.borrow_mut();
+        // a question in flight keeps its claim: its answer composes in
+        // the NEW language by itself, and re-asking would only double it
         if c.words != lex.unknown {
             c.words = lex.unknown.clone();
             c.by_hex.clear();
-            c.asking.clear();
         }
         for i in 0..blocks.row_count() {
             let Some(mut b) = blocks.row_data(i) else { continue };
@@ -550,7 +557,7 @@ pub(crate) fn image_decoded(
 /// Forget one reference's answer and ask again (the `failed` card's verb,
 /// and every re-resolve trigger below).
 pub(crate) fn forget_file_ref(ui: &AppWindow, dest: &str) {
-    let Some(hex) = ref_hex(dest) else { return };
+    let hex = ref_key(dest);
     FILE_REFS.with(|c| {
         let mut c = c.borrow_mut();
         c.by_hex.remove(&hex);
@@ -580,7 +587,11 @@ pub(crate) fn uploads_pushed(ui: &AppWindow, uploads: &[crate::surfaces::UploadR
         let c = c.borrow();
         uploads
             .iter()
-            .filter(|u| u.mirror_of > 0 && u.mirror_held == u.mirror_of)
+            // a legacy share has no checksum, and "" would match every
+            // reference whose answer has not landed yet
+            .filter(|u| {
+                !u.checksum_full.is_empty() && u.mirror_of > 0 && u.mirror_held == u.mirror_of
+            })
             .filter_map(|u| {
                 c.by_hex
                     .iter()
@@ -599,16 +610,14 @@ pub(crate) fn uploads_pushed(ui: &AppWindow, uploads: &[crate::surfaces::UploadR
 
 /// The share a reference names, for the `Herunterladen` verb.
 fn file_ref_share(dest: &str) -> Option<molt_core::MessageId> {
-    let hex = ref_hex(dest)?;
+    let hex = ref_key(dest);
     FILE_REFS.with(|c| c.borrow().by_hex.get(&hex).and_then(|f| f.id))
 }
 
 /// The jump's needle and view (§3.5): the FULL checksum where the answer
 /// carries one, and the table the row actually lives in.
 fn file_ref_jump(dest: &str) -> (String, &'static str) {
-    let Some(hex) = ref_hex(dest) else {
-        return (dest.to_string(), "persistent");
-    };
+    let hex = ref_key(dest);
     FILE_REFS.with(|c| {
         let c = c.borrow();
         match c.by_hex.get(&hex) {

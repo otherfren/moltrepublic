@@ -435,3 +435,78 @@ fn a_ghost_picture_renders_flat_and_offers_no_verb() {
         "a ghost card offers no verb"
     );
 }
+
+
+/// **A completing transfer re-resolves the reference that names it.**
+/// Without this the picture the member just downloaded stays a card until
+/// the page is reopened - and the mirror case never resolves at all,
+/// because nothing else ever asks again.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_transfer_and_a_completed_mirror_both_re_resolve_their_reference() {
+    let (ui, asked) = page_asking(&format!("Intro\n\n![Netz](upload:{HEX})\n"));
+    file_resolved(
+        &ui,
+        HEX,
+        Some(resolved(
+            Some(upload("netz.png")),
+            molt_core::LocalCopy::None,
+        )),
+    );
+    assert_eq!(asked.borrow().len(), 1, "asked once so far");
+
+    transfer_touched(&ui, MessageId([7u8; 16]));
+    assert_eq!(asked.borrow().len(), 2, "the transfer's share is asked again");
+    assert_eq!(
+        image_block(&ui).file_name.as_str(),
+        "",
+        "the answer is forgotten while the new one is in flight"
+    );
+
+    file_resolved(
+        &ui,
+        HEX,
+        Some(resolved(
+            Some(upload("netz.png")),
+            molt_core::LocalCopy::None,
+        )),
+    );
+    // the mirror finished for this very file: the bytes arrive by
+    // themselves, so the reference has to be asked about again
+    let rows = vec![UploadRowData {
+        checksum_full: FULL.to_string(),
+        mirror_held: 5,
+        mirror_of: 5,
+        ..upload_row()
+    }];
+    uploads_pushed(&ui, &rows);
+    assert_eq!(asked.borrow().len(), 3, "the completed mirror asks again");
+}
+
+/// An uploads row with nothing set but the fields the wiki reads.
+fn upload_row() -> UploadRowData {
+    UploadRowData {
+        id: String::new(),
+        user: String::new(),
+        date: String::new(),
+        name: String::new(),
+        kind: String::new(),
+        size: String::new(),
+        available: false,
+        online: false,
+        checksum: String::new(),
+        expires: String::new(),
+        status: String::new(),
+        status_kind: 0,
+        availability: String::new(),
+        ts: 0,
+        bytes: 0,
+        expires_ts: 0,
+        checksum_full: String::new(),
+        persistent: true,
+        vote: String::new(),
+        mirrors: 0,
+        mirror_held: 0,
+        mirror_of: 0,
+    }
+}
