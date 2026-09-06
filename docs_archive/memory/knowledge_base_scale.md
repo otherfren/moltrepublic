@@ -994,11 +994,16 @@ occurrence - the form coding-agent scaffolds converged on),
   whole after-tree, so a repaired page is one more entry in it, and
   `paths` names them. A `[[Name]]` binds by title or alias and needs no
   rewrite; a code span and a URL ending in `.md` are no claims about the
-  graph and are left alone. The repair is a `rename_link` warning (it is
-  five more pages in the vote than the caller named, and that is worth
-  acknowledging), and `repair_links: false` restores the old behaviour
-  WITHOUT the silence: base in-links then refuse the call, naming the
-  pages that would keep the old path.
+  graph and are left alone. **The repair is NOT a warning**: a caller
+  renaming a page with in-links asked for exactly this, and making the
+  most common rename cost an acknowledgement would rebuild the friction
+  round 3 filed. It is REPORTED instead - `repaired: [{ from, to, pages }]`
+  on `Reply::Proposed` and `Reply::WikiPreview`, so an agent sees what the
+  vote carries beyond what it named. `repair_links: false` restores the old
+  behaviour WITHOUT the silence: base in-links then refuse the call under
+  `rename_link`, naming the pages that would keep the old path. The code
+  `rename_link` otherwise stays what it was - a link an OPEN proposal
+  still writes to the old path, which no patch of ours may rewrite.
 - **`propose` now refuses a raw `wiki_patch` that does not apply**
   (`wiki_semantic_gaps.md` §1.1) with `patch does not apply: <reason>`,
   checked over the touched paths exactly as the header warnings are. A
@@ -1018,7 +1023,8 @@ edit kind, the file order, the summary) and
 round 3's (an alias this call frees is no collision while one it creates
 inside the call still is; `allow_warnings` takes the codes it
 acknowledges; a rename repairs the base links naming the old path and
-`repair_links: false` refuses instead; the caller's own retired card is
+`repair_links: false` refuses instead; a dry run names them too; the
+caller's own retired card is
 no longer contended;
 `graph::a_rename_rewrites_only_the_links_that_name_the_path`;
 `proposals::the_graph_reads_answer_while_the_index_builds`). The MCP

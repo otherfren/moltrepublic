@@ -151,6 +151,7 @@ impl State {
             id: ProposalId(id),
             warnings: Vec::new(),
             channel: molt_core::ChannelRef::Patch { id: ProposalId(id) },
+            repaired: Vec::new(),
         })
     }
 

@@ -5832,6 +5832,12 @@ pub enum Reply {
         /// belong (B10, `docs_archive/reviews/mcp_agent_friction_fixes.md`).
         #[serde(default)]
         channel: ChannelRef,
+        /// The in-links a `rename` carried with it (E2): pages the patch
+        /// rewrites BEYOND the ones the caller named. Not a warning - the
+        /// caller asked for the rename - but the vote carries them, so the
+        /// reply says which.
+        #[serde(default)]
+        repaired: Vec<WikiRepairedLinks>,
     },
     /// This node's vote landed (approve or decline): the record as it
     /// stands afterwards, so a voter sees what its voice did without a
@@ -5867,6 +5873,9 @@ pub enum Reply {
         summary: String,
         /// Header warnings the patch would leave behind.
         warnings: Vec<String>,
+        /// The in-links a `rename` would carry with it (E2).
+        #[serde(default)]
+        repaired: Vec<WikiRepairedLinks>,
     },
     /// A surface snapshot.
     State(SurfaceSnapshot),
@@ -6579,6 +6588,18 @@ pub struct WikiFileIssue {
     pub paths: Vec<String>,
     /// How many documents reference it in total.
     pub paths_total: u64,
+}
+
+/// The pages one `rename` carried with it ([`Reply::Proposed`],
+/// [`Reply::WikiPreview`], E2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiRepairedLinks {
+    /// The path the rename left.
+    pub from: String,
+    /// The path it moved to.
+    pub to: String,
+    /// The pages whose links were rewritten, path-sorted.
+    pub pages: Vec<String>,
 }
 
 /// One `type` value with the header keys its pages carry
@@ -7755,6 +7776,7 @@ mod tests {
                 id: ProposalId(1),
                 warnings: Vec::new(),
                 channel: ChannelRef::Patch { id: ProposalId(1) },
+                repaired: Vec::new(),
             },
             Reply::Proposals { proposals: vec![] },
             Reply::Members { members: vec![] },

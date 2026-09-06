@@ -755,7 +755,12 @@ impl State {
             // honest 1-of-1 governance (the solo boot group)
             self.try_apply(id);
         }
-        Ok(Reply::Proposed { id, warnings, channel: molt_core::ChannelRef::Patch { id } })
+        Ok(Reply::Proposed {
+            id,
+            warnings,
+            channel: molt_core::ChannelRef::Patch { id },
+            repaired: Vec::new(),
+        })
     }
 
     /// A wiki patch, checked against the base it claims to apply to.
@@ -2615,7 +2620,7 @@ impl State {
         // E2: a rename strands every BASE link naming the old path. The
         // repair rides the SAME patch - the emitter diffs the whole
         // after-tree, so a rewritten page is one more entry in it.
-        let rename_warnings = self.repair_rename_links(
+        let (repaired, kept_link_warnings) = self.repair_rename_links(
             &mut touched,
             &mut base,
             &mut after,
@@ -2639,7 +2644,7 @@ impl State {
             WARN_OPEN_PATH,
             self.open_proposal_warnings(&touched, supersedes),
         ));
-        found.extend(coded(WARN_RENAME_LINK, rename_warnings));
+        found.extend(coded(WARN_RENAME_LINK, kept_link_warnings));
         found.extend(coded(
             WARN_RENAME_LINK,
             self.open_rename_warnings(&edits, supersedes),
@@ -2659,7 +2664,7 @@ impl State {
         found.extend(coded(WARN_FILE_REF, self.file_ref_warnings(&after)));
         let warnings: Vec<String> = found.iter().map(|(c, m)| format!("{c}: {m}")).collect();
         if dry_run {
-            return Ok(Reply::WikiPreview { patch, summary, warnings });
+            return Ok(Reply::WikiPreview { patch, summary, warnings, repaired });
         }
         // B5: a warning is a refusal by default - it used to arrive once the
         // patch was already in the vote, and the only way out was withdraw
@@ -2692,7 +2697,9 @@ impl State {
         // the propose path recomputes the header half only; the sources
         // this call alone knows ride the reply from here
         match self.cmd_propose(Surface::Memory, payload)? {
-            Reply::Proposed { id, channel, .. } => Ok(Reply::Proposed { id, warnings, channel }),
+            Reply::Proposed { id, channel, .. } => {
+                Ok(Reply::Proposed { id, warnings, channel, repaired })
+            }
             other => Ok(other),
         }
     }
@@ -2806,9 +2813,12 @@ impl State {
     }
 
     /// **E2**: every BASE page whose markdown link names a path this call
-    /// renames, rewritten onto the new path IN THE SAME PATCH. `repair` off
-    /// leaves them - and then their existence is the warning, because a
-    /// rename that strands seven edges in silence is the round-3 finding.
+    /// renames, rewritten onto the new path IN THE SAME PATCH. It is no
+    /// warning - a caller that renames a page with in-links asked for
+    /// exactly this - but the vote carries pages it did not name, so the
+    /// reply REPORTS them. `repair` off leaves the links and then their
+    /// existence IS the warning: a rename that strands seven edges in
+    /// silence is the round-3 finding.
     ///
     /// The rewritten pages join `base`/`after`/`touched`, so the one
     /// emitter diffs them like any other and the reply's `paths` names them.
@@ -2819,9 +2829,10 @@ impl State {
         after: &mut std::collections::BTreeMap<String, String>,
         renames: &std::collections::BTreeMap<String, String>,
         repair: bool,
-    ) -> Result<Vec<String>, MoltError> {
+    ) -> Result<(Vec<molt_core::WikiRepairedLinks>, Vec<String>), MoltError> {
+        let none = || (Vec::new(), Vec::new());
         if renames.is_empty() {
-            return Ok(Vec::new());
+            return Ok(none());
         }
         let (tree, _) = self.wiki_base()?;
         // old path -> the pages linking to it
@@ -2851,30 +2862,37 @@ impl State {
             }
         }
         if hits.is_empty() {
-            return Ok(Vec::new());
+            return Ok(none());
         }
-        let mut out = Vec::new();
-        for (from, pages) in &hits {
-            let to = renames
-                .iter()
-                .find(|(_, o)| o.as_str() == *from)
-                .map_or("", |(t, _)| t.as_str());
-            out.push(if repair {
-                format!("{from} -> {to}: rewrote {}", name_a_few(pages))
-            } else {
-                format!("{from}: old path kept by {}", name_a_few(pages))
-            });
+        if !repair {
+            return Ok((
+                Vec::new(),
+                hits.iter()
+                    .map(|(from, pages)| {
+                        format!("{from}: old path kept by {}", name_a_few(pages))
+                    })
+                    .collect(),
+            ));
         }
-        if repair {
-            for (path, content) in fixed {
-                if let Some(held) = tree.get(&path) {
-                    base.entry(path.clone()).or_insert_with(|| held.clone());
-                }
-                touched.insert(path.clone());
-                after.insert(path, content);
+        let repaired: Vec<molt_core::WikiRepairedLinks> = hits
+            .iter()
+            .map(|(from, pages)| molt_core::WikiRepairedLinks {
+                from: (*from).to_string(),
+                to: renames
+                    .iter()
+                    .find(|(_, o)| o.as_str() == *from)
+                    .map_or_else(String::new, |(t, _)| t.clone()),
+                pages: pages.clone(),
+            })
+            .collect();
+        for (path, content) in fixed {
+            if let Some(held) = tree.get(&path) {
+                base.entry(path.clone()).or_insert_with(|| held.clone());
             }
+            touched.insert(path.clone());
+            after.insert(path, content);
         }
-        Ok(out)
+        Ok((repaired, Vec::new()))
     }
 
     /// B3 (G7): a title or alias this call newly claims that already names

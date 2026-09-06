@@ -558,7 +558,7 @@ async fn a_dry_run_shows_the_patch_and_proposes_nothing() {
     )
     .await
     .expect("a dry run is fine");
-    let Reply::WikiPreview { patch, summary, warnings } = reply else {
+    let Reply::WikiPreview { patch, summary, warnings, .. } = reply else {
         panic!("unexpected: {reply:?}");
     };
     assert!(patch.contains("+++ b/a.md") && patch.contains("+title: A"), "the patch: {patch}");
@@ -1007,6 +1007,8 @@ async fn allow_warnings_takes_the_codes_it_acknowledges() {
 /// round-3 case: `standards/lexicon.md` moved and five pages that wrote
 /// the path kept pointing at nothing - `paths` named one file, `warnings`
 /// was empty, and only `wiki_links {direction: in}` could have found them.
+/// The repair is no warning: the caller asked for the rename. But the
+/// vote carries five pages it did not name, so the reply reports them.
 #[tokio::test]
 async fn a_rename_repairs_the_base_links_that_name_the_old_path() {
     let w = spawn_solo();
@@ -1025,23 +1027,23 @@ async fn a_rename_repairs_the_base_links_that_name_the_old_path() {
             to: "standards/atproto-lexicon.md".to_string(),
         }]
     };
-    // it is not silent: the repair is five more pages in the patch, and
-    // the caller acknowledges that by code
-    let text = match propose(&w, rename(), AllowWarnings::NONE).await {
-        Err(e) => e.to_string(),
-        Ok(other) => panic!("the rewrite has to be acknowledged: {other:?}"),
-    };
-    assert!(
-        text.contains("rename_link: standards/lexicon.md -> standards/atproto-lexicon.md: rewrote 5 pages"),
-        "names what it rewrote: {text}"
-    );
-
-    let reply = propose(&w, rename(), AllowWarnings::Codes(vec!["rename_link".to_string()]))
+    let reply = propose(&w, rename(), AllowWarnings::NONE)
         .await
-        .expect("acknowledged");
-    let Reply::Proposed { id, .. } = reply else {
+        .expect("the rename proposes as asked");
+    let Reply::Proposed { id, warnings, repaired, .. } = reply else {
         panic!("unexpected: {reply:?}");
     };
+    assert!(warnings.is_empty(), "the repair is no warning: {warnings:?}");
+    assert_eq!(repaired.len(), 1, "{repaired:?}");
+    assert_eq!(repaired[0].from, "standards/lexicon.md");
+    assert_eq!(repaired[0].to, "standards/atproto-lexicon.md");
+    assert_eq!(
+        repaired[0].pages,
+        (0..5)
+            .map(|n| format!("standards/x{n}.md"))
+            .collect::<Vec<String>>(),
+        "the reply names what the vote carries beyond the rename"
+    );
     w.execute(Command::Approve { proposal: id, note: None })
         .await
         .expect("approve");
@@ -1061,6 +1063,48 @@ async fn a_rename_repairs_the_base_links_that_name_the_old_path() {
         panic!("unexpected: {health:?}");
     };
     assert_eq!(dangling_total, 0, "nothing points at the old path: {dangling:?}");
+}
+
+/// …and a dry run answers the same report without proposing.
+#[tokio::test]
+async fn a_dry_run_names_the_links_a_rename_would_repair() {
+    let w = spawn_solo();
+    edit(
+        &w,
+        vec![
+            content("standards/lexicon.md", "# Lexicon\n"),
+            content("standards/x.md", "See [Lexicon](standards/lexicon.md).\n"),
+        ],
+    )
+    .await
+    .expect("the base");
+
+    let preview = settle(
+        &w,
+        Command::WikiEdit {
+            edits: vec![WikiEdit::Rename {
+                from: "standards/lexicon.md".to_string(),
+                to: "standards/atproto-lexicon.md".to_string(),
+            }],
+            dry_run: true,
+            allow_warnings: AllowWarnings::NONE,
+            supersedes: None,
+            repair_links: true,
+        },
+    )
+    .await
+    .expect("a dry run is fine");
+    let Reply::WikiPreview { patch, warnings, repaired, .. } = preview else {
+        panic!("unexpected: {preview:?}");
+    };
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(repaired.len(), 1);
+    assert_eq!(repaired[0].pages, vec!["standards/x.md".to_string()]);
+    assert!(
+        patch.contains("standards/x.md"),
+        "the rewrite rides the same patch: {patch}"
+    );
+    assert_eq!(open_proposals(&w).await, 1, "nothing new was proposed");
 }
 
 /// …and `repair_links: false` is the old behaviour WITHOUT the silence:
