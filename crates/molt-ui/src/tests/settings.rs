@@ -102,3 +102,45 @@ fn both_buckets_round_trip_through_the_settings_draft() {
         "an untouched draft equals the stored settings"
     );
 }
+
+/// Settings › Anonymity network: the embedded Tor mode is a real choice in a
+/// binary built with the feature - the dropdown's middle row follows the
+/// compile-time flag, and a stored `embedded` survives the draft round trip
+/// in both directions (release decision 2026-09-06: the published binary
+/// carries arti).
+#[test]
+fn the_embedded_tor_mode_round_trips_and_is_selectable_when_built_in() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    // the app→ui seam: a feature-on binary enables the middle row
+    ui.set_tor_mode_enabled(ModelRc::new(VecModel::from(tor_mode_enabled(true).to_vec())));
+    let rows = ui.get_tor_mode_enabled();
+    assert_eq!(rows.row_count(), 3);
+    assert!(rows.row_data(1).expect("embedded row"), "embedded is selectable in a feature-on build");
+    // stored config → form
+    let stored = SessionSettings {
+        anonymity: "tor".to_string(),
+        tor_mode: "embedded".to_string(),
+        tor_port: 9050,
+        ..SessionSettings::default()
+    };
+    apply_settings_fields(&ui, &stored);
+    assert_eq!(ui.get_cfg_network_index(), 0, "tor");
+    assert_eq!(ui.get_cfg_tor_mode_index(), 1, "the dropdown shows embedded");
+    // form → draft: what a save carries
+    let draft = read_settings_draft(&ui, &stored);
+    assert_eq!(draft.anonymity, "tor");
+    assert_eq!(draft.tor_mode, "embedded");
+    assert!(!settings_draft_differs(&stored, &ui), "an untouched draft is clean");
+    // picking the row is what a member does: the index becomes the word
+    ui.set_cfg_tor_mode_index(2);
+    assert_eq!(read_settings_draft(&ui, &stored).tor_mode, "whonix");
+    ui.set_cfg_tor_mode_index(1);
+    assert_eq!(read_settings_draft(&ui, &stored).tor_mode, "embedded");
+    // a feature-off binary greys the row but never rewrites a stored choice:
+    // the engine refuses the dial honestly (TorMisconfigured), the form
+    // does not silently fall back to local
+    ui.set_tor_mode_enabled(ModelRc::new(VecModel::from(tor_mode_enabled(false).to_vec())));
+    apply_settings_fields(&ui, &stored);
+    assert_eq!(read_settings_draft(&ui, &stored).tor_mode, "embedded");
+}

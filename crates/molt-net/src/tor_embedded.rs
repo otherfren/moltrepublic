@@ -162,18 +162,17 @@ mod tests {
 
     #[test]
     fn per_server_isolation_yields_distinct_circuits() {
-        // distinct remote hosts get distinct isolation tokens (⇒ distinct
-        // Tor circuits); the same host reuses one (concept §4/§5). Pure — no
-        // network, no bootstrap.
+        // distinct remote hosts, and distinct lanes to one host, get distinct
+        // isolation tokens (⇒ distinct Tor circuits); the same lane+host
+        // reuses one (concept §4/§5, 83d72c39). Pure — no network, no bootstrap.
         let shared = ArtiShared::new();
-        let a1 = shared.token_for("smp.a.example");
-        let a2 = shared.token_for("smp.a.example");
-        let b = shared.token_for("smp.b.example");
-        assert_eq!(a1, a2, "same host must reuse one isolation token/circuit");
-        assert_ne!(
-            a1, b,
-            "distinct hosts must get distinct isolation tokens/circuits"
-        );
+        let a1 = shared.token_for("relay", "a.example");
+        let a2 = shared.token_for("relay", "a.example");
+        let b = shared.token_for("relay", "b.example");
+        let c = shared.token_for("s3", "a.example");
+        assert_eq!(a1, a2, "same lane and host must reuse one isolation token/circuit");
+        assert_ne!(a1, b, "distinct hosts must get distinct isolation tokens/circuits");
+        assert_ne!(a1, c, "distinct lanes to one host must not share a circuit");
     }
 
     #[test]
