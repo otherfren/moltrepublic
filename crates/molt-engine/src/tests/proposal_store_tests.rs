@@ -190,6 +190,52 @@ fn a_create_onto_an_occupied_path_is_superseded() {
     assert_eq!(after.state, ProposalState::Rejected);
 }
 
+/// B2 (R2), the half a reopen actually hits: on a FOLDED holder the
+/// base is adopted AFTER the log tail and the chain, and the supersede
+/// walk must do nothing while it is missing (K6 §4.9.6) — so every walk
+/// of the reopen was a no-op and a patch the base had long invalidated
+/// sat open forever. Four of round 2's proposals did exactly that.
+#[test]
+fn a_pending_patch_is_re_checked_when_the_folded_base_arrives() {
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    b.commit_wiki(1, "a.md", "A", &["petra", "walter"]);
+    let mut walter = crate::chain::test_support::chain_signer("walter", &b, b.blocks.clone());
+    // fold the base into one commitment (the cut)
+    let hash = crate::chain::checkpoint_state_hash(
+        &walter.own_checkpoint_state(1, true).expect("folded projection"),
+    );
+    walter.receive_checkpoint_proposal(40, 1, &hash, true);
+    let change = molt_core::ChainChange::CheckpointFolded { upto: 1, state_hash: hash };
+    let sig = molt_storage::identity_sign(
+        b.key("petra"),
+        &molt_core::chain::approval_bytes(&b.republic_id, 2, &change),
+    );
+    walter.receive_approval(40, "petra", 2, &sig);
+    let held = walter.chain.wiki_base.clone().expect("the cut kept the tree");
+
+    // the reopen shape: the base is not fetched yet
+    walter.chain.wiki_base = None;
+    walter.bump_applied_epoch();
+    let create = "diff --git a/a.md b/a.md\nnew file mode 100644\n--- /dev/null\n+++ b/a.md\n@@ -0,0 +1,1 @@\n+mine\n";
+    walter.receive_proposed(
+        11,
+        Surface::Memory,
+        json!({ "op": "wiki_patch", "value": create }),
+        "petra",
+    );
+    walter.supersede_stale_wiki(None);
+    assert_eq!(
+        walter.proposals.get(&11).map(|p| p.state),
+        Some(ProposalState::Proposed),
+        "a base this node does not hold retires nothing"
+    );
+
+    walter.adopt_wiki_base(Some(molt_core::wiki_fold::wiki_base_canonical_bytes(&held)));
+    let p = walter.proposals.get(&11).expect("card 11");
+    assert!(p.superseded, "the arriving base retires the patch it invalidates");
+    assert_eq!(p.state, ProposalState::Rejected);
+}
+
 /// B3 (R7): `withdraw` takes a `note` — posted into the patch channel
 /// BEFORE the retraction, like approve/decline — and answers the record
 /// instead of a bare ack (which left the caller guessing which card it
