@@ -508,7 +508,7 @@ async fn a_raw_patch_that_does_not_apply_is_refused_at_propose() {
     .expect("a patch that applies still proposes");
 }
 
-/// B4 (`docs/reviews/mcp_agent_friction_fixes.md`): a dry run answers the
+/// B4 (`docs_archive/reviews/mcp_agent_friction_fixes.md`): a dry run answers the
 /// patch, its summary and the warnings, and proposes nothing.
 #[tokio::test]
 async fn a_dry_run_shows_the_patch_and_proposes_nothing() {

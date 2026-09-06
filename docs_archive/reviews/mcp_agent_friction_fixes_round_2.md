@@ -3,7 +3,8 @@
 Status: EXECUTED 2026-09-06 - Parts A (A1-A3), B, C and D are on master,
 built by three agents in parallel worktrees and merged in that order.
 Open: A4 (a decline delays the seal - a governance question for the
-republic). The latent index race the Part B agent found on the way
+republic), tracked in `docs/reviews/known_debt.md` since this document
+was archived (2026-09-06). The latent index race the Part B agent found on the way
 (`refresh_wiki_graph` took `wiki_graph_dirty` before checking that a graph
 exists, so a build installed over a moved tree stayed stale) is fixed and
 pinned in the same wave. Source:

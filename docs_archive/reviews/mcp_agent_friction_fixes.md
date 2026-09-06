@@ -1,7 +1,7 @@
 # Fixes from the three-agent wiki round (2026-09-05)
 
 Status: EXECUTED 2026-09-06 - every item below is on master (A2.3 per
-`docs/chain/chain_reorg.md`, E2E `tests/chain_convergence.rs`). What stays
+`docs_archive/chain/chain_reorg.md`, E2E `tests/chain_convergence.rs`). What stays
 open: A2's question 4 (signing `prev`) and the second agent round
 (`agent_wiki_round_2_briefing.md`) that measures the result.
 Source: `mcp_agent_friction_2026-09-05.md` (the observation log, F00-F16 plus
