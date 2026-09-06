@@ -180,7 +180,7 @@ mod tests {
     fn arti_bootstraps_a_client_to_a_state_dir() {
         // the bootstrap-to-state-dir wiring constructs without a live Tor
         // network: a config pinned to a tempdir state/cache builds cleanly.
-        // (The full bootstrap + dial is the #[ignore]d live-tor test below.)
+        // (The full bootstrap + dial is the #[ignore]d `tor_embedded_smoke` test.)
         let dir = tempfile::tempdir().expect("tempdir");
         let state = dir.path().join("state");
         let cache = dir.path().join("cache");
@@ -193,13 +193,4 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    #[ignore = "live tor: full bootstrap + dial needs the real Tor network"]
-    async fn dialer_arti_dials_an_smp_host() {
-        // end-to-end: bootstrap the embedded client and open a Tor circuit to a
-        // known live host. Ignored by default (needs live Tor + network egress).
-        let shared = ArtiShared::new();
-        let stream = shared.connect("smp.konkin.io", 5223).await;
-        assert!(stream.is_ok(), "arti dial failed: {stream:?}");
-    }
 }

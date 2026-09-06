@@ -24,7 +24,10 @@ export LC_ALL=C
 export TZ=UTC
 
 # --locked refuses to build if Cargo.lock and Cargo.toml have drifted.
-cargo build --workspace --release --locked
+# The release carries the embedded Tor client (arti, opt-in feature) - the
+# one binary must run without a system Tor. Only the node binary is packed,
+# so only molt-app is built.
+cargo build -p molt-app --features embedded-tor --release --locked
 
 # Strip after the build → debug-info stays in target/debug for local use.
 strip --strip-unneeded target/release/moltd
