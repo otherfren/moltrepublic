@@ -255,13 +255,18 @@ impl State {
                 )
             })
         });
-        if let Some(found) = live {
-            return Ok(found);
+        if let Some((meta, available)) = live {
+            // R21: a share is immutable - my own file replaced on disk is
+            // not the share any more, at EVERY door (serve, vote, download)
+            let changed = self.share_file_changed(id, meta.size);
+            return Ok((meta, available && !changed));
         }
         match self.files_state().get(id) {
             Some(st) => {
                 let meta = st.identity().clone();
-                let available = meta.by != self.member() || self.files.share_paths.contains_key(id);
+                let available = meta.by != self.member()
+                    || (self.files.share_paths.contains_key(id)
+                        && !self.share_file_changed(id, meta.size));
                 Ok((meta, available))
             }
             None => match self.chat_by_id(id) {

@@ -342,6 +342,7 @@ fn manual_export_writes_a_real_blob_and_fails_honestly() {
             workspaces: Vec::new(),
             settings: SessionSettings {
                 workspace_dir: tmp.path().join("workspaces").display().to_string(),
+                download_dir: tmp.path().join("exchange").display().to_string(),
                 ..SessionSettings::default()
             },
             ..SessionView::default()
@@ -425,6 +426,22 @@ fn manual_export_writes_a_real_blob_and_fails_honestly() {
                 .file_name()
                 .to_string_lossy()
                 .ends_with(".part")));
+
+        // a BARE NAME lands in the exchange folder (ADR-0007: any path is
+        // allowed, the bare form stays the hand-over convenience)
+        w.execute(Command::ExportWorkspace {
+            id: id.clone(),
+            dest: "handover.molt.enc".to_string(),
+            passphrase: pass.clone(),
+        })
+        .await
+        .expect("export kickoff");
+        let outcome = await_export(&w).await;
+        assert_eq!(outcome.result, "ok", "bare-name export: {outcome:?}");
+        assert!(
+            tmp.path().join("exchange").join("handover.molt.enc").is_file(),
+            "the bare name did not land in the download directory"
+        );
 
         // honest failure: the destination's parent is a FILE — the task
         // must report the real error, not a fake success

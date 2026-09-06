@@ -351,9 +351,9 @@ pub struct SessionSettings {
     /// S3 access key id.
     #[serde(default)]
     pub s3_access_key: String,
-    /// S3 secret key. NEVER SERIALIZED (2026-08-26): a credential no
+    /// S3 secret key. WRITE-ONLY (ADR-0007 keeps this): a credential no
     /// surface needs to read back — set blind through `patch_settings` or
-    /// the GUI (`SetNodePosture`); `read_session` carries "".
+    /// `set_node_posture`; `read_session` carries "".
     #[serde(skip_serializing, default)]
     pub s3_secret_key: String,
     /// S3 bucket name. Defaults to something inconspicuous — the bucket
@@ -378,16 +378,16 @@ pub struct SessionSettings {
     pub mcp_port: u16,
     /// MCP client allowlist (`"127.0.0.1" | "0.0.0.0" | comma-separated`).
     pub mcp_allow: String,
-    /// MCP API token clients must present. NEVER SERIALIZED (2026-08-26):
-    /// the token is the whole TCP credential; a client that holds it needs
-    /// no copy, and one that rotates it must not be the only party that
-    /// learns the new one. The GUI reads it in-process; its one door is
-    /// `SetNodePosture`.
+    /// MCP API token clients must present. WRITE-ONLY (ADR-0007 keeps
+    /// this): the token is the whole TCP credential; a client that holds
+    /// it needs no copy, and one that rotates it must not be the only
+    /// party that learns the new one. Settable through `patch_settings` /
+    /// `set_node_posture`; the GUI reads it in-process.
     #[serde(skip_serializing, default)]
     pub mcp_token: String,
     /// A SECOND key admitting only the read tools
     /// (`docs_archive/memory/knowledge_base_scale.md` §4.7). Empty = OFF, never
-    /// "unauthenticated". Never serialized, for the same reason as
+    /// "unauthenticated". Write-only, for the same reason as
     /// [`SessionSettings::mcp_token`]: a credential no surface reads back.
     #[serde(skip_serializing, default)]
     pub mcp_read_token: String,
@@ -743,11 +743,10 @@ pub struct WorkspaceInfo {
     /// workspace is unsealed; cleared to "" the moment it is sealed at rest
     /// (no key material on disk means none in session memory either).
     ///
-    /// NEVER SERIALIZED: an in-process display value for the GUI's
-    /// hold-to-peek only. It rode `read_session` to every MCP client until
-    /// 2026-08-26 (review K4); a phrase is private and leaves the process on
-    /// no surface. Reads back as "" from any wire form.
-    #[serde(skip_serializing, default)]
+    /// SERVED to the SEAT (ADR-0007): an agent operates the machine, so it
+    /// holds the phrase like the human does. The READ-ONLY key never sees
+    /// it (`molt-mcp` strips it from every read-scope reply).
+    #[serde(default)]
     pub seed: String,
     /// The effective global anonymity network (`"tor" | "none"`) when this
     /// entry was founded/joined — a display label (routing always follows
@@ -1652,6 +1651,13 @@ pub struct WorkspacePrefs {
     /// history (the paths would leak the local filesystem layout).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub shared_files: std::collections::BTreeMap<String, String>,
+    /// The STAMP of each of my shares at share time: chat message id (hex)
+    /// → the source file's mtime (unix seconds; 0 = unreadable). A share is
+    /// immutable (`mcp_agent_friction_fixes_round_3.md` D1) - together with
+    /// the share's own `size` this is what tells a replaced file from the
+    /// one the republic voted on. Node-local like the paths beside it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub shared_file_mtimes: std::collections::BTreeMap<String, u64>,
     /// B2 — the seat's own read state: channel key
     /// ([`ChannelRef::storage_key`]) → the [`MessageId`] (hex) this seat
     /// has read THROUGH. Id-addressed, never a position: positions shift
@@ -1693,6 +1699,7 @@ impl Default for WorkspacePrefs {
             last_backup: None,
             simulated_members: false,
             shared_files: std::collections::BTreeMap::new(),
+            shared_file_mtimes: std::collections::BTreeMap::new(),
             read_cursors: std::collections::BTreeMap::new(),
             local_copies: std::collections::BTreeMap::new(),
             last_seen: std::collections::BTreeMap::new(),
@@ -3335,8 +3342,8 @@ pub struct CreateState {
     /// when the ritual opened — a read-only display value, never a choice.
     pub net: String,
     /// The founder's recovery phrase (shown during the ritual, then gone).
-    /// NEVER SERIALIZED — see `WorkspaceInfo::seed`.
-    #[serde(skip_serializing, default)]
+    /// Served to the seat — see `WorkspaceInfo::seed`.
+    #[serde(default)]
     pub seed: String,
     /// Whether the FOUNDER's own phrase backup is confirmed (the re-typed
     /// phrase matched — `seed_backup_confirmation.md` ❻½). The ritual
@@ -3374,8 +3381,8 @@ pub struct JoinState {
     pub inviter: String,
     /// The joiner's freshly generated recovery phrase, shown once during the
     /// join (its identity + own workspace derive from it). Empty while idle.
-    /// NEVER SERIALIZED — see `WorkspaceInfo::seed`.
-    #[serde(skip_serializing, default)]
+    /// Served to the seat — see `WorkspaceInfo::seed`.
+    #[serde(default)]
     pub seed: String,
     /// The founder's proposed final DAO name, surfaced when the ritual reaches
     /// the ratification step (empty until then).
@@ -3884,6 +3891,11 @@ pub enum Command {
     Withdraw {
         /// The proposal to pull back.
         proposal: ProposalId,
+        /// Reasoning, posted into the proposal's discussion right BEFORE
+        /// the retraction lands (empty/absent posts nothing) — the
+        /// approve/decline rule.
+        #[serde(default)]
+        note: Option<String>,
     },
     /// Delete a chat message: its text is wiped for everyone and replaced
     /// by a deletion notice naming who deleted it (reactions are dropped).
@@ -3919,23 +3931,15 @@ pub enum Command {
     /// dedicated encrypted queue. A share IS a chat message, so it files
     /// under a channel view like any other (concept Q8).
     ShareFile {
-        /// Absolute path of the local file to share.
+        /// The local file to share: any ABSOLUTE path the node's user can
+        /// read (`~` expanded), or a BARE NAME, which resolves inside the
+        /// node's download directory - the exchange folder both surfaces
+        /// hand files over in. A relative path is refused (ADR-0007): it
+        /// would resolve against the daemon's working directory.
         path: String,
         /// The channel view the share files under. `Command` is never
         /// persisted, so the field is a clean swap (no serde default) —
         /// every construction site states its channel.
-        channel: ChannelRef,
-    },
-    /// [`Command::ShareFile`] for an MCP client: `name` is a bare file
-    /// name inside the node's download directory — the EXCHANGE FOLDER an
-    /// agent may read from and write into. `ShareFile` itself (any path
-    /// the node's user can read) is the GUI's file dialog only: an agent
-    /// that could name any path would publish the operator's private files
-    /// to the whole republic (MCP audit 2026-08-26 H3).
-    ShareFileFromExchange {
-        /// A bare file name (no separators) in the download directory.
-        name: String,
-        /// The channel view the share files under.
         channel: ChannelRef,
     },
     /// Download a shared file: fetch the bytes peer-to-peer from the
@@ -3945,9 +3949,11 @@ pub enum Command {
     DownloadFile {
         /// The share message's stable id.
         id: MessageId,
-        /// Destination: an existing directory (the file lands inside it,
-        /// name collisions resolve as "name (1).ext") or a full target
-        /// path. Defaults to the session's download directory.
+        /// Destination: a BARE NAME in the download directory, or an
+        /// absolute path - an existing directory takes the share's own
+        /// name (collisions resolve as "name (1).ext"). A relative path is
+        /// refused - see [`Command::ShareFile`]. Defaults to the session's
+        /// download directory.
         #[serde(default)]
         dest: Option<String>,
     },
@@ -4181,14 +4187,20 @@ pub enum Command {
         /// Return the patch instead of proposing it (B4).
         #[serde(default)]
         dry_run: bool,
-        /// Propose even when the result leaves a header the parser reads
-        /// differently than written; without it such a result refuses (B5).
+        /// Propose even with warnings: `true` for all of them, or the
+        /// list of warning codes to acknowledge (E1). Without it a
+        /// warning refuses the call (B5).
         #[serde(default)]
-        allow_warnings: bool,
+        allow_warnings: AllowWarnings,
         /// Withdraw this own, still-open proposal in the same step - the
         /// correction path for a proposal already on the table (B4).
         #[serde(default)]
         supersedes: Option<ProposalId>,
+        /// A `rename` rewrites the base links naming the old path, in the
+        /// same patch (E2). `false` leaves them - and then a base in-link
+        /// refuses the call rather than stranding it silently.
+        #[serde(default = "default_true")]
+        repair_links: bool,
     },
     /// What a `[[Name]]` would bind to, and what else it could mean
     /// (§4.5). Name resolution is case-exact, so an agent needs a way to
@@ -4464,26 +4476,13 @@ pub enum Command {
     ExportWorkspace {
         /// The workspace id ([`WorkspaceInfo::id`]).
         id: WorkspaceId,
-        /// Target file path (`~` is expanded; parents are created; an
-        /// existing file is atomically replaced).
+        /// Target file path: absolute (`~` is expanded; parents are
+        /// created; an existing file is atomically replaced), or a BARE
+        /// NAME, which lands in the node's download directory. A relative
+        /// path is refused — see [`Command::ShareFile`].
         dest: String,
         /// The export passphrase (Argon2id-stretched; minimum 10
         /// characters, engine-enforced).
-        passphrase: String,
-    },
-    /// [`Command::ExportWorkspace`] for an MCP client: a KNOWLEDGE ARCHIVE
-    /// — the history, chain and snapshot, but never the recovery seed, and
-    /// marked phrase-sealed so an import needs the phrase to open it —
-    /// written as `name` into the download directory (the exchange
-    /// folder). The seed-carrying export to any path is the GUI's only:
-    /// blob + passphrase would otherwise replace the phrase, which leaves
-    /// the process on no surface (MCP audit 2026-08-26 H1).
-    ExportWorkspaceArchive {
-        /// The workspace id ([`WorkspaceInfo::id`]).
-        id: WorkspaceId,
-        /// A bare file name (no separators) in the download directory.
-        name: String,
-        /// The export passphrase (minimum 10 characters, engine-enforced).
         passphrase: String,
     },
     /// The export task confirmed the blob on disk (engine-internal, from
@@ -4520,19 +4519,11 @@ pub enum Command {
     /// anything with — a files-only export stays available). Runs off the
     /// actor; the honest outcome lands in [`SessionView::wiki_export`].
     WikiExport {
-        /// Target directory (`~` is expanded; parents are created; existing
-        /// files of the same name are overwritten).
+        /// Target directory: absolute (`~` is expanded; parents are
+        /// created; existing files of the same name are overwritten), or a
+        /// BARE NAME, which lands in the node's download directory. A
+        /// relative path is refused — see [`Command::ShareFile`].
         dest: String,
-        /// Include the verification bundle.
-        proof: bool,
-    },
-    /// [`Command::WikiExport`] for an MCP client: into `name`, a bare
-    /// directory name inside the download directory — never an arbitrary
-    /// path, which the tree would be scattered into and same-named files
-    /// overwritten at (MCP audit 2026-08-26 M3).
-    WikiExportArchive {
-        /// A bare directory name (no separators) in the download directory.
-        name: String,
         /// Include the verification bundle.
         proof: bool,
     },
@@ -5625,7 +5616,7 @@ pub enum Command {
     },
     /// Where this seat keeps the mirrored pieces of the open republic
     /// (`prefs.mirror_dir`; "" = the default folder). Any-path on the
-    /// host, so GUI/config-only - never an MCP tool (`mcp-security.md`).
+    /// host, and a tool on both surfaces (ADR-0007).
     SetMirrorDir {
         /// The folder, `~` allowed; "" restores the default.
         path: String,
@@ -5655,25 +5646,21 @@ pub enum Command {
         generation: Option<u64>,
     },
     /// Set (or clear) this node's **wake command** — the local shell hook a
-    /// poke or pending vote runs. Deliberately NOT an MCP tool: the string is
-    /// executed by the node, so an agent that could set it would grant itself
-    /// code execution on the operator's machine (the same reasoning that
-    /// keeps the clearnet switch off the settings surface). The GUI and
-    /// `config.toml` are its only doors.
+    /// poke or pending vote runs. The GUI's direct door; over MCP the key
+    /// rides the settings surface (`poke_wake_command`, ADR-0007), so this
+    /// variant stays INTERNAL only because it is a second door, not
+    /// because the value is off limits.
     SetWakeCommand {
         /// The command line, run via `sh -c`. Empty clears it.
         command: String,
     },
-    /// Set the node's HOST POSTURE — the settings that decide who can
-    /// reach this node, whether its traffic is anonymized, where it keeps
-    /// and exchanges files, and the two secrets. Deliberately NOT an MCP
-    /// tool (MCP audit 2026-08-26 M1/H4): an agent operates its human's
-    /// SEAT (the "agents are seats" decision), not the human's machine or
-    /// anonymity — `anonymity = "none"` over MCP would deanonymize the
-    /// operator, `mcp_allow = "0.0.0.0"` or a token rotation would let it
-    /// widen or take over its own access. `SaveSettings` and
-    /// `PatchSettings` keep the stored values for these keys; the GUI and
-    /// `config.toml` are the doors.
+    /// Set the node's HOST POSTURE in one call — who can reach this node,
+    /// whether its traffic is anonymized, where it keeps and exchanges
+    /// files, and the three secrets. A tool on both surfaces (ADR-0007:
+    /// the agent operates the machine); `PatchSettings` reaches the same
+    /// keys one at a time. The secrets are `Option`: `None` keeps the
+    /// stored value, which is how `SaveSettings` (whose payload never
+    /// carries them) leaves them alone.
     SetNodePosture {
         /// The posture to store.
         posture: NodePosture,
@@ -5744,8 +5731,9 @@ pub const UI_ACTION_VERBS: [&str; 5] = [
     "chat_send",
 ];
 
-/// The settings keys [`Command::SetNodePosture`] owns — refused by
-/// `PatchSettings`, re-merged from the stored values by `SaveSettings`.
+/// The HOST-POSTURE settings keys: [`Command::SetNodePosture`] sets them
+/// in one call, `PatchSettings` and `SaveSettings` reach them like any
+/// other key (ADR-0007). The three secrets among them are write-only.
 pub const NODE_POSTURE_KEYS: [&str; 11] = [
     "headless",
     "workspace_dir",
@@ -5858,6 +5846,12 @@ pub enum Reply {
         /// belong (B10, `docs_archive/reviews/mcp_agent_friction_fixes.md`).
         #[serde(default)]
         channel: ChannelRef,
+        /// The in-links a `rename` carried with it (E2): pages the patch
+        /// rewrites BEYOND the ones the caller named. Not a warning - the
+        /// caller asked for the rename - but the vote carries them, so the
+        /// reply says which.
+        #[serde(default)]
+        repaired: Vec<WikiRepairedLinks>,
     },
     /// This node's vote landed (approve or decline): the record as it
     /// stands afterwards, so a voter sees what its voice did without a
@@ -5893,6 +5887,9 @@ pub enum Reply {
         summary: String,
         /// Header warnings the patch would leave behind.
         warnings: Vec<String>,
+        /// The in-links a `rename` would carry with it (E2).
+        #[serde(default)]
+        repaired: Vec<WikiRepairedLinks>,
     },
     /// A surface snapshot.
     State(SurfaceSnapshot),
@@ -5947,6 +5944,10 @@ pub enum Reply {
         index_rev: u64,
         /// The base revision of the fold itself.
         wiki_rev: u64,
+        /// The index is still being built: `hits` is empty because
+        /// nothing could be read, not because nothing matched (R7).
+        #[serde(default)]
+        index_building: bool,
     },
     /// The documents near one ([`Command::WikiNeighbors`]).
     WikiNeighbors {
@@ -5959,6 +5960,10 @@ pub enum Reply {
         index_rev: u64,
         /// The base revision of the fold itself.
         wiki_rev: u64,
+        /// The index is still being built: `docs` is empty because
+        /// nothing could be walked, not because the page is isolated (R7).
+        #[serde(default)]
+        index_building: bool,
     },
     /// What changed since a revision ([`Command::WikiChanges`]).
     WikiChanges {
@@ -5999,10 +6004,39 @@ pub enum Reply {
         /// The page references to shared files that rot.
         #[serde(default)]
         files: WikiFileHealth,
+        /// Per `type` value the header keys its pages carry (E3): the
+        /// group that shows a WRONG key (seven `person` pages on `year`
+        /// while forty carry `notable_year`), which no spelling check
+        /// can see. Types by page count, keys by page count.
+        #[serde(default)]
+        props_by_type: Vec<WikiTypeProps>,
+        /// How many types there are.
+        #[serde(default)]
+        props_by_type_total: u64,
+        /// Edges whose (subject type, object type) pair is rare for their
+        /// predicate (E3) - the reversed-relation signal. HEURISTIC: a
+        /// rare pair is not a wrong one.
+        #[serde(default)]
+        direction_outliers: Vec<WikiDirectionOutlier>,
+        /// How many such groups there are.
+        #[serde(default)]
+        direction_outliers_total: u64,
         /// The base revision the GRAPH reflects.
         index_rev: u64,
         /// The base revision of the fold itself.
         wiki_rev: u64,
+        /// The chain height this answer was measured at (R10) - a hygiene
+        /// value is LOCAL truth, and two seats at different heights
+        /// honestly disagree. Additive.
+        #[serde(default)]
+        head: u64,
+        /// The folded base behind it, `None` until this republic has cut.
+        #[serde(default)]
+        base: Option<String>,
+        /// The index is still being built: the lists are empty because
+        /// nothing could be read, not because the wiki is clean (R7).
+        #[serde(default)]
+        index_building: bool,
     },
     /// What a name could mean ([`Command::WikiResolve`]).
     WikiResolve {
@@ -6041,6 +6075,12 @@ pub enum Reply {
         /// document order.
         #[serde(default)]
         files: Vec<WikiFileRef>,
+        /// The chain height this read was measured at (R10). Additive.
+        #[serde(default)]
+        head: u64,
+        /// The folded base behind it, `None` until this republic has cut.
+        #[serde(default)]
+        base: Option<String>,
     },
     /// The member table (Organization → Members). A struct variant on
     /// purpose: the internally-tagged `reply` repr cannot serialize a bare
@@ -6589,6 +6629,66 @@ pub struct WikiFileIssue {
     pub paths_total: u64,
 }
 
+/// The pages one `rename` carried with it ([`Reply::Proposed`],
+/// [`Reply::WikiPreview`], E2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiRepairedLinks {
+    /// The path the rename left.
+    pub from: String,
+    /// The path it moved to.
+    pub to: String,
+    /// The pages whose links were rewritten, path-sorted.
+    pub pages: Vec<String>,
+}
+
+/// One `type` value with the header keys its pages carry
+/// ([`Reply::WikiHealth`], E3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiTypeProps {
+    /// The `type` value.
+    pub kind: String,
+    /// How many pages carry it.
+    pub pages: u64,
+    /// Its keys, most-carried first, capped by the request's `limit`.
+    pub keys: Vec<WikiKeyCount>,
+    /// How many distinct keys its pages carry.
+    pub keys_total: u64,
+}
+
+/// One header key and how many pages of a type carry it
+/// ([`Reply::WikiHealth`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiKeyCount {
+    /// The key.
+    pub key: String,
+    /// How many pages of the type carry it.
+    pub pages: u64,
+}
+
+/// One predicate asserted between a type pair its own wiki rarely uses
+/// ([`Reply::WikiHealth`], E3). HEURISTIC: read as "check these", never
+/// as "these are wrong".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiDirectionOutlier {
+    /// The predicate.
+    pub predicate: String,
+    /// The `type` of the pages asserting it.
+    pub subject_type: String,
+    /// The `type` of the pages it points at.
+    pub object_type: String,
+    /// How many edges run that way (a claim written both in the header
+    /// and inline counts once).
+    pub count: u64,
+    /// The pair this predicate usually runs between, `"a -> b"`.
+    pub usual: String,
+    /// How many edges run the usual way.
+    pub usual_count: u64,
+    /// The asserting pages, capped by the request's `limit`.
+    pub from: Vec<String>,
+    /// How many pages assert it.
+    pub from_total: u64,
+}
+
 /// One document a name could mean ([`Reply::WikiResolve`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WikiCandidate {
@@ -6598,6 +6698,38 @@ pub struct WikiCandidate {
     /// `"case"` - a case-insensitive match the case-exact rule does NOT
     /// bind, listed so an agent can pick the real spelling.
     pub via: String,
+}
+
+/// What a [`Command::WikiEdit`] caller acknowledges (E1). `true` takes
+/// every warning, a list takes exactly the named codes - so one stale
+/// warning can be waved through without blinding the caller to the rest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AllowWarnings {
+    /// All of them, or none.
+    All(bool),
+    /// Exactly these warning codes.
+    Codes(Vec<String>),
+}
+
+impl Default for AllowWarnings {
+    fn default() -> Self {
+        AllowWarnings::All(false)
+    }
+}
+
+impl AllowWarnings {
+    /// Nothing acknowledged - the default.
+    pub const NONE: AllowWarnings = AllowWarnings::All(false);
+
+    /// Is this code acknowledged?
+    #[must_use]
+    pub fn admits(&self, code: &str) -> bool {
+        match self {
+            AllowWarnings::All(all) => *all,
+            AllowWarnings::Codes(codes) => codes.iter().any(|c| c == code),
+        }
+    }
 }
 
 /// One edit of the structured write path ([`Command::WikiEdit`]). Applied
@@ -6694,6 +6826,12 @@ pub struct ChainBlockView {
     pub proposal_id: u64,
     /// The m signers, roster order as on the block.
     pub signers: Vec<String>,
+    /// When this node's log first carried the block (unix seconds; 0 =
+    /// not in the log any more, or below a cut). A DISPLAY stamp off the
+    /// local log - the chain itself is unstamped and consensus never
+    /// reads this. Additive.
+    #[serde(default)]
+    pub ts: u64,
 }
 
 /// One `(height, hash)` sample of a chain - what a fork-aware catch-up
@@ -6833,12 +6971,20 @@ pub struct UploadView {
     /// This node's live download of the share, if any (requester side).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download: Option<DownloadView>,
-    /// ONE status word for the relay plane (`file_transfer_nostr.md` §5.5):
-    /// `"relay-held"` (a live series stamp is known — downloads need no
-    /// live sharer), `"sharer-only"` (the first download wakes the
-    /// sharer), `"gone"` (withdrawn and not on the relays). Additive.
+    /// ONE status word for where the bytes can be had, in this
+    /// precedence: `"changed"` (the sharer's file was replaced on disk -
+    /// a share is immutable, so the row is no longer the voted file),
+    /// `"gone"` (nobody holds it any more), `"mirrored"` (a seat other
+    /// than the sharer holds the whole series), `"relay-held"` (a live
+    /// series stamp - a download needs no live sharer), `"sharer-only"`
+    /// (the first download wakes the sharer). Additive.
     #[serde(default)]
     pub availability: String,
+    /// Where THIS seat has the bytes: `"own"` · `"downloaded"` ·
+    /// `"mirrored"` · `"partial"` · `"none"` - the word half of
+    /// [`LocalCopy`] (the path stays with the seat). Additive.
+    #[serde(default)]
+    pub local: String,
     /// A vote pinned this share (`persistent_uploads.md` D1): it never
     /// expires and lists under Persistent Uploads, not Temporary.
     #[serde(default)]
@@ -7429,6 +7575,48 @@ pub enum MoltError {
 mod tests {
     use super::*;
 
+    // ---- wiki_edit's acknowledgement (E1) --------------------------------
+
+    /// The wire shape has to take BOTH: the bool every caller already
+    /// sends, and the code list that acknowledges one warning without
+    /// waving through the rest.
+    #[test]
+    fn allow_warnings_reads_a_bool_or_a_list_of_codes() {
+        let all: AllowWarnings = serde_json::from_value(serde_json::json!(true)).expect("bool");
+        assert!(all.admits("name_collision") && all.admits("anything"));
+        let none: AllowWarnings = serde_json::from_value(serde_json::json!(false)).expect("bool");
+        assert!(!none.admits("name_collision"));
+        assert_eq!(none, AllowWarnings::default());
+        let some: AllowWarnings =
+            serde_json::from_value(serde_json::json!(["open_path"])).expect("list");
+        assert!(some.admits("open_path") && !some.admits("name_collision"));
+        assert_eq!(
+            serde_json::to_value(&some).expect("back"),
+            serde_json::json!(["open_path"])
+        );
+        assert_eq!(
+            serde_json::to_value(AllowWarnings::NONE).expect("back"),
+            serde_json::json!(false),
+            "an untouched command still writes the legacy shape"
+        );
+    }
+
+    /// A pre-E2 caller sends no `repair_links`, and a rename must then
+    /// carry its in-links - the default is the SAFE half.
+    #[test]
+    fn a_wiki_edit_without_repair_links_repairs() {
+        let cmd: Command = serde_json::from_value(serde_json::json!({
+            "cmd": "wiki_edit",
+            "edits": []
+        }))
+        .expect("the legacy shape loads");
+        let Command::WikiEdit { repair_links, allow_warnings, .. } = cmd else {
+            panic!("not a wiki_edit");
+        };
+        assert!(repair_links);
+        assert_eq!(allow_warnings, AllowWarnings::NONE);
+    }
+
     // ---- TransportState v4 (N4: the Nostr transport shape) ----------------
 
     /// A v3-era `transport.state` (no `kind`, no relay fields) must load with
@@ -7695,6 +7883,7 @@ mod tests {
                 id: ProposalId(1),
                 warnings: Vec::new(),
                 channel: ChannelRef::Patch { id: ProposalId(1) },
+                repaired: Vec::new(),
             },
             Reply::Proposals { proposals: vec![] },
             Reply::Members { members: vec![] },

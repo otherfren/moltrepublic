@@ -366,8 +366,34 @@ async fn call_tool(
     let cmd = (def.build)(args)?;
     let reply = handle.execute(cmd).await.map_err(|e| e.to_string())?;
     let value = serde_json::to_value(&reply).map_err(|e| e.to_string())?;
-    let value = present(name, args, value)?;
+    let mut value = present(name, args, value)?;
+    if scope == Scope::Read {
+        strip_seat_secrets(&mut value);
+    }
     serde_json::to_string_pretty(&value).map_err(|e| e.to_string())
+}
+
+/// The READ-ONLY key sees no recovery phrase and no secret, whatever a
+/// future reply carries (ADR-0007: the SEAT holds the phrase, the read key
+/// is a knowledge door). A belt over the scope list's braces - a read tool
+/// added tomorrow cannot leak one by accident. `props` is skipped: those
+/// keys are the wiki's, and a page property may legitimately be named
+/// `seed`.
+fn strip_seat_secrets(v: &mut Value) {
+    match v {
+        Value::Object(o) => {
+            for key in ["seed", "mcp_token", "mcp_read_token", "s3_secret_key"] {
+                o.remove(key);
+            }
+            for (key, child) in o.iter_mut() {
+                if key != "props" {
+                    strip_seat_secrets(child);
+                }
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(strip_seat_secrets),
+        _ => {}
+    }
 }
 
 /// The agent-facing shape of a reply, where it differs from the engine's
@@ -809,23 +835,18 @@ fn screen_arg(args: &Value) -> Result<Screen, String> {
 /// Open TCP connections the endpoint serves at once (review F7).
 const MAX_CONNECTIONS: usize = 64;
 
-/// A bare exchange-folder name: one path component, no separators, no
-/// `..` — the engine re-checks, this refuses early with the tool's words.
-fn bare_name_arg(args: &Value, key: &str) -> Result<String, String> {
-    let name = str_arg(args, key)?;
-    let name = name.trim();
-    if name.is_empty()
-        || name == "."
-        || name == ".."
-        || name.contains('/')
-        || name.contains('\\')
-        || name.contains('\0')
-    {
-        return Err(format!(
-            "`{key}` must be a bare file name inside the download directory (no path separators)"
-        ));
+/// A destination: `path` (anywhere the node's user can reach) or `name`
+/// (a bare name in the download directory). Exactly one, and the engine
+/// resolves a bare name against that folder (ADR-0007).
+fn dest_arg(args: &Value) -> Result<String, String> {
+    let path = args.get("path").and_then(Value::as_str).map(str::trim);
+    let name = args.get("name").and_then(Value::as_str).map(str::trim);
+    match (path.filter(|p| !p.is_empty()), name.filter(|n| !n.is_empty())) {
+        (Some(_), Some(_)) => Err("`path` and `name` are alternatives - give one".to_string()),
+        (Some(p), None) => Ok(p.to_string()),
+        (None, Some(n)) => Ok(n.to_string()),
+        (None, None) => Err("`path` (any path) or `name` (in the download directory) is required".to_string()),
     }
-    Ok(name.to_string())
 }
 
 fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
@@ -850,10 +871,10 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
         args.get(key).and_then(Value::as_u64).ok_or_else(|| missing(key))
     };
     Ok(SessionSettings {
-        // the HOST POSTURE and the two secrets have exactly one door — the GUI
-        // (`SetNodePosture`) and config.toml: carried through unchanged, the
-        // engine re-merges the stored values (MCP audit 2026-08-26 M1/H4)
-        headless: d.headless,
+        // the host posture is part of the wholesale save (ADR-0007) and
+        // required like every other field: an absent `anonymity` must not
+        // read as "switch Tor off"
+        headless: flag("headless")?,
         // NOT settable through save_settings — the relay pool and the
         // clearnet decision have exactly one door each (the Relay* tools),
         // so an agent cannot grant itself non-onion dialing here. Carried
@@ -864,17 +885,18 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
         font_app: d.font_app,
         font_nav: d.font_nav,
         font_editor: d.font_editor,
-        workspace_dir: d.workspace_dir,
+        workspace_dir: text("workspace_dir")?,
         // REQUIRED, null = no cap (mirroring.md §1), 0 = sharing off
         // (FP4): an absent key must not flip a human's "off" to unlimited
         file_cap_bytes: match args.get("file_cap_bytes") {
             None => return Err(missing("file_cap_bytes")),
             Some(_) => nullable_u64_arg(args, "file_cap_bytes")?,
         },
-        download_dir: d.download_dir,
+        download_dir: text("download_dir")?,
         s3_backup: flag("s3_backup")?,
         s3_endpoint: text("s3_endpoint")?,
         s3_access_key: text("s3_access_key")?,
+        // write-only: never on the wire, the engine keeps the stored one
         s3_secret_key: d.s3_secret_key,
         s3_bucket: text("s3_bucket")?,
         s3_interval_min: port("s3_interval_min")?,
@@ -896,11 +918,7 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
             .get("poke_enabled")
             .and_then(Value::as_bool)
             .unwrap_or(d.poke_enabled),
-        // NOT settable here — the wake command is a local SHELL hook, and an
-        // agent that could plant one would grant itself code execution as the
-        // node's user. Carried through unchanged; the engine re-merges the
-        // stored value, exactly like the clearnet decision above.
-        poke_wake_command: d.poke_wake_command,
+        poke_wake_command: text("poke_wake_command")?,
         read_receipts: flag("read_receipts")?,
         // the trickle pace (mirroring §3.2): optional, absent = the defaults
         mirror_publish_interval_secs: args
@@ -911,15 +929,43 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
             .get("mirror_daily_bytes")
             .and_then(Value::as_u64)
             .unwrap_or(d.mirror_daily_bytes),
-        mcp_port: d.mcp_port,
-        mcp_allow: d.mcp_allow,
+        mcp_port: port("mcp_port")?,
+        mcp_allow: text("mcp_allow")?,
+        // the three secrets are write-only: the engine keeps the stored ones
         mcp_token: d.mcp_token,
         mcp_read_token: d.mcp_read_token,
-        anonymity: d.anonymity,
-        tor_mode: d.tor_mode,
-        tor_port: d.tor_port,
+        anonymity: text("anonymity")?,
+        tor_mode: text("tor_mode")?,
+        tor_port: port("tor_port")?,
         // never taken from the payload — the engine keeps the live pool
         relays: Vec::new(),
+    })
+}
+
+/// The host posture from `set_node_posture`'s arguments. Every non-secret
+/// key is required (a defaulted `anonymity` would read as "Tor off"); an
+/// absent secret keeps the stored one.
+fn posture_arg(args: &Value) -> Result<molt_core::NodePosture, String> {
+    let missing = |key: &str| format!("`{key}` is required - to change one setting use patch_settings");
+    let text = |key: &str| -> Result<String, String> {
+        args.get(key).and_then(Value::as_str).map(str::to_string).ok_or_else(|| missing(key))
+    };
+    let port = |key: &str| -> Result<u16, String> {
+        args.get(key).and_then(Value::as_u64).and_then(|p| u16::try_from(p).ok()).ok_or_else(|| missing(key))
+    };
+    let secret = |key: &str| args.get(key).and_then(Value::as_str).map(str::to_string);
+    Ok(molt_core::NodePosture {
+        headless: args.get("headless").and_then(Value::as_bool).ok_or_else(|| missing("headless"))?,
+        workspace_dir: text("workspace_dir")?,
+        download_dir: text("download_dir")?,
+        mcp_port: port("mcp_port")?,
+        mcp_allow: text("mcp_allow")?,
+        anonymity: text("anonymity")?,
+        tor_mode: text("tor_mode")?,
+        tor_port: port("tor_port")?,
+        mcp_token: secret("mcp_token"),
+        mcp_read_token: secret("mcp_read_token"),
+        s3_secret_key: secret("s3_secret_key"),
     })
 }
 
@@ -1032,10 +1078,22 @@ pub fn tools() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "set_mirror_dir",
+            command: "set_mirror_dir",
+            scope: Scope::Seat,
+            description: "Where this seat keeps the mirrored pieces of the OPEN republic (\"\" restores the default folder). The series folders move with it; a folder already at the target stays and its pieces are re-checked.",
+            schema: || json!({
+                "type": "object",
+                "properties": { "path": { "type": "string", "description": "the folder (~ expanded); \"\" = the default" } },
+                "required": ["path"]
+            }),
+            build: |args| Ok(Command::SetMirrorDir { path: str_arg(args, "path")? }),
+        },
+        ToolDef {
             name: "read_mirror",
             command: "read_mirror",
             scope: Scope::Seat,
-            description: "Who mirrors what in the open republic: this seat's switch and quota, every member's declaration (known or not), and per shared file the members holding the whole series (the sharer included) plus this seat's own held/of.",
+            description: "Who mirrors what in the open republic: this seat's switch and quota, every member's declaration (known or not), and per shared file the MEMBERS holding the whole series (the sharer included) plus this seat's own held/of PIECES.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ReadMirror),
         },
@@ -1100,19 +1158,19 @@ pub fn tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "share_file",
-            command: "share_file_from_exchange",
+            command: "share_file",
             scope: Scope::Seat,
-            description: "Share a file from the node's download directory (the EXCHANGE FOLDER - read_session.settings.download_dir) into the ungated chat: the engine derives the metadata and streams the real sha256 off the actor, then posts the share message (async - it appears in read_state once hashing completes). Only metadata enters the chat; the bytes move per-download over a dedicated encrypted queue. `name` is a bare file name inside that folder - an agent shares what was put there for it, never an arbitrary path on the operator's machine (that is the GUI's file dialog). A share is a chat message, so `channel` files it under a view of the one stream exactly like chat_send (omit for the all-hands group).",
+            description: "Share a local file into the ungated chat: the engine derives the metadata and streams the real sha256 off the actor, then posts the share message (async - it appears in read_state once hashing completes). Only metadata enters the chat; the bytes move per-download over a dedicated encrypted queue. Name the file with `path` (any ABSOLUTE path this node's user can read; a relative one is refused - it would resolve against the daemon's working directory) or with `name` (a bare name inside the download directory - read_session.settings.download_dir, the exchange folder). A share is a chat message, so `channel` files it under a view of the one stream exactly like chat_send (omit for the all-hands group). A share is IMMUTABLE: replacing the file on disk does not update it - the row turns `available: false, availability: changed` and serves nothing. A new version is a new share.",
             schema: || json!({
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "description": "bare file name inside the download directory (no path separators)" },
+                    "path": { "type": "string", "description": "an absolute path the node's user can read (~ expanded)" },
+                    "name": { "type": "string", "description": "a bare file name inside the download directory" },
                     "channel": channel_schema("optional: the channel view this share files under (omit for the all-hands group)")
-                },
-                "required": ["name"]
+                }
             }),
-            build: |args| Ok(Command::ShareFileFromExchange {
-                name: bare_name_arg(args, "name")?,
+            build: |args| Ok(Command::ShareFile {
+                path: dest_arg(args)?,
                 channel: channel_arg(args)?.unwrap_or_default(),
             }),
         },
@@ -1120,21 +1178,23 @@ pub fn tools() -> Vec<ToolDef> {
             name: "download_file",
             command: "download_file",
             scope: Scope::Seat,
-            description: "Download a shared file: fetches the BYTES peer-to-peer from the sharer's device over a dedicated encrypted queue (the sharer must be online), verifies size + sha256 against the share, and writes the file into the node's download directory (the EXCHANGE FOLDER) - as `dest`, a bare file name, or under the share's own name when omitted. Never an arbitrary path: peer-chosen bytes landing anywhere on the operator's machine would be a persistence primitive. Async kickoff - poll read_uploads for the download's phase/percent/path/error. Addressed by the share message's stable id (32-char lowercase hex, from read_state). Fails honestly once the sharer deleted the file or stays offline.",
+            description: "Download a shared file. When this seat already MIRRORS the whole file (read_uploads `local: mirrored`) the bytes are assembled locally and no network is involved - otherwise they are fetched peer-to-peer from the sharer's device over a dedicated encrypted queue (the sharer must be online). Either way it verifies size + sha256 against the share, and writes it to `dest`: a bare name lands in the node's download directory (the EXCHANGE FOLDER), an ABSOLUTE path is that path, an existing directory takes the share's own name; omitted = the share's name in the download directory. A relative path is refused - it would resolve against the daemon's working directory. Async kickoff - poll read_uploads for the download's phase/percent/path/error. Addressed by the share message's stable id (32-char lowercase hex, from read_state). Fails honestly once the sharer deleted the file or stays offline.",
             schema: || json!({
                 "type": "object",
                 "properties": {
                     "id": { "type": "string", "description": "share message id (32-char lowercase hex, from read_state)" },
-                    "dest": { "type": "string", "description": "optional: a bare file name inside the download directory (no path separators; omit = the share's own name)" }
+                    "dest": { "type": "string", "description": "optional: a bare file name in the download directory, or an absolute path / directory (~ expanded); omit = the share's own name" }
                 },
                 "required": ["id"]
             }),
             build: |args| Ok(Command::DownloadFile {
                 id: id_arg(args, "id")?,
-                dest: match args.get("dest").and_then(Value::as_str) {
-                    Some(_) => Some(bare_name_arg(args, "dest")?),
-                    None => None,
-                },
+                dest: args
+                    .get("dest")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|d| !d.is_empty())
+                    .map(str::to_string),
             }),
         },
         ToolDef {
@@ -1169,12 +1229,12 @@ pub fn tools() -> Vec<ToolDef> {
             name: "propose",
             command: "propose",
             scope: Scope::Seat,
-            description: "Put an object forward for threshold approval on a gated surface. An Organization set_image payload must embed the actual image as base64 `bytes_b64` and the bytes must DECODE as a picture (png/jpeg/webp/gif/bmp, ≤8192x8192; svg is refused) - sign-what-you-see: members vote on the image, so undecodable bytes are refused here and dropped by every peer. Payload size is capped at what one relay message can carry (about 64 KiB of image for a small roster); an over-size proposal is refused with the exact figure that fits. Organization op set_features enables charter features: value = space-separated keys among memory/quests/vault/wallet, the FULL target set - it must keep every enabled feature (enable-only, never off again) and add at least one. Proposing on a surface whose feature is not enabled is refused (status.features lists the enabled set). Memory op wiki_patch is a wiki changeset vote: `value` carries a raw git-format patch (unified diffs; rename/new/deleted headers), `summary` a short count string like \"+2 -1 →1 ~34\" where `+` `-` `→` count FILES added, deleted and renamed and `~` counts changed LINES - the GUI's changeset vote emits exactly this shape and renders the patch in its diff viewer. It is the RAW form, for a caller that already holds a patch, and it is refused when the patch does not apply to the base it is proposed against; wiki_edit writes the wiki without one. A path another OPEN proposal also touches is NOT that refusal: the patch goes to the vote and reads `superseded` once the other one seals and moves the base. The proposer's own signature is the first of m; the reply names the proposal's `channel`. Ids are minted per seat, so the sequence has gaps by design.",
+            description: "Put an object forward for threshold approval on a gated surface. An Organization set_image payload must embed the actual image as base64 `bytes_b64` and the bytes must DECODE as a picture (png/jpeg/webp/gif/bmp, ≤8192x8192; svg is refused) - sign-what-you-see: members vote on the image, so undecodable bytes are refused here and dropped by every peer. Payload size is capped at what one relay message can carry (about 64 KiB of image for a small roster); an over-size proposal is refused with the exact figure that fits. Organization op set_features enables charter features: value = space-separated keys among memory/quests/vault/wallet, the FULL target set - it must keep every enabled feature (enable-only, never off again) and add at least one. Proposing on a surface whose feature is not enabled is refused (status.features lists the enabled set); organization, chat and files are CORE surfaces - always proposable, never in a feature set. Memory op wiki_patch is a wiki changeset vote: `value` carries a raw git-format patch (unified diffs; rename/new/deleted headers), `summary` a short count string like \"+2 -1 →1 ~34\" where `+` `-` `→` count FILES added, deleted and renamed and `~` counts changed LINES - the GUI's changeset vote emits exactly this shape and renders the patch in its diff viewer. It is the RAW form, for a caller that already holds a patch, and it is refused when the patch does not apply to the base it is proposed against; wiki_edit writes the wiki without one. A path another OPEN proposal also touches is NOT that refusal: the patch goes to the vote and reads `superseded` once the other one seals and moves the base. The proposer's own signature is the first of m; the reply names the proposal's `channel`. Ids are minted per seat, so the sequence has gaps by design.",
             schema: || json!({
                 "type": "object",
                 "properties": {
                     "surface": { "type": "string", "enum": gated_enum() },
-                    "payload": { "type": "object", "description": "surface-specific transition {\"op\": ...}: organization set_name/set_charter/set_chat_retention {value}, set_image {value, bytes_b64}, remove_image, set_relays {value: \"wss://a wss://b\"}, set_features {value: \"memory quests\"}, set_member_image {member, value, bytes_b64}/remove_member_image/set_member_desc {member, value} (own seat only, square picture); memory add_note {title}, wiki_patch {value: git-format patch, summary} (raw - wiki_edit is the structured way); quests add_quest {title}; vault seal_secret {title}; wallet transfer {title}" }
+                    "payload": { "type": "object", "description": "surface-specific transition {\"op\": ...}: organization set_name/set_charter/set_chat_retention {value}, set_image {value, bytes_b64}, remove_image, set_relays {value: \"wss://a wss://b\"}, set_features {value: \"memory quests\"}, set_member_image {member, value, bytes_b64}/remove_member_image/set_member_desc {member, value} (own seat only, square picture); memory add_note {title}, wiki_patch {value: git-format patch, summary} (raw - wiki_edit is the structured way); quests add_quest {title}; vault seal_secret {title}; wallet transfer {title}; files persist {id} / unpersist {id, at} (id = the SHARE's chat message id from read_uploads, `at` = a unix stamp within an hour of this clock and not before the share)" }
                 },
                 "required": ["surface", "payload"]
             }),
@@ -1223,14 +1283,18 @@ pub fn tools() -> Vec<ToolDef> {
             name: "withdraw",
             command: "withdraw",
             scope: Scope::Seat,
-            description: "Pull back a proposal THIS seat proposed (proposer only - anyone else is refused): it turns terminal on every node without forging any vote, and the card reads \"pulled back\". Only works while the vote is still pending.",
+            description: "Pull back a proposal THIS seat proposed (proposer only - anyone else is refused): it turns terminal on every node without forging any vote, and the card reads \"pulled back\". Only works while the vote is still pending. Pass `note` to post the reason into the proposal's discussion in the same call: it lands BEFORE the retraction. The reply is the record, like approve/decline.",
             schema: || json!({
                 "type": "object",
-                "properties": { "proposal_id": { "type": "integer" } },
+                "properties": {
+                    "proposal_id": { "type": "integer" },
+                    "note": { "type": "string", "description": "optional: your reasoning, posted into the proposal's discussion before the retraction" }
+                },
                 "required": ["proposal_id"]
             }),
             build: |args| Ok(Command::Withdraw {
                 proposal: ProposalId(u64_arg(args, "proposal_id")?),
+                note: opt_str_arg(args, "note")?,
             }),
         },
         ToolDef {
@@ -1265,7 +1329,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "read_chain",
             command: "read_chain",
             scope: Scope::Seat,
-            description: "The persistent chain as display data (Chain-History): every committed block of the open republic, newest first - genesis, applied changes, membership transitions, and checkpoint compaction cuts - each with its height, kind, target surface, display payload, consumed proposal id, and the m signers. On a pruned holder the history below the last checkpoint cut appears as summarized entries rebuilt from the checkpoint blob (height 0 - the per-block positions and signatures were dropped with the history). Two fields report the two ways a seat loses the republic, and they are NOT the same thing: `diverged` means CONTRADICTION - that peer is on another branch and the two refuse each other's blocks; `stale_signers` means SILENCE - the seat is on this branch but has stopped co-signing since `last_signed_height`. For distance (the peers running ahead of this node) read status.chain_lag.",
+            description: "The persistent chain as display data (Chain-History): every committed block of the open republic, newest first - genesis, applied changes, membership transitions, and checkpoint compaction cuts - each with its height, kind, target surface, display payload, consumed proposal id, the m signers, and `ts` - the unix seconds this node's log carried the block (a DISPLAY stamp; the chain itself is unstamped, and 0 means the log no longer holds it). On a pruned holder the history below the last checkpoint cut appears as summarized entries rebuilt from the checkpoint blob (height 0 - the per-block positions and signatures were dropped with the history). Two fields report the two ways a seat loses the republic, and they are NOT the same thing: `diverged` means CONTRADICTION - that peer is on another branch and the two refuse each other's blocks; `stale_signers` means SILENCE - the seat is on this branch but has stopped co-signing since `last_signed_height`. For distance (the peers running ahead of this node) read status.chain_lag.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ReadChain),
         },
@@ -1273,7 +1337,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wiki_list",
             command: "wiki_list",
             scope: Scope::Read,
-            description: "List the shared wiki's documents under `docs` - path, `bytes` and title (the header's `title`, else the first heading), no content - one page at a time. `prefix` narrows to a folder, `cursor` continues a page (pass the previous reply's `next_cursor`), `limit` is clamped to 1..=500 (default 100). `total` counts everything under the prefix. Fetch a document with wiki_get.",
+            description: "List the shared wiki's documents under `docs` - path, `bytes` and title (the header's `title`, else the first heading), no content - one page at a time. `prefix` narrows to a FOLDER (a path prefix ending at a `/` boundary, not a string match), `cursor` continues a page (pass the previous reply's `next_cursor`), `limit` is clamped to 1..=500 (default 100). `total` counts everything under the prefix. Fetch a document with wiki_get.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1300,7 +1364,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wiki_search",
             command: "wiki_search",
             scope: Scope::Read,
-            description: "Search the wiki. `query` is tantivy syntax (`+must -not \"phrase\" title:term`) over title, body, the header's own values and the aliases a page declares - so a page is found under its name, not only under its prose. `tags`, `type`, `folder` and `props` narrow it. `props` is an object of front-matter pairs (`{\"status\": \"draft\"}`) that must ALL match, with the value written exactly as wiki_props reports it; a value over 64 characters is not faceted and matches nothing. The hits arrive under `hits`, each with a snippet. Page with `limit` and `cursor`. An empty query with no filter finds nothing, never everything.",
+            description: "Search the wiki. `query` is tantivy syntax (`+must -not \"phrase\" title:term`) over title, body, the header's own values, the aliases a page declares and the `upload:` file references it carries - so a page is found under its name, and a file's pages under its checksum (the first 12 hex digits find every carrying page, however long the reference was written). `tags`, `type`, `folder` and `props` narrow it. `props` is an object of front-matter pairs (`{\"status\": \"draft\"}`) that must ALL match, with the value written exactly as wiki_props reports it; a value over 64 characters is not faceted and matches nothing. The hits arrive under `hits`, each with a snippet. Page with `limit` and `cursor`. An empty query with no filter finds nothing, never everything. While the index rebuilds the reply is `index_building: true` with `hits` empty - ask again.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1351,7 +1415,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wiki_neighbors",
             command: "wiki_neighbors",
             scope: Scope::Read,
-            description: "The documents within one or two hops of a document, under `docs`, nearest first. Each hit says HOW it was reached: `predicate` (the relation of the edge that reached it, null for a plain link), `direction` (out|in, seen from the document it was reached from) and `via` (the documents in between, empty at distance 1). `predicate` narrows the walk to one relation, `direction` picks which way it runs (default both). `transitive` walks that ONE predicate to a fixpoint (cap 500) instead of `depth` hops - it is the caller's assumption about the predicate, the republic declares no vocabulary - and needs a `predicate`. `capped` says the cap cut the walk short.",
+            description: "The documents within one or two hops of a document, under `docs`, nearest first. Each hit says HOW it was reached: `predicate` (the relation of the edge that reached it, null for a plain link), `direction` (out|in, seen from the document it was reached from) and `via` (the documents in between, empty at distance 1). `predicate` narrows the walk to one relation, `direction` picks which way it runs (default both). `transitive` walks that ONE predicate to a fixpoint (cap 500) instead of `depth` hops - it is the caller's assumption about the predicate, the republic declares no vocabulary - and needs a `predicate`. `capped` says the cap cut the walk short. While the index rebuilds the reply is `index_building: true` with `docs` empty - ask again.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1377,7 +1441,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wiki_get",
             command: "wiki_get",
             scope: Scope::Read,
-            description: "One wiki document in full, front matter included. An unknown path is an error, never an empty document. `files` lists the page's file references - `upload:<sha256 hex, 12..64>` names a PERSISTENT shared file, written `![alt](upload:...)` for an image and `[text](upload:...)` otherwise - one entry per distinct hex in document order, each with the `name` it resolves to (empty when none) and its `state`: unknown, ambiguous, temporary, remote or local (the bytes are on this node). resolve_upload answers one such reference on its own.",
+            description: "One wiki document in full, front matter included. An unknown path is an error, never an empty document. `files` lists the page's file references - `upload:<sha256 hex, 12..64>` names a PERSISTENT shared file, written `![alt](upload:...)` for an image and `[text](upload:...)` otherwise - one entry per distinct hex in document order, each with the `name` it resolves to (empty when none) and its `state`: unknown, ambiguous, temporary, remote or local (the bytes are on this node). resolve_upload answers one such reference on its own. `head` and `base` name the chain height and folded base this read was measured on - two seats at different heights honestly answer differently.",
             schema: || json!({
                 "type": "object",
                 "properties": { "path": { "type": "string", "description": "the document's path, e.g. \"people/anna.md\"" } },
@@ -1410,7 +1474,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wiki_health",
             command: "wiki_health",
             scope: Scope::Read,
-            description: "The wiki's hygiene in one read. `dangling` = names some document links to and no document carries, each with who references them - the best \"what should I write next\" signal; `orphans` = documents nothing links to; `key_drift` = groups of front-matter keys that differ only in case or separator (`status` and `Status` are two fields to every property query). `files` = the file references that rot: `dangling` (no shared file carries the `upload:<sha256 hex, 12..64>` prefix), `temporary` (the only match is not persisted yet) and `ambiguous` (more than one file carries the prefix), each naming the `paths` that reference it. `limit` caps each list on its own, 1..=500 (default 100), and each carries its own total.",
+            description: "The wiki's hygiene in one read. `dangling` = names some document links to and no document carries, each with who references them - the best \"what should I write next\" signal; `orphans` = documents nothing links to; `key_drift` = groups of front-matter keys that differ only in case or separator (`status` and `Status` are two fields to every property query). `files` = the file references that rot: `dangling` (no shared file carries the `upload:<sha256 hex, 12..64>` prefix), `temporary` (the only match is not persisted yet) and `ambiguous` (more than one file carries the prefix), each naming the `paths` that reference it. `head` and `base` name the chain height and folded base this read was measured on - a hygiene value is LOCAL truth. `limit` caps each list on its own, 1..=500 (default 100), and each carries its own total. `props_by_type` = per `type` value, how many pages carry it and how many of them carry each header key - the WRONG key `key_drift` cannot see (seven `person` pages on `year` while forty carry `notable_year`). `direction_outliers` = a predicate asserted between a type pair the wiki itself rarely uses, with the pair it usually runs between; HEURISTIC - read it as \"check these\", not as \"these are wrong\". While the index rebuilds after a large apply the reply is `index_building: true` with empty lists - ask again, it is a state, not a fault.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1441,7 +1505,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wiki_edit",
             command: "wiki_edit",
             scope: Scope::Seat,
-            description: "Write the wiki. `edits` apply IN ORDER to a working copy of the current base; the engine diffs the result and puts THAT patch to the members as a normal changeset vote - propose, not save, and the reply is the proposal id. Ops (fields in the schema): create, content, replace, set_props, add_relation, rename, delete. `create` writes a NEW page and refuses an occupied path; `content` writes a whole document, creating it when the path is free and OVERWRITING it when it is not. An edit that cannot land refuses the whole call with the reason and proposes nothing: a create onto an occupied path, a path that does not exist, an `old` that is absent or occurs more than once, a header the parser would not read back, a relation target that does not resolve uniquely, a rename onto an existing path. A path another OPEN proposal also touches is no refusal by itself (it is a warning, see below): that patch goes to the vote and reads `superseded` once the other one seals and moves the base. `replace` matches a SUBSTRING, not a line: `## Quellen` also sits inside `### Quellen (Sitz B)`, so anchor on `\\n## Quellen\\n`; a repeated one-line `old` is refused with the line numbers it hit. A relation reads better in the sentence that asserts it - write `[[predicate::Name]]` inside a content or replace edit; add_relation is for when there is no such sentence. An edge asserted BOTH in the header and in the prose survives set_props removing the header key - the inline link still asserts it (wiki_links marks each edge `header: true/false`). Check a target with wiki_resolve, and wiki_props for the relation names this republic already uses. The proposer's own signature is the first of m. The vote card's `summary` counts `+` `-` `→` in FILES added, deleted and renamed, `~` in changed LINES. `dry_run: true` proposes nothing and answers `summary`, `warnings` and the `paths` it would touch; `with_patch: true` adds the patch itself. A warning REFUSES the call, naming each one; `allow_warnings: true` proposes anyway. The warnings: a header the parser reads differently than written (an unquoted `[[link]]` value is a nested list), a touched path an open proposal already touches, a rename that leaves a link in an open proposal, a new title or alias that already names another page, `content` over a page another seat last wrote, and a file reference `upload:<sha256 hex, 12..64>` that resolves to nothing or to more than one file (a match that is only TEMPORARY does not warn: the page may reference a file the persist vote is about to pin). `supersedes: <id>` withdraws that own, still-open proposal in the same step - the way to correct one already on the table. The header dialect is the YAML 1.2 core schema in a flat subset: `no`, `yes`, `on` stay strings. The reply names the proposal's `channel`, where review remarks belong.",
+            description: "Write the wiki. `edits` apply IN ORDER to a working copy of the current base; the engine diffs the result and puts THAT patch to the members as a normal changeset vote - propose, not save, and the reply is the proposal id. Ops (fields in the schema): create, content, replace, set_props, add_relation, rename, delete. `create` writes a NEW page and refuses an occupied path; `content` writes a whole document, creating it when the path is free and OVERWRITING it when it is not. An edit that cannot land refuses the whole call with the reason and proposes nothing: a create onto an occupied path, a path that does not exist, an `old` that is absent or occurs more than once, a header the parser would not read back, a relation target that does not resolve uniquely, a rename onto an existing path. A path another OPEN proposal also touches is no refusal by itself (it is a warning, see below): that patch goes to the vote and reads `superseded` once the other one seals and moves the base. `replace` matches a SUBSTRING, not a line: `## Quellen` also sits inside `### Quellen (Sitz B)`, so anchor on `\\n## Quellen\\n`; a repeated one-line `old` is refused with the line numbers it hit. A relation reads better in the sentence that asserts it - write `[[predicate::Name]]` inside a content or replace edit; add_relation is for when there is no such sentence. An edge asserted BOTH in the header and in the prose survives set_props removing the header key - the inline link still asserts it (wiki_links marks each edge `header: true/false`). Check a target with wiki_resolve, and wiki_props for the relation names this republic already uses. The proposer's own signature is the first of m. The vote card's `summary` counts `+` `-` `→` in FILES added, deleted and renamed, `~` in changed LINES. `dry_run: true` proposes nothing and answers `summary`, `warnings` and the `paths` it would touch; `with_patch: true` adds the patch itself. `supersedes: <id>` withdraws that own, still-open proposal in the same step - the way to correct one already on the table. The header dialect is the YAML 1.2 core schema in a flat subset: `no`, `yes`, `on` stay strings. The reply names the proposal's `channel`, where review remarks belong. A warning REFUSES the call, naming each one as `<code>: <what>`; `allow_warnings: true` proposes anyway, and `allow_warnings: [\"<code>\", ...]` acknowledges exactly those - so one stale warning does not blind you to the rest. The codes: `header` (the parser reads the header differently than written - an unquoted `[[link]]` value is a nested list), `open_path` (a touched path an open proposal already touches), `rename_link` (a rename's incoming links: the base pages it rewrote, or a link an open proposal still writes to the old path), `name_collision` (a new title or alias that already names another page), `foreign_rewrite` (`content` over a page another seat last wrote), `file_ref` (an `upload:<sha256 hex, 12..64>` reference that is malformed, resolves to nothing, to more than one file, or only to a TEMPORARY share - a page outlives the chat window, so propose `persist` on `files` first). Every warning is measured against the tree the WHOLE edit list leaves, not against the base: an alias one edit frees and a later one claims is no collision. `rename` carries its incoming links with it - every base page whose markdown link or `[[path]]` names the old path is rewritten IN THE SAME PATCH; that is no warning, but the reply names those pages under `repaired` (and `paths` lists them) so you see what the vote carries beyond the rename. A `[[Name]]` binds by title or alias and needs no rewrite. `repair_links: false` leaves the links and REFUSES instead, naming the pages that would keep the old path.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1521,8 +1585,9 @@ pub fn tools() -> Vec<ToolDef> {
                     },
                     "dry_run": { "type": "boolean", "description": "optional: answer summary, warnings and paths, propose nothing" },
                     "with_patch": { "type": "boolean", "description": "optional, dry runs only: include the patch itself (default false)" },
-                    "allow_warnings": { "type": "boolean", "description": "optional: propose even with warnings (default: a warning refuses the call)" },
-                    "supersedes": { "type": "integer", "description": "optional: withdraw this own open proposal in the same step" }
+                    "allow_warnings": { "description": "optional: `true` for every warning, or the list of codes to acknowledge - header, open_path, rename_link, name_collision, foreign_rewrite, file_ref (default: a warning refuses the call)", "oneOf": [{ "type": "boolean" }, { "type": "array", "items": { "type": "string" } }] },
+                    "supersedes": { "type": "integer", "description": "optional: withdraw this own open proposal in the same step" },
+                    "repair_links": { "type": "boolean", "description": "optional: a rename rewrites the base links naming the old path (default true)" }
                 },
                 "required": ["edits"]
             }),
@@ -1536,11 +1601,20 @@ pub fn tools() -> Vec<ToolDef> {
                     None | Some(Value::Null) => None,
                     Some(_) => Some(ProposalId(u64_arg(args, "supersedes")?)),
                 };
+                let allow_warnings = match args.get("allow_warnings") {
+                    None | Some(Value::Null) => molt_core::AllowWarnings::NONE,
+                    Some(v) => serde_json::from_value(v.clone())
+                        .map_err(|_| "`allow_warnings`: a boolean or a list of codes".to_string())?,
+                };
                 Ok(Command::WikiEdit {
                     edits,
                     dry_run: flag_arg(args, "dry_run"),
-                    allow_warnings: flag_arg(args, "allow_warnings"),
+                    allow_warnings,
                     supersedes,
+                    repair_links: args
+                        .get("repair_links")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true),
                 })
             },
         },
@@ -1592,7 +1666,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "read_uploads",
             command: "read_uploads",
             scope: Scope::Read,
-            description: "The Shared Files tables: every file shared into the chat (metadata only - bytes move user-to-user via the share link), with sharer, timestamp, availability and the deadline `expires_ts`. `persistent: false` = Temporary Uploads: ephemeral like chat, gone from the read (and undownloadable) after the chat retention window. `persistent: true` = Persistent Uploads: a threshold vote pinned it (`propose` on `files`, op `persist`), `expires_ts` is 0 and it outlives its chat message; an `unpersist` vote moves it back with a fresh window. The `id` is the chat message id `download_file` and the two ops take.",
+            description: "The Shared Files tables: every file shared into the chat (metadata only - bytes move user-to-user via the share link), with sharer, timestamp, availability and the deadline `expires_ts`. `persistent: false` = Temporary Uploads: ephemeral like chat, gone from the read (and undownloadable) after the chat retention window. `persistent: true` = Persistent Uploads: a threshold vote pinned it (`propose` on `files`, op `persist`), `expires_ts` is 0 and it outlives its chat message; an `unpersist` vote moves it back with a fresh window. The `id` is the chat message id `download_file` and the two ops take. `availability` says where the bytes can be had, in this precedence: `changed` (the sharer replaced the file on disk - a share is immutable, so this row is no longer the voted file), `gone` (nobody holds it), `mirrored` (a seat other than the sharer holds the whole series), `relay-held` (a live series stamp - no live sharer needed), `sharer-only` (the first download wakes the sharer). `local` says where THIS seat has them: own, downloaded, mirrored, partial, none. `mirrors` counts MEMBERS holding the whole series (the sharer included); `mirror_held`/`mirror_of` count this seat's verified PIECES.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ReadUploads),
         },
@@ -1652,7 +1726,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "read_session",
             command: "read_session",
             scope: Scope::Seat,
-            description: "Read the shared app/session state the GUI mirrors: current screen, surface + sub-view, language, workspaces, run lifecycles, and settings.",
+            description: "Read the shared app/session state the GUI mirrors: current screen, surface + sub-view, language, workspaces, run lifecycles, and settings. Carries the recovery phrase of a running ritual (create.seed / join.seed) and of each stored workspace - the seat holds it, the read-only key never sees it. The three secrets (mcp_token, mcp_read_token, s3_secret_key) are write-only and read back as \"\".",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ReadSession),
         },
@@ -1770,10 +1844,19 @@ pub fn tools() -> Vec<ToolDef> {
             name: "save_settings",
             command: "save_settings",
             scope: Scope::Seat,
-            description: "Store the node settings and persist them to the node's config.toml (format-preserving, atomic; the write outcome lands in the session notice, restart-required keys in session.restart_required). Replaces the settings wholesale; read_session first, then pass back the changed fields. The host posture (headless, directories, MCP port/allowlist/token, anonymity, Tor) and the S3 secret are NOT part of it - they are set in the GUI or config.toml (the S3 secret also via patch_settings, write-only).",
+            description: "Store the node settings and persist them to the node's config.toml (format-preserving, atomic; the write outcome lands in the session notice, restart-required keys in session.restart_required). Replaces the settings WHOLESALE, host posture included, so every field is required: read_session first, then pass the whole set back with your change. To adjust one thing use patch_settings. The three secrets (mcp_token, mcp_read_token, s3_secret_key) are not part of it - they never read back and keep their stored values here (patch_settings and set_node_posture set them).",
             schema: || json!({
                 "type": "object",
                 "properties": {
+                    "headless": { "type": "boolean" },
+                    "workspace_dir": { "type": "string" },
+                    "download_dir": { "type": "string" },
+                    "mcp_port": { "type": "integer" },
+                    "mcp_allow": { "type": "string", "description": "\"127.0.0.1\" | \"0.0.0.0\" | comma-separated" },
+                    "anonymity": { "type": "string", "enum": ["tor", "none"] },
+                    "tor_mode": { "type": "string", "enum": ["local", "embedded", "whonix"] },
+                    "tor_port": { "type": "integer" },
+                    "poke_wake_command": { "type": "string", "description": "local shell hook a poke runs; \"\" clears it" },
                     "s3_backup": { "type": "boolean" },
                     "s3_endpoint": { "type": "string" },
                     "s3_access_key": { "type": "string" },
@@ -1791,6 +1874,8 @@ pub fn tools() -> Vec<ToolDef> {
                     "mirror_daily_bytes": { "type": "integer", "description": "optional; piece bytes the file trickle may publish per UTC day (default 536870912)" }
                 },
                 "required": [
+                    "headless", "workspace_dir", "download_dir", "mcp_port", "mcp_allow",
+                    "anonymity", "tor_mode", "tor_port", "poke_wake_command",
                     "s3_backup", "s3_endpoint", "s3_access_key", "s3_bucket",
                     "s3_interval_min", "s3_keep_copies", "s3_max_bytes",
                     "sound_message",
@@ -1802,14 +1887,50 @@ pub fn tools() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "set_node_posture",
+            command: "set_node_posture",
+            scope: Scope::Seat,
+            description: "Set the node's HOST POSTURE in one call: where it runs (headless), where it keeps workspaces and exchanges files, who may reach its MCP endpoint, and whether its traffic goes over Tor. Most keys read back in read_session.settings; the three secrets never do - omit one to keep it, pass \"\" to clear it. Restart-required keys land in session.restart_required. Changing anonymity or tor_mode re-runs nothing by itself: probe with net_test_tor.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "headless": { "type": "boolean", "description": "run without a window" },
+                    "workspace_dir": { "type": "string" },
+                    "download_dir": { "type": "string", "description": "the exchange folder shares and downloads default to" },
+                    "mcp_port": { "type": "integer" },
+                    "mcp_allow": { "type": "string", "description": "\"127.0.0.1\" | \"0.0.0.0\" | comma-separated" },
+                    "anonymity": { "type": "string", "enum": ["tor", "none"] },
+                    "tor_mode": { "type": "string", "enum": ["local", "embedded", "whonix"] },
+                    "tor_port": { "type": "integer" },
+                    "mcp_token": { "type": "string", "description": "write-only: the seat key; omit to keep it" },
+                    "mcp_read_token": { "type": "string", "description": "write-only: the read-only key; \"\" switches it off" },
+                    "s3_secret_key": { "type": "string", "description": "write-only: the S3 secret; omit to keep it" }
+                },
+                "required": ["headless", "workspace_dir", "download_dir", "mcp_port", "mcp_allow", "anonymity", "tor_mode", "tor_port"]
+            }),
+            build: |args| Ok(Command::SetNodePosture { posture: posture_arg(args)? }),
+        },
+        ToolDef {
             name: "patch_settings",
             command: "patch_settings",
             scope: Scope::Seat,
-            description: "Change SOME settings, keeping every field you do not mention. This is the tool for adjusting one thing: save_settings REPLACES everything, and its defaults are not neutral - its defaults are not neutral, so a partial save_settings would silently reset them. Unknown keys are refused rather than ignored; the relay pool keeps its own door (the relay_* tools), and the host posture (headless, workspace_dir, download_dir, mcp_port, mcp_allow, mcp_token, anonymity, tor_mode, tor_port, poke_wake_command) is the GUI's / config.toml's - refused here. s3_secret_key is accepted write-only (it never reads back).",
+            description: "Change SOME settings, keeping every field you do not mention - the tool for adjusting one thing (save_settings replaces everything, and its defaults are not neutral). The host posture is reachable here too. Unknown keys are refused rather than ignored; the relay pool keeps its own door (the relay_* tools). The three secrets are accepted write-only (they never read back).",
             schema: || json!({
                 "type": "object",
                 "description": "the settings to change, keyed as in read_session.settings",
                 "properties": {
+                    "headless": { "type": "boolean" },
+                    "workspace_dir": { "type": "string" },
+                    "download_dir": { "type": "string" },
+                    "mcp_port": { "type": "integer" },
+                    "mcp_allow": { "type": "string", "description": "\"127.0.0.1\" | \"0.0.0.0\" | comma-separated" },
+                    "anonymity": { "type": "string", "enum": ["tor", "none"] },
+                    "tor_mode": { "type": "string", "enum": ["local", "embedded", "whonix"] },
+                    "tor_port": { "type": "integer" },
+                    "poke_wake_command": { "type": "string", "description": "local shell hook a poke runs; \"\" clears it" },
+                    "mcp_token": { "type": "string", "description": "write-only: the seat key" },
+                    "mcp_read_token": { "type": "string", "description": "write-only: the read-only key; \"\" switches it off" },
+                    "s3_secret_key": { "type": "string", "description": "write-only: the S3 secret" },
                     "s3_backup": { "type": "boolean" },
                     "s3_endpoint": { "type": "string" },
                     "s3_access_key": { "type": "string" },
@@ -1900,21 +2021,13 @@ pub fn tools() -> Vec<ToolDef> {
                 },
                 "required": ["url"]
             }),
-            build: |args| {
-                // the clearnet acknowledgement exposes the OPERATOR's IP and
-                // subscriptions: a human decision in the GUI, never an
-                // agent's (MCP audit 2026-08-26 M2)
-                if args.get("accept_clearnet").and_then(Value::as_bool) == Some(true) {
-                    return Err(
-                        "clearnet consent is given in the GUI, not over MCP - confirm onion relays here"
-                            .to_string(),
-                    );
-                }
-                Ok(Command::RelayConfirm {
-                    url: str_arg(args, "url")?,
-                    accept_clearnet: false,
-                })
-            },
+            build: |args| Ok(Command::RelayConfirm {
+                url: str_arg(args, "url")?,
+                accept_clearnet: args
+                    .get("accept_clearnet")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            }),
         },
         ToolDef {
             name: "relay_revoke",
@@ -1940,16 +2053,9 @@ pub fn tools() -> Vec<ToolDef> {
                 },
                 "required": ["unlock"]
             }),
-            build: |args| {
-                let unlock = bool_arg(args, "unlock")?;
-                if unlock {
-                    return Err(
-                        "non-onion dialing is switched on in the GUI, not over MCP - switching it off is fine here"
-                            .to_string(),
-                    );
-                }
-                Ok(Command::RelayClearnetSession { unlock })
-            },
+            build: |args| Ok(Command::RelayClearnetSession {
+                unlock: bool_arg(args, "unlock")?,
+            }),
         },
         ToolDef {
             name: "net_test_s3",
@@ -2148,39 +2254,40 @@ pub fn tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "export_workspace",
-            command: "export_workspace_archive",
+            command: "export_workspace",
             scope: Scope::Seat,
-            description: "Export a workspace as ONE encrypted KNOWLEDGE ARCHIVE (*.molt.enc, format molt-export-v1) into the node's download directory (the EXCHANGE FOLDER): manifest, the encrypted history, the threshold-signed chain, the newest snapshot, the logo. NEVER the recovery seed: the blob is marked phrase-sealed, so an import needs the recovery phrase to open it - blob + passphrase reads the knowledge and nothing more (the seed-carrying export to any path is the GUI's). Live MLS/transport state is NEVER exported: the blob restores knowledge; rejoining the live republic goes through the recovery ritual. Protection: Argon2id-stretched passphrase (minimum 10 characters) + XChaCha20-Poly1305. Async kickoff - the honest outcome (ok with byte count and skipped files, or the real error) lands in read_session's `export` state; there is no fake success.",
+            description: "Export a workspace as ONE encrypted *.molt.enc blob (format molt-export-v1): manifest, the encrypted history, the threshold-signed chain, the newest snapshot, the logo and - when this device stores it - the recovery seed. CAUTION: blob + passphrase then restores the seat like the recovery phrase itself; guard both. Live MLS/transport state is NEVER exported: the blob restores knowledge, rejoining the live republic goes through the recovery ritual. Write it with `path` (an ABSOLUTE path; a relative one is refused) or `name` (a bare name in the download directory). Protection: Argon2id-stretched passphrase (minimum 10 characters) + XChaCha20-Poly1305. Async kickoff - the honest outcome (ok with byte count and skipped files, or the real error) lands in read_session's `export` state; there is no fake success.",
             schema: || json!({
                 "type": "object",
                 "properties": {
                     "id": { "type": "string", "description": "the workspace id from read_session" },
-                    "name": { "type": "string", "description": "bare file name inside the download directory (no path separators; an existing file is replaced)" },
+                    "path": { "type": "string", "description": "an absolute target path (~ expanded; an existing file is replaced)" },
+                    "name": { "type": "string", "description": "a bare file name inside the download directory" },
                     "passphrase": { "type": "string", "description": "export passphrase, minimum 10 characters" }
                 },
-                "required": ["id", "name", "passphrase"]
+                "required": ["id", "passphrase"]
             }),
-            build: |args| Ok(Command::ExportWorkspaceArchive {
+            build: |args| Ok(Command::ExportWorkspace {
                 id: str_arg(args, "id")?,
-                name: bare_name_arg(args, "name")?,
+                dest: dest_arg(args)?,
                 passphrase: str_arg(args, "passphrase")?,
             }),
         },
         ToolDef {
             name: "wiki_export",
-            command: "wiki_export_archive",
+            command: "wiki_export",
             scope: Scope::Seat,
-            description: "Export the wiki (every applied page) as files into `name`, a directory inside the node's download directory (the EXCHANGE FOLDER), optionally with the verification bundle (the threshold-signed patches that prove every page). Never an arbitrary path: an agent-chosen destination would scatter the tree into the operator's directories and overwrite same-named files. Async kickoff - the outcome lands in read_session's `wiki_export` state.",
+            description: "Export the wiki (every applied page) as files into a directory, optionally with the verification bundle (the threshold-signed patches that prove every page). Name it with `path` (an ABSOLUTE directory; a relative one is refused) or `name` (a bare name in the node's download directory). Existing files of the same name are overwritten. Async kickoff - the outcome lands in read_session's `wiki_export` state.",
             schema: || json!({
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "description": "bare directory name inside the download directory (no path separators)" },
+                    "path": { "type": "string", "description": "an absolute target directory (~ expanded; parents are created)" },
+                    "name": { "type": "string", "description": "a bare directory name inside the download directory" },
                     "proof": { "type": "boolean", "description": "include the verification bundle (default true)" }
-                },
-                "required": ["name"]
+                }
             }),
-            build: |args| Ok(Command::WikiExportArchive {
-                name: bare_name_arg(args, "name")?,
+            build: |args| Ok(Command::WikiExport {
+                dest: dest_arg(args)?,
                 proof: args.get("proof").and_then(Value::as_bool).unwrap_or(true),
             }),
         },
@@ -2360,7 +2467,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "confirm_seed_backup",
             command: "confirm_seed_backup",
             scope: Scope::Seat,
-            description: "Confirm the operator's recovery-phrase backup during a RUNNING founding or join ritual by re-typing the phrase (create.seed / join.seed). The engine matches it; the ritual seals - and touches disk - only once EVERY participant confirmed (founder included). Founder side: any time before the seal (the GUI prompts once every member ratified - seats at state 2 or 4). Joiner side: after ratifying (join.awaiting_backup).",
+            description: "Confirm this seat's recovery-phrase backup during a RUNNING founding or join ritual by re-typing the phrase - read it from read_session (create.seed for a founding, join.seed for a join). The engine matches it; the ritual seals - and touches disk - only once EVERY participant confirmed (founder included). Founder side: any time before the seal (seats at state 2 or 4). Joiner side: after ratifying (join.awaiting_backup).",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -2507,27 +2614,15 @@ mod tests {
         // net_poked is the transport handing over an MLS-AUTHENTICATED poke
         // (poke is the tool; an agent must not be able to forge a nudge that
         // claims to come from another member).
-        // set_wake_command is the ONE door of the local shell hook the wake
-        // feature runs, and it is deliberately GUI/config-only: a tool for it
-        // would let any MCP client execute code as the node's user, which is
-        // a different thing entirely from acting inside the republic. The
-        // wholesale settings paths refuse the key for the same reason.
-        const INTERNAL: [&str; 78] = [
+        // set_wake_command is the GUI's DIRECT door for the local shell
+        // hook; the value itself rides the settings surface as
+        // `poke_wake_command` (ADR-0007), so this stays internal only
+        // because it is a second door, not because it is off limits.
+        const INTERNAL: [&str; 73] = [
             // a referenced file's bytes off the local disk / mirror store
             // (wiki_files_and_images.md §3.3): the GUI's picture, an agent
             // gets download_file into its exchange folder
             "read_upload_bytes",
-            // the HOST POSTURE and the two secrets (MCP audit 2026-08-26 M1/H4):
-            // an agent operates the seat, not the machine — GUI / config only
-            "set_node_posture",
-            // the mirror folder is an any-path host setting (mirroring §3.5)
-            "set_mirror_dir",
-            // any-path file access is the GUI's file dialog; an agent gets the
-            // exchange folder (share_file_from_exchange, export_workspace_archive,
-            // wiki_export_archive) — H1/H3/M3 of the same audit
-            "share_file",
-            "export_workspace",
-            "wiki_export",
             // ui_publish is the WINDOW reporting what it renders — an
             // agent must not be able to forge what the GUI claims to show
             // (gui_over_mcp.md); reads go through read_ui_state.
@@ -2866,17 +2961,15 @@ mod tests {
     /// A well-formed message id for the argument-mapping tests.
     const HEX_ID: &str = "00112233445566778899aabbccddeeff";
 
-    /// **No recovery phrase ever leaves the process.** `read_session`
-    /// serialized the whole `SessionView`, and `WorkspaceInfo.seed` (a
-    /// demo-era display field) plus the two wizard phrases rode along —
-    /// every MCP client, over cleartext TCP, held every phrase on the
-    /// device (review 2026-08-25 K4; the operator's rule: private, never
-    /// shared). The fields never serialize now, so no surface can leak
-    /// them by accident.
+    /// **The SEAT holds the phrase, the read-only key never does**
+    /// (ADR-0007). The audit of 2026-08-26 had made the three seed fields
+    /// unserializable, which left every headless node unable to found or
+    /// join; they are served again — and the read scope strips them, along
+    /// with the three write-only secrets, from whatever a reply carries.
     #[test]
-    fn no_recovery_phrase_ever_serializes() {
+    fn no_recovery_phrase_reaches_the_read_scope() {
         let phrase = "abandon ability able about above absent absorb abstract";
-        let sv = molt_core::SessionView {
+        let mut sv = molt_core::SessionView {
             workspaces: vec![molt_core::WorkspaceInfo {
                 seed: phrase.to_string(),
                 ..molt_core::WorkspaceInfo::demo_set().remove(0)
@@ -2885,80 +2978,159 @@ mod tests {
             join: molt_core::JoinState { seed: phrase.to_string(), ..Default::default() },
             ..Default::default()
         };
-        let mut sv = sv;
         sv.settings.mcp_token = "TOKEN-SECRET".to_string();
+        sv.settings.mcp_read_token = "READ-SECRET".to_string();
         sv.settings.s3_secret_key = "S3-SECRET".to_string();
-        let json = serde_json::to_string(&sv).expect("serializes");
-        assert!(!json.contains(phrase), "a phrase is in the wire form: {json}");
-        assert!(!json.contains("\"seed\""), "a seed key is in the wire form");
-        assert!(!json.contains("TOKEN-SECRET") && !json.contains("S3-SECRET"), "a secret is in the wire form");
-        // …and a view read back without them is the same view
-        let back: molt_core::SessionView = serde_json::from_str(&json).expect("reads back");
-        assert_eq!(back.workspaces[0].seed, "", "the phrase stays in-process");
+        let mut value = serde_json::to_value(&sv).expect("serializes");
+        let json = value.to_string();
+        assert_eq!(value["create"]["seed"], phrase, "the ritual phrase reaches the seat");
+        assert_eq!(value["join"]["seed"], phrase);
+        assert_eq!(value["workspaces"][0]["seed"], phrase);
+        assert!(
+            !json.contains("TOKEN-SECRET")
+                && !json.contains("READ-SECRET")
+                && !json.contains("S3-SECRET"),
+            "a stored secret is on the wire: {json}"
+        );
+
+        strip_seat_secrets(&mut value);
+        assert!(
+            !value.to_string().contains(phrase),
+            "the read scope sees a phrase: {value}"
+        );
+        for key in ["seed", "mcp_token", "mcp_read_token", "s3_secret_key"] {
+            assert!(
+                !value.to_string().contains(&format!("\"{key}\"")),
+                "`{key}` survived the read-scope strip"
+            );
+        }
+        // …but a wiki PAGE property named `seed` is content, not a secret
+        let mut page = json!({ "reply": "wiki_document", "props": { "seed": "12 words" } });
+        strip_seat_secrets(&mut page);
+        assert_eq!(page["props"]["seed"], "12 words", "the wiki's own keys are untouched");
+        // …and the session is a SEAT tool, so a read key never asks for it
+        assert_eq!(tool_named("read_session").scope, Scope::Seat);
     }
 
-    /// **No host-posture key and no secret is on the settings surface.**
-    /// `save_settings` never carries them (the engine re-merges the stored
-    /// values), `patch_settings` refuses them — an agent operates the seat,
-    /// not the machine (MCP audit 2026-08-26 M1/H4).
+    /// **The host posture is on the settings surface** (ADR-0007): the
+    /// wholesale save carries every posture key (required, so an absent
+    /// `anonymity` cannot read as "Tor off"), the patch reaches them one
+    /// at a time, and `set_node_posture` is the one-call form. Only the
+    /// three secrets stay write-only.
     #[test]
-    fn the_settings_tools_carry_no_host_posture_or_secret() {
+    fn the_settings_tools_carry_the_host_posture() {
+        let readable: Vec<&str> = molt_core::NODE_POSTURE_KEYS
+            .iter()
+            .copied()
+            .filter(|k| !["mcp_token", "mcp_read_token", "s3_secret_key"].contains(k))
+            .collect();
         for tool in ["save_settings", "patch_settings"] {
             let schema = (tool_named(tool).schema)();
             let props = schema["properties"].as_object().expect("properties");
-            for key in molt_core::NODE_POSTURE_KEYS {
-                assert!(!props.contains_key(key), "{tool} exposes `{key}`");
-            }
-            if tool == "save_settings" {
-                assert!(!props.contains_key("s3_secret_key"), "the secret is write-only via patch");
+            for key in &readable {
+                assert!(props.contains_key(*key), "{tool} hides `{key}`");
             }
         }
+        let save = (tool_named("save_settings").schema)();
+        let required: Vec<String> = save["required"]
+            .as_array()
+            .expect("required")
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        for key in &readable {
+            assert!(required.contains(&(*key).to_string()), "save_settings defaults `{key}`");
+        }
+        for secret in ["mcp_token", "mcp_read_token", "s3_secret_key"] {
+            assert!(
+                !save["properties"].as_object().expect("props").contains_key(secret),
+                "`{secret}` never reads back, so a wholesale save cannot carry it"
+            );
+            assert!(
+                (tool_named("patch_settings").schema)()["properties"]
+                    .as_object()
+                    .expect("props")
+                    .contains_key(secret),
+                "`{secret}` is settable write-only"
+            );
+        }
+        assert!(matches!(
+            build("set_node_posture", &json!({
+                "headless": true, "workspace_dir": "/w", "download_dir": "/d",
+                "mcp_port": 7777, "mcp_allow": "127.0.0.1",
+                "anonymity": "none", "tor_mode": "local", "tor_port": 9050
+            })),
+            Ok(Command::SetNodePosture { posture }) if posture.headless && posture.mcp_token.is_none()
+        ));
+        assert!(
+            build("set_node_posture", &json!({ "headless": true })).is_err(),
+            "a partial posture would default the rest"
+        );
     }
 
-    /// **The exchange folder is the only place an agent reads from or
-    /// writes into.** Download, share and both exports take a bare name;
-    /// a path is refused before it reaches the engine (H2/H3/M3).
+    /// **Any path the node's user can reach** (ADR-0007): `path` names one,
+    /// `name` stays the bare exchange-folder convenience, and the engine
+    /// resolves a bare name against the download directory.
     #[test]
-    fn file_tools_take_bare_exchange_names_only() {
-        let refused = ["../x", "/etc/passwd", "a/b", "..", ""];
-        for bad in refused {
-            assert!(build("download_file", &json!({ "id": HEX_ID, "dest": bad })).is_err(), "{bad:?}");
-            assert!(build("share_file", &json!({ "name": bad })).is_err(), "{bad:?}");
-            assert!(
-                build("export_workspace", &json!({ "id": "w", "name": bad, "passphrase": "long enough passphrase" })).is_err(),
-                "{bad:?}"
-            );
-            assert!(build("wiki_export", &json!({ "name": bad })).is_err(), "{bad:?}");
-        }
+    fn file_tools_take_a_path_or_a_bare_exchange_name() {
+        assert!(matches!(
+            build("share_file", &json!({ "path": "/home/petra/private/report.pdf" })),
+            Ok(Command::ShareFile { path, .. }) if path == "/home/petra/private/report.pdf"
+        ));
+        assert!(matches!(
+            build("share_file", &json!({ "name": "report.pdf" })),
+            Ok(Command::ShareFile { path, .. }) if path == "report.pdf"
+        ));
+        assert!(
+            build("share_file", &json!({ "path": "/a", "name": "b" })).is_err(),
+            "one destination, not two"
+        );
+        assert!(build("share_file", &json!({})).is_err(), "a share needs a file");
+        assert!(matches!(
+            build("download_file", &json!({ "id": HEX_ID, "dest": "/srv/incoming/report.pdf" })),
+            Ok(Command::DownloadFile { dest: Some(d), .. }) if d == "/srv/incoming/report.pdf"
+        ));
         assert!(matches!(
             build("download_file", &json!({ "id": HEX_ID, "dest": "report.pdf" })),
             Ok(Command::DownloadFile { dest: Some(d), .. }) if d == "report.pdf"
         ));
         assert!(matches!(
-            build("share_file", &json!({ "name": "report.pdf" })),
-            Ok(Command::ShareFileFromExchange { name, .. }) if name == "report.pdf"
+            build("export_workspace", &json!({ "id": "w", "path": "/backup/w.molt.enc", "passphrase": "long enough passphrase" })),
+            Ok(Command::ExportWorkspace { dest, .. }) if dest == "/backup/w.molt.enc"
         ));
         assert!(matches!(
             build("export_workspace", &json!({ "id": "w", "name": "w.molt.enc", "passphrase": "long enough passphrase" })),
-            Ok(Command::ExportWorkspaceArchive { .. })
+            Ok(Command::ExportWorkspace { dest, .. }) if dest == "w.molt.enc"
+        ));
+        assert!(matches!(
+            build("wiki_export", &json!({ "path": "/srv/wiki" })),
+            Ok(Command::WikiExport { dest, proof: true }) if dest == "/srv/wiki"
+        ));
+        assert!(matches!(
+            build("set_mirror_dir", &json!({ "path": "/mnt/mirror" })),
+            Ok(Command::SetMirrorDir { path }) if path == "/mnt/mirror"
         ));
     }
 
-    /// **Clearnet consent is a human decision.** Over MCP a relay can be
-    /// confirmed only without the acknowledgement, and non-onion dialing
-    /// can only be switched OFF (M2).
+    /// **Clearnet consent is the operator's, and the agent operates the
+    /// machine** (ADR-0007): both forms build the command they name. The
+    /// engine still probes the relay before it flips.
     #[test]
-    fn clearnet_consent_is_not_given_over_mcp() {
-        assert!(build("relay_confirm", &json!({ "url": "wss://r.example", "accept_clearnet": true })).is_err());
+    fn clearnet_consent_is_given_over_mcp() {
+        assert!(matches!(
+            build("relay_confirm", &json!({ "url": "wss://r.example", "accept_clearnet": true })),
+            Ok(Command::RelayConfirm { accept_clearnet: true, .. })
+        ));
         assert!(matches!(
             build("relay_confirm", &json!({ "url": "wss://r.example" })),
             Ok(Command::RelayConfirm { accept_clearnet: false, .. })
         ));
-        assert!(build("relay_clearnet_session", &json!({ "unlock": true })).is_err());
-        assert!(matches!(
-            build("relay_clearnet_session", &json!({ "unlock": false })),
-            Ok(Command::RelayClearnetSession { unlock: false })
-        ));
+        for unlock in [true, false] {
+            assert!(matches!(
+                build("relay_clearnet_session", &json!({ "unlock": unlock })),
+                Ok(Command::RelayClearnetSession { unlock: u }) if u == unlock
+            ));
+        }
     }
 
     /// **`save_settings` builds from exactly what its schema requires.**
@@ -3115,11 +3287,11 @@ mod tests {
             schema["properties"]["channel"]["properties"]["kind"]["enum"],
             json!(["group", "patch", "topic"])
         );
-        assert_eq!(schema["required"], json!(["name"]));
+        assert!(schema.get("required").is_none(), "path OR name, so neither alone is required");
 
         // Omitted channel → the all-hands group (the default view).
         match build("share_file", &json!({ "name": "a.pdf" })).expect("plain share builds") {
-            Command::ShareFileFromExchange { channel, .. } => assert_eq!(channel, ChannelRef::Group),
+            Command::ShareFile { channel, .. } => assert_eq!(channel, ChannelRef::Group),
             other => panic!("wrong command: {other:?}"),
         }
         // Patch channel by proposal id.
@@ -3129,7 +3301,7 @@ mod tests {
         )
         .expect("patch share builds")
         {
-            Command::ShareFileFromExchange { channel, .. } => {
+            Command::ShareFile { channel, .. } => {
                 assert_eq!(channel, ChannelRef::Patch { id: ProposalId(7) });
             }
             other => panic!("wrong command: {other:?}"),
@@ -3141,7 +3313,7 @@ mod tests {
         )
         .expect("topic share builds")
         {
-            Command::ShareFileFromExchange { channel, .. } => {
+            Command::ShareFile { channel, .. } => {
                 assert_eq!(
                     channel,
                     ChannelRef::Topic {
@@ -3512,9 +3684,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_accept_loop_reads_the_token_that_is_current_now() {
         let h = wallet();
-        // the token's one door is the host posture (GUI / config.toml —
-        // MCP audit 2026-08-26): save_settings and patch_settings keep the
-        // stored one, so a rotation over MCP is refused
+        // the token is write-only, never unreachable: `set_node_posture`
+        // and `patch_settings` rotate it, `save_settings` (which cannot
+        // read it back) keeps the stored one — ADR-0007
         let d = molt_core::SessionSettings::default();
         let posture = |t: &str| molt_core::NodePosture {
             headless: d.headless,
@@ -3533,13 +3705,15 @@ mod tests {
             .await
             .expect("posture");
         assert_eq!(live_tokens(&h).await.map(|c| c.seat).as_deref(), Some("first"));
-        assert!(
-            h.execute(Command::PatchSettings { patch: json!({ "mcp_token": "hijack" }) })
-                .await
-                .is_err(),
-            "a rotation over MCP is refused"
-        );
-        assert_eq!(live_tokens(&h).await.map(|c| c.seat).as_deref(), Some("first"));
+        h.execute(Command::PatchSettings { patch: json!({ "mcp_token": "rotated" }) })
+            .await
+            .expect("a patch rotates the token");
+        assert_eq!(live_tokens(&h).await.map(|c| c.seat).as_deref(), Some("rotated"));
+        // …and a wholesale save, whose payload can never carry it, keeps it
+        h.execute(Command::SaveSettings { settings: d.clone() })
+            .await
+            .expect("save");
+        assert_eq!(live_tokens(&h).await.map(|c| c.seat).as_deref(), Some("rotated"));
 
         // …rotate, exactly as the GUI button does
         h.execute(Command::SetNodePosture { posture: posture("second") })
@@ -3710,9 +3884,27 @@ mod tests {
         for state in ["unknown", "ambiguous", "temporary", "remote", "local"] {
             assert!(get.contains(state), "wiki_get never names the {state} state");
         }
+        let edit = tool_named("wiki_edit").description;
         assert!(
-            tool_named("wiki_edit").description.contains("TEMPORARY"),
-            "the write path must say that a temporary match is no warning"
+            edit.contains("TEMPORARY") && edit.contains("malformed"),
+            "the write path must name the temporary and the malformed reference"
+        );
+        let uploads = tool_named("read_uploads").description;
+        for word in ["changed", "mirrored", "relay-held", "sharer-only", "gone"] {
+            assert!(uploads.contains(word), "read_uploads never explains {word}");
+        }
+        assert!(
+            uploads.contains("MEMBERS") && uploads.contains("PIECES"),
+            "read_uploads must say which count is members and which is pieces"
+        );
+        let propose = (tool_named("propose").schema)().to_string();
+        assert!(
+            propose.contains("files persist {id}") && propose.contains("unpersist {id, at}"),
+            "propose never names the files ops"
+        );
+        assert!(
+            tool_named("propose").description.contains("CORE surfaces"),
+            "propose never says which surfaces are core"
         );
     }
 

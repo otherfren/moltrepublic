@@ -147,19 +147,26 @@ finding, the same as a bug.
 
 - **clippy is kept at 0, including tests.** `unwrap_used = "warn"` applies to all
   targets — use `.expect("…")` in tests, never `.unwrap()`. `cargo clippy
-  --all-targets` must be clean before you commit.
+  --all-targets` must be clean before you commit — run it PER CRATE: at
+  workspace level, or for `molt-ui`/`molt-app` in the normal profile, it
+  check-builds the 400k-line window module (~11 GiB, measured 2026-09-06),
+  so those two get the window build's care (once per change-set, `-j 1`,
+  never beside a live run); the live-preview flavour of `molt-ui` is the
+  cheap everyday clippy.
 - **Co-equality is enforced by a test.** Every `Command` variant must be either
   an MCP tool (`crates/molt-mcp/src/lib.rs::tools()`) or on the documented
   `INTERNAL` list in that file — `co_equality_every_command_is_a_tool_or_documented_internal`
   fails otherwise. Adding a `Command` means updating one of those. Network/ritual
   tasks speaking *to* the engine are INTERNAL (an MCP agent must not be able to
   forge a peer/ritual member); human decisions (approve, propose, confirm) are
-  tools on **both** surfaces. Co-equal means the SEAT, not the machine
-  (`docs_archive/security/mcp-security.md`, audit 2026-08-26): host posture
-  (`SetNodePosture`) and any-path file access are GUI/config-only INTERNAL
-  commands, an agent gets the exchange folder `download_dir`, and the
-  recovery phrase plus the two stored secrets are `skip_serializing` — they
-  leave the process on NO surface.
+  tools on **both** surfaces. Since ADR-0007 the seat token operates the
+  MACHINE (`docs_archive/security/mcp-security.md`, "The machine boundary"):
+  host posture, any path, the clearnet consent and the recovery phrase are
+  all on the surface. What stays INTERNAL is only what would let a client
+  speak AS someone else - `ui_publish` (the window) and every `net_*`
+  channel (the transport/ritual tasks). The three stored secrets
+  (`mcp_token`, `mcp_read_token`, `s3_secret_key`) stay write-only, and the
+  read-only key never sees a phrase or a secret.
 - **`WorkspaceEvent::Founded`, `SealedRoster`, and `roster_canonical_bytes`
   ripple widely.** Adding a field touches ~15 sites, many of them test harnesses
   that recompute the signed table. `roster_canonical_bytes` is versioned
@@ -429,6 +436,10 @@ both verified red-without/green-with).
     and note that a worktree agent with its OWN target dir is NOT serialized
     by cargo's build lock against a build in the main checkout.
 
+  **`cargo build -p molt-app --features ui-testing` is a SECOND full window
+  build** (10m44s, 2026-09-06): the feature changes the window crate's unit
+  hash, so the `gui_walk.py` prerequisite costs the same as the authoritative
+  build — plan both, never concurrently.
   GUI changes are validated by a clean `cargo build -j 1 -p molt-ui-window -p
   molt-ui` — **one** invocation naming BOTH: `-p molt-ui-window` alone
   resolves a different `slint` feature set, so a solo window build is thrown

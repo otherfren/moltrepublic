@@ -901,6 +901,7 @@ lexicon! {
     ou_mirror_of: "of", "von";
     ou_copy: "Copy", "Kopieren";
     ou_gone: "gone", "weg";
+    ou_changed: "file replaced", "Datei ersetzt";
     ou_download: "Download", "Download";
     ou_offline: "user offline", "Nutzer offline";
     ou_empty: "No files shared yet.", "Noch keine Dateien geteilt.";

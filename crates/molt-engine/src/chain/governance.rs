@@ -234,7 +234,14 @@ impl State {
     /// new one does not: junk under a roster name must never evict a
     /// genuine approval (one insider could otherwise stall every vote), and
     /// under the OWN name an unverified signature is never held at all.
-    fn collect_sig(&mut self, id: u64, height: u64, member: &str, sig: &str, verified: bool) {
+    pub(crate) fn collect_sig(
+        &mut self,
+        id: u64,
+        height: u64,
+        member: &str,
+        sig: &str,
+        verified: bool,
+    ) {
         if self
             .proposals
             .get(&id)
@@ -246,11 +253,14 @@ impl State {
         // free-form member string, so distinct fake names grew one Vec
         // without bound. Roster membership (not link identity) is the rule:
         // the WP2 re-serve legitimately relays other members' signatures.
-        if !self
-            .chain.head
-            .as_ref()
-            .is_some_and(|h| h.identities.iter().any(|i| i.member == member))
-        {
+        let rostered = match self.chain.head.as_ref() {
+            Some(h) => h.identities.iter().any(|i| i.member == member),
+            // the log replay runs BEFORE the chain is adopted (the reopen
+            // order), so the genesis roster is the only membership fact
+            // available yet; `verified` stays false until the adoption
+            None => self.roster().iter().any(|m| m == member),
+        };
+        if !rostered {
             return;
         }
         if !verified && member == self.member() {

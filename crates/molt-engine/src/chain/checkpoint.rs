@@ -149,6 +149,7 @@ impl State {
             id: ProposalId(id),
             warnings: Vec::new(),
             channel: molt_core::ChannelRef::Patch { id: ProposalId(id) },
+            repaired: Vec::new(),
         })
     }
 
@@ -259,6 +260,12 @@ impl State {
                 tracing::warn!(error = %e, "the stored wiki base does not parse - dropping it");
                 self.persist_wiki_base(None);
             }
+        }
+        // R2: every walk that ran while the base was pending was a no-op
+        // (§4.9.6 demands it), so a reopen left patches the base had long
+        // invalidated sitting open forever. Re-check the moment it answers.
+        if self.chain.wiki_base.is_some() {
+            self.supersede_stale_wiki(None);
         }
     }
 

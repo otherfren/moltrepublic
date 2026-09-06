@@ -5,6 +5,19 @@ that carries this file into the archive (2026-09-03). The MIRRORING
 addendum below was decided the same evening and is designed in
 `docs_archive/files/mirroring.md` (executed 2026-09-04). The shipping behaviour is
 the code and its tests; D1-D3 below name the shipped identifiers.**
+
+**Round 3 (2026-09-06, `mcp_agent_friction_fixes_round_3.md` D1/D2/D4)
+added three things on top:** a share is IMMUTABLE - `share_file` stamps
+its source (size + mtime in `prefs.shared_file_mtimes`), and a file
+replaced on disk reads `available: false` with `availability: "changed"`
+and serves nothing; `download_file` assembles a COMPLETE local mirror
+into the exchange folder instead of fetching (`ByteSource::Pieces`, the
+same re-hash every landing gets); and `UploadView` gained `local`
+(`own` · `downloaded` · `mirrored` · `partial` · `none`) beside an
+`availability` word whose precedence is now
+**changed > gone > mirrored > relay-held > sharer-only** ("gone" is
+nowhere, so it never outranks a holder; "mirrored" means a seat OTHER
+than the sharer holds the whole series).
 Commissioned on 2026-09-03 right after the Shared Files nav surface landed
 (`Surface::Files`, core).
 

@@ -277,13 +277,124 @@ async fn a_mirrored_file_reads_its_bytes_without_a_download() {
     // petra holds the source: her own read answers the same bytes…
     let got = read_bytes(&a, &checksum, 32 << 20).await.expect("the own share answers");
     assert_eq!(got, bytes);
-    // …until the file behind the share is swapped - then it is a refusal
-    std::fs::write(&src, pattern(1_000)).expect("swap the source");
+    // …until the file behind the share is swapped. A swap that keeps SIZE
+    // and mtime slips past the immutability stamp (D1) - the re-hash is
+    // what still refuses it.
+    let was = std::fs::metadata(&src).expect("stat").modified().expect("mtime");
+    let other: Vec<u8> = bytes.iter().map(|b| b ^ 0x5a).collect();
+    std::fs::write(&src, &other).expect("swap the source");
+    std::fs::File::options()
+        .write(true)
+        .open(&src)
+        .expect("reopen")
+        .set_times(std::fs::FileTimes::new().set_modified(was))
+        .expect("restore the mtime");
     let err = read_bytes(&a, &checksum, 32 << 20).await.expect_err("the re-hash refuses");
     assert!(err.to_string().contains("checksum mismatch"), "{err}");
+    // a swap the stamp CAN see stops the read one step earlier
+    std::fs::write(&src, pattern(1_000)).expect("shrink the source");
+    let err = read_bytes(&a, &checksum, 32 << 20).await.expect_err("the stamp refuses");
+    assert!(err.to_string().contains("not on this device"), "{err}");
     // …and walter, who has the honest bytes, still answers them
     let got = read_bytes(&b, &checksum, 32 << 20).await.expect("the mirror is unaffected");
     assert_eq!(got, bytes);
+
+    a.execute(Command::CloseWorkspace).await.expect("close a");
+    b.execute(Command::CloseWorkspace).await.expect("close b");
+}
+
+
+/// **Round 3, D2 keystone**: bytes this seat already mirrors are not
+/// fetched again. Walter's mirror completes, the relay is stopped, and
+/// `download_file` still lands the exact file in his exchange folder -
+/// while `read_uploads` says where the bytes are (`local`) and reads
+/// `mirrored` now that a seat beside the sharer holds the series. The
+/// same node's `wiki_health` names the chain head it measured on (R10).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_mirrored_file_downloads_with_the_relay_stopped() {
+    let relay = MockRelay::run().await.expect("relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root = tmp.path().join("workspaces");
+    let (a, b) = found_pair(&root, &url).await;
+    let bytes = pattern(molt_net::file_plane::PIECE_PAYLOAD_LEN + 5);
+    let src = tmp.path().join("zwei.bin");
+    std::fs::write(&src, &bytes).expect("write source");
+    let id = share(&a, &b, &src).await;
+    persist(&a, &b, id).await;
+
+    // walter mirrors the whole series without ever downloading
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let checksum = loop {
+        let row = uploads(&b).await.into_iter().find(|u| u.id == id);
+        if let Some(row) = row {
+            if row.local == "mirrored" {
+                assert!(row.download.is_none(), "no download was involved: {row:?}");
+                assert_eq!(row.availability, "mirrored", "a seat beside the sharer holds it");
+                break row.checksum;
+            }
+        }
+        assert!(tokio::time::Instant::now() < deadline, "walter's mirror never completed");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    // the pieces are a readable source a beat after the last one arrives
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        match read_bytes(&b, &checksum, 32 << 20).await {
+            Ok(_) => break,
+            Err(e) => {
+                assert!(tokio::time::Instant::now() < deadline, "the mirror never answered: {e}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+
+    relay.shutdown();
+
+    // …and the download is served off those pieces, with no network at all
+    b.execute(Command::DownloadFile { id, dest: None })
+        .await
+        .expect("the mirrored download is admitted");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let landed = loop {
+        let row = uploads(&b).await.into_iter().find(|u| u.id == id).expect("row");
+        if let Some(d) = &row.download {
+            assert_ne!(d.phase, "failed", "the mirror assembly failed: {d:?}");
+            if d.phase == "done" {
+                break d.path.clone();
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the mirrored download never finished"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(std::fs::read(&landed).expect("the landed file"), bytes);
+    assert!(
+        landed.starts_with(&root.join("..").display().to_string())
+            || std::path::Path::new(&landed).starts_with(tmp.path()),
+        "it landed in walter's exchange folder: {landed}"
+    );
+    let row = uploads(&b).await.into_iter().find(|u| u.id == id).expect("row");
+    assert_eq!(row.local, "downloaded", "the exchange copy is the nearest source now");
+
+    // R10: the hygiene read names the chain it was measured on
+    match b.execute(Command::WikiHealth { limit: 0 }).await {
+        Ok(Reply::WikiHealth { head, .. }) => assert!(head >= 1, "the head is a real height"),
+        Err(molt_core::MoltError::IndexBuilding { .. }) => {}
+        other => panic!("unexpected: {other:?}"),
+    }
+    // D4: the chain rows carry the moment this node's log took the block
+    for (who, w) in [("petra", &a), ("walter", &b)] {
+        match w.execute(Command::ReadChain).await.expect("read chain") {
+            Reply::Chain { blocks, .. } => assert!(
+                blocks.iter().any(|bl| bl.ts > 0),
+                "{who} has no stamped block: {blocks:?}"
+            ),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
 
     a.execute(Command::CloseWorkspace).await.expect("close a");
     b.execute(Command::CloseWorkspace).await.expect("close b");

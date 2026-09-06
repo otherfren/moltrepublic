@@ -59,10 +59,23 @@ impl State {
     /// receive path) stay unstamped — they are never fanned out, and a zero
     /// serializes away (byte-identical legacy log frames).
     pub(crate) fn make_env(&mut self, by: MemberId, body: WorkspaceEvent) -> EventEnvelope {
+        let ts = now_secs();
+        self.make_env_at(by, ts, body)
+    }
+
+    /// [`Self::make_env`] at a GIVEN stamp — for re-authoring a peer's
+    /// event into the own log: a ts-derived verdict (`declined_at`) has to
+    /// replay to the value the live wire path produced.
+    pub(crate) fn make_env_at(
+        &mut self,
+        by: MemberId,
+        ts: u64,
+        body: WorkspaceEvent,
+    ) -> EventEnvelope {
         let prev_seq = if by == self.member() { self.delivery.last_own_ackable } else { 0 };
         let env = EventEnvelope {
             seq: self.next_seq,
-            ts: now_secs(),
+            ts,
             by,
             body,
             prev_seq,
@@ -322,13 +335,31 @@ impl State {
                     self.supersede_stale_wiki(None);
                 }
             }
-            WorkspaceEvent::Approved { id, by, .. } => {
+            WorkspaceEvent::Approved { id, by, height, sig } => {
                 // the OWN decision register is ephemeral: an own Approved in
-                // the own log means this node signed (a re-serve re-wraps
-                // under the serving peer), so a restart rebuilds it here —
-                // else the next re-base drops the standing decision
-                if *by == self.member() {
+                // the own log means this node signed, so a restart rebuilds
+                // it here — else the next re-base drops the standing
+                // decision. Both sides must be us: since the ingest keeps a
+                // peer's vote in the own log, a re-serve carrying OUR name
+                // in the body is that peer's claim, not our decision.
+                let mine = *by == self.member() && env.by == self.member();
+                if mine {
                     self.chain.own_approvals.insert(id.0);
+                }
+                // R12: the signature collection is ephemeral too, and the
+                // reopen rebuilds it from here. An own-authored own
+                // signature is genuine by construction (nothing else writes
+                // one into this log); every other one waits for
+                // `reverify_all_pending`, run once the chain is adopted.
+                if !sig.is_empty() {
+                    self.collect_sig(id.0, *height, by, sig, mine);
+                    // `collect_sig` only CLEARS the old verdict — the
+                    // verified mark is the caller's, as in every signing path
+                    if mine {
+                        if let Some(p) = self.chain.pending_sigs.get_mut(&id.0) {
+                            p.verified.insert(by.clone());
+                        }
+                    }
                 }
                 // D2 replay twin of the live clears: the newest stance wins
                 // — an own log that recorded decline-then-approve must
@@ -433,8 +464,13 @@ impl State {
                 let stamp = self.files.series.entry(*id).or_insert(*at);
                 *stamp = (*stamp).max(*at);
             }
-            WorkspaceEvent::Committed(_)
-            | WorkspaceEvent::VoteRefused { .. }
+            // D4: the block's DISPLAY stamp - the chain carries none, and
+            // the replay refills this from the same envelopes
+            WorkspaceEvent::Committed(block) => {
+                let at = self.chain.block_ts.entry(block.height).or_insert(env.ts);
+                *at = (*at).min(env.ts);
+            }
+            WorkspaceEvent::VoteRefused { .. }
             | WorkspaceEvent::ChainRequest { .. }
             | WorkspaceEvent::CheckpointProposed { .. }
             | WorkspaceEvent::CheckpointServed { .. }
@@ -443,9 +479,9 @@ impl State {
             | WorkspaceEvent::FileRequested { .. }
             | WorkspaceEvent::FileWanted { .. }
             | WorkspaceEvent::FileServed { .. } => {
-                // chain transport/coordination frames (a broadcast block, a
-                // catch-up request, a raw MLS re-key commit, a relayed mesh
-                // announce, a file fetch request) ride the log only to reach
+                // chain transport/coordination frames (a catch-up request, a
+                // raw MLS re-key commit, a relayed mesh announce, a file
+                // fetch request) ride the log only to reach
                 // the outbox; the chain lives in chain.state, the MLS ratchet
                 // in the group, the mesh in transport.state and a file
                 // transfer on its dedicated queue, none rebuilt from the log,
@@ -736,6 +772,7 @@ impl State {
             tokio::spawn(async move { group.handle.shutdown().await });
         }
         self.chain.blocks.clear();
+        self.chain.block_ts.clear();
         self.chain.head = None;
         self.set_checkpoint_blob(None);
         self.chain.pending_served_blob = None;
@@ -787,6 +824,7 @@ impl State {
         self.compacted_at = 0;
         self.parked.clear();
         self.files.share_paths.clear();
+        self.files.share_stamps.clear();
         self.files.downloads.clear();
         self.applied.clear();
         self.bump_applied_epoch();

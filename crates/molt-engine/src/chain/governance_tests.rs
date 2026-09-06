@@ -230,7 +230,7 @@ fn a_withdraw_turns_the_card_terminal_without_forging_a_vote() {
         molt_core::Reply::Proposed { id, .. } => id,
         other => panic!("unexpected reply {other:?}"),
     };
-    peer.cmd_withdraw(id).expect("withdraw");
+    peer.cmd_withdraw(id, None).expect("withdraw");
     let p = peer.proposals.get(&id.0).expect("card");
     assert_eq!(p.state, ProposalState::Rejected);
     assert!(p.withdrawn, "the verdict is its own, not a decline");
@@ -241,7 +241,7 @@ fn a_withdraw_turns_the_card_terminal_without_forging_a_vote() {
         "collected signatures are cleared"
     );
     // terminal: a second withdraw refuses
-    assert!(peer.cmd_withdraw(id).is_err());
+    assert!(peer.cmd_withdraw(id, None).is_err());
 }
 
 /// Only the proposer withdraws: the local command refuses a foreign
@@ -264,7 +264,7 @@ fn only_the_proposer_may_withdraw() {
     );
     // walter is not the proposer — the command refuses
     assert!(matches!(
-        peer.cmd_withdraw(ProposalId(9)),
+        peer.cmd_withdraw(ProposalId(9), None),
         Err(molt_core::MoltError::NotTheProposer(_))
     ));
     // forgery: dora's link carries petra's withdraw — dropped
@@ -350,7 +350,7 @@ fn open_governance_reserves_the_own_withdraw() {
         molt_core::Reply::Proposed { id, .. } => id,
         other => panic!("unexpected reply {other:?}"),
     };
-    peer.cmd_withdraw(id).expect("withdraw");
+    peer.cmd_withdraw(id, None).expect("withdraw");
     // keep the card inside the display retention (fixture ts is historic)
     peer.proposals.get_mut(&id.0).expect("card").declined_at = crate::now_secs();
     let events = peer.open_governance_events();
@@ -1532,7 +1532,7 @@ fn a_withdrawn_card_keeps_the_votes_it_had() {
         Reply::Proposed { id, .. } => id,
         other => panic!("unexpected reply {other:?}"),
     };
-    walter.cmd_withdraw(id).expect("withdraw");
+    walter.cmd_withdraw(id, None).expect("withdraw");
     let p = walter.proposals.get(&id.0).cloned().expect("card");
     assert_eq!(p.state, ProposalState::Rejected);
     let v = walter.view(id.0, &p);
@@ -2287,14 +2287,14 @@ fn a_rewrite_of_a_foreign_page_warns() {
         content: "# XSF, rewritten\n".to_string(),
     }];
     let err = walter
-        .cmd_wiki_edit(rewrite.clone(), false, false, None)
+        .cmd_wiki_edit(rewrite.clone(), false, &molt_core::AllowWarnings::NONE, None, true)
         .expect_err("a foreign rewrite warns");
     assert!(
         err.to_string().contains("rewrites a page last written by petra (#7)"),
         "names the seat and the card: {err}"
     );
     walter
-        .cmd_wiki_edit(rewrite, false, true, None)
+        .cmd_wiki_edit(rewrite, false, &molt_core::AllowWarnings::All(true), None, true)
         .expect("allow_warnings proposes anyway");
 
     // a page that does not exist yet is a create, and creates never warn
@@ -2302,5 +2302,7 @@ fn a_rewrite_of_a_foreign_page_warns() {
         path: "notizen/walter.md".to_string(),
         content: "# Walter\n".to_string(),
     }];
-    walter.cmd_wiki_edit(fresh, false, false, None).expect("a free path is a create");
+    walter
+        .cmd_wiki_edit(fresh, false, &molt_core::AllowWarnings::NONE, None, true)
+        .expect("a free path is a create");
 }

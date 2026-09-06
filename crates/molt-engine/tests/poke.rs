@@ -66,26 +66,22 @@ async fn a_poke_crosses_the_mesh_and_wakes_the_opted_in_target() {
         "echo \"$MOLT_WAKE_REASON $MOLT_WAKE_BY\" > '{}'",
         marker.display()
     );
-    // the wake command has its own door: the wholesale settings paths refuse
-    // it, so an MCP client can never plant a shell command
+    // the wake command rides the settings surface too (ADR-0007) - but it
+    // stays one line, whatever the door
     assert!(
         a.execute(Command::PatchSettings {
-            patch: serde_json::json!({ "poke_wake_command": wake.clone() }),
+            patch: serde_json::json!({ "poke_wake_command": "one
+two" }),
         })
         .await
         .is_err(),
-        "patch_settings must not be able to set a shell command"
+        "a multi-line shell hook must be refused"
     );
     a.execute(Command::PatchSettings {
-        patch: serde_json::json!({ "poke_enabled": true }),
+        patch: serde_json::json!({ "poke_enabled": true, "poke_wake_command": wake.clone() }),
     })
     .await
-    .expect("enable poking");
-    a.execute(Command::SetWakeCommand {
-        command: wake.clone(),
-    })
-    .await
-    .expect("arm the wake hook");
+    .expect("enable poking and arm the wake hook");
 
     // The founding itself reaches member-b as an ordinary application
     // envelope, and the delivery tick decides WHEN — so "the poke crossed no

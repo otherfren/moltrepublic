@@ -142,9 +142,8 @@ class Node:
 def spawn_moltd(tag, tmp, port, relay_url):
     cfg = os.path.join(tmp, f"{tag}.toml")
     ws = os.path.join(tmp, f"ws-{tag}")
-    # the dev relay is loopback, and clearnet consent is a GUI decision,
-    # never an MCP call (mcp-security.md, audit 2026-08-26): the config
-    # carries it the way the GUI would have written it
+    # the dev relay is pre-confirmed in the config - the shortest path;
+    # relay_confirm {accept_clearnet: true} does the same over MCP
     with open(cfg, "w", encoding="utf-8") as f:
         f.write(
             f'[node]\nheadless = false\n[storage]\nworkspace_dir = "{ws}"\n'

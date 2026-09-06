@@ -127,25 +127,12 @@ impl State {
         Ok(Reply::Ack)
     }
 
-    /// The wake command's ONE door (besides hand-editing `config.toml`).
-    ///
-    /// It is a local shell hook, so it deliberately has no MCP tool: an agent
-    /// that could set it would grant itself code execution as the node's
-    /// user. The wholesale settings paths refuse it for the same reason
-    /// (`cmd_save_settings` re-merges the stored value, `cmd_patch_settings`
-    /// names it) — exactly how the clearnet decision is protected.
+    /// The GUI's direct door for the wake command. The value also rides
+    /// the settings surface (`poke_wake_command`, ADR-0007) — both go
+    /// through [`validate_wake_command`].
     pub(crate) fn cmd_set_wake_command(&mut self, command: String) -> Result<Reply, MoltError> {
         let command = command.trim().to_string();
-        if command.len() > 4096 {
-            return Err(MoltError::Settings(
-                "wake command: too long (max 4096)".to_string(),
-            ));
-        }
-        if command.contains('\n') || command.contains('\0') {
-            return Err(MoltError::Settings(
-                "wake command: one line, no NUL".to_string(),
-            ));
-        }
+        validate_wake_command(&command)?;
         self.session.settings.poke_wake_command = command;
         self.persist_settings(false);
         self.emit_session(SessionScope::Full);
@@ -435,18 +422,10 @@ impl State {
         let serde_json::Value::Object(base_map) = &mut base else {
             return Err(MoltError::Settings("settings are not an object".to_string()));
         };
-        // the S3 secret never serializes, so the base carries "": keep the
-        // stored one unless the patch sets it (write-only)
-        let sets_s3_secret = fields.contains_key("s3_secret_key");
+        // the three secrets never serialize, so the base carries none of
+        // them: a patch may SET one (write-only), an absent key keeps it
+        let names: std::collections::BTreeSet<String> = fields.keys().cloned().collect();
         for (k, v) in fields {
-            // the host posture (who reaches this node, its anonymity, its
-            // directories, the token) is the GUI's / config.toml's: an agent
-            // operates the seat, not the machine (MCP audit 2026-08-26 M1)
-            if molt_core::NODE_POSTURE_KEYS.contains(&k.as_str()) {
-                return Err(MoltError::Settings(format!(
-                    "`{k}` is set in the GUI or config.toml, not here"
-                )));
-            }
             // the relay pool keeps its one door (the Relay* commands), and
             // an unknown key is a typo the caller has to hear about — a
             // silently ignored `anonimity` reads exactly like a setting
@@ -456,48 +435,32 @@ impl State {
                     "`{k}` is set by the relay commands, not here"
                 )));
             }
-            // the wake command is executed by this node: an agent that could
-            // set it here would grant itself code execution as the node's
-            // user. Its one door is the GUI / config.toml.
-            if k == "poke_wake_command" {
-                return Err(MoltError::Settings(
-                    "`poke_wake_command` is set in the GUI or config.toml, not here".to_string(),
-                ));
-            }
-            if !base_map.contains_key(&k) {
+            if !base_map.contains_key(&k) && !WRITE_ONLY_SECRETS.contains(&k.as_str()) {
                 return Err(MoltError::Settings(format!("unknown setting `{k}`")));
             }
             base_map.insert(k, v);
         }
-        let mut merged: SessionSettings = serde_json::from_value(base)
+        let merged: SessionSettings = serde_json::from_value(base)
             .map_err(|e| MoltError::Settings(format!("the patch does not fit the settings: {e}")))?;
-        let s3_secret = if sets_s3_secret {
-            Some(std::mem::take(&mut merged.s3_secret_key))
-        } else {
-            None
+        let named = |key: &str, value: &str| names.contains(key).then(|| value.to_string());
+        let secrets = molt_core::NodePosture {
+            mcp_token: named("mcp_token", &merged.mcp_token),
+            mcp_read_token: named("mcp_read_token", &merged.mcp_read_token),
+            s3_secret_key: named("s3_secret_key", &merged.s3_secret_key),
+            ..molt_core::NodePosture::of(&merged)
         };
+        let sets_a_secret = secrets.mcp_token.is_some()
+            || secrets.mcp_read_token.is_some()
+            || secrets.s3_secret_key.is_some();
         let reply = self.cmd_save_settings(merged)?;
-        if let Some(secret) = s3_secret {
-            self.cmd_set_node_posture(molt_core::NodePosture {
-                s3_secret_key: Some(secret),
-                ..self.node_posture()
-            })?;
+        if sets_a_secret {
+            self.cmd_set_node_posture(secrets)?;
         }
         Ok(reply)
     }
 
-    /// The stored host posture, secrets left as "keep".
-    fn node_posture(&self) -> molt_core::NodePosture {
-        molt_core::NodePosture {
-            mcp_token: None,
-            mcp_read_token: None,
-            s3_secret_key: None,
-            ..molt_core::NodePosture::of(&self.session.settings)
-        }
-    }
-
-    /// The GUI's / config's door for the host posture and the two secrets
-    /// (see [`Command::SetNodePosture`]).
+    /// Set the host posture and the write-only secrets in one call — see
+    /// [`Command::SetNodePosture`].
     pub(crate) fn cmd_set_node_posture(
         &mut self,
         p: molt_core::NodePosture,
@@ -535,47 +498,22 @@ impl State {
         Ok(Reply::Ack)
     }
 
-    /// `name` as a path inside the download directory — the EXCHANGE
-    /// FOLDER an MCP client may read from and write into. A bare name
-    /// only: no separators, no `..`, nothing that leaves the folder.
-    pub(crate) fn exchange_path(&self, name: &str) -> Result<String, MoltError> {
-        let name = bare_exchange_name(name)?;
-        let dir = molt_storage::expand_tilde(&self.session.settings.download_dir);
-        Ok(dir.join(name).to_string_lossy().into_owned())
-    }
-
-    /// [`Command::ExportWorkspaceArchive`].
-    pub(crate) fn cmd_export_workspace_archive(
-        &mut self,
-        id: WorkspaceId,
-        name: String,
-        passphrase: String,
-    ) -> Result<Reply, MoltError> {
-        let dest = self.exchange_path(&name)?;
-        self.cmd_export_workspace(id, dest, passphrase, true)
-    }
-
-    /// [`Command::WikiExportArchive`].
-    pub(crate) fn cmd_wiki_export_archive(
-        &mut self,
-        name: String,
-        proof: bool,
-    ) -> Result<Reply, MoltError> {
-        let dest = self.exchange_path(&name)?;
-        self.cmd_wiki_export(dest, proof)
+    /// A destination on the host: any ABSOLUTE path the node's user can
+    /// reach (ADR-0007), with a BARE NAME resolved inside the download
+    /// directory — the exchange folder both surfaces hand files over in.
+    pub(crate) fn host_path(&self, dest: &str) -> Result<String, MoltError> {
+        resolve_host_path(dest, &self.session.settings.download_dir)
     }
 
     pub(crate) fn cmd_save_settings(
         &mut self,
         settings: SessionSettings,
     ) -> Result<Reply, MoltError> {
-        // the HOST POSTURE and the two secrets have their own door
-        // (`SetNodePosture`, GUI/config only — MCP audit 2026-08-26): a
-        // wholesale save keeps the stored values, before anything reads the
-        // incoming ones (a default `anonymity` must not even look like a
-        // change to the Tor-test invalidation)
+        // the three secrets never ride a payload (they do not serialize),
+        // so a wholesale save keeps the stored ones — `SetNodePosture` and
+        // `PatchSettings` are their doors
         let mut settings = settings;
-        apply_stored_posture(&mut settings, &self.session.settings);
+        keep_stored_secrets(&mut settings, &self.session.settings);
         validate_settings(&settings)?;
         self.invalidate_backup_listing_on_target_change(&settings);
         self.invalidate_tor_test_on_anonymity_change(&settings);
@@ -601,11 +539,6 @@ impl State {
         settings.font_app = self.session.settings.font_app;
         settings.font_nav = self.session.settings.font_nav;
         settings.font_editor = self.session.settings.font_editor;
-        // …and the wake command has its own door too (`SetWakeCommand`): it
-        // is a local SHELL hook, so a wholesale settings replacement must not
-        // be able to plant one — that would turn any surface that can call
-        // save_settings into code execution on the operator's machine.
-        settings.poke_wake_command = std::mem::take(&mut self.session.settings.poke_wake_command);
         self.session.settings = settings;
         self.mark_restart_required();
         if self.store.is_some() {
@@ -1489,6 +1422,10 @@ impl State {
             // adopting — verify_own then runs the suffix rules
             self.set_checkpoint_blob(checkpoint_blob);
             self.adopt_chain(chain);
+            // R12: the tail replayed the collected signatures before this
+            // point, so none of them could be checked yet — verify them
+            // now, or every restored vote reads `open`
+            self.reverify_all_pending();
         }
         // …and the tree behind the chain's own commitment. Checked against
         // it here: bytes that do not answer the commitment are deleted, and
@@ -1570,6 +1507,13 @@ impl State {
             };
             if ident.by == me && available {
                 self.files.share_paths.insert(id, std::path::PathBuf::from(path));
+                if let Some(stamp) = self
+                    .active
+                    .as_ref()
+                    .and_then(|a| a.prefs.shared_file_mtimes.get(&id_hex).copied())
+                {
+                    self.files.share_stamps.insert(id, stamp);
+                }
             }
         }
     }
@@ -2006,7 +1950,6 @@ impl State {
         id: WorkspaceId,
         dest: String,
         passphrase: String,
-        archive: bool,
     ) -> Result<Reply, MoltError> {
         let Some(entry) = self.session.workspaces.iter().find(|w| w.id == id) else {
             return Err(MoltError::UnknownWorkspace(id));
@@ -2045,7 +1988,7 @@ impl State {
             .as_ref()
             .filter(|a| a.id == id)
             .map(|a| a.handle.clone());
-        let dest_path = molt_storage::expand_tilde(dest.trim());
+        let dest_path = molt_storage::expand_tilde(&self.host_path(&dest)?);
         let dest_str = dest_path.display().to_string();
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return Err(MoltError::Engine("engine is shutting down".to_string()));
@@ -2070,7 +2013,7 @@ impl State {
                         tracing::error!("flush before export failed - the copy may lag the log");
                     }
                 }
-                export_to_file(&root, &dir, &dest_path, zeroize::Zeroizing::new(passphrase), archive)
+                export_to_file(&root, &dir, &dest_path, zeroize::Zeroizing::new(passphrase))
             })
             .await;
             let cmd = match res {
@@ -2173,7 +2116,7 @@ impl State {
         } else {
             None
         };
-        let dest_path = molt_storage::expand_tilde(dest);
+        let dest_path = molt_storage::expand_tilde(&self.host_path(dest)?);
         let dest_str = dest_path.display().to_string();
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return Err(MoltError::Engine("engine is shutting down".to_string()));
@@ -2368,7 +2311,6 @@ fn export_to_file(
     ws_dir: &std::path::Path,
     dest: &std::path::Path,
     passphrase: zeroize::Zeroizing<String>,
-    archive: bool,
 ) -> Result<molt_storage::export::ExportOutcome, molt_storage::StorageError> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
@@ -2384,11 +2326,7 @@ fn export_to_file(
         let file = std::fs::File::create(&part)?;
         let mut out = std::io::BufWriter::new(file);
         let key = molt_storage::export::ExportKey::Passphrase(passphrase);
-        let outcome = if archive {
-            molt_storage::export::export_archive(root, ws_dir, &key, &mut out)?
-        } else {
-            molt_storage::export::export_dir(root, ws_dir, &key, &mut out)?
-        };
+        let outcome = molt_storage::export::export_dir(root, ws_dir, &key, &mut out)?;
         use std::io::Write as _;
         out.flush()?;
         let file = out
@@ -2453,38 +2391,48 @@ fn validate_fonts(app: u16, nav: u16, editor: u16) -> Result<(), MoltError> {
     Ok(())
 }
 
-/// Keep the stored host posture and secrets in a wholesale settings
-/// replacement (their door is `SetNodePosture`).
-fn apply_stored_posture(target: &mut SessionSettings, stored: &SessionSettings) {
-    target.headless = stored.headless;
-    target.workspace_dir = stored.workspace_dir.clone();
-    target.download_dir = stored.download_dir.clone();
-    target.mcp_port = stored.mcp_port;
-    target.mcp_allow = stored.mcp_allow.clone();
+/// The settings that never ride a payload: they do not serialize, so a
+/// wholesale save would wipe them (ADR-0007 keeps them write-only —
+/// `SetNodePosture` and `PatchSettings` are their doors).
+pub(crate) const WRITE_ONLY_SECRETS: [&str; 3] =
+    ["mcp_token", "mcp_read_token", "s3_secret_key"];
+
+/// Keep the stored secrets in a wholesale settings replacement.
+fn keep_stored_secrets(target: &mut SessionSettings, stored: &SessionSettings) {
     target.mcp_token = stored.mcp_token.clone();
     target.mcp_read_token = stored.mcp_read_token.clone();
-    target.anonymity = stored.anonymity.clone();
-    target.tor_mode = stored.tor_mode.clone();
-    target.tor_port = stored.tor_port;
     target.s3_secret_key = stored.s3_secret_key.clone();
 }
 
-/// A bare exchange-folder name: one path component, nothing else.
-fn bare_exchange_name(name: &str) -> Result<String, MoltError> {
-    let name = name.trim();
-    if name.is_empty()
-        || name == "."
-        || name == ".."
-        || name.contains('/')
-        || name.contains('\\')
-        || name.contains('\0')
-        || name.len() > 255
-    {
-        return Err(MoltError::BadPayload(
-            "a bare file name in the download directory is required".to_string(),
-        ));
+/// See [`State::host_path`]. A RELATIVE path with separators is refused:
+/// it would land wherever the daemon happens to have been started, which
+/// is an accident of the launch, not a place anybody chose.
+fn resolve_host_path(dest: &str, download_dir: &str) -> Result<String, MoltError> {
+    let dest = dest.trim();
+    if is_bare_name(dest) {
+        return Ok(molt_storage::expand_tilde(download_dir)
+            .join(dest)
+            .to_string_lossy()
+            .into_owned());
     }
-    Ok(name.to_string())
+    if dest.starts_with('/') || dest.starts_with('~') {
+        return Ok(dest.to_string());
+    }
+    Err(MoltError::BadPayload(
+        "a destination is a bare name in the download directory or an absolute path".to_string(),
+    ))
+}
+
+/// One path component and nothing else — the exchange-folder form of a
+/// destination.
+fn is_bare_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains('\0')
+        && name.len() <= 255
 }
 
 fn validate_settings(s: &SessionSettings) -> Result<(), MoltError> {
@@ -2525,7 +2473,23 @@ fn validate_settings(s: &SessionSettings) -> Result<(), MoltError> {
             "workspace_dir must not be empty".to_string(),
         ));
     }
+    validate_wake_command(&s.poke_wake_command)?;
     validate_fonts(s.font_app, s.font_nav, s.font_editor)?;
+    Ok(())
+}
+
+/// The wake command is run through `sh -c`: one line, bounded, no NUL.
+fn validate_wake_command(command: &str) -> Result<(), MoltError> {
+    if command.len() > 4096 {
+        return Err(MoltError::Settings(
+            "wake command: too long (max 4096)".to_string(),
+        ));
+    }
+    if command.contains('\n') || command.contains('\0') {
+        return Err(MoltError::Settings(
+            "wake command: one line, no NUL".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -2608,50 +2572,131 @@ mod patch_tests {
         assert_eq!(s.mcp_token, "s3cret", "…and the token stayed in place");
     }
 
-    /// The READ-ONLY MCP key is host posture too
-    /// (`knowledge_base_scale.md` §4.7): an agent must not be able to issue
-    /// itself one, nor to wipe the one the human issued through a
-    /// wholesale save.
+    /// The three secrets are WRITE-ONLY, not unreachable (ADR-0007): a
+    /// patch that names one sets it, a wholesale save - whose payload can
+    /// never carry one - keeps every stored value.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_read_only_key_is_the_humans_door_only() {
+    async fn the_secrets_are_write_only_and_survive_a_wholesale_save() {
         let w = node();
         let base = molt_core::SessionSettings {
             mcp_token: "seat".to_string(),
             mcp_read_token: "readonly".to_string(),
+            s3_secret_key: "s3".to_string(),
             ..molt_core::SessionSettings::default()
         };
         w.execute(Command::SetNodePosture { posture: molt_core::NodePosture::of(&base) })
             .await
             .expect("posture");
 
-        assert!(
-            w.execute(Command::PatchSettings {
-                patch: serde_json::json!({ "mcp_read_token": "mine" }),
-            })
-            .await
-            .is_err(),
-            "an agent cannot issue itself a key"
-        );
-        // a wholesale save carrying the DEFAULT (empty) must not revoke it
+        // a wholesale save carrying the DEFAULT (empty) must not revoke them
         w.execute(Command::SaveSettings {
             settings: molt_core::SessionSettings::default(),
         })
         .await
         .expect("save");
         let s = settings(&w).await;
-        assert_eq!(s.mcp_read_token, "readonly", "the key survived the save");
-        assert_eq!(s.mcp_token, "seat");
+        assert_eq!(
+            (s.mcp_token.as_str(), s.mcp_read_token.as_str(), s.s3_secret_key.as_str()),
+            ("seat", "readonly", "s3"),
+            "the three secrets survived the save"
+        );
 
-        // …and the human's own door revokes it
-        w.execute(Command::SetNodePosture {
-            posture: molt_core::NodePosture {
-                mcp_read_token: Some(String::new()),
-                ..molt_core::NodePosture::of(&s)
-            },
+        // …a patch naming one sets it and leaves the others alone
+        w.execute(Command::PatchSettings {
+            patch: serde_json::json!({ "mcp_read_token": "mine" }),
+        })
+        .await
+        .expect("issue a read key");
+        let s = settings(&w).await;
+        assert_eq!(s.mcp_read_token, "mine");
+        assert_eq!(s.mcp_token, "seat", "the seat key is untouched");
+        assert_eq!(s.s3_secret_key, "s3");
+
+        // …and "" revokes
+        w.execute(Command::PatchSettings {
+            patch: serde_json::json!({ "mcp_read_token": "" }),
         })
         .await
         .expect("revoke");
         assert_eq!(settings(&w).await.mcp_read_token, "");
+    }
+
+    /// **The host posture is on the settings surface** (ADR-0007): a patch
+    /// reaches Tor, the endpoint, the directories and the wake command,
+    /// and a wholesale save carries them too - the audit of 2026-08-26 had
+    /// re-merged the stored values, which left a headless node unable to
+    /// set its own posture at all.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_patch_and_a_save_reach_the_host_posture() {
+        let w = node();
+        w.execute(Command::PatchSettings {
+            patch: serde_json::json!({
+                "anonymity": "none",
+                "tor_port": 9051,
+                "download_dir": "/srv/exchange",
+                "poke_wake_command": "echo woke",
+            }),
+        })
+        .await
+        .expect("patch the posture");
+        let s = settings(&w).await;
+        assert_eq!(s.anonymity, "none");
+        assert_eq!(s.tor_port, 9051);
+        assert_eq!(s.download_dir, "/srv/exchange");
+        assert_eq!(s.poke_wake_command, "echo woke");
+
+        w.execute(Command::SaveSettings {
+            settings: molt_core::SessionSettings {
+                anonymity: "tor".to_string(),
+                headless: true,
+                poke_wake_command: "echo again".to_string(),
+                ..molt_core::SessionSettings::default()
+            },
+        })
+        .await
+        .expect("wholesale save");
+        let s = settings(&w).await;
+        assert_eq!(s.anonymity, "tor", "the save carried the posture");
+        assert!(s.headless);
+        assert_eq!(s.poke_wake_command, "echo again");
+
+        // …and the wake command keeps its ONE validation on every door
+        for patch in [
+            serde_json::json!({ "poke_wake_command": "one
+two" }),
+            serde_json::json!({ "anonymity": "nym" }),
+        ] {
+            assert!(
+                w.execute(Command::PatchSettings { patch: patch.clone() }).await.is_err(),
+                "{patch} was accepted"
+            );
+        }
+    }
+
+    /// A destination is any ABSOLUTE path the node's user can reach; a
+    /// BARE NAME still means the exchange folder, which keeps the agent's
+    /// hand-over convenience working (ADR-0007). A relative path with
+    /// separators is refused - it would resolve against the daemon's
+    /// working directory, an accident of how the node was started.
+    #[test]
+    fn a_bare_destination_is_the_exchange_folder_a_path_is_itself() {
+        let at = |d: &str| super::resolve_host_path(d, "/srv/exchange");
+        assert_eq!(at("report.pdf").expect("bare"), "/srv/exchange/report.pdf");
+        assert_eq!(
+            at("  report.pdf  ").expect("bare"),
+            "/srv/exchange/report.pdf",
+            "the bare form is trimmed"
+        );
+        for path in ["/etc/passwd", "/srv/incoming", "~/backups/w.molt.enc"] {
+            assert_eq!(at(path).expect("absolute"), path.to_string(), "a path is itself");
+        }
+        for bad in ["sub/dir", "../up", "./y", ".", "..", ""] {
+            let err = at(bad).expect_err("relative");
+            assert!(
+                matches!(err, molt_core::MoltError::BadPayload(_)),
+                "{bad:?} -> {err:?}"
+            );
+        }
     }
 
     /// `set_fonts` is the sizes' ONE door (item 11): it validates the

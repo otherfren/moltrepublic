@@ -282,16 +282,6 @@ impl State {
     /// the share message posts (via [`State::cmd_net_file_shared`]) once
     /// the real metadata + sha256 exist. Only metadata enters the chat;
     /// the path stays this node's business (prefs, never wire/log).
-    /// [`Command::ShareFileFromExchange`].
-    pub(crate) fn cmd_share_file_from_exchange(
-        &mut self,
-        name: String,
-        channel: ChannelRef,
-    ) -> Result<Reply, MoltError> {
-        let path = self.exchange_path(&name)?;
-        self.cmd_share_file(path, channel)
-    }
-
     pub(crate) fn cmd_share_file(
         &mut self,
         path: String,
@@ -303,12 +293,14 @@ impl State {
         // lazily on the first download request
         self.ensure_demo_net();
         let channel = channel.normalized().map_err(MoltError::BadPayload)?;
-        let path = path.trim().to_string();
-        if path.is_empty() {
+        if path.trim().is_empty() {
             return Err(MoltError::BadPayload(
                 "the file path must not be empty".into(),
             ));
         }
+        // a bare name is the exchange folder's; any absolute path the
+        // node's user can read is fair game on both surfaces (ADR-0007)
+        let path = self.host_path(&path)?;
         let p = std::path::PathBuf::from(&path);
         if p.file_name().is_none() {
             return Err(MoltError::BadPayload(format!(
@@ -380,7 +372,7 @@ impl State {
         });
         let env = self.make_env(from.clone(), WorkspaceEvent::Chat(msg));
         self.record(env);
-        self.remember_share_path(id, &path);
+        self.remember_share_path(id, &path, modified);
         self.emit(Event::Chat {
             id,
             from,
@@ -412,11 +404,14 @@ impl State {
         id: MessageId,
         dest: Option<String>,
     ) -> Result<Reply, MoltError> {
+        // D2: a completed mirror IS the file - assembled locally below,
+        // and its bytes outlive the sharer's copy
+        let mirrored = self.mirrored_byte_source(&id);
         let (from, target) = {
             // the live message, or the persist block once the message left
             // the log (`persistent_uploads.md` D2)
             let (ident, available) = self.share_identity(&id)?;
-            if !available {
+            if !available && mirrored.is_none() {
                 return Err(MoltError::FileUnavailable(id));
             }
             // a share that left the tables is refused here too - before any
@@ -448,11 +443,22 @@ impl State {
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return Err(MoltError::Engine("the engine is shutting down".into()));
         };
+        // one destination rule for every door (ADR-0007): a bare name is
+        // the exchange folder's, an absolute path is itself
+        let explicit = match dest {
+            Some(d) => Some(self.host_path(&d)?),
+            None => None,
+        };
         let dest = crate::transfer::DestSpec {
-            explicit: dest,
+            explicit,
             default_dir: self.session.settings.download_dir.clone(),
         };
         let me = self.member();
+        if let Some(source) = mirrored {
+            crate::transfer::spawn_mirror_assembly(source, id, target, dest, self.net_scope, cmd_tx);
+            self.set_download_phase(id, molt_core::TransferPhase::Requested);
+            return Ok(Reply::Ack);
+        }
         if from == me {
             // my own share: no network involved — an honest local copy
             let source = self.files.share_paths.get(&id).cloned().ok_or_else(|| {
@@ -526,13 +532,18 @@ impl State {
 
     /// Remember one of MY shares' local source path — runtime map + the
     /// per-workspace prefs sidecar (survives restarts; never wire/log).
-    fn remember_share_path(&mut self, id: MessageId, path: &str) {
+    fn remember_share_path(&mut self, id: MessageId, path: &str, modified: u64) {
         self.files.share_paths.insert(id, std::path::PathBuf::from(path));
+        self.files.share_stamps.insert(id, modified);
         if let Some(active) = &mut self.active {
             active
                 .prefs
                 .shared_files
                 .insert(id.to_string(), path.to_string());
+            active
+                .prefs
+                .shared_file_mtimes
+                .insert(id.to_string(), modified);
             active.handle.set_prefs(active.prefs.clone());
         }
     }
@@ -540,8 +551,10 @@ impl State {
     /// Forget a share's source path (share removed).
     pub(crate) fn forget_share_path(&mut self, id: &MessageId) {
         self.files.share_paths.remove(id);
+        self.files.share_stamps.remove(id);
         if let Some(active) = &mut self.active {
-            if active.prefs.shared_files.remove(&id.to_string()).is_some() {
+            let stamp = active.prefs.shared_file_mtimes.remove(&id.to_string()).is_some();
+            if active.prefs.shared_files.remove(&id.to_string()).is_some() || stamp {
                 active.handle.set_prefs(active.prefs.clone());
             }
         }

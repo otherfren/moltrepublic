@@ -618,6 +618,10 @@ pub(crate) struct FilePlane {
     /// `prefs.shared_files`; NEVER wire, NEVER log — the paths would leak
     /// this node's filesystem layout).
     pub(crate) share_paths: HashMap<MessageId, std::path::PathBuf>,
+    /// The mtime each of my shares had when it was hashed (runtime mirror
+    /// of `prefs.shared_file_mtimes`). With the share's size it is the
+    /// immutability check: a replaced file is not the voted one.
+    pub(crate) share_stamps: HashMap<MessageId, u64>,
     /// Requester-side live download status per share (runtime-only; feeds
     /// [`molt_core::UploadView::download`]).
     pub(crate) downloads: HashMap<MessageId, molt_core::DownloadView>,
@@ -700,6 +704,11 @@ pub(crate) struct ChainProjection {
     /// governance record (`docs_archive/chain/persistent_chain.md`). Block 0 is the
     /// founding; empty when no chain-aware workspace is open.
     pub(crate) blocks: Vec<molt_core::ChainBlock>,
+    /// DISPLAY stamps: block height → the unix seconds its `Committed`
+    /// envelope carried in this node's log (refilled by the replay, empty
+    /// for history the log no longer holds). Never consensus input - the
+    /// chain itself is unstamped.
+    pub(crate) block_ts: HashMap<u64, u64>,
     /// The verified head of [`ChainProjection::blocks`] (`None` = empty chain).
     pub(crate) head: Option<chain::ChainHead>,
     /// The verification walk over [`ChainProjection::blocks`], kept so appending a block
@@ -1301,6 +1310,7 @@ impl State {
                 wiki_base_next_try: 0,
                 wiki_base_fetching: None,
                 share_paths: HashMap::new(),
+                share_stamps: HashMap::new(),
                 downloads: HashMap::new(),
                 serve_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
                 series: HashMap::new(),
@@ -1375,6 +1385,7 @@ impl State {
             },
             chain: ChainProjection {
                 blocks: Vec::new(),
+                block_ts: HashMap::new(),
                 head: None,
                 walk: None,
                 pending_served_blob: None,
@@ -1533,9 +1544,6 @@ impl State {
             Command::MarkRead { ids } => self.cmd_mark_read(ids),
             Command::DeleteChat { id } => self.cmd_delete_chat(id),
             Command::ShareFile { path, channel } => self.cmd_share_file(path, channel),
-            Command::ShareFileFromExchange { name, channel } => {
-                self.cmd_share_file_from_exchange(name, channel)
-            }
             Command::DownloadFile { id, dest } => self.cmd_download_file(id, dest),
             Command::RemoveFile { id } => self.cmd_remove_file(id),
             Command::MarkChannelRead { channel, up_to } => {
@@ -1719,7 +1727,7 @@ impl State {
             Command::Propose { surface, payload } => self.cmd_propose(surface, payload),
             Command::Approve { proposal, note } => self.cmd_approve(proposal, note),
             Command::Decline { proposal, note } => self.cmd_decline(proposal, note),
-            Command::Withdraw { proposal } => self.cmd_withdraw(proposal),
+            Command::Withdraw { proposal, note } => self.cmd_withdraw(proposal, note),
             Command::ReadState { surface, channel, view } => {
                 // the view key is shared vocabulary (`Surface::views`, the
                 // same list `select_view` validates against) PLUS chat's
@@ -1786,7 +1794,8 @@ impl State {
                 dry_run,
                 allow_warnings,
                 supersedes,
-            } => self.cmd_wiki_edit(edits, dry_run, allow_warnings, supersedes),
+                repair_links,
+            } => self.cmd_wiki_edit(edits, dry_run, &allow_warnings, supersedes, repair_links),
             Command::WikiResolve { name } => self.cmd_wiki_resolve(name),
             Command::WikiProps => self.cmd_wiki_props(),
             Command::WikiLinks {
@@ -1894,17 +1903,13 @@ impl State {
                 self.cmd_set_workspace_backup(id, enabled)
             }
             Command::ExportWorkspace { id, dest, passphrase } => {
-                self.cmd_export_workspace(id, dest, passphrase, false)
+                self.cmd_export_workspace(id, dest, passphrase)
             }
             Command::NetExportDone { id, dest, bytes, skipped } => {
                 self.cmd_net_export_done(id, dest, bytes, skipped)
             }
             Command::NetExportFailed { id, error } => self.cmd_net_export_failed(id, error),
             Command::WikiExport { dest, proof } => self.cmd_wiki_export(dest, proof),
-            Command::WikiExportArchive { name, proof } => self.cmd_wiki_export_archive(name, proof),
-            Command::ExportWorkspaceArchive { id, name, passphrase } => {
-                self.cmd_export_workspace_archive(id, name, passphrase)
-            }
             Command::NetWikiExportDone { dest, files, bytes } => {
                 self.cmd_net_wiki_export_done(dest, files, bytes)
             }

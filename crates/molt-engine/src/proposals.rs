@@ -755,7 +755,12 @@ impl State {
             // honest 1-of-1 governance (the solo boot group)
             self.try_apply(id);
         }
-        Ok(Reply::Proposed { id, warnings, channel: molt_core::ChannelRef::Patch { id } })
+        Ok(Reply::Proposed {
+            id,
+            warnings,
+            channel: molt_core::ChannelRef::Patch { id },
+            repaired: Vec::new(),
+        })
     }
 
     /// A wiki patch, checked against the base it claims to apply to.
@@ -985,7 +990,11 @@ impl State {
     /// designed above): terminal on every node, converging like a decline
     /// — but no vote is forged. Proposer-gated twice: here against the own
     /// record, and on every receiver against ITS record + link identity.
-    pub(crate) fn cmd_withdraw(&mut self, proposal: ProposalId) -> Result<Reply, MoltError> {
+    pub(crate) fn cmd_withdraw(
+        &mut self,
+        proposal: ProposalId,
+        note: Option<String>,
+    ) -> Result<Reply, MoltError> {
         let me = self.member();
         {
             let p = self
@@ -999,6 +1008,9 @@ impl State {
                 return Err(MoltError::NotTheProposer(proposal));
             }
         }
+        // the reason goes in FIRST, like approve/decline (A2): a retraction
+        // must not leave its reasoning behind the decision
+        self.post_vote_note(proposal, note)?;
         let env = self.make_env(
             me.clone(),
             WorkspaceEvent::Withdrawn {
@@ -1029,7 +1041,9 @@ impl State {
                 tracing::warn!(error = %e, id = proposal.0, "could not post the withdraw summary");
             }
         }
-        Ok(Reply::Ack)
+        // B3: the record as it stands now, like approve/decline — a bare
+        // ack left the caller guessing which card it hit
+        Ok(self.vote_reply(proposal))
     }
 
     /// The withdraw choke point (log applier, wire ingest, park drain) —
@@ -1434,6 +1448,17 @@ impl State {
             if let Some(payload) = self.proposals.get(&id.0).map(|p| p.payload.clone()) {
                 self.post_decision_summary(id.0, &payload, None);
             }
+        }
+    }
+
+    /// R12: re-check every signature the log replay collected. The tail
+    /// replays BEFORE the chain is adopted (`open_stored_workspace`), so
+    /// nothing was verifiable yet; called right after the adoption, this
+    /// is what makes a restored vote count again.
+    pub(crate) fn reverify_all_pending(&mut self) {
+        let ids: Vec<u64> = self.chain.pending_sigs.keys().copied().collect();
+        for id in ids {
+            self.reverify_pending(id);
         }
     }
 
@@ -1963,6 +1988,7 @@ impl State {
             None => (None, None),
         };
         let files = self.wiki_file_refs(content);
+        let (head, base) = self.measured_at();
         Ok(Reply::WikiDocument {
             path: path.clone(),
             content: content.clone(),
@@ -1971,7 +1997,20 @@ impl State {
             links_out,
             links_in,
             files,
+            head,
+            base,
         })
+    }
+
+    /// WHICH chain this read was measured on (R10): the head height and
+    /// the folded base behind the tree. Two seats at different heights
+    /// honestly answer different hygiene - without this the difference
+    /// reads as a bug.
+    fn measured_at(&self) -> (u64, Option<String>) {
+        (
+            self.chain.head.as_ref().map(|h| h.height).unwrap_or(0),
+            self.wiki_cache.as_ref().and_then(|c| c.base.clone()),
+        )
     }
 
     /// Every DISTINCT `upload:` reference of a page with what it names
@@ -2113,7 +2152,15 @@ impl State {
         self.refresh_wiki_graph();
         if self.wiki_graph.is_none() {
             self.spawn_wiki_index_build();
-            return Err(self.index_building());
+            // E4 (R7): empty AND saying why, rather than a hard error
+            let wiki_rev = self.wiki_base()?.1;
+            return Ok(Reply::WikiNeighbors {
+                docs: Vec::new(),
+                capped: false,
+                index_rev: 0,
+                wiki_rev,
+                index_building: true,
+            });
         }
         let depth = match depth {
             0 => 1,
@@ -2156,6 +2203,7 @@ impl State {
             capped,
             index_rev: wiki_rev,
             wiki_rev,
+            index_building: false,
         })
     }
 
@@ -2269,7 +2317,15 @@ impl State {
         self.refresh_wiki_search()?;
         if self.wiki_search.is_none() {
             self.spawn_wiki_index_build();
-            return Err(self.index_building());
+            // E4 (R7): empty AND saying why, rather than a hard error
+            let wiki_rev = self.wiki_base()?.1;
+            return Ok(Reply::WikiSearch {
+                hits: Vec::new(),
+                next_cursor: None,
+                index_rev: 0,
+                wiki_rev,
+                index_building: true,
+            });
         }
         let page = usize::try_from(match limit {
             0 => WIKI_PAGE_DEFAULT,
@@ -2306,6 +2362,7 @@ impl State {
             next_cursor,
             index_rev: wiki_rev,
             wiki_rev,
+            index_building: false,
         })
     }
 
@@ -2370,16 +2427,37 @@ impl State {
     pub(crate) fn cmd_wiki_health(&mut self, limit: u32) -> Result<Reply, MoltError> {
         self.require_feature(Surface::Memory)?;
         self.refresh_wiki_graph();
-        if self.wiki_graph.is_none() {
-            self.spawn_wiki_index_build();
-            return Err(self.index_building());
-        }
         let cap = usize::try_from(match limit {
             0 => WIKI_PAGE_DEFAULT,
             n => n.clamp(1, WIKI_PAGE_MAX),
         })
         .unwrap_or(100);
         let wiki_rev = self.wiki_base()?.1;
+        if self.wiki_graph.is_none() {
+            self.spawn_wiki_index_build();
+            // E4 (R7): a build in flight is a STATE, not a fault - the
+            // caller reads `index_building` and asks again, instead of
+            // handling an error on the one call that reports faults.
+            let (head, base) = self.measured_at();
+            return Ok(Reply::WikiHealth {
+                dangling: Vec::new(),
+                dangling_total: 0,
+                orphans: Vec::new(),
+                orphans_total: 0,
+                key_drift: Vec::new(),
+                key_drift_total: 0,
+                files: molt_core::WikiFileHealth::default(),
+                props_by_type: Vec::new(),
+                props_by_type_total: 0,
+                direction_outliers: Vec::new(),
+                direction_outliers_total: 0,
+                index_rev: 0,
+                wiki_rev,
+                head,
+                base,
+                index_building: true,
+            });
+        }
         let graph = self
             .wiki_graph
             .as_ref()
@@ -2387,8 +2465,11 @@ impl State {
         let dangling = graph.dangling_targets();
         let orphans = graph.orphans();
         let drift = graph.key_drift();
+        let by_type = graph.props_by_type();
+        let outliers = graph.direction_outliers();
         let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
         let files = self.wiki_file_health(cap)?;
+        let (head, base) = self.measured_at();
         Ok(Reply::WikiHealth {
             dangling_total: count(dangling.len()),
             dangling: dangling
@@ -2405,8 +2486,42 @@ impl State {
             key_drift_total: count(drift.len()),
             key_drift: drift.into_iter().take(cap).collect(),
             files,
+            props_by_type_total: count(by_type.len()),
+            props_by_type: by_type
+                .into_iter()
+                .take(cap)
+                .map(|t| molt_core::WikiTypeProps {
+                    kind: t.kind,
+                    pages: t.pages,
+                    keys_total: count(t.keys.len()),
+                    keys: t
+                        .keys
+                        .into_iter()
+                        .take(cap)
+                        .map(|(key, pages)| molt_core::WikiKeyCount { key, pages })
+                        .collect(),
+                })
+                .collect(),
+            direction_outliers_total: count(outliers.len()),
+            direction_outliers: outliers
+                .into_iter()
+                .take(cap)
+                .map(|o| molt_core::WikiDirectionOutlier {
+                    predicate: o.predicate,
+                    subject_type: o.subject_type,
+                    object_type: o.object_type,
+                    count: o.count,
+                    usual: format!("{} -> {}", o.usual.0, o.usual.1),
+                    usual_count: o.usual_count,
+                    from_total: count(o.from.len()),
+                    from: o.from.into_iter().take(cap).collect(),
+                })
+                .collect(),
             index_rev: wiki_rev,
             wiki_rev,
+            head,
+            base,
+            index_building: false,
         })
     }
 
@@ -2494,8 +2609,9 @@ impl State {
         &mut self,
         edits: Vec<molt_core::WikiEdit>,
         dry_run: bool,
-        allow_warnings: bool,
+        allow_warnings: &molt_core::AllowWarnings,
         supersedes: Option<ProposalId>,
+        repair_links: bool,
     ) -> Result<Reply, MoltError> {
         self.require_feature(Surface::Memory)?;
         if edits.is_empty() {
@@ -2521,9 +2637,9 @@ impl State {
         // over the whole base (§4.2's argument), and a 100 MiB tree is
         // never cloned to move one paragraph. It runs BEFORE the graph
         // branch so a base-pending node says THAT and not "index building".
-        let touched: std::collections::BTreeSet<String> =
+        let mut touched: std::collections::BTreeSet<String> =
             edits.iter().flat_map(edit_paths).collect();
-        let base: std::collections::BTreeMap<String, String> = {
+        let mut base: std::collections::BTreeMap<String, String> = {
             let (tree, _) = self.wiki_base()?;
             touched
                 .iter()
@@ -2557,6 +2673,16 @@ impl State {
                 )));
             }
         }
+        // E2: a rename strands every BASE link naming the old path. The
+        // repair rides the SAME patch - the emitter diffs the whole
+        // after-tree, so a rewritten page is one more entry in it.
+        let (repaired, kept_link_warnings) = self.repair_rename_links(
+            &mut touched,
+            &mut base,
+            &mut after,
+            &renames,
+            repair_links,
+        )?;
         let patch = molt_core::wiki_patch::build_patch(&base, &after, &renames)
             .ok_or_else(|| MoltError::BadPayload("nothing to change".to_string()))?;
         let summary = molt_core::wiki_patch::count_changes(&base, &after, &renames).summary();
@@ -2565,41 +2691,80 @@ impl State {
         // minted (`mcp_agent_friction_fixes_round_2.md` B2-B4): the header
         // check, the open-proposal queue, the name index and the applied
         // projection's authorship.
-        let mut warnings = self.wiki_patch_check(Surface::Memory, &payload)?;
-        warnings.extend(self.open_proposal_warnings(&touched, &edits, supersedes));
+        // E1: every warning carries its CODE, so `allow_warnings` can take
+        // a list and one stale warning no longer blinds the caller to the
+        // rest.
+        let mut found: Vec<(&'static str, String)> = Vec::new();
+        found.extend(coded(WARN_HEADER, self.wiki_patch_check(Surface::Memory, &payload)?));
+        found.extend(coded(
+            WARN_OPEN_PATH,
+            self.open_proposal_warnings(&touched, supersedes),
+        ));
+        found.extend(coded(WARN_RENAME_LINK, kept_link_warnings));
+        found.extend(coded(
+            WARN_RENAME_LINK,
+            self.open_rename_warnings(&edits, supersedes),
+        ));
         // the name check needs the index and is SKIPPED without one - a
         // write is never blocked on it, and no build is kicked off here:
         // a graph installed over a tree an append has since moved is the
         // stale-index race `refresh_wiki_graph` drops the dirty set into.
-        warnings.extend(self.name_collision_warnings(&base, &after, &renames));
-        warnings.extend(self.foreign_rewrite_warnings(&edits, &base));
-        warnings.extend(self.file_ref_warnings(&after));
+        found.extend(coded(
+            WARN_NAME_COLLISION,
+            self.name_collision_warnings(&base, &after, &renames),
+        ));
+        found.extend(coded(
+            WARN_FOREIGN_REWRITE,
+            self.foreign_rewrite_warnings(&edits, &base),
+        ));
+        found.extend(coded(WARN_FILE_REF, self.file_ref_warnings(&after)));
+        let warnings: Vec<String> = found.iter().map(|(c, m)| format!("{c}: {m}")).collect();
         if dry_run {
-            return Ok(Reply::WikiPreview { patch, summary, warnings });
+            return Ok(Reply::WikiPreview { patch, summary, warnings, repaired });
         }
         // B5: a warning is a refusal by default - it used to arrive once the
         // patch was already in the vote, and the only way out was withdraw
         // + refile
-        if !warnings.is_empty() && !allow_warnings {
+        let held: Vec<&(&str, String)> = found
+            .iter()
+            .filter(|(code, _)| !allow_warnings.admits(code))
+            .collect();
+        if !held.is_empty() {
+            let mut codes: Vec<&str> = held.iter().map(|(c, _)| *c).collect();
+            codes.sort_unstable();
+            codes.dedup();
+            // the faults, then the remedy ONCE - naming the codes it takes
             return Err(MoltError::BadPayload(format!(
-                "warnings (allow_warnings: true proposes anyway): {}",
-                warnings.join("; ")
+                "{}; allow_warnings: [{}] proposes anyway",
+                held.iter()
+                    .map(|(c, m)| format!("{c}: {m}"))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+                codes
+                    .iter()
+                    .map(|c| format!("\"{c}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )));
         }
         if let Some(old) = supersedes {
-            self.cmd_withdraw(old)?;
+            self.cmd_withdraw(old, None)?;
         }
         // the propose path recomputes the header half only; the sources
         // this call alone knows ride the reply from here
         match self.cmd_propose(Surface::Memory, payload)? {
-            Reply::Proposed { id, channel, .. } => Ok(Reply::Proposed { id, warnings, channel }),
+            Reply::Proposed { id, channel, .. } => {
+                Ok(Reply::Proposed { id, warnings, channel, repaired })
+            }
             other => Ok(other),
         }
     }
 
-    /// A page that would reference a file nothing carries, or a prefix
-    /// more than one file carries (§3.7). A `temporary` match is NOT a
-    /// warning: the persist vote may follow the page.
+    /// A page may only reference a KNOWN, PERSISTENT file (round 3, D3):
+    /// a malformed hex, a prefix nothing carries, a prefix more than one
+    /// file carries, and a match that is only a temporary share each
+    /// warn - and a warning refuses without `allow_warnings`. A page
+    /// outlives the chat window; a temporary share does not.
     fn file_ref_warnings(
         &self,
         after: &std::collections::BTreeMap<String, String>,
@@ -2614,10 +2779,16 @@ impl State {
         let rows = self.uploads_view();
         hexes
             .into_iter()
-            .filter_map(|hex| match self.upload_ref_state(&rows, &hex).1 {
-                "unknown" => Some(format!("file reference unresolved: upload:{hex}")),
-                "ambiguous" => Some(format!("file reference ambiguous: upload:{hex}")),
-                _ => None,
+            .filter_map(|hex| {
+                if !molt_core::wiki_refs::valid_hex(&hex) {
+                    return Some(format!("file reference malformed: upload:{hex}"));
+                }
+                match self.upload_ref_state(&rows, &hex).1 {
+                    "unknown" => Some(format!("file reference unresolved: upload:{hex}")),
+                    "ambiguous" => Some(format!("file reference ambiguous: upload:{hex}")),
+                    "temporary" => Some(format!("file reference not persistent: upload:{hex}")),
+                    _ => None,
+                }
             })
             .collect()
     }
@@ -2626,6 +2797,7 @@ impl State {
     /// `except` drops the one this call supersedes - it is about to be
     /// withdrawn, so its paths are not contended.
     fn open_wiki_proposals(&self, except: Option<ProposalId>) -> Vec<(u64, String, &str)> {
+        let me = self.member();
         let mut open: Vec<(u64, String, &str)> = self
             .proposals
             .iter()
@@ -2633,6 +2805,10 @@ impl State {
                 p.surface == Surface::Memory
                     && p.state == ProposalState::Proposed
                     && except != Some(ProposalId(**id))
+                    // E1: the caller's own card the moved base already
+                    // retired is dead, not contended - re-proposing over it
+                    // must not need `allow_warnings` (R19)
+                    && !(p.superseded && p.by == me)
                     && p.payload.get("op").and_then(Value::as_str) == Some("wiki_patch")
             })
             .filter_map(|(id, p)| {
@@ -2653,15 +2829,10 @@ impl State {
     fn open_proposal_warnings(
         &self,
         touched: &std::collections::BTreeSet<String>,
-        edits: &[molt_core::WikiEdit],
         except: Option<ProposalId>,
     ) -> Vec<String> {
-        let open = self.open_wiki_proposals(except);
-        if open.is_empty() {
-            return Vec::new();
-        }
         let mut out = Vec::new();
-        for (id, by, patch) in &open {
+        for (id, by, patch) in &self.open_wiki_proposals(except) {
             let paths = molt_core::wiki_fold::touched_paths(
                 &molt_core::wiki_fold::parse_patch(patch),
             );
@@ -2673,6 +2844,23 @@ impl State {
                 });
             }
         }
+        out
+    }
+
+    /// The other half of B2: a rename this call makes leaves a link an
+    /// open proposal still writes to the old path. The BASE half is E2's
+    /// repair ([`Self::repair_rename_links`]) - a foreign proposal cannot
+    /// be rewritten, so this one stays a warning.
+    fn open_rename_warnings(
+        &self,
+        edits: &[molt_core::WikiEdit],
+        except: Option<ProposalId>,
+    ) -> Vec<String> {
+        let open = self.open_wiki_proposals(except);
+        if open.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
         for edit in edits {
             let molt_core::WikiEdit::Rename { from, .. } = edit else {
                 continue;
@@ -2686,6 +2874,89 @@ impl State {
             }
         }
         out
+    }
+
+    /// **E2**: every BASE page whose markdown link names a path this call
+    /// renames, rewritten onto the new path IN THE SAME PATCH. It is no
+    /// warning - a caller that renames a page with in-links asked for
+    /// exactly this - but the vote carries pages it did not name, so the
+    /// reply REPORTS them. `repair` off leaves the links and then their
+    /// existence IS the warning: a rename that strands seven edges in
+    /// silence is the round-3 finding.
+    ///
+    /// The rewritten pages join `base`/`after`/`touched`, so the one
+    /// emitter diffs them like any other and the reply's `paths` names them.
+    fn repair_rename_links(
+        &self,
+        touched: &mut std::collections::BTreeSet<String>,
+        base: &mut std::collections::BTreeMap<String, String>,
+        after: &mut std::collections::BTreeMap<String, String>,
+        renames: &std::collections::BTreeMap<String, String>,
+        repair: bool,
+    ) -> Result<(Vec<molt_core::WikiRepairedLinks>, Vec<String>), MoltError> {
+        let none = || (Vec::new(), Vec::new());
+        if renames.is_empty() {
+            return Ok(none());
+        }
+        let (tree, _) = self.wiki_base()?;
+        // old path -> the pages linking to it
+        let mut hits: std::collections::BTreeMap<&str, Vec<String>> =
+            std::collections::BTreeMap::new();
+        let mut fixed: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        for (path, held) in tree.iter() {
+            // a page this call deletes or moves away is not repaired into
+            // existence again
+            if base.contains_key(path) && !after.contains_key(path) {
+                continue;
+            }
+            let start = after.get(path).unwrap_or(held);
+            let mut next = start.clone();
+            for (to, from) in renames {
+                if from == path {
+                    continue;
+                }
+                if let Some(done) = wiki_index::graph::rewrite_link_target(&next, from, to) {
+                    next = done;
+                    hits.entry(from.as_str()).or_default().push(path.clone());
+                }
+            }
+            if next != *start {
+                fixed.insert(path.clone(), next);
+            }
+        }
+        if hits.is_empty() {
+            return Ok(none());
+        }
+        if !repair {
+            return Ok((
+                Vec::new(),
+                hits.iter()
+                    .map(|(from, pages)| {
+                        format!("{from}: old path kept by {}", name_a_few(pages))
+                    })
+                    .collect(),
+            ));
+        }
+        let repaired: Vec<molt_core::WikiRepairedLinks> = hits
+            .iter()
+            .map(|(from, pages)| molt_core::WikiRepairedLinks {
+                from: (*from).to_string(),
+                to: renames
+                    .iter()
+                    .find(|(_, o)| o.as_str() == *from)
+                    .map_or_else(String::new, |(t, _)| t.clone()),
+                pages: pages.clone(),
+            })
+            .collect();
+        for (path, content) in fixed {
+            if let Some(held) = tree.get(&path) {
+                base.entry(path.clone()).or_insert_with(|| held.clone());
+            }
+            touched.insert(path.clone());
+            after.insert(path, content);
+        }
+        Ok((repaired, Vec::new()))
     }
 
     /// B3 (G7): a title or alias this call newly claims that already names
@@ -2723,7 +2994,15 @@ impl State {
         }
         let names: std::collections::BTreeSet<String> =
             claims.iter().map(|(_, _, _, n)| n.clone()).collect();
-        let owners = graph.name_owners(&names);
+        // E1 (R19): measured against the tree the WHOLE edit list leaves,
+        // not the base - an alias one edit frees and a later one claims is
+        // no collision, and a base-only check refused exactly that.
+        let gone: std::collections::BTreeSet<String> = base
+            .keys()
+            .filter(|p| !after.contains_key(*p))
+            .cloned()
+            .collect();
+        let owners = graph.name_owners_after(&names, after, &gone);
         let mut out = Vec::new();
         for (path, origin, kind, name) in claims {
             for owner in owners.get(&name).into_iter().flatten() {
@@ -3700,7 +3979,17 @@ impl State {
         let row = |id: molt_core::MessageId, ident: ShareIdentity, available: bool, expires_ts: u64, persistent: bool| {
             let mine = ident.by == me;
             let pieces = ident.pieces;
-            UploadView {
+            // R21: my own share whose file was replaced on disk is no
+            // longer the file the republic knows - it is not available
+            // and it does not serve
+            let changed = mine && self.share_file_changed(&id, ident.size);
+            let available = available && !changed;
+            // a holder OTHER than the sharer means the bytes survive the
+            // sharer going offline; the sharer holding its own file does not
+            let mirrored = holders
+                .get(&id)
+                .is_some_and(|h| h.iter().any(|m| *m != ident.by));
+            let mut u = UploadView {
                 id,
                 member: ident.by.clone(),
                 ts: ident.shared_ts,
@@ -3714,15 +4003,19 @@ impl State {
                 // honestly unknown) — what a download must reproduce
                 checksum: ident.checksum,
                 download: self.files.downloads.get(&id).cloned(),
-                // §5.5: ONE derived word, no extra state — a live stamp
-                // outranks `available` (relay copies outlive a removal
-                // until retention prunes them)
-                availability: if self.files.series.contains_key(&id) {
-                    "relay-held"
-                } else if available {
-                    "sharer-only"
-                } else {
+                // §5.5 + D4: ONE derived word, in the precedence
+                // changed > gone > mirrored > relay-held > sharer-only
+                // ("gone" is nowhere, so it cannot outrank a holder)
+                availability: if changed {
+                    "changed"
+                } else if !available && !mirrored && !self.files.series.contains_key(&id) {
                     "gone"
+                } else if mirrored {
+                    "mirrored"
+                } else if self.files.series.contains_key(&id) {
+                    "relay-held"
+                } else {
+                    "sharer-only"
                 }
                 .to_string(),
                 persistent,
@@ -3731,7 +4024,10 @@ impl State {
                 mirrors: u32::try_from(holders.get(&id).map_or(0, Vec::len)).unwrap_or(u32::MAX),
                 mirror_held: self.mirror_held_of(&id, mine, pieces).0,
                 mirror_of: self.mirror_held_of(&id, mine, pieces).1,
-            }
+                local: String::new(),
+            };
+            u.local = crate::upload_refs::local_word(&self.local_copy_of(&u)).to_string();
+            u
         };
         // the plain shares: chat messages inside the window that no vote
         // touched (a voted share renders from its block below)
@@ -3869,6 +4165,42 @@ impl State {
             chain_lag: self.chain_lag(),
         }
     }
+}
+
+/// The warning codes `wiki_edit` answers with and `allow_warnings` takes
+/// (E1). One per FAMILY: acknowledging a stale name collision must not
+/// also wave through a foreign rewrite.
+pub(crate) const WARN_HEADER: &str = "header";
+/// A touched path an open proposal already touches.
+pub(crate) const WARN_OPEN_PATH: &str = "open_path";
+/// A rename's incoming links - rewritten, kept, or left in an open card.
+pub(crate) const WARN_RENAME_LINK: &str = "rename_link";
+/// A title or alias that already names another page.
+pub(crate) const WARN_NAME_COLLISION: &str = "name_collision";
+/// `content` over a page another seat last wrote.
+pub(crate) const WARN_FOREIGN_REWRITE: &str = "foreign_rewrite";
+/// An `upload:` reference that does not resolve to one usable file.
+pub(crate) const WARN_FILE_REF: &str = "file_ref";
+
+/// Tag one family's messages with its code.
+fn coded(code: &'static str, msgs: Vec<String>) -> impl Iterator<Item = (&'static str, String)> {
+    msgs.into_iter().map(move |m| (code, m))
+}
+
+/// The count always, the names while they still fit on a line.
+fn name_a_few(paths: &[String]) -> String {
+    /// Beyond this the list stops being scannable.
+    const SHOW: usize = 5;
+    let shown: Vec<&str> = paths.iter().take(SHOW).map(String::as_str).collect();
+    let rest = paths.len().saturating_sub(shown.len());
+    let tail = if rest == 0 {
+        String::new()
+    } else {
+        format!(", +{rest}")
+    };
+    let n = paths.len();
+    let plural = if n == 1 { "" } else { "s" };
+    format!("{n} page{plural} ({}{tail})", shown.join(", "))
 }
 
 /// One patch file as the change history records it (§4.11): the path the
@@ -4064,6 +4396,7 @@ mod upload_ref_state_tests {
             checksum: "3f9a2c1b7e04".to_string(),
             download: None,
             availability: "sharer-only".to_string(),
+            local: "own".to_string(),
             persistent: true,
             mirrors: 0,
             mirror_held: 0,
@@ -4770,5 +5103,87 @@ mod wiki_maintenance_tests {
         assert_eq!(wiki_rev, 1, "the second add cannot apply");
         assert_eq!(wiki_rev, st.wiki_base().expect("a tree").1);
         assert_eq!(list.len(), 1);
+    }
+
+    /// **E4 (R7)**: a build in flight is a STATE, not a fault. The three
+    /// reads a maintainer runs right after a multi-page apply answer
+    /// empty AND say why - a hard error on the one call that reports
+    /// faults cost every seat a retry loop it had to learn from a
+    /// refusal.
+    #[test]
+    fn the_graph_reads_answer_while_the_index_builds() {
+        let mut st = crate::tests::plain_state();
+        apply(&mut st, &[ADD_A]);
+        st.wiki_graph = None;
+        st.wiki_search = None;
+        // the guard a running build holds: nothing is built inline here
+        st.wiki_index_building = Some(st.applied_epoch);
+
+        let Reply::WikiHealth { index_building, dangling_total, wiki_rev, .. } =
+            st.cmd_wiki_health(0).expect("health answers")
+        else {
+            panic!("not a health reply");
+        };
+        assert!(index_building && dangling_total == 0 && wiki_rev == 1);
+
+        let Reply::WikiSearch { index_building, hits, .. } = st
+            .cmd_wiki_search("A".to_string(), vec![], None, None, vec![], 0, 0)
+            .expect("search answers")
+        else {
+            panic!("not a search reply");
+        };
+        assert!(index_building && hits.is_empty());
+
+        let Reply::WikiNeighbors { index_building, docs, .. } = st
+            .cmd_wiki_neighbors("notes/a.md".to_string(), 1, 0, None, None, false)
+            .expect("neighbors answers")
+        else {
+            panic!("not a neighbors reply");
+        };
+        assert!(index_building && docs.is_empty());
+    }
+
+    /// **E1 (R19's second half)**: a card the moved base already retired
+    /// is DEAD, not contended. It stays in `proposals` for the record, and
+    /// re-proposing over its paths must not need an acknowledgement -
+    /// round 3 measured the opposite, on a base-pending node where the
+    /// supersede walk is a no-op and the retired card still reads open.
+    #[test]
+    fn the_callers_own_retired_card_is_not_an_open_proposal() {
+        let mut st = crate::tests::plain_state();
+        apply(&mut st, &[ADD_A]);
+        let me = st.member();
+        let mut dead = molt_core::ProposalRecord {
+            surface: Surface::Memory,
+            payload: json!({ "op": "wiki_patch", "value": ADD_B }),
+            approvals: 0,
+            state: molt_core::ProposalState::Proposed,
+            declined_at: 0,
+            declined_by: String::new(),
+            decliners: Vec::new(),
+            voted: Vec::new(),
+            by: me.clone(),
+            superseded: false,
+            superseded_kind: None,
+            withdrawn: false,
+        };
+        st.proposals.insert(9, dead.clone());
+        assert_eq!(
+            st.open_wiki_proposals(None).len(),
+            1,
+            "an open card of ours is contended"
+        );
+
+        dead.superseded = true;
+        st.proposals.insert(9, dead.clone());
+        assert!(
+            st.open_wiki_proposals(None).is_empty(),
+            "our own retired card is not"
+        );
+
+        // …but a FOREIGN retired card still is: its proposer may re-file it
+        dead.by = "petra".to_string();
+        st.proposals.insert(9, dead);
+        assert_eq!(st.open_wiki_proposals(None).len(), 1);
     }
 }

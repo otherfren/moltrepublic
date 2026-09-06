@@ -367,6 +367,7 @@ struct WikiFileWords {
     loading: String,
     mirroring: String,
     gone: String,
+    changed: String,
     offline: String,
 }
 
@@ -382,6 +383,7 @@ impl WikiFileWords {
             loading: s.get_mem_file_loading().to_string(),
             mirroring: s.get_mem_file_mirroring().to_string(),
             gone: s.get_ou_gone().to_string(),
+            changed: s.get_ou_changed().to_string(),
             offline: s.get_ou_offline().to_string(),
         }
     }
@@ -568,11 +570,15 @@ fn ref_face(
         }
     }
     f.state = file_state::REMOTE;
-    let relay_held = u.availability == "relay-held";
-    f.can_fetch = u.available && (u.online || relay_held);
-    f.avail = if u.availability == "gone" {
+    // a series a seat beside the sharer holds serves without a live sharer,
+    // exactly like a relay-held one
+    let served = matches!(u.availability.as_str(), "relay-held" | "mirrored");
+    f.can_fetch = u.available && (u.online || served);
+    f.avail = if u.availability == "changed" {
+        lex.changed.clone()
+    } else if u.availability == "gone" {
         lex.gone.clone()
-    } else if !u.online && !relay_held {
+    } else if !u.online && !served {
         lex.offline.clone()
     } else {
         String::new()
@@ -2328,6 +2334,7 @@ pub(crate) fn wire_wiki_index(ui: &AppWindow, ctx: &Ctx) {
                 let building = matches!(
                     outcome,
                     Err(molt_core::MoltError::IndexBuilding { .. })
+                        | Ok(Reply::WikiSearch { index_building: true, .. })
                 );
                 let hits = match outcome {
                     Ok(Reply::WikiSearch { hits, .. }) => hits,

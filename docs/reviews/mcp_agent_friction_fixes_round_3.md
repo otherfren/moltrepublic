@@ -1,6 +1,6 @@
 # Fix plan, round 3: the cut that partitions, and the machine the agent operates
 
-Status: **OPEN WORK - ratified 2026-09-06 evening, not built.** The user
+Status: **OPEN WORK - ratified 2026-09-06 evening; B-F and G2/G3 built the same night, A and G1 in progress.** The user
 approved the proposals of the round-3 discussion as written
 (`docs_archive/reviews/mcp_agent_friction_2026-09-06_r3.md` §6, items 1-7)
 and decided item 8 by ADR-0007
@@ -96,7 +96,15 @@ control frame (INTERNAL) that the sender surfaces as a notice. Test: the
 round-3 situation (Right approving at 97 while the others are at 100+)
 answers a refusal on Right.
 
-## Part B - restart durability (R12, R17, R2)
+## Part B - restart durability (R12, R17, R2) - BUILT 2026-09-06 (0188fa8d)
+
+What the build found: foreign governance events were never written to the
+own log (a reopen rebuilt them from the catch-up re-serve, re-authored as
+own), `pending_sigs` was never rebuilt at open, and the reopen order on a
+folded holder skipped the supersede walk. All three fixed; the peer's
+events now ride the own log under the peer's name and are never
+re-broadcast. Open: a card that reaches a node ONLY through a catch-up
+re-serve is still attributed to the serving peer.
 
 B1 The proposal store persists `by`, every vote and the proposer's own
 signature across a reopen (today: reload re-labels foreign proposals as
@@ -109,7 +117,10 @@ B2 A pure `create` patch onto a path that the base already carries is
 B3 `withdraw` takes `note` (posted into the patch channel before the
 withdrawal) and answers the proposal record like approve/decline.
 
-## Part C - log noise (D10, D11)
+## Part C - log noise (D10, D11) - BUILT 2026-09-06 (0188fa8d + 60d4bf13)
+
+D11 was a harness artefact: `RUST_LOG=info` replaced the default filter's
+`openmls=off`; `molt-app` now appends it unless the value names openmls.
 
 C1 The decision line's deterministic id is RECOGNIZED by the ingest: the
 guard recomputes `decision_summary_id(proposal)` for a cross-author
@@ -122,7 +133,11 @@ resent frame goes through the engine's stale-frame filter (debug), like
 the 2026-09-03 fix did for the other replay class; a genuine decrypt
 failure stays one WARN line.
 
-## Part D - the file plane (R21, R18, R5, R10, R4, R23, R22)
+## Part D - the file plane (R21, R18, R5, R10, R4, R23, R22) - BUILT 2026-09-06 (48090f6b)
+
+Open: a bare `touch` on a shared file reads `changed` (the stamp is the
+cheap witness; the remedy is a new share); `gone` means "nowhere" and
+sits below `mirrored` in the precedence.
 
 D1 **A share is immutable.** `share_file` records (size, mtime) beside
 the path; `uploads_view` / `local_copy_of` re-check both on read and mark
@@ -160,7 +175,11 @@ D5 **Reverse lookup:** the search index tokenizes `upload:` destinations
 as a `files` field, so `wiki_search "<hex>"` finds the pages; `wiki_get.files`
 stays.
 
-## Part E - wiki hygiene (R19, R15, R6, R25, R7)
+## Part E - wiki hygiene (R19, R15, R6, R25, R7) - BUILT 2026-09-06 (880715f7)
+
+The rename repair reports (`repaired`) and does not warn; `repair_links:
+false` refuses. Warning codes: header, open_path, rename_link,
+name_collision, foreign_rewrite, file_ref.
 
 E1 `wiki_edit`'s title/alias and open-path warnings are computed against
 the WORKING COPY after the whole edit list (not the base); a warning names
@@ -182,7 +201,11 @@ labelled so. Test: the 13 reversed `authored_by` edges of round 2 show up.
 E4 `wiki_health` / `wiki_neighbors` answer `index_building` as a reply
 field, not a hard error, while the index rebuilds.
 
-## Part F - the machine boundary (ADR-0007; D1, D5 of the protocol)
+## Part F - the machine boundary (ADR-0007; D1, D5 of the protocol) - BUILT 2026-09-06 (81a0c44c)
+
+A relative destination with separators is REFUSED (it would resolve
+against the daemon's cwd); `set_mirror_dir` still stores its path raw
+(open). The walk's full run is part of the exhaustive run.
 
 F1 The recovery phrase: drop `skip_serializing` from `WorkspaceInfo.seed`,
 `create.seed`, `join.seed` (the wire shape gains the fields back, older
@@ -209,7 +232,7 @@ INTERNAL and why; `scripts/gui_walk.py` runs end to end again (its relay
 step may use `relay_confirm` again or keep the config form); phases 3-5
 re-verified; the known-debt entry closes.
 
-## Part G - build and docs (D2, D6, D7, D8)
+## Part G - build and docs (D2, D6, D7, D8) - G2 and G3 BUILT 2026-09-06 (60d4bf13, 2e50f046); G1 open
 
 G1 The two GUI tests red in the normal profile: run them at `df798858`
 once (one window build); then fix either the element lookup in the

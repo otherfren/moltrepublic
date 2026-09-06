@@ -558,6 +558,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             cx.issue(
                 Command::Withdraw {
                     proposal: ProposalId(id as u64),
+                    note: None,
                 },
             );
         });
