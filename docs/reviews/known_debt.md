@@ -93,6 +93,13 @@ still OPEN there, by id (each carries its fix direction in the review):
 - MCP privileges (section 9): P8 ritual abandon on context switch
   (product) · P10 send-side rate limits.
 
+## `scripts/gui_walk.py` has not been re-run since ADR-0007 (2026-09-06)
+
+Both blockers are gone (the phrase is served again, `relay_confirm`
+takes the clearnet acknowledgement), but the walk needs the
+`ui-testing` window build, which the round-3 agents could not run.
+Delete this entry once one full run is green.
+
 ## Flaky: `a_broadcast_ack_moves_the_senders_proven_floor` (2026-09-05)
 
 Failed once on `cursor.ack_seen` during a fully parallel `cargo test
