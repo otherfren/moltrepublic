@@ -118,12 +118,13 @@ thread_local! {
     static IMAGE_BUDGET: std::cell::Cell<usize> = const { std::cell::Cell::new(IMAGE_CACHE_BYTES) };
 }
 
+#[cfg(test)]
 fn image_budget() -> usize {
-    #[cfg(test)]
-    {
-        return IMAGE_BUDGET.with(std::cell::Cell::get);
-    }
-    #[cfg(not(test))]
+    IMAGE_BUDGET.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+fn image_budget() -> usize {
     IMAGE_CACHE_BYTES
 }
 
