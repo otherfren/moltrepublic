@@ -1423,6 +1423,17 @@ impl State {
         }
     }
 
+    /// R12: re-check every signature the log replay collected. The tail
+    /// replays BEFORE the chain is adopted (`open_stored_workspace`), so
+    /// nothing was verifiable yet; called right after the adoption, this
+    /// is what makes a restored vote count again.
+    pub(crate) fn reverify_all_pending(&mut self) {
+        let ids: Vec<u64> = self.chain.pending_sigs.keys().copied().collect();
+        for id in ids {
+            self.reverify_pending(id);
+        }
+    }
+
     /// Re-decide thresholds after a replay: a crash between an `Approved`
     /// frame and its `Applied` frame must not leave a proposal stuck at
     /// `have >= need` forever. Called once per open, after the tail applied.

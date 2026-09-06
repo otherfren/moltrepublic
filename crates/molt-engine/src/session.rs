@@ -1489,6 +1489,10 @@ impl State {
             // adopting — verify_own then runs the suffix rules
             self.set_checkpoint_blob(checkpoint_blob);
             self.adopt_chain(chain);
+            // R12: the tail replayed the collected signatures before this
+            // point, so none of them could be checked yet — verify them
+            // now, or every restored vote reads `open`
+            self.reverify_all_pending();
         }
         // …and the tree behind the chain's own commitment. Checked against
         // it here: bytes that do not answer the commitment are deleted, and
