@@ -802,14 +802,26 @@ fn renderer_selection(
 /// cache via GetAll" WARN on every portal interaction — Slint's
 /// color-scheme query at startup, the file picker. A user cannot act on
 /// it and nothing is broken, so it does not belong in their terminal.
-/// `RUST_LOG` overrides the whole filter for debugging.
+/// `RUST_LOG` overrides the filter for debugging - except that a value
+/// which does not mention openmls keeps it off (round 3: `RUST_LOG=info`
+/// on a headless node printed 182 openmls ERROR lines for the resends a
+/// restart provokes, which the engine already classifies as stale).
 fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_FILTER));
+    let filter = EnvFilter::new(effective_log_filter(std::env::var("RUST_LOG").ok().as_deref()));
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(filter)
         .init();
+}
+
+/// The filter to install: the default, or `RUST_LOG` with `openmls=off`
+/// appended unless it names openmls itself.
+fn effective_log_filter(env: Option<&str>) -> String {
+    match env.map(str::trim).filter(|v| !v.is_empty()) {
+        None => DEFAULT_LOG_FILTER.to_string(),
+        Some(v) if v.contains("openmls") => v.to_string(),
+        Some(v) => format!("{v},openmls=off"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -831,6 +843,16 @@ mod tests {
     fn the_default_log_filter_parses_and_silences_openmls() {
         let filter = EnvFilter::try_new(DEFAULT_LOG_FILTER).expect("a valid filter");
         assert!(filter.to_string().contains("openmls=off"));
+    }
+
+    #[test]
+    fn a_rust_log_that_forgets_openmls_gets_it_appended() {
+        assert_eq!(effective_log_filter(None), DEFAULT_LOG_FILTER);
+        assert_eq!(effective_log_filter(Some("")), DEFAULT_LOG_FILTER);
+        assert_eq!(effective_log_filter(Some("info")), "info,openmls=off");
+        assert_eq!(effective_log_filter(Some("molt_net=debug")), "molt_net=debug,openmls=off");
+        assert_eq!(effective_log_filter(Some("debug,openmls=info")), "debug,openmls=info");
+        assert!(EnvFilter::try_new(effective_log_filter(Some("info"))).is_ok());
     }
 
     #[test]

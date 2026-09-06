@@ -147,7 +147,12 @@ finding, the same as a bug.
 
 - **clippy is kept at 0, including tests.** `unwrap_used = "warn"` applies to all
   targets — use `.expect("…")` in tests, never `.unwrap()`. `cargo clippy
-  --all-targets` must be clean before you commit.
+  --all-targets` must be clean before you commit — run it PER CRATE: at
+  workspace level, or for `molt-ui`/`molt-app` in the normal profile, it
+  check-builds the 400k-line window module (~11 GiB, measured 2026-09-06),
+  so those two get the window build's care (once per change-set, `-j 1`,
+  never beside a live run); the live-preview flavour of `molt-ui` is the
+  cheap everyday clippy.
 - **Co-equality is enforced by a test.** Every `Command` variant must be either
   an MCP tool (`crates/molt-mcp/src/lib.rs::tools()`) or on the documented
   `INTERNAL` list in that file — `co_equality_every_command_is_a_tool_or_documented_internal`
@@ -429,6 +434,10 @@ both verified red-without/green-with).
     and note that a worktree agent with its OWN target dir is NOT serialized
     by cargo's build lock against a build in the main checkout.
 
+  **`cargo build -p molt-app --features ui-testing` is a SECOND full window
+  build** (10m44s, 2026-09-06): the feature changes the window crate's unit
+  hash, so the `gui_walk.py` prerequisite costs the same as the authoritative
+  build — plan both, never concurrently.
   GUI changes are validated by a clean `cargo build -j 1 -p molt-ui-window -p
   molt-ui` — **one** invocation naming BOTH: `-p molt-ui-window` alone
   resolves a different `slint` feature set, so a solo window build is thrown
