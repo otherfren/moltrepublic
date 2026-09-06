@@ -14,6 +14,16 @@ their concept docs (`docs/kanban/kanban_workflows.md` §2–§5+§7,
 `docs/vault/vault_threshold_disclosure.md`) — both docs carry open
 questions that gate any real build.
 
+## Which renderer a GPU-less box should ship
+
+From `docs_archive/ui/wiki_pane_performance.md` §4 step 5 / §5 Q1-Q2: the
+`[ui] renderer` key exists (`auto` | `software` | `gl`), but nobody has
+measured the software renderer against femtovg-on-llvmpipe on the live
+Qubes nodes (`SLINT_BACKEND=winit-software` plus
+`SLINT_DEBUG_PERFORMANCE=refresh_lazy,console,overlay`), nor run the wiki
+on the compiled release build at all. Decide the default from that
+measurement; until then `auto`.
+
 ## A reasoned decline delays the seal (agent round 2, A4)
 
 From `docs_archive/reviews/mcp_agent_friction_fixes_round_2.md` §A4: a

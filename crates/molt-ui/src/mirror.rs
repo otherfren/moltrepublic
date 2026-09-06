@@ -1084,7 +1084,7 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         has_votes,
     );
     // the rows already on screen, by surface key - their nested models get
-    // PATCHED, never replaced (F7, `docs/ui/wiki_pane_performance.md`): a
+    // PATCHED, never replaced (F7, `docs_archive/ui/wiki_pane_performance.md`): a
     // fresh ModelRc per event rebuilds every log/vote repeater in the pane,
     // the most expensive frame the GUI has.
     let shown = ui.get_surfaces();

@@ -1336,7 +1336,7 @@ export component MemoryPane inherits VerticalLayout {
                             // WINDOWED: only the rows the view shows (plus two
                             // rows of margin) exist as element trees. Eager rows
                             // cost 5.5 ms each to build, and a 134-row tree took
-                            // 690 ms per frame (docs/ui/wiki_pane_performance.md
+                            // 690 ms per frame (docs_archive/ui/wiki_pane_performance.md
                             // F3). The empty shell keeps its 26px slot, so the
                             // scroll geometry and every row index are unchanged.
                             property <bool> live:

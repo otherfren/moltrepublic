@@ -929,7 +929,7 @@ fn a_caret_move_does_not_resync_the_whole_face() {
     assert_ne!(g.get_doc_meta().as_str(), "sentinel");
 }
 
-/// **A keystroke renders nothing** (`docs/ui/wiki_pane_performance.md`
+/// **A keystroke renders nothing** (`docs_archive/ui/wiki_pane_performance.md`
 /// F4): the block view is off screen while the editor is up
 /// (surfaces.slint gates it on `!editing`), so the markdown parse of
 /// working AND base text plus the Myers diff must not run per keystroke -

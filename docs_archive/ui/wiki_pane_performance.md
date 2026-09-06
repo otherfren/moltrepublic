@@ -1,7 +1,10 @@
 # Wiki pane performance - analysis and fix plan
 
-Status: **OPEN - analysis measured 2026-09-06, fix plan partly executed.**
-A step marked BUILT below is done; the rest is a proposal to discuss first.
+Status: **EXECUTED 2026-09-06.** Steps 1-6 are on master (step 1
+b37a3dbe + c56575f8, step 2 9e14fe0d, step 3 6fe781bf + fb4ec783, steps 4
+and 6 badcc389, step 5 2bb3b3da). What stays open is not engineering: the
+renderer measurement on the live nodes (§4 step 5), tracked in
+`docs/reviews/known_debt.md`.
 
 Reported live (2026-09-06, three `moltd` nodes on the "Second Wiki Test"
 republic, 125 pages / 9 folders / 293 KB): the wiki pane is sluggish
@@ -198,23 +201,29 @@ removal, no visible change); 4-6 change behaviour or structure.
    corpus, same flavour, in one run (`surfaces_push_frame_cost_offscreen`,
    `#[ignore]`d): the wholesale rewrite 0.4-0.8 s depending on machine
    weather, `apply_surfaces` with an unchanged bundle **drew=false**.
-3. **`sync_wiki` diet (F4, F5) - molt-ui only, no .slint change.**
-   - `to_draft()` only when the 2 s guard is due AND a generation counter
-     (bumped by every mutating verb) moved - never on the keystroke echo.
-   - `build_patch()`/`cs_patch` cached by that generation; the modal reads
-     it when it opens.
-   - `preview()` only when `!editing` and the (id, raw, base) triple
-     changed; the block/spans models patched in place as today.
-   - `wants_content()` remembers what it asked for (`in_flight: BTreeSet`,
-     cleared by `load_base`/`content_failed`).
-   - Modal drafts (tags/link) synced only while their modal is open.
-4. **Navigator rows (F3) - .slint.** One `ContextMenuArea` per navigator,
-   its `Menu` built from the marked row (the row's right-click marks then
-   shows it - the click already does the marking); the tooltip `changed`
-   handler only on the hovered row; and the navigator on a virtualising
-   `ListView` (std-widgets) so off-screen rows do not exist. The drag/drop
-   gesture reads row indices from `mouse-y / stride`, which a `ListView`
-   keeps.
+3. **`sync_wiki` diet (F4, F5) - BUILT 2026-09-06 (`6fe781bf`, trailing
+   flush `fb4ec783`).** One generation counter at one choke point
+   (`sync_after`); the draft is serialized only when the model moved AND
+   the 2 s window is over, and a single-shot timer flushes the last edit
+   when the window ends (before, an edit followed by silence was saved
+   only by the next click); `cs_patch` rebuilt by generation; the block
+   view, infobox and link list rebuilt only when the active document's
+   bytes moved (`face_key`) and never while editing; bytes in flight are
+   asked for once (`content_failed` / `requeue_content` reopen). Measured
+   (debug, held base): nav_mark 40.7 → 1.5 ms, keystroke 56.8 → 4.7 ms;
+   `content_wanted` 45 → 1 per document.
+4. **Navigator rows (F3) - BUILT 2026-09-06 (`badcc389`).** Windowed
+   inside `ScrollBody` (option b): only the rows within the viewport plus
+   two rows of margin exist as element trees, an off-screen row is a bare
+   26 px shell; ONE `ContextMenuArea` per row kind for the whole
+   navigator, built from the marked row (`WikiState.marked-*`,
+   `sync_nav_menu`); a rename scrolls its row into view
+   (`nav-renaming-row`). A finding that corrects F3: the per-row `Menu`
+   was never the cost (Slint lowers it lazily on `show()`), the row
+   trees were. `ListView` rejected by measurement: the 134 shells alone
+   cost 59 ms, so full virtualisation buys at most that and costs the
+   scroll seam, the `ScrollHint`, the drag index math and the keyboard
+   routes. Measured: fold_all(true) 506 → 139 ms.
 5. **Renderer choice on a GPU-less box (F1, F2).** The choice is BUILT
    (2026-09-06): `[ui] renderer = "auto" | "software" | "gl"`, default
    `auto`, applied by `molt-app` through `slint::BackendSelector` before
@@ -226,9 +235,16 @@ removal, no visible change); 4-6 change behaviour or structure.
    what a GPU-less box should carry in its config. Partial repaint only
    pays with step 6; without it the software renderer still repaints the
    window on every mark (§2.2), just without the GL round trip.
-6. **Marks without relayout (F2).** Keep row text metrics constant (weight
-   via colour only, or a fixed-width label) so a mark dirties two rows, not
-   the window - only pays off with a partially-repainting renderer (step 4).
+6. **Marks without relayout (F2) - BUILT 2026-09-06 (`badcc389`).** A
+   mark no longer switches `font-weight`; the accent bar is permanent and
+   colour-switched. Measured: the dirty region after a mark 1600x1000 →
+   412x26, nav_mark with a document open 125 → 8 ms.
+
+**Result in the live flavour (debug + interpreter, same probe):** an
+engine event 992 ms → nothing drawn; unfolding the whole tree 690 → 139
+ms; a mark 121 → 8 ms and one row instead of the window; a keystroke
+149 → 93 ms paint over 4.7 ms of model work. The remaining per-frame cost
+is the interpreter and the software rasterizer themselves (§5 Q1).
 
 ## 5. Open questions
 

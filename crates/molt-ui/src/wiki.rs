@@ -16,7 +16,7 @@ use similar::{capture_diff_slices, Algorithm, DiffOp};
 
 pub type DocId = u32;
 
-/// Test seam for the sync diet (`docs/ui/wiki_pane_performance.md` F4):
+/// Test seam for the sync diet (`docs_archive/ui/wiki_pane_performance.md` F4):
 /// how often the expensive rebuilds and the draft flush actually ran.
 #[cfg(test)]
 pub(crate) mod counters {
@@ -386,7 +386,7 @@ pub struct Wiki {
     vote_pending: Option<Vec<Change>>,
     /// Bumped once per callback by the bridge ([`Wiki::touch`]): the face
     /// sync's "has anything moved at all" key
-    /// (`docs/ui/wiki_pane_performance.md` F4).
+    /// (`docs_archive/ui/wiki_pane_performance.md` F4).
     gen: u64,
     /// Base paths already asked for and not answered yet (§4.10). Without
     /// it every sync re-asks while the bytes are in flight - 45 `wiki_get`
@@ -556,7 +556,7 @@ impl Wiki {
     /// The model moved. The bridge calls this once per callback - every
     /// wiki verb is a mutation by construction, and one choke point
     /// cannot be forgotten the way sixty verbs can
-    /// (`docs/ui/wiki_pane_performance.md` F4).
+    /// (`docs_archive/ui/wiki_pane_performance.md` F4).
     pub fn touch(&mut self) {
         self.gen = self.gen.wrapping_add(1);
     }
@@ -3806,7 +3806,7 @@ mod tests {
     }
 
     /// **The bytes of a document are asked for ONCE per attempt**
-    /// (`docs/ui/wiki_pane_performance.md` F5). `wants_content` used to be
+    /// (`docs_archive/ui/wiki_pane_performance.md` F5). `wants_content` used to be
     /// stateless, so every face sync re-asked for a fetch already running:
     /// 45 `wiki_get` round trips in a 60-interaction flow, each reply
     /// re-syncing the face. A failure and a base that moved make the path

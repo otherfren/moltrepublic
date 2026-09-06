@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The surfaces mirror PATCHES, it never rewrites (F7,
-//! `docs/ui/wiki_pane_performance.md`): an engine event fires on every
+//! `docs_archive/ui/wiki_pane_performance.md`): an engine event fires on every
 //! chat line, vote and 30 s presence tick, and a wholesale rewrite made
 //! that the most expensive frame the GUI has.
 
@@ -146,7 +146,7 @@ fn a_new_chat_line_grows_the_log_model_in_place() {
 /// engine event carries nothing new. Rendered offscreen through the
 /// software renderer, the only thing that can answer "did this frame
 /// draw" - the measured 992 ms frame in
-/// `docs/ui/wiki_pane_performance.md` is exactly this one.
+/// `docs_archive/ui/wiki_pane_performance.md` is exactly this one.
 #[test]
 fn an_unchanged_surfaces_push_paints_nothing() {
     use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
@@ -200,7 +200,7 @@ fn an_unchanged_surfaces_push_paints_nothing() {
     );
 }
 
-/// The measured frame (`docs/ui/wiki_pane_performance.md` §2.2): the
+/// The measured frame (`docs_archive/ui/wiki_pane_performance.md` §2.2): the
 /// memory pane holding the real corpus, then ONE engine event - once
 /// through `apply_surfaces`, once through the wholesale rewrite this
 /// step replaced. Needs the corpus, so it is `#[ignore]`d:

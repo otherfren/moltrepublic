@@ -56,7 +56,7 @@ const DRAFT_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// What ONE wiring's face sync carries between calls: the editor-buffer
 /// guard, plus the keys that say which parts of the face have to be
-/// rebuilt at all (`docs/ui/wiki_pane_performance.md` F4 - the sync used
+/// rebuilt at all (`docs_archive/ui/wiki_pane_performance.md` F4 - the sync used
 /// to rebuild everything after every callback, 85 % of it a draft
 /// serialization of a model nothing had touched).
 pub(crate) struct FaceState {
@@ -111,7 +111,7 @@ fn link_error_text(ui: &AppWindow, code: &str) -> String {
 
 /// The navigator keeps ONE context menu per row KIND and builds it from
 /// the MARKED row, so the row's facts travel as scalars
-/// (`docs/ui/wiki_pane_performance.md` F3).
+/// (`docs_archive/ui/wiki_pane_performance.md` F3).
 fn sync_nav_menu(s: &WikiState<'_>, nav: &[WikiNavRow]) {
     let m = nav.iter().find(|r| r.marked);
     s.set_marked_is_folder(m.is_some_and(|r| r.is_folder));
@@ -159,7 +159,7 @@ fn sync_draft(ui: &AppWindow, w: &wiki::Wiki, face: &mut FaceState, forced: bool
 /// Push the wiki model into the `WikiState` global after every mutation:
 /// the small models patch in place, and the parts that are neither cheap
 /// nor on screen are skipped on the keys `face` carries
-/// (`docs/ui/wiki_pane_performance.md` F4). The editor buffer is the
+/// (`docs_archive/ui/wiki_pane_performance.md` F4). The editor buffer is the
 /// oldest of those keys: `raw` is rewritten only when the active doc or
 /// the edit mode changes (`raw_for`), never on the keystroke echo — a
 /// mid-typing rewrite fights the caret. A modal write clears it itself.
@@ -387,7 +387,7 @@ fn sync_doc_face(s: &WikiState<'_>, w: &wiki::Wiki, id: wiki::DocId) {
 /// A callback ran: the model moved, so bump its generation and push the
 /// face. Every wiki verb is a mutation by construction, which makes this
 /// the ONE place the sync's "has anything changed" key has to be kept
-/// honest (`docs/ui/wiki_pane_performance.md` F4).
+/// honest (`docs_archive/ui/wiki_pane_performance.md` F4).
 fn sync_after(ui: &AppWindow, m: &Rc<RefCell<wiki::Wiki>>, face: &Rc<RefCell<FaceState>>) {
     m.borrow_mut().touch();
     sync_wiki(ui, &m.borrow(), &mut face.borrow_mut());

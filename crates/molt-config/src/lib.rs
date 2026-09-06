@@ -364,7 +364,7 @@ pub struct UiConfig {
 
 /// The GUI's renderer, chosen at start. Unknown values are rejected by the
 /// parser. `SLINT_BACKEND` still wins over this key, so a one-off trial needs
-/// no edit (`docs/ui/wiki_pane_performance.md` §4 step 5).
+/// no edit (`docs_archive/ui/wiki_pane_performance.md` §4 step 5).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Renderer {
@@ -1468,7 +1468,7 @@ mod tests {
         assert_eq!(salvaged.font_editor, 15);
     }
 
-    /// §4 step 5 of `docs/ui/wiki_pane_performance.md` (F1/F2): the renderer
+    /// §4 step 5 of `docs_archive/ui/wiki_pane_performance.md` (F1/F2): the renderer
     /// is a config key, not an env var somebody has to remember. An older
     /// config has none and keeps its default; a typo is a hard error like
     /// every other unknown value.
