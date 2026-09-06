@@ -383,3 +383,24 @@ Praktische Folge fuer die Stimmen: Signaturen sind positionsgebunden
 meine Zustimmungen zu 218/220/223/226/229/232/235 sind dort vermutlich
 wirkungslos. Abgegeben habe ich sie trotzdem: sie koennen nicht schaden, und
 die Gegenseite erreicht die Schwelle 2 auch ohne mich.
+
+### 15:40-15:57Z Zweiter Ausfall, diesmal ohne Wiederkehr
+Gemessen im 26-Sekunden-Takt (final.log):
+  15:40:41Z bis 15:51:00Z  h=96, 20 offene Antraege, 222 proposed, 225 proposed
+                            - 25 Messungen, voellig stabil, keine Bewegung
+  ab 15:51:25Z             `ConnectionRefusedError [Errno 111]` auf 127.0.0.1:4042
+  15:57:58Z                unveraendert nicht erreichbar (6 min 33 s)
+Der Knoten ist also ein drittes Mal weg. Vorher hat sich in zehn Minuten
+Laufzeit NICHTS bewegt: die Kette blieb auf 96, waehrend die anderen beiden
+weiterarbeiteten. Der Zustand "Transport zurueck, Kette tot" war stabil und
+kein Uebergang.
+
+Fuer den Bericht heisst das: 222 und 225 stehen auf MEINER Kette bis zuletzt
+als `proposed`. Die Zustimmung von Sitz B zu 225 (15:37:25Z, im Patch-Kanal
+mit allen vier Pruefsummen) ist der einzige Beleg, dass das Finale die
+Gegenseite erreicht hat - ein Chat-Beleg, kein Kettenbeleg. Genau die
+Unterscheidung, die dieser ganze Vorfall gelehrt hat.
+
+
+---
+Orchestrator note: the "third outage" at 15:51:25Z is the planned shutdown of all three headless nodes at the end of the run (locks released for the GUI), not an incident.
