@@ -174,7 +174,7 @@ tantivy = { version = "0.26", default-features = false, features = ["lz4-compres
 similar     = "2"
 
 [workspace.package]
-version    = "0.0.3"
+version    = "0.0.4"
 edition    = "2021"
 license    = "GPL-3.0-or-later"
 authors    = ["Peter Geschel <geschel@gmail.com>"]
