@@ -65,6 +65,10 @@ pub struct NodeConfig {
     /// carrying the queue size). Empty = off.
     #[serde(default)]
     pub poke_wake_command: String,
+    /// Workspace id to open at start (a service seat). File-owned like
+    /// `[ui] renderer`: never in [`Settings`], so a save leaves it alone.
+    #[serde(default)]
+    pub open_on_start: String,
 }
 
 /// The file plane's pacing (`[files]`, `docs_archive/files/mirroring.md` §3.2).
@@ -717,6 +721,9 @@ poke_enabled = {poke_enabled}
 # nudges once: loop list_proposals until nothing waits. Only this file and
 # the GUI set it: it is executed here, so no MCP client may plant one.
 poke_wake_command = {poke_wake_command}
+# Workspace id opened at start without a client (a service seat). "" = none.
+# A phrase-sealed workspace is only logged as a warning: decrypt it over MCP.
+open_on_start = ""
 
 [storage]
 # Per-group workspace root. "~" = $HOME.
@@ -1569,6 +1576,20 @@ mod tests {
             "the removed keys must not survive a save"
         );
         assert!(parse(&saved).is_ok());
+    }
+
+    /// `[node] open_on_start` is FILE-OWNED like `renderer`: a boot choice
+    /// the session never carries, so a runtime save must leave the file's
+    /// value alone instead of blanking it.
+    #[test]
+    fn open_on_start_is_a_file_owned_node_key() {
+        let text = render(&Settings::default());
+        assert!(text.contains("open_on_start = \"\""), "{text}");
+        assert_eq!(parse(&text).expect("parses").node.open_on_start, "");
+        let edited = text.replace("open_on_start = \"\"", "open_on_start = \"ws-1234\"");
+        assert_eq!(parse(&edited).expect("parses").node.open_on_start, "ws-1234");
+        let saved = update(&edited, &Settings::default()).expect("update");
+        assert_eq!(parse(&saved).expect("parses").node.open_on_start, "ws-1234");
     }
 
     #[test]

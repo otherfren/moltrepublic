@@ -42,7 +42,8 @@ molt-ui.workspace = true
 # process, before the GUI builds its first Slint object. Same workspace dep
 # molt-ui already pulls, so the feature set is unchanged.
 slint.workspace = true
-tokio.workspace = true
+# `signal`: SIGTERM/SIGINT end the node through the durable close (a service stop)
+tokio = { workspace = true, features = ["signal"] }
 clap.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

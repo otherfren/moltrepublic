@@ -1,0 +1,23 @@
+# moltd as a systemd service (a headless seat). Install as
+# /etc/systemd/system/moltd.service; the config carries node.headless = true
+# and node.open_on_start = "<workspace id>" so the seat comes up open after a
+# restart. --mcp-tcp must name a port OTHER than [mcp].port (that endpoint is
+# always on; the second one only keeps the process in the foreground - with
+# stdio the node would exit on systemd's /dev/null stdin). SIGTERM runs the
+# durable close. tor.mode = "local" needs tor.service; drop the After= line
+# for "embedded" (feature build) or "whonix".
+[Unit]
+Description=MoltRepublic node
+After=network-online.target tor.service
+Wants=network-online.target
+
+[Service]
+User=molt
+Environment=HOME=/var/lib/molt
+ExecStart=/usr/local/bin/moltd --config /var/lib/molt/config.toml --mcp-tcp 127.0.0.1:4041
+Restart=on-failure
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

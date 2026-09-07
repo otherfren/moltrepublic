@@ -485,6 +485,11 @@ both verified red-without/green-with).
   `initialize`. Two configs on two ports found and join a real republic in
   under a minute; it is the only way to exercise the command surface end to
   end without a window.
+  **As a service** (`scripts/moltd.service`, 2026-09-07): `--mcp-tcp` on a
+  second port keeps the process up without stdin, `[node] open_on_start`
+  opens a workspace with no client (a phrase-sealed one only logs a warning
+  and the node stays up), and SIGTERM/SIGINT run the durable close (exit 0).
+  Pinned by `crates/molt-app/tests/service.rs`.
 - Tests that need a real network are `#[ignore]`d — the Nostr real-relay PoC
   twin (`crates/molt-net/tests/nostr_relay_poc.rs`), the live-S3 probe, and the
   embedded-tor bootstrap; the founding+join+MLS flow is proven fast over

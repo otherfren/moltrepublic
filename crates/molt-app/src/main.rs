@@ -368,6 +368,10 @@ fn main() -> anyhow::Result<()> {
     }
     tracing::info!(mcp = %mcp_addr, allow = %config.mcp.allow, "MCP server listening (co-equal operator, token-gated)");
 
+    if !config.node.open_on_start.is_empty() {
+        open_on_start(&rt, &wallet, config.node.open_on_start.clone());
+    }
+
     let shutdown_wallet = wallet.clone();
     let result = if config.node.headless {
         tracing::info!("mode: headless (config: node.headless = true)");
@@ -400,6 +404,12 @@ fn main() -> anyhow::Result<()> {
             select_renderer(config.ui.renderer);
         }
         tracing::info!("mode: UI (GUI on main thread)");
+        rt.spawn(async {
+            shutdown_signal().await;
+            let _ = slint::invoke_from_event_loop(|| {
+                let _ = slint::quit_event_loop();
+            });
+        });
         // The GUI greys the embedded tor-mode row unless this binary was built
         // with the in-process arti dialer (the `embedded-tor` feature, P3).
         let embedded_tor_available = cfg!(feature = "embedded-tor");
@@ -427,7 +437,10 @@ fn main() -> anyhow::Result<()> {
 
     // Close any open workspace durably (flush, closing snapshot, LOCK
     // release) — quitting must be as safe as the in-app close button.
-    let _ = rt.block_on(shutdown_wallet.execute(molt_core::Command::CloseWorkspace));
+    match rt.block_on(shutdown_wallet.execute(molt_core::Command::CloseWorkspace)) {
+        Ok(_) => tracing::info!("workspace closed"),
+        Err(error) => tracing::warn!(%error, "workspace close failed"),
+    }
     // Flush any pending (debounced) config write and release the config lock.
     rt.block_on(config_store.shutdown());
     result
@@ -731,19 +744,54 @@ fn run_headless(
     token: String,
     read_token: String,
 ) -> anyhow::Result<()> {
-    match mcp_tcp {
-        Some(addr) => {
-            tracing::info!(%addr, "MCP transport: tcp");
-            rt.block_on(molt_mcp::serve_tcp(
-                wallet, addr, allow_all, allowlist, token, read_token,
-            ))?;
+    rt.block_on(async {
+        tokio::select! {
+            r = async {
+                match mcp_tcp {
+                    Some(addr) => {
+                        tracing::info!(%addr, "MCP transport: tcp");
+                        molt_mcp::serve_tcp(wallet, addr, allow_all, allowlist, token, read_token).await
+                    }
+                    None => {
+                        tracing::info!("MCP transport: stdio");
+                        molt_mcp::serve_stdio(wallet).await
+                    }
+                }
+            } => r.map_err(anyhow::Error::from),
+            () = shutdown_signal() => Ok(()),
         }
-        None => {
-            tracing::info!("MCP transport: stdio");
-            rt.block_on(molt_mcp::serve_stdio(wallet))?;
+    })
+}
+
+/// Resolves on SIGTERM or SIGINT - a service stop or a Ctrl-C. Never
+/// resolves if a handler cannot be installed (logged; the stop is then
+/// the default, a hard kill).
+async fn shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let (mut term, mut int) = match (signal(SignalKind::terminate()), signal(SignalKind::interrupt())) {
+        (Ok(t), Ok(i)) => (t, i),
+        (t, i) => {
+            let error = t.err().or(i.err()).map(|e| e.to_string()).unwrap_or_default();
+            tracing::warn!(%error, "signal handler unavailable - a stop is a hard kill");
+            std::future::pending().await
+        }
+    };
+    tokio::select! {
+        _ = term.recv() => tracing::info!(signal = "SIGTERM", "stopping"),
+        _ = int.recv() => tracing::info!(signal = "SIGINT", "stopping"),
+    }
+}
+
+/// `[node] open_on_start`: open `id` without a client. A refusal (unknown
+/// id, phrase-sealed, busy) is a warning and the node stays up - whoever
+/// operates it decides.
+fn open_on_start(rt: &Runtime, wallet: &WalletHandle, id: String) {
+    match rt.block_on(wallet.execute(molt_core::Command::OpenWorkspace { id: id.clone() })) {
+        Ok(_) => tracing::info!(key = "[node].open_on_start", workspace = %id, "opened"),
+        Err(error) => {
+            tracing::warn!(key = "[node].open_on_start", workspace = %id, %error, "not opened");
         }
     }
-    Ok(())
 }
 
 /// `openmls=off`: the whole crate, deliberately - its per-frame ERROR
