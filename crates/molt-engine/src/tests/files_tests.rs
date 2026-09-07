@@ -563,3 +563,227 @@ fn a_running_mirror_job_does_not_count_this_seat_as_a_holder() {
     }
     assert_eq!(st.mirror_holders().get(&id).cloned(), Some(vec![st.member()]));
 }
+
+/// A 1-of-1 state whose own approve applies at once: the delete's
+/// engine-internal effects (the share path, the download gate) are
+/// reachable here, unlike behind the actor handle.
+fn solo_state() -> State {
+    let (ev_tx, _keep) = tokio::sync::broadcast::channel::<Event>(8);
+    let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel::<Envelope>(8);
+    State::new(
+        GroupConfig {
+            threshold: 1,
+            self_cosign: false,
+            ..GroupConfig::demo()
+        },
+        SessionView::default(),
+        ev_tx,
+        cmd_tx,
+        None,
+        false,
+        None,
+    )
+}
+
+/// An own live share with its source path on disk.
+fn own_share(st: &mut State, dir: &std::path::Path, name: &str) -> molt_core::MessageId {
+    let path = dir.join(name);
+    std::fs::write(&path, b"minutes").expect("write the shared file");
+    let id = molt_core::MessageId([4u8; 16]);
+    let mut msg = molt_core::ChatMessage::text(id, "me", "a share", now_secs());
+    msg.file = Some(molt_core::FileMeta {
+        name: name.to_string(),
+        size: 7,
+        kind: "PDF".to_string(),
+        modified: 100,
+        available: true,
+        checksum: "ab".repeat(32),
+        key_b64: String::new(),
+        pieces: 0,
+        root: String::new(),
+    });
+    let env = st.make_env("me".to_string(), molt_core::WorkspaceEvent::Chat(msg));
+    st.apply(&env);
+    st.files.share_paths.insert(id, path);
+    id
+}
+
+/// The delete vote (`delete_upload.md` D1): the engine fills the identity,
+/// the applied block empties both tables, the chat row reads unavailable
+/// and a later persist is refused.
+#[test]
+fn a_delete_vote_removes_a_temporary_share_for_good() {
+    rt().block_on(async {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let w = spawn(one_of_three(), SessionView::default());
+        let id = share_temp_file(&w, tmp.path(), "protokoll.pdf", b"minutes").await;
+
+        let pid = propose(&w, json!({"op": "delete", "id": id.to_string()}))
+            .await
+            .expect("a live temporary share may be deleted");
+        let pending = read_surface(&w, Surface::Files).await.pending;
+        let payload = &pending[0].payload;
+        assert_eq!(payload["name"], json!("protokoll.pdf"), "the engine filled the identity");
+        assert_eq!(payload["size"], json!(7));
+        assert_eq!(payload["by"], json!("me"));
+        assert!(payload.get("at").is_none(), "a delete carries no stamp");
+        assert!(
+            matches!(
+                propose(&w, json!({"op": "delete", "id": id.to_string()})).await,
+                Err(MoltError::BadPayload(_))
+            ),
+            "a second delete while one is open is refused"
+        );
+        assert!(
+            matches!(
+                propose(&w, json!({"op": "persist", "id": id.to_string()})).await,
+                Err(MoltError::BadPayload(_))
+            ),
+            "a persist while a delete is open is refused"
+        );
+
+        w.execute(Command::Approve { proposal: pid, note: None }).await.expect("approve");
+        assert!(uploads(&w).await.is_empty(), "gone from both tables");
+        assert!(
+            matches!(
+                w.execute(Command::DownloadFile { id, dest: None }).await,
+                Err(MoltError::FileDeleted(_))
+            ),
+            "the download gate says deleted, not aged out"
+        );
+        let chat = read_surface(&w, Surface::Chat).await.applied;
+        let row = chat
+            .iter()
+            .find(|v| msg_id(v) == id)
+            .expect("the carrying message is still in the log");
+        assert_eq!(row["file"]["available"], json!(false), "the chat row reads unavailable");
+        assert!(
+            matches!(
+                propose(&w, json!({"op": "persist", "id": id.to_string()})).await,
+                Err(MoltError::BadPayload(_))
+            ),
+            "a deleted share cannot be persisted afterwards"
+        );
+    });
+}
+
+/// The propose door: a persistent share must be unpersisted first, and an
+/// unknown id names nothing to delete.
+#[test]
+fn a_delete_is_refused_for_a_persistent_share_and_an_unknown_id() {
+    rt().block_on(async {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let w = spawn(one_of_three(), SessionView::default());
+        let id = share_temp_file(&w, tmp.path(), "pinned.pdf", b"minutes").await;
+        let pid = propose(&w, json!({"op": "persist", "id": id.to_string()}))
+            .await
+            .expect("persist");
+        w.execute(Command::Approve { proposal: pid, note: None }).await.expect("approve");
+        match propose(&w, json!({"op": "delete", "id": id.to_string()})).await {
+            Err(MoltError::BadPayload(m)) => assert!(m.contains("unpersist first"), "{m}"),
+            other => panic!("a persistent share must not be deletable: {other:?}"),
+        }
+        assert!(matches!(
+            propose(&w, json!({"op": "delete", "id": "cd".repeat(16)})).await,
+            Err(MoltError::BadPayload(_))
+        ));
+    });
+}
+
+/// Cleanup is the point: a share the sharer already withdrew still lists
+/// as temporary, and the vote takes it off the table.
+#[test]
+fn an_unavailable_share_can_still_be_deleted() {
+    rt().block_on(async {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let w = spawn(one_of_three(), SessionView::default());
+        let id = share_temp_file(&w, tmp.path(), "withdrawn.pdf", b"minutes").await;
+        w.execute(Command::RemoveFile { id }).await.expect("the sharer withdraws it");
+        let rows = uploads(&w).await;
+        assert_eq!(rows.len(), 1, "the row stays, unavailable");
+        assert!(!rows[0].available);
+        let pid = propose(&w, json!({"op": "delete", "id": id.to_string()}))
+            .await
+            .expect("an unavailable share is deletable");
+        w.execute(Command::Approve { proposal: pid, note: None }).await.expect("approve");
+        assert!(uploads(&w).await.is_empty());
+    });
+}
+
+/// The applied delete makes the sharer forget its source path at once,
+/// and every gate reads the share as gone.
+#[test]
+fn a_delete_block_makes_the_sharer_forget_its_share_path() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let mut st = solo_state();
+    let id = own_share(&mut st, tmp.path(), "minutes.pdf");
+    let pid = match st.cmd_propose(Surface::Files, json!({"op": "delete", "id": id.to_string()})) {
+        Ok(Reply::Proposed { id, .. }) => id,
+        other => panic!("the delete proposal is accepted: {other:?}"),
+    };
+    st.cmd_approve(pid, None).expect("approve");
+    assert!(!st.files.share_paths.contains_key(&id), "the sharer stopped serving it");
+    assert!(st.uploads_view().is_empty());
+    assert!(st.share_expired(&id), "the serve path and the sweep read it as gone");
+    assert!(matches!(st.cmd_download_file(id, None), Err(MoltError::FileDeleted(_))));
+}
+
+/// The approve door: the matching identity passes, a persistent share is
+/// refused, and availability is not required.
+#[test]
+fn the_approve_door_takes_a_matching_delete_and_refuses_a_persistent_share() {
+    let mut st = plain_state();
+    let id = molt_core::MessageId([7u8; 16]);
+    let mut msg = molt_core::ChatMessage::text(id, "peer-1", "a share", now_secs());
+    msg.file = Some(molt_core::FileMeta {
+        name: "real.pdf".to_string(),
+        size: 9,
+        kind: "PDF".to_string(),
+        modified: 100,
+        available: false,
+        checksum: "ab".repeat(32),
+        key_b64: String::new(),
+        pieces: 0,
+        root: String::new(),
+    });
+    let env = st.make_env("peer-1".to_string(), molt_core::WorkspaceEvent::Chat(msg));
+    st.apply(&env);
+    let vote = |checksum: String| {
+        json!({
+            "op": "delete", "id": id.to_string(), "by": "peer-1", "name": "real.pdf",
+            "kind": "PDF", "size": 9, "checksum": checksum, "shared_ts": env.ts
+        })
+    };
+    assert!(st.check_files_vote(&vote("ab".repeat(32))).is_ok(), "unavailable is deletable");
+    assert!(
+        matches!(st.check_files_vote(&vote("ff".repeat(32))), Err(MoltError::BadPayload(_))),
+        "a foreign identity gets no signature"
+    );
+    st.applied.entry(Surface::Files).or_default().push((None, json!({
+        "op": "persist", "id": id.to_string(), "name": "real.pdf", "kind": "PDF",
+        "size": 9, "checksum": "ab".repeat(32), "by": "peer-1", "shared_ts": env.ts
+    })));
+    match st.check_files_vote(&vote("ab".repeat(32))) {
+        Err(MoltError::BadPayload(m)) => assert!(m.contains("unpersist first"), "{m}"),
+        other => panic!("a persistent share must not be deletable: {other:?}"),
+    }
+}
+
+/// The mirror sweep drops a deleted share's job: `gone` reads the fold,
+/// so no seat keeps mirroring what the vote removed.
+#[test]
+fn the_mirror_sweep_drops_a_deleted_job() {
+    let mut st = plain_state();
+    let id = molt_core::MessageId([2u8; 16]);
+    let block = |op: &str| json!({
+        "op": op, "id": id.to_string(), "by": "peer-1", "name": "big.bin", "kind": "BIN",
+        "size": 5, "checksum": "ab".repeat(32), "shared_ts": now_secs()
+    });
+    st.applied.entry(Surface::Files).or_default().push((None, block("persist")));
+    assert!(
+        !st.mirror_job_gone(&st.files_state(), &id.to_string()),
+        "a persistent share is worth holding"
+    );
+    st.applied.entry(Surface::Files).or_default().push((None, block("delete")));
+    assert!(st.mirror_job_gone(&st.files_state(), &id.to_string()), "the delete drops it");
+}

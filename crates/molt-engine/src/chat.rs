@@ -404,6 +404,11 @@ impl State {
         id: MessageId,
         dest: Option<String>,
     ) -> Result<Reply, MoltError> {
+        // a delete vote is not an expiry: nobody serves, fetches or
+        // assembles it any more (`delete_upload.md` D1)
+        if self.share_deleted(&id) {
+            return Err(MoltError::FileDeleted(id));
+        }
         // D2: a completed mirror IS the file - assembled locally below,
         // and its bytes outlive the sharer's copy
         let mirrored = self.mirrored_byte_source(&id);

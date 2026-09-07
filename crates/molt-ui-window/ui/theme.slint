@@ -191,6 +191,7 @@ export struct UploadRow {
     persistent: bool, // a vote pinned it (Persistent Uploads)
     checksum-full: string, // the full sha256 for the modal ("" = legacy)
     vote: string, // an open persist/unpersist vote's "n/m", "" = none
+    delete-vote: string, // an open delete vote's "n/m", "" = none
     mirrors: int, // members holding the whole series, the sharer included
     mirror-held: int, // this seat's verified pieces
     mirror-of: int, // the series' piece count (0 = legacy share)
@@ -1099,6 +1100,8 @@ export global Strings {
     in property <string> ou-col-unpersist;
     in property <string> ou-persist;
     in property <string> ou-unpersist;
+    in property <string> ou-col-delete;
+    in property <string> ou-delete;
     in property <string> ou-empty-persistent;
     in property <string> ou-note-persistent;
     in property <string> ou-col-mirrors;

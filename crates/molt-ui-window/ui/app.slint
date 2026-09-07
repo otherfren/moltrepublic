@@ -853,7 +853,8 @@ component SortHeader inherits Rectangle {
 
 
 // The Shared Files table, ONE component for both views: `persistent`
-// swaps the tail columns (expires + persist ↔ unpersist). Header and rows
+// swaps the tail columns (expires + persist + delete ↔ mirrors +
+// unpersist). Header and rows
 // are separate layouts, so every fixed width carries ui-scale on BOTH
 // sides and the stretch column has preferred-width 0 on both.
 component UploadsTable inherits Rectangle {
@@ -867,6 +868,7 @@ component UploadsTable inherits Rectangle {
     callback download(string);
     callback persist(string);
     callback unpersist(string);
+    callback delete(string);
     callback show-checksum(string, string);
     background: Theme.panel;
     border-radius: Theme.win95 ? 0px : 8px;
@@ -971,6 +973,14 @@ component UploadsTable inherits Rectangle {
                     desc: false;
                     align: center;
                     width: 90px * Theme.ui-scale;
+                }
+                // temporary only: a pinned share is unpersisted first
+                if !root.persistent: SortHeader {
+                    label: Strings.ou-col-delete;
+                    active: false;
+                    desc: false;
+                    align: center;
+                    width: 70px * Theme.ui-scale;
                 }
             }
             Rectangle {
@@ -1157,19 +1167,34 @@ component UploadsTable inherits Rectangle {
                     HorizontalLayout {
                         width: 90px * Theme.ui-scale;
                         alignment: center;
-                        AppButton {
+                        ou-vote := AppButton {
                             height: 28px * Theme.ui-scale;
                             pad: 8px;
                             y: (parent.height - self.height) / 2;
                             label: u.vote != "" ? u.vote
                                 : (root.persistent ? Strings.ou-unpersist : Strings.ou-persist);
-                            enabled: u.vote == "" && u.id != "";
+                            enabled: u.vote == "" && u.delete-vote == "" && u.id != "";
                             clicked => {
                                 if (root.persistent) {
                                     root.unpersist(u.id);
                                 } else {
                                     root.persist(u.id);
                                 }
+                            }
+                        }
+                    }
+                    // the delete vote (`delete_upload.md` D2): gone for good
+                    if !root.persistent: HorizontalLayout {
+                        width: 70px * Theme.ui-scale;
+                        alignment: center;
+                        ou-delete := AppButton {
+                            height: 28px * Theme.ui-scale;
+                            pad: 8px;
+                            y: (parent.height - self.height) / 2;
+                            label: u.delete-vote != "" ? u.delete-vote : Strings.ou-delete;
+                            enabled: u.vote == "" && u.delete-vote == "" && u.id != "";
+                            clicked => {
+                                root.delete(u.id);
                             }
                         }
                     }
@@ -1281,8 +1306,9 @@ export component AppWindow inherits Window {
     callback sort-uploads(string);
     // uploads filter needle edited (matches user/filename/checksum in Rust)
     callback filter-uploads(string);
-    // the two Shared Files votes, by the share's chat message id
+    // the three Shared Files votes, by the share's chat message id
     callback persist-upload(string);
+    callback delete-upload(string);
     // the mirror switch + quota (GB text) and the folder picker
     callback set-mirror(bool, string);
     callback pick-mirror-dir();
@@ -6778,6 +6804,7 @@ export component AppWindow inherits Window {
                                 download(id) => { root.download-file(id); }
                                 persist(id) => { root.persist-upload(id); }
                                 unpersist(id) => { root.unpersist-upload(id); }
+                                delete(id) => { root.delete-upload(id); }
                                 show-checksum(name, hash) => { root.open-checksum(name, hash); }
                             }
                             // mirroring §3.6: consent, quota, folder and usage
@@ -6869,6 +6896,7 @@ export component AppWindow inherits Window {
                                 download(id) => { root.download-file(id); }
                                 persist(id) => { root.persist-upload(id); }
                                 unpersist(id) => { root.unpersist-upload(id); }
+                                delete(id) => { root.delete-upload(id); }
                                 show-checksum(name, hash) => { root.open-checksum(name, hash); }
                             }
                             Text {

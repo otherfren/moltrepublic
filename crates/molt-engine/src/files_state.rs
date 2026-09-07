@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Shared Files votes (`docs_archive/files/persistent_uploads.md` D1/D2):
-//! the fold of the persist/unpersist log, the ONE expiry rule every share
-//! consumer reads, and the two doors a Files proposal passes - propose
-//! (the identity is written here) and approve (it is checked here).
+//! Shared Files votes (`docs_archive/files/persistent_uploads.md` D1/D2,
+//! `docs_archive/files/delete_upload.md` D1): the fold of the
+//! persist/unpersist/delete log, the ONE expiry rule every share consumer
+//! reads, and the two doors a Files proposal passes - propose (the identity
+//! is written here) and approve (it is checked here).
 
 use std::collections::HashMap;
 
@@ -13,6 +14,8 @@ use crate::State;
 
 /// How far an `unpersist` stamp may sit from a seat's clock.
 const UNPERSIST_SKEW: u64 = 3_600;
+
+const FILES_OPS: &str = "files ops: persist {id} · unpersist {id, at} · delete {id}";
 
 /// A share's identity as the persist block carries it - the chat message
 /// may be gone by the time anyone reads it.
@@ -109,12 +112,14 @@ pub(crate) enum FileState {
     Persistent(ShareIdentity),
     /// Back to temporary since `at` - its window restarts there.
     Unpersisted(ShareIdentity, u64),
+    /// A vote deleted it: terminal, gone from every table and gate.
+    Deleted(ShareIdentity),
 }
 
 impl FileState {
     pub(crate) fn identity(&self) -> &ShareIdentity {
         match self {
-            FileState::Persistent(m) | FileState::Unpersisted(m, _) => m,
+            FileState::Persistent(m) | FileState::Unpersisted(m, _) | FileState::Deleted(m) => m,
         }
     }
 }
@@ -128,14 +133,14 @@ fn parse_id(v: &Value) -> Option<MessageId> {
 }
 
 /// The node-independent shape check - the wire door and the propose door
-/// alike, so peers agree on what to drop. Both ops carry the identity: a
+/// alike, so peers agree on what to drop. Every op carries the identity: a
 /// checkpoint keeps only the LATEST op per share (`applied_lww_slot`), so
-/// an unpersist must fold on its own.
+/// an unpersist or a delete must fold on its own.
 pub(crate) fn validate_files_payload(v: &Value) -> Result<(), MoltError> {
     let bad = |m: &str| MoltError::BadPayload(m.to_string());
     let op = v.get("op").and_then(Value::as_str).unwrap_or("");
-    if !matches!(op, "persist" | "unpersist") {
-        return Err(bad("files ops: persist {id} · unpersist {id, at}"));
+    if !matches!(op, "persist" | "unpersist" | "delete") {
+        return Err(bad(FILES_OPS));
     }
     if parse_id(v).is_none() {
         return Err(bad("a share id (32 hex chars) is required"));
@@ -221,10 +226,38 @@ impl State {
                         out.insert(id, FileState::Unpersisted(meta, at));
                     }
                 }
+                // terminal: the identity rides it, so a cut that kept only
+                // this op still knows the share is gone
+                Some("delete") => {
+                    let meta = ShareIdentity::from_payload(v)
+                        .or_else(|| out.get(&id).map(|prev| prev.identity().clone()));
+                    if let Some(mut meta) = meta {
+                        if let Some(prev) = out.get(&id) {
+                            meta.adopt_material(prev.identity());
+                        }
+                        out.insert(id, FileState::Deleted(meta));
+                    }
+                }
                 _ => {}
             }
         }
         out
+    }
+
+    pub(crate) fn share_deleted(&self, id: &MessageId) -> bool {
+        matches!(self.files_state().get(id), Some(FileState::Deleted(_)))
+    }
+
+    /// A Files block just applied: a delete stops the sharer serving at
+    /// once (`delete_upload.md` D1) - every other seat's mirror drops the
+    /// job on its next planning beat, which reads the fold.
+    pub(crate) fn after_files_applied(&mut self, payload: &Value) {
+        if payload.get("op").and_then(Value::as_str) != Some("delete") {
+            return;
+        }
+        if let Some(id) = parse_id(payload) {
+            self.forget_share_path(&id);
+        }
     }
 
     pub(crate) fn is_persistent_share(&self, id: &MessageId) -> bool {
@@ -289,6 +322,8 @@ impl State {
         match states.get(id) {
             Some(FileState::Persistent(_)) => None,
             Some(FileState::Unpersisted(_, at)) => Some(at.saturating_add(self.retention_secs())),
+            // a delete ends the window at once: a deadline in the past
+            Some(FileState::Deleted(_)) => Some(1),
             None => {
                 let ts = self.chat_by_id(id).map(|(_, m)| m.ts).unwrap_or(0);
                 Some(if ts == 0 { 0 } else { ts.saturating_add(self.retention_secs()) })
@@ -338,6 +373,9 @@ impl State {
             .parse()
             .map_err(|_| bad("a share id (32 hex chars) is required"))?;
         let states = self.files_state();
+        if matches!(states.get(&id), Some(FileState::Deleted(_))) {
+            return Err(bad("deleted"));
+        }
         match op.as_str() {
             "persist" => {
                 if matches!(states.get(&id), Some(FileState::Persistent(_))) {
@@ -347,6 +385,10 @@ impl State {
                     self.share_identity(&id).map_err(|_| bad("not a shared file"))?;
                 if self.open_files_vote("persist", &id_hex, !ident.key_b64.is_empty()) {
                     return Err(bad("a persist vote for this share is open"));
+                }
+                // a delete would leave a sealed persist unappliable forever
+                if self.open_files_vote("delete", &id_hex, false) {
+                    return Err(bad("a delete vote for this share is open"));
                 }
                 if !available {
                     return Err(MoltError::FileUnavailable(id));
@@ -375,7 +417,23 @@ impl State {
                 }
                 meta.write_into(payload);
             }
-            _ => return Err(bad("files ops: persist {id} · unpersist {id, at}")),
+            "delete" => {
+                if matches!(states.get(&id), Some(FileState::Persistent(_))) {
+                    return Err(bad("persistent - unpersist first"));
+                }
+                // an unavailable share is deletable - cleanup is the point
+                let (ident, _) = self.share_identity(&id).map_err(|_| bad("not a shared file"))?;
+                if self.open_files_vote("delete", &id_hex, false)
+                    || self.open_files_vote("persist", &id_hex, false)
+                {
+                    return Err(bad("a vote for this share is open"));
+                }
+                if self.share_expired_in(&states, &id) {
+                    return Err(MoltError::FileExpired(id));
+                }
+                ident.write_into(payload);
+            }
+            _ => return Err(bad(FILES_OPS)),
         }
         validate_files_payload(payload)
     }
@@ -390,6 +448,9 @@ impl State {
         let id = parse_id(payload).ok_or_else(|| bad("a share id is required"))?;
         let claimed = ShareIdentity::from_payload(payload).ok_or_else(|| bad("no identity"))?;
         let states = self.files_state();
+        if matches!(states.get(&id), Some(FileState::Deleted(_))) {
+            return Err(bad("deleted"));
+        }
         match payload.get("op").and_then(Value::as_str).unwrap_or("") {
             "persist" => {
                 if matches!(states.get(&id), Some(FileState::Persistent(_))) {
@@ -407,7 +468,19 @@ impl State {
                     return Err(mine.mismatch(&claimed));
                 }
             }
-            _ => {
+            "delete" => {
+                if matches!(states.get(&id), Some(FileState::Persistent(_))) {
+                    return Err(bad("persistent - unpersist first"));
+                }
+                // availability is not required: a withdrawn share is
+                // exactly what a delete cleans up
+                let (mine, _) =
+                    self.share_identity(&id).map_err(|_| bad("not a shared file here"))?;
+                if !mine.matches(&claimed) {
+                    return Err(mine.mismatch(&claimed));
+                }
+            }
+            "unpersist" => {
                 let Some(FileState::Persistent(meta)) = states.get(&id) else {
                     return Err(bad("not persistent"));
                 };
@@ -422,6 +495,7 @@ impl State {
                     return Err(bad("`at` lies before the share"));
                 }
             }
+            _ => return Err(bad(FILES_OPS)),
         }
         Ok(())
     }

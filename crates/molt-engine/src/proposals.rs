@@ -1439,6 +1439,10 @@ impl State {
             self.emit(Event::Applied { id, surface });
             if surface == Surface::Organization {
                 self.after_org_applied();
+            } else if surface == Surface::Files {
+                if let Some(payload) = self.proposals.get(&id.0).map(|p| p.payload.clone()) {
+                    self.after_files_applied(&payload);
+                }
             }
         }
         // the decision's summary goes to ITS discussion, minted exactly
@@ -3699,9 +3703,26 @@ impl State {
         view: Option<&str>,
     ) -> Vec<(Option<u64>, Value)> {
         if surface == Surface::Chat {
+            // a deleted share reads unavailable on every frontend - a
+            // read-time overlay from the fold, never a log write
+            // (`delete_upload.md` D1)
+            let deleted: std::collections::HashSet<molt_core::MessageId> = self
+                .files_state()
+                .into_iter()
+                .filter(|(_, st)| matches!(st, crate::files_state::FileState::Deleted(_)))
+                .map(|(id, _)| id)
+                .collect();
             self.chat_visible_in(view)
                 .filter(|m| channel.map_or(true, |c| &m.channel == c))
-                .map(|m| (None, serde_json::to_value(m).unwrap_or_default()))
+                .map(|m| {
+                    let mut v = serde_json::to_value(m).unwrap_or_default();
+                    if deleted.contains(&m.id) {
+                        if let Some(file) = v.get_mut("file").filter(|f| f.is_object()) {
+                            file["available"] = Value::Bool(false);
+                        }
+                    }
+                    (None, v)
+                })
                 .collect()
         } else {
             // the surface's applied log is the single-operator projection
@@ -4080,6 +4101,8 @@ impl State {
                         rows.push(row(*id, meta.clone(), available, deadline, false));
                     }
                 }
+                // a delete vote: no row in either table
+                FileState::Deleted(_) => {}
             }
         }
         rows

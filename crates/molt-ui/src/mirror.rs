@@ -1377,6 +1377,7 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
             persistent: u.persistent,
             checksum_full: u.checksum_full.as_str().into(),
             vote: u.vote.as_str().into(),
+            delete_vote: u.delete_vote.as_str().into(),
             mirrors: u.mirrors,
             mirror_held: u.mirror_held,
             mirror_of: u.mirror_of,

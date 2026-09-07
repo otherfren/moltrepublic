@@ -7540,6 +7540,10 @@ pub enum MoltError {
     /// ephemeral exactly like chat, so an expired share is not downloadable.
     #[error("the shared file at message {0} aged out of the chat retention window")]
     FileExpired(MessageId),
+    /// A threshold vote deleted the share (`delete_upload.md` D1) - gone for
+    /// good, not aged out.
+    #[error("the shared file at message {0} was deleted by vote")]
+    FileDeleted(MessageId),
     /// Only the member who shared a file can remove it.
     #[error("only the member who shared the file at message {0} can remove it")]
     NotYourFile(MessageId),

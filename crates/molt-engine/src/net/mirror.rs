@@ -195,6 +195,17 @@ impl State {
         Some((self.mirror_dir()?.join(id.to_string()), true))
     }
 
+    /// Whether a mirror job's share is no longer worth holding: an
+    /// unpersisted window that ended, a deleted share, or one the fold does
+    /// not know (the sharer's own file is never in the mirror folder).
+    pub(crate) fn mirror_job_gone(&self, states: &crate::files_state::FilesState, series: &str) -> bool {
+        series.parse::<MessageId>().map_or(true, |id| match states.get(&id) {
+            Some(FileState::Persistent(_)) => false,
+            Some(FileState::Unpersisted(..)) => self.share_expired_in(states, &id),
+            Some(FileState::Deleted(_)) | None => true,
+        })
+    }
+
     /// The worker's planning beat (`docs_archive/files/mirroring.md` §3.3), every
     /// five seconds: drop what an unpersist freed, resume or start the
     /// least-mirrored persistent share this seat does not hold (one fetch
@@ -219,13 +230,7 @@ impl State {
             .mirror
             .jobs
             .keys()
-            .filter(|series| {
-                series.parse::<MessageId>().map_or(true, |id| match states.get(&id) {
-                    Some(FileState::Persistent(_)) => false,
-                    Some(FileState::Unpersisted(..)) => self.share_expired_in(&states, &id),
-                    None => true,
-                })
-            })
+            .filter(|series| self.mirror_job_gone(&states, series))
             .cloned()
             .collect();
         for series in gone {
@@ -246,7 +251,7 @@ impl State {
             .iter()
             .filter_map(|(id, st)| match st {
                 FileState::Persistent(ident) => Some((*id, ident.clone())),
-                FileState::Unpersisted(..) => None,
+                FileState::Unpersisted(..) | FileState::Deleted(_) => None,
             })
             .filter(|(id, ident)| {
                 ident.by != me

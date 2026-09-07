@@ -288,7 +288,8 @@ set_features {value: \"memory quests\"}, set_member_image {member,value,bytes_b6
 /remove_member_image/set_member_desc {member,value} (own seat only, square \
 picture); memory add_note {title}; files persist {id} (the engine fills the \
 share's identity; a live share only), unpersist {id, at: unix now} (a \
-persistent share only); quests/vault/wallet add_quest/seal_secret/ \
+persistent share only), delete {id} (a temporary share - gone for good); \
+quests/vault/wallet add_quest/seal_secret/ \
 transfer {title}. Traps: founding/join/recovery need a confirmed relay \
 (relay_add, then confirm); mark_channel_read moves your PRIVATE cursor while \
 mark_read broadcasts read receipts; restore_start = offline knowledge from a \
@@ -1201,7 +1202,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "download_file",
             command: "download_file",
             scope: Scope::Seat,
-            description: "Download a shared file. When this seat already MIRRORS the whole file (read_uploads `local: mirrored`) the bytes are assembled locally and no network is involved - otherwise they are fetched peer-to-peer from the sharer's device over a dedicated encrypted queue (the sharer must be online). Either way it verifies size + sha256 against the share, and writes it to `dest`: a bare name lands in the node's download directory (the EXCHANGE FOLDER), an ABSOLUTE path is that path, an existing directory takes the share's own name; omitted = the share's name in the download directory. A relative path is refused - it would resolve against the daemon's working directory. Async kickoff - poll read_uploads for the download's phase/percent/path/error. Addressed by the share message's stable id (32-char lowercase hex, from read_state). Fails honestly once the sharer deleted the file or stays offline.",
+            description: "Download a shared file. When this seat already MIRRORS the whole file (read_uploads `local: mirrored`) the bytes are assembled locally and no network is involved - otherwise they are fetched peer-to-peer from the sharer's device over a dedicated encrypted queue (the sharer must be online). Either way it verifies size + sha256 against the share, and writes it to `dest`: a bare name lands in the node's download directory (the EXCHANGE FOLDER), an ABSOLUTE path is that path, an existing directory takes the share's own name; omitted = the share's name in the download directory. A relative path is refused - it would resolve against the daemon's working directory. Async kickoff - poll read_uploads for the download's phase/percent/path/error. Addressed by the share message's stable id (32-char lowercase hex, from read_state). Fails honestly once the sharer deleted the file, a vote deleted the share, or the sharer stays offline.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1257,7 +1258,7 @@ pub fn tools() -> Vec<ToolDef> {
                 "type": "object",
                 "properties": {
                     "surface": { "type": "string", "enum": gated_enum() },
-                    "payload": { "type": "object", "description": "surface-specific transition {\"op\": ...}: organization set_name/set_charter/set_chat_retention {value}, set_image {value, bytes_b64}, remove_image, set_relays {value: \"wss://a wss://b\"}, set_features {value: \"memory quests\"}, set_member_image {member, value, bytes_b64}/remove_member_image/set_member_desc {member, value} (own seat only, square picture); memory add_note {title}, wiki_patch {value: git-format patch, summary} (raw - wiki_edit is the structured way); quests add_quest {title}; vault seal_secret {title}; wallet transfer {title}; files persist {id} / unpersist {id, at} (id = the SHARE's chat message id from read_uploads, `at` = a unix stamp within an hour of this clock and not before the share)" }
+                    "payload": { "type": "object", "description": "surface-specific transition {\"op\": ...}: organization set_name/set_charter/set_chat_retention {value}, set_image {value, bytes_b64}, remove_image, set_relays {value: \"wss://a wss://b\"}, set_features {value: \"memory quests\"}, set_member_image {member, value, bytes_b64}/remove_member_image/set_member_desc {member, value} (own seat only, square picture); memory add_note {title}, wiki_patch {value: git-format patch, summary} (raw - wiki_edit is the structured way); quests add_quest {title}; vault seal_secret {title}; wallet transfer {title}; files persist {id} / unpersist {id, at} / delete {id} (id = the SHARE's chat message id from read_uploads, `at` = a unix stamp within an hour of this clock and not before the share; delete removes a temporary share for good)" }
                 },
                 "required": ["surface", "payload"]
             }),
@@ -1689,7 +1690,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "read_uploads",
             command: "read_uploads",
             scope: Scope::Read,
-            description: "The Shared Files tables: every file shared into the chat (metadata only - bytes move user-to-user via the share link), with sharer, timestamp, availability and the deadline `expires_ts`. `persistent: false` = Temporary Uploads: ephemeral like chat, gone from the read (and undownloadable) after the chat retention window. `persistent: true` = Persistent Uploads: a threshold vote pinned it (`propose` on `files`, op `persist`), `expires_ts` is 0 and it outlives its chat message; an `unpersist` vote moves it back with a fresh window. The `id` is the chat message id `download_file` and the two ops take. `availability` says where the bytes can be had, in this precedence: `changed` (the sharer replaced the file on disk - a share is immutable, so this row is no longer the voted file), `gone` (nobody holds it), `mirrored` (a seat other than the sharer holds the whole series), `relay-held` (a live series stamp - no live sharer needed), `sharer-only` (the first download wakes the sharer). `local` says where THIS seat has them: own, downloaded, mirrored, partial, none. `mirrors` counts MEMBERS holding the whole series (the sharer included); `mirror_held`/`mirror_of` count this seat's verified PIECES.",
+            description: "The Shared Files tables: every file shared into the chat (metadata only - bytes move user-to-user via the share link), with sharer, timestamp, availability and the deadline `expires_ts`. `persistent: false` = Temporary Uploads: ephemeral like chat, gone from the read (and undownloadable) after the chat retention window. `persistent: true` = Persistent Uploads: a threshold vote pinned it (`propose` on `files`, op `persist`), `expires_ts` is 0 and it outlives its chat message; an `unpersist` vote moves it back with a fresh window; a `delete` vote (temporary shares only) removes a share for good - a deleted share lists in neither table and downloads nowhere. The `id` is the chat message id `download_file` and the three ops take. `availability` says where the bytes can be had, in this precedence: `changed` (the sharer replaced the file on disk - a share is immutable, so this row is no longer the voted file), `gone` (nobody holds it), `mirrored` (a seat other than the sharer holds the whole series), `relay-held` (a live series stamp - no live sharer needed), `sharer-only` (the first download wakes the sharer). `local` says where THIS seat has them: own, downloaded, mirrored, partial, none. `mirrors` counts MEMBERS holding the whole series (the sharer included); `mirror_held`/`mirror_of` count this seat's verified PIECES.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ReadUploads),
         },
@@ -3993,8 +3994,14 @@ mod tests {
         );
         let propose = (tool_named("propose").schema)().to_string();
         assert!(
-            propose.contains("files persist {id}") && propose.contains("unpersist {id, at}"),
+            propose.contains("files persist {id}")
+                && propose.contains("unpersist {id, at}")
+                && propose.contains("delete {id}"),
             "propose never names the files ops"
+        );
+        assert!(
+            uploads.contains("deleted") && tool_named("download_file").description.contains("deleted"),
+            "a deleted share must list nowhere and download nowhere"
         );
         assert!(
             tool_named("propose").description.contains("CORE surfaces"),

@@ -634,6 +634,8 @@ impl State {
                 });
                 if *surface == Surface::Organization {
                     self.after_org_applied();
+                } else if *surface == Surface::Files {
+                    self.after_files_applied(payload);
                 }
             }
             // a re-admission committed: on EVERY node, a threshold-approved

@@ -65,7 +65,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     }
 
     {
-        // the two Shared Files votes: the engine fills a persist's identity
+        // the three Shared Files votes: the engine fills a persist's identity
         // and refuses what the tables cannot take; an unpersist carries the
         // stamp its fresh window starts from
         let cx = ctx.clone();
@@ -84,6 +84,14 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                     "id": id.as_str(),
                     "at": crate::labels::unix_now(),
                 }),
+            });
+        });
+        // a delete needs no stamp: the block's seal is the moment
+        let cx = ctx.clone();
+        ui.on_delete_upload(move |id| {
+            cx.issue(Command::Propose {
+                surface: Surface::Files,
+                payload: serde_json::json!({ "op": "delete", "id": id.as_str() }),
             });
         });
     }

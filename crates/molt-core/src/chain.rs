@@ -440,11 +440,11 @@ pub struct CheckpointState {
 /// accumulates, so a malformed entry can never collapse two seats into one.
 #[must_use]
 pub fn applied_lww_slot(surface: Surface, payload: &Value) -> Option<String> {
-    // Shared Files: one slot per share — the latest persist/unpersist IS
-    // the file's state (`persistent_uploads.md` D1)
+    // Shared Files: one slot per share — the latest persist/unpersist/delete
+    // IS the file's state (`persistent_uploads.md` D1, `delete_upload.md` D1)
     if surface == Surface::Files {
         return match payload.get("op").and_then(Value::as_str)? {
-            "persist" | "unpersist" => payload
+            "persist" | "unpersist" | "delete" => payload
                 .get("id")
                 .and_then(Value::as_str)
                 .filter(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -1163,6 +1163,13 @@ mod tests {
             "persist and unpersist of one share share a slot"
         );
         assert_eq!(applied_lww_slot(Surface::Files, &json!({"op": "persist", "id": "nope"})), None);
+        // …and a delete shares that same slot: the cut keeps the latest op,
+        // so a rejoiner never sees a deleted share come back
+        assert_eq!(
+            applied_lww_slot(Surface::Files, &share("delete")),
+            applied_lww_slot(Surface::Files, &share("persist")),
+            "a delete supersedes the share it deletes"
+        );
         // and no other surface declares slots — a note is a distinct object
         for s in Surface::ALL {
             if s != Surface::Organization && s != Surface::Files {

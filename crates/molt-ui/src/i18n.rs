@@ -88,6 +88,7 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
         E::NoFile(id) => format!("Nachricht {id} trägt keine geteilte Datei"),
         E::FileUnavailable(id) => format!("Die geteilte Datei an {id} ist nicht mehr verfügbar"),
         E::FileExpired(id) => format!("Die geteilte Datei an {id} ist aus dem Aufbewahrungsfenster gealtert"),
+        E::FileDeleted(id) => format!("Die geteilte Datei an {id} wurde per Abstimmung gelöscht"),
         E::NotYourFile(_) => "Nur wer die Datei geteilt hat, kann sie entfernen".to_string(),
         E::NotYourMessage(_) => "Nur wer die Nachricht geschrieben hat, kann sie löschen".to_string(),
         E::Restore(t) => format!("Restore: {t}"),
@@ -891,6 +892,8 @@ lexicon! {
     ou_col_unpersist: "Unpersist", "Befristen";
     ou_persist: "persist", "dauerhaft";
     ou_unpersist: "unpersist", "befristen";
+    ou_col_delete: "Delete", "Löschen";
+    ou_delete: "delete", "löschen";
     ou_empty_persistent: "No persistent uploads yet.", "Noch keine dauerhaften Uploads.";
     ou_note_persistent: "A vote pinned these shares: no expiry, listed for good - the bytes stay with the sharer. Unpersist restarts the clock.", "Eine Abstimmung hat diese Shares fixiert: kein Ablauf, dauerhaft gelistet - die Bytes bleiben beim Teilenden. Befristen startet die Frist neu.";
     ou_col_mirrors: "Mirrored by", "Gespiegelt von";

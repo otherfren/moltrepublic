@@ -493,6 +493,7 @@ fn a_transfer_and_a_completed_mirror_both_re_resolve_their_reference() {
 /// An uploads row with nothing set but the fields the wiki reads.
 fn upload_row() -> UploadRowData {
     UploadRowData {
+        delete_vote: String::new(),
         id: String::new(),
         user: String::new(),
         date: String::new(),

@@ -280,6 +280,8 @@ pub(crate) struct UploadRowData {
     /// An open persist/unpersist vote on this share, as its "n/m" ("" =
     /// none) — the row's button shows it and stays disabled meanwhile.
     pub(crate) vote: String,
+    /// The same for an open delete vote, on its own button.
+    pub(crate) delete_vote: String,
     /// Members holding the whole series, the sharer included (§3.4).
     pub(crate) mirrors: i32,
     /// This seat's verified pieces and the series' piece count.
@@ -792,6 +794,7 @@ pub(crate) async fn gather_surfaces(
             .map(|u| UploadRowData {
                 persistent: u.persistent,
                 vote: String::new(),
+                delete_vote: String::new(),
                 mirrors: i32::try_from(u.mirrors).unwrap_or(i32::MAX),
                 mirror_held: i32::try_from(u.mirror_held).unwrap_or(i32::MAX),
                 mirror_of: i32::try_from(u.mirror_of).unwrap_or(i32::MAX),
@@ -998,18 +1001,25 @@ pub(crate) async fn gather_surfaces(
     sort_members(&mut members, &members_sort, members_asc);
     let mut uploads = filter_uploads(uploads, &uploads_filter);
     sort_uploads(&mut uploads, &uploads_sort, uploads_asc);
-    // an open Shared Files vote marks its row (the button shows the count)
-    let open_votes: HashMap<String, String> = all_pending
+    // an open Shared Files vote marks its row on the button it belongs to
+    let open_votes: HashMap<(String, bool), String> = all_pending
         .iter()
         .filter(|p| p.surface == Surface::Files)
         .filter_map(|p| {
             let id = p.payload.get("id").and_then(serde_json::Value::as_str)?;
-            Some((id.to_string(), format!("{}/{}", p.approvals, p.threshold)))
+            let delete = p.payload.get("op").and_then(serde_json::Value::as_str) == Some("delete");
+            Some((
+                (id.to_string(), delete),
+                format!("{}/{}", p.approvals, p.threshold),
+            ))
         })
         .collect();
     for u in &mut uploads {
-        if let Some(v) = open_votes.get(&u.id) {
+        if let Some(v) = open_votes.get(&(u.id.clone(), false)) {
             u.vote = v.clone();
+        }
+        if let Some(v) = open_votes.get(&(u.id.clone(), true)) {
+            u.delete_vote = v.clone();
         }
     }
     // titles come from the cache, so a patch channel keeps its name (and
@@ -1620,13 +1630,15 @@ pub(crate) fn display_title(lang: i32, v: &serde_json::Value) -> String {
         };
     }
     // a Shared Files vote is about ONE share: the title names the file
-    if let (Some(op @ ("persist" | "unpersist")), Some(name)) =
+    if let (Some(op @ ("persist" | "unpersist" | "delete")), Some(name)) =
         (op, v.get("name").and_then(serde_json::Value::as_str))
     {
         let by = v.get("by").and_then(serde_json::Value::as_str).unwrap_or("");
         let head = match (lang, op) {
             (1, "persist") => "Dauerhaft",
             (_, "persist") => "Persist",
+            (1, "delete") => "Löschen",
+            (_, "delete") => "Delete",
             (1, _) => "Befristen",
             (_, _) => "Unpersist",
         };

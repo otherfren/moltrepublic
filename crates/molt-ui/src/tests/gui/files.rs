@@ -440,3 +440,99 @@ fn the_uploads_filter_text_is_vertically_centred() {
         ui.set_ou_filter("".into());
     }
 }
+
+/// The delete vote (`delete_upload.md` D2): an open delete marks the row
+/// on its own button, the applied vote takes the row off both tables.
+#[test]
+fn a_delete_vote_marks_the_row_and_the_applied_vote_removes_it() {
+    i_slint_backend_testing::init_no_event_loop();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    let w = one_of_three();
+    let ui = AppWindow::new().expect("headless window");
+    let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+    let last: Arc<Mutex<Option<SessionSettings>>> = Arc::new(Mutex::new(None));
+    let shared = tmp.path().join("protokoll.pdf");
+    std::fs::write(&shared, b"minutes").expect("write the file to share");
+
+    rt.block_on(async {
+        w.execute(Command::ShareFile {
+            path: shared.display().to_string(),
+            channel: ChannelRef::Group,
+        })
+        .await
+        .expect("share");
+        let id = listed_share(&w).await;
+        let pid = propose_files(&w, serde_json::json!({"op": "delete", "id": id})).await;
+        mirror(&w, &ui, &last, &chat_ui).await;
+        let row = ui.get_org_uploads().row_data(0).expect("still temporary");
+        assert_eq!(row.delete_vote.as_str(), "0/1", "the open delete marks its own button");
+        assert_eq!(row.vote.as_str(), "", "…and not the persist button");
+
+        w.execute(Command::Approve { proposal: pid, note: None }).await.expect("approve");
+        mirror(&w, &ui, &last, &chat_ui).await;
+        assert_eq!(ui.get_org_uploads().row_count(), 0, "gone from Temporary");
+        assert_eq!(ui.get_org_persistent().row_count(), 0, "and from Persistent");
+    });
+}
+
+/// The delete button sits right of the persist button, fires
+/// `delete-upload` with the share id, and an open vote disables both.
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_delete_button_sits_right_of_persist_and_fires_its_callback() {
+    i_slint_backend_testing::init_no_event_loop();
+    let hex = "cc".repeat(16);
+    let row = |delete_vote: &str| UploadRow {
+        id: hex.as_str().into(),
+        name: "protokoll.pdf".into(),
+        user: "walter".into(),
+        available: true,
+        online: true,
+        delete_vote: delete_vote.into(),
+        ..UploadRow::default()
+    };
+    let ui = files_window(vec![row("")]);
+    // the temporary table is wider than the default window with this
+    // column; a clipped element is not in the tested tree at all
+    ui.window().set_size(slint::PhysicalSize::new(1700, 800));
+    let deleted: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let persisted: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = deleted.clone();
+    ui.on_delete_upload(move |id| {
+        if let Ok(mut v) = sink.lock() {
+            v.push(id.to_string());
+        }
+    });
+    let sink = persisted.clone();
+    ui.on_persist_upload(move |id| {
+        if let Ok(mut v) = sink.lock() {
+            v.push(id.to_string());
+        }
+    });
+    let at = |id: &str| {
+        i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, id)
+            .next()
+            .unwrap_or_else(|| panic!("no element {id}"))
+    };
+    let persist = at("UploadsTable::ou-vote");
+    let delete = at("UploadsTable::ou-delete");
+    assert!(
+        delete.absolute_position().x > persist.absolute_position().x,
+        "the delete button sits right of the persist button"
+    );
+    click(&ui, &delete);
+    assert_eq!(
+        deleted.lock().expect("deleted").as_slice(),
+        std::slice::from_ref(&hex),
+        "the click carries the share id"
+    );
+
+    ui.set_org_uploads(ModelRc::new(VecModel::from(vec![row("1/3")])));
+    click(&ui, &at("UploadsTable::ou-delete"));
+    click(&ui, &at("UploadsTable::ou-vote"));
+    assert_eq!(deleted.lock().expect("deleted").len(), 1, "an open vote disables delete");
+    assert!(persisted.lock().expect("persisted").is_empty(), "…and persist");
+}
+
