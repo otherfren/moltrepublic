@@ -11,15 +11,21 @@ use serde_json::json;
 fn chat_is_ungated_and_propose_rejects_chat() {
     rt().block_on(async {
         let w = spawn(GroupConfig::demo(), SessionView::default());
-        assert!(matches!(
-            w.execute(Command::Chat {
+        // the reply names the message (field report v0.0.2): the handle
+        // every later verb takes, without a poll
+        let id = match w
+            .execute(Command::Chat {
                 body: "hi".into(),
                 quote: None,
                 channel: molt_core::ChannelRef::default(),
             })
-            .await,
-            Ok(Reply::Ack)
-        ));
+            .await
+        {
+            Ok(Reply::Sent { id }) => id,
+            other => panic!("unexpected: {other:?}"),
+        };
+        let chat = read_surface(&w, Surface::Chat).await;
+        assert_eq!(msg_id(&chat.applied[0]), id, "the reply's id is the message's");
         let err = w
             .execute(Command::Propose {
                 surface: Surface::Chat,

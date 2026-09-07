@@ -818,6 +818,7 @@ fn encode_key(key: &[u8; 32]) -> String {
 pub(crate) fn spawn_share_hash(
     path: PathBuf,
     channel: ChannelRef,
+    id: molt_core::MessageId,
     scope: u64,
     cmd_tx: mpsc::Sender<Envelope>,
 ) {
@@ -864,6 +865,7 @@ pub(crate) fn spawn_share_hash(
                 checksum: st.checksum,
                 path: path.display().to_string(),
                 channel,
+                id,
                 generation: Some(scope),
                 key_b64: st.key_b64,
                 pieces: st.pieces,

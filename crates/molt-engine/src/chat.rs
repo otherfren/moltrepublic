@@ -92,8 +92,8 @@ impl State {
         self.ensure_demo_net();
         let channel = channel.normalized().map_err(MoltError::BadPayload)?;
         let from = self.member();
-        self.post_message(from, body, quote, channel)?;
-        Ok(Reply::Ack)
+        let id = self.post_message(from, body, quote, channel)?;
+        Ok(Reply::Sent { id })
     }
 
     /// Build, record and announce one chat message; returns its minted id.
@@ -334,8 +334,10 @@ impl State {
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return Err(MoltError::Engine("the engine is shutting down".into()));
         };
-        crate::transfer::spawn_share_hash(p, channel, self.net_scope, cmd_tx);
-        Ok(Reply::Ack)
+        // the id is promised now, so the caller need not poll for it
+        let id = mint_message_id()?;
+        crate::transfer::spawn_share_hash(p, channel, id, self.net_scope, cmd_tx);
+        Ok(Reply::Sent { id })
     }
 
     /// The off-actor share hash finished: post the share message (the real
@@ -353,10 +355,11 @@ impl State {
         checksum: String,
         path: String,
         channel: ChannelRef,
+        promised: MessageId,
         (key_b64, pieces, root): (String, u32, String),
     ) -> Result<Reply, MoltError> {
         let from = self.member();
-        let id = mint_message_id()?;
+        let id = if promised.is_nil() { mint_message_id()? } else { promised };
         let mut msg = ChatMessage::text(id, from.clone(), String::new(), now_secs())
             .with_channel(channel.clone());
         msg.file = Some(FileMeta {

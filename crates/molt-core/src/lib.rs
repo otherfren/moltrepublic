@@ -5371,6 +5371,9 @@ pub enum Command {
         path: String,
         /// The channel view the share files under.
         channel: ChannelRef,
+        /// The id the share was promised at `share_file` (nil = mint one).
+        #[serde(default)]
+        id: MessageId,
         /// Workspace-net incarnation (stale task results are dropped).
         #[serde(default)]
         generation: Option<u64>,
@@ -5859,6 +5862,13 @@ pub struct UiAction {
 pub enum Reply {
     /// The command was accepted with no further data.
     Ack,
+    /// A message was posted (`chat_send`), or a share accepted for hashing
+    /// (`share_file`): the message id every later verb takes. For a share
+    /// the message appears under this id once the hash completes.
+    Sent {
+        /// The message id.
+        id: MessageId,
+    },
     /// A proposal was created.
     Proposed {
         /// The new proposal's id.

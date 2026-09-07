@@ -111,12 +111,19 @@ pub(super) async fn share_temp_file(
 ) -> MessageId {
     let path = dir.join(name);
     std::fs::write(&path, content).expect("write share source");
-    w.execute(Command::ShareFile {
-        path: path.display().to_string(),
-        channel: molt_core::ChannelRef::default(),
-    })
-    .await
-    .expect("share");
+    // the reply names the id the share message will carry once the
+    // off-actor hash completes (field report v0.0.2)
+    let promised = match w
+        .execute(Command::ShareFile {
+            path: path.display().to_string(),
+            channel: molt_core::ChannelRef::default(),
+        })
+        .await
+        .expect("share")
+    {
+        Reply::Sent { id } => id,
+        other => panic!("unexpected: {other:?}"),
+    };
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let snap = read_surface(w, Surface::Chat).await;
@@ -125,7 +132,8 @@ pub(super) async fn share_temp_file(
             .iter()
             .find(|m| m["file"]["name"] == serde_json::json!(name))
         {
-            return msg_id(row);
+            assert_eq!(msg_id(row), promised, "the share carries the promised id");
+            return promised;
         }
         assert!(
             tokio::time::Instant::now() < deadline,

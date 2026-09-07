@@ -1651,6 +1651,7 @@ impl State {
                 checksum,
                 path,
                 channel,
+                id,
                 generation,
                 key_b64,
                 pieces,
@@ -1667,6 +1668,7 @@ impl State {
                     checksum,
                     path,
                     channel,
+                    id,
                     (key_b64, pieces, root),
                 )
             }

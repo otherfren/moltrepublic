@@ -1017,6 +1017,20 @@ fn feature_enum() -> Value {
     surface_keys(|s| s.is_charter_feature())
 }
 
+/// The `edits` list, one element at a time, so a refusal names the edit
+/// and the `op` values (field report v0.0.2: `missing field op` alone
+/// sent a caller nesting the op as a key).
+fn wiki_edits_arg(v: &Value) -> Result<Vec<molt_core::WikiEdit>, String> {
+    const OPS: &str = "one of create, content, replace, set_props, add_relation, rename, delete";
+    let list = v.as_array().ok_or_else(|| format!("`edits`: a list of edit objects, each {{\"op\": {OPS}, ...}}"))?;
+    list.iter()
+        .enumerate()
+        .map(|(i, e)| {
+            serde_json::from_value(e.clone()).map_err(|err| format!("edits[{i}]: {err} (op is {OPS})"))
+        })
+        .collect()
+}
+
 /// One MCP tool: name, wire schema and command builder side by side — a
 /// single source of truth, so the schema can never drift from the parser
 /// (that drift class is exactly how `save_settings` once hid `mcp_token`).
@@ -1051,7 +1065,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "chat_send",
             command: "chat",
             scope: Scope::Seat,
-            description: "Post a message to the ungated chat. Every message rides the republic's ONE broadcast stream and every member receives it; `channel` merely files it under a view of that stream - a tag, never a boundary or a room (it hides nothing and grants nothing). Kinds: {\"kind\":\"group\"} the all-hands default; {\"kind\":\"patch\",\"id\":N} discussion attached to proposal N; {\"kind\":\"topic\",\"name\":\"…\"} a free named topic, created by simply posting to it. Pass `quote` (the quoted message's 32-char hex id, from read_state) to reply - and quoting a message that lives in another channel is the cross-post idiom: the original stays where it is, the quote carries it across. A review remark on a proposal belongs in ITS patch channel (the `channel` every propose/approve reply names), not in the group - also after the vote decided. A reason for your own vote goes with it, as approve/decline `note`.",
+            description: "Post a message to the ungated chat. The reply names the message `id` (the handle for react_chat, delete_chat, mark_read and `quote`). Every message rides the republic's ONE broadcast stream and every member receives it; `channel` merely files it under a view of that stream - a tag, never a boundary or a room (it hides nothing and grants nothing). Kinds: {\"kind\":\"group\"} the all-hands default; {\"kind\":\"patch\",\"id\":N} discussion attached to proposal N; {\"kind\":\"topic\",\"name\":\"…\"} a free named topic, created by simply posting to it. Pass `quote` (the quoted message's 32-char hex id, from read_state) to reply - and quoting a message that lives in another channel is the cross-post idiom: the original stays where it is, the quote carries it across. A review remark on a proposal belongs in ITS patch channel (the `channel` every propose/approve reply names), not in the group - also after the vote decided. A reason for your own vote goes with it, as approve/decline `note`.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1184,7 +1198,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "share_file",
             command: "share_file",
             scope: Scope::Seat,
-            description: "Share a local file into the ungated chat: the engine derives the metadata and streams the real sha256 off the actor, then posts the share message (async - it appears in read_state once hashing completes). Only metadata enters the chat; the bytes move per-download over a dedicated encrypted queue. Name the file with `path` (any ABSOLUTE path this node's user can read; a relative one is refused - it would resolve against the daemon's working directory) or with `name` (a bare name inside the download directory - read_session.settings.download_dir, the exchange folder). A share is a chat message, so `channel` files it under a view of the one stream exactly like chat_send (omit for the all-hands group). A share is IMMUTABLE: replacing the file on disk does not update it - the row turns `available: false, availability: changed` and serves nothing. A new version is a new share.",
+            description: "Share a local file into the ungated chat: the engine derives the metadata and streams the real sha256 off the actor, then posts the share message (async - it appears in read_state once hashing completes). The reply names the share's `id` - the chat message id the share message will carry, the one handle download_file, remove_file, delete_chat and read_uploads use. A share is TEMPORARY: it lives for the chat retention window (status.chat_retention_days, default 7 days; the deadline reads as read_uploads `expires_ts`), then it lists nowhere and downloads nowhere; a `persist` vote on `files` pins it for good. Only metadata enters the chat; the bytes move per-download over a dedicated encrypted queue. Name the file with `path` (any ABSOLUTE path this node's user can read; a relative one is refused - it would resolve against the daemon's working directory) or with `name` (a bare name inside the download directory - read_session.settings.download_dir, the exchange folder). A share is a chat message, so `channel` files it under a view of the one stream exactly like chat_send (omit for the all-hands group). A share is IMMUTABLE: replacing the file on disk does not update it - the row turns `available: false, availability: changed` and serves nothing. A new version is a new share.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1225,7 +1239,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "remove_file",
             command: "remove_file",
             scope: Scope::Seat,
-            description: "Sharer-only: mark a shared file as deleted from this disk, addressed by the share message's stable id (32-char lowercase hex, from read_state) - the share becomes permanently unavailable for every participant.",
+            description: "Sharer-only: withdraw the BYTES of an own share, addressed by its id (the share's chat message id). The row and the message stay, marked unavailable, until the window ends; delete_chat on the SAME id tombstones the message and drops the row. A share another seat posted leaves only by a `delete` vote on `files`.",
             schema: || json!({
                 "type": "object",
                 "properties": { "id": { "type": "string", "description": "share message id (32-char lowercase hex, from read_state)" } },
@@ -1529,7 +1543,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wiki_edit",
             command: "wiki_edit",
             scope: Scope::Seat,
-            description: "Write the wiki. `edits` apply IN ORDER to a working copy of the current base; the engine diffs the result and puts THAT patch to the members as a normal changeset vote - propose, not save, and the reply is the proposal id. Ops (fields in the schema): create, content, replace, set_props, add_relation, rename, delete. `create` writes a NEW page and refuses an occupied path; `content` writes a whole document, creating it when the path is free and OVERWRITING it when it is not. An edit that cannot land refuses the whole call with the reason and proposes nothing: a create onto an occupied path, a path that does not exist, an `old` that is absent or occurs more than once, a header the parser would not read back, a relation target that does not resolve uniquely, a rename onto an existing path. A path another OPEN proposal also touches is no refusal by itself (it is a warning, see below): that patch goes to the vote and reads `superseded` once the other one seals and moves the base. `replace` matches a SUBSTRING, not a line: `## Quellen` also sits inside `### Quellen (Sitz B)`, so anchor on `\\n## Quellen\\n`; a repeated one-line `old` is refused with the line numbers it hit. A relation reads better in the sentence that asserts it - write `[[predicate::Name]]` inside a content or replace edit; add_relation is for when there is no such sentence. An edge asserted BOTH in the header and in the prose survives set_props removing the header key - the inline link still asserts it (wiki_links marks each edge `header: true/false`). Check a target with wiki_resolve, and wiki_props for the relation names this republic already uses. The proposer's own signature is the first of m. The vote card's `summary` counts `+` `-` `→` in FILES added, deleted and renamed, `~` in changed LINES. `dry_run: true` proposes nothing and answers `summary`, `warnings` and the `paths` it would touch; `with_patch: true` adds the patch itself. `supersedes: <id>` withdraws that own, still-open proposal in the same step - the way to correct one already on the table. The header dialect is the YAML 1.2 core schema in a flat subset: `no`, `yes`, `on` stay strings. The reply names the proposal's `channel`, where review remarks belong. A warning REFUSES the call, naming each one as `<code>: <what>`; `allow_warnings: true` proposes anyway, and `allow_warnings: [\"<code>\", ...]` acknowledges exactly those - so one stale warning does not blind you to the rest. The codes: `header` (the parser reads the header differently than written - an unquoted `[[link]]` value is a nested list), `open_path` (a touched path an open proposal already touches), `rename_link` (a rename's incoming links: the base pages it rewrote, or a link an open proposal still writes to the old path), `name_collision` (a new title or alias that already names another page), `foreign_rewrite` (`content` over a page another seat last wrote), `file_ref` (an `upload:<sha256 hex, 12..64>` reference that is malformed, resolves to nothing, to more than one file, or only to a TEMPORARY share - a page outlives the chat window, so propose `persist` on `files` first). Every warning is measured against the tree the WHOLE edit list leaves, not against the base: an alias one edit frees and a later one claims is no collision. `rename` carries its incoming links with it - every base page whose markdown link or `[[path]]` names the old path is rewritten IN THE SAME PATCH; that is no warning, but the reply names those pages under `repaired` (and `paths` lists them) so you see what the vote carries beyond the rename. A `[[Name]]` binds by title or alias and needs no rewrite. `repair_links: false` leaves the links and REFUSES instead, naming the pages that would keep the old path.",
+            description: "Write the wiki. `edits` apply IN ORDER to a working copy of the current base; the engine diffs the result and puts THAT patch to the members as a normal changeset vote - propose, not save, and the reply is the proposal id. Each edit is a flat object whose `op` value picks the operation, e.g. {\"op\": \"create\", \"path\": \"notes/a.md\", \"content\": \"...\"}; the ops: create, content, replace, set_props, add_relation, rename, delete. `create` writes a NEW page and refuses an occupied path; `content` writes a whole document, creating it when the path is free and OVERWRITING it when it is not. An edit that cannot land refuses the whole call with the reason and proposes nothing: a create onto an occupied path, a path that does not exist, an `old` that is absent or occurs more than once, a header the parser would not read back, a relation target that does not resolve uniquely, a rename onto an existing path. A path another OPEN proposal also touches is no refusal by itself (it is a warning, see below): that patch goes to the vote and reads `superseded` once the other one seals and moves the base. `replace` matches a SUBSTRING, not a line: `## Quellen` also sits inside `### Quellen (Sitz B)`, so anchor on `\\n## Quellen\\n`; a repeated one-line `old` is refused with the line numbers it hit. A relation reads better in the sentence that asserts it - write `[[predicate::Name]]` inside a content or replace edit; add_relation is for when there is no such sentence. An edge asserted BOTH in the header and in the prose survives set_props removing the header key - the inline link still asserts it (wiki_links marks each edge `header: true/false`). Check a target with wiki_resolve, and wiki_props for the relation names this republic already uses. The proposer's own signature is the first of m. The vote card's `summary` counts `+` `-` `→` in FILES added, deleted and renamed, `~` in changed LINES. `dry_run: true` proposes nothing and answers `summary`, `warnings` and the `paths` it would touch; `with_patch: true` adds the patch itself. `supersedes: <id>` withdraws that own, still-open proposal in the same step - the way to correct one already on the table. The header dialect is the YAML 1.2 core schema in a flat subset: `no`, `yes`, `on` stay strings. The reply names the proposal's `channel`, where review remarks belong. A warning REFUSES the call, naming each one as `<code>: <what>`; `allow_warnings: true` proposes anyway, and `allow_warnings: [\"<code>\", ...]` acknowledges exactly those - so one stale warning does not blind you to the rest. The codes: `header` (the parser reads the header differently than written - an unquoted `[[link]]` value is a nested list), `open_path` (a touched path an open proposal already touches), `rename_link` (a rename's incoming links: the base pages it rewrote, or a link an open proposal still writes to the old path), `name_collision` (a new title or alias that already names another page), `foreign_rewrite` (`content` over a page another seat last wrote), `file_ref` (an `upload:<sha256 hex, 12..64>` reference that is malformed, resolves to nothing, to more than one file, or only to a TEMPORARY share - a page outlives the chat window, so propose `persist` on `files` first). Every warning is measured against the tree the WHOLE edit list leaves, not against the base: an alias one edit frees and a later one claims is no collision. `rename` carries its incoming links with it - every base page whose markdown link or `[[path]]` names the old path is rewritten IN THE SAME PATCH; that is no warning, but the reply names those pages under `repaired` (and `paths` lists them) so you see what the vote carries beyond the rename. A `[[Name]]` binds by title or alias and needs no rewrite. `repair_links: false` leaves the links and REFUSES instead, naming the pages that would keep the old path.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1618,8 +1632,7 @@ pub fn tools() -> Vec<ToolDef> {
             build: |args| {
                 let edits = match args.get("edits") {
                     None | Some(Value::Null) => Vec::new(),
-                    Some(v) => serde_json::from_value(v.clone())
-                        .map_err(|e| format!("`edits`: {e}"))?,
+                    Some(v) => wiki_edits_arg(v)?,
                 };
                 let supersedes = match args.get("supersedes") {
                     None | Some(Value::Null) => None,
@@ -3084,6 +3097,30 @@ mod tests {
         let shown = present("read_session", &json!({}), value).expect("presents");
         assert_eq!(shown["workspaces"][0]["last_backup_min"], Value::Null);
         assert_eq!(shown["workspaces"][1]["last_backup_min"], 30);
+    }
+
+    /// Field report v0.0.2 (write replies): a wrongly shaped edit names its
+    /// index and the `op` values; the descriptions of the file verbs say
+    /// what the caller could only learn by polling.
+    #[test]
+    fn the_write_verbs_say_what_they_do() {
+        let err = match build("wiki_edit", &json!({ "edits": [{ "create": { "path": "a.md" } }] })) {
+            Err(e) => e,
+            Ok(_) => panic!("a nested edit is refused"),
+        };
+        assert!(err.starts_with("edits[0]:"), "the index leads: {err}");
+        assert!(
+            err.contains("one of create, content, replace, set_props, add_relation, rename, delete"),
+            "the values follow: {err}"
+        );
+        let wiki_edit = tool_named("wiki_edit").description;
+        assert!(wiki_edit.contains("`op` value") && wiki_edit.contains(r#"{"op": "create""#));
+        let share = tool_named("share_file").description;
+        assert!(share.contains("chat retention") && share.contains("persist"), "the lifetime: {share}");
+        assert!(share.contains("chat message id"), "the id IS the message id");
+        assert!(tool_named("chat_send").description.contains("The reply names the message `id`"));
+        let remove = tool_named("remove_file").description;
+        assert!(remove.contains("delete_chat") && !remove.contains("permanently"), "{remove}");
     }
 
     /// A chat row's default kind is explicit on the agent surface
