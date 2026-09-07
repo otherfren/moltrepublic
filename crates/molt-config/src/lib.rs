@@ -723,6 +723,9 @@ poke_enabled = {poke_enabled}
 poke_wake_command = {poke_wake_command}
 # Workspace id opened at start without a client (a service seat). "" = none.
 # A phrase-sealed workspace is only logged as a warning: decrypt it over MCP.
+# As a service (scripts/moltd.service): headless = true, and start moltd with
+# --mcp-tcp 127.0.0.1:<a port other than [mcp].port> - without it a headless
+# node serves stdio and exits on systemd's closed stdin. SIGTERM closes cleanly.
 open_on_start = ""
 
 [storage]
