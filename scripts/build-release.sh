@@ -26,8 +26,10 @@ export TZ=UTC
 # --locked refuses to build if Cargo.lock and Cargo.toml have drifted.
 # The release carries the embedded Tor client (arti, opt-in feature) - the
 # one binary must run without a system Tor. Only the node binary is packed,
-# so only molt-app is built.
-cargo build -p molt-app --features embedded-tor --release --locked
+# so only molt-app is built. ONE job: the window module's rustc alone peaks
+# near the box's memory (CLAUDE.md, "Build, test, run"); a second rustc
+# beside it is the OOM kill of 2026-09-08.
+cargo build -j 1 -p molt-app --features embedded-tor --release --locked
 
 # Strip after the build → debug-info stays in target/debug for local use.
 strip --strip-unneeded target/release/moltd
