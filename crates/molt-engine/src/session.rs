@@ -1556,7 +1556,8 @@ impl State {
         // trivially present, everyone else keeps the NEWEST thing this node
         // knows — the live stamp, the presence memory persisted in
         // `prefs.last_seen`, or the founding date, which is a real
-        // observation (every seat signed that genesis with us). Only a seat
+        // observation (every seat signed that founding; a recovery that
+        // learned no date carries 0, which raises nothing). Only a seat
         // this install has no evidence for at all stays never-seen.
         let prev = std::mem::take(&mut ws.members);
         ws.members = roster_members(&replica.roster, now, |m| {

@@ -21,6 +21,7 @@ fn payload() -> WelcomePayload {
             "wss://relay.example".to_string(),
             "ws://127.0.0.1:8080".to_string(),
         ],
+        founded_ts: 1_700_000_000,
     }
 }
 
@@ -176,6 +177,7 @@ async fn an_oversized_welcome_payload_is_refused_at_wrap_time() {
         welcome: vec![0xabu8; 40_000],
         rotation_seed: [7u8; 32],
         relays: vec!["wss://relay.example".to_string()],
+        founded_ts: 0,
     };
     match wrap_welcome(&founder, &invitee.public_key(), &fat).await {
         Err(WelcomeError::TooLarge { bytes, cap }) => {

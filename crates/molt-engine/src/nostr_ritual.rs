@@ -1189,6 +1189,7 @@ async fn recovery_rejoin(
             mesh: Vec::new(),
             nostr_sk: hex::encode(&*nostr_sk),
             rotation_seed: hex::encode(payload.rotation_seed),
+            founded_ts: payload.founded_ts,
             generation,
         },
     )
@@ -1640,6 +1641,7 @@ mod tests {
             agenda: String::new(),
             relays: Vec::new(),
             features: None,
+            founded_ts: 0,
         }
     }
 

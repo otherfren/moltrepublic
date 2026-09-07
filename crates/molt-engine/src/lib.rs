@@ -2020,6 +2020,7 @@ impl State {
                 mesh,
                 nostr_sk,
                 rotation_seed,
+                founded_ts,
                 generation,
             } => self.cmd_net_recover_sealed(
                 member,
@@ -2028,6 +2029,7 @@ impl State {
                 mesh,
                 nostr_sk,
                 rotation_seed,
+                founded_ts,
                 generation,
             ),
             Command::NetRecoverFailed { error, generation } => {

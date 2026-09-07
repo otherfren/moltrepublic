@@ -148,6 +148,7 @@ fn valid_sealed_roster() -> molt_core::SealedRoster {
         agenda: String::new(),
         relays: Vec::new(),
         features: None,
+        founded_ts: 1_700_000_000,
     }
 }
 
@@ -353,6 +354,9 @@ fn join_sealed_validates_the_persisted_nostr_secret() {
     // sealed (entering waits for the phrase-backup step; the secret's
     // validation + persistence is what THIS test pins)
     assert_eq!(st.session.join.run.outcome, 1, "the matching secret seals the join");
+    // one founding date per republic (field report v0.0.2, N1): the
+    // joiner's genesis carries the founder's stamp, not its own clock
+    assert_eq!(st.status().founded_ts, 1_700_000_000);
     let dir = st.active.as_ref().expect("materialized").dir.clone();
     drop(st); // release the writer + flock before reopening
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -365,6 +369,7 @@ fn join_sealed_validates_the_persisted_nostr_secret() {
             Err(e) => panic!("reopening the joined workspace: {e}"),
         }
     };
+    assert_eq!(ws.manifest.workspace.created, 1_700_000_000, "the manifest agrees");
     let ts = ws.read_transport_state();
     assert_eq!(
         ts.nostr_sk.as_deref(),

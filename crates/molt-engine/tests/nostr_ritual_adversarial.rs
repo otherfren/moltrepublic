@@ -349,6 +349,7 @@ async fn a_1059_frame_from_anyone_but_the_link_founder_cannot_kill_a_join() {
         welcome: b"garbage".to_vec(),
         rotation_seed: [9u8; 32],
         relays: h.relays.clone(),
+        founded_ts: 0,
     };
     let anchor = victim_anchor.clone();
     let shooter = {

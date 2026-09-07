@@ -88,6 +88,9 @@ pub struct WelcomePayload {
     /// The group's relay list (normalized URLs, at most
     /// [`MAX_PAYLOAD_RELAYS`]).
     pub relays: Vec<String>,
+    /// The republic's founding date (unix seconds) for a rejoiner, whose
+    /// chain carries no time; 0 = unknown. Absent on an older wire.
+    pub founded_ts: u64,
 }
 
 /// The wire form of [`WelcomePayload`] — versioned, hex-encoded byte fields.
@@ -97,6 +100,8 @@ struct WelcomeWire {
     welcome: String,
     rotation_seed: String,
     relays: Vec<String>,
+    #[serde(default)]
+    founded_ts: u64,
 }
 
 const WELCOME_PAYLOAD_VERSION: u8 = 2;
@@ -117,6 +122,7 @@ impl WelcomePayload {
             welcome: hex::encode(&self.welcome),
             rotation_seed: hex::encode(self.rotation_seed),
             relays: self.relays.clone(),
+            founded_ts: self.founded_ts,
         };
         serde_json::to_string(&wire).map_err(|e| WelcomeError::Payload(e.to_string()))
     }
@@ -150,9 +156,11 @@ impl WelcomePayload {
             welcome,
             rotation_seed,
             relays: wire.relays,
+            founded_ts: wire.founded_ts,
         })
     }
 }
+
 
 /// Gift-wrap the Welcome payload to `invitee`, authored as `inviter` inside
 /// the seal. Returns the publishable kind-1059 event. Refuses (never
@@ -192,4 +200,24 @@ pub async fn peel_welcome(
     }
     let payload = WelcomePayload::decode(&rumor.content)?;
     Ok((payload, rumor.pubkey))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An older writer's wire has no founding date: it decodes to 0, and
+    /// the field rides the same version.
+    #[test]
+    fn a_wire_without_the_founding_date_decodes_to_unknown() {
+        let old = format!(
+            r#"{{"v":{WELCOME_PAYLOAD_VERSION},"welcome":"ab","rotation_seed":"{}","relays":[]}}"#,
+            "00".repeat(32)
+        );
+        let p = WelcomePayload::decode(&old).expect("decodes");
+        assert_eq!(p.founded_ts, 0);
+        let roundtrip = WelcomePayload { founded_ts: 1_700_000_000, ..p };
+        let again = WelcomePayload::decode(&roundtrip.encode().expect("encodes")).expect("decodes");
+        assert_eq!(again.founded_ts, 1_700_000_000);
+    }
 }

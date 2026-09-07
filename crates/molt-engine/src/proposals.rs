@@ -3802,10 +3802,14 @@ impl State {
             .map(|(id, p)| self.view(*id, p))
             .collect();
         accepted.sort_by_key(|v| std::cmp::Reverse(v.id.0));
-        let (applied_ids, applied) = self
+        let (mut applied_ids, applied): (Vec<Option<u64>>, Vec<Value>) = self
             .applied_values(surface, channel.as_ref(), view)
             .into_iter()
             .unzip();
+        // chat rows have no proposal origin: no track, not a row of nulls
+        if surface == Surface::Chat {
+            applied_ids.clear();
+        }
         // Memory serves the folded BASE with every read — the one
         // projection GUI and MCP share (shared_memory_real.md WP-B)
         // the COUNT, not the tree (§4.10): the count is free off the
@@ -4125,6 +4129,7 @@ impl State {
                 SurfaceStat {
                     surface: s,
                     gated: s.is_gated(),
+                    implemented: s.is_implemented(),
                     applied,
                     pending,
                 }

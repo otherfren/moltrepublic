@@ -84,6 +84,7 @@ async fn a_welcome_round_trips_with_its_payload() {
         welcome: b"the mls welcome bytes".to_vec(),
         rotation_seed: [7u8; 32],
         relays: vec![url],
+        founded_ts: 0,
     };
     founder
         .send_welcome(&joiner.pk_hex(), &payload)

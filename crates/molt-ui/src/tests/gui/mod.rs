@@ -210,6 +210,7 @@ fn workspace_on_disk(
         relays: Vec::new(),
         agenda: agenda.to_string(),
         features: None,
+        founded_ts: 0,
     };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

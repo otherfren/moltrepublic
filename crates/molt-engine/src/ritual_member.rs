@@ -596,6 +596,7 @@ mod tests {
             agenda: agenda.to_string(),
             relays: Vec::new(),
             features: None,
+            founded_ts: 0,
         }
     }
 

@@ -81,6 +81,10 @@ impl State {
         // the ratified feature set (roster-v5); `None` on pre-v5 paths —
         // it must reach the genesis exactly as signed, like `agenda`
         features: Option<Vec<String>>,
+        // the founding stamp every copy reports (`SealedRoster::founded_ts`).
+        // 0 = unknown and STAYS 0 (a recovery whose coordinator carried none):
+        // a stamp this node made up would read as "every seat seen just now"
+        founded_ts: u64,
         // which transport family this workspace runs on + its Nostr material
         // (relay list, rotation seed) — all persisted into the v4
         // `transport.state`. `TransportShape::default()` = the legacy
@@ -125,13 +129,15 @@ impl State {
             attestations,
             agenda,
             features,
+            founded_ts,
             // the RATIFIED pool. `shape.relays` is the same list the founder
             // picked, the members signed and the genesis must carry — a
             // placeholder here writes a genesis whose own attestations do not
             // verify against it.
             relays: shape.relays.clone(),
         };
-        let genesis = sealed.into_genesis(member, now_secs());
+        // one founding date per republic: the founder's stamp, never a future one
+        let genesis = sealed.into_genesis(member, founded_ts.min(now_secs()));
         // Block 0 of the persistent chain IS the founding: the sealed roster as a
         // Genesis change, signed by the founding attestations. Only a *real*
         // founding (content republic id + full attestations) roots a chain; a
@@ -972,6 +978,12 @@ impl State {
         }];
         attestations.append(&mut self.ritual_attestations.clone());
 
+        // the founding date every copy reports (the sim seam's ritual may
+        // carry none - the seal is the founding then)
+        let founded_ts = match ritual.founded_ts() {
+            0 => now_secs(),
+            ts => ts,
+        };
         // the complete sealed roster every member (founder included) writes
         let sealed = molt_core::SealedRoster {
             relays: pool.clone(),
@@ -984,6 +996,7 @@ impl State {
             attestations: attestations.clone(),
             agenda: c.agenda.clone(),
             features: features.clone(),
+            founded_ts,
         };
         // what every member writes must verify HERE too (review R2): an
         // attestation collected over a pre-charter table would otherwise be
@@ -1057,6 +1070,7 @@ impl State {
                 republic_id.clone(),
                 c.agenda.clone(),
                 features.clone(),
+                founded_ts,
                 ritual.transport_shape(),
                 // the founder's identity key, exactly as anchored in the roster
                 Some(ritual.founder_sk().clone()),
@@ -1535,6 +1549,12 @@ impl State {
                 sealed.republic_id.clone(),
                 sealed.agenda.clone(),
                 sealed.features.clone(),
+                // an older founder carries no stamp: the seal we just signed
+                // is real evidence, so this node's clock stands in
+                match sealed.founded_ts {
+                    0 => now_secs(),
+                    ts => ts,
+                },
                 shape,
                 joiner_sk,
                 joiner_nostr_sk,
@@ -1929,6 +1949,7 @@ impl State {
         mesh: Vec<molt_core::MeshLink>,
         nostr_sk: String,
         rotation_seed: String,
+        founded_ts: u64,
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
         // a cancelled/restarted recovery bumped the generation — drop stale results
@@ -2131,6 +2152,7 @@ impl State {
             sealed.republic_id.clone(),
             sealed.agenda.clone(),
             sealed.features.clone(),
+            founded_ts,
             shape,
             Some(sk),
             recovered_nostr_sk,
@@ -2177,6 +2199,9 @@ impl State {
             sealed.agenda.clone(),
         );
         self.session.active_workspace = id;
+        // the entry is complete NOW, not on the next tick: the first poll
+        // and read_members must agree (field report v0.0.2, N5)
+        self.refresh_active_entry();
         // stand the runtime supervisor up over the re-established mesh, REUSING
         // the rejoin transport (its Arc owns the fresh mesh queues' receive
         // credentials — the join-tail twin). Best-effort: no mesh or no

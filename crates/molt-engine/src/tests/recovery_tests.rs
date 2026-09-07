@@ -128,6 +128,7 @@ fn recovery_materializes_the_workspace_from_the_full_verified_chain() {
             mesh: Vec::new(),
             nostr_sk: String::new(),
             rotation_seed: String::new(),
+            founded_ts: 0,
             generation: Some(999),
         })
         .await
@@ -143,12 +144,32 @@ fn recovery_materializes_the_workspace_from_the_full_verified_chain() {
             mesh: Vec::new(),
             nostr_sk: String::new(),
             rotation_seed: String::new(),
+            founded_ts: 1_700_000_000,
             generation: Some(1),
         })
         .await
         .expect("sealed");
         let s = read_session(&w).await;
         assert_eq!(s.screen, Screen::Main, "entered the recovered republic");
+        // the founding date is the coordinator's, not the recovery moment
+        // (field report v0.0.2, N1)
+        match w.execute(Command::Status).await.expect("status") {
+            Reply::Status(st) => assert_eq!(st.founded_ts, 1_700_000_000),
+            other => panic!("unexpected: {other:?}"),
+        }
+        // the session entry is fresh at the seal (N5): the survivor this
+        // node never linked to shows the founding date, and the members
+        // table reads the same stamp in the same poll
+        let entry = s.workspaces.iter().find(|x| x.id == s.active_workspace).expect("entry");
+        let coordinator = entry.members.iter().find(|m| m.name == "coordinator").expect("seat");
+        assert_eq!(coordinator.last_seen, 1_700_000_000, "founding = the last real evidence");
+        match w.execute(Command::ReadMembers).await.expect("members") {
+            Reply::Members { members } => {
+                let row = members.iter().find(|m| m.member == "coordinator").expect("row");
+                assert_eq!(row.last_seen, coordinator.last_seen, "one stamp, two views");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
         let ws = s
             .workspaces
             .iter()
@@ -203,6 +224,7 @@ fn recovery_materializes_the_nostr_shape_and_the_new_anchor() {
         Vec::new(),
         hex::encode(new_sk),
         "5a".repeat(32),
+        0,
         Some(1),
     )
     .expect("the handler never errors");
@@ -335,6 +357,7 @@ fn recovery_refuses_a_transport_secret_that_is_not_the_seats_own() {
         Vec::new(),
         hex::encode(foreign_sk),
         "5a".repeat(32),
+        0,
         Some(1),
     )
     .expect("the handler never errors");
@@ -385,6 +408,7 @@ fn a_context_switch_abandons_an_in_flight_recovery() {
         Vec::new(),
         String::new(),
         String::new(),
+        0,
         Some(1),
     )
     .expect("the handler never errors");
@@ -425,6 +449,7 @@ fn recovery_refuses_a_chain_that_re_anchors_the_seat_elsewhere() {
         Vec::new(),
         hex::encode(ours),
         "5a".repeat(32),
+        0,
         Some(1),
     )
     .expect("the handler never errors");
@@ -462,6 +487,7 @@ fn recovery_hard_rejects_a_chain_that_does_not_anchor_the_phrase() {
             mesh: Vec::new(),
             nostr_sk: String::new(),
             rotation_seed: String::new(),
+            founded_ts: 0,
             generation: Some(1),
         })
         .await

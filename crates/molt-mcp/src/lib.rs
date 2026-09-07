@@ -416,6 +416,16 @@ fn present(name: &str, args: &Value, mut value: Value) -> Result<Value, String> 
             }
             Ok(value)
         }
+        // a chat row's default kind is explicit here (field report v0.0.2,
+        // N3): the wire omits `user` to keep legacy messages byte-identical
+        "read_state" if value.get("surface").and_then(Value::as_str) == Some("chat") => {
+            if let Some(rows) = value.get_mut("applied").and_then(Value::as_array_mut) {
+                for o in rows.iter_mut().filter_map(Value::as_object_mut) {
+                    o.entry("kind").or_insert_with(|| Value::String("user".to_string()));
+                }
+            }
+            Ok(value)
+        }
         // the local copy's PATH is the seat's (wiki_files_and_images.md §4)
         "resolve_upload" => {
             if let Some(local) = value.get_mut("local").and_then(Value::as_object_mut) {
@@ -1314,7 +1324,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "read_state",
             command: "read_state",
             scope: Scope::Seat,
-            description: "Read the projected state of one surface. The entries come back under `applied` on EVERY surface, chat included - a chat message is one entry there, there is no `messages` key. A CHAT read sends read receipts for the messages it returns (retrieval is the agent's way of seeing them - agents and humans light the same dots; silent while this node's receipts are off), so there is no need to call mark_read after reading. Chat messages each carry their stable 32-char hex `id` - the handle for react_chat, delete_chat, download_file, remove_file and chat_send's `quote` - plus the channel they file under, and the snapshot enumerates every channel seen in the log (`channels`). Each enumerated patch channel carries the vote's lifecycle in `state` (\"proposed\"/\"applied\"/\"rejected\"; absent for group/topic channels and unknown referents); a decided vote's discussion stays writable - the review of an applied change and the post-mortem of a rejected one belong there. Pass `channel` to get only the messages of that view; channels are tags on the one shared stream, not boundaries, and the enumeration still lists all of them. Pass `view` (chat only) to narrow the read: \"unread\" keeps only the messages after this seat's read cursor; \"today\" and omitting it both give the whole retention window. The filters compose. On gated surfaces, `applied_ids` runs positionally parallel to `applied` and names the proposal each applied entry came from (null = origin unknown: legacy data) - the back-link from an accepted change to its `{\"kind\":\"patch\",\"id\":N}` discussion channel. On `files` the applied entries are the persist/unpersist votes; the tables themselves are read_uploads. On `memory` the whole folded wiki rides along - read a large base paged with wiki_list + wiki_get instead.",
+            description: "Read the projected state of one surface. The entries come back under `applied` on EVERY surface, chat included - a chat message is one entry there, there is no `messages` key. A CHAT read sends read receipts for the messages it returns (retrieval is the agent's way of seeing them - agents and humans light the same dots; silent while this node's receipts are off), so there is no need to call mark_read after reading. Chat messages each carry their stable 32-char hex `id` - the handle for react_chat, delete_chat, download_file, remove_file and chat_send's `quote` - their `kind` (\"user\" = member speech, \"system\" = an engine notice), plus the channel they file under, and the snapshot enumerates every channel seen in the log (`channels`). Each enumerated patch channel carries the vote's lifecycle in `state` (\"proposed\"/\"applied\"/\"rejected\"; absent for group/topic channels and unknown referents); a decided vote's discussion stays writable - the review of an applied change and the post-mortem of a rejected one belong there. Pass `channel` to get only the messages of that view; channels are tags on the one shared stream, not boundaries, and the enumeration still lists all of them. Pass `view` (chat only) to narrow the read: \"unread\" keeps only the messages after this seat's read cursor; \"today\" and omitting it both give the whole retention window. The filters compose. On gated surfaces, `applied_ids` runs positionally parallel to `applied` and names the proposal each applied entry came from (null = origin unknown: legacy data) - the back-link from an accepted change to its `{\"kind\":\"patch\",\"id\":N}` discussion channel; it is absent on chat (messages have no proposal origin) and whenever `applied` is empty. On `files` the applied entries are the persist/unpersist votes; the tables themselves are read_uploads. On `memory` the whole folded wiki rides along - read a large base paged with wiki_list + wiki_get instead.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1663,7 +1673,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "status",
             command: "status",
             scope: Scope::Seat,
-            description: "Read a one-shot status summary of the group and surfaces. `chain_lag.peers_ahead` = how many blocks the furthest peer claims beyond this node's head (0 = level; anything else means votes cast here would not count, and approve/decline refuse); `chain_lag.silent` lists seats unheard-of, with the age of the last sighting. `chain_diverged` is the other failure and a different one: a peer on another branch.",
+            description: "Read a one-shot status summary of the group and surfaces. `founded_ts` is the founder's founding stamp, the same on every copy. `surfaces[].implemented` says a real engine stands behind a surface; the others are listed and gated but carry nothing yet. `chain_lag.peers_ahead` = how many blocks the furthest peer claims beyond this node's head (0 = level; anything else means votes cast here would not count, and approve/decline refuse); `chain_lag.silent` lists seats unheard-of, with the age of the last sighting. `chain_diverged` is the other failure and a different one: a peer on another branch.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::Status),
         },
@@ -2433,7 +2443,7 @@ pub fn tools() -> Vec<ToolDef> {
                 "properties": {
                     "name": { "type": "string", "description": "the final republic name to ratify" },
                     "agenda": { "type": "string", "description": "the free-text charter/agenda to ratify" },
-                    "features": { "type": "array", "items": { "type": "string", "enum": feature_enum() }, "description": "the optional surfaces to activate (chat is always on); omitted = none. memory (the shared wiki) and wallet are real; quests and vault have no real surface yet - the GUI wizard locks them off, prefer leaving them out" }
+                    "features": { "type": "array", "items": { "type": "string", "enum": feature_enum() }, "description": "the optional surfaces to activate (chat is always on); omitted = none. memory (the shared wiki) is real; quests, vault and wallet have no real surface yet (status.surfaces[].implemented) - the GUI wizard locks them off, prefer leaving them out" }
                 },
                 "required": ["name"]
             }),
@@ -3073,6 +3083,27 @@ mod tests {
         let shown = present("read_session", &json!({}), value).expect("presents");
         assert_eq!(shown["workspaces"][0]["last_backup_min"], Value::Null);
         assert_eq!(shown["workspaces"][1]["last_backup_min"], 30);
+    }
+
+    /// A chat row's default kind is explicit on the agent surface
+    /// (field report v0.0.2, N3): the wire omits `user` to keep legacy
+    /// messages byte-identical, and a client read the absent key as null.
+    #[test]
+    fn a_chat_row_reads_its_default_kind_explicitly() {
+        let snap = json!({
+            "surface": "chat",
+            "applied": [
+                { "id": "aa", "from": "petra", "body": "gm" },
+                { "id": "bb", "from": "Human", "body": "rejoined", "kind": "system" }
+            ]
+        });
+        let shown = present("read_state", &json!({ "surface": "chat" }), snap).expect("presents");
+        assert_eq!(shown["applied"][0]["kind"], "user");
+        assert_eq!(shown["applied"][1]["kind"], "system");
+        // a gated surface's entries are payloads, not messages: untouched
+        let org = json!({ "surface": "memory", "applied": [{ "op": "wiki_patch" }] });
+        let shown = present("read_state", &json!({ "surface": "memory" }), org).expect("presents");
+        assert!(shown["applied"][0].get("kind").is_none());
     }
 
     /// **The host posture is on the settings surface** (ADR-0007): the

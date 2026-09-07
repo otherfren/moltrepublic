@@ -84,6 +84,9 @@ pub(crate) struct RitualRuntime {
     /// the charter proposal. `None` until proposed (and on the pre-v5 seams),
     /// which keeps the canonical bytes v4-shaped.
     features: Option<Vec<String>>,
+    /// The founding date every copy reports ([`molt_core::SealedRoster::founded_ts`]):
+    /// stamped when the founder proposes the charter (the sim seam at start).
+    founded_ts: u64,
     rule_m: u8,
     rule_n: u8,
     founder: MemberIdentity,
@@ -146,6 +149,11 @@ impl Drop for NostrRitual {
 }
 
 impl RitualRuntime {
+    /// The founding stamp the sealed roster and the founder's own genesis carry.
+    pub(crate) fn founded_ts(&self) -> u64 {
+        self.founded_ts
+    }
+
     /// The final identity table in ritual order: founder first, then seat
     /// order. `None` until every seat's key is collected.
     fn full_identities(&self) -> Option<Vec<MemberIdentity>> {
@@ -573,6 +581,7 @@ impl State {
             // pre-proposes and seals on all-joined (its name, empty agenda);
             // every real founding waits for the founder's explicit charter
             charter_proposed: self.ritual_sim,
+            founded_ts: crate::now_secs(),
             features: None,
             rule_m,
             rule_n,
@@ -1907,6 +1916,8 @@ mod ritual_ops {
                     welcome: welcome_bytes.clone(),
                     rotation_seed: seed,
                     relays: relays.clone(),
+                    // the founding roster carries the date; only a recovery Welcome does
+                    founded_ts: 0,
                 };
                 let weak = weak.clone();
                 tokio::spawn(async move {
@@ -2473,6 +2484,7 @@ mod ritual_ops {
             ritual.agenda = agenda.clone();
             ritual.features = Some(features.clone());
             ritual.charter_proposed = true;
+            ritual.founded_ts = crate::now_secs();
             self.session.create.name = name;
             self.session.create.agenda = agenda;
             self.session.create.features = features;
@@ -2589,6 +2601,7 @@ mod ritual_ops {
                 attestations: Vec::new(),
                 agenda: ritual.agenda.clone(),
                 features: ritual.features.clone(),
+                founded_ts: ritual.founded_ts,
             };
             let proposal_json = match serde_json::to_string(&proposal) {
                 Ok(j) => j,
@@ -3034,6 +3047,7 @@ mod tests {
             agenda: "charter".into(),
             relays: Vec::new(),
             features: None,
+            founded_ts: 0,
         }
     }
 
@@ -3509,6 +3523,7 @@ mod tests {
             name: "R".to_string(),
             agenda: String::new(),
             charter_proposed: false,
+            founded_ts: 0,
             features: None,
             rule_m: 3,
             rule_n: 3,
@@ -3722,6 +3737,7 @@ mod tests {
                 agenda: "the ratified charter".to_string(),
                 relays: Vec::new(),
                 features: None,
+                founded_ts: 0,
             };
             send(invite::RitualMsg::JoinAccepted { seat: 0 }, 1).await;
             send(
@@ -3790,6 +3806,7 @@ mod tests {
                 ],
                 agenda: "a charter nobody ratified".to_string(),
                 features: None,
+                founded_ts: 0,
             };
             // The forgery must clear every OTHER gate on this path, or the
             // test pins the wrong one — which is exactly what it did before:

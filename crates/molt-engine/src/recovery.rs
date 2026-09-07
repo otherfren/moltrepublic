@@ -275,6 +275,8 @@ pub(crate) fn sealed_roster_from_genesis(
         // same for the ratified feature set (roster-v5): dropping it here
         // would make the recomputed bytes v4-shaped and fail every signature
         features: features.clone(),
+        // blocks carry no time - the recovery Welcome hands the date on
+        founded_ts: 0,
     })
 }
 
@@ -791,6 +793,8 @@ pub(crate) fn sealed_roster_from_blob(blob: &molt_core::CheckpointState) -> molt
         relays: blob.relays.clone(),
         // the ratified feature set survives the cut the same way (v7)
         features: blob.founding_features.clone(),
+        // the blob carries no time either - the Welcome hands the date on
+        founded_ts: 0,
     }
 }
 

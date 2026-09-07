@@ -173,6 +173,16 @@ fn workspace_state_survives_close_and_reopen() {
                     st.founded_ts > 0,
                     "the genesis envelope's timestamp is the founding date"
                 );
+                // a client can tell "you may not" from "there is nothing
+                // here" (field report v0.0.2, N4)
+                let implemented = |s: Surface| {
+                    st.surfaces.iter().find(|x| x.surface == s).expect("listed").implemented
+                };
+                assert!(implemented(Surface::Memory));
+                assert!(implemented(Surface::Files));
+                assert!(!implemented(Surface::Quests));
+                assert!(!implemented(Surface::Vault));
+                assert!(!implemented(Surface::Wallet));
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -864,6 +874,7 @@ fn a_read_cursor_survives_a_restart() {
         Vec::new(),
         String::new(),
         String::new(),
+        0,
         Some(1),
     )
     .expect("materialize");

@@ -431,6 +431,14 @@ async fn founding_gates_on_the_joiners_charter_ratification() {
     let b_out = b_task.await.expect("B task");
     let sealed = b_out.sealed.expect("B received the sealed roster");
     assert_eq!(sealed.agenda, "the pact: tend the commons, share the harvest");
+    // one founding date per republic (field report v0.0.2, N1): the
+    // distributed roster carries the founder's stamp, and it IS the
+    // founder's own founding date
+    assert!(sealed.founded_ts > 0, "the sealed roster carries the founding date");
+    match a.execute(Command::Status).await.expect("status") {
+        molt_core::Reply::Status(st) => assert_eq!(st.founded_ts, sealed.founded_ts),
+        other => panic!("unexpected: {other:?}"),
+    }
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
@@ -2617,6 +2625,7 @@ async fn recovery_completes_end_to_end_and_the_rejoiner_materializes() {
         mesh: outcome.mesh.clone(),
         nostr_sk: String::new(),
         rotation_seed: String::new(),
+        founded_ts: 0,
         generation: Some(1),
     })
     .await
@@ -2674,6 +2683,7 @@ async fn recovery_completes_end_to_end_and_the_rejoiner_materializes() {
         mesh: Vec::new(), // option A: no live links re-established
         nostr_sk: String::new(),
         rotation_seed: String::new(),
+        founded_ts: 0,
         generation: Some(1),
     })
     .await
@@ -2957,6 +2967,7 @@ async fn a_second_recovery_round_after_a_dead_first_attempt_succeeds() {
         mesh: outcome.mesh.clone(),
         nostr_sk: String::new(),
         rotation_seed: String::new(),
+        founded_ts: 0,
         generation: Some(1),
     })
     .await

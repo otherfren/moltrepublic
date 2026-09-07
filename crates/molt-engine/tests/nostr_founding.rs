@@ -1022,6 +1022,7 @@ fn injected_seal(member: &str) -> (String, String) {
         ],
         agenda: String::new(),
         features: None,
+        founded_ts: 0,
     };
     (
         serde_json::to_string(&sealed).expect("sealed json"),

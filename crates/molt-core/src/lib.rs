@@ -121,6 +121,17 @@ impl Surface {
         !matches!(self, Surface::Chat)
     }
 
+    /// Whether a real engine stands behind the surface. The rest are
+    /// listed (navigation order) and gated, but have no ops a proposal
+    /// could carry yet - a client reads `implemented` to tell "you may
+    /// not" from "there is nothing here".
+    pub fn is_implemented(self) -> bool {
+        matches!(
+            self,
+            Surface::Organization | Surface::Chat | Surface::Memory | Surface::Files
+        )
+    }
+
     /// Parse a surface from its lowercase name.
     pub fn parse(s: &str) -> Option<Surface> {
         Surface::ALL.into_iter().find(|x| x.as_str() == s)
@@ -2409,6 +2420,13 @@ pub struct SealedRoster {
     /// (the canonical bytes stay v4). `Some([])` = deliberately none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub features: Option<Vec<String>>,
+    /// Unix seconds of the founding: the founder's stamp when it proposed
+    /// the charter, written into every member's genesis envelope so each
+    /// copy reports the same date. Display metadata, NOT in the signed
+    /// bytes (blocks carry no time); 0 = unknown, the writer uses its own
+    /// clock. A receiver clamps it to its own "now".
+    #[serde(default)]
+    pub founded_ts: u64,
 }
 
 impl SealedRoster {
@@ -5246,6 +5264,10 @@ pub enum Command {
         /// recovery.
         #[serde(default)]
         rotation_seed: String,
+        /// The founding date the coordinator's Welcome handed on
+        /// ([`SealedRoster::founded_ts`]); 0 = unknown.
+        #[serde(default)]
+        founded_ts: u64,
         /// Recovery incarnation (a superseded recovery drops stale results).
         #[serde(default)]
         generation: Option<u64>,
@@ -6403,8 +6425,9 @@ pub struct SurfaceSnapshot {
     /// stay untouched — readers that compare payloads keep working; this
     /// track only ADDS the back-link a frontend needs to reopen the vote's
     /// discussion (its `patch:<id>` channel). Additive with a default, so an
-    /// older writer's snapshot stays deserializable.
-    #[serde(default)]
+    /// older writer's snapshot stays deserializable. Empty on chat (no
+    /// proposal origin at all) and then absent on the wire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub applied_ids: Vec<Option<u64>>,
     /// Proposals still pending against this surface.
     pub pending: Vec<ProposalView>,
@@ -6875,6 +6898,9 @@ pub struct SurfaceStat {
     pub surface: Surface,
     /// Whether it is threshold-gated.
     pub gated: bool,
+    /// Whether a real engine stands behind it ([`Surface::is_implemented`]).
+    #[serde(default)]
+    pub implemented: bool,
     /// Number of applied transitions.
     pub applied: usize,
     /// Number of pending proposals.
@@ -7100,8 +7126,9 @@ pub struct StatusView {
     pub threshold: usize,
     /// Per-surface counters.
     pub surfaces: Vec<SurfaceStat>,
-    /// Unix seconds of the founding — the genesis envelope's timestamp
-    /// (real on replayed workspaces; 0 on pre-ritual/demo groups).
+    /// Unix seconds of the founding — the genesis envelope's timestamp,
+    /// which carries the founder's stamp on every copy
+    /// ([`SealedRoster::founded_ts`]; 0 on pre-ritual/demo groups).
     #[serde(default)]
     pub founded_ts: u64,
     /// Members actually seen on the wire within the last hour (real
@@ -8039,6 +8066,15 @@ mod tests {
         let legacy_bytes = roster_canonical_bytes("f00", 2, 3, &legacy, "charter", &[], None);
         assert_eq!(legacy_bytes.len(), 329 - 64);
         assert_ne!(legacy_bytes, bytes);
+    }
+
+    /// Only the surfaces with a real engine behind them read as
+    /// implemented (field report v0.0.2, N4); the rest stay listed and
+    /// gated, but a client can tell them apart.
+    #[test]
+    fn only_the_built_surfaces_read_as_implemented() {
+        let real: Vec<Surface> = Surface::ALL.into_iter().filter(|s| s.is_implemented()).collect();
+        assert_eq!(real, vec![Surface::Organization, Surface::Chat, Surface::Memory, Surface::Files]);
     }
 
     /// Shared Files is the seventh surface and a CORE one: never a feature

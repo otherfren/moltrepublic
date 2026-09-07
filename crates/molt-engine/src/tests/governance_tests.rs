@@ -524,7 +524,12 @@ fn applied_entries_carry_their_proposal_id() {
     ));
     let chat = st.snapshot(Surface::Chat, None, None);
     assert_eq!(chat.applied.len(), 1);
-    assert_eq!(chat.applied_ids, vec![None]);
+    // chat rows have no proposal origin: no track at all, and the key is
+    // absent on the wire rather than an array of nulls (field report
+    // v0.0.2, N2)
+    assert!(chat.applied_ids.is_empty());
+    let wire = serde_json::to_value(&chat).expect("json");
+    assert!(wire.get("applied_ids").is_none(), "an empty track is omitted: {wire}");
     // a NEW dump round-trips the id track…
     let dump = st.snapshot_now().state;
     let mut st2 = plain_state();
