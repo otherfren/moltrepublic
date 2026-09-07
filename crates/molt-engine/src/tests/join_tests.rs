@@ -241,6 +241,10 @@ fn join_seals_into_the_republic_from_a_valid_roster() {
     assert_ne!(st.session.screen, Screen::Main, "sealing must not auto-enter");
     assert_eq!(st.session.join.run.outcome, 1, "the run reports sealed");
     assert!(!st.session.join.sealed_id.is_empty(), "the sealed id is exposed");
+    // the phrase appears NOWHERE in the status poll once sealed (field
+    // report v0.0.2): the seat pulls it with RevealSeed
+    let poll = serde_json::to_string(&st.session).expect("json");
+    assert!(!poll.contains("wombat lattice orbit"), "a sealed join still serves the phrase: {poll}");
     st.cmd_join_finish().expect("finish enters");
     assert_eq!(st.session.screen, Screen::Main, "entered the republic");
     assert_eq!(st.session.join, molt_core::JoinState::default(), "join reset");

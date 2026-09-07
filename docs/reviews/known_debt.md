@@ -46,7 +46,11 @@ One write key admits all seat tools, `delete_workspace` and
 `export_workspace` included; the only narrower key is the read-only one.
 A per-token tool allowlist ("may chat and propose, not exfiltrate or
 destroy") is a third scope beside Read and Seat and a design question
-against ADR-0007's "one seat, one operator". Not built.
+against ADR-0007's "one seat, one operator". Not built. The follow-up
+report's `[mcp] allow_seed_reveal` knob is the same question in a smaller
+coat: refusing `reveal_seed` alone is theatre while `export_workspace`
+still carries the seed - a per-token allowlist covers both, a lone knob
+covers neither.
 Source: `docs_archive/reviews/field_report_v0.0.2_headless_seat.md`.
 
 ## A reasoned decline delays the seal (agent round 2, A4)

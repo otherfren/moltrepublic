@@ -508,6 +508,10 @@ fn the_recovery_phrase_is_revealed_on_request_only() {
             other => panic!("unexpected: {other:?}"),
         };
         assert_eq!(phrase.split(' ').count(), 24, "the real phrase");
+        // the status poll carries the phrase nowhere - the reporter's own
+        // two-line test: the ritual produced it, so the test knows it
+        let poll = serde_json::to_string(&*s).expect("json");
+        assert!(!poll.contains(&phrase), "read_session serves the phrase: {poll}");
         assert!(w
             .execute(Command::RevealSeed { id: "nope".to_string() })
             .await
