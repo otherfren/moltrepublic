@@ -336,6 +336,19 @@ ring-flavored `tokio-rustls`; ADR-0005 (2026-07-31) decided against the pool
 `cargo tree -p molt-net -e no-dev -i ring` must stay empty — enforced by
 `crates/molt-net/tests/ring_free_guard.rs` since 2026-07-31.
 
+- **Ring-free means NO process-level rustls default provider.** Our own TLS
+  configs pass the rustcrypto provider explicitly, but a dependency that
+  calls `rustls::ClientConfig::builder()` (arti's tor-rtcompat does) needs
+  `CryptoProvider::install_default()` first, or it PANICS - and the release
+  profile is `panic = "abort"`, so v0.0.2 died with SIGABRT on the first
+  embedded-Tor dial (field report 2026-09-07). `tor_embedded::ArtiShared::new`
+  installs the X25519 rustcrypto provider. The trap that hid it: molt-net's
+  DEV-dependency `nostr-relay-pool` enables `rustls/ring`, so every molt-net
+  test - the live smoke test included - runs in a graph where rustls
+  auto-selects a provider. A graph-shape regression is only caught in the
+  BINARY's graph (`crates/molt-app/tests/embedded_tor.rs`, an
+  `--features embedded-tor` build).
+
 Keep new code pure-Rust where you can; these are the sanctioned exceptions.
 
 ## MLS / OpenMLS + transport-crate specifics

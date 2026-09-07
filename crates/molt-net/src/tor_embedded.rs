@@ -60,6 +60,7 @@ pub struct ArtiShared {
 impl ArtiShared {
     /// A fresh, unbootstrapped shared state (used by [`shared`] and tests).
     pub fn new() -> ArtiShared {
+        install_crypto_provider();
         ArtiShared {
             client: OnceCell::new(),
             iso: Mutex::new(HashMap::new()),
@@ -113,6 +114,14 @@ pub fn shared() -> Arc<ArtiShared> {
         .clone()
 }
 
+/// arti's TLS (tor-rtcompat) builds its `ClientConfig` on the PROCESS-level
+/// rustls provider, and this ring-free graph has none to auto-select - the
+/// first embedded dial would panic (v0.0.2 field report). Install the
+/// crate's X25519 rustcrypto provider; an already-installed one wins.
+fn install_crypto_provider() {
+    let _ = crate::dial::x25519_provider().install_default();
+}
+
 /// Bootstrap a fresh arti [`TorClient`] against the on-disk state / cache dirs
 /// under `~/.moltrepublic/arti`. Slow (Tor directory bootstrap over the
 /// network); called once, lazily, on the first dial.
@@ -159,6 +168,19 @@ pub(crate) fn build_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// arti's TLS (tor-rtcompat) builds its `ClientConfig` on the PROCESS
+    /// default provider. Our graph is ring-free, so nothing auto-installs
+    /// one: v0.0.2 aborted on the first embedded dial. Creating the shared
+    /// state must install the crate's own provider first.
+    #[test]
+    fn the_shared_state_installs_the_rustcrypto_provider_as_process_default() {
+        let _shared = ArtiShared::new();
+        let provider = rustls::crypto::CryptoProvider::get_default()
+            .expect("a process-level provider is installed before arti runs");
+        let groups: Vec<_> = provider.kx_groups.iter().map(|g| g.name()).collect();
+        assert_eq!(groups, vec![rustls::NamedGroup::X25519], "the crate's X25519 rustcrypto provider");
+    }
 
     #[test]
     fn per_server_isolation_yields_distinct_circuits() {

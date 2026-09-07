@@ -42,6 +42,15 @@ async fn the_embedded_client_bootstraps_and_reaches_a_relay() {
     let ws = first.unwrap_or_else(|e| panic!("first dial through embedded tor failed after {cold:?}: {e}"));
     ws.close().await;
     println!("REACHABLE {url} through embedded arti - cold bootstrap + handshake {cold:?}");
+    // the test graph carries ring through a dev-dependency; the release
+    // binary does not - the live path must have run on our own provider
+    let groups: Vec<_> = rustls::crypto::CryptoProvider::get_default()
+        .expect("provider installed")
+        .kx_groups
+        .iter()
+        .map(|g| g.name())
+        .collect();
+    assert_eq!(groups, vec![rustls::NamedGroup::X25519], "arti ran on the rustcrypto provider");
 
     let warm = Instant::now();
     let second = tokio::time::timeout(Duration::from_secs(120), RelayWs::connect(&dialer, &url))
