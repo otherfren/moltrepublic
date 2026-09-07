@@ -1618,7 +1618,7 @@ export component MemoryPane inherits VerticalLayout {
                                         Text {
                                             width: 100%;
                                             height: 100%;
-                                            text: r.label + "/";
+                                            text: r.label;
                                             color: root.tone(r.status, Theme.dim);
                                             font-size: Theme.fs-nav;
                                             font-weight: 600;
@@ -1632,7 +1632,7 @@ export component MemoryPane inherits VerticalLayout {
                                             property <int> tip-gen;
                                             changed tip-on => {
                                                 if (self.tip-on) {
-                                                    self.tip-gen = HintTip.show(r.label + "/",
+                                                    self.tip-gen = HintTip.show(r.label,
                                                         frow.absolute-position.x + frow.width + 8px,
                                                         frow.absolute-position.y + (frow.height - 23px) / 2);
                                                 } else {
