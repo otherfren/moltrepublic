@@ -129,10 +129,8 @@ fn main() -> anyhow::Result<()> {
                     );
                 }
             } else {
-                if let Some(phrase) = molt_storage::read_sealed_seed(&workspace_dir, &e.dir, &w.id)
-                {
-                    w.seed = phrase;
-                }
+                w.has_seed =
+                    molt_storage::read_sealed_seed(&workspace_dir, &e.dir, &w.id).is_some();
                 if let Some(genesis) = molt_storage::peek_genesis(&workspace_dir, &e.dir, &w.id) {
                     if let molt_core::WorkspaceEvent::Founded { roster, agenda, .. } = genesis.body {
                         // a closed workspace has no presence knowledge —

@@ -226,7 +226,8 @@ fn create_lifecycle_founds_a_republic() {
                 // phrase up on the wizard's last step first — the exact
                 // twin of the joiner's JoinFinish gate
                 assert_ne!(s.screen, Screen::Main, "sealing must not auto-enter");
-                assert_eq!(s.create.seed.split(' ').count(), 24);
+                // backed up before the seal: the ritual copy is gone with it
+                assert!(s.create.seed.is_empty(), "no phrase lingers after the seal");
                 assert_eq!(s.create.seats.len(), 2);
                 for seat in &s.create.seats {
                     // 3 = sealed AND backup-confirmed (❻½): a finalized

@@ -223,7 +223,7 @@ export struct WorkspaceItem {
     s3: bool, // automatic S3 backup configured
     backup: string, // human "last backup" label, e.g. "30 min ago" / "never"
     encrypted: bool, // at-rest sealed (S6, real): open refuses until unsealed
-    seed: string, // recovery seed all secret keys derive from (real entropy, device-sealed)
+    has-seed: bool, // this device holds the recovery phrase (reveal-seed pulls it on request)
     net: string, // effective global anonymity network at founding/join ("tor" | "none"; demo entries may carry legacy values)
     members: [MemberSync], // who is in the DAO + when they last synced
 }

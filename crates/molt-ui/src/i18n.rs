@@ -643,8 +643,8 @@ pub(crate) static LOG_SHAPES_DE: &[(&[&str], &[&str])] = &[
         &["✓ Recovery-Phrase gesichert · warte auf die anderen"],
     ),
     (
-        &["✓ sealed - back up your recovery phrase to enter"],
-        &["✓ versiegelt - zum Eintreten die Recovery-Phrase sichern"],
+        &["✓ sealed by everyone · enter the republic"],
+        &["✓ von allen versiegelt · Republik betreten"],
     ),
     (&["✗ join failed: ", ""], &["✗ Beitritt fehlgeschlagen: ", ""]),
     (

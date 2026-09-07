@@ -778,8 +778,9 @@ allow = {mcp_allow}
 # API key every MCP client must send in its initialize request. Keep it secret;
 # rotate it from the GUI settings. A fresh token is written on --generate-config.
 token = {mcp_token}
-# A second key admitting only the READ tools can be issued in the GUI
-# (Settings > MCP); it is written here as read_token. Absent = off.
+# A second key admitting only the READ tools: set it in the GUI (Settings > MCP)
+# or over MCP (patch_settings {{"mcp_read_token": "..."}}, "" revokes); it is
+# written here as read_token. Absent = off.
 
 [transport.anonymity]
 # network = "tor" | "none" (default "none" = clearnet). "tor" routes

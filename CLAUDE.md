@@ -162,7 +162,8 @@ finding, the same as a bug.
   tools on **both** surfaces. Since ADR-0007 the seat token operates the
   MACHINE (`docs_archive/security/mcp-security.md`, "The machine boundary"):
   host posture, any path, the clearnet consent and the recovery phrase are
-  all on the surface. What stays INTERNAL is only what would let a client
+  all on the surface (a stored workspace's phrase as a pull, `reveal_seed`;
+  `read_session` only flags `has_seed`). What stays INTERNAL is only what would let a client
   speak AS someone else - `ui_publish` (the window) and every `net_*`
   channel (the transport/ritual tasks). The three stored secrets
   (`mcp_token`, `mcp_read_token`, `s3_secret_key`) stay write-only, and the
@@ -455,7 +456,11 @@ both verified red-without/green-with).
   build** (10m44s, 2026-09-06): the feature changes the window crate's unit
   hash, so the `gui_walk.py` prerequisite costs the same as the authoritative
   build — plan both, never concurrently.
-  GUI changes are validated by a clean `cargo build -j 1 -p molt-ui-window -p
+  **Do NOT run the full window build per change-set** (user decision
+  2026-09-08): the live-preview chain runs the whole Slint compiler and the
+  GUI tests, and that is the pre-commit check. The full build is for a
+  release (`scripts/build-release.sh`) or when the user asks. When it does
+  run: `cargo build -j 1 -p molt-ui-window -p
   molt-ui` — **one** invocation naming BOTH: `-p molt-ui-window` alone
   resolves a different `slint` feature set, so a solo window build is thrown
   away the moment `-p molt-ui` is built after it
@@ -482,10 +487,8 @@ both verified red-without/green-with).
   whole suite in one process reached 12 GiB and was OOM-killed
   — iterate there, and run the expensive window build ONCE per change-set.
   Dev-only: never enable the feature by default in a Cargo.toml. The .slint compiler still runs fully, so
-  `dev-ui.sh build` catches .slint errors and API breaks in molt-ui; the
-  authoritative pre-commit check remains one normal
-  `cargo build -p molt-ui-window -p molt-ui` (once per change-set, not per
-  iteration).
+  `dev-ui.sh build` catches .slint errors and API breaks in molt-ui, and
+  is the pre-commit check; the full window build is reserved for releases.
 - **Driving a REAL node by hand goes over MCP, and needs a relay.** Founding
   refuses without one ("cannot found: no relay configured"), and the suite's
   `MockRelay` lives inside the test process — so there is

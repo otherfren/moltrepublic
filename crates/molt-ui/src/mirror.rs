@@ -68,7 +68,7 @@ fn workspace_item(lang: i32, now: u64, w: &molt_core::WorkspaceInfo) -> Workspac
         s3: w.s3,
         backup: backup_when_label(lang, w.last_backup_min).into(),
         encrypted: w.encrypted,
-        seed: w.seed.as_str().into(),
+        has_seed: w.has_seed,
         net: w.net.as_str().into(),
         members: ModelRc::new(VecModel::from(members)),
     }

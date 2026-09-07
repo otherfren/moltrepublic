@@ -2547,10 +2547,10 @@ pub struct ScanEntry {
 impl ScanEntry {
     /// Project this directory entry into the session's workspace-list shape.
     /// Only plaintext facts: sync/presence fields stay neutral (they are the
-    /// transport's runtime state) and roster/seed stay empty here. The app's
-    /// startup scan fills them via [`read_sealed_seed`] / [`peek_genesis`]
+    /// transport's runtime state) and roster/seed flag stay empty here. The
+    /// app's startup scan fills them via [`read_sealed_seed`] / [`peek_genesis`]
     /// (both open with the device-sealed key material) so the details panel
-    /// of an at-rest-unencrypted workspace shows the real phrase and roster.
+    /// of an at-rest-unencrypted workspace shows the roster and offers the phrase.
     pub fn info(&self) -> molt_core::WorkspaceInfo {
         let w = &self.manifest.workspace;
         let last_backup_min = self
@@ -2572,7 +2572,7 @@ impl ScanEntry {
             // bucket-side facts appear only from a real listing/attempt
             backup_copies: 0,
             backup_error: String::new(),
-            seed: String::new(),
+            has_seed: false,
             // the manifest carries no network label — the caller stamps the
             // effective global setting (`molt_core::effective_net_label`);
             // claiming one here would mislabel every entry after a restart

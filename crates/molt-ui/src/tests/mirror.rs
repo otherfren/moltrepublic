@@ -66,7 +66,7 @@ fn ws(name: &str, minutes: i32) -> WorkspaceItem {
         s3: false,
         backup: "".into(),
         encrypted: false,
-        seed: "".into(),
+        has_seed: false,
         net: "".into(),
         members: ModelRc::new(VecModel::from(Vec::new())),
     }

@@ -42,7 +42,7 @@ pub(super) fn presence_fixture() -> crate::State {
         last_backup_min: molt_core::WorkspaceInfo::NEVER,
         backup_copies: 0,
         backup_error: String::new(),
-        seed: String::new(),
+        has_seed: false,
         net: "none".to_string(),
         encrypted: false,
         restored: false,

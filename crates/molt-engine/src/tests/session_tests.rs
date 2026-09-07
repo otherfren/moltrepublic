@@ -154,3 +154,29 @@ fn session_navigate_and_save_are_co_equal_state() {
         }
     });
 }
+
+/// A run start drops the GUI's transient notice: a headless client never
+/// navigates, so a stale `saved` sat there for a whole join (field
+/// report v0.0.2, F4).
+#[test]
+fn a_run_start_clears_the_stale_notice() {
+    rt().block_on(async {
+        let w = __spawn_sim_founding(GroupConfig::demo(), SessionView::default(), false);
+        w.execute(Command::SaveSettings {
+            settings: SessionSettings::default(),
+        })
+        .await
+        .expect("save");
+        assert_eq!(read_session(&w).await.notice, "saved");
+        w.execute(Command::CreateStart {
+            name: "Quiet".to_string(),
+            member: "petra".to_string(),
+            threshold: 2,
+            members: 3,
+            relays: Vec::new(),
+        })
+        .await
+        .expect("create start");
+        assert_eq!(read_session(&w).await.notice, "");
+    });
+}

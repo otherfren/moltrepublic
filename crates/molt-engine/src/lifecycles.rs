@@ -311,13 +311,16 @@ impl State {
             last_backup_min: WorkspaceInfo::NEVER,
             backup_copies: 0,
             backup_error: String::new(),
-            seed,
+            has_seed: !seed.is_empty(),
             net,
             agenda,
             encrypted: false,
             members: members.clone(),
             restored: false,
         });
+        if !seed.is_empty() {
+            self.seeds.insert(id.clone(), seed);
+        }
         // the stamps this entry starts with are real observations (the seal
         // round, the announces a recovery reached) - and presence knowledge
         // only survives a restart if it reaches the workspace's prefs.toml
@@ -423,6 +426,7 @@ impl State {
         let root = self.workspace_root();
         let mut run = RunCore::started();
         run.log.push(format!("→ restore started · way {way} · {target}"));
+        self.session.notice.clear();
         self.session.restore = RestoreState { run, way, target };
         self.session.screen = Screen::Restore;
         self.emit_session(SessionScope::Full);
@@ -619,7 +623,7 @@ impl State {
                     .unwrap_or(WorkspaceInfo::NEVER),
                 backup_copies: 0,
                 backup_error: String::new(),
-                seed: entry_seed,
+                has_seed: !entry_seed.is_empty(),
                 net: self.effective_net_label(),
                 encrypted,
                 restored: false,
@@ -814,6 +818,8 @@ impl State {
                 state: 0,
             })
             .collect();
+        // a run start is a navigation: the settings toast must not outlive it
+        self.session.notice.clear();
         self.session.create = CreateState {
             run: RunCore::started(),
             name: name.clone(),
@@ -895,6 +901,8 @@ impl State {
         match self.finalize_founding(&c, ritual) {
             Ok(id) => {
                 self.session.create.run.outcome = 1;
+                // backed up and sealed: the ritual copy has no reader left
+                self.session.create.seed = String::new();
                 self.session.active_workspace = id;
                 self.session
                     .create
@@ -1286,6 +1294,7 @@ impl State {
             molt_storage::generate_seed_phrase().map_err(|e| MoltError::Join(e.to_string()))?;
         self.join_generation += 1;
         let generation = self.join_generation;
+        self.session.notice.clear();
         self.session.join = JoinState {
             run: RunCore::started(),
             invite,
@@ -1592,18 +1601,19 @@ impl State {
                 }
             }
         }
-        // sealed, but NOT entered (2026-08-08): the wizard's last step makes
-        // the joiner back its phrase up first; `JoinFinish` enters. The seed
-        // and the run stay in `session.join` for exactly that step.
+        // sealed, but NOT entered (2026-08-08): `JoinFinish` enters. The
+        // backup was confirmed before the seal, so the ritual's phrase copy
+        // has no reader left.
         self.session.join.sealed_id = id;
         self.session.join.awaiting_ratify = false;
         self.session.join.run.outcome = 1;
+        self.session.join.seed = String::new();
         self.session.join.run.progress_pct = 100;
         self.session
             .join
             .run
             .log
-            .push("✓ sealed - back up your recovery phrase to enter".to_string());
+            .push("✓ sealed by everyone · enter the republic".to_string());
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }
@@ -1648,14 +1658,7 @@ impl State {
         }
         // the seat's phrase, revealed from the workspace's sealed seed — a
         // knowledge-only restore (no seed in the blob) cannot reattach
-        let Some(phrase) = self
-            .session
-            .workspaces
-            .iter()
-            .find(|w| w.id == self.session.active_workspace)
-            .map(|w| w.seed.clone())
-            .filter(|s| !s.is_empty())
-        else {
+        let Some(phrase) = self.seed_of(&self.session.active_workspace) else {
             tracing::info!("detached workspace carries no seed - reattach needs the recovery link");
             return false;
         };
@@ -1831,6 +1834,7 @@ impl State {
         self.recovery.ctx = Some((inv.clone(), phrase.into()));
         // a fresh run starts with a fresh checklist (the old republic's
         // finished list must not front-run the new coordinator's report)
+        self.session.notice.clear();
         self.session.recover = molt_core::RecoverState::default();
         // a fresh transport slot for this recovery incarnation, the
         // join_transport twin: cmd_net_recover_sealed stands the runtime

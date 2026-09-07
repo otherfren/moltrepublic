@@ -738,16 +738,12 @@ pub struct WorkspaceInfo {
     /// rest" skip status of design P6. Additive.
     #[serde(default)]
     pub backup_error: String,
-    /// The real recovery phrase every secret key of this workspace derives
-    /// from — a secret. Populated from the device-sealed seed while the
-    /// workspace is unsealed; cleared to "" the moment it is sealed at rest
-    /// (no key material on disk means none in session memory either).
-    ///
-    /// SERVED to the SEAT (ADR-0007): an agent operates the machine, so it
-    /// holds the phrase like the human does. The READ-ONLY key never sees
-    /// it (`molt-mcp` strips it from every read-scope reply).
+    /// Whether this device holds the recovery phrase (the device-sealed
+    /// seed of an at-rest-unsealed workspace). The phrase itself is a
+    /// PULL — [`Command::RevealSeed`] — never a poll payload: an operator
+    /// who wants it asks, one who wants it out of its logs never sees it.
     #[serde(default)]
-    pub seed: String,
+    pub has_seed: bool,
     /// The effective global anonymity network (`"tor" | "none"`) when this
     /// entry was founded/joined — a display label (routing always follows
     /// the LIVE global settings); demo entries may carry legacy values.
@@ -887,7 +883,7 @@ impl WorkspaceInfo {
                 last_backup_min,
                 backup_copies: 0,
                 backup_error: String::new(),
-                seed: seed.to_string(),
+                has_seed: !seed.is_empty(),
                 net: net.to_string(),
                 encrypted: false,
                 members,
@@ -4466,6 +4462,14 @@ pub enum Command {
         /// The workspace's recovery phrase.
         phrase: String,
     },
+    /// Hand out a stored workspace's recovery phrase ([`Reply::Seed`]).
+    /// Refused for a sealed-at-rest workspace (no key material on the
+    /// device) and for an unknown id. SEAT scope (ADR-0007); the read-only
+    /// key never sees a phrase.
+    RevealSeed {
+        /// The workspace id ([`WorkspaceInfo::id`]).
+        id: WorkspaceId,
+    },
     /// Export a workspace as ONE encrypted `.molt.enc` blob file
     /// (`molt-export-v1`): manifest, encrypted history, the threshold-signed
     /// chain, the newest snapshot, the logo — and, when stored, the recovery
@@ -6121,6 +6125,11 @@ pub enum Reply {
     UploadBytes {
         /// The bytes; their sha256 equals the requested checksum.
         bytes: Vec<u8>,
+    },
+    /// A stored workspace's recovery phrase ([`Command::RevealSeed`]).
+    Seed {
+        /// The phrase, space-separated words.
+        seed: String,
     },
     /// The whole shared session state (boxed: it is by far the largest reply).
     Session(Box<SessionView>),

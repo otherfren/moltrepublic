@@ -58,10 +58,13 @@ fn workspace_state_survives_close_and_reopen() {
         assert_eq!(id.len(), 64, "a real derived workspace id");
         let ws = s.workspaces.iter().find(|x| x.id == id).expect("entry");
         assert_eq!(ws.name, "Keystone");
-        // the recovery phrase stays in the entry (decision 2026-07-15:
-        // stored device-sealed, shown by the Open screen's details
-        // panel while the workspace is at-rest-unencrypted)
-        assert_eq!(ws.seed.split(' ').count(), 24, "the real phrase: {}", ws.seed);
+        // the recovery phrase is stored device-sealed (decision 2026-07-15)
+        // and pulled on request while the workspace is at-rest-unencrypted
+        assert!(ws.has_seed, "the entry offers the phrase");
+        match w.execute(Command::RevealSeed { id: id.clone() }).await {
+            Ok(Reply::Seed { seed }) => assert_eq!(seed.split(' ').count(), 24, "{seed}"),
+            other => panic!("unexpected: {other:?}"),
+        }
 
         // write history: chat, reaction, delete, proposal to threshold
         // (all chat verbs address by stable id since the chat bus)
@@ -463,6 +466,66 @@ fn manual_export_writes_a_real_blob_and_fails_honestly() {
 }
 
 
+/// **The phrase is a PULL, never a poll payload** (field report v0.0.2,
+/// F2): the session carries only `has_seed`, `RevealSeed` hands the
+/// phrase to whoever asks, a sealed workspace has none to reveal, and
+/// the ritual's own copy is gone the moment the seal lands.
+#[test]
+fn the_recovery_phrase_is_revealed_on_request_only() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    rt().block_on(async {
+        let root = tmp.path().join("workspaces");
+        let session = SessionView {
+            workspaces: Vec::new(),
+            settings: SessionSettings {
+                workspace_dir: root.display().to_string(),
+                ..SessionSettings::default()
+            },
+            ..SessionView::default()
+        };
+        let w = __spawn_sim_founding(GroupConfig::demo(), session, true);
+        w.execute(Command::CreateStart {
+            name: "Pulled".to_string(),
+            member: "petra".to_string(),
+            threshold: 2,
+            members: 3,
+            relays: Vec::new(),
+        })
+        .await
+        .expect("create start");
+        await_founding(&w).await;
+        let s = read_session(&w).await;
+        assert_eq!(s.create.run.outcome, 1);
+        assert!(s.create.seed.is_empty(), "the ritual copy is cleared at the seal");
+        w.execute(Command::CreateFinish).await.expect("finish");
+        let s = read_session(&w).await;
+        let id = s.active_workspace.clone();
+        let json = serde_json::to_string(&s.workspaces).expect("json");
+        assert!(!json.contains("\"seed\""), "no phrase field on the entries: {json}");
+        assert!(s.workspaces.iter().find(|x| x.id == id).expect("entry").has_seed);
+        let phrase = match w.execute(Command::RevealSeed { id: id.clone() }).await {
+            Ok(Reply::Seed { seed }) => seed,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert_eq!(phrase.split(' ').count(), 24, "the real phrase");
+        assert!(w
+            .execute(Command::RevealSeed { id: "nope".to_string() })
+            .await
+            .is_err());
+
+        w.execute(Command::CloseWorkspace).await.expect("close");
+        w.execute(Command::EncryptWorkspace { id: id.clone(), phrase })
+            .await
+            .expect("encrypt");
+        let s = read_session(&w).await;
+        assert!(!s.workspaces.iter().find(|x| x.id == id).expect("entry").has_seed);
+        assert!(
+            w.execute(Command::RevealSeed { id: id.clone() }).await.is_err(),
+            "a sealed workspace has no phrase to reveal"
+        );
+    });
+}
+
 /// **The story-10 keystone:** at-rest sealing is real, phrase-verified
 /// and derived from the directory (design §8.2, engine level). Found a
 /// republic on a storage engine, close it, seal it with the real phrase
@@ -496,7 +559,10 @@ fn at_rest_sealing_is_real_verified_and_survives_a_restart() {
         w.execute(Command::CreateFinish).await.expect("finish");
         let s = read_session(&w).await;
         let id = s.active_workspace.clone();
-        let phrase = s.workspaces.iter().find(|x| x.id == id).expect("entry").seed.clone();
+        let phrase = match w.execute(Command::RevealSeed { id: id.clone() }).await {
+            Ok(Reply::Seed { seed }) => seed,
+            other => panic!("unexpected: {other:?}"),
+        };
         assert_eq!(phrase.split(' ').count(), 24, "the real phrase");
         let dir = molt_storage::find_workspace_dir(&root, &id).expect("dir");
 
@@ -544,7 +610,7 @@ fn at_rest_sealing_is_real_verified_and_survives_a_restart() {
             let s = read_session(&w).await;
             let ws = s.workspaces.iter().find(|x| x.id == id).expect("entry");
             assert!(ws.encrypted);
-            assert!(ws.seed.is_empty(), "no phrase to show while sealed");
+            assert!(!ws.has_seed, "no phrase to offer while sealed");
             assert!(ws.members.is_empty(), "no roster to show while sealed");
         }
         assert!(matches!(
@@ -598,7 +664,11 @@ fn at_rest_sealing_is_real_verified_and_survives_a_restart() {
             let s = read_session(&w).await;
             let ws = s.workspaces.iter().find(|x| x.id == id).expect("entry");
             assert!(!ws.encrypted);
-            assert_eq!(ws.seed, phrase, "the stored phrase is shown again");
+            assert!(ws.has_seed, "the stored phrase is offered again");
+            match w.execute(Command::RevealSeed { id: id.clone() }).await {
+                Ok(Reply::Seed { seed }) => assert_eq!(seed, phrase),
+                other => panic!("unexpected: {other:?}"),
+            }
             assert!(!ws.members.is_empty(), "the roster is back");
         }
         w.execute(Command::OpenWorkspace { id: id.clone() })

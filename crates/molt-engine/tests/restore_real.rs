@@ -72,13 +72,10 @@ async fn founded_source(
     w.execute(Command::CreateFinish).await.expect("create finish");
     let sv = session(&w).await;
     let id = sv.active_workspace.clone();
-    let phrase = sv
-        .workspaces
-        .iter()
-        .find(|ws| ws.id == id)
-        .expect("entry")
-        .seed
-        .clone();
+    let phrase = match w.execute(Command::RevealSeed { id: id.clone() }).await {
+        Ok(molt_core::Reply::Seed { seed }) => seed,
+        other => panic!("unexpected: {other:?}"),
+    };
     w.execute(Command::Chat {
         body: "history to restore".to_string(),
         quote: None,
@@ -217,7 +214,7 @@ async fn file_restore_round_trips_verified_and_opens_detached() {
         .expect("restored entry has the source id");
     assert_eq!(entry.name, "Roundtrip Republic");
     assert_eq!(entry.detail, "2-of-3");
-    assert!(!entry.seed.is_empty(), "the re-sealed seed backs the entry");
+    assert!(entry.has_seed, "the re-sealed seed backs the entry");
 
     // finish opens DETACHED: main screen, honest notice, readable history
     w2.execute(Command::RestoreFinish).await.expect("finish");
@@ -495,10 +492,7 @@ async fn backup_fetch_lands_sealed_and_the_phrase_opens_it() {
     })
     .await;
     let entry = sv.workspaces.iter().find(|w| w.id == id).expect("entry");
-    assert!(
-        entry.seed.is_empty(),
-        "a fetched artifact must carry no phrase material"
-    );
+    assert!(!entry.has_seed, "a fetched artifact must carry no phrase material");
 
     // a malformed phrase refuses synchronously and changes nothing
     let err = w2

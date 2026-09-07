@@ -346,7 +346,7 @@ fn a_switched_away_workspace_ages_out_instead_of_freezing_online() {
         last_backup_min: molt_core::WorkspaceInfo::NEVER,
         backup_copies: 0,
         backup_error: String::new(),
-        seed: String::new(),
+        has_seed: false,
         net: "none".to_string(),
         encrypted: false,
         members: molt_core::roster_members(&closed_roster, T, |_| T),

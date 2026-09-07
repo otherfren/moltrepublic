@@ -284,7 +284,7 @@ pub fn known_log_shapes() -> &'static [LogShape] {
         &["⧗ waiting for the genesis · ", ""],
         // the join leg (lifecycles.rs + relay_msg.rs refusal detail)
         &["✓ recovery phrase backed up · waiting for the others"],
-        &["✓ sealed - back up your recovery phrase to enter"],
+        &["✓ sealed by everyone · enter the republic"],
         &["✗ join failed: ", ""],
         &["✓ the founder accepted your join · waiting for the deliberation"],
         &["→ charter proposed: “", "” · review and confirm to join"],

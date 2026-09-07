@@ -211,6 +211,14 @@ fn entry(sv: &SessionView, id: &str) -> WorkspaceInfo {
         .expect("entry exists")
 }
 
+/// The stored phrase, pulled the way an operator does (`RevealSeed`).
+async fn reveal(w: &molt_engine::WalletHandle, id: &str) -> String {
+    match w.execute(Command::RevealSeed { id: id.to_string() }).await {
+        Ok(molt_core::Reply::Seed { seed }) => seed,
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
 /// Poll until the predicate holds on the session.
 async fn poll_session(
     w: &molt_engine::WalletHandle,
@@ -340,7 +348,7 @@ async fn stamp_moves_only_on_a_confirmed_upload_and_the_blob_is_real() {
 
     // the uploaded body is the real blob: workspace key mode, decryptable
     // from the recovery phrase (phrase → key → read_export)
-    let phrase = entry(&sv, &id).seed.clone();
+    let phrase = reveal(&w, &id).await;
     assert!(!phrase.is_empty(), "the entry carries the phrase");
     let seed = molt_storage::seed_entropy(&phrase).expect("phrase parses");
     let key = molt_storage::derive_workspace_key(&seed, &id);
@@ -393,7 +401,7 @@ async fn the_uploaded_blob_never_carries_workspace_plaintext() {
     })
     .await
     .expect("chat");
-    let phrase = entry(&session(&w).await, &id).seed.clone();
+    let phrase = reveal(&w, &id).await;
     assert!(!phrase.is_empty(), "the harness entry carries the phrase");
 
     w.execute(Command::SetWorkspaceBackup { id: id.clone(), enabled: true })
@@ -512,7 +520,7 @@ async fn a_sealed_workspace_is_skipped_with_an_honest_status() {
     let tmp = tempfile::tempdir().expect("tmp");
     let (endpoint, log) = stub_server(Arc::new(|_m, _p| (200, empty_listing(), 0))).await;
     let (w, id, _root) = founded_engine(tmp.path(), &endpoint, 5).await;
-    let phrase = entry(&session(&w).await, &id).seed.clone();
+    let phrase = reveal(&w, &id).await;
     w.execute(Command::SetWorkspaceBackup { id: id.clone(), enabled: true })
         .await
         .expect("enable");
@@ -584,7 +592,7 @@ async fn encrypt_is_refused_while_a_backup_is_in_flight() {
     }))
     .await;
     let (w, id, _root) = founded_engine(tmp.path(), &endpoint, 5).await;
-    let phrase = entry(&session(&w).await, &id).seed.clone();
+    let phrase = reveal(&w, &id).await;
     // kick off a backup while the workspace is open (inflight set now)
     w.execute(Command::BackupNow { id: id.clone() }).await.expect("backup now");
     // close so the active-workspace guard is out of the way — the inflight
@@ -656,7 +664,7 @@ async fn decrypting_clears_the_sealed_skip_backup_status() {
     let tmp = tempfile::tempdir().expect("tmp");
     let (endpoint, _log) = stub_server(Arc::new(|_m, _p| (200, empty_listing(), 0))).await;
     let (w, id, _root) = founded_engine(tmp.path(), &endpoint, 5).await;
-    let phrase = entry(&session(&w).await, &id).seed.clone();
+    let phrase = reveal(&w, &id).await;
     w.execute(Command::SetWorkspaceBackup { id: id.clone(), enabled: true })
         .await
         .expect("enable");

@@ -201,6 +201,63 @@ fn a_long_member_name_grows_its_pill_and_keeps_the_last_seen_label() {
 /// on the Open screen. Two invariants, measured on the real layout:
 /// a button's label stays INSIDE the button, and no two buttons
 /// overlap (a button taller than its fixed row lands on its neighbour).
+/// The Open screen's phrase is a PULL: the reveal button asks the engine
+/// (`reveal-seed` with the selected id), the answer lands in `open-seed`,
+/// and hiding drops the phrase from the window again.
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_details_panel_pulls_the_phrase_and_drops_it_on_hide() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    ui.window().set_size(slint::PhysicalSize::new(1400, 900));
+    apply_strings(&ui, 0);
+    ui.set_screen(AppScreen::Open);
+    ui.set_ws_list(ModelRc::new(VecModel::from(vec![WorkspaceItem {
+        id: "a".into(),
+        name: "First".into(),
+        has_seed: true,
+        ..WorkspaceItem::default()
+    }])));
+    ui.set_open_selected(0);
+    ui.set_open_id("a".into());
+    ui.set_open_has_seed(true);
+    let asked: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    {
+        let a = asked.clone();
+        ui.on_reveal_seed(move |id| a.borrow_mut().push(id.to_string()));
+    }
+    ui.show().expect("show headless");
+    let click = |label: String| {
+        let h = i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, label.as_str())
+            .next()
+            .expect("the button renders");
+        let at = slint::LogicalPosition::new(
+            h.absolute_position().x + h.size().width / 2.0,
+            h.absolute_position().y + h.size().height / 2.0,
+        );
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at });
+        ui.window().dispatch_event(slint::platform::WindowEvent::PointerPressed {
+            position: at,
+            button: slint::platform::PointerEventButton::Left,
+        });
+        ui.window().dispatch_event(slint::platform::WindowEvent::PointerReleased {
+            position: at,
+            button: slint::platform::PointerEventButton::Left,
+        });
+    };
+    click(ui.global::<Strings>().get_ow_seed_show().to_string());
+    assert_eq!(asked.borrow().as_slice(), ["a"], "the panel asks for the selected id");
+    assert_eq!(ui.get_open_seed(), "", "nothing shown before the answer");
+    // the engine's answer
+    ui.set_open_seed("word1 word2".into());
+    ui.set_seed_shown(true);
+    click(ui.global::<Strings>().get_ow_seed_hide().to_string());
+    assert!(!ui.get_seed_shown());
+    assert_eq!(ui.get_open_seed(), "", "hiding drops the phrase");
+    assert_eq!(asked.borrow().len(), 1, "hiding asks nothing");
+}
+
 #[cfg(feature = "live-preview")]
 #[test]
 fn every_button_keeps_its_label_at_the_largest_font() {

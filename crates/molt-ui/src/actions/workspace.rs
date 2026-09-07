@@ -3,9 +3,10 @@
 //! open / seal / unseal / close / delete / export, the backup toggle, the
 //! Open-list sort and the restore wizard.
 
-use molt_core::{Command, Surface};
+use molt_core::{Command, Reply, Surface};
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
+use crate::i18n::error_toast;
 use crate::labels::to_screen;
 use crate::mirror::sort_ws_items;
 use crate::app::Ctx;
@@ -62,6 +63,29 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
         let cx = ctx.clone();
         ui.on_close_workspace(move || {
             cx.issue(Command::CloseWorkspace);
+        });
+    }
+
+    // the phrase is a pull: the panel asks, the answer lands in open-seed
+    {
+        let cx = ctx.clone();
+        ui.on_reveal_seed(move |id| {
+            let w = cx.wallet.clone();
+            let weak = cx.weak.clone();
+            cx.rt.spawn(async move {
+                let outcome = w.execute(Command::RevealSeed { id: id.to_string() }).await;
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    match outcome {
+                        Ok(Reply::Seed { seed }) if ui.get_open_id() == id => {
+                            ui.set_open_seed(seed.into());
+                            ui.set_seed_shown(true);
+                        }
+                        Ok(_) => {}
+                        Err(e) => ui.invoke_show_toast_error(error_toast(&ui, &e)),
+                    }
+                });
+            });
         });
     }
 

@@ -44,9 +44,11 @@ Reverted (each becomes a Seat-scope tool or a served field):
 * Clearnet consent: `relay_confirm {accept_clearnet: true}` and
   `relay_clearnet_session {unlock: true}`.
 * The recovery phrase: `create.seed` and `join.seed` are served during the
-  ritual, a stored workspace's phrase is readable (`WorkspaceInfo.seed`
-  and a dedicated read), `confirm_seed_backup` works headless, the MCP
-  export carries the seed like the GUI export.
+  ritual (cleared at the seal), a stored workspace's phrase is a PULL
+  (`reveal_seed`; the list only flags `has_seed` - amended 2026-09-08 after
+  the v0.0.2 field report: an operator who wants the phrase out of its logs
+  must be able to not receive it), `confirm_seed_backup` works headless,
+  the MCP export carries the seed like the GUI export.
 
 Kept, because they are not about trust but about WHO speaks:
 

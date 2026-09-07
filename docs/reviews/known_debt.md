@@ -40,6 +40,15 @@ Qubes nodes (`SLINT_BACKEND=winit-software` plus
 on the compiled release build at all. Decide the default from that
 measurement; until then `auto`.
 
+## The seat token is all-or-nothing (field report v0.0.2, F5)
+
+One write key admits all seat tools, `delete_workspace` and
+`export_workspace` included; the only narrower key is the read-only one.
+A per-token tool allowlist ("may chat and propose, not exfiltrate or
+destroy") is a third scope beside Read and Seat and a design question
+against ADR-0007's "one seat, one operator". Not built.
+Source: `docs_archive/reviews/field_report_v0.0.2_headless_seat.md`.
+
 ## A reasoned decline delays the seal (agent round 2, A4)
 
 From `docs_archive/reviews/mcp_agent_friction_fixes_round_2.md` §A4: a

@@ -1123,6 +1123,10 @@ pub(crate) struct State {
     /// ritual opened). Every probe path is timeout-bounded, so an entry
     /// always clears.
     pub(crate) pending_relay_confirms: std::collections::HashSet<String>,
+    /// Recovery phrases of session-only entries (no directory to read the
+    /// device-sealed seed from); a stored workspace's phrase is read from
+    /// disk on demand ([`Command::RevealSeed`]), never held here.
+    pub(crate) seeds: std::collections::HashMap<WorkspaceId, String>,
     /// Generation of the newest backup-bucket listing request
     /// ([`molt_core::Command::NetListBackups`]): bumped per request and on a
     /// backup-target settings change, so a stale off-actor result can never
@@ -1426,6 +1430,7 @@ impl State {
             // exposure is not asked again on every restart
             clearnet_session: session.settings.clearnet_relays_enabled,
             pending_relay_confirms: std::collections::HashSet::new(),
+            seeds: std::collections::HashMap::new(),
             s3_list_gen: 0,
             tor_test_gen: 0,
             backup_inflight: std::collections::HashSet::new(),
@@ -1902,6 +1907,7 @@ impl State {
             Command::OpenWorkspace { id } => self.cmd_open_workspace(id),
             Command::CloseWorkspace => self.cmd_close_workspace(),
             Command::DeleteWorkspace { id } => self.cmd_delete_workspace(id),
+            Command::RevealSeed { id } => self.cmd_reveal_seed(&id),
             Command::EncryptWorkspace { id, phrase } => self.cmd_encrypt_workspace(id, phrase),
             Command::DecryptWorkspace { id, phrase } => self.cmd_decrypt_workspace(id, phrase),
             Command::SetWorkspaceBackup { id, enabled } => {

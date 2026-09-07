@@ -1371,6 +1371,9 @@ export component AppWindow inherits Window {
     callback jump-to-vote();
     // workspace verbs (engine-backed, co-equal with MCP)
     callback open-workspace(string);
+    // pull the selected workspace's recovery phrase (the MCP reveal_seed
+    // twin); Rust answers into open-seed + seed-shown
+    callback reveal-seed(string);
     // real at-rest sealing (S6): encrypt verifies the phrase and removes
     // the device-sealed keys, decrypt verifies and restores them — the
     // same commands the MCP encrypt_/decrypt_workspace tools drive
@@ -2250,15 +2253,17 @@ export component AppWindow inherits Window {
     in-out property <string> ws-sort-key: "";
     in-out property <bool> ws-sort-desc: false;
     callback sort-workspaces(string, bool);
-    property <int> open-selected: -1;
-    property <string> open-id;
+    in-out property <int> open-selected: -1;
+    in-out property <string> open-id;
     property <string> open-name;
     property <string> open-detail;
     property <string> open-status;
     property <bool> open-synced: false;
     property <int> open-state: 0; // 0 = synced, 1 = syncing, 2 = offline
     property <bool> open-s3: false;
-    property <string> open-seed;
+    in-out property <bool> open-has-seed: false;
+    // the revealed phrase: filled by reveal-seed's answer, emptied on hide
+    in-out property <string> open-seed;
     // LIVE binding into the list row (never assigned!) — the other open-*
     // fields are click-time copies, but encrypting/decrypting the selected
     // row must fold the seed/members groups immediately
@@ -2266,7 +2271,7 @@ export component AppWindow inherits Window {
         && root.open-selected < root.ws-list.length
         && root.ws-list[root.open-selected].encrypted;
     property <[MemberSync]> open-members;
-    property <bool> seed-shown: false;
+    in-out property <bool> seed-shown: false;
     // Manual-export status — Rust-driven from the session's honest export
     // state (never set locally): the note text, whether it is a failure,
     // and WHICH workspace it belongs to (shown only on that one's panel).
@@ -2335,7 +2340,8 @@ export component AppWindow inherits Window {
         root.open-synced = w.synced;
         root.open-state = w.state;
         root.open-s3 = w.s3;
-        root.open-seed = w.seed;
+        root.open-has-seed = w.has-seed;
+        root.open-seed = "";
         root.open-members = w.members;
         root.seed-shown = false;
     }
@@ -2344,6 +2350,7 @@ export component AppWindow inherits Window {
     function deselect-workspace() {
         root.open-selected = -1;
         root.open-id = "";
+        root.open-seed = "";
         root.seed-shown = false;
     }
 
@@ -2357,6 +2364,7 @@ export component AppWindow inherits Window {
         root.open-synced = false;
         root.open-state = 0;
         root.open-s3 = false;
+        root.open-has-seed = false;
         root.open-seed = "";
         // the chain-history tab exists only WITH a workspace — leave it
         // before it turns into an empty pane
@@ -4343,7 +4351,7 @@ export component AppWindow inherits Window {
                         // seed storage says honestly that nothing is stored.
                         if !root.open-encrypted: DetailGroup {
                             title: Strings.ow-grp-seed;
-                            if root.open-seed != "": HorizontalLayout {
+                            if root.open-has-seed: HorizontalLayout {
                                 alignment: start;
                                 AppButton {
                                     height: 30px * Theme.ui-scale;
@@ -4352,7 +4360,12 @@ export component AppWindow inherits Window {
                                     icon-set: true;
                                     label: root.seed-shown ? Strings.ow-seed-hide : Strings.ow-seed-show;
                                     clicked => {
-                                        root.seed-shown = !root.seed-shown;
+                                        if root.seed-shown {
+                                            root.seed-shown = false;
+                                            root.open-seed = "";
+                                        } else {
+                                            root.reveal-seed(root.open-id);
+                                        }
                                     }
                                 }
                             }
@@ -4363,7 +4376,7 @@ export component AppWindow inherits Window {
                                     root.show-toast(Strings.toast-copied);
                                 }
                             }
-                            if root.open-seed == "": Text {
+                            if !root.open-has-seed: Text {
                                 text: Strings.ow-seed-missing;
                                 color: Theme.dim;
                                 font-size: Theme.fs-cap;

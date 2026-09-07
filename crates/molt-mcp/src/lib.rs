@@ -403,6 +403,19 @@ fn strip_seat_secrets(v: &mut Value) {
 fn present(name: &str, args: &Value, mut value: Value) -> Result<Value, String> {
     withdrawn_is_a_state(&mut value);
     match name {
+        // "never backed up" is null on this surface, not the u32 sentinel
+        "read_session" => {
+            if let Some(list) = value.get_mut("workspaces").and_then(Value::as_array_mut) {
+                for w in list.iter_mut() {
+                    if w.get("last_backup_min").and_then(Value::as_u64)
+                        == Some(u64::from(molt_core::WorkspaceInfo::NEVER))
+                    {
+                        w["last_backup_min"] = Value::Null;
+                    }
+                }
+            }
+            Ok(value)
+        }
         // the local copy's PATH is the seat's (wiki_files_and_images.md §4)
         "resolve_upload" => {
             if let Some(local) = value.get_mut("local").and_then(Value::as_object_mut) {
@@ -1726,7 +1739,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "read_session",
             command: "read_session",
             scope: Scope::Seat,
-            description: "Read the shared app/session state the GUI mirrors: current screen, surface + sub-view, language, workspaces, run lifecycles, and settings. Carries the recovery phrase of a running ritual (create.seed / join.seed) and of each stored workspace - the seat holds it, the read-only key never sees it. The three secrets (mcp_token, mcp_read_token, s3_secret_key) are write-only and read back as \"\".",
+            description: "Read the shared app/session state the GUI mirrors: current screen, surface + sub-view, language, workspaces, run lifecycles, and settings. Carries the recovery phrase of a RUNNING ritual (create.seed / join.seed, cleared at the seal); a stored workspace's phrase is a pull (reveal_seed), the list only flags has_seed. A run is done when its run.outcome is 1 (ok) or 2 (failed); `notice` is the GUI's transient toast, cleared by every run start. The three secrets (mcp_token, mcp_read_token, s3_secret_key) are write-only and read back as \"\".",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ReadSession),
         },
@@ -2253,6 +2266,22 @@ pub fn tools() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "reveal_seed",
+            command: "reveal_seed",
+            scope: Scope::Seat,
+            description: "Hand out a stored workspace's recovery phrase (the seat holds it; read_session only flags has_seed). Refused for a sealed-at-rest workspace - no seed material on this device - and for an unknown id. The phrase restores the whole seat: keep it out of logs you do not control.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "the workspace id from read_session" }
+                },
+                "required": ["id"]
+            }),
+            build: |args| Ok(Command::RevealSeed {
+                id: str_arg(args, "id")?,
+            }),
+        },
+        ToolDef {
             name: "export_workspace",
             command: "export_workspace",
             scope: Scope::Seat,
@@ -2333,7 +2362,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "create_start",
             command: "create_start",
             scope: Scope::Seat,
-            description: "Begin founding a new republic: the engine derives the founder's identity, mints one-time invite links per member, and runs the real founding ritual with a live log; read_session shows the joinable links and each seat filling in (the recovery phrase is shown in the GUI wizard only - it leaves the process on no surface, so the backup confirmation and thereby a founding complete on a GUI node). Once every member has joined, propose the charter with create_propose. Needs a CONFIRMED relay first (relay_add, then confirm) - without one it refuses with \"cannot found: no relay configured\". The threshold must be at least 2.",
+            description: "Begin founding a new republic: the engine derives the founder's identity, mints one-time invite links per member, and runs the real founding ritual with a live log; read_session shows the joinable links, each seat filling in and the founder's recovery phrase (create.seed) for confirm_seed_backup - a founding completes headless. Once every member has joined, propose the charter with create_propose. Needs a CONFIRMED relay first (relay_add, then confirm) - without one it refuses with \"cannot found: no relay configured\". The threshold must be at least 2.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -2435,7 +2464,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "create_finish",
             command: "create_finish",
             scope: Scope::Seat,
-            description: "Enter the republic a successful founding sealed (read_session shows create.run.outcome == 1). The phrase backup was already confirmed DURING the ritual (confirm_seed_backup, which needs the phrase the GUI wizard shows) - this just enters, the founder twin of join_finish.",
+            description: "Enter the republic a successful founding sealed (read_session shows create.run.outcome == 1). The phrase backup was already confirmed DURING the ritual (confirm_seed_backup with create.seed) - this just enters, the founder twin of join_finish.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::CreateFinish),
         },
@@ -2517,7 +2546,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "join_finish",
             command: "join_finish",
             scope: Scope::Seat,
-            description: "Enter the republic a completed join sealed (read_session shows join.run.outcome == 1 with join.sealed_id). The phrase backup was already confirmed DURING the ritual (confirm_seed_backup, which needs the phrase the GUI wizard shows) - this just enters, the joiner twin of create_finish.",
+            description: "Enter the republic a completed join sealed (read_session shows join.run.outcome == 1 with join.sealed_id). The phrase backup was already confirmed DURING the ritual (confirm_seed_backup with join.seed) - this just enters, the joiner twin of create_finish.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::JoinFinish),
         },
@@ -2971,7 +3000,7 @@ mod tests {
         let phrase = "abandon ability able about above absent absorb abstract";
         let mut sv = molt_core::SessionView {
             workspaces: vec![molt_core::WorkspaceInfo {
-                seed: phrase.to_string(),
+                has_seed: true,
                 ..molt_core::WorkspaceInfo::demo_set().remove(0)
             }],
             create: molt_core::CreateState { seed: phrase.to_string(), ..Default::default() },
@@ -2985,7 +3014,17 @@ mod tests {
         let json = value.to_string();
         assert_eq!(value["create"]["seed"], phrase, "the ritual phrase reaches the seat");
         assert_eq!(value["join"]["seed"], phrase);
-        assert_eq!(value["workspaces"][0]["seed"], phrase);
+        // a stored workspace's phrase is a PULL (reveal_seed), the poll
+        // carries only the flag (field report v0.0.2, F2)
+        assert_eq!(value["workspaces"][0]["has_seed"], true);
+        assert!(value["workspaces"][0].get("seed").is_none());
+        let mut reveal = serde_json::to_value(molt_core::Reply::Seed {
+            seed: phrase.to_string(),
+        })
+        .expect("serializes");
+        assert_eq!(reveal["seed"], phrase);
+        strip_seat_secrets(&mut reveal);
+        assert!(!reveal.to_string().contains(phrase), "the belt covers the reveal too");
         assert!(
             !json.contains("TOKEN-SECRET")
                 && !json.contains("READ-SECRET")
@@ -3010,6 +3049,30 @@ mod tests {
         assert_eq!(page["props"]["seed"], "12 words", "the wiki's own keys are untouched");
         // …and the session is a SEAT tool, so a read key never asks for it
         assert_eq!(tool_named("read_session").scope, Scope::Seat);
+        assert_eq!(tool_named("reveal_seed").scope, Scope::Seat);
+    }
+
+    /// `last_backup_min`'s never-backed-up sentinel is `null` on the
+    /// agent surface, not `u32::MAX` (field report v0.0.2, F6).
+    #[test]
+    fn a_never_backed_up_workspace_reads_null_not_the_sentinel() {
+        let sv = molt_core::SessionView {
+            workspaces: vec![
+                molt_core::WorkspaceInfo {
+                    last_backup_min: molt_core::WorkspaceInfo::NEVER,
+                    ..molt_core::WorkspaceInfo::demo_set().remove(0)
+                },
+                molt_core::WorkspaceInfo {
+                    last_backup_min: 30,
+                    ..molt_core::WorkspaceInfo::demo_set().remove(1)
+                },
+            ],
+            ..Default::default()
+        };
+        let value = serde_json::to_value(molt_core::Reply::Session(Box::new(sv))).expect("json");
+        let shown = present("read_session", &json!({}), value).expect("presents");
+        assert_eq!(shown["workspaces"][0]["last_backup_min"], Value::Null);
+        assert_eq!(shown["workspaces"][1]["last_backup_min"], 30);
     }
 
     /// **The host posture is on the settings surface** (ADR-0007): the

@@ -218,9 +218,10 @@ Consequences worth knowing before opening the port:
 * The endpoint is **cleartext TCP**. Loopback or an SSH tunnel; `allow`
   beyond `127.0.0.1` hands the machine to whoever reaches it.
 * `read_session` carries the recovery phrase of a running ritual
-  (`create.seed` / `join.seed`) and of each stored workspace, so
+  (`create.seed` / `join.seed`, cleared at the seal), so
   `confirm_seed_backup` works headless and a founding completes without a
-  window.
+  window. A stored workspace's phrase is a pull (`reveal_seed`); the list
+  only flags `has_seed`.
 * `export_workspace` writes the same seed-carrying blob the GUI does:
   blob + passphrase restores the seat.
 

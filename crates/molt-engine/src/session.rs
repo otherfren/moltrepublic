@@ -1772,6 +1772,33 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// The phrase this device holds for `id`: a session-only entry's from
+    /// memory, a stored workspace's from its device-sealed seed (absent
+    /// once sealed at rest).
+    pub(crate) fn seed_of(&self, id: &WorkspaceId) -> Option<String> {
+        if let Some(seed) = self.seeds.get(id).filter(|s| !s.is_empty()) {
+            return Some(seed.clone());
+        }
+        if !self.persist {
+            return None;
+        }
+        let root = self.workspace_root();
+        let dir = molt_storage::find_workspace_dir(&root, id)?;
+        molt_storage::read_sealed_seed(&root, &dir, id).filter(|s| !s.is_empty())
+    }
+
+    pub(crate) fn cmd_reveal_seed(&self, id: &WorkspaceId) -> Result<Reply, MoltError> {
+        if !self.session.workspaces.iter().any(|w| w.id == *id) {
+            return Err(MoltError::UnknownWorkspace(id.clone()));
+        }
+        match self.seed_of(id) {
+            Some(seed) => Ok(Reply::Seed { seed }),
+            None => Err(MoltError::Storage(
+                "no seed is stored on this device for this workspace".to_string(),
+            )),
+        }
+    }
+
     /// Seal a workspace at rest under its recovery phrase (S6 — real,
     /// durable): `molt_storage::seal_at_rest` verifies the phrase against
     /// the encrypted genesis FIRST (proof the caller holds the credential),
@@ -1831,11 +1858,12 @@ impl State {
         if let Some(ws) = self.session.workspaces.iter_mut().find(|w| w.id == id) {
             ws.encrypted = true;
             // sealed = no key material: the details panel must not keep
-            // showing the phrase or the genesis roster from session memory
-            ws.seed = String::new();
+            // offering the phrase or the genesis roster from session memory
+            ws.has_seed = false;
             ws.members = Vec::new();
             ws.agenda = String::new();
         }
+        self.seeds.remove(&id);
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }
@@ -1926,7 +1954,7 @@ impl State {
         }
         if let Some(ws) = self.session.workspaces.iter_mut().find(|w| w.id == id) {
             ws.encrypted = false;
-            ws.seed = seed;
+            ws.has_seed = !seed.is_empty();
             ws.members = members;
             ws.agenda = agenda;
             // the sealed-at-rest skip status ("sealed — backup skipped") no
@@ -2287,6 +2315,7 @@ impl State {
             }
         }
         self.session.workspaces.retain(|w| w.id != id);
+        self.seeds.remove(&id);
         // the deleted workspace's bucket copies surface as restorable
         // orphans NOW, from the last listing (field bug 2026-08-24)
         self.reclassify_backups();
