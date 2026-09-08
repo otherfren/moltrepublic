@@ -544,6 +544,62 @@ fn the_backlink_request_rides_the_document_change() {
     assert_eq!(asked.borrow().as_slice(), ["a.md", "b.md"]);
 }
 
+/// **A `[[Title]]` link opens its page even when the pane cannot bind
+/// it.** The pane resolves a click by path and file name only; a header
+/// title or an alias binds in the ENGINE's index, and for a page whose
+/// bytes were never fetched the pane does not even hold the title. So a
+/// miss asks the engine, and its answer opens the page (reported
+/// 2026-09-08: title links in an agent-written wiki went nowhere).
+#[test]
+fn a_title_link_the_pane_cannot_bind_asks_the_engine_and_opens_the_answer() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    let _wiki = wire_wiki(&ui);
+    let g = ui.global::<WikiState>();
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+    let seen = asked.clone();
+    g.on_link_resolve_wanted(move |name| seen.borrow_mut().push(name.to_string()));
+
+    g.set_base_docs(ModelRc::new(VecModel::from(vec![
+        WikiBase {
+            path: "start.md".into(),
+            content: "# Start\n\nSee [[Kafka]].\n".into(),
+            loaded: true,
+        },
+        // the target's bytes are not here: only the engine knows its title
+        WikiBase {
+            path: "systeme/kafka.md".into(),
+            content: "".into(),
+            loaded: false,
+        },
+    ])));
+    g.set_base_rev(1);
+    g.invoke_base_arrived();
+    let rows = g.get_nav_rows();
+    let id = (0..rows.row_count())
+        .filter_map(|i| rows.row_data(i))
+        .find(|r| r.label.as_str() == "start.md")
+        .expect("nav row")
+        .id;
+    g.invoke_nav_open(id);
+
+    g.invoke_open_link("Kafka".into());
+    assert_eq!(g.get_doc_path().as_str(), "start.md", "a miss stays put");
+    assert_eq!(asked.borrow().as_slice(), ["Kafka"], "…and asks the engine");
+
+    g.invoke_link_resolved("systeme/kafka.md".into());
+    assert_eq!(
+        g.get_doc_path().as_str(),
+        "systeme/kafka.md",
+        "the engine's answer opens the page"
+    );
+
+    // a target the pane binds itself never asks
+    g.invoke_open_link("start.md".into());
+    assert_eq!(g.get_doc_path().as_str(), "start.md");
+    assert_eq!(asked.borrow().len(), 1, "a local hit is no question");
+}
+
 /// **The Linked section is navigation, not decoration.** Its entries
 /// rendered as passive pills while the Backlinks right below them were
 /// live links, so the one list that walks the graph FORWARD was dead

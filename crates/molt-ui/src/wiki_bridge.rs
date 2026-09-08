@@ -1324,9 +1324,24 @@ pub(crate) fn wire_wiki(ui: &AppWindow) -> (Rc<RefCell<wiki::Wiki>>, Rc<RefCell<
             sync_after(&ui, &m, &la);
         });
     }
-    act!(on_open_link, |w, target: slint::SharedString| {
-        // a dead link is a no-op — the preview stays put
-        let _ = w.open_link(&target);
+    {
+        let m = model.clone();
+        let la = last.clone();
+        let weak = ui.as_weak();
+        g.on_open_link(move |target| {
+            let Some(ui) = weak.upgrade() else { return };
+            let hit = m.borrow_mut().open_link(&target);
+            sync_after(&ui, &m, &la);
+            if !hit {
+                // a title or alias binds in the engine's index, and an
+                // unfetched page's title is not even here: ask, the answer
+                // comes back through link-resolved (a dead link stays put)
+                ui.global::<WikiState>().invoke_link_resolve_wanted(target);
+            }
+        });
+    }
+    act!(on_link_resolved, |w, path: slint::SharedString| {
+        let _ = w.open_link(&path);
     });
     // workspace switch: the wiki model is per republic — reset, then load
     // the stored draft; the base follows over the normal bridge
@@ -2256,6 +2271,26 @@ pub(crate) fn wire_wiki_index(ui: &AppWindow, ctx: &Ctx) {
                 view: view.to_string(),
             });
             cx.refresh_surfaces();
+        });
+    }
+    {
+        let cx = ctx.clone();
+        g.on_link_resolve_wanted(move |name| {
+            let wh = cx.wallet.clone();
+            let weak = cx.weak.clone();
+            let name = name.to_string();
+            cx.rt.spawn(async move {
+                let Ok(Reply::WikiResolve {
+                    exact: Some(path), ..
+                }) = wh.execute(Command::WikiResolve { name }).await
+                else {
+                    return;
+                };
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    ui.global::<WikiState>().invoke_link_resolved(path.into());
+                });
+            });
         });
     }
     {

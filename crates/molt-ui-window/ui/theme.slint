@@ -682,6 +682,10 @@ export global WikiState {
     callback copy-link(int); // context menu: link markup to the clipboard
     callback revert-active(); // editor header: discard the open file's changes
     callback open-link(string); // a preview link's .md target
+    // a [[Name]] the pane could not bind itself (a title or alias binds in
+    // the engine's index): ask, and open the answered path
+    callback link-resolve-wanted(string);
+    callback link-resolved(string);
     // the open document changed: fetch its in-edges from the engine
     callback backlinks-wanted(string);
     // run the navigator's search ("" clears it)
