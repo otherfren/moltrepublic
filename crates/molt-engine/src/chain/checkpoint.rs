@@ -396,7 +396,7 @@ impl State {
                         ChainChange::Applied {
                             proposal_id,
                             surface,
-                            ..
+                            payload,
                         } => {
                             self.emit(Event::Applied {
                                 id: ProposalId(*proposal_id),
@@ -404,6 +404,8 @@ impl State {
                             });
                             if *surface == Surface::Organization {
                                 org_touched = true;
+                            } else if *surface == Surface::Files {
+                                self.after_files_applied(payload);
                             }
                         }
                         ChainChange::Membership {

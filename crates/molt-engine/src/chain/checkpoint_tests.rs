@@ -562,6 +562,44 @@ fn a_lagging_holder_re_anchors_on_a_served_blob() {
     );
 }
 
+/// A delete vote that arrives inside a served suffix (the re-anchor path
+/// applies blocks wholesale) still makes the sharer forget its serve
+/// path - the block-by-block hook's one Files duty.
+#[test]
+fn a_re_anchor_applies_a_delete_block_to_the_sharers_share_path() {
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    b.commit_applied(1, &["petra", "walter"]);
+    let blob = checkpoint_state(&b.blocks, 1).expect("state@1");
+    let anchor = b.seal(
+        2,
+        ChainChange::Checkpoint {
+            upto: 1,
+            state_hash: checkpoint_state_hash(&blob),
+        },
+        &["petra", "walter"],
+    );
+    b.push(anchor.clone());
+    let id = molt_core::MessageId([7u8; 16]);
+    let delete = b.seal(
+        3,
+        ChainChange::Applied {
+            proposal_id: 9,
+            surface: Surface::Files,
+            payload: json!({ "op": "delete", "id": id.to_string(), "by": "walter", "name": "a.txt", "size": 1 }),
+        },
+        &["petra", "walter"],
+    );
+    b.push(delete.clone());
+
+    let mut lag = chain_peer("walter", &b, b.blocks[..1].to_vec());
+    lag.files.share_paths.insert(id, std::path::PathBuf::from("/tmp/a.txt"));
+    lag.receive_checkpoint_blob(blob);
+    lag.receive_block(delete);
+    lag.receive_block(anchor);
+    assert_eq!(lag.chain.head.as_ref().expect("head").height, 3, "re-anchored");
+    assert!(!lag.files.share_paths.contains_key(&id), "the deleted share is not served any more");
+}
+
 /// Review pins: an id collision must never turn the auto-cosign into
 /// an unattended approval of a DIFFERENT change, and the gossip frame
 /// crosses the wire.

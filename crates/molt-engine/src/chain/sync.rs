@@ -608,12 +608,14 @@ impl State {
             .filter(|m| *m != me)
             .filter_map(|member| {
                 let seen = self.member_last_seen(&member);
-                let secs = if seen == molt_core::MemberInfo::NEVER {
-                    now.saturating_sub(founded)
-                } else {
-                    now.saturating_sub(seen)
+                // never seen and no founding date known: silent, age unknown
+                let (secs, unknown) = match (seen, founded) {
+                    (molt_core::MemberInfo::NEVER, 0) => (0, true),
+                    (molt_core::MemberInfo::NEVER, f) => (now.saturating_sub(f), false),
+                    (s, _) => (now.saturating_sub(s), false),
                 };
-                (secs >= SILENT_AFTER_SECS).then_some(molt_core::SilentMember { member, secs })
+                (unknown || secs >= SILENT_AFTER_SECS)
+                    .then_some(molt_core::SilentMember { member, secs })
             })
             .collect();
         molt_core::ChainLag { peers_ahead, silent }

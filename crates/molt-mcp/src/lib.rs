@@ -1687,7 +1687,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "status",
             command: "status",
             scope: Scope::Seat,
-            description: "Read a one-shot status summary of the group and surfaces. `founded_ts` is the founder's founding stamp, the same on every copy. `surfaces[].implemented` says a real engine stands behind a surface; the others are listed and gated but carry nothing yet. `chain_lag.peers_ahead` = how many blocks the furthest peer claims beyond this node's head (0 = level; anything else means votes cast here would not count, and approve/decline refuse); `chain_lag.silent` lists seats unheard-of, with the age of the last sighting. `chain_diverged` is the other failure and a different one: a peer on another branch.",
+            description: "Read a one-shot status summary of the group and surfaces. `founded_ts` is the founder's founding stamp, the same on every copy. `surfaces[].implemented` says a real engine stands behind a surface; the others are listed and gated but carry nothing yet. `chain_lag.peers_ahead` = how many blocks the furthest peer claims beyond this node's head (0 = level; anything else means votes cast here would not count, and approve/decline refuse); `chain_lag.silent` lists seats unheard-of, with the age of the last sighting (0 = never seen, age unknown). `chain_diverged` is the other failure and a different one: a peer on another branch.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::Status),
         },

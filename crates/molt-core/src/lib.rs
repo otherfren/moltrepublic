@@ -7231,7 +7231,8 @@ pub struct SilentMember {
     /// The member.
     pub member: MemberId,
     /// Age of the last sighting in seconds - since the founding for a seat
-    /// this node has never seen at all.
+    /// this node has never seen at all; 0 = never seen and the founding
+    /// date unknown.
     pub secs: u64,
 }
 

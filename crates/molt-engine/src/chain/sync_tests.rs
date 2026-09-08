@@ -777,6 +777,21 @@ fn a_seat_the_republic_ran_past_reads_the_distance() {
     );
 }
 
+/// A seat never seen here, in a republic whose founding date this node
+/// does not know (a recovery from an older coordinator): silent, with an
+/// age of 0 = unknown - never "since the epoch".
+#[test]
+fn a_never_seen_seat_of_unknown_founding_reads_silent_with_no_age() {
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    b.commit_applied(1, &["petra", "dora"]);
+    let walter = chain_peer("walter", &b, b.blocks.clone());
+    assert_eq!(walter.replica.as_ref().map(|r| r.founded_ts), Some(0), "the fixture knows no founding");
+    let lag = walter.chain_lag();
+    let petra = lag.silent.iter().find(|s| s.member == "petra").expect("never seen = silent");
+    assert_eq!(petra.secs, 0, "unknown age reads 0, not the seconds since 1970");
+    assert!(lag.silent.iter().all(|s| s.member != "walter"), "never the own seat");
+}
+
 /// A6 KEYSTONE: while the peers are ahead, this seat's vote would be
 /// signed at a height the republic has left - so the vote is REFUSED here
 /// instead of answering like a success (round 3: eleven approvals into a
