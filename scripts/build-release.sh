@@ -42,6 +42,6 @@ tar \
   --mtime="@${SOURCE_DATE_EPOCH}" \
   --no-acls --no-selinux --no-xattrs \
   -cf - -C target/release moltd \
-| zstd -19 --no-progress -o dist/moltrepublic-linux-x86_64.tar.zst
+| zstd -19 -f --no-progress -o dist/moltrepublic-linux-x86_64.tar.zst
 
 sha256sum dist/moltrepublic-linux-x86_64.tar.zst

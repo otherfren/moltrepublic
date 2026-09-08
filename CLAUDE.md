@@ -428,7 +428,9 @@ both verified red-without/green-with).
   same step and needed 8 of the 9 GiB swap; 29m34s end to end. 2026-09-08
   (v0.0.4): OOM-killed twice at 15.9 + 10 GiB swap with ~6 GiB held by other
   processes, built at 15.9 + 18 GiB (`swapon /rw/swapfile2`, not in fstab -
-  re-add after a reboot). That cost is paid ONLY when
+  re-add after a reboot). 2026-09-09 (v0.0.5): built at 15.9 + 17 GiB swap
+  with ~2 GiB held by other processes, 39m04s, window rustc peak 12.6 GiB
+  RSS, swap 15 of 17 GiB in use at the peak. That cost is paid ONLY when
   a `.slint` file changes; GUI-logic edits (`molt-ui`) rebuild in ~2 s at <1 GiB.
   A SIGKILL during the window compile is the kernel OOM-killer. Three things
   keep it survivable, and only one of them is yours to remember:
