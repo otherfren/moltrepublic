@@ -358,11 +358,28 @@ export struct WikiSpan {
     file-size: string,
 }
 
+// One cell of a table block (wiki_preview_tables.md): its own runs, so a
+// link in a cell stays clickable; `frac` is the column's share of the row
+// width (0..1, the same on every row), `align` the delimiter row's
+// 0 none · 1 left · 2 center · 3 right.
+export struct WikiCell {
+    text: string,
+    spans: [WikiSpan],
+    frac: float,
+    align: int,
+}
+
+export struct WikiRow {
+    head: bool,
+    cells: [WikiCell],
+}
+
 export struct WikiBlock {
-    kind: int, // 0 h1 · 1 h2 · 2 paragraph · 3 bullet · 4 code · 5 upload image
+    kind: int, // 0 h1 · 1 h2 · 2 paragraph · 3 bullet · 4 code · 5 upload image · 6 table
     text: string,
     status: int, // 0 same · 1 added · 2 changed · 3 removed ghost
     spans: [WikiSpan],
+    rows: [WikiRow], // kind 6 only, the header row first
     // ---- file references (images + file links) ----
     // wiki_files_and_images.md §3.4. `file-state`:
     // 0 none · 1 unknown · 2 ambiguous · 3 remote · 4 fetching ·

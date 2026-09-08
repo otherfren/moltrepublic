@@ -11,7 +11,7 @@
 //! Slint sees only flat row models built from [`Wiki`] (bridge in `lib.rs`);
 //! this module stays slint-free so the whole state machine tests headless.
 
-use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use similar::{capture_diff_slices, Algorithm, DiffOp};
 
 pub type DocId = u32;
@@ -74,15 +74,40 @@ pub enum Status {
 }
 
 /// One pseudo-rendered markdown block (the pane's render primitive):
-/// 0 = h1, 1 = h2+, 2 = paragraph, 3 = bullet, 4 = code.
+/// 0 = h1, 1 = h2+, 2 = paragraph, 3 = bullet, 4 = code, 5 = upload
+/// image, 6 = table.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct Block {
     pub kind: u8,
     pub text: String,
     /// The same content as inline runs: plain text, or a `.md`-link run
     /// (target kept) — what makes preview links clickable. Concatenated
-    /// span text equals `text`.
+    /// span text equals `text`. A table carries its runs per cell instead
+    /// and leaves this empty.
     pub spans: Vec<Span>,
+    /// A table's grid (kind 6 only): the header row first. `text` holds
+    /// the rows flattened so the diff sees a changed cell.
+    pub rows: Vec<Row>,
+}
+
+/// One row of a table block.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Default)]
+pub struct Row {
+    pub head: bool,
+    pub cells: Vec<Cell>,
+}
+
+/// One cell of a table block: its own runs, so a link in a cell stays
+/// navigation.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Default)]
+pub struct Cell {
+    pub text: String,
+    pub spans: Vec<Span>,
+    /// The column's share of the row width, permille; every cell of a
+    /// column carries the same value.
+    pub frac: u16,
+    /// 0 none · 1 left · 2 center · 3 right, from the delimiter row.
+    pub align: u8,
 }
 
 /// One row of the header INFOBOX (`knowledge_base_scale.md` §4.10): one
@@ -138,6 +163,7 @@ impl Block {
             kind,
             text: String::new(),
             spans: Vec::new(),
+            rows: Vec::new(),
         }
     }
 
@@ -2970,8 +2996,9 @@ impl Wiki {
 
 /// Pseudo-render markdown into the pane's block primitives. H1 → 0, deeper
 /// headings → 1, paragraphs → 2, list items → 3, code blocks → 4,
-/// an `upload:` image → 5 (`wiki_files_and_images.md` §3.4); inline
-/// markup flattens to its text.
+/// an `upload:` image → 5 (`wiki_files_and_images.md` §3.4), a pipe
+/// table → 6 (`wiki_preview_tables.md`); inline markup flattens to its
+/// text.
 pub fn parse_blocks(raw: &str) -> Vec<Block> {
     let mut out = Vec::new();
     let mut cur: Option<Block> = None;
@@ -2983,8 +3010,47 @@ pub fn parse_blocks(raw: &str) -> Vec<Block> {
     // far. A picture is a block of its own, so the text around it is cut
     // at the markup and resumes after it.
     let mut img: Option<(String, String)> = None;
-    for ev in Parser::new(raw) {
+    // the open table; a cell collects in `cur` like a paragraph would
+    let mut table: Option<TableBuild> = None;
+    for ev in Parser::new_ext(raw, Options::ENABLE_TABLES) {
         match ev {
+            Event::Start(Tag::Table(aligns)) => {
+                if let Some(b) = cur.take() {
+                    finish_block(b, &mut out);
+                }
+                table = Some(TableBuild {
+                    aligns,
+                    rows: Vec::new(),
+                    cells: Vec::new(),
+                });
+            }
+            Event::Start(Tag::TableHead | Tag::TableRow) => {}
+            Event::Start(Tag::TableCell) => {
+                cur = Some(Block::new(2));
+            }
+            Event::End(TagEnd::TableCell) => {
+                if let (Some(t), Some(mut b)) = (&mut table, cur.take()) {
+                    expand_wiki_links(&mut b);
+                    t.cells.push(Cell {
+                        text: b.text,
+                        spans: b.spans,
+                        ..Cell::default()
+                    });
+                }
+            }
+            Event::End(TagEnd::TableHead | TagEnd::TableRow) => {
+                if let Some(t) = &mut table {
+                    t.rows.push(Row {
+                        head: matches!(ev, Event::End(TagEnd::TableHead)),
+                        cells: std::mem::take(&mut t.cells),
+                    });
+                }
+            }
+            Event::End(TagEnd::Table) => {
+                if let Some(t) = table.take() {
+                    out.push(t.block());
+                }
+            }
             Event::Start(Tag::Heading { level, .. }) => {
                 cur = Some(Block::new(u8::from(level != HeadingLevel::H1)));
             }
@@ -3010,8 +3076,9 @@ pub fn parse_blocks(raw: &str) -> Vec<Block> {
                 link.clear();
             }
             // inside a link the picture is part of the run: splitting
-            // there would tear the enclosing sentence apart
-            Event::Start(Tag::Image { dest_url, .. }) if link.is_empty() => {
+            // there would tear the enclosing sentence apart; in a cell
+            // it reads as its alt text - a grid holds no picture block
+            Event::Start(Tag::Image { dest_url, .. }) if link.is_empty() && table.is_none() => {
                 let dest = dest_url.to_string();
                 if molt_core::wiki_refs::checksum_of(&dest).is_some() {
                     img = Some((dest, String::new()));
@@ -3032,6 +3099,7 @@ pub fn parse_blocks(raw: &str) -> Vec<Block> {
                             link: dest,
                             rel: String::new(),
                         }],
+                        rows: Vec::new(),
                     });
                     cur = Some(Block::new(kind));
                 }
@@ -3076,6 +3144,90 @@ pub fn parse_blocks(raw: &str) -> Vec<Block> {
         }
     }
     out
+}
+
+/// A table while its events arrive: the delimiter row's alignments, the
+/// rows closed so far and the cells of the row in progress.
+struct TableBuild {
+    aligns: Vec<Alignment>,
+    rows: Vec<Row>,
+    cells: Vec<Cell>,
+}
+
+/// A column narrower than this many characters gets this much room, one
+/// wider than [`COL_MAX`] no more: a lone long cell must not crush the
+/// grid, and a one-letter column still needs a readable cell.
+const COL_MIN: usize = 4;
+const COL_MAX: usize = 48;
+
+impl TableBuild {
+    /// The finished block: every row padded to the grid, each column's
+    /// share of the width weighted by its longest cell, the alignment
+    /// from the delimiter row.
+    fn block(self) -> Block {
+        let cols = self
+            .aligns
+            .len()
+            .max(self.rows.iter().map(|r| r.cells.len()).max().unwrap_or(0));
+        let mut widest = vec![0usize; cols];
+        for r in &self.rows {
+            for (w, c) in widest.iter_mut().zip(&r.cells) {
+                let n = c.text.chars().count();
+                // bold header glyphs run wider than their count
+                *w = (*w).max(if r.head { n * 6 / 5 } else { n });
+            }
+        }
+        // every cell pays its padding: without it a short column under a
+        // long header wraps that header mid-word
+        let widest: Vec<usize> = widest
+            .into_iter()
+            .map(|w| w.clamp(COL_MIN, COL_MAX) + 2)
+            .collect();
+        let sum = widest.iter().sum::<usize>().max(1);
+        let mut fracs: Vec<u16> = widest
+            .iter()
+            .map(|w| u16::try_from(w * 1000 / sum).unwrap_or(0))
+            .collect();
+        // the rounding remainder goes to the last column: the row is full
+        let used: u16 = fracs.iter().sum();
+        if let Some(last) = fracs.last_mut() {
+            *last += 1000 - used;
+        }
+        let rows: Vec<Row> = self
+            .rows
+            .into_iter()
+            .map(|mut r| {
+                r.cells.resize_with(cols, Cell::default);
+                for (i, c) in r.cells.iter_mut().enumerate() {
+                    c.frac = fracs[i];
+                    c.align = match self.aligns.get(i) {
+                        Some(Alignment::Left) => 1,
+                        Some(Alignment::Center) => 2,
+                        Some(Alignment::Right) => 3,
+                        _ => 0,
+                    };
+                }
+                r
+            })
+            .collect();
+        let text = rows
+            .iter()
+            .map(|r| {
+                r.cells
+                    .iter()
+                    .map(|c| c.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Block {
+            kind: 6,
+            text,
+            spans: Vec::new(),
+            rows,
+        }
+    }
 }
 
 /// Close a collected block: expand its `[[…]]` forms (never inside a
@@ -3856,6 +4008,57 @@ mod tests {
     }
 
     // ---- markdown pseudo-render -------------------------------------------
+
+    #[test]
+    fn a_pipe_table_is_one_block_with_its_rows_and_cells() {
+        let blocks = parse_blocks(
+            "Intro.\n\n| Partner | Kanal |\n|:---|---:|\n| VDDM-Verticals | [[Kafka]] |\n| [[GEOS]] | GEOS-MQ mit Mapping auf ein internes Kafka-Event |\n\nAfter.\n",
+        );
+        let kinds: Vec<u8> = blocks.iter().map(|b| b.kind).collect();
+        assert_eq!(kinds, vec![2, 6, 2]);
+        let t = &blocks[1];
+        assert_eq!(t.rows.len(), 3);
+        assert!(t.rows[0].head && !t.rows[1].head);
+        let head: Vec<&str> = t.rows[0].cells.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(head, ["Partner", "Kanal"]);
+        // a [[link]] in a cell is navigation
+        assert_eq!(t.rows[1].cells[1].spans[0].link, "Kafka");
+        assert_eq!(t.rows[2].cells[0].text, "GEOS");
+        // the delimiter row's alignment: left, right
+        assert_eq!(t.rows[0].cells[0].align, 1);
+        assert_eq!(t.rows[0].cells[1].align, 3);
+        // the wider column gets more room; the shares fill the row
+        let f: Vec<u16> = t.rows[2].cells.iter().map(|c| c.frac).collect();
+        assert!(f[1] > f[0], "{f:?}");
+        assert_eq!(f.iter().sum::<u16>(), 1000);
+        assert_eq!(t.rows[0].cells[0].frac, f[0], "one share per column");
+        // the flat text keeps the diff honest; the runs live in the cells
+        assert_eq!(
+            t.text,
+            "Partner | Kanal\nVDDM-Verticals | Kafka\nGEOS | GEOS-MQ mit Mapping auf ein internes Kafka-Event"
+        );
+        assert!(t.spans.is_empty());
+    }
+
+    #[test]
+    fn a_long_header_over_short_cells_keeps_room_for_its_bold_glyphs() {
+        let blocks =
+            parse_blocks("| Verfügbarkeit | Name |\n|---|---|\n| 100 % | Jannik Morgenschweis |\n");
+        let f: Vec<u16> = blocks[0].rows[0].cells.iter().map(|c| c.frac).collect();
+        // 13 header glyphs weigh 15, plus the padding: 17 of 39
+        assert!(f[0] >= 400, "{f:?}");
+        assert_eq!(f.iter().sum::<u16>(), 1000);
+    }
+
+    #[test]
+    fn a_short_table_row_is_padded_to_the_grid() {
+        let blocks = parse_blocks("| A | B | C |\n|---|---|---|\n| 1 |\n");
+        assert_eq!(blocks.len(), 1);
+        let t = &blocks[0];
+        assert_eq!(t.rows[1].cells.len(), 3);
+        assert_eq!(t.rows[1].cells[2].text, "");
+        assert_eq!(t.rows[1].cells[2].frac, t.rows[0].cells[2].frac);
+    }
 
     #[test]
     fn parse_blocks_maps_the_five_kinds() {

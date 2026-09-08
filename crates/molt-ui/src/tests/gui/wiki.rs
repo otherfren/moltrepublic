@@ -600,6 +600,53 @@ fn a_title_link_the_pane_cannot_bind_asks_the_engine_and_opens_the_answer() {
     assert_eq!(asked.borrow().len(), 1, "a local hit is no question");
 }
 
+/// **A pipe table reaches the pane as a grid, not as a paragraph of
+/// bars** (`wiki_preview_tables.md`): one block of kind 6, the header
+/// row first, a link in a cell still a link, the column shares filling
+/// the row.
+#[test]
+fn a_pipe_table_reaches_the_pane_as_one_block_with_rows_and_cells() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    let _wiki = wire_wiki(&ui);
+    let g = ui.global::<WikiState>();
+    g.set_base_docs(ModelRc::new(VecModel::from(vec![WikiBase {
+        path: "t.md".into(),
+        content: "# T\n\n| A | B |\n|---|---|\n| 1 | [[Kafka]] |\n".into(),
+        loaded: true,
+    }])));
+    g.set_base_rev(1);
+    g.invoke_base_arrived();
+    let rows = g.get_nav_rows();
+    let id = (0..rows.row_count())
+        .filter_map(|i| rows.row_data(i))
+        .find(|r| r.label.as_str() == "t.md")
+        .expect("nav row")
+        .id;
+    g.invoke_nav_open(id);
+
+    let blocks = g.get_blocks();
+    let table = (0..blocks.row_count())
+        .filter_map(|i| blocks.row_data(i))
+        .find(|b| b.kind == 6)
+        .expect("the table block");
+    assert_eq!(table.rows.row_count(), 2);
+    let head = table.rows.row_data(0).expect("header row");
+    assert!(head.head);
+    assert_eq!(head.cells.row_count(), 2);
+    assert_eq!(head.cells.row_data(0).expect("cell").text.as_str(), "A");
+    let body = table.rows.row_data(1).expect("body row");
+    assert!(!body.head);
+    let cell = body.cells.row_data(1).expect("cell");
+    assert_eq!(cell.text.as_str(), "Kafka");
+    assert_eq!(cell.spans.row_data(0).expect("span").link.as_str(), "Kafka");
+    let shares: f32 = (0..body.cells.row_count())
+        .filter_map(|i| body.cells.row_data(i))
+        .map(|c| c.frac)
+        .sum();
+    assert!((shares - 1.0).abs() < 0.001, "{shares}");
+}
+
 /// **The Linked section is navigation, not decoration.** Its entries
 /// rendered as passive pills while the Backlinks right below them were
 /// live links, so the one list that walks the graph FORWARD was dead

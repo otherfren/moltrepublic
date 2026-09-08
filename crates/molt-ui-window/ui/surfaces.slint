@@ -1094,6 +1094,73 @@ component BrainBlockView inherits HorizontalLayout {
                 wrap: word-wrap;
             }
         }
+        // a pipe table: one framed grid - the header row on Theme.bg, a
+        // rule between rows and columns, each cell wrapping in its column
+        if root.b.kind == 6: Rectangle {
+            border-radius: Theme.win95 ? 0px : 6px;
+            border-width: Theme.border-w;
+            border-color: Theme.line;
+            clip: true;
+            height: grid.preferred-height;
+            grid := VerticalLayout {
+                for r in root.b.rows: VerticalLayout {
+                    if !r.head: Rectangle {
+                        height: Theme.border-w;
+                        background: Theme.line;
+                    }
+                    Rectangle {
+                        background: r.head ? Theme.bg : transparent;
+                        height: cells.preferred-height;
+                        cells := HorizontalLayout {
+                            // the column's share is a STRETCH factor over
+                            // zero constraints: a width derived from the
+                            // layout's own width would be a binding loop
+                            for c[i] in r.cells: Rectangle {
+                                min-width: 0px;
+                                preferred-width: 0px;
+                                horizontal-stretch: c.frac;
+                                height: body.preferred-height;
+                                property <bool> linked: !root.ghost
+                                    && (c.spans.length > 1
+                                        || (c.spans.length == 1 && c.spans[0].link != ""));
+                                if i > 0: Rectangle {
+                                    x: 0px;
+                                    width: Theme.border-w;
+                                    height: parent.height;
+                                    background: Theme.line;
+                                }
+                                // explicit geometry keeps the text's own
+                                // width out of the cell's constraints
+                                body := VerticalLayout {
+                                    x: 0px;
+                                    width: parent.width;
+                                    padding-top: 5px;
+                                    padding-bottom: 5px;
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    if !linked: Text {
+                                        text: c.text;
+                                        color: root.ink;
+                                        font-size: Theme.fs-editor - 1px;
+                                        font-weight: r.head ? 700 : 400;
+                                        font-italic: root.ghost;
+                                        wrap: word-wrap;
+                                        horizontal-alignment: c.align == 2 ? center
+                                            : c.align == 3 ? right : left;
+                                    }
+                                    if linked: SpanFlow {
+                                        spans: c.spans;
+                                        flat: c.text;
+                                        ink: root.ink;
+                                        fsize: Theme.fs-editor - 1px;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

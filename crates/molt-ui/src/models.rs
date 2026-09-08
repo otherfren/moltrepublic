@@ -6,7 +6,7 @@
 
 use slint::{Model, ModelRc, VecModel};
 
-use crate::{LogLine, ProposalRow, WikiBlock, WorkspaceItem};
+use crate::{LogLine, ProposalRow, WikiBlock, WikiCell, WikiRow, WorkspaceItem};
 
 /// Update a `VecModel`-backed property IN PLACE: shrink, patch the rows
 /// `eq` does not accept as unchanged, grow. Wholesale `ModelRc`
@@ -96,7 +96,30 @@ pub(crate) fn models_eq<T: Clone + PartialEq + 'static>(a: &ModelRc<T>, b: &Mode
 /// comparison and freeze a stale row on screen.
 pub(crate) fn wiki_block_eq(a: &WikiBlock, b: &WikiBlock) -> bool {
     models_eq(&a.spans, &b.spans)
-        && *b == WikiBlock { spans: b.spans.clone(), ..a.clone() }
+        && a.rows.row_count() == b.rows.row_count()
+        && a.rows
+            .iter()
+            .zip(b.rows.iter())
+            .all(|(x, y)| wiki_row_eq(&x, &y))
+        && *b
+            == WikiBlock {
+                spans: b.spans.clone(),
+                rows: b.rows.clone(),
+                ..a.clone()
+            }
+}
+
+/// [`wiki_block_eq`] for a table row (`cells`, each with `spans`).
+fn wiki_row_eq(a: &WikiRow, b: &WikiRow) -> bool {
+    a.head == b.head
+        && a.cells.row_count() == b.cells.row_count()
+        && a.cells.iter().zip(b.cells.iter()).all(|(x, y)| {
+            models_eq(&x.spans, &y.spans)
+                && y == WikiCell {
+                    spans: y.spans.clone(),
+                    ..x.clone()
+                }
+        })
 }
 
 /// [`wiki_block_eq`] for a chat/log row (`reactions`, `receipts`).

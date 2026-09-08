@@ -25,7 +25,9 @@ use crate::{
     PatchView,
     Strings,
     WikiBlock,
+    WikiCell,
     WikiChangeRow,
+    WikiRow,
     WikiBase,
     WikiFileRow,
     WikiHitRow,
@@ -1018,6 +1020,22 @@ fn sync_wiki(ui: &AppWindow, w: &wiki::Wiki, face: &mut FaceState) {
     }
 }
 
+/// A block's or a cell's runs as the pane's span rows; the file-reference
+/// face stays default here and is patched by `patch_file_rows`.
+fn span_model(spans: Vec<wiki::Span>) -> ModelRc<WikiSpan> {
+    ModelRc::new(VecModel::from(
+        spans
+            .into_iter()
+            .map(|sp| WikiSpan {
+                text: sp.text.into(),
+                link: sp.link.into(),
+                rel: sp.rel.into(),
+                ..WikiSpan::default()
+            })
+            .collect::<Vec<_>>(),
+    ))
+}
+
 /// The open document's rendered face: the diffed blocks, its links and
 /// its header as infobox rows. Split out of [`sync_wiki`] because it is
 /// the expensive half and runs only when the document's bytes moved.
@@ -1034,14 +1052,23 @@ fn sync_doc_face(s: &WikiState<'_>, w: &wiki::Wiki, id: wiki::DocId) {
                 wiki::BlockStatus::Changed => 2,
                 wiki::BlockStatus::Removed => 3,
             },
-            spans: ModelRc::new(VecModel::from(
-                b.spans
+            spans: span_model(b.spans),
+            rows: ModelRc::new(VecModel::from(
+                b.rows
                     .into_iter()
-                    .map(|sp| WikiSpan {
-                        text: sp.text.into(),
-                        link: sp.link.into(),
-                        rel: sp.rel.into(),
-                        ..WikiSpan::default()
+                    .map(|r| WikiRow {
+                        head: r.head,
+                        cells: ModelRc::new(VecModel::from(
+                            r.cells
+                                .into_iter()
+                                .map(|c| WikiCell {
+                                    text: c.text.into(),
+                                    spans: span_model(c.spans),
+                                    frac: f32::from(c.frac) / 1000.0,
+                                    align: i32::from(c.align),
+                                })
+                                .collect::<Vec<_>>(),
+                        )),
                     })
                     .collect::<Vec<_>>(),
             )),
