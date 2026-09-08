@@ -425,7 +425,10 @@ both verified red-without/green-with).
   lever is more SWAP (the peak is one process, and swap keeps the authoritative
   build) — shrinking the module is the weakest one. The RELEASE profile
   (`scripts/build-release.sh`, measured 2026-09-06) sampled 13.97 GiB on the
-  same step and needed 8 of the 9 GiB swap; 29m34s end to end. That cost is paid ONLY when
+  same step and needed 8 of the 9 GiB swap; 29m34s end to end. 2026-09-08
+  (v0.0.4): OOM-killed twice at 15.9 + 10 GiB swap with ~6 GiB held by other
+  processes, built at 15.9 + 18 GiB (`swapon /rw/swapfile2`, not in fstab -
+  re-add after a reboot). That cost is paid ONLY when
   a `.slint` file changes; GUI-logic edits (`molt-ui`) rebuild in ~2 s at <1 GiB.
   A SIGKILL during the window compile is the kernel OOM-killer. Three things
   keep it survivable, and only one of them is yours to remember:

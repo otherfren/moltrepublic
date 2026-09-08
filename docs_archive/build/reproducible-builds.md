@@ -55,8 +55,13 @@ These inputs determine the artifact bytes:
   release-profile window rustc (`molt-ui-window`, opt-level 3, one codegen
   unit, thin LTO) ~24 min with a sampled peak of 13.97 GiB RSS and 8 of the
   9 GiB swap in use at the peak - do not run it beside anything else, and
-  add swap before a bigger window. The stripped `moltd` is 90.2 MiB, the
-  tarball 21.9 MiB. That pulls arti's
+  add swap before a bigger window. **2026-09-08 (v0.0.4): the same step was
+  OOM-killed twice with 15.9 GiB + 10 GiB swap (two GUI dev nodes, an
+  editor and a browser held ~6 GiB), once beside a second rustc and once
+  alone - the script now builds `-j 1` - and completed with 8 GiB of swap
+  added (15.9 + 18 GiB; swap use peaked above 14 GiB), 35 min end to end.**
+  The stripped `moltd` is 90.2 MiB, the tarball 21.9 MiB (22.9 MiB at
+  v0.0.4). That pulls arti's
   `tor-dirmgr → rusqlite → libsqlite3-sys`, i.e. a bundled C SQLite compiled
   by `cc` at build time - the C compiler and its flags therefore join the
   envelope (see below).
