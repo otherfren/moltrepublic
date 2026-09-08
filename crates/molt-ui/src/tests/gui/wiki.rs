@@ -1723,6 +1723,22 @@ fn a_long_link_bearing_paragraph_stays_inside_the_pane() {
     );
 }
 
+/// **One click opens a navigator row** (asked 2026-09-08: the mark-then-
+/// double-click route made navigation feel like a file manager). The
+/// open marks as well, so the keyboard verbs keep their target.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_single_click_on_a_navigator_row_opens_the_document() {
+    let ui = nav_window(&["alpha.md", "beta.md"]);
+    let g = ui.global::<WikiState>();
+    let rows = nav_row_trees(&ui, "MemoryPane::filerow");
+    click(&ui, &rows[1]);
+    settle();
+    assert!(g.get_doc_open(), "one click opened nothing");
+    assert_eq!(g.get_doc_path().as_str(), "beta.md");
+    assert_eq!(g.get_marked_id(), nav_id(&ui, "beta.md"), "the open marks");
+}
+
 /// The double-click route stays open with one pane-level menu (the
 /// per-row menu used to host the TouchArea that carries it).
 #[cfg(feature = "live-preview")]

@@ -1795,8 +1795,8 @@ export component MemoryPane inherits VerticalLayout {
                                 }
                             }
 
-                            // ---- a file row: mark on click, open on
-                            // double-click / Enter / menu, right-click menu,
+                            // ---- a file row: open on click (Enter / menu
+                            // too), right-click marks and opens the menu,
                             // drag to move ----
                             if !r.is-folder && live: filerow := Rectangle {
                                 width: 100%;
@@ -1816,18 +1816,14 @@ export component MemoryPane inherits VerticalLayout {
                                 ta := TouchArea {
                                     mouse-cursor: MouseCursor.pointer;
                                     clicked => {
-                                        // marking only — opening needs the
-                                        // double-click / Enter / menu route.
-                                        // A click that ended a drag is the
-                                        // drop, not a mark.
+                                        // one click opens (and marks); a
+                                        // click that ended a drag is the
+                                        // drop, not an open
                                         nav-scope.focus();
                                         if (!root.drag-was) {
-                                            WikiState.nav-mark(r.id);
+                                            WikiState.nav-open(r.id);
                                         }
                                         root.drag-was = false;
-                                    }
-                                    double-clicked => {
-                                        WikiState.nav-open(r.id);
                                     }
                                     moved => {
                                         if (self.pressed && (root.drag-live || Math.abs((self.mouse-y - self.pressed-y) / 1px) > 6)) {

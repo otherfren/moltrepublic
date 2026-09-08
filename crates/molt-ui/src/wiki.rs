@@ -1015,7 +1015,7 @@ impl Wiki {
 
     // ---- navigator actions ------------------------------------------------
 
-    /// Single click: MARK only — nothing opens.
+    /// Right-click / keyboard: MARK only — nothing opens.
     pub fn mark(&mut self, id: DocId) {
         if self.doc(id).is_some() {
             self.marked = Some(id);
@@ -1065,7 +1065,7 @@ impl Wiki {
         self.marked.is_some() || self.marked_folder.is_some()
     }
 
-    /// Open route (double-click / Enter / menu-Open): mark + open as tab +
+    /// Open route (click / Enter / menu-Open): mark + open as tab +
     /// focus. A deleted doc no longer opens.
     pub fn open(&mut self, id: DocId) {
         let Some(d) = self.doc(id) else { return };
