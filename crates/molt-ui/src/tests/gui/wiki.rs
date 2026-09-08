@@ -1689,6 +1689,40 @@ fn a_new_file_brings_its_rename_input_into_view() {
     );
 }
 
+/// **A link-bearing paragraph wraps at the pane, it does not run off it**
+/// (reported 2026-09-08: sentences cut at the right edge). The stacked
+/// fallback's plain runs wrap only when the flow is as wide as its
+/// column; the inline row, invisible but still laid out, imposed its
+/// unwrapped width on the flow.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_long_link_bearing_paragraph_stays_inside_the_pane() {
+    let ui = nav_window(&["a.md"]);
+    let g = ui.global::<WikiState>();
+    let long = "Team der [[Solution depotnahe Module]] mit dem Scope Workflow Depotservice \
+        und Depotarchiv. Vision: ein flexibles Workflow-Tool mit Dokumentenverwaltung, das \
+        jede Fachabteilung ohne Programmierung anpassen kann und das trotzdem revisionssicher \
+        bleibt, auch wenn die Anforderungen sich jedes Quartal ändern und neue Mandanten dazukommen.";
+    g.set_base_docs(ModelRc::new(VecModel::from(vec![WikiBase {
+        path: "a.md".into(),
+        content: format!("# A\n\n{long}\n").into(),
+        loaded: true,
+    }])));
+    g.set_base_rev(2);
+    g.invoke_base_arrived();
+    g.invoke_nav_open(nav_id(&ui, "a.md"));
+    settle();
+    let flow = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "BrainBlockView::flow")
+        .find(|e| e.size().width > 0.0)
+        .expect("the paragraph renders as a span flow");
+    let right = flow.absolute_position().x + flow.size().width;
+    assert!(
+        right <= 1400.0,
+        "the flow runs off the window: right edge {right}, width {}",
+        flow.size().width
+    );
+}
+
 /// The double-click route stays open with one pane-level menu (the
 /// per-row menu used to host the TouchArea that carries it).
 #[cfg(feature = "live-preview")]

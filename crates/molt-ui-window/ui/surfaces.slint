@@ -866,12 +866,21 @@ component SpanFlow inherits Rectangle {
     in property <length> fsize: Theme.fs-editor;
     property <bool> fits: m.preferred-width <= root.width - 8px;
     height: root.fits ? one.preferred-height : many.preferred-height;
+    // every child here carries an x/y: a child without one hands its
+    // size constraints to the flow (Slint's rule, layout or not), and the
+    // unwrapped measure alone made the flow as wide as the whole line -
+    // the stacked runs then wrapped at a width the pane never had
     m := Text {
+        x: 0px;
+        y: 0px;
         text: root.flat;
         font-size: root.fsize;
         visible: false;
     }
     one := HorizontalLayout {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
         visible: root.fits;
         alignment: start;
         spacing: 0;
@@ -897,6 +906,9 @@ component SpanFlow inherits Rectangle {
         }
     }
     many := VerticalLayout {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
         visible: !root.fits;
         spacing: 2px;
         for sp in root.spans: VerticalLayout {
@@ -980,7 +992,7 @@ component BrainBlockView inherits HorizontalLayout {
             font-italic: root.ghost;
             wrap: word-wrap;
         }
-        if root.b.kind == 2 && root.linked: SpanFlow {
+        if root.b.kind == 2 && root.linked: flow := SpanFlow {
             spans: root.b.spans;
             flat: root.b.text;
             ink: root.ink;
