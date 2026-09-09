@@ -7030,7 +7030,7 @@ export component AppWindow inherits Window {
                                         // filter axis is a click away)
                                         if s.declined-count > 0: DecisionTable {
                                             rows: s.declined;
-                                            with-when: true;
+                                            with-rescue: true;
                                             discuss(id) => {
                                                 root.select-view("chat", "today");
                                                 root.select-channel("patch:\{id}");
@@ -7398,7 +7398,7 @@ export component AppWindow inherits Window {
                                         // outcomes
                                         if s.declined-count > 0: DecisionTable {
                                             rows: s.declined;
-                                            with-when: true;
+                                            with-rescue: true;
                                             discuss(id) => {
                                                 root.select-view("chat", "today");
                                                 root.select-channel("patch:\{id}");

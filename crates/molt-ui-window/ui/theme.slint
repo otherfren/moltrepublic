@@ -127,6 +127,9 @@ export struct ProposalRow {
     votes: [MemberVoteMark], // per-member stance, roster order
     declined-by: string, // "" = not declined (the Declined view fills it)
     declined-when: string, // human "when" label of the decline
+    // WHEN the vote was decided, for the decided-votes table ("-" = the
+    // record carries no stamp)
+    decided-when: string,
     // the READING member's own stance (0 open · 1 approved · 2 declined):
     // a cast stance grays the vote buttons (clickable OR grayed, never
     // click-then-refusal)

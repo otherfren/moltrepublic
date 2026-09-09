@@ -25,6 +25,7 @@ fn a_feature_diff_never_shows_a_removal_and_renders_labels() {
         current: "memory vault".to_string(),
         proposed: "memory quests".to_string(),
         votes: Vec::new(),
+        applied_at: 0,
         declined_at: 0,
         declined_by: String::new(),
         by: String::new(),
@@ -176,6 +177,7 @@ fn applied_log_lines_carry_their_patch_id() {
                     vote: molt_core::VoteState::Approved,
                 },
             ],
+            applied_at: 0,
             declined_at: 0,
             declined_by: String::new(),
             by: String::new(),
@@ -656,6 +658,7 @@ fn outcome_snapshot(pending: usize, applied: usize, declined: usize) -> molt_cor
                 current: String::new(),
                 proposed: String::new(),
                 votes: Vec::new(),
+                applied_at: 0,
                 declined_at: 0,
                 declined_by: String::new(),
                 by: String::new(),
@@ -733,4 +736,49 @@ fn the_files_row_stays_for_votes_on_record() {
     assert!(files_row_visible(1, false, false));
     assert!(files_row_visible(0, true, false));
     assert!(files_row_visible(0, false, true));
+}
+
+/// **Every decided vote row says WHEN it was decided.** An accepted row
+/// takes the apply stamp, a declined one its decline stamp, and a record
+/// without either says so instead of showing an empty cell.
+#[test]
+fn a_decided_row_carries_its_decision_date() {
+    let view = |state: ProposalState, applied_at: u64, declined_at: u64| ProposalView {
+        id: ProposalId(1),
+        surface: Surface::Organization,
+        payload: serde_json::json!({ "op": "set_name", "value": "Chess Club" }),
+        approvals: 2,
+        threshold: 2,
+        state,
+        approved_by_me: false,
+        declined_by_me: false,
+        current: String::new(),
+        proposed: String::new(),
+        votes: Vec::new(),
+        applied_at,
+        declined_at,
+        declined_by: String::new(),
+        by: String::new(),
+        mine: false,
+        superseded: false,
+        superseded_kind: None,
+        withdrawn: false,
+        sealing: false,
+    };
+    let ts = 1_750_000_000;
+    let applied = proposal_row(0, &view(ProposalState::Applied, ts, 0));
+    assert_eq!(applied.decided_when, stamp_label(ts), "the apply stamp");
+    let declined = proposal_row(0, &view(ProposalState::Rejected, 0, ts - 60));
+    assert_eq!(
+        declined.decided_when,
+        stamp_label(ts - 60),
+        "the decline stamp"
+    );
+    assert_eq!(
+        declined.declined_when,
+        when_label(0, ts - 60),
+        "the vote card keeps the relative label"
+    );
+    let unknown = proposal_row(0, &view(ProposalState::Applied, 0, 0));
+    assert_eq!(unknown.decided_when, "-", "an unknown stamp says so");
 }

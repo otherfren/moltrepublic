@@ -1341,3 +1341,72 @@ fn every_outcome_panel_pages_its_own_list() {
         );
     }
 }
+
+/// The decided-votes table of `key`/`view`, with one row stamped `when`.
+#[cfg(feature = "live-preview")]
+fn set_decided_surface(ui: &AppWindow, key: &str, view: &str, when: &str) {
+    ui.set_selected_surface(key.into());
+    ui.set_selected_view(view.into());
+    let row = ProposalRow {
+        id: 1,
+        text: "Charter".into(),
+        decided_when: when.into(),
+        ..ProposalRow::default()
+    };
+    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: key.into(),
+        gated: true,
+        applied_count: 1,
+        declined_count: 1,
+        accepted: ModelRc::new(VecModel::from(vec![row.clone()])),
+        declined: ModelRc::new(VecModel::from(vec![row])),
+        ..SurfaceTab::default()
+    }])));
+}
+
+/// **Every decided-votes table names WHEN the vote was decided.** The
+/// Accepted panels carried no date at all - a decision without its date
+/// is not a record. The column is fixed-width, so the cell shows the
+/// absolute stamp and must be wide enough to hold all 16 of its
+/// characters at ui-scale 1 (a date eliding to "2026-06-0…" is a bug).
+#[cfg(feature = "live-preview")]
+#[test]
+fn every_decided_votes_table_shows_the_decision_date() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    ui.window().set_size(slint::PhysicalSize::new(1200, 800));
+    ui.set_screen(AppScreen::Main);
+    apply_strings(&ui, 0);
+    ui.show().expect("show headless");
+    let stamp = "2026-06-02 13:37";
+    let text = |id: &str| {
+        i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, id)
+            .next()
+            .map(|e| (e.accessible_label().unwrap_or_default().to_string(), e.size().width))
+    };
+    for (key, view) in [
+        ("organization", "accepted"),
+        ("organization", "declined"),
+        ("files", "accepted"),
+        ("files", "declined"),
+        ("memory", "accepted"),
+        ("memory", "denied"),
+    ] {
+        set_decided_surface(&ui, key, view, stamp);
+        assert_eq!(
+            text("DecisionTable::dt-when-head")
+                .map(|(t, _)| t)
+                .as_deref(),
+            Some("When"),
+            "{key}/{view}: the table must carry the When column"
+        );
+        let (cell, width) = text("DecisionTable::dt-when")
+            .unwrap_or_else(|| panic!("{key}/{view}: the When cell must render"));
+        assert_eq!(cell, stamp, "{key}/{view}: the row shows its decision date");
+        // 16 chars at fs-cap (12px at the default app font) measure ~106px
+        assert!(
+            width >= 120.0,
+            "{key}/{view}: a {width}px When column elides the date"
+        );
+    }
+}
