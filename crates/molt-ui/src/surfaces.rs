@@ -1256,6 +1256,8 @@ pub(crate) fn surface_data(
                             .next()
                             .unwrap_or_default()
                             .to_string(),
+                        // no record behind it, so no stamp either
+                        decided_when: "-".to_string(),
                         ..ProposalRowData::default()
                     },
                 }
@@ -1465,6 +1467,23 @@ pub(crate) fn retention_value(lang: i32, raw: &str) -> String {
     }
 }
 
+/// The decided-votes table's date cell: an accepted vote's apply stamp,
+/// a rejected one's decline stamp, `"-"` when the record carries neither
+/// (a legacy dump, a superseded patch, a pull-back). ABSOLUTE, never the
+/// relative tail - a fixed column elides the date away first.
+fn decided_stamp(p: &molt_core::ProposalView) -> String {
+    let ts = if p.state == molt_core::ProposalState::Applied {
+        p.applied_at
+    } else {
+        p.declined_at
+    };
+    if ts == 0 {
+        "-".to_string()
+    } else {
+        stamp_label(ts)
+    }
+}
+
 pub(crate) fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRowData {
     let op = p
         .payload
@@ -1537,16 +1556,7 @@ pub(crate) fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRo
         } else {
             String::new()
         },
-        // the decided-votes table's own cell: the ABSOLUTE stamp, never
-        // the relative tail (a fixed column elides the date away first)
-        decided_when: match if p.state == molt_core::ProposalState::Applied {
-            p.applied_at
-        } else {
-            p.declined_at
-        } {
-            0 => "-".to_string(),
-            ts => stamp_label(ts),
-        },
+        decided_when: decided_stamp(p),
         my_vote: if p.declined_by_me {
             2
         } else if p.approved_by_me {

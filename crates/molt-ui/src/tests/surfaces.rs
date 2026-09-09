@@ -201,6 +201,10 @@ fn applied_log_lines_carry_their_patch_id() {
     // its voters, the legacy row (unknown origin) only its title
     assert_eq!(data.accepted.len(), 2);
     assert_eq!(data.accepted[0].id, -1, "legacy row, no discussion jump");
+    assert_eq!(
+        data.accepted[0].decided_when, "-",
+        "a row of unknown origin says its date is unknown"
+    );
     assert_eq!(data.accepted[1].id, 7);
     assert_eq!(data.accepted[1].votes.len(), 2, "the block-proven voters");
 }
