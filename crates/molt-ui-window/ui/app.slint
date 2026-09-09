@@ -1282,6 +1282,12 @@ export component AppWindow inherits Window {
     in property <[UploadRow]> org-uploads;
     // the vote-pinned shares (Shared Files → Persistent Uploads)
     in property <[UploadRow]> org-persistent;
+    // both tables' pagers - Rust slices at 15 rows like the outcome lists
+    // and echoes "page x of y" back here (1-based)
+    in property <int> ou-page: 1;
+    in property <int> ou-pages: 1;
+    in property <int> op-page: 1;
+    in property <int> op-pages: 1;
     // this seat's mirror consent, quota (GB, editable), usage line, folder
     // (mirroring §3.6) - mirrored from the engine's read_mirror
     in-out property <bool> org-mirror-on: true;
@@ -6808,6 +6814,13 @@ export component AppWindow inherits Window {
                                 delete(id) => { root.delete-upload(id); }
                                 show-checksum(name, hash) => { root.open-checksum(name, hash); }
                             }
+                            if root.selected-view == "uploads" && root.ou-pages > 1: PagerRow {
+                                page: root.ou-page;
+                                pages: root.ou-pages;
+                                paged(delta) => {
+                                    root.page-list("files", "uploads", delta);
+                                }
+                            }
                             // mirroring §3.6: consent, quota, folder and usage
                             // above the Persistent table
                             if root.selected-view == "persistent": ou-mirror-row := Rectangle {
@@ -6899,6 +6912,13 @@ export component AppWindow inherits Window {
                                 unpersist(id) => { root.unpersist-upload(id); }
                                 delete(id) => { root.delete-upload(id); }
                                 show-checksum(name, hash) => { root.open-checksum(name, hash); }
+                            }
+                            if root.selected-view == "persistent" && root.op-pages > 1: PagerRow {
+                                page: root.op-page;
+                                pages: root.op-pages;
+                                paged(delta) => {
+                                    root.page-list("files", "persistent", delta);
+                                }
                             }
                             Text {
                                 text: root.selected-view == "persistent" ? Strings.ou-note-persistent : Strings.ou-note;

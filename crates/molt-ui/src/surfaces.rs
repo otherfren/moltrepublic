@@ -149,9 +149,13 @@ pub(crate) struct SurfacesBundle {
     /// Organization → Members table rows (engine `ReadMembers`), already
     /// ordered by the active sort.
     pub(crate) members: Vec<MemberRowData>,
-    /// Shared Files → Uploads table rows (engine `ReadUploads`), already
-    /// thinned by the filter and ordered by the active sort.
+    /// Shared Files → Temporary Uploads rows (engine `ReadUploads`),
+    /// already thinned by the filter, ordered by the active sort and split
+    /// off the vote-pinned ones. The FULL table - `apply_surfaces` slices
+    /// it to the page, like every other paged list.
     pub(crate) uploads: Vec<UploadRowData>,
+    /// The same for Shared Files → Persistent Uploads (the pinned shares).
+    pub(crate) persistent: Vec<UploadRowData>,
     /// How many shares the engine lists BEFORE the filter: the Shared Files
     /// nav row exists only while this is non-zero (or the surface is on
     /// screen) - a filter matching nothing must not hide the surface.
@@ -167,10 +171,11 @@ pub(crate) struct SurfacesBundle {
     /// (a workspace-switch reset or the members-table uploads-jump; live
     /// typing is guarded by the generation).
     pub(crate) uploads_filter: String,
-    /// Effective (push-clamped) 0-based page per paged proposal-outcome
-    /// list, keyed `"{surface}:{list}"` — `apply_surfaces` slices the
-    /// pending/applied/declined models with it and echoes "page x of y"
-    /// into the surface tab (see [`ChatUiState::list_pages`]).
+    /// Effective (push-clamped) 0-based page per paged list, keyed
+    /// `"{surface}:{list}"` — `apply_surfaces` slices the
+    /// pending/applied/declined models and the two Shared Files tables
+    /// (`files:uploads`, `files:persistent`) with it and echoes
+    /// "page x of y" back (see [`ChatUiState::list_pages`]).
     pub(crate) list_pages: HashMap<String, usize>,
     /// The status info strip (founding date + mock activity trio).
     pub(crate) org_stats: OrgStats,
@@ -351,9 +356,10 @@ pub(crate) struct ChatUiState {
     /// Uploads filter needle: case-insensitive substring across user,
     /// filename and (full) checksum; "" = all rows.
     pub(crate) uploads_filter: String,
-    /// Current 0-based page of the paged proposal-outcome lists, keyed
-    /// `"{surface}:{list}"` (list = "pending" | "applied" | "declined",
-    /// plus `"chain:history"`); a missing key is page 0. UI-LOCAL
+    /// Current 0-based page of the paged lists, keyed `"{surface}:{list}"`
+    /// (list = "pending" | "applied" | "declined", plus `"chain:history"`
+    /// and the two Shared Files tables `"files:uploads"` /
+    /// `"files:persistent"`); a missing key is page 0. UI-LOCAL
     /// presentation like the sorts — the engine's reads stay the full
     /// projections (MCP sees them unchanged). The stored page re-bases
     /// against the list's current length on every push
@@ -434,6 +440,7 @@ impl ChatUiState {
     /// Click on an Uploads header column: toggle-or-switch the sort.
     pub(crate) fn sort_uploads_by(&mut self, column: &str) {
         toggle_sort(&mut self.uploads_sort, &mut self.uploads_asc, column);
+        self.reset_upload_pages();
         self.generation += 1;
     }
 
@@ -491,7 +498,16 @@ impl ChatUiState {
     /// table's uploads-jump).
     pub(crate) fn set_uploads_filter(&mut self, needle: String) {
         self.uploads_filter = needle;
+        self.reset_upload_pages();
         self.generation += 1;
+    }
+
+    /// Both Shared Files tables back to page 1. A re-filtered or re-sorted
+    /// list is a NEW list - page 3 of the old one means nothing.
+    fn reset_upload_pages(&mut self) {
+        for list in ["uploads", "persistent"] {
+            self.list_pages.remove(&format!("files:{list}"));
+        }
     }
 
     /// Step a paged proposal-outcome list by `delta` pages (the pager's
@@ -540,6 +556,24 @@ impl ChatUiState {
                 self.clamp_list_page(surface, list, len),
             );
         }
+    }
+
+    /// Split the filtered+sorted uploads into the two Shared Files tables
+    /// (the persist vote decides), then re-base each table's stored page
+    /// against ITS OWN length, so the two page apart. Same contract as
+    /// [`ChatUiState::clamp_surface_pages`]: `mirror.rs` slices exactly
+    /// these keys.
+    pub(crate) fn split_uploads(
+        &mut self,
+        uploads: Vec<UploadRowData>,
+        out: &mut HashMap<String, usize>,
+    ) -> (Vec<UploadRowData>, Vec<UploadRowData>) {
+        let (persistent, temporary): (Vec<UploadRowData>, Vec<UploadRowData>) =
+            uploads.into_iter().partition(|u| u.persistent);
+        for (list, len) in [("uploads", temporary.len()), ("persistent", persistent.len())] {
+            out.insert(format!("files:{list}"), self.clamp_list_page("files", list, len));
+        }
+        (temporary, persistent)
     }
 }
 pub(crate) struct SurfaceData {
@@ -944,7 +978,8 @@ pub(crate) async fn gather_surfaces(
         _ => Vec::new(),
     };
     let chain_len = chain_rows.len();
-    let (unread, first_seen, known, org_view, list_pages) = {
+    let uploads_total = uploads.len();
+    let (unread, first_seen, known, org_view, list_pages, mut uploads, mut persistent) = {
         // …and here for the same reason: this is the chat pane's own
         // bookkeeping, and losing the mirror is worse than working from a
         // state some other panic left mid-update
@@ -977,6 +1012,13 @@ pub(crate) async fn gather_surfaces(
             "chain:history".to_string(),
             st.clamp_list_page("chain", "history", chain_len),
         );
+        // the Uploads tables' presentation pass (UI-local, like the channel
+        // selection): thin by the filter needle, order by the active sort,
+        // then split into the two tables - each pages on its OWN filtered
+        // length. The engine's ReadUploads projection stays untouched.
+        let mut rows = filter_uploads(uploads, &st.uploads_filter);
+        sort_uploads(&mut rows, &st.uploads_sort, st.uploads_asc);
+        let (uploads, persistent) = st.split_uploads(rows, &mut list_pages);
         (
             engine_unread,
             st.first_seen.clone(),
@@ -989,18 +1031,15 @@ pub(crate) async fn gather_surfaces(
                 st.uploads_filter.clone(),
             ),
             list_pages,
+            uploads,
+            persistent,
         )
     };
-    // the Members/Uploads tables' presentation pass (UI-local, like the
-    // channel selection): thin the uploads by the filter needle, then
-    // order both tables by their active sort column — the engine's
-    // ReadMembers/ReadUploads projections stay the full, untouched truth
-    let uploads_total = uploads.len();
+    // the Members table's presentation pass - same rule, the engine's
+    // ReadMembers projection stays the full, untouched truth
     let (members_sort, members_asc, uploads_sort, uploads_asc, uploads_filter) = org_view;
     let mut members = members;
     sort_members(&mut members, &members_sort, members_asc);
-    let mut uploads = filter_uploads(uploads, &uploads_filter);
-    sort_uploads(&mut uploads, &uploads_sort, uploads_asc);
     // an open Shared Files vote marks its row on the button it belongs to
     let open_votes: HashMap<(String, bool), String> = all_pending
         .iter()
@@ -1014,7 +1053,7 @@ pub(crate) async fn gather_surfaces(
             ))
         })
         .collect();
-    for u in &mut uploads {
+    for u in uploads.iter_mut().chain(persistent.iter_mut()) {
         if let Some(v) = open_votes.get(&(u.id.clone(), false)) {
             u.vote = v.clone();
         }
@@ -1095,6 +1134,7 @@ pub(crate) async fn gather_surfaces(
         selected_decision,
         members,
         uploads,
+        persistent,
         uploads_total,
         members_sort,
         members_asc,
