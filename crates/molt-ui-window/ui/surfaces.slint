@@ -910,33 +910,43 @@ component SpanFlow inherits Rectangle {
         y: 0px;
         width: parent.width;
         visible: !root.fits;
-        spacing: 2px;
-        for sp in root.spans: VerticalLayout {
+        spacing: 0;
+        for sp[i] in root.spans: row := VerticalLayout {
+            // a plain run right after a link rides in that link's row -
+            // otherwise the ", " between two links stands alone on a line
+            property <bool> tail: sp.link == "" && i > 0 && root.spans[i - 1].link != "";
+            property <bool> has-tail: sp.link != "" && i + 1 < root.spans.length
+                && root.spans[i + 1].link == "";
+            padding-top: i > 0 && !row.tail ? 2px : 0px;
             // a plain run fills the width and wraps; a link keeps its
-            // natural width (alignment: start) so the pill hugs the text
-            if sp.link == "": Text {
+            // natural width so the pill hugs the text
+            if sp.link == "" && !row.tail: Text {
                 text: sp.text;
                 color: root.ink;
                 font-size: root.fsize;
                 wrap: word-wrap;
             }
-            if sp.link != "" && sp.file-state == 0: HorizontalLayout {
-                alignment: start;
-                LinkRun {
+            if sp.link != "": HorizontalLayout {
+                alignment: row.has-tail ? stretch : start;
+                if sp.file-state == 0: LinkRun {
                     label: sp.text;
                     target: sp.link;
                     rel: sp.rel;
                     fsize: root.fsize;
                 }
-            }
-            if sp.file-state != 0: HorizontalLayout {
-                alignment: start;
-                FileRun {
+                if sp.file-state != 0: FileRun {
                     label: sp.text;
                     target: sp.link;
                     state: sp.file-state;
                     size: sp.file-size;
                     fsize: root.fsize;
+                }
+                if row.has-tail: Text {
+                    text: root.spans[i + 1].text;
+                    color: root.ink;
+                    font-size: root.fsize;
+                    wrap: word-wrap;
+                    vertical-alignment: top;
                 }
             }
         }

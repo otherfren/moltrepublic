@@ -1739,6 +1739,44 @@ fn a_single_click_on_a_navigator_row_opens_the_document() {
     assert_eq!(g.get_marked_id(), nav_id(&ui, "beta.md"), "the open marks");
 }
 
+/// **A comma between two links never stands alone on a line** (reported
+/// 2026-09-09: link lists in the preview read link / "," / link). The
+/// stacked fallback gave every run its own row; a plain run that follows
+/// a link rides in that link's row.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_plain_run_after_a_link_rides_in_the_links_row() {
+    let ui = nav_window(&["a.md"]);
+    let g = ui.global::<WikiState>();
+    let long = "Für Neue im Projekt: [[Projekthandbuch DBD 2.0]], [[Neue Mitarbeitende onboarden]], \
+        [[Digitaler Arbeitsplatz einrichten]], [[Aufwände und Abwesenheiten erfassen]]. Zur \
+        Orientierung: [[Programmorganisation DPR]], [[Regeltermine im DPR-Programm]], \
+        [[Roadmap Plattform Retail]], [[Glossar DBD 2.0]], [[Kafka Guidelines]], \
+        [[Einheitliches Logging-Konzept VDDM]], [[Transactional Outbox]].";
+    g.set_base_docs(ModelRc::new(VecModel::from(vec![WikiBase {
+        path: "a.md".into(),
+        content: format!("# A\n\n{long}\n").into(),
+        loaded: true,
+    }])));
+    g.set_base_rev(2);
+    g.invoke_base_arrived();
+    g.invoke_nav_open(nav_id(&ui, "a.md"));
+    settle();
+    let flow = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "BrainBlockView::flow")
+        .find(|e| e.size().width > 0.0)
+        .expect("the paragraph renders as a span flow");
+    let left = flow.absolute_position().x;
+    assert!(flow.size().height > 40.0, "the paragraph is long enough to stack: height {}", flow.size().height);
+    let commas: Vec<_> = i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "Text")
+        .filter(|t| t.size().width > 0.0 && t.accessible_label().is_some_and(|l| l.trim_start().starts_with(',')))
+        .collect();
+    assert!(!commas.is_empty(), "the paragraph has comma runs");
+    for c in commas {
+        let x = c.absolute_position().x;
+        assert!(x > left + 20.0, "a comma run starts at the flow's left edge, alone on its row: x={x} left={left}");
+    }
+}
+
 /// The double-click route stays open with one pane-level menu (the
 /// per-row menu used to host the TouchArea that carries it).
 #[cfg(feature = "live-preview")]
