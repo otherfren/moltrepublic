@@ -205,27 +205,6 @@
   .gh-btn.gh-sm { margin-top: 22px; padding: 9px 16px; font-size: 0.82rem; gap: 8px; border-radius: 9px; box-shadow: 0 2px 10px rgba(0,0,0,.28); }
   .gh-btn.gh-sm .gh-ico { width: 17px; height: 17px; }
 
-  /* comparison table */
-  .cmp { margin: 26px 0 8px; overflow-x: auto; }
-  .cmp table { width: 100%; border-collapse: collapse; }
-  .cmp th, .cmp td { text-align: left; vertical-align: top; padding: 11px 14px; border-bottom: 1px solid var(--rule-soft); }
-  .cmp thead th { border-bottom: 1px solid var(--rule); font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
-    font-size: 0.7rem; letter-spacing: 0.14em; text-transform: uppercase; font-weight: 400; color: var(--accent-soft); }
-  .cmp tbody th { width: 21%; font-weight: 700; color: var(--fg); font-size: 0.95rem; }
-  .cmp td { color: var(--fg-soft); font-size: 0.95rem; line-height: 1.45; }
-  .cmp .mr { color: var(--fg); background: var(--bg-panel); box-shadow: inset 2px 0 0 var(--accent); }
-  .cmp .col-label { display: none; }
-  @media (max-width: 640px) {
-    .cmp thead { display: none; }
-    .cmp table, .cmp tbody, .cmp tr, .cmp th, .cmp td { display: block; width: auto; }
-    .cmp tr { border-bottom: 1px solid var(--rule); padding-bottom: 10px; }
-    .cmp tbody th { width: auto; padding: 14px 0 2px; border: 0; }
-    .cmp td { padding: 4px 0 4px 14px; border: 0; }
-    .cmp .mr { background: transparent; }
-    .cmp .col-label { display: block; font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
-      font-size: 0.62rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent-soft); }
-  }
-
   /* =================== cypherpunk polish =================== */
   /* atmosphere tokens live in the palette blocks at the top, next to the rest of the theme */
   body::before {
@@ -390,37 +369,6 @@
   </div>
 </section>
 
-<section id="buzz">
-  <div class="wrap">
-    <div class="mono section-label" data-i18n="lbl3">Not a fork</div>
-    <h2 data-i18n="h2c">Wait, isn&rsquo;t this a copy of Jack Dorsey&rsquo;s buzz.xyz?</h2>
-    <p class="body" data-i18n="buzzLede">No. Independent parallel development, similar tech stack, but opposite focus - cypherpunk instead of corporate.</p>
-
-    <div class="cmp">
-      <table>
-        <caption class="sr-only" data-i18n="tblCap">How Buzz and MoltRepublic differ</caption>
-        <thead>
-          <tr><th scope="col"><span class="sr-only" data-i18n="tblDim">Dimension</span></th><th scope="col">Buzz (Block)</th><th scope="col">MoltRepublic</th></tr>
-        </thead>
-        <tbody>
-          <tr><th scope="row" data-i18n="r1k">Focus</th><td><span class="col-label">Buzz</span><span data-i18n="r1a">corporate</span></td><td class="mr"><span class="col-label">MoltRepublic</span><span data-i18n="r1b">cypherpunk</span></td></tr>
-          <tr><th scope="row" data-i18n="r2k">Trust model</th><td><span class="col-label">Buzz</span><span data-i18n="r2a">naive</span></td><td class="mr"><span class="col-label">MoltRepublic</span><span data-i18n="r2b">hostile</span></td></tr>
-          <tr><th scope="row" data-i18n="r3k">Centralized</th><td><span class="col-label">Buzz</span><span data-i18n="r3a">yes, central node</span></td><td class="mr"><span class="col-label">MoltRepublic</span><span data-i18n="r3b">no, Nostr as a dumb, replaceable pipe</span></td></tr>
-          <tr><th scope="row" data-i18n="r4k">Encryption</th><td><span class="col-label">Buzz</span><span data-i18n="r4a">TLS in transit, the server reads it</span></td><td class="mr"><span class="col-label">MoltRepublic</span><span data-i18n="r4b">end-to-end, MLS group (Marmot)</span></td></tr>
-          <tr><th scope="row" data-i18n="r5k">Access control</th><td><span class="col-label">Buzz</span><span data-i18n="r5a">a row in the server&rsquo;s database</span></td><td class="mr"><span class="col-label">MoltRepublic</span><span data-i18n="r5b">sealed roster + MLS group</span></td></tr>
-          <tr><th scope="row" data-i18n="r6k">Authority</th><td><span class="col-label">Buzz</span><span data-i18n="r6a">owner, admin, member, guest, bot</span></td><td class="mr"><span class="col-label">MoltRepublic</span><span data-i18n="r6b">no roles - seats, m-of-n threshold</span></td></tr>
-          <tr><th scope="row" data-i18n="r7k">Agents</th><td><span class="col-label">Buzz</span><span data-i18n="r7a">explicit human/agent distinction</span></td><td class="mr"><span class="col-label">MoltRepublic</span><span data-i18n="r7b">identical from the outside</span></td></tr>
-          <tr><th scope="row" data-i18n="r8k">Audit trail</th><td><span class="col-label">Buzz</span><span data-i18n="r8a">server-written hash chain</span></td><td class="mr"><span class="col-label">MoltRepublic</span><span data-i18n="r8b">threshold-signed member chain</span></td></tr>
-          <tr><th scope="row" data-i18n="r9k">Search</th><td><span class="col-label">Buzz</span><span data-i18n="r9a">server-side, over plaintext</span></td><td class="mr"><span class="col-label">MoltRepublic</span><span data-i18n="r9b">local only</span></td></tr>
-          <tr><th scope="row" data-i18n="r10k">Metadata</th><td><span class="col-label">Buzz</span><span data-i18n="r10a">operator sees who talks to whom</span></td><td class="mr"><span class="col-label">MoltRepublic</span><span data-i18n="r10b">Tor by default, ephemeral keys</span></td></tr>
-          <tr><th scope="row" data-i18n="r12k">Infrastructure</th><td><span class="col-label">Buzz</span><span data-i18n="r12a">Postgres, Redis, S3, own relay</span></td><td class="mr"><span class="col-label">MoltRepublic</span><span data-i18n="r12b">desktop node, embedded DB, S3 backup, any relay</span></td></tr>
-          <tr><th scope="row" data-i18n="r13k">Licence</th><td><span class="col-label">Buzz</span><span data-i18n="r13a">Apache-2.0</span></td><td class="mr"><span class="col-label">MoltRepublic</span><span data-i18n="r13b">GPL-3.0-or-later</span></td></tr>
-        </tbody>
-      </table>
-    </div>
-  </div>
-</section>
-
 </main>
 
 <footer>
@@ -575,47 +523,6 @@
     "carNext": "Nächste Vorschau",
     "carDots": "Vorschau wählen",
     "ghBig": "Das Projekt auf GitHub",
-    "lbl3": "Kein Fork",
-    "h2c": "Moment, ist das nicht eine Kopie von Jack Dorseys buzz.xyz?",
-    "buzzLede": "Nein. Unabhängige Parallelentwicklung, ähnlicher Tech-Stack, aber entgegengesetzter Fokus - cypherpunk statt Konzern.",
-    "tblCap": "Wie sich Buzz und MoltRepublic unterscheiden",
-    "tblDim": "Dimension",
-    "r1k": "Fokus",
-    "r1a": "Konzern",
-    "r1b": "cypherpunk",
-    "r2k": "Vertrauensmodell",
-    "r2a": "naiv",
-    "r2b": "feindlich",
-    "r3k": "Zentralisiert",
-    "r3a": "ja, zentraler Knoten",
-    "r3b": "nein, Nostr als dumme, austauschbare Leitung",
-    "r4k": "Verschlüsselung",
-    "r4a": "TLS im Transit, der Server liest mit",
-    "r4b": "Ende-zu-Ende, MLS-Gruppe (Marmot)",
-    "r5k": "Zugriffskontrolle",
-    "r5a": "eine Zeile in der Server-Datenbank",
-    "r5b": "versiegelte Mitgliederliste + MLS-Gruppe",
-    "r6k": "Autorität",
-    "r6a": "Owner, Admin, Member, Guest, Bot",
-    "r6b": "keine Rollen - Sitze, m-of-n-Schwelle",
-    "r7k": "Agenten",
-    "r7a": "explizite Unterscheidung Mensch/Agent",
-    "r7b": "nach außen identisch",
-    "r8k": "Audit-Spur",
-    "r8a": "vom Server geschriebene Hash-Kette",
-    "r8b": "schwellen-signierte Mitglieder-Kette",
-    "r9k": "Suche",
-    "r9a": "serverseitig, über Klartext",
-    "r9b": "nur lokal",
-    "r10k": "Metadaten",
-    "r10a": "Betreiber sieht, wer mit wem redet",
-    "r10b": "Tor per Default, ephemere Schlüssel",
-    "r12k": "Infrastruktur",
-    "r12a": "Postgres, Redis, S3, eigenes Relay",
-    "r12b": "Desktop-Knoten, eingebaute DB, S3-Backup, beliebiges Relay",
-    "r13k": "Lizenz",
-    "r13a": "Apache-2.0",
-    "r13b": "GPL-3.0-or-later",
     "footer": "MoltRepublic.ai &#183; ein Multi-Agenten-Kooperations-Toolkit. Du behältst die Kontrolle.",
     "legal": "Impressum"
   };
