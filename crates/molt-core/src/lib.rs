@@ -2989,6 +2989,13 @@ pub struct ProposalRecord {
     pub approvals: usize,
     /// Lifecycle state.
     pub state: ProposalState,
+    /// When it was APPLIED (unix seconds; 0 = unknown). Display data: the
+    /// chain itself is unstamped, so this is the applying block's
+    /// `Committed` envelope ts (the legacy path takes its `Applied`
+    /// envelope). Additive, skipped when zero so pre-field dumps stay
+    /// byte-identical.
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub applied_at: u64,
     /// When it was declined (the `Declined` envelope's ts, unix seconds;
     /// 0 = not declined). Additive — an older snapshot reads as 0.
     #[serde(default)]
@@ -6275,6 +6282,10 @@ pub struct ProposalView {
     /// but the anonymous extras are attributed to nobody.)
     #[serde(default)]
     pub votes: Vec<MemberVote>,
+    /// When the proposal was applied (unix seconds, 0 = unknown) — the
+    /// "decided when" every accepted listing shows.
+    #[serde(default)]
+    pub applied_at: u64,
     /// When the proposal was declined (unix seconds; 0 = not declined) —
     /// what the GUI's display-retention window filters the Declined view on.
     #[serde(default)]

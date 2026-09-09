@@ -364,3 +364,41 @@ fn a_second_tippers_decision_line_is_not_an_audit_finding() {
         "…and still collapses it to one line"
     );
 }
+
+/// The apply stamp is ADDITIVE: an undecided (or pre-field) record
+/// serializes exactly as it did before the field existed, so an old dump
+/// and a new one stay byte-identical. An applied record carries it.
+#[test]
+fn a_zero_apply_stamp_never_reaches_the_dump() {
+    let mut st = plain_state();
+    let e = |seq: u64, body: WorkspaceEvent| molt_core::EventEnvelope {
+        prev_seq: 0,
+        seq,
+        ts: 100 + seq,
+        by: "petra".to_string(),
+        body,
+    };
+    for id in [4u64, 5] {
+        st.apply(&e(
+            id,
+            WorkspaceEvent::Proposed {
+                id: ProposalId(id),
+                surface: Surface::Memory,
+                payload: json!({ "op": "add_note", "title": "minutes" }),
+            },
+        ));
+    }
+    st.apply(&e(6, WorkspaceEvent::Applied { id: ProposalId(5) }));
+    let wire = serde_json::to_value(st.snapshot_now().state).expect("dump serializes");
+    let rec = |id: &str| wire["proposals"][id].clone();
+    assert!(
+        rec("4").get("applied_at").is_none(),
+        "an open record must serialize as before the field: {}",
+        rec("4")
+    );
+    assert_eq!(
+        rec("5")["applied_at"],
+        106,
+        "the applied one carries its stamp"
+    );
+}

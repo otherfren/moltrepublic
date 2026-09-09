@@ -150,6 +150,7 @@ fn patch_title_and_state_survive_the_proposal_leaving_pending() {
         current: String::new(),
         proposed: String::new(),
         votes: Vec::new(),
+        applied_at: 0,
         declined_at: 0,
         declined_by: String::new(),
         by: String::new(),
@@ -239,6 +240,7 @@ pub(super) fn view_of(id: u64, title: &str, state: ProposalState) -> ProposalVie
         current: String::new(),
         proposed: String::new(),
         votes: Vec::new(),
+        applied_at: 0,
         declined_at: if state == ProposalState::Rejected { 100 } else { 0 },
         declined_by: if state == ProposalState::Rejected {
             "ashi".to_string()

@@ -7051,7 +7051,7 @@ export component AppWindow inherits Window {
                                         // filter axis is a click away)
                                         if s.declined-count > 0: DecisionTable {
                                             rows: s.declined;
-                                            with-when: true;
+                                            with-rescue: true;
                                             discuss(id) => {
                                                 root.select-view("chat", "today");
                                                 root.select-channel("patch:\{id}");
@@ -7301,16 +7301,16 @@ export component AppWindow inherits Window {
                                 }
                             }
                             // the applied log: memory shows it under its own
-                            // Accepted sub-view (as the decided-votes table);
-                            // the other surfaces keep the inline prose list
-                            // under Proposals (resp. wallet Status)
+                            // Accepted sub-view, the other surfaces under
+                            // Proposals (resp. wallet Status) - one
+                            // decided-votes table for all of them
                             if s.key != "memory" || root.selected-view == "accepted": Text {
                                 text: Strings.mv-applied;
                                 color: Theme.dim;
                                 font-size: Theme.fs-cap;
                                 font-weight: 600;
                             }
-                            if s.key == "memory" && root.selected-view == "accepted": Rectangle {
+                            if s.key != "memory" || root.selected-view == "accepted": Rectangle {
                                 vertical-stretch: 1;
                                 clip: true;
                                 ma-fl := Flickable {
@@ -7342,44 +7342,6 @@ export component AppWindow inherits Window {
                                     view-h: ma-fl.height;
                                     content-h: ma-fl.viewport-height;
                                     scroll-y: ma-fl.viewport-y;
-                                }
-                            }
-                            if s.key != "memory": Rectangle {
-                                vertical-stretch: 1;
-                                clip: true;
-                                VerticalLayout {
-                                    padding: 2px;
-                                    spacing: 4px;
-                                    alignment: start;
-                                    if s.applied-count == 0: Text {
-                                        text: Strings.mv-empty-applied;
-                                        color: Theme.faint;
-                                        font-size: Theme.fs-cap;
-                                    }
-                                    // an accepted vote's row keeps the 💬
-                                    // back-link into its (read-only)
-                                    // discussion; rows of unknown origin
-                                    // (legacy dumps) offer none
-                                    for l in s.log: HorizontalLayout {
-                                        spacing: 8px;
-                                        Text {
-                                            text: l.text;
-                                            color: Theme.dim;
-                                            font-size: Theme.fs-body;
-                                            wrap: word-wrap;
-                                            horizontal-stretch: 1;
-                                            vertical-alignment: center;
-                                        }
-                                        if l.patch-id >= 0: AppButton {
-                                            height: 26px * Theme.ui-scale;
-                                            pad: 8px;
-                                            emoji: "💬";
-                                            clicked => {
-                                                root.select-view("chat", "today");
-                                                root.select-channel("patch:\{l.patch-id}");
-                                            }
-                                        }
-                                    }
                                 }
                             }
                             // the applied history holds the ACCEPTED votes —
@@ -7419,7 +7381,7 @@ export component AppWindow inherits Window {
                                         // outcomes
                                         if s.declined-count > 0: DecisionTable {
                                             rows: s.declined;
-                                            with-when: true;
+                                            with-rescue: true;
                                             discuss(id) => {
                                                 root.select-view("chat", "today");
                                                 root.select-channel("patch:\{id}");

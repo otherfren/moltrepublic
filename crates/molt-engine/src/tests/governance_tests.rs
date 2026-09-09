@@ -304,6 +304,7 @@ fn org_pending_cards_carry_current_and_proposed_state() {
         payload: json!({"op": op, "title": "t", "value": value}),
         approvals: 0,
         state: molt_core::ProposalState::Proposed,
+        applied_at: 0,
         declined_at: 0,
         declined_by: String::new(),
         decliners: Vec::new(),
@@ -912,5 +913,44 @@ fn declined_proposals_surface_with_decliner_and_timestamp() {
             molt_core::VoteState::Declined,
             "the votes row marks the decliner"
         );
+    });
+}
+
+/// An APPLIED proposal carries when it was applied — the "decided when"
+/// every accepted listing shows. On the single-operator path that is the
+/// `Applied` envelope's own ts.
+#[test]
+fn applied_proposals_surface_with_their_apply_stamp() {
+    rt().block_on(async {
+        let cfg = GroupConfig {
+            threshold: 1,
+            self_cosign: false,
+            ..GroupConfig::demo()
+        };
+        let w = spawn(cfg, SessionView::default());
+        let id = match w
+            .execute(Command::Propose {
+                surface: Surface::Memory,
+                payload: json!({"op":"add_note","title":"t"}),
+            })
+            .await
+            .expect("propose")
+        {
+            Reply::Proposed { id, .. } => id,
+            other => panic!("unexpected: {other:?}"),
+        };
+        w.execute(Command::Approve { proposal: id, note: None })
+            .await
+            .expect("approve");
+        let snap = read_surface(&w, Surface::Memory).await;
+        assert_eq!(snap.accepted.len(), 1, "the accepted view is exposed");
+        let v = &snap.accepted[0];
+        assert_eq!(v.id, id);
+        assert_eq!(v.state, molt_core::ProposalState::Applied);
+        assert!(
+            v.applied_at > 0,
+            "an accepted vote names when it was applied"
+        );
+        assert_eq!(v.declined_at, 0, "…and was never declined");
     });
 }

@@ -406,6 +406,7 @@ impl State {
                 payload,
                 approvals: 0,
                 state: ProposalState::Applied,
+                applied_at: 0,
                 declined_at: 0,
                 declined_by: molt_core::MemberId::new(),
                 decliners: Vec::new(),
@@ -490,6 +491,26 @@ impl State {
                 id: ProposalId(id),
                 surface,
             });
+        }
+        // D4: …and their display stamps, wherever the local log still
+        // carries the block's `Committed` envelope (a reopen replays the
+        // tail before this runs). Idempotent: a record restored from a
+        // dump keeps the stamp it already had.
+        let stamps: Vec<(u64, u64)> = self
+            .chain
+            .blocks
+            .iter()
+            .filter_map(|b| match &b.change {
+                ChainChange::Applied { proposal_id, .. } => self
+                    .chain
+                    .block_ts
+                    .get(&b.height)
+                    .map(|at| (*proposal_id, *at)),
+                _ => None,
+            })
+            .collect();
+        for (id, at) in stamps {
+            self.stamp_applied_at(id, at);
         }
         // membership blocks carry no proposal id — settle by content, the
         // `after_block_applied` pattern

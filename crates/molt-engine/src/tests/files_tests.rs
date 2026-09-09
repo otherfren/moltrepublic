@@ -481,6 +481,7 @@ fn a_material_less_open_vote_does_not_block_a_current_re_propose() {
         }),
         approvals: 0,
         state: molt_core::ProposalState::Proposed,
+        applied_at: 0,
         declined_at: 0,
         declined_by: String::new(),
         decliners: Vec::new(),

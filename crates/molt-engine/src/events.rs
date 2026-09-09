@@ -313,6 +313,7 @@ impl State {
                     payload: payload.clone(),
                     approvals: 0,
                     state: ProposalState::Proposed,
+                    applied_at: 0,
                     declined_at: 0,
                     declined_by: MemberId::new(),
                     decliners: Vec::new(),
@@ -402,6 +403,7 @@ impl State {
                 if let Some(p) = self.proposals.get_mut(&id.0) {
                     if p.state == ProposalState::Proposed {
                         p.state = ProposalState::Applied;
+                        p.applied_at = env.ts;
                         let payload = p.payload.clone();
                         let surface = p.surface;
                         let moved = Self::wiki_payload_paths(&payload);
@@ -440,6 +442,7 @@ impl State {
                     }),
                     approvals: 0,
                     state: ProposalState::Proposed,
+                    applied_at: 0,
                     declined_at: 0,
                     declined_by: MemberId::new(),
                     decliners: Vec::new(),
@@ -467,8 +470,15 @@ impl State {
             // D4: the block's DISPLAY stamp - the chain carries none, and
             // the replay refills this from the same envelopes
             WorkspaceEvent::Committed(block) => {
-                let at = self.chain.block_ts.entry(block.height).or_insert(env.ts);
-                *at = (*at).min(env.ts);
+                let slot = self.chain.block_ts.entry(block.height).or_insert(env.ts);
+                *slot = (*slot).min(env.ts);
+                let at = *slot;
+                // …and the applied card's stamp with it: our OWN seal records
+                // this envelope only AFTER `after_block_applied` ran, so this
+                // is the sealer's only chance to stamp the card
+                if let molt_core::ChainChange::Applied { proposal_id, .. } = &block.change {
+                    self.stamp_applied_at(*proposal_id, at);
+                }
             }
             WorkspaceEvent::VoteRefused { .. }
             | WorkspaceEvent::ChainRequest { .. }

@@ -149,6 +149,7 @@ fn system_lines_interleave_by_time_and_tolerate_unknown_proposals() {
         current: String::new(),
         proposed: String::new(),
         votes: Vec::new(),
+        applied_at: 0,
         declined_at: 0,
         declined_by: String::new(),
         by: String::new(),

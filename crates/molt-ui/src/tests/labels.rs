@@ -127,3 +127,20 @@ fn every_view_has_an_icon() {
         }
     }
 }
+
+/// A decided-vote table cell shows the ABSOLUTE stamp only - the
+/// relative tail of [`when_label`] would elide the date away in a
+/// fixed column. Language-independent, like the file date.
+#[test]
+fn a_decision_stamp_is_the_absolute_half_of_the_when_label() {
+    let ts = 1_750_000_000;
+    let stamp = stamp_label(ts);
+    assert_eq!(stamp.len(), 16, "YYYY-MM-DD HH:MM: {stamp}");
+    for lang in [0, 1] {
+        assert!(
+            when_label(lang, ts).starts_with(&stamp),
+            "the cell must be the label's absolute prefix: {stamp}"
+        );
+    }
+    assert_eq!(stamp_label(0), "", "no stamp, no text");
+}

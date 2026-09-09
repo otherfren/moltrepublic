@@ -21,8 +21,8 @@ use crate::chat_log::{
 };
 use crate::images::avatar_cache_key;
 use crate::labels::{
-    expires_label, file_date_label, file_size_label, never_seen_label, seen_label, strings_pick,
-    surface_name, unix_now, when_label,
+    expires_label, file_date_label, file_size_label, never_seen_label, seen_label, stamp_label,
+    strings_pick, surface_name, unix_now, when_label,
 };
 use crate::{ChainRow, MemberVoteMark, ProposalRow, RelayChange};
 
@@ -686,6 +686,10 @@ pub(crate) struct ProposalRowData {
     /// Who declined it ("" = not declined) + the human "when" label.
     pub(crate) declined_by: String,
     pub(crate) declined_when: String,
+    /// WHEN the vote was decided, for the decided-votes table: the apply
+    /// stamp of an accepted row, the decline stamp of a rejected one,
+    /// `"-"` when the record carries none.
+    pub(crate) decided_when: String,
     /// The READING member's own stance (0 open · 1 approved · 2 declined):
     /// a cast stance grays the vote buttons — clickable OR grayed, never
     /// click-then-refusal (story 2026-08-09).
@@ -1292,6 +1296,8 @@ pub(crate) fn surface_data(
                             .next()
                             .unwrap_or_default()
                             .to_string(),
+                        // no record behind it, so no stamp either
+                        decided_when: "-".to_string(),
                         ..ProposalRowData::default()
                     },
                 }
@@ -1422,6 +1428,7 @@ pub(crate) fn to_proposal_row(p: &ProposalRowData) -> ProposalRow {
         )),
         declined_by: p.declined_by.clone().into(),
         declined_when: p.declined_when.clone().into(),
+        decided_when: p.decided_when.clone().into(),
         my_vote: p.my_vote,
         mine: p.mine,
         superseded: p.superseded,
@@ -1500,6 +1507,23 @@ pub(crate) fn retention_value(lang: i32, raw: &str) -> String {
     }
 }
 
+/// The decided-votes table's date cell: an accepted vote's apply stamp,
+/// a rejected one's decline stamp, `"-"` when the record carries neither
+/// (a legacy dump, a superseded patch, a pull-back). ABSOLUTE, never the
+/// relative tail - a fixed column elides the date away first.
+fn decided_stamp(p: &molt_core::ProposalView) -> String {
+    let ts = if p.state == molt_core::ProposalState::Applied {
+        p.applied_at
+    } else {
+        p.declined_at
+    };
+    if ts == 0 {
+        "-".to_string()
+    } else {
+        stamp_label(ts)
+    }
+}
+
 pub(crate) fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRowData {
     let op = p
         .payload
@@ -1572,6 +1596,7 @@ pub(crate) fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRo
         } else {
             String::new()
         },
+        decided_when: decided_stamp(p),
         my_vote: if p.declined_by_me {
             2
         } else if p.approved_by_me {

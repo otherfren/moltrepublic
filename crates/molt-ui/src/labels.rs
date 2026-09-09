@@ -196,6 +196,24 @@ pub(crate) fn when_label(lang: i32, ts: u64) -> String {
     when_label_at(lang, ts, chrono::Utc::now().timestamp())
 }
 
+/// The absolute half of [`when_label`]: `2026-06-02 13:37`, local time,
+/// no relative tail. A table CELL has one line and a fixed column - the
+/// "(~20 minutes ago)" tail only elides the date away. "" = no stamp.
+pub(crate) fn stamp_label(ts: u64) -> String {
+    if ts == 0 {
+        return String::new();
+    }
+    let Ok(secs) = i64::try_from(ts) else {
+        return String::new();
+    };
+    let Some(utc) = chrono::DateTime::from_timestamp(secs, 0) else {
+        return String::new();
+    };
+    utc.with_timezone(&chrono::Local)
+        .format("%Y-%m-%d %H:%M")
+        .to_string()
+}
+
 /// [`when_label`] against an explicit "now" (testable). The relative part
 /// renders in the ACTIVE language (a cached English "(~2 days ago)" was
 /// leaking into the German UI — user report 2026-07-18).
