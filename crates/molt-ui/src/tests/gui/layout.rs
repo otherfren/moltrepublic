@@ -1391,6 +1391,11 @@ fn every_decided_votes_table_shows_the_decision_date() {
         ("files", "declined"),
         ("memory", "accepted"),
         ("memory", "denied"),
+        // the surfaces that used to list their accepted votes as gray
+        // prose lines, with no date anywhere
+        ("quests", "proposals"),
+        ("vault", "proposals"),
+        ("wallet", "status"),
     ] {
         set_decided_surface(&ui, key, view, stamp);
         assert_eq!(

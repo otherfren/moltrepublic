@@ -7335,28 +7335,15 @@ export component AppWindow inherits Window {
                                         color: Theme.faint;
                                         font-size: Theme.fs-cap;
                                     }
-                                    // an accepted vote's row keeps the 💬
-                                    // back-link into its (read-only)
-                                    // discussion; rows of unknown origin
-                                    // (legacy dumps) offer none
-                                    for l in s.log: HorizontalLayout {
-                                        spacing: 8px;
-                                        Text {
-                                            text: l.text;
-                                            color: Theme.dim;
-                                            font-size: Theme.fs-body;
-                                            wrap: word-wrap;
-                                            horizontal-stretch: 1;
-                                            vertical-alignment: center;
-                                        }
-                                        if l.patch-id >= 0: AppButton {
-                                            height: 26px * Theme.ui-scale;
-                                            pad: 8px;
-                                            emoji: "💬";
-                                            clicked => {
-                                                root.select-view("chat", "today");
-                                                root.select-channel("patch:\{l.patch-id}");
-                                            }
+                                    // the same decided-votes table the
+                                    // organization and memory outcomes use:
+                                    // a decision is a record, and a record
+                                    // names when it was decided
+                                    if s.applied-count > 0: DecisionTable {
+                                        rows: s.accepted;
+                                        discuss(id) => {
+                                            root.select-view("chat", "today");
+                                            root.select-channel("patch:\{id}");
                                         }
                                     }
                                 }
