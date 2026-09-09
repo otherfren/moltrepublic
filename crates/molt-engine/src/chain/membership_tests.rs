@@ -82,6 +82,7 @@ fn an_applied_membership_card_reports_the_block_signers() {
             payload: json!({ "op": "restore_member", "member": "dora" }),
             approvals: 0,
             state: ProposalState::Applied,
+            applied_at: 0,
             declined_at: 0,
             declined_by: String::new(),
             decliners: Vec::new(),

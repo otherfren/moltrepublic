@@ -2306,3 +2306,68 @@ fn a_rewrite_of_a_foreign_page_warns() {
         .cmd_wiki_edit(fresh, false, &molt_core::AllowWarnings::NONE, None, true)
         .expect("a free path is a create");
 }
+
+/// **The accepted card names WHEN it was decided.** The chain carries no
+/// time, so the stamp is the applying block's `Committed` envelope: on
+/// the SEALER that envelope is recorded *after* `after_block_applied`
+/// (the MLS ordering rule), so only the backfill in the `Committed` arm
+/// can stamp it; a RECEIVER takes the sender's ts, so both nodes name
+/// the same moment for the same height.
+#[test]
+fn an_applied_card_carries_the_blocks_stamp() {
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    let genesis = b.blocks.clone();
+    b.commit_applied(1, &["petra", "walter"]);
+    let block = b.blocks[1].clone();
+
+    let mut sealer = chain_peer("walter", &b, genesis.clone());
+    let _tmp = attach_storage(&mut sealer, false);
+    sealer.adopt_committed_block(block.clone(), 1);
+    let p = sealer.proposals.get(&1).cloned().expect("card");
+    assert_eq!(p.state, ProposalState::Applied);
+    let at = sealer.view(1, &p).applied_at;
+    assert!(at > 0, "the sealer stamps the block it just sealed");
+    assert_eq!(
+        Some(at),
+        sealer.chain.block_ts.get(&1).copied(),
+        "…with the block's own display stamp"
+    );
+    sealer.active.take().expect("active").handle.close(None);
+
+    let mut peer = chain_peer("petra", &b, genesis);
+    wire(&mut peer, "walter", 1, WorkspaceEvent::Committed(block));
+    let p = peer.proposals.get(&1).cloned().expect("card");
+    assert_eq!(p.state, ProposalState::Applied);
+    assert_eq!(
+        peer.view(1, &p).applied_at,
+        1_751_000_001,
+        "a receiver takes the sender's stamp"
+    );
+}
+
+/// The "decided when" stamp survives a restart. The chain is unstamped,
+/// so the sealer's own `Committed` envelope is the only durable
+/// evidence - a log-only reopen (the hard-kill shape) must rebuild the
+/// very stamp the live state showed, or the Accepted table forgets when
+/// half its rows were decided.
+#[test]
+fn a_reopen_keeps_the_apply_stamp() {
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    let (mut walter, _tmp, dir) =
+        crate::tests::stored_chain_signer(&b, "walter", &["petra", "walter", "dora"]);
+    b.commit_applied(7, &["walter", "dora"]);
+    walter.adopt_committed_block(b.blocks[1].clone(), 7);
+    let stamp = |st: &crate::State| {
+        let p = st.proposals.get(&7).cloned().expect("the applied card");
+        st.view(7, &p).applied_at
+    };
+    let live = stamp(&walter);
+    assert!(live > 0, "the sealer stamps the block it just sealed");
+
+    let back = crate::tests::reopen_chain_signer(walter, &dir, &b, "walter", false);
+    assert_eq!(
+        stamp(&back),
+        live,
+        "the log-only reopen rebuilds the same stamp"
+    );
+}

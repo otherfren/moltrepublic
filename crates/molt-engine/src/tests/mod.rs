@@ -5,7 +5,7 @@
 //! fixtures live in [`support`].
 
 mod support;
-pub(crate) use support::{plain_state, tiny_bmp_header};
+pub(crate) use support::{plain_state, reopen_chain_signer, stored_chain_signer, tiny_bmp_header};
 
 mod chat_tests;
 mod files_tests;

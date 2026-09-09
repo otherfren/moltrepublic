@@ -199,6 +199,20 @@ impl State {
         }
     }
 
+    /// D4: the applied card's DISPLAY stamp - the block's `Committed`
+    /// envelope ts, taken like `chain.block_ts` itself (the earliest seen
+    /// wins, so two holders converge on one moment). 0 = the log never
+    /// carried that envelope; the stamp stays unknown.
+    pub(crate) fn stamp_applied_at(&mut self, proposal_id: u64, at: u64) {
+        if at == 0 {
+            return;
+        }
+        if let Some(p) = self.proposals.get_mut(&proposal_id) {
+            let cur = p.applied_at;
+            p.applied_at = if cur == 0 { at } else { cur.min(at) };
+        }
+    }
+
     /// Drop the ephemeral vote bookkeeping of a DECIDED proposal id: its
     /// collected signatures (the voter set is stashed for the display
     /// first) and its registered chain change. Idempotent.
@@ -628,6 +642,11 @@ impl State {
                 }
                 self.stash_voted(*proposal_id);
                 self.chain.pending_sigs.remove(proposal_id);
+                // a peer's block was stamped by the ingest before this runs;
+                // our OWN seal records its envelope afterwards and is
+                // backfilled by the `Committed` arm
+                let at = self.chain.block_ts.get(&block.height).copied().unwrap_or(0);
+                self.stamp_applied_at(*proposal_id, at);
                 self.emit(Event::Applied {
                     id: ProposalId(*proposal_id),
                     surface: *surface,
@@ -1002,6 +1021,7 @@ impl State {
                 payload,
                 approvals: 0,
                 state: ProposalState::Proposed,
+                applied_at: 0,
                 declined_at: 0,
                 declined_by: String::new(),
                 decliners: Vec::new(),
