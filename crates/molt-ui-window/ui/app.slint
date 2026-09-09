@@ -865,7 +865,7 @@ component UploadsTable inherits Rectangle {
     in property <string> filter;
     in property <string> node-member;
     callback sort(string);
-    callback download(string);
+    callback download(string, string);
     callback persist(string);
     callback unpersist(string);
     callback delete(string);
@@ -1102,14 +1102,14 @@ component UploadsTable inherits Rectangle {
                         if (u.online || u.availability == "relay-held"
                             || u.availability == "mirrored")
                             && u.availability != "changed"
-                            && u.status-kind != 1: AppButton {
+                            && u.status-kind != 1: ou-dl := AppButton {
                             height: 28px * Theme.ui-scale;
                             pad: 10px;
                             y: (parent.height - self.height) / 2;
                             label: Strings.ou-download;
                             enabled: u.available && u.id != "";
                             clicked => {
-                                root.download(u.id);
+                                root.download(u.id, u.name);
                             }
                         }
                         if (u.availability == "changed"
@@ -1383,7 +1383,8 @@ export component AppWindow inherits Window {
     // share a file into the chat: opens the native file picker; Rust reads
     // the real metadata (name, size, type, date) — no bytes are uploaded
     callback share-pick();
-    callback download-file(string);
+    // the shared file's id and its name (the save dialog's suggestion)
+    callback download-file(string, string);
     callback remove-file(string);
     // toggle the local member's emoji reaction on a chat message, by its
     // stable id (ReactChat)
@@ -5507,7 +5508,7 @@ export component AppWindow inherits Window {
                                                             // opens the save dialog;
                                                             // the outcome toasts via
                                                             // the transfer events
-                                                            root.download-file(l.id);
+                                                            root.download-file(l.id, l.file-name);
                                                         }
                                                     }
                                                     file-remove-requested => {
@@ -6801,7 +6802,7 @@ export component AppWindow inherits Window {
                                 filter: root.ou-filter;
                                 node-member: root.node-member;
                                 sort(col) => { root.sort-uploads(col); }
-                                download(id) => { root.download-file(id); }
+                                download(id, name) => { root.download-file(id, name); }
                                 persist(id) => { root.persist-upload(id); }
                                 unpersist(id) => { root.unpersist-upload(id); }
                                 delete(id) => { root.delete-upload(id); }
@@ -6893,7 +6894,7 @@ export component AppWindow inherits Window {
                                 filter: root.ou-filter;
                                 node-member: root.node-member;
                                 sort(col) => { root.sort-uploads(col); }
-                                download(id) => { root.download-file(id); }
+                                download(id, name) => { root.download-file(id, name); }
                                 persist(id) => { root.persist-upload(id); }
                                 unpersist(id) => { root.unpersist-upload(id); }
                                 delete(id) => { root.delete-upload(id); }

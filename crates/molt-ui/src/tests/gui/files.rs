@@ -536,3 +536,52 @@ fn the_delete_button_sits_right_of_persist_and_fires_its_callback() {
     assert!(persisted.lock().expect("persisted").is_empty(), "…and persist");
 }
 
+/// **The download button hands the row's NAME over with its id** - the
+/// save dialog is pre-filled from it (`actions::chat`), and it opened
+/// empty because the callback carried the id alone. Both tables are the
+/// same component, wired twice.
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_download_button_carries_the_rows_name_in_both_tables() {
+    i_slint_backend_testing::init_no_event_loop();
+    let hex = "cc".repeat(16);
+    let row = UploadRow {
+        id: hex.as_str().into(),
+        name: "protokoll.pdf".into(),
+        user: "walter".into(),
+        available: true,
+        online: true,
+        ..UploadRow::default()
+    };
+    let ui = files_window(vec![row.clone()]);
+    // the download column is off a 1200px window (a clipped element is
+    // not in the tested tree at all)
+    ui.window().set_size(slint::PhysicalSize::new(1700, 800));
+    let asked: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = asked.clone();
+    ui.on_download_file(move |id, name| {
+        if let Ok(mut v) = sink.lock() {
+            v.push((id.to_string(), name.to_string()));
+        }
+    });
+    let button = || {
+        i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "UploadsTable::ou-dl")
+            .next()
+            .expect("the download button")
+    };
+    click(&ui, &button());
+
+    ui.set_org_persistent(ModelRc::new(VecModel::from(vec![UploadRow {
+        persistent: true,
+        ..row
+    }])));
+    ui.set_selected_view("persistent".into());
+    click(&ui, &button());
+
+    let want = (hex, "protokoll.pdf".to_string());
+    assert_eq!(
+        *asked.lock().expect("asked"),
+        vec![want.clone(), want],
+        "both tables pass the row's name beside its id"
+    );
+}

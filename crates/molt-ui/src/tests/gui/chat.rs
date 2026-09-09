@@ -356,3 +356,54 @@ fn a_decided_votes_discussion_keeps_its_decision_card() {
         card.text
     );
 }
+
+/// **A chat file card hands its file name over with the message id** -
+/// the third download site, feeding the same pre-filled save dialog.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_file_cards_click_carries_the_file_name() {
+    i_slint_backend_testing::init_no_event_loop();
+    let hex = "7a".repeat(16);
+    let ui = AppWindow::new().expect("headless window");
+    ui.window().set_size(slint::PhysicalSize::new(1400, 900));
+    ui.set_screen(AppScreen::Main);
+    ui.set_selected_surface("chat".into());
+    ui.set_selected_view("today".into());
+    ui.set_selected_channel("group".into());
+    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: "chat".into(),
+        log: ModelRc::new(VecModel::from(vec![LogLine {
+            id: hex.as_str().into(),
+            lead: "walter".into(),
+            when: "2026-09-09 13:37".into(),
+            quote: -1,
+            first: true,
+            has_file: true,
+            file_name: "protokoll.pdf".into(),
+            file_meta: "7 B · PDF · 2026-09-09".into(),
+            file_available: true,
+            patch_id: -1,
+            ..LogLine::default()
+        }])),
+        ..SurfaceTab::default()
+    }])));
+    apply_strings(&ui, 0);
+    ui.show().expect("show headless");
+
+    let asked: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = asked.clone();
+    ui.on_download_file(move |id, name| {
+        if let Ok(mut v) = sink.lock() {
+            v.push((id.to_string(), name.to_string()));
+        }
+    });
+    let card = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "ChatRow::file-ta")
+        .next()
+        .expect("the file card");
+    click(&ui, &card);
+    assert_eq!(
+        *asked.lock().expect("asked"),
+        vec![(hex, "protokoll.pdf".to_string())],
+        "the chat card passes the file name beside the message id"
+    );
+}

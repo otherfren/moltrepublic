@@ -164,7 +164,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
 
     {
         let cx = ctx.clone();
-        ui.on_download_file(move |id| {
+        ui.on_download_file(move |id, name| {
             let Ok(id) = id.parse::<MessageId>() else {
                 return; // legacy row without an id — nothing to address
             };
@@ -174,7 +174,11 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             // the destination, then the engine fetches peer-to-peer;
             // completion/failure surfaces via Event::FileTransfer
             cx.rt.spawn(async move {
-                let Some(dest) = rfd::AsyncFileDialog::new().save_file().await else {
+                let mut picker = rfd::AsyncFileDialog::new();
+                if !name.is_empty() {
+                    picker = picker.set_file_name(name.as_str());
+                }
+                let Some(dest) = picker.save_file().await else {
                     return; // cancelled
                 };
                 let cmd = Command::DownloadFile {
