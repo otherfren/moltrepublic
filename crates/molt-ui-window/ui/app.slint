@@ -7280,16 +7280,16 @@ export component AppWindow inherits Window {
                                 }
                             }
                             // the applied log: memory shows it under its own
-                            // Accepted sub-view (as the decided-votes table);
-                            // the other surfaces keep the inline prose list
-                            // under Proposals (resp. wallet Status)
+                            // Accepted sub-view, the other surfaces under
+                            // Proposals (resp. wallet Status) - one
+                            // decided-votes table for all of them
                             if s.key != "memory" || root.selected-view == "accepted": Text {
                                 text: Strings.mv-applied;
                                 color: Theme.dim;
                                 font-size: Theme.fs-cap;
                                 font-weight: 600;
                             }
-                            if s.key == "memory" && root.selected-view == "accepted": Rectangle {
+                            if s.key != "memory" || root.selected-view == "accepted": Rectangle {
                                 vertical-stretch: 1;
                                 clip: true;
                                 ma-fl := Flickable {
@@ -7321,31 +7321,6 @@ export component AppWindow inherits Window {
                                     view-h: ma-fl.height;
                                     content-h: ma-fl.viewport-height;
                                     scroll-y: ma-fl.viewport-y;
-                                }
-                            }
-                            if s.key != "memory": Rectangle {
-                                vertical-stretch: 1;
-                                clip: true;
-                                VerticalLayout {
-                                    padding: 2px;
-                                    spacing: 4px;
-                                    alignment: start;
-                                    if s.applied-count == 0: Text {
-                                        text: Strings.mv-empty-applied;
-                                        color: Theme.faint;
-                                        font-size: Theme.fs-cap;
-                                    }
-                                    // the same decided-votes table the
-                                    // organization and memory outcomes use:
-                                    // a decision is a record, and a record
-                                    // names when it was decided
-                                    if s.applied-count > 0: DecisionTable {
-                                        rows: s.accepted;
-                                        discuss(id) => {
-                                            root.select-view("chat", "today");
-                                            root.select-channel("patch:\{id}");
-                                        }
-                                    }
                                 }
                             }
                             // the applied history holds the ACCEPTED votes —
