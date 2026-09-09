@@ -213,6 +213,65 @@ fn a_persist_vote_moves_the_row_and_an_unpersist_vote_moves_it_back() {
     });
 }
 
+/// Poll until `n` shares list, returning their ids in the engine's order.
+async fn listed_shares(w: &WalletHandle, n: usize) -> Vec<String> {
+    for _ in 0..400 {
+        if let Ok(Reply::Uploads { uploads }) = w.execute(Command::ReadUploads).await {
+            if uploads.len() >= n {
+                return uploads.iter().map(|u| u.id.to_string()).collect();
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("only some of the {n} shares listed");
+}
+
+/// **Both Shared Files tables page at 15 rows, and page apart.** 16
+/// temporary and 16 persistent shares fill one page each with a second
+/// behind it; a step moves only the table it addressed.
+#[test]
+fn both_upload_tables_page_at_fifteen_rows_apart() {
+    i_slint_backend_testing::init_no_event_loop();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    let w = one_of_three();
+    let ui = AppWindow::new().expect("headless window");
+    let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+    let last: Arc<Mutex<Option<SessionSettings>>> = Arc::new(Mutex::new(None));
+
+    rt.block_on(async {
+        for i in 0..32 {
+            let f = tmp.path().join(format!("share-{i:02}.pdf"));
+            std::fs::write(&f, format!("minutes {i}").as_bytes()).expect("write the share");
+            w.execute(Command::ShareFile {
+                path: f.display().to_string(),
+                channel: ChannelRef::Group,
+            })
+            .await
+            .expect("share");
+        }
+        let ids = listed_shares(&w, 32).await;
+        // half of them get pinned by a vote (1-of-3, this seat decides)
+        for id in ids.iter().take(16) {
+            let pid = propose_files(&w, serde_json::json!({"op": "persist", "id": id})).await;
+            w.execute(Command::Approve { proposal: pid, note: None }).await.expect("approve");
+        }
+        mirror(&w, &ui, &last, &chat_ui).await;
+        assert_eq!(ui.get_org_uploads().row_count(), 15, "one page of Temporary");
+        assert_eq!(ui.get_org_persistent().row_count(), 15, "…and one of Persistent");
+        assert_eq!((ui.get_ou_page(), ui.get_ou_pages()), (1, 2));
+        assert_eq!((ui.get_op_page(), ui.get_op_pages()), (1, 2));
+
+        chat_ui.lock().expect("state").page_list_by("files", "uploads", 1);
+        mirror(&w, &ui, &last, &chat_ui).await;
+        assert_eq!(ui.get_org_uploads().row_count(), 1, "the 16th share is page 2");
+        assert_eq!((ui.get_ou_page(), ui.get_ou_pages()), (2, 2));
+        assert_eq!(ui.get_org_persistent().row_count(), 15, "the other table never moved");
+        assert_eq!(ui.get_op_page(), 1);
+    });
+}
+
 /// A Shared Files window with rows pushed straight into the models.
 #[cfg(feature = "live-preview")]
 fn files_window(rows: Vec<UploadRow>) -> AppWindow {
@@ -229,6 +288,89 @@ fn files_window(rows: Vec<UploadRow>) -> AppWindow {
     apply_strings(&ui, 0);
     ui.show().expect("show headless");
     ui
+}
+
+/// The pager rows currently on screen.
+#[cfg(feature = "live-preview")]
+fn pager_rows(ui: &AppWindow) -> Vec<i_slint_backend_testing::ElementHandle> {
+    i_slint_backend_testing::ElementHandle::find_by_element_type_name(ui, "PagerRow").collect()
+}
+
+/// The pager's › button: the rightmost of the two inside `row` (the row is
+/// centred in the pane, so its own right edge is empty space).
+#[cfg(feature = "live-preview")]
+fn pager_next(
+    ui: &AppWindow,
+    row: &i_slint_backend_testing::ElementHandle,
+) -> i_slint_backend_testing::ElementHandle {
+    let left = row.absolute_position().x;
+    let right = left + row.size().width;
+    let top = row.absolute_position().y;
+    let bottom = top + row.size().height;
+    let mut inside: Vec<i_slint_backend_testing::ElementHandle> =
+        i_slint_backend_testing::ElementHandle::find_by_element_type_name(ui, "AppButton")
+            .filter(|b| {
+                let p = b.absolute_position();
+                p.x >= left
+                    && p.x + b.size().width <= right
+                    && p.y >= top
+                    && p.y + b.size().height <= bottom
+            })
+            .collect();
+    inside.sort_by(|a, b| {
+        a.absolute_position()
+            .x
+            .partial_cmp(&b.absolute_position().x)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    inside.pop().expect("the pager's two step buttons render")
+}
+
+/// **Each uploads table carries its OWN pager.** One copied into the
+/// neighbouring view would step the wrong table, and a single page shows
+/// none at all.
+#[cfg(feature = "live-preview")]
+#[test]
+fn each_uploads_table_pages_its_own_list() {
+    i_slint_backend_testing::init_no_event_loop();
+    let row = |name: &str, persistent: bool| UploadRow {
+        id: "cc".repeat(16).into(),
+        name: name.into(),
+        persistent,
+        available: true,
+        ..UploadRow::default()
+    };
+    let ui = files_window(vec![row("protokoll.pdf", false)]);
+    ui.set_org_persistent(ModelRc::new(VecModel::from(vec![row("charta.pdf", true)])));
+    let stepped: Rc<RefCell<Vec<(String, String, i32)>>> = Rc::new(RefCell::new(Vec::new()));
+    let sink = stepped.clone();
+    ui.on_page_list(move |surface, list, delta| {
+        sink.borrow_mut().push((surface.to_string(), list.to_string(), delta));
+    });
+
+    ui.set_ou_pages(2);
+    let rows = pager_rows(&ui);
+    assert_eq!(rows.len(), 1, "Temporary over two pages: its pager, and only its");
+    click(&ui, &pager_next(&ui, &rows[0]));
+    assert_eq!(
+        stepped.borrow().as_slice(),
+        [("files".to_string(), "uploads".to_string(), 1)]
+    );
+    ui.set_ou_pages(1);
+    assert!(pager_rows(&ui).is_empty(), "a single page shows no pager");
+
+    ui.set_selected_view("persistent".into());
+    ui.set_op_pages(2);
+    stepped.borrow_mut().clear();
+    let rows = pager_rows(&ui);
+    assert_eq!(rows.len(), 1, "Persistent over two pages: its own pager");
+    click(&ui, &pager_next(&ui, &rows[0]));
+    assert_eq!(
+        stepped.borrow().as_slice(),
+        [("files".to_string(), "persistent".to_string(), 1)]
+    );
+    ui.set_op_pages(1);
+    assert!(pager_rows(&ui).is_empty(), "a single page shows no pager");
 }
 
 /// The checksum cell is an info button; a real click opens the modal on

@@ -33,7 +33,7 @@ use crate::settings::{apply_settings_fields, settings_draft_differs};
 use crate::surfaces::{
     chain_row, files_row_visible, gather_surfaces, page_of, page_slice, to_decided_row,
     to_proposal_row, ChatUiState,
-    SurfacesBundle,
+    SurfacesBundle, UploadRowData,
     LIST_PAGE_SIZE,
 };
 use crate::wiki_bridge::{patch_view_sync, wiki_export_toast};
@@ -1053,8 +1053,11 @@ pub(crate) async fn push_surfaces(
 /// and with it drop the keyboard focus out of the chat compose box mid-typing.
 pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     // a mirror that completed brings a referenced file's bytes without
-    // the wiki asking for them (wiki_files_and_images.md §3.4)
+    // the wiki asking for them (wiki_files_and_images.md §3.4) - over both
+    // FULL tables: a reference resolves off the shares, never off the page
+    // the Shared Files pane happens to show
     crate::wiki_bridge::uploads_pushed(ui, &b.uploads);
+    crate::wiki_bridge::uploads_pushed(ui, &b.persistent);
     ui.set_node_member(b.member.clone().into());
     // the poke menus need the own seat too: every site gates "never myself"
     // through Poke.can()
@@ -1357,37 +1360,42 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
             .collect()
     });
     sync_rows(&ui.get_org_members(), members, |m| ui.set_org_members(m));
-    let uploads: Vec<UploadRow> = b
-        .uploads
-        .iter()
-        .map(|u| UploadRow {
-            id: u.id.as_str().into(),
-            user: u.user.as_str().into(),
-            date: u.date.as_str().into(),
-            name: u.name.as_str().into(),
-            kind: u.kind.as_str().into(),
-            size: u.size.as_str().into(),
-            available: u.available,
-            online: u.online,
-            checksum: u.checksum.as_str().into(),
-            expires: u.expires.as_str().into(),
-            status: u.status.as_str().into(),
-            status_kind: u.status_kind,
-            availability: u.availability.as_str().into(),
-            persistent: u.persistent,
-            checksum_full: u.checksum_full.as_str().into(),
-            vote: u.vote.as_str().into(),
-            delete_vote: u.delete_vote.as_str().into(),
-            mirrors: u.mirrors,
-            mirror_held: u.mirror_held,
-            mirror_of: u.mirror_of,
-        })
-        .collect();
-    // the two Shared Files tables: the vote decides the row set
-    let (persistent, uploads): (Vec<UploadRow>, Vec<UploadRow>) =
-        uploads.into_iter().partition(|u| u.persistent);
+    let upload_row = |u: &UploadRowData| UploadRow {
+        id: u.id.as_str().into(),
+        user: u.user.as_str().into(),
+        date: u.date.as_str().into(),
+        name: u.name.as_str().into(),
+        kind: u.kind.as_str().into(),
+        size: u.size.as_str().into(),
+        available: u.available,
+        online: u.online,
+        checksum: u.checksum.as_str().into(),
+        expires: u.expires.as_str().into(),
+        status: u.status.as_str().into(),
+        status_kind: u.status_kind,
+        availability: u.availability.as_str().into(),
+        persistent: u.persistent,
+        checksum_full: u.checksum_full.as_str().into(),
+        vote: u.vote.as_str().into(),
+        delete_vote: u.delete_vote.as_str().into(),
+        mirrors: u.mirrors,
+        mirror_held: u.mirror_held,
+        mirror_of: u.mirror_of,
+    };
+    // the two Shared Files tables (the gather split them on the vote): each
+    // pages on its own, 15 rows a page like every outcome list
+    let u_page = page_of(&b.list_pages, "files", "uploads");
+    let (u_start, u_end, u_page, u_pages) = page_slice(b.uploads.len(), u_page, LIST_PAGE_SIZE);
+    let uploads: Vec<UploadRow> = b.uploads[u_start..u_end].iter().map(upload_row).collect();
+    let p_page = page_of(&b.list_pages, "files", "persistent");
+    let (p_start, p_end, p_page, p_pages) = page_slice(b.persistent.len(), p_page, LIST_PAGE_SIZE);
+    let persistent: Vec<UploadRow> = b.persistent[p_start..p_end].iter().map(upload_row).collect();
     sync_rows(&ui.get_org_persistent(), persistent, |m| ui.set_org_persistent(m));
     sync_rows(&ui.get_org_uploads(), uploads, |m| ui.set_org_uploads(m));
+    ui.set_ou_page(i32::try_from(u_page + 1).unwrap_or(1));
+    ui.set_ou_pages(i32::try_from(u_pages).unwrap_or(1));
+    ui.set_op_page(i32::try_from(p_page + 1).unwrap_or(1));
+    ui.set_op_pages(i32::try_from(p_pages).unwrap_or(1));
 
     // the tables' sort/filter echo: the headers render the ▲/▼ arrow from
     // these; the filter box only refreshes when Rust owns the change (a

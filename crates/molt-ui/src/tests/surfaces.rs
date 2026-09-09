@@ -724,6 +724,89 @@ fn a_push_re_bases_every_paged_list() {
     }
 }
 
+/// `temporary` + `persistent` uploads-table rows, mixed the way the
+/// engine's read hands them over — only the LENGTHS drive the paging, so
+/// the rows stay content-free.
+fn upload_rows(temporary: usize, persistent: usize) -> Vec<UploadRowData> {
+    (0..temporary + persistent)
+        .map(|i| {
+            let ts = u64::try_from(i).unwrap_or(0);
+            UploadRowData {
+                persistent: i >= temporary,
+                ..upload("u", "f.pdf", "", ts, ts)
+            }
+        })
+        .collect()
+}
+
+/// **The two Shared Files tables page independently.** 16 temporary and
+/// 16 persistent shares are a 2-page table each (15 rows a page), and a
+/// step on one leaves the other on its first page.
+#[test]
+fn the_two_upload_tables_page_independently() {
+    let mut st = ChatUiState::default();
+    let rows = || upload_rows(16, 16);
+    let mut pages = HashMap::new();
+    let (temporary, persistent) = st.split_uploads(rows(), &mut pages);
+    assert_eq!(temporary.len(), 16, "the persist vote decides the table");
+    assert_eq!(persistent.len(), 16);
+    assert_eq!(pages.get("files:uploads").copied(), Some(0));
+    assert_eq!(pages.get("files:persistent").copied(), Some(0));
+    assert_eq!(
+        page_slice(temporary.len(), 0, LIST_PAGE_SIZE),
+        (0, 15, 0, 2),
+        "16 rows are page 1 of 2 - the pager row shows"
+    );
+    st.page_list_by("files", "uploads", 1);
+    let mut pages = HashMap::new();
+    let _ = st.split_uploads(rows(), &mut pages);
+    assert_eq!(pages.get("files:uploads").copied(), Some(1), "the step landed");
+    assert_eq!(pages.get("files:persistent").copied(), Some(0), "…on that table only");
+}
+
+/// A push re-bases BOTH tables against their own filtered length: a
+/// needle that narrows the list to three rows kills page 2, and the clamp
+/// writes back, so the next › steps from the page on screen.
+#[test]
+fn a_push_re_bases_both_upload_tables_against_the_filtered_length() {
+    let mut st = ChatUiState::default();
+    st.page_list_by("files", "uploads", 1);
+    st.page_list_by("files", "persistent", 1);
+    let mut pages = HashMap::new();
+    let _ = st.split_uploads(upload_rows(3, 3), &mut pages);
+    assert_eq!(pages.get("files:uploads").copied(), Some(0));
+    assert_eq!(pages.get("files:persistent").copied(), Some(0));
+    st.page_list_by("files", "uploads", 1);
+    let mut pages = HashMap::new();
+    let _ = st.split_uploads(upload_rows(16, 16), &mut pages);
+    assert_eq!(
+        pages.get("files:uploads").copied(),
+        Some(1),
+        "the step moved from the visible page"
+    );
+}
+
+/// A new needle or a new sort is a NEW list: both file tables snap back to
+/// page 1. The members table's uploads-jump goes through the filter, so it
+/// lands there too.
+#[test]
+fn a_filter_or_sort_change_resets_both_upload_pages() {
+    let mut st = ChatUiState::default();
+    let g = st.generation;
+    for change in ["filter", "sort"] {
+        st.page_list_by("files", "uploads", 2);
+        st.page_list_by("files", "persistent", 2);
+        if change == "filter" {
+            st.set_uploads_filter("alice".to_string());
+        } else {
+            st.sort_uploads_by("size");
+        }
+        assert_eq!(st.clamp_list_page("files", "uploads", 100), 0, "{change}");
+        assert_eq!(st.clamp_list_page("files", "persistent", 100), 0, "{change}");
+    }
+    assert_eq!(st.generation, g + 6, "the reset rides the change's own bump");
+}
+
 /// The Shared Files nav row: shares, the screen, or a vote on record keep
 /// it - an open persist on a share that just aged out stays reachable.
 #[test]
