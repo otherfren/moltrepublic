@@ -1,9 +1,9 @@
 # Code review 2026-08-25 (security, correctness, style, refactoring)
 
-Status: ARCHIVED 2026-09-06 - the six items still marked OPEN / PARTLY
-FIXED below live on in `docs/reviews/known_debt.md`; nothing here is open
-work on its own. Was: open work only for those six items (R4, R9, M2, T10, P8, P10 - design or product calls, listed
-with their fix direction in `docs/reviews/known_debt.md`). Everything
+Status: ARCHIVED 2026-09-06 - what is still open from it is the eleven
+items `docs/reviews/known_debt.md` carries (C3, E3, R4, R9, M1, M2, T10,
+S1, F7, P8, P10 - design or product calls and residuals, each with its fix
+direction there); nothing here is open work on its own. Everything
 else landed on master: the CRITICAL/HIGH fixes the same night
 (`2714d814`..`ecf9b640`, follow-ups `5a421487`), the MEDIUM/LOW batches
 on 2026-08-26 (`ff044d38`..`afd16726`, the MCP host boundary `2cace65b`,
