@@ -833,3 +833,47 @@ fn a_restored_commit_without_a_pending_recovery_is_inert() {
     // recovery is untouched
     assert!(node.recovery.pending.contains_key("dora"));
 }
+
+/// A rejoiner adopts the chain before the day's gossip replays: a restore
+/// proposal whose block is already sealed must arrive settled, never as an
+/// open vote (field 2026-09-12: three stale "Restore seat" cards).
+#[test]
+fn a_restore_proposal_already_sealed_arrives_settled() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    let (_, anchor) = molt_net::nostr_identity(&[7u8; 16], "restore-ticket");
+    let block = b.seal(
+        1,
+        ChainChange::Membership {
+            op: MembershipOp::Restored,
+            member: "dora".to_string(),
+            identity_pk: b.pk("dora"),
+            nostr_pk: Some(anchor.clone()),
+            relays: Vec::new(),
+            consent: None,
+        },
+        &["petra", "walter"],
+    );
+    b.push(block);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    wire(
+        &mut walter,
+        "petra",
+        1,
+        WorkspaceEvent::MembershipProposed {
+            id: ProposalId(7),
+            op: MembershipOp::Restored,
+            member: "dora".to_string(),
+            identity_pk: b.pk("dora"),
+            nostr_pk: Some(anchor),
+            relays: Vec::new(),
+            consent: None,
+        },
+    );
+    let card = walter.proposals.get(&7).expect("the card exists");
+    assert_ne!(card.state, ProposalState::Proposed, "a sealed restore is no open vote");
+}

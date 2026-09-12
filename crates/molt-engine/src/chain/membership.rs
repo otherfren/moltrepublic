@@ -186,6 +186,26 @@ impl State {
             return;
         }
         self.next_id = self.next_id.max(id.saturating_add(1));
+        // a rejoiner adopts the chain before the day's gossip replays: a
+        // restore already sealed settles its card instead of opening a vote,
+        // and stays out of proposal_changes, where R3 would read it as a
+        // re-admission still pending
+        if self.restore_sealed(&change) {
+            let open = match self.proposals.get_mut(&id) {
+                Some(p) if p.state == ProposalState::Proposed => {
+                    p.state = ProposalState::Applied;
+                    true
+                }
+                _ => false,
+            };
+            if open {
+                self.emit(Event::Applied {
+                    id: ProposalId(id),
+                    surface: Surface::Organization,
+                });
+            }
+            return;
+        }
         self.chain.proposal_changes.insert(id, change);
         // L2: signatures that OUTRAN this change become displayable now
         self.reverify_pending(id);
@@ -517,6 +537,32 @@ impl State {
             approved: approved.into_iter().collect(),
             to: nostr_pk.clone(),
         })
+    }
+
+    /// Whether `change` is a `Restored` whose block this chain already
+    /// sealed: same seat, same new anchor (the anchor is unique per restore).
+    fn restore_sealed(&self, change: &ChainChange) -> bool {
+        let ChainChange::Membership {
+            op: MembershipOp::Restored,
+            member,
+            nostr_pk: Some(pk),
+            ..
+        } = change
+        else {
+            return false;
+        };
+        self.chain.blocks.iter().any(|b| {
+            matches!(&b.change, ChainChange::Membership {
+                op: MembershipOp::Restored,
+                member: m,
+                nostr_pk: Some(a),
+                ..
+            } if m == member && a == pk)
+        }) || self
+            .chain
+            .checkpoint_blob
+            .as_ref()
+            .is_some_and(|blob| blob.anchors.iter().any(|(m, a)| m == member && a == pk))
     }
 
     /// Whether `pk` was EVER a seat's transport anchor in this republic —
