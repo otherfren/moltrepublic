@@ -898,7 +898,10 @@ async fn recovery_rejoin(
         .inbox()
         .await
         .map_err(|e| format!("recovery inbox subscribe: {e}"))?;
-    if !inbox.live_state(LIVE_WAIT).await.any() {
+    // the run's one deadline, not LIVE_WAIT: an onion relay over Tor can
+    // take longer to replay (field 2026-09-12)
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if !inbox.live_state(remaining).await.any() {
         return Err(
             "the recovery inbox is not readable on any relay".to_string(),
         );
@@ -1075,7 +1078,8 @@ async fn recovery_rejoin(
         .subscribe()
         .await
         .map_err(|e| format!("group subscribe: {e}"))?;
-    if !sub.live_state(LIVE_WAIT).await.any() {
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if !sub.live_state(remaining).await.any() {
         return Err(
             "the group channel is not readable on any relay - the chain cannot be \
              fetched"
