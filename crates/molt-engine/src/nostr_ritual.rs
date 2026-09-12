@@ -31,6 +31,9 @@ use crate::Envelope;
 const RECV_SLICE: Duration = Duration::from_secs(30);
 /// Best-effort EOSE wait after placing a subscription.
 const LIVE_WAIT: Duration = Duration::from_secs(10);
+/// A ritual's group-channel replay (founder and joiner): an onion relay over
+/// Tor replays a busy channel for longer than `LIVE_WAIT` (field 2026-09-12).
+const REPLAY_WAIT: Duration = Duration::from_secs(120);
 
 /// What the founder inbox task needs to render one seat's v2 link.
 pub(crate) struct SeatInvite {
@@ -688,7 +691,7 @@ pub(crate) fn spawn_founder_group_recv(
         };
         // this gate was MISSING entirely: a founder whose 445 subscription
         // never replays waits forever for Signed frames that can never arrive
-        let st = sub.live_state(LIVE_WAIT).await;
+        let st = sub.live_state(REPLAY_WAIT).await;
         if !st.any() {
             let _ = send_cmd(
                 &tx,
@@ -1312,7 +1315,7 @@ impl NostrLeg {
             .subscribe()
             .await
             .map_err(|e| format!("group subscribe: {e}"))?;
-        let st = sub.live_state(LIVE_WAIT).await;
+        let st = sub.live_state(REPLAY_WAIT).await;
         if !st.any() {
             return Err("the group channel is not readable on any relay".to_string());
         }

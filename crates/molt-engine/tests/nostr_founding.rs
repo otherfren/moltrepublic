@@ -18,6 +18,8 @@ use molt_core::{Command, GroupConfig, Reply, SessionSettings, SessionView, Works
 use molt_engine::WalletHandle;
 use nostr_relay_builder::MockRelay;
 
+mod common;
+
 async fn read_session(w: &WalletHandle) -> Box<SessionView> {
     match w.execute(Command::ReadSession).await.expect("read session") {
         Reply::Session(s) => s,
@@ -28,7 +30,16 @@ async fn read_session(w: &WalletHandle) -> Box<SessionView> {
 /// Poll the session until `pred` holds — the same no-event-bus pattern every
 /// engine test uses.
 async fn wait_for(w: &WalletHandle, what: &str, pred: impl Fn(&SessionView) -> bool) -> Box<SessionView> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    wait_for_secs(w, what, 30, pred).await
+}
+
+async fn wait_for_secs(
+    w: &WalletHandle,
+    what: &str,
+    secs: u64,
+    pred: impl Fn(&SessionView) -> bool,
+) -> Box<SessionView> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
     loop {
         let s = read_session(w).await;
         if pred(&s) {
@@ -2102,4 +2113,54 @@ async fn the_feature_set_is_bound_into_what_every_member_signs() {
         molt_engine::verify_chain(&forged).is_err(),
         "stripping the selection down to the v4 shape must not verify either"
     );
+}
+
+/// **Field failure 2026-09-12, the join twin:** the joiner's group channel
+/// got a flat 10 s to replay, too short for an onion relay over Tor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_join_over_a_slowly_replaying_relay_still_reaches_the_charter() {
+    let slow = common::SlowReplay::new(&[445]);
+    let (_relay, url) = common::slow_relay(&slow).await;
+    let tmp = tempfile::tempdir().expect("tmp");
+
+    let a = engine(&tmp.path().join("founder"));
+    adopt_relay(&a, &url).await;
+    a.execute(Command::CreateStart {
+        name: "Chess Club".to_string(),
+        member: "walter".to_string(),
+        threshold: 2,
+        members: 2,
+        relays: Vec::new(),
+    })
+    .await
+    .expect("founding starts");
+    let s = wait_for(&a, "the seat link to become joinable", |s| {
+        !s.create.seats.is_empty()
+            && molt_engine::FoundingInvite::parse(&s.create.seats[0].link).is_ok()
+    })
+    .await;
+    let link = s.create.seats[0].link.clone();
+
+    let b = engine(&tmp.path().join("joiner"));
+    adopt_relay(&b, &url).await;
+    slow.arm();
+    b.execute(Command::JoinStart {
+        invite: link,
+        member: "petra".to_string(),
+    })
+    .await
+    .expect("join starts");
+    wait_for_secs(&a, "the founder to accept petra's join", 60, |s| s.create.can_propose).await;
+    a.execute(Command::CreatePropose {
+        name: "Chess Club".to_string(),
+        agenda: "play chess, decide together".to_string(),
+        features: vec!["memory".to_string()],
+    })
+    .await
+    .expect("charter proposed");
+    let s = wait_for_secs(&b, "petra to see the charter or fail", 120, |s| {
+        s.join.awaiting_ratify || s.join.run.outcome == 2
+    })
+    .await;
+    assert!(s.join.awaiting_ratify, "the join failed: {:?}", s.join.run.log);
 }

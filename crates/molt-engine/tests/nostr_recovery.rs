@@ -15,6 +15,8 @@ use molt_core::{Command, GroupConfig, Reply, SessionSettings, SessionView};
 use molt_engine::WalletHandle;
 use nostr_relay_builder::MockRelay;
 
+mod common;
+
 async fn read_session(w: &WalletHandle) -> Box<SessionView> {
     match w.execute(Command::ReadSession).await.expect("read session") {
         Reply::Session(s) => s,
@@ -1534,50 +1536,13 @@ async fn a_three_member_reattach_leaves_everyone_talking() {
     }
 }
 
-/// Holds every 445/1059 REQ once armed: an onion relay over Tor replaying a
-/// busy day's backlog.
-#[derive(Debug, Clone)]
-struct SlowReplay(std::sync::Arc<std::sync::atomic::AtomicBool>);
-
-impl nostr_relay_builder::builder::QueryPolicy for SlowReplay {
-    fn admit_query<'a>(
-        &'a self,
-        query: &'a nostr_relay_builder::prelude::Filter,
-        _addr: &'a std::net::SocketAddr,
-    ) -> nostr_relay_builder::prelude::BoxedFuture<'a, nostr_relay_builder::builder::PolicyResult>
-    {
-        Box::pin(async move {
-            let slow = query
-                .kinds
-                .as_ref()
-                .is_some_and(|ks| ks.iter().any(|k| matches!(k.as_u16(), 445 | 1059)));
-            if slow && self.0.load(std::sync::atomic::Ordering::SeqCst) {
-                // past the 10 s the rejoiner's gates used to allow
-                tokio::time::sleep(Duration::from_secs(12)).await;
-            }
-            nostr_relay_builder::builder::PolicyResult::Accept
-        })
-    }
-}
-
 /// **Field failure 2026-09-12:** the rejoiner gave a relay a flat 10 s to
 /// replay; over Tor the group channel took longer, and the run died after
 /// the Welcome with the seat already re-keyed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_rejoin_over_a_slowly_replaying_relay_still_comes_back() {
-    use nostr_relay_builder::prelude::{MemoryDatabase, MemoryDatabaseOptions};
-    let slow = SlowReplay(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
-    let db = std::sync::Arc::new(MemoryDatabase::with_opts(MemoryDatabaseOptions {
-        events: true,
-        max_events: None,
-    }));
-    let relay = nostr_relay_builder::LocalRelay::new(
-        nostr_relay_builder::builder::RelayBuilder::default()
-            .database(db)
-            .query_policy(slow.clone()),
-    );
-    relay.run().await.expect("relay runs");
-    let url = relay.url().await.to_string();
+    let slow = common::SlowReplay::new(&[445, 1059]);
+    let (_relay, url) = common::slow_relay(&slow).await;
     let tmp = tempfile::tempdir().expect("tmp");
     let (a, b, petra_phrase, _) = found_republic(tmp.path(), &url, 2).await;
     drop(b);
@@ -1599,7 +1564,7 @@ async fn a_rejoin_over_a_slowly_replaying_relay_still_comes_back() {
 
     let c = engine(&tmp.path().join("rejoiner"));
     adopt_relay(&c, &url).await;
-    slow.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    slow.arm();
     c.execute(Command::RecoverStart {
         link,
         phrase: petra_phrase,

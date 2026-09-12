@@ -257,3 +257,63 @@ pub async fn found_with_mesh(
     assert!(!id.is_empty(), "the founded workspace is active");
     (a, hub, member_mesh, member_mls, id)
 }
+
+/// Holds every REQ for one of `kinds` for 12 s once armed: an onion relay
+/// over Tor replaying a busy channel (field 2026-09-12). 12 s is past the
+/// 10 s the ritual gates once allowed.
+#[derive(Debug, Clone)]
+pub struct SlowReplay {
+    armed: Arc<std::sync::atomic::AtomicBool>,
+    kinds: &'static [u16],
+}
+
+impl SlowReplay {
+    pub fn new(kinds: &'static [u16]) -> Self {
+        Self {
+            armed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            kinds,
+        }
+    }
+
+    pub fn arm(&self) {
+        self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl nostr_relay_builder::builder::QueryPolicy for SlowReplay {
+    fn admit_query<'a>(
+        &'a self,
+        query: &'a nostr_relay_builder::prelude::Filter,
+        _addr: &'a std::net::SocketAddr,
+    ) -> nostr_relay_builder::prelude::BoxedFuture<'a, nostr_relay_builder::builder::PolicyResult>
+    {
+        Box::pin(async move {
+            let slow = query
+                .kinds
+                .as_ref()
+                .is_some_and(|ks| ks.iter().any(|k| self.kinds.contains(&k.as_u16())));
+            if slow && self.armed.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_secs(12)).await;
+            }
+            nostr_relay_builder::builder::PolicyResult::Accept
+        })
+    }
+}
+
+/// A relay that stores events (a late subscriber is served the history),
+/// behind `slow`. Keep the relay alive for the test's lifetime.
+pub async fn slow_relay(slow: &SlowReplay) -> (nostr_relay_builder::LocalRelay, String) {
+    use nostr_relay_builder::prelude::{MemoryDatabase, MemoryDatabaseOptions};
+    let db = Arc::new(MemoryDatabase::with_opts(MemoryDatabaseOptions {
+        events: true,
+        max_events: None,
+    }));
+    let relay = nostr_relay_builder::LocalRelay::new(
+        nostr_relay_builder::builder::RelayBuilder::default()
+            .database(db)
+            .query_policy(slow.clone()),
+    );
+    relay.run().await.expect("relay runs");
+    let url = relay.url().await.to_string();
+    (relay, url)
+}
