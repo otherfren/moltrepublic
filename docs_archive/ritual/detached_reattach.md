@@ -121,7 +121,8 @@ anchors actually addressed. Keystone:
 A member that missed a re-key commit is deaf both ways and does not know
 it. The deaf-node signature is detected in `apply_group_health`: the OWN
 outbox stalls (`net_send_stuck` — nobody acks) while unopenable frames
-arrive (`opaque_frames`); a healthy rejoiner counting a laggard's stale
+arrive (`live_opaque`: stamped after the subscription opened, so a
+rejoiner's replayed history never counts - 2026-09-12); a healthy rejoiner counting a laggard's stale
 frames never stalls, so it never triggers. The heal is the ordinary
 self-service reattach, **capped at 3 per session and spaced 10 min**
 (`maybe_self_heal_reattach`) — two devices restoring the same seat must

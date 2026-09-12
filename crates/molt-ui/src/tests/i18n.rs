@@ -64,11 +64,11 @@ fn e6_maps_render_german_and_keep_tails() {
     };
     // net reason: compound parts — member, count and free tail survive
     let r = "link to walter: connecting; sends to mara: io: broken pipe; \
-             relays: no relay accepted the subscription; 3 frames past the key ring";
+             relays: no relay accepted the subscription; catching up; 3 new messages unreadable";
     assert_eq!(
         localize_net_reason(1, r),
         "Verbindung zu walter: verbinde; Zustellung an mara: io: broken pipe; \
-         Relays: kein Relay nahm die Subscription an; 3 Frames jenseits des Schlüsselrings"
+         Relays: kein Relay nahm die Subscription an; holt Verlauf nach; 3 neue Nachrichten nicht lesbar"
     );
     assert_eq!(localize_net_reason(0, r), r);
     assert_eq!(

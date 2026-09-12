@@ -132,6 +132,11 @@ fn classify_process_error<E: std::fmt::Debug>(e: ProcessMessageError<E>) -> MlsE
         ProcessMessageError::ValidationError(ValidationError::CannotDecryptOwnMessage) => {
             MlsError::OwnEcho
         }
+        // a commit from before the prior epoch, replayed by the relay's day
+        // window: `decrypt_at` already routed anything AHEAD of us
+        ProcessMessageError::ValidationError(ValidationError::WrongEpoch) => {
+            MlsError::Stale("past epoch")
+        }
         e => MlsError::Wire(format!("processing message: {e:?}")),
     }
 }
@@ -1665,6 +1670,38 @@ mod tests {
     /// [`the_evicted_leaf_cannot_speak_after_the_rekey`]), so forward secrecy
     /// wins. A delayed pre-re-key message is dropped — chat is ephemeral and
     /// chain blocks have catch-up.
+    /// A commit replayed from before the prior epoch (the relay's day window
+    /// after two re-keys) is stale, not a wire error.
+    #[test]
+    fn a_replayed_commit_two_epochs_back_is_stale() {
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        let bob = MlsMember::new(&key(2), "bob").expect("bob");
+        let cara = MlsMember::new(&key(3), "cara").expect("cara");
+        founder.create_group().expect("create");
+        let welcome = founder
+            .add_members(&[
+                bob.key_package().expect("bob kp"),
+                cara.key_package().expect("cara kp"),
+            ])
+            .expect("add")
+            .expect("welcome");
+        let mut bob = bob;
+        bob.join_from_welcome(&welcome).expect("bob joins");
+        let fresh = |n: &str| MlsMember::new(&key(3), n).expect("fresh cara");
+        let (first, _) = founder
+            .restore_member("cara", &fresh("cara").key_package().expect("kp"), NO_CARRIER_STAMP)
+            .expect("first re-key");
+        bob.decrypt(&first).expect("bob merges the first");
+        let (second, _) = founder
+            .restore_member("cara", &fresh("cara").key_package().expect("kp"), NO_CARRIER_STAMP)
+            .expect("second re-key");
+        bob.decrypt(&second).expect("bob merges the second");
+        match bob.decrypt(&first) {
+            Err(MlsError::Stale(_)) => {}
+            other => panic!("expected Stale, got {other:?}"),
+        }
+    }
+
     #[test]
     fn an_old_epoch_message_is_rejected_after_a_rekey() {
         let mut founder = MlsMember::new(&key(1), "founder").expect("founder");

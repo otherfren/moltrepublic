@@ -411,6 +411,11 @@ pub struct Subscription {
 }
 
 impl Subscription {
+    /// Whether at least one relay finished its stored-events replay, now.
+    pub fn replayed(&self) -> bool {
+        *self.eose.borrow() > 0
+    }
+
     /// The next deduplicated event, or `None` if nothing arrived within
     /// `timeout` (also `None` once every reader has ended and the buffer is
     /// drained).

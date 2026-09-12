@@ -764,6 +764,11 @@ impl std::fmt::Debug for GroupSub {
 }
 
 impl GroupSub {
+    /// Whether the live subscription's stored-events replay has finished.
+    pub fn replayed(&self) -> bool {
+        self.sub.replayed()
+    }
+
     /// Best-effort replay gate, like [`RitualInbox::live`].
     pub async fn live(&mut self, timeout: Duration) -> bool {
         self.sub.synced(timeout).await

@@ -471,7 +471,12 @@ Resolution — split the two secrets explicitly:
   the ring, old-epoch events are epoch-opaque and must be reported loudly (G4)
   rather than silently skipped. The ACK/rewind layer — not the subscription —
   remains the guarantee: a laggard rejoining across a commit gets everything
-  it is still owed via fresh resends at the current epoch.
+  it is still owed via fresh resends at the current epoch. *Clarified
+  2026-09-12:* "loudly" means LIVE frames (stamped after the subscription
+  opened) that no held key opens (`GroupHealth::live_opaque`, "N new messages
+  unreadable"). Opaque frames of the first replay are counted in the log
+  only: the resends above cover what is owed, and a rejoiner never held keys
+  for its day window. The first replay itself reads as "catching up".
 
 Everything else from the 2026-07-28 work stays and mostly gets simpler:
 

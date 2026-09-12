@@ -49,6 +49,9 @@ const RESEND_MAX_BACKOFF_SECS: u64 = 600;
 /// resends keep going at the cap.
 const RESEND_GIVEUP_ROUNDS: u32 = 8;
 
+/// Clock skew a live frame's stamp may carry against our subscription start.
+const LIVE_SKEW_SECS: u64 = 120;
+
 /// Control frames awaiting publication before further ones are dropped:
 /// a paged mirror status must fit whole (mirroring §3.4), a poke is worth
 /// one attempt anyway.
@@ -111,6 +114,12 @@ pub struct GroupHealth {
     /// the loss is permanent, and silence about it is the dishonesty §10.4
     /// (G4) names.
     pub opaque_frames: u64,
+    /// Of `opaque_frames`, those stamped after the subscription opened: live
+    /// traffic this seat cannot read. Older ones are history it never held
+    /// keys for (a rejoiner's day window), not a loss.
+    pub live_opaque: u64,
+    /// The subscription's first stored-events replay has not finished.
+    pub catching_up: bool,
 }
 
 /// A running group runtime.
@@ -1065,12 +1074,22 @@ async fn outbox_loop<L, S, K>(
             }
         };
         let report = stall.round_granted();
-        tracing::warn!(
-            floor = f,
-            cursor,
-            attempt = stall.rounds_without_progress,
-            "unacknowledged deliveries — re-offering the tail"
-        );
+        // routine until the give-up count; from there on it is the loud one
+        if stall.rounds_without_progress >= RESEND_GIVEUP_ROUNDS {
+            tracing::warn!(
+                floor = f,
+                cursor,
+                attempt = stall.rounds_without_progress,
+                "unacknowledged deliveries — re-offering the tail"
+            );
+        } else {
+            tracing::info!(
+                floor = f,
+                cursor,
+                attempt = stall.rounds_without_progress,
+                "unacknowledged deliveries — re-offering the tail"
+            );
+        }
         if report {
             for m in &cfg.members {
                 sink.send_failed(m, "not acknowledging deliveries - still resending")
@@ -1375,8 +1394,8 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
 
 /// Re-offer every held frame after an epoch advance, **in hold order**, and
 /// repeatedly while progress is made — a held commit can unlock further held
-/// frames, so one pass is not enough. Returns how many stayed permanently
-/// unreadable, for the operator counter.
+/// frames, so one pass is not enough. Returns the stamps of the frames that
+/// stayed permanently unreadable, for the operator counters.
 ///
 /// Each frame is retried at its ORIGINAL `created_at`: that stamp is half of
 /// the `CommitKey` both ends must agree on, and re-stamping it here with the
@@ -1395,11 +1414,11 @@ async fn retry_epoch_hold<L: OutboxLog, S: StateStore, K: EngineSink>(
     me: &MemberId,
     seen: &mut SeenCiphertexts,
     hold: &mut Vec<(String, u64)>,
-) -> Result<u64, ()> {
+) -> Result<Vec<u64>, ()> {
     let mut ingest = GroupHeldIngest { mls, log, store, sink, me, seen };
     crate::epoch_hold::drain_until_no_progress(hold, &mut ingest)
         .await
-        .map(|lost| u64::try_from(lost.len()).unwrap_or(u64::MAX))
+        .map(|lost| lost.into_iter().map(|(_, at)| at).collect())
 }
 
 /// How the 445 inbox ingests one held frame (the group runtime's half of
@@ -1460,14 +1479,21 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
                 subscribed: false,
                 deaf: Some(e.to_string()),
                 opaque_frames: 0,
+                live_opaque: 0,
+                catching_up: false,
             });
             return;
         }
     };
+    // an opaque frame stamped before this is history, not a live loss
+    let opened_at = crate::ritual_net::now_secs();
+    let live = |at: u64| at.saturating_add(LIVE_SKEW_SECS) >= opened_at;
     let mut state = GroupHealth {
         subscribed: true,
         deaf: None,
         opaque_frames: 0,
+        live_opaque: 0,
+        catching_up: true,
     };
     let _ = health.send(state.clone());
     // frames whose commit has not arrived yet — see `retry_epoch_hold`
@@ -1475,6 +1501,10 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
     // exact-duplicate turnaround (relay re-deliveries) — runtime-only
     let mut seen = SeenCiphertexts::new();
     loop {
+        if state.catching_up && sub.replayed() {
+            state.catching_up = false;
+            let _ = health.send(state.clone());
+        }
         let recv = tokio::select! {
             r = sub.recv(RECV_SLICE) => r,
             _ = stop.changed() => return,
@@ -1500,13 +1530,16 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
                             // stale frames must not crowd out the one
                             // commit that would heal this node
                             // (detached_reattach.md §2.4)
-                            hold.remove(0);
+                            let (_, at) = hold.remove(0);
                             state.opaque_frames += 1;
+                            if live(at) {
+                                state.live_opaque += 1;
+                            }
                             let _ = health.send(state.clone());
                             // sampled: a backlog storm otherwise logs per
                             // frame, several times a second, for minutes
                             if state.opaque_frames % 256 == 1 {
-                                tracing::warn!(
+                                tracing::debug!(
                                     held = hold.len(),
                                     dropped = state.opaque_frames,
                                     "epoch hold is full — evicting oldest unopenable frames (sampled)"
@@ -1523,9 +1556,11 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
                         }
                         match retry_epoch_hold(&mls, &log, &store, &sink, &me, &mut seen, &mut hold).await {
                             Err(()) => return,
-                            Ok(0) => {}
+                            Ok(lost) if lost.is_empty() => {}
                             Ok(lost) => {
-                                state.opaque_frames += lost;
+                                let n = |k: usize| u64::try_from(k).unwrap_or(u64::MAX);
+                                state.opaque_frames += n(lost.len());
+                                state.live_opaque += n(lost.iter().filter(|at| live(**at)).count());
                                 let _ = health.send(state.clone());
                             }
                         }
@@ -1892,6 +1927,23 @@ mod tests {
     /// counter and silence here would read as delivery.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_frame_still_opaque_after_the_advance_is_counted_as_lost() {
+        let h = one_opaque_frame(false).await;
+        assert!(h.live_opaque >= 1, "a frame stamped after the subscription opened is a live loss");
+    }
+
+    /// A rejoiner's day window: an opaque frame stamped before the
+    /// subscription opened is history this seat never held keys for -
+    /// counted, but not a live loss.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_opaque_frame_from_before_the_subscription_is_history() {
+        let h = one_opaque_frame(true).await;
+        assert_eq!(h.live_opaque, 0, "history is not a live loss");
+    }
+
+    /// Bob's runtime meets one frame no epoch opens, then the commit whose
+    /// retry proves it lost; `historic` publishes that frame before bob
+    /// subscribes, stamped ten minutes back.
+    async fn one_opaque_frame(historic: bool) -> GroupHealth {
         use crate::mls::MlsMember;
         use ed25519_dalek::SigningKey;
         use nostr_relay_builder::MockRelay;
@@ -1951,6 +2003,12 @@ mod tests {
             })
             .expect("commit frame");
 
+        if historic {
+            alice_chan
+                .publish_frame_at(&[9u8; 32], &[0x5au8; 64], crate::ritual_net::now_secs() - 600)
+                .await
+                .expect("publish the historic alien frame");
+        }
         let sink = Sink::default();
         let (_wake, wake_rx) = watch::channel(0u64);
         let (health_tx, mut health_rx) = watch::channel(GroupHealth::default());
@@ -1970,10 +2028,12 @@ mod tests {
 
         // a frame under an exporter NO group epoch ever derives: unopenable
         // now, unopenable after any advance — the laggard-past-the-ring shape
-        alice_chan
-            .publish_frame(&[9u8; 32], &[0x5au8; 64])
-            .await
-            .expect("publish the alien frame");
+        if !historic {
+            alice_chan
+                .publish_frame(&[9u8; 32], &[0x5au8; 64])
+                .await
+                .expect("publish the alien frame");
+        }
         tokio::time::sleep(std::time::Duration::from_millis(600)).await;
         // …then the commit that advances bob's epoch and triggers the retry
         alice_chan
@@ -1990,6 +2050,71 @@ mod tests {
                 tokio::time::Instant::now() < deadline,
                 "the permanently opaque frame was never counted as lost"
             );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let h = health_rx.borrow().clone();
+        handle.shutdown().await;
+        h
+    }
+
+    /// The first replay reads as catching up until the relay is through it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_first_replay_reads_as_catching_up_until_the_relay_is_through() {
+        use nostr_relay_builder::builder::{PolicyResult, QueryPolicy, RelayBuilder};
+        use nostr_relay_builder::prelude::{BoxedFuture, Filter};
+
+        #[derive(Debug)]
+        struct SlowReq;
+        impl QueryPolicy for SlowReq {
+            fn admit_query<'a>(
+                &'a self,
+                _query: &'a Filter,
+                _addr: &'a std::net::SocketAddr,
+            ) -> BoxedFuture<'a, PolicyResult> {
+                Box::pin(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    PolicyResult::Accept
+                })
+            }
+        }
+        #[derive(Clone)]
+        struct Sink;
+        impl EngineSink for Sink {
+            async fn deliver(
+                &self,
+                _from: &MemberId,
+                _env: molt_core::EventEnvelope,
+            ) -> Result<(), crate::NetError> {
+                Ok(())
+            }
+            async fn peer_seen(&self, _m: &MemberId) {}
+            async fn send_failed(&self, _m: &MemberId, _r: &str) {}
+        }
+
+        let relay = nostr_relay_builder::LocalRelay::new(RelayBuilder::default().query_policy(SlowReq));
+        relay.run().await.expect("relay");
+        let url = relay.url().await.to_string();
+        let mut alice = crate::mls::MlsMember::new(&ed25519_dalek::SigningKey::from_bytes(&[1; 32]), "alice")
+            .expect("alice");
+        alice.create_group().expect("group");
+        let (_wake, wake_rx) = watch::channel(0u64);
+        let (health_tx, mut health_rx) = watch::channel(GroupHealth::default());
+        let chan = crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![url], [7u8; 32]);
+        let handle = spawn_group(
+            chan,
+            MlsChannel::new(alice),
+            GroupNetConfig::fast("alice".into(), Vec::new()),
+            crate::MemLog::default(),
+            crate::MemStateStore::default(),
+            Sink,
+            wake_rx,
+            health_tx,
+        );
+        health_rx.changed().await.expect("the first health report");
+        assert!(health_rx.borrow_and_update().catching_up, "a fresh subscription is catching up");
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+        while health_rx.borrow_and_update().catching_up {
+            assert!(tokio::time::Instant::now() < deadline, "the replay never finished");
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
         handle.shutdown().await;

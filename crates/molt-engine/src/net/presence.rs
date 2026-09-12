@@ -225,19 +225,22 @@ impl State {
             if let Some(why) = h.deaf {
                 parts.push(format!("relays: {why}"));
             }
-            if h.opaque_frames > 0 {
-                // G4 (N5.4): older than the exporter ring is unreadable BY
-                // CONSTRUCTION — a permanent, named loss, never silence
-                parts.push(format!("{} frames past the key ring", h.opaque_frames));
+            if h.catching_up {
+                parts.push("catching up".to_string());
+            }
+            if h.live_opaque > 0 {
+                // G4 (N5.4): LIVE traffic no held key opens is a named loss;
+                // a rejoiner's replayed day window is history, not trouble
+                parts.push(format!("{} new messages unreadable", h.live_opaque));
             }
             // a stuck broadcast outbox names no peer — the channel is the
             // trouble, so its reason joins the channel verdict
             parts.extend(self.delivery.send_stuck.values().cloned());
             // SELF-HEAL (detached_reattach.md §2.4): the deaf-node signature
-            // — the OWN outbox stalls (nobody acks) while frames arrive that
-            // no held key opens. A healthy rejoiner counting a laggard's
-            // stale frames never stalls, so it never triggers.
-            if !self.delivery.send_stuck.is_empty() && h.opaque_frames > 0 {
+            // — the OWN outbox stalls (nobody acks) while LIVE frames arrive
+            // that no held key opens. A rejoiner's history never counts, so
+            // an offline peer cannot talk it into re-keying itself.
+            if !self.delivery.send_stuck.is_empty() && h.live_opaque > 0 {
                 self.maybe_self_heal_reattach();
             }
             if parts.is_empty() {

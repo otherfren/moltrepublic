@@ -147,42 +147,49 @@ fn a_seat_silent_past_the_coarse_window_goes_dark_again() {
     );
 }
 
-/// N5.4 (G4 epoch-ring honesty) + N5.5: on a Nostr workspace the health
-/// verdict is the GROUP CHANNEL's — relays, not members. A deaf channel
-/// degrades with the relay reason; frames past the exporter ring are a
-/// PERMANENT, named loss; a dead subscription is Down; a healthy
-/// channel is an honest Ok again.
+/// N5.4 + N5.5: on a Nostr workspace the health verdict is the GROUP
+/// CHANNEL's — relays, not members. A deaf channel degrades with the relay
+/// reason; the first replay reads as catching up; only LIVE unreadable
+/// frames are a loss (a rejoiner's day window is history, not trouble); a
+/// dead subscription is Down; a healthy channel is an honest Ok again.
 #[test]
-fn group_channel_health_names_relays_and_ring_losses() {
+fn group_channel_health_names_relays_live_losses_and_catch_up() {
     let mut st = presence_fixture();
-    let h = |subscribed: bool, deaf: Option<&str>, opaque: u64| {
+    let h = |deaf: Option<&str>, opaque: u64, live: u64, catching_up: bool| {
         molt_net::group_runtime::GroupHealth {
-            subscribed,
+            subscribed: true,
             deaf: deaf.map(|s| s.to_string()),
             opaque_frames: opaque,
+            live_opaque: live,
+            catching_up,
         }
     };
-    st.apply_group_health(h(true, Some("relay ws://r refused the sub"), 0));
+    st.apply_group_health(h(Some("relay ws://r refused the sub"), 0, 0, false));
     match &st.session.net_health {
         molt_core::NetHealth::Degraded { reason } => {
             assert!(reason.contains("relay"), "names the relay trouble: {reason}");
         }
         other => panic!("deaf must degrade, got {other:?}"),
     }
-    // the deafness heals — honest Ok again
-    st.apply_group_health(h(true, None, 0));
+    st.apply_group_health(h(None, 0, 0, false));
     assert_eq!(st.session.net_health, molt_core::NetHealth::Ok);
-    // G4: a frame older than the exporter ring is unreadable BY
-    // CONSTRUCTION — a named permanent loss, never silence
-    st.apply_group_health(h(true, None, 3));
+    st.apply_group_health(h(None, 0, 0, true));
     match &st.session.net_health {
-        molt_core::NetHealth::Degraded { reason } => {
-            assert!(reason.contains('3') && reason.contains("key ring"), "{reason}");
-        }
-        other => panic!("ring losses must be loud, got {other:?}"),
+        molt_core::NetHealth::Degraded { reason } => assert_eq!(reason, "catching up"),
+        other => panic!("the first replay reads as catching up, got {other:?}"),
     }
-    // a dead subscription cannot heal itself — Down, not Degraded
-    st.apply_group_health(h(false, Some("subscribe: connection refused"), 0));
+    st.apply_group_health(h(None, 4249, 0, false));
+    assert_eq!(st.session.net_health, molt_core::NetHealth::Ok, "history is not a loss");
+    st.apply_group_health(h(None, 4252, 3, false));
+    match &st.session.net_health {
+        molt_core::NetHealth::Degraded { reason } => assert_eq!(reason, "3 new messages unreadable"),
+        other => panic!("live losses must be loud, got {other:?}"),
+    }
+    st.apply_group_health(molt_net::group_runtime::GroupHealth {
+        subscribed: false,
+        deaf: Some("subscribe: connection refused".to_string()),
+        ..Default::default()
+    });
     assert!(
         matches!(st.session.net_health, molt_core::NetHealth::Down { .. }),
         "a dead inbox is Down: {:?}",
@@ -199,8 +206,7 @@ fn a_stuck_group_outbox_joins_the_channel_verdict() {
         .insert("ada".to_string(), "no relay accepted the frame".to_string());
     st.apply_group_health(molt_net::group_runtime::GroupHealth {
         subscribed: true,
-        deaf: None,
-        opaque_frames: 0,
+        ..Default::default()
     });
     match &st.session.net_health {
         molt_core::NetHealth::Degraded { reason } => {

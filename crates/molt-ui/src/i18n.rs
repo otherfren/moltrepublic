@@ -171,8 +171,11 @@ pub(crate) fn localize_net_reason(lang: i32, reason: &str) -> String {
         if let Some(why) = part.strip_prefix("relays: ") {
             return format!("Relays: {}", net_phrase_de(why));
         }
-        if let Some(n) = part.strip_suffix(" frames past the key ring") {
-            return format!("{n} Frames jenseits des Schlüsselrings");
+        if part == "catching up" {
+            return "holt Verlauf nach".to_string();
+        }
+        if let Some(n) = part.strip_suffix(" new messages unreadable") {
+            return format!("{n} neue Nachrichten nicht lesbar");
         }
         net_phrase_de(part)
     };
