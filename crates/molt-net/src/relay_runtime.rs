@@ -812,13 +812,23 @@ async fn supervise(
         }
         shared.health.lock().await.insert(url.clone(), RelayHealth::Down);
         // a session that dies instantly, over and over, is the signature of a
-        // relay that accepts then bans; say so instead of only going Down
-        tracing::warn!(
-            relay = %url, via = %via,
-            lived_s = started.elapsed().as_secs(),
-            retry_in_s = backoff.as_secs(),
-            "relay session ended"
-        );
+        // relay that accepts then bans; say so instead of only going Down. A
+        // session that lived and dropped (a Tor circuit reset) is routine.
+        if started.elapsed() >= HEALTHY_SESSION {
+            tracing::info!(
+                relay = %url, via = %via,
+                lived_s = started.elapsed().as_secs(),
+                retry_in_s = backoff.as_secs(),
+                "relay session ended"
+            );
+        } else {
+            tracing::warn!(
+                relay = %url, via = %via,
+                lived_s = started.elapsed().as_secs(),
+                retry_in_s = backoff.as_secs(),
+                "relay session ended"
+            );
+        }
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(cap);
     }
@@ -968,7 +978,8 @@ async fn read_session(
             // the OS buffer), so pinging here is a hot loop that never
             // reconnects. End the session and let the supervisor redial.
             Err(RecvFail::Dead(e)) => {
-                tracing::warn!(relay = %url, error = %e, "relay connection died");
+                // the supervisor's "relay session ended" is the one verdict line
+                tracing::debug!(relay = %url, error = %e, "relay connection died");
                 return std::ops::ControlFlow::Continue(());
             }
             // a timeout is just the keepalive window elapsing — ping and
