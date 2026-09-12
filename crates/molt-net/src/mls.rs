@@ -102,6 +102,10 @@ pub enum MlsError {
     /// Our own frame, echoed back by the transport.
     #[error("mls: own frame echoed back")]
     OwnEcho,
+    /// A Welcome for a KeyPackage this member does not hold (another
+    /// attempt's). Nothing was consumed.
+    #[error("mls: welcome is for another key package")]
+    NotForUs,
 }
 
 /// A `process_message` failure by class: the routine ones get their own
@@ -606,8 +610,11 @@ impl MlsMember {
         let config = MlsGroupJoinConfig::builder()
             .sender_ratchet_configuration(ratchet_window())
             .build();
-        let staged = StagedWelcome::new_from_welcome(&self.provider, &config, welcome, None)
-            .map_err(|e| MlsError::Mls(format!("staging welcome: {e:?}")))?;
+        let staged = match StagedWelcome::new_from_welcome(&self.provider, &config, welcome, None) {
+            Ok(staged) => staged,
+            Err(WelcomeError::NoMatchingKeyPackage) => return Err(MlsError::NotForUs),
+            Err(e) => return Err(MlsError::Mls(format!("staging welcome: {e:?}"))),
+        };
         let group = staged
             .into_group(&self.provider)
             .map_err(|e| MlsError::Mls(format!("joining from welcome: {e:?}")))?;
@@ -1389,6 +1396,34 @@ mod tests {
             !matches!(bob.decrypt(&ct), Ok(MlsIncoming::Application { .. })),
             "the removed leaf is locked out of the new epoch"
         );
+    }
+
+    /// A Welcome for ANOTHER KeyPackage of the same seat (an earlier,
+    /// aborted attempt's) is classified and consumes nothing: the member
+    /// still joins from its own Welcome afterwards.
+    #[test]
+    fn a_welcome_for_another_key_package_is_not_for_us_and_consumes_nothing() {
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        founder.create_group().expect("create");
+        let welcome_first = {
+            let first = MlsMember::new(&key(2), "bob").expect("first attempt");
+            founder
+                .add_members(&[first.key_package().expect("kp")])
+                .expect("add")
+                .expect("welcome")
+        };
+        let mut second = MlsMember::new(&key(2), "bob").expect("second attempt");
+        let kp_second = second.key_package().expect("kp");
+        match second.join_from_welcome(&welcome_first) {
+            Err(MlsError::NotForUs) => {}
+            other => panic!("expected NotForUs, got {other:?}"),
+        }
+        let (_commit, welcome_second) = founder
+            .restore_member("bob", &kp_second, NO_CARRIER_STAMP)
+            .expect("restore");
+        second
+            .join_from_welcome(&welcome_second)
+            .expect("joins from its own welcome");
     }
 
     /// **Cross-epoch delivery, forward direction.** A message encrypted at an

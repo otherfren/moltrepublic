@@ -841,6 +841,22 @@ pub(crate) fn spawn_recovery_rejoiner(
     })
 }
 
+/// Join the group from the coordinator's Welcome.
+fn join_from_coordinator_welcome(
+    mls: &mut molt_net::MlsMember,
+    welcome: &[u8],
+) -> Result<(), String> {
+    match mls.join_from_welcome(welcome) {
+        Ok(()) => Ok(()),
+        // one anchor per (seat, link): a foreign Welcome here is an earlier,
+        // aborted attempt's, and no matching one will ever arrive
+        Err(molt_net::MlsError::NotForUs) => {
+            Err("link already used by an earlier attempt - mint a new one".to_string())
+        }
+        Err(e) => Err(format!("mls welcome: {e}")),
+    }
+}
+
 /// The rejoiner state machine over Nostr (N4b step 6e).
 ///
 /// Fresh anchor from the RECOVERY ticket → 1059 inbox (readable-gated before
@@ -1042,6 +1058,7 @@ async fn recovery_rejoin(
             _ => continue,
         }
     };
+    join_from_coordinator_welcome(&mut mls, &payload.welcome)?;
     let _ = send_cmd(
         tx,
         Command::NetRecoverNote {
@@ -1050,8 +1067,6 @@ async fn recovery_rejoin(
         },
     )
     .await;
-    mls.join_from_welcome(&payload.welcome)
-        .map_err(|e| format!("mls welcome: {e}"))?;
     let group = Arc::new(Mutex::new(mls));
 
     // 445 under the Welcome's rotation seed, dialing only our own subset
@@ -1602,6 +1617,27 @@ mod tests {
     }
 
     use super::*;
+
+    /// The field failure 2026-09-12: a restarted recovery on the same link
+    /// finds the aborted attempt's Welcome on its anchor. Say what to do.
+    #[test]
+    fn a_welcome_for_an_earlier_attempt_names_the_used_link() {
+        let sk = |b: u8| molt_storage::SigningKey::from_bytes(&[b; 32]);
+        let mut founder = molt_net::MlsMember::new(&sk(1), "founder").expect("founder");
+        founder.create_group().expect("create");
+        let stale = {
+            let first = molt_net::MlsMember::new(&sk(2), "bob").expect("first attempt");
+            founder
+                .add_members(&[first.key_package().expect("kp")])
+                .expect("add")
+                .expect("welcome")
+        };
+        let mut second = molt_net::MlsMember::new(&sk(2), "bob").expect("second attempt");
+        assert_eq!(
+            join_from_coordinator_welcome(&mut second, &stale),
+            Err("link already used by an earlier attempt - mint a new one".to_string())
+        );
+    }
 
     fn info(inviter: &str, m: u8, n: u8) -> molt_core::InviteInfo {
         molt_core::InviteInfo {
