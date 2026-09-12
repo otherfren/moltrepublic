@@ -20,10 +20,10 @@
 // the nav sub-view icons, the reaction pills and the emoji palette.
 import "assets/fonts/Twemoji.Mozilla.ttf";
 
-import { Theme, Strings, HintTip, WikiState, PatchView, Poke, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, RecoverSeatRow, InvitePreview, LinkPreview, BackupRow, ChainRow, RelayItem, RelayPick } from "theme.slint";
+import { Theme, Strings, HintTip, WikiState, PatchView, Poke, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, RecoverSeatRow, SeedRow, SeedWord, InvitePreview, LinkPreview, BackupRow, ChainRow, RelayItem, RelayPick } from "theme.slint";
 import {
     AppButton, AppField, AppArea, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
-    ConfirmModal, DotLabel, InsetWell
+    ConfirmModal, DotLabel, InsetWell, WordChip
 } from "components.slint";
 import {
     BusyModal, ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, SeedConfirmStep, RunView, RitualLog, WizardFrame, CharterView, SealedPanel, ProposalCard, DecisionTable, Spinner, DiffViewer
@@ -1758,6 +1758,8 @@ export component AppWindow inherits Window {
     property <string> cw-seed-check;
     property <string> jw-seed-check;
     pure callback seed-matches(string, string) -> bool;
+    // the rejoin phrase area's word chips, toned in Rust by the BIP-39 list
+    pure callback seed-rows(string) -> [SeedRow];
     property <int> cw-threshold: 2;
     property <int> cw-members: 3;
     // the configured workspace root (mirrored from the session settings)
@@ -4766,11 +4768,13 @@ export component AppWindow inherits Window {
                         icon: @image-url("assets/key.svg");
                         HorizontalLayout {
                             spacing: 8px;
-                            AppField {
+                            // a 24-word phrase does not fit one line; Ctrl+Enter continues
+                            AppArea {
                                 text <=> root.rw-seed;
                                 placeholder: Strings.ph-seed;
+                                height: 96px * Theme.ui-scale;
                                 horizontal-stretch: 1;
-                                accepted => {
+                                ctrl-accepted => {
                                     root.phrase-continue();
                                 }
                             }
@@ -4783,6 +4787,17 @@ export component AppWindow inherits Window {
                                 clicked => {
                                     root.rw-seed = root.paste-clipboard();
                                 }
+                            }
+                        }
+                        // each word toned by the BIP-39 list, so a typo shows before
+                        // the recovery runs
+                        for row in root.seed-rows(root.rw-seed): HorizontalLayout {
+                            spacing: 6px;
+                            alignment: start;
+                            for w in row.words: WordChip {
+                                n: w.n;
+                                word: w.word;
+                                tone: w.tone;
                             }
                         }
                         // what this phrase is about to unlock, so the step

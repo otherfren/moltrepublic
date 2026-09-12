@@ -10,7 +10,7 @@ use slint::{ComponentHandle, Model};
 
 use crate::i18n::error_toast;
 use crate::app::Ctx;
-use crate::{AppWindow, InvitePreview, LinkPreview, RelayPick};
+use crate::{AppWindow, InvitePreview, LinkPreview, RelayPick, SeedRow, SeedWord};
 
 pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     // The join preview: the same molt-core invite parser the engine's join
@@ -136,6 +136,23 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                     .join(" ")
             };
             !typed.trim().is_empty() && norm(&typed) == norm(&expected)
+        });
+    }
+
+    {
+        // the rejoin phrase area's chips
+        ui.on_seed_rows(|text| {
+            let rows: Vec<SeedRow> = seed_word_rows(&text)
+                .into_iter()
+                .map(|row| SeedRow {
+                    words: slint::ModelRc::new(slint::VecModel::from(
+                        row.into_iter()
+                            .map(|(n, word, tone)| SeedWord { n, word: word.into(), tone })
+                            .collect::<Vec<_>>(),
+                    )),
+                })
+                .collect();
+            slint::ModelRc::new(slint::VecModel::from(rows))
         });
     }
 
@@ -386,4 +403,28 @@ fn invite_relays_missing(ui: &AppWindow, link: &str) -> i32 {
             .count(),
     )
     .unwrap_or(0)
+}
+
+/// The rejoin phrase area's chips: each typed word numbered and toned by the
+/// BIP-39 list (1 = a list word, 2 = not one, 0 = the last word while it is
+/// still a prefix of one), four to a row.
+pub(crate) fn seed_word_rows(text: &str) -> Vec<Vec<(i32, String, i32)>> {
+    let typing = !text.ends_with(char::is_whitespace);
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let last = words.len().saturating_sub(1);
+    let toned: Vec<(i32, String, i32)> = words
+        .iter()
+        .enumerate()
+        .map(|(i, w)| {
+            let tone = if molt_storage::phrase_word_known(w) {
+                1
+            } else if typing && i == last && molt_storage::phrase_word_prefix(w) {
+                0
+            } else {
+                2
+            };
+            (i32::try_from(i + 1).unwrap_or(i32::MAX), (*w).to_string(), tone)
+        })
+        .collect();
+    toned.chunks(4).map(<[_]>::to_vec).collect()
 }

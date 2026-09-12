@@ -215,6 +215,19 @@ export struct RecoverSeatRow {
     approved: bool,
 }
 
+// One word of the rejoin phrase area, toned by the BIP-39 list:
+// 1 = a list word, 2 = not one, 0 = still being typed.
+export struct SeedWord {
+    n: int,
+    word: string,
+    tone: int,
+}
+
+// A row of word chips under the phrase area.
+export struct SeedRow {
+    words: [SeedWord],
+}
+
 // A local workspace/republic shown in the Open screen list.
 export struct WorkspaceItem {
     id: string, // the workspace id — the sole address of workspace verbs

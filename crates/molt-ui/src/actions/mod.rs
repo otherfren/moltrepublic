@@ -10,3 +10,6 @@ pub(crate) mod relays;
 pub(crate) mod ritual;
 pub(crate) mod settings;
 pub(crate) mod workspace;
+
+#[cfg(test)]
+pub(crate) use ritual::seed_word_rows;

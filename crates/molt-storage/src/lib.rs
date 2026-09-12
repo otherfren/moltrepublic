@@ -262,6 +262,17 @@ pub fn seed_entropy(phrase: &str) -> Result<Vec<u8>, StorageError> {
     Ok(m.to_entropy())
 }
 
+/// Whether `word` is a BIP-39 English list word, exactly as the phrase
+/// parser will read it (no case folding).
+pub fn phrase_word_known(word: &str) -> bool {
+    bip39::Language::English.find_word(word).is_some()
+}
+
+/// Whether some BIP-39 English word starts with `prefix`.
+pub fn phrase_word_prefix(prefix: &str) -> bool {
+    !bip39::Language::English.words_by_prefix(prefix).is_empty()
+}
+
 /// HKDF-SHA256: 32 bytes from `(ikm, tag || context)`.
 fn hkdf32(ikm: &[u8], tag: &str, context: &[u8]) -> [u8; 32] {
     let hk = Hkdf::<Sha256>::new(None, ikm);
@@ -3598,6 +3609,17 @@ mod tests {
     use super::*;
     use molt_core::{ChatMessage, MemberId, MemberIdentity};
     use std::collections::BTreeMap;
+
+    /// The rejoin phrase area tones each word by the BIP-39 list: a list
+    /// word, a word still being typed toward one, or neither.
+    #[test]
+    fn phrase_words_follow_the_bip39_list() {
+        assert!(phrase_word_known("abandon"));
+        assert!(!phrase_word_known("abandonx"));
+        assert!(!phrase_word_known("Abandon"), "the engine parses lowercase only");
+        assert!(phrase_word_prefix("aband"));
+        assert!(!phrase_word_prefix("xyzq"));
+    }
 
     fn ids() -> Vec<MemberIdentity> {
         vec![
