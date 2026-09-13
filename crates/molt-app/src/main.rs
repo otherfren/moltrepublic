@@ -604,7 +604,7 @@ fn generate_config(path: &Path) -> anyhow::Result<()> {
     let shown = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     println!("Wrote default config to {}", shown.display());
     println!();
-    println!("MCP API token (shown once - clients send it as `initialize` params.token):");
+    println!("MCP API token (shown once - HTTP clients send it as `Authorization: Bearer`, line clients as `initialize` params.token):");
     println!("    {}", settings.mcp_token);
     println!("It is stored in the config; rotate it anytime from the GUI settings (MCP tab).");
     println!();
@@ -795,7 +795,9 @@ fn open_on_start(rt: &Runtime, wallet: &WalletHandle, id: String) {
 /// `openmls=off`: the whole crate, deliberately - its per-frame ERROR
 /// lines duplicate the failure the group runtime reports (not its
 /// diagnostics; `RUST_LOG` brings those back).
-const DEFAULT_LOG_FILTER: &str = "info,zbus=error,openmls=off";
+/// `rmcp=error`: the SDK logs INFO per HTTP request, and a WARN for the
+/// version fallback every current Claude Code client goes through.
+const DEFAULT_LOG_FILTER: &str = "info,zbus=error,openmls=off,rmcp=error";
 
 /// Install the renderer `[ui] renderer` asks for. Must run before any Slint
 /// object exists (the platform is set once per process) and never when

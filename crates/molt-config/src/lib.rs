@@ -775,8 +775,10 @@ port = {mcp_port}
 #   or a comma-separated allowlist, e.g. "127.0.0.1, 192.168.1.10"
 # Connections from IPs not on the list are refused.
 allow = {mcp_allow}
-# API key every MCP client must send in its initialize request. Keep it secret;
-# rotate it from the GUI settings. A fresh token is written on --generate-config.
+# API key every MCP client must send: HTTP clients as `Authorization: Bearer`
+# (http://127.0.0.1:<port>/mcp), line clients as `initialize` params.token.
+# Keep it secret; rotate it from the GUI settings. A fresh token is written
+# on --generate-config.
 token = {mcp_token}
 # A second key admitting only the READ tools: set it in the GUI (Settings > MCP)
 # or over MCP (patch_settings {{"mcp_read_token": "..."}}, "" revokes); it is

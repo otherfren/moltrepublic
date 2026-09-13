@@ -20,3 +20,12 @@ serde_json.workspace = true
 tracing.workspace = true
 # constant-time token comparison (review F6)
 subtle = "2"
+# Streamable HTTP (docs_archive/security/streamable_http.md): the official SDK's tower
+# service, served by hyper on the sniffed MCP port
+rmcp = { version = "3.3", default-features = false, features = ["server", "transport-streamable-http-server"] }
+hyper = { version = "1", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
+tower-service = "0.3"

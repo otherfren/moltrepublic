@@ -2,8 +2,17 @@
 
 MoltRepublic's MCP interface is a **co-equal operator**: anything an agent can do
 over MCP, it does through the same command set the GUI drives. That makes the MCP
-endpoint as powerful as the person at the keyboard, so the network-facing TCP
-transport is gated two ways — a **peer-IP allowlist** and a **shared token**.
+endpoint as powerful as the person at the keyboard, so the network-facing port
+is gated two ways — a **peer-IP allowlist** and a **shared token**. The port
+speaks two protocols, told apart by the first byte of a connection: **Streamable
+HTTP** (the MCP standard transport, `http://127.0.0.1:<port>/mcp`, token as
+`Authorization: Bearer`) and the older **newline-delimited JSON-RPC line
+protocol** (token in `initialize`). Stock MCP clients use the first:
+
+```
+claude mcp add --transport http molt http://127.0.0.1:4040/mcp \
+  --header "Authorization: Bearer <token from config.toml>"
+```
 
 Both are configured in the `[mcp]` section of `config.toml`:
 
@@ -17,7 +26,7 @@ port = 4040
 #   or a comma-separated allowlist, e.g. "127.0.0.1, 192.168.1.10"
 # Connections from IPs not on the list are refused.
 allow = "127.0.0.1"
-# API key every MCP client must send in its initialize request.
+# API key every MCP client must send (Bearer over HTTP, params.token on a line).
 token = "2d6f1183510ee92cb59ba355a3f1b502274df9bf708f1bce"
 ```
 
@@ -25,16 +34,22 @@ token = "2d6f1183510ee92cb59ba355a3f1b502274df9bf708f1bce"
 
 | Transport | Peer-IP allowlist | Token |
 |-----------|-------------------|-------|
-| **TCP** (`[mcp].port`, always on; also `--mcp-tcp`) | yes | yes |
+| **HTTP** (`[mcp].port`, `/mcp`, always on; also `--mcp-tcp`) | yes | yes, `Authorization: Bearer` per request |
+| **line** (same port, newline-delimited JSON-RPC) | yes | yes, `initialize` `params.token` per connection |
 | **stdio** (`moltd` headless, no `--mcp-tcp`) | n/a | no |
 
 * **stdio is trusted.** The agent host spawns the process and owns its stdin/stdout,
   so there is nothing to authenticate — stdio skips both checks. This is the path
   to prefer for local development (see below).
-* **TCP is gated.** On every incoming connection the server first checks the peer
-  IP; if `allow` is not `0.0.0.0` and the peer is not on the list, the socket is
-  closed immediately with no reply. A surviving connection must then call
-  `initialize` with the correct `token` before any other method works.
+* **The port is gated.** On every incoming connection the server first checks the
+  peer IP; if `allow` is not `0.0.0.0` and the peer is not on the list, the socket
+  is closed immediately with no reply — before a byte is read, so HTTP and line
+  clients are refused alike. A surviving HTTP request must carry the token as
+  `Authorization: Bearer`; a surviving line connection must call `initialize`
+  with it before any other method works. Over HTTP the server is stateless (no
+  `Mcp-Session-Id`, GET/DELETE answer 405) and answers `application/json`; the
+  client's `Host` must be loopback while `allow` is loopback-only (DNS-rebinding
+  guard), and a browser `Origin` is not validated.
 
 ### Bind address
 
@@ -46,7 +61,9 @@ token = "2d6f1183510ee92cb59ba355a3f1b502274df9bf708f1bce"
 
 ### Errors
 
-Auth failures come back as JSON-RPC error `-32001`:
+Over HTTP a missing or wrong bearer is `401` with `WWW-Authenticate: Bearer`, a
+body past 1 MiB `413`, a foreign `Host` `403`. On a line, and for a scope
+refusal on both, auth failures come back as JSON-RPC error `-32001`:
 
 * wrong/missing token in `initialize` → `unauthorized: missing or invalid MCP token`.
 * any method before a successful `initialize` → `unauthorized: call initialize with a valid token first`.
@@ -58,7 +75,7 @@ Auth failures come back as JSON-RPC error `-32001`:
   and the clear value is printed **once** to the terminal:
 
   ```
-  MCP API token (shown once — clients send it as `initialize` params.token):
+  MCP API token (shown once - HTTP clients send it as `Authorization: Bearer`, line clients as `initialize` params.token):
       2d6f1183510ee92cb59ba355a3f1b502274df9bf708f1bce
   ```
 
@@ -104,9 +121,10 @@ never reads one back, and a read-only client never sees a secret at all.
 * The scope is **host-local**. The republic knows no roles and no rights; the
   human narrows their own tool (see the machine boundary below).
 
-## A TCP handshake, end to end
+## A line handshake, end to end
 
-Newline-delimited JSON-RPC 2.0. Send the token in `initialize`, then use tools:
+The older transport, for a client without an HTTP stack. Newline-delimited
+JSON-RPC 2.0; send the token in `initialize`, then use tools:
 
 ```jsonc
 --> {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"token":"<token from config>"}}
@@ -153,8 +171,10 @@ printf '%s\n' \
 Most MCP client libraries can also *spawn* `moltd` themselves and speak stdio —
 that is the least-friction integration and needs no secret.
 
-**When you need TCP** (attaching to a running UI node, or a client that only speaks
-TCP):
+**When you need the port** (attaching to a running UI node): a stock client
+takes the `claude mcp add --transport http` line at the top; a curl needs
+`Accept: application/json, text/event-stream` on every POST. For anything
+hand-rolled:
 
 * Read the token straight from `config.toml` — don't retype it. The 20-line client
   above does exactly this.

@@ -30,8 +30,56 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 
-/// MCP protocol version this server advertises.
-const PROTOCOL_VERSION: &str = "2025-06-18";
+mod http;
+
+/// The protocol versions this server serves in SHAPE, both transports.
+/// Capped below 2026-07-28: under that version a `tools/list` result must
+/// carry `ttlMs`/`cacheScope`, which rmcp 3.3 does not emit - Claude Code
+/// 2.1.270 refused the catalogue (verified 2026-09-13 against the real
+/// client). A client that offers the newer version is answered with the
+/// newest one here and continues on it.
+pub(crate) fn supported_versions() -> &'static [rmcp::model::ProtocolVersion] {
+    rmcp::model::ProtocolVersion::known_up_to(&rmcp::model::ProtocolVersion::V_2025_11_25)
+}
+
+/// The version `initialize` answers: the client's own when it is one we
+/// serve, else the newest (a strict client disconnects on a mismatch).
+fn negotiated_version(requested: Option<&str>) -> &'static str {
+    let served = supported_versions();
+    served
+        .iter()
+        .find(|v| Some(v.as_str()) == requested)
+        .or(served.last())
+        .map_or("2025-11-25", |v| v.as_str())
+}
+
+/// The operating guide every transport hands the client at `initialize`.
+pub(crate) const INSTRUCTIONS: &str = "MoltRepublic seat operator: you drive ONE member seat of an encrypted \
+republic; a human GUI may drive the same seat concurrently. Operating loop: \
+1) read_session - workspaces, settings, async outcomes (notices). \
+2) open_workspace - REQUIRED before chat or governance; without it you run a \
+solo local context (member \"me\", threshold 1) where calls succeed but reach \
+nobody. 3) observe: read_state {surface}, list_proposals, status, read_members. \
+4) act: chat_send is ungated; everything else changes only via propose -> \
+approve/decline by the members (threshold m-of-n, one stance per member); \
+withdraw pulls back an OWN pending proposal. 5) any *_start/backup/test call \
+returns immediately - poll read_session for the outcome. propose payloads \
+{\"op\": ...}: organization set_name/set_charter/set_chat_retention {value}, \
+set_image {value,bytes_b64}, remove_image, set_relays {value: \"wss://a wss://b\"}, \
+set_features {value: \"memory quests\"}, set_member_image {member,value,bytes_b64} \
+/remove_member_image/set_member_desc {member,value} (own seat only, square \
+picture); memory add_note {title}; files persist {id} (the engine fills the \
+share's identity; a live share only), unpersist {id, at: unix now} (a \
+persistent share only), delete {id} (a temporary share - gone for good); \
+quests/vault/wallet add_quest/seal_secret/ \
+transfer {title}. Traps: founding/join/recovery need a confirmed relay \
+(relay_add, then confirm); mark_channel_read moves your PRIVATE cursor while \
+mark_read broadcasts read receipts; restore_start = offline knowledge from a \
+backup blob, recover_start = rejoin the live republic; navigate/select_* only \
+move the human's GUI and are never required before other tools. The WIKI is \
+written with wiki_edit - structured edits, refused at the call with a reason; \
+propose op wiki_patch is the raw form for a caller that already holds a patch, \
+and both become the same changeset vote.";
 
 /// Serve the MCP protocol over stdin/stdout (the standard headless transport).
 /// stdio is inherently local — the agent host spawns the process — so it needs
@@ -57,10 +105,24 @@ pub async fn serve_tcp(
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(%addr, allow_all, allowed = allowlist.len(), "MCP server on tcp");
+    serve_listener(handle, listener, allow_all, allowlist, token, read_token).await
+}
+
+/// [`serve_tcp`] on a listener the caller bound (tests bind port 0).
+pub async fn serve_listener(
+    handle: WalletHandle,
+    listener: TcpListener,
+    allow_all: bool,
+    allowlist: Vec<IpAddr>,
+    token: String,
+    read_token: String,
+) -> std::io::Result<()> {
     // bounded (review F7): every accepted socket holds a buffer and costs
     // the actor a session read before it authenticates — a flood must not
     // exhaust either, and one accept error must not end the endpoint
     let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
+    let loopback_only = !allow_all && allowlist.iter().all(|ip| ip.is_loopback());
+    let http_face = http::Http::new(handle.clone(), loopback_only);
     loop {
         let (sock, peer) = match listener.accept().await {
             Ok(accepted) => accepted,
@@ -78,8 +140,8 @@ pub async fn serve_tcp(
             tracing::warn!(%peer, max = MAX_CONNECTIONS, "MCP connection refused: too many open");
             continue;
         };
-        tracing::info!(%peer, "MCP client connected");
         let h = handle.clone();
+        let http_face = http_face.clone();
         // the LIVE token, per connection. `mcp-security.md` promises a
         // rotation "takes effect immediately"; a copy captured at startup
         // kept the leaked value working until the next restart and refused
@@ -94,8 +156,18 @@ pub async fn serve_tcp(
             });
         tokio::spawn(async move {
             let _permit = permit; // released with the connection
-            let (r, w) = sock.into_split();
-            if let Err(e) = serve_conn(h, BufReader::new(r), w, Some(creds)).await {
+            // one port, two protocols: an HTTP request opens with its
+            // method, a JSON-RPC line with `{`
+            let mut first = [0u8; 1];
+            let is_http = matches!(sock.peek(&mut first).await, Ok(1) if first[0].is_ascii_uppercase());
+            tracing::info!(%peer, via = if is_http { "http" } else { "line" }, "MCP client connected");
+            let outcome = if is_http {
+                http_face.serve(sock, creds, peer).await
+            } else {
+                let (r, w) = sock.into_split();
+                serve_conn(h, BufReader::new(r), w, Some(creds)).await
+            };
+            if let Err(e) = outcome {
                 tracing::warn!(%peer, error = %e, "MCP connection ended");
             }
         });
@@ -137,6 +209,25 @@ async fn live_tokens(handle: &WalletHandle) -> Option<Credentials> {
             read: s.settings.mcp_read_token.clone(),
         }),
         _ => None,
+    }
+}
+
+impl Credentials {
+    /// The scope a presented key admits. Neither branch tells a prober
+    /// WHICH key it guessed: a guess of a given length runs exactly one
+    /// `ct_eq` either way, and the scope is chosen only after both verdicts
+    /// exist. (The lengths themselves still leak, as they always did.) An
+    /// empty read key matches nobody — "off", never "unauthenticated".
+    fn scope_for(&self, given: &str) -> Option<Scope> {
+        let seat_ok = secret_eq(given, &self.seat);
+        let read_ok = !self.read.is_empty() && secret_eq(given, &self.read);
+        if seat_ok {
+            Some(Scope::Seat)
+        } else if read_ok {
+            Some(Scope::Read)
+        } else {
+            None
+        }
     }
 }
 
@@ -243,21 +334,7 @@ async fn handle_rpc(
     if method == "initialize" {
         if let Some(cred) = auth {
             let given = params.get("token").and_then(Value::as_str).unwrap_or("");
-            // Neither branch tells a prober WHICH key it guessed: a guess of
-            // a given length runs exactly one `ct_eq` either way, and the
-            // scope is chosen only after both verdicts exist. (The lengths
-            // themselves still leak, as they always did.) An empty read key
-            // matches nobody — "off", never "unauthenticated".
-            let seat_ok = secret_eq(given, &cred.seat);
-            let read_ok = !cred.read.is_empty() && secret_eq(given, &cred.read);
-            let scope = if seat_ok {
-                Some(Scope::Seat)
-            } else if read_ok {
-                Some(Scope::Read)
-            } else {
-                None
-            };
-            let Some(scope) = scope else {
+            let Some(scope) = cred.scope_for(given) else {
                 return Some(error_response(
                     id,
                     -32001,
@@ -269,35 +346,10 @@ async fn handle_rpc(
         return Some(ok(
             id,
             json!({
-                "protocolVersion": PROTOCOL_VERSION,
+                "protocolVersion": negotiated_version(params.get("protocolVersion").and_then(Value::as_str)),
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "moltrepublic", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "MoltRepublic seat operator: you drive ONE member seat of an encrypted \
-republic; a human GUI may drive the same seat concurrently. Operating loop: \
-1) read_session - workspaces, settings, async outcomes (notices). \
-2) open_workspace - REQUIRED before chat or governance; without it you run a \
-solo local context (member \"me\", threshold 1) where calls succeed but reach \
-nobody. 3) observe: read_state {surface}, list_proposals, status, read_members. \
-4) act: chat_send is ungated; everything else changes only via propose -> \
-approve/decline by the members (threshold m-of-n, one stance per member); \
-withdraw pulls back an OWN pending proposal. 5) any *_start/backup/test call \
-returns immediately - poll read_session for the outcome. propose payloads \
-{\"op\": ...}: organization set_name/set_charter/set_chat_retention {value}, \
-set_image {value,bytes_b64}, remove_image, set_relays {value: \"wss://a wss://b\"}, \
-set_features {value: \"memory quests\"}, set_member_image {member,value,bytes_b64} \
-/remove_member_image/set_member_desc {member,value} (own seat only, square \
-picture); memory add_note {title}; files persist {id} (the engine fills the \
-share's identity; a live share only), unpersist {id, at: unix now} (a \
-persistent share only), delete {id} (a temporary share - gone for good); \
-quests/vault/wallet add_quest/seal_secret/ \
-transfer {title}. Traps: founding/join/recovery need a confirmed relay \
-(relay_add, then confirm); mark_channel_read moves your PRIVATE cursor while \
-mark_read broadcasts read receipts; restore_start = offline knowledge from a \
-backup blob, recover_start = rejoin the live republic; navigate/select_* only \
-move the human's GUI and are never required before other tools. The WIKI is \
-written with wiki_edit - structured edits, refused at the call with a reason; \
-propose op wiki_patch is the raw form for a caller that already holds a patch, \
-and both become the same changeset vote."
+                "instructions": INSTRUCTIONS
             }),
         ));
     }
@@ -2594,11 +2646,11 @@ fn error_response(id: Value, code: i64, message: &str) -> Value {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use molt_core::{GroupConfig, SessionView};
 
-    fn wallet() -> WalletHandle {
+    pub(crate) fn wallet() -> WalletHandle {
         molt_engine::spawn(GroupConfig::demo(), SessionView::default())
     }
 
