@@ -1,7 +1,15 @@
 # MCP over Streamable HTTP with a Bearer token
 
-**Status: PLAN, not built (2026-09-13).** Open questions at the end are
-undecided; nothing in this document is agreed until they are.
+**Status: BUILT 2026-09-13** (`molt-mcp/src/http.rs`; the plan below is the
+executed one). Verified against Claude Code 2.1.270 with
+`claude mcp add --transport http` - connected, catalogue fetched. One
+finding beyond the plan: **the served protocol versions are capped at
+2025-11-25** on both transports. Claude Code opens with `server/discover`
+under 2026-07-28 and then requires `ttlMs`/`cacheScope` on a `tools/list`
+result, which rmcp 3.3 does not emit; offering that version made the client
+refuse the catalogue. rmcp answers the newer probe with a version-refusal
+naming what it serves, and the client continues on 2025-11-25. Lift the cap
+when rmcp emits the 2026-07-28 result shapes.
 
 ## Why
 
@@ -79,7 +87,9 @@ exist; only the HTTP frame around them is missing.
 - `http_notification_is_202` (`notifications/initialized`, empty body).
 - `http_get_and_delete_are_405`.
 - `http_body_over_bound_is_413`.
-- `http_foreign_host_is_403` (`Host: evil.example`).
+- `http_foreign_host_is_403` (`Host: evil.example`, loopback allowlist).
+- `http_peer_off_the_allowlist_gets_nothing` (empty allowlist: the socket
+  closes before a byte is read).
 - `same_port_still_serves_line_json` - the existing TCP tests keep
   passing on the sniffed listener (they are the regression).
 - `line_loop_echoes_supported_protocol_version`.
@@ -104,19 +114,16 @@ own scratch config, own port - never the user's running node).
   row (token via Bearer, same allowlist), the "when you need TCP" recipe
   gets the `claude mcp add` line first.
 - `moltd --generate-config` `[mcp]` comment: one line naming the URL.
-- This document moves to `docs_archive/security/` when built.
 
-## Open questions
+## Decisions (2026-09-13)
 
-- **Q1 - port.** Same port, protocol sniffed (recommended: no new config
-  key, allowlist and bound shared, one URL to document) vs. a separate
-  `[mcp].http_port`.
-- **Q2 - rmcp as a dependency.** ~8 new crates for the HTTP layer; the
-  alternative is ~250 hand-written lines that re-implement a spec that
-  moved twice this year (2025-11-25, 2026-07-28). Recommended: rmcp.
-- **Q3 - browser clients.** `allowed_origins` stays empty (an `Origin`
-  header is not validated). Acceptable while `[mcp].allow` is loopback;
-  a `0.0.0.0` node with a browser client would need a config key.
+- **Q1 port:** same port, protocol sniffed. No `[mcp].http_port`.
+- **Q2 rmcp:** yes. Note `server` pulls `schemars`; accepted.
+- **Q3 browser clients:** no Origin validation. rmcp's `Host` check stays
+  at its loopback default while `[mcp].allow` is loopback-only and is
+  disabled otherwise - the peer-IP allowlist is the gate, for HTTP as for
+  the line protocol, and a test pins that a peer off the list gets no
+  HTTP answer at all.
 
 ## Follow-ups (not in this change)
 
