@@ -23,6 +23,8 @@ mod recovery_backup;
 mod ritual_log;
 mod seed_confirm;
 mod snapshot;
+mod tab_order;
+mod version_panel;
 mod wiki;
 #[cfg(feature = "live-preview")]
 mod wiki_files;

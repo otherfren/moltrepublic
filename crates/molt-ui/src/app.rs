@@ -60,6 +60,7 @@ pub fn run_app(
         .unwrap_or_default();
     ui.set_config_dir(dir.into());
     ui.set_config_file(file.into());
+    ui.set_app_version(env!("CARGO_PKG_VERSION").into());
     // Surface the compile-time embedded-tor availability into the tor-mode
     // dropdown's per-row enabled flags (a constant for the process lifetime).
     ui.set_tor_mode_enabled(ModelRc::new(VecModel::from(

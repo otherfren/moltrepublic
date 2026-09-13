@@ -1440,6 +1440,8 @@ export component AppWindow inherits Window {
     // file name (text color) — set together by the Rust side
     in property <string> config-dir;
     in property <string> config-file;
+    // the running binary's version, worn by the settings footer
+    in property <string> app-version;
 
     // ---- active workspace (main header), live-mirrored from the engine ----
     in property <string> active-workspace;
@@ -7683,8 +7685,9 @@ export component AppWindow inherits Window {
                     tm1 := Text { text: Strings.set-tab-workspace; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
                     tm2 := Text { text: Strings.set-tab-backup; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
                     tm3 := Text { text: Strings.set-tab-s3; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
-                    tm4 := Text { text: Strings.set-tab-anon; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
-                    tm5 := Text { text: Strings.set-tab-relays; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
+                    // bar positions 4 and 5: relays before the anonymity network
+                    tm4 := Text { text: Strings.set-tab-relays; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
+                    tm5 := Text { text: Strings.set-tab-anon; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
                     tm6 := Text { text: Strings.set-tab-mcp; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
                     tm7 := Text { text: Strings.set-tab-node; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
                     tm8 := Text { text: Strings.set-tab-chain; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
@@ -7714,13 +7717,13 @@ export component AppWindow inherits Window {
                                 current <=> root.set-tab;
                             }
                             if set-tabs.row1 > 4: SettingsTab {
-                                label: Strings.set-tab-anon;
-                                index: 4;
+                                label: Strings.set-tab-relays;
+                                index: 5;
                                 current <=> root.set-tab;
                             }
                             if set-tabs.row1 > 5: SettingsTab {
-                                label: Strings.set-tab-relays;
-                                index: 5;
+                                label: Strings.set-tab-anon;
+                                index: 4;
                                 current <=> root.set-tab;
                             }
                             if set-tabs.row1 > 6: SettingsTab {
@@ -7768,13 +7771,13 @@ export component AppWindow inherits Window {
                                 current <=> root.set-tab;
                             }
                             if set-tabs.row1 <= 4: SettingsTab {
-                                label: Strings.set-tab-anon;
-                                index: 4;
+                                label: Strings.set-tab-relays;
+                                index: 5;
                                 current <=> root.set-tab;
                             }
                             if set-tabs.row1 <= 5: SettingsTab {
-                                label: Strings.set-tab-relays;
-                                index: 5;
+                                label: Strings.set-tab-anon;
+                                index: 4;
                                 current <=> root.set-tab;
                             }
                             if set-tabs.row1 <= 6: SettingsTab {
@@ -8799,6 +8802,22 @@ export component AppWindow inherits Window {
                         label: Strings.set-close;
                         clicked => {
                             root.close-settings();
+                        }
+                    }
+                    // the running version, its own small panel
+                    Rectangle {
+                        background: Theme.zebra;
+                        border-radius: Theme.win95 ? 0px : 6px;
+                        border-width: Theme.border-w;
+                        border-color: Theme.line;
+                        HorizontalLayout {
+                            padding: 8px;
+                            Text {
+                                text: "v\{root.app-version}";
+                                color: Theme.text;
+                                font-size: Theme.fs-cap;
+                                vertical-alignment: center;
+                            }
                         }
                     }
                     // the config.toml path rides the button row (it stole a
