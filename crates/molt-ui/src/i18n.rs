@@ -821,7 +821,7 @@ lexicon! {
     cw_backup_confirm: "Confirm backup", "Backup bestätigen";
     cw_backup_wait: "Backup confirmed - waiting for every member's confirmation", "Backup bestätigt - warte auf die Bestätigung aller Mitglieder";
     cw_seed_confirm_hint: "It is the only way back to this seat. Re-type it to continue.", "Sie ist der einzige Weg zurück zu deinem Sitz. Gib sie zur Bestätigung erneut ein.";
-    cw_seed_confirm_ph: "Re-type the phrase", "Phrase erneut eingeben";
+    cw_seed_confirm_ph: "Re-type the phrase - Ctrl+Enter continues", "Phrase erneut eingeben - Strg+Enter bestätigt";
     cw_ratify_wait: "The charter is with the members - waiting for their signatures…", "Die Satzung liegt bei den Mitgliedern - warte auf ihre Unterschriften…";
     cw_charter_name_label: "Republic name", "Name der Republik";
     cw_charter_name_ph: "Final republic name", "Endgültiger Name der Republik";

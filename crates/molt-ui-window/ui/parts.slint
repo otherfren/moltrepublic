@@ -4,8 +4,8 @@
 // Strings globals and its own properties — no AppWindow state. The window
 // (app.slint) composes these into the actual screens.
 
-import { Theme, Strings, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, MemberSync, ProposalRow, HintTip, PatchView, Poke } from "theme.slint";
-import { AppButton, AppField, AppCheck, ScrollHint, HoverTip, DotLabel } from "components.slint";
+import { Theme, Strings, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, MemberSync, ProposalRow, HintTip, PatchView, Poke, SeedRow } from "theme.slint";
+import { AppButton, AppField, AppArea, AppCheck, ScrollHint, HoverTip, DotLabel, WordChip } from "components.slint";
 
 // A large clickable option card used on the first-run choice screen. The
 // title is split into its hotkey letter (rendered underlined; the window
@@ -2007,13 +2007,15 @@ export component SeedPanel inherits Rectangle {
 
 // The wizards' phrase-backup proof (create + join): the freshly minted
 // recovery phrase, and the re-typed proof it was backed up. The confirm
-// ACTION lives in the wizard footer; the field's Enter key fires the same
+// ACTION lives in the wizard footer; the area's Ctrl+Enter fires the same
 // `enter()` — only while `armed` (the caller's engine-side phrase match).
 export component SeedConfirmStep inherits VerticalLayout {
     in property <string> seed;
     // the re-typed phrase matches — computed by the caller (engine rule)
     in property <bool> armed;
     in-out property <string> check;
+    // the typed words as chips, toned by the caller (the BIP-39 list)
+    in property <[SeedRow]> rows;
     callback enter();
     callback copy-requested();
     vertical-stretch: 1;
@@ -2038,14 +2040,25 @@ export component SeedConfirmStep inherits VerticalLayout {
         font-size: Theme.fs-body;
         wrap: word-wrap;
     }
-    AppField {
+    // a 24-word phrase does not fit one line (field report 2026-09-13)
+    AppArea {
         text <=> root.check;
         placeholder: Strings.cw-seed-confirm-ph;
-        // Enter confirms, exactly like the button — behind the SAME gate
-        accepted => {
+        height: 96px * Theme.ui-scale;
+        // Ctrl+Enter confirms, exactly like the button — behind the SAME gate
+        ctrl-accepted => {
             if (root.armed) {
                 root.enter();
             }
+        }
+    }
+    for row in root.rows: HorizontalLayout {
+        spacing: 6px;
+        alignment: start;
+        for w in row.words: WordChip {
+            n: w.n;
+            word: w.word;
+            tone: w.tone;
         }
     }
 }

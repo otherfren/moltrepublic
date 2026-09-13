@@ -3798,6 +3798,7 @@ export component AppWindow inherits Window {
                         seed: root.cw-seed;
                         armed: root.seed-matches(root.cw-seed-check, root.cw-seed);
                         check <=> root.cw-seed-check;
+                        rows: root.seed-rows(root.cw-seed-check);
                         enter => {
                             root.confirm-seed-backup(root.cw-seed-check);
                             root.cw-seed-check = "";
@@ -4760,6 +4761,7 @@ export component AppWindow inherits Window {
                         seed: root.jw-seed;
                         armed: root.seed-matches(root.jw-seed-check, root.jw-seed);
                         check <=> root.jw-seed-check;
+                        rows: root.seed-rows(root.jw-seed-check);
                         enter => {
                             root.confirm-seed-backup(root.jw-seed-check);
                             root.jw-seed-check = "";
