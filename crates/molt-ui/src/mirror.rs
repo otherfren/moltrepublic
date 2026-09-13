@@ -994,23 +994,25 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
 /// What the wizard's log button counts: refusals (✗) and warnings (⚠),
 /// so the operator knows when the modal is worth opening.
 pub(crate) fn log_warning_count(log: &[String]) -> i32 {
-    let n = log
-        .iter()
-        .filter(|l| matches!(l.chars().next(), Some('✗' | '⚠')))
-        .count();
+    let n = log.iter().filter(|l| log_line_tone(l) >= 2).count();
     i32::try_from(n).unwrap_or(i32::MAX)
+}
+
+/// A log line's tone by its prefix: 1 success, 2 refusal, 3 warning,
+/// 0 the grey flow. The modal colours it; `log_warning_count` counts 2 + 3.
+pub(crate) fn log_line_tone(line: &str) -> i32 {
+    match line.chars().next() {
+        Some('✓') => 1,
+        Some('✗') => 2,
+        Some('⚠') => 3,
+        _ => 0,
+    }
 }
 
 fn sync_log_tones(current: &ModelRc<i32>, log: &[String], set: impl FnOnce(ModelRc<i32>)) {
     sync_rows(
         current,
-        log.iter()
-            .map(|l| match l.chars().next() {
-                Some('✓') => 1,
-                Some('✗') => 2,
-                _ => 0,
-            })
-            .collect::<Vec<i32>>(),
+        log.iter().map(|l| log_line_tone(l)).collect::<Vec<i32>>(),
         set,
     );
 }

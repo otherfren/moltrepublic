@@ -239,3 +239,14 @@ fn log_warning_count_is_the_refusals_and_warnings() {
     assert_eq!(crate::mirror::log_warning_count(&log), 2);
     assert_eq!(crate::mirror::log_warning_count(&[]), 0);
 }
+
+/// A log line's tone by its prefix: success, refusal, warning, or the
+/// grey flow — the modal colours the three, the button counts two.
+#[test]
+fn log_line_tone_follows_the_prefix() {
+    assert_eq!(crate::mirror::log_line_tone("✓ sealed"), 1);
+    assert_eq!(crate::mirror::log_line_tone("✗ refused"), 2);
+    assert_eq!(crate::mirror::log_line_tone("⚠ landed on 1 of 2 relays"), 3);
+    assert_eq!(crate::mirror::log_line_tone("→ opened"), 0);
+    assert_eq!(crate::mirror::log_line_tone(""), 0);
+}

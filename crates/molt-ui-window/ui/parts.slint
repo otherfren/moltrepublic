@@ -2345,8 +2345,8 @@ export component RunView inherits VerticalLayout {
 // height.
 export component RitualLog inherits Rectangle {
     in property <[string]> log;
-    // per-line tone (0 neutral, 1 good, 2 bad), computed Rust-side from the
-    // ✓/✗ prefix; an empty model keeps every line neutral
+    // per-line tone (0 neutral, 1 good, 2 bad, 3 warn), computed Rust-side
+    // from the ✓/✗/⚠ prefix; an empty model keeps every line neutral
     in property <[int]> tones;
     background: Theme.panel-2;
     border-radius: Theme.win95 ? 0px : 8px;
@@ -2368,9 +2368,10 @@ export component RitualLog inherits Rectangle {
             alignment: start;
             for line[i] in root.log: Text {
                 text: line;
-                // terminal ✓/✗ lines stand out of the gray flow
+                // ✓/✗/⚠ lines stand out of the gray flow
                 color: i < root.tones.length
                     ? (root.tones[i] == 2 ? Theme.bad
+                        : root.tones[i] == 3 ? Theme.warn
                         : root.tones[i] == 1 ? Theme.good : Theme.dim)
                     : Theme.dim;
                 font-size: Theme.fs-cap;
