@@ -2410,6 +2410,8 @@ export component WizardFrame inherits VerticalLayout {
     in property <bool> back-enabled: true;
     callback back();
     in property <string> log-label;
+    // refusals + warnings in the log: shown on the button when > 0
+    in property <int> log-warnings;
     callback show-log();
     in property <string> alt-label;
     in property <bool> alt-enabled: true;
@@ -2532,7 +2534,7 @@ export component WizardFrame inherits VerticalLayout {
                 }
                 if root.log-label != "": AppButton {
                     height: 38px * Theme.ui-scale;
-                    label: root.log-label;
+                    label: root.log-warnings > 0 ? "\{root.log-label} · \{root.log-warnings}" : root.log-label;
                     clicked => {
                         root.show-log();
                     }

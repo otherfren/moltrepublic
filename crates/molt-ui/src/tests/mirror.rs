@@ -227,3 +227,15 @@ fn relay_rows_mirror_the_engine_verdict_and_the_priority_order() {
     assert!(one[0].first && one[0].last);
     assert!(relay_rows(&[]).is_empty(), "a fresh install shows no rows");
 }
+
+/// The wizard's log button counts what went wrong: refusals (✗) and
+/// warnings (⚠), never progress or success lines.
+#[test]
+fn log_warning_count_is_the_refusals_and_warnings() {
+    let log: Vec<String> = ["→ ritual opened", "✗ invite 2: refused", "⚠ landed on 1 of 2 relays", "✓ sealed", "· invite 1 activated"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    assert_eq!(crate::mirror::log_warning_count(&log), 2);
+    assert_eq!(crate::mirror::log_warning_count(&[]), 0);
+}

@@ -1664,6 +1664,10 @@ export component AppWindow inherits Window {
     // per-line ✓/✗ tones for the three run logs (see cw-log-tone)
     in property <[int]> rw-log-tone;
     in property <[int]> jw-log-tone;
+    // refusals + warnings per run log, worn by the wizard's log button
+    in property <int> rw-log-warnings;
+    in property <int> cw-log-warnings;
+    in property <int> jw-log-warnings;
     // the ONE thing that went wrong, a few words, rendered large + signal
     in property <string> rw-headline;
     in property <string> jw-headline;
@@ -3366,6 +3370,7 @@ export component AppWindow inherits Window {
                     }
                 }
                 log-label: root.cw-step == 1 ? Strings.cw-log-title : "";
+                log-warnings: root.cw-log-warnings;
                 show-log => {
                     root.wizard-log-open = true;
                 }
@@ -4609,6 +4614,7 @@ export component AppWindow inherits Window {
                     }
                 }
                 log-label: root.jw-step == 1 ? Strings.cw-log-title : "";
+                log-warnings: root.jw-log-warnings;
                 show-log => {
                     root.wizard-log-open = true;
                 }
@@ -4869,6 +4875,7 @@ export component AppWindow inherits Window {
                     }
                 }
                 log-label: root.rw-step == 1 ? Strings.rw-log-title : "";
+                log-warnings: root.rw-log-warnings;
                 show-log => {
                     root.wizard-log-open = true;
                 }

@@ -20,6 +20,7 @@ mod mirror;
 mod modals;
 mod poke;
 mod recovery_backup;
+mod ritual_log;
 mod seed_confirm;
 mod snapshot;
 mod wiki;

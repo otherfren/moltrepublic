@@ -841,6 +841,7 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
         ui.set_rw_log(m)
     });
     sync_log_tones(&ui.get_rw_log_tone(), &sv.restore.run.log, |m| ui.set_rw_log_tone(m));
+    ui.set_rw_log_warnings(log_warning_count(&sv.restore.run.log));
     ui.set_rw_headline(localize_headline(ui.get_lang_index(), &sv.restore.run.headline).into());
 
     // founding ritual; the run header is composed here so an MCP-started
@@ -861,6 +862,7 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
         ui.set_cw_log(m)
     });
     sync_log_tones(&ui.get_cw_log_tone(), &sv.create.run.log, |m| ui.set_cw_log_tone(m));
+    ui.set_cw_log_warnings(log_warning_count(&sv.create.run.log));
     ui.set_cw_headline(localize_headline(ui.get_lang_index(), &sv.create.run.headline).into());
     // a declined seat switches the failure banner to "the founding is over"
     ui.set_cw_declined(sv.create.seats.iter().any(|s| s.state == 3));
@@ -979,6 +981,7 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
         ui.set_jw_log(m)
     });
     sync_log_tones(&ui.get_jw_log_tone(), &sv.join.run.log, |m| ui.set_jw_log_tone(m));
+    ui.set_jw_log_warnings(log_warning_count(&sv.join.run.log));
     ui.set_jw_headline(localize_headline(ui.get_lang_index(), &sv.join.run.headline).into());
 }
 
@@ -988,6 +991,16 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
 // Mirrored in place via sync_rows: the log modal's per-line colour bindings
 // consume these models, and a fresh ModelRc per engine tick would reset the
 // repeater on every tick while the modal is open.
+/// What the wizard's log button counts: refusals (✗) and warnings (⚠),
+/// so the operator knows when the modal is worth opening.
+pub(crate) fn log_warning_count(log: &[String]) -> i32 {
+    let n = log
+        .iter()
+        .filter(|l| matches!(l.chars().next(), Some('✗' | '⚠')))
+        .count();
+    i32::try_from(n).unwrap_or(i32::MAX)
+}
+
 fn sync_log_tones(current: &ModelRc<i32>, log: &[String], set: impl FnOnce(ModelRc<i32>)) {
     sync_rows(
         current,
