@@ -119,6 +119,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                 .map(|(url, picked)| RelayPick { url: url.into(), picked })
                 .collect();
             if let Some(ui) = cx.weak.upgrade() {
+                ui.set_cw_relay_picked(crate::mirror::picked_count(&rows));
                 ui.set_cw_relay_picks(slint::ModelRc::new(slint::VecModel::from(rows)));
             }
         });

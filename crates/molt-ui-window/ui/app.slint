@@ -26,7 +26,7 @@ import {
     ConfirmModal, DotLabel, InsetWell, WordChip
 } from "components.slint";
 import {
-    BusyModal, ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, SeedConfirmStep, RunView, RitualLog, WizardFrame, CharterView, SealedPanel, ProposalCard, DecisionTable, Spinner, DiffViewer
+    BusyModal, ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, SeedConfirmStep, RunView, RitualLog, WizardFrame, CharterView, SealedPanel, FoldedStep, ProposalCard, DecisionTable, Spinner, DiffViewer
 } from "parts.slint";
 // the four staged surfaces' badged DESIGN-MOCK panes (sample data lives
 // .slint-side only; the real governance views stay below in this file)
@@ -1211,6 +1211,187 @@ component UploadsTable inherits Rectangle {
 }
 
 
+// The founding ritual's member list: founder + one row per seat, rows turn
+// green as members activate their link and sign the roster (capped, the
+// list scrolls beyond the cap). `bare` drops the title row - the folded
+// header carries it once the invite step is over.
+component FounderSeats inherits Rectangle {
+    in property <[RitualSeat]> seats;
+    in property <bool> simulated;
+    in property <int> outcome;
+    in property <int> sealed;
+    in property <int> total;
+    in property <bool> hint-visible;
+    in property <bool> bare: false;
+    callback copy(string);
+    // row height follows the font ladder: a fixed 44px clipped the two
+    // stacked lines at larger app fonts (user report 2026-08-16)
+    property <length> seat-row-h: max(44px, Theme.fs-body * 1.4 + Theme.fs-cap * 1.4 + 16px);
+    height: min(340px, (root.bare ? 24px : 84px) + root.seats.length * (self.seat-row-h + 5px));
+    background: root.bare ? transparent : Theme.panel-2;
+    border-radius: Theme.win95 ? 0px : 8px;
+    border-width: root.bare ? 0px : Theme.border-w;
+    border-color: Theme.line;
+    VerticalLayout {
+        padding: root.bare ? 0px : 12px;
+        spacing: 8px;
+        if !root.bare: HorizontalLayout {
+            spacing: 8px;
+            Text {
+                text: Strings.cw-members-title;
+                color: Theme.faint;
+                font-size: Theme.fs-cap;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+            // honest marker: these members are simulated
+            if root.simulated: Rectangle {
+                background: Theme.warn;
+                border-radius: Theme.win95 ? 0px : 4px;
+                HorizontalLayout {
+                    padding-left: 6px;
+                    padding-right: 6px;
+                    padding-top: 2px;
+                    padding-bottom: 2px;
+                    Text {
+                        text: Strings.cw-sim-badge;
+                        color: #1a1200;
+                        font-size: Theme.fs-cap;
+                        font-weight: 700;
+                    }
+                }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Text {
+                text: "\{root.sealed} / \{root.total} \{Strings.cw-sealed-word}";
+                color: root.outcome == 1 ? Theme.good : Theme.faint;
+                font-size: Theme.fs-cap;
+                vertical-alignment: center;
+            }
+        }
+        // only while links are still being handed out - once everyone
+        // joined the advice is stale
+        if root.hint-visible: Text {
+            text: root.simulated ? Strings.cw-ritual-hint-sim : Strings.cw-ritual-hint;
+            color: root.simulated ? Theme.warn : Theme.faint;
+            font-size: Theme.fs-cap;
+            wrap: word-wrap;
+        }
+        Rectangle {
+            vertical-stretch: 1;
+            clip: true;
+            seatfl := Flickable {
+                width: 100%;
+                height: 100%;
+                viewport-width: self.width;
+                viewport-height: seatlist.preferred-height;
+                seatlist := VerticalLayout {
+                    spacing: 5px;
+                    alignment: start;
+                    for seat in root.seats: Rectangle {
+                        height: seat-row-h;
+                        border-radius: Theme.win95 ? 0px : 8px;
+                        background: Theme.panel;
+                        border-width: Theme.border-w;
+                        // fully green only at 4 (sealed AND key secured,
+                        // ❻½); a sealed seat still securing shows
+                        // in-progress
+                        border-color: seat.state == 4 ? Theme.good
+                            : (seat.state == 2 ? Theme.warn
+                            : (seat.state == 3 ? Theme.bad : Theme.line));
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 6px;
+                            spacing: 10px;
+                            // status dot: gray waiting, amber key-in, green
+                            // sealed, red declined
+                            Rectangle {
+                                width: 11px;
+                                height: 11px;
+                                border-radius: 5.5px;
+                                y: (parent.height - self.height) / 2;
+                                background: seat.state == 4 ? Theme.good
+                                    : (seat.state == 3 ? Theme.bad
+                                    : (seat.state == 1 || seat.state == 2 ? Theme.warn : Theme.line));
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: seat.member;
+                                    color: Theme.text;
+                                    font-size: Theme.fs-body;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: seat.detail;
+                                    color: Theme.faint;
+                                    font-size: Theme.fs-cap;
+                                    overflow: elide;
+                                }
+                            }
+                            // copy the link once it is ready (empty until
+                            // the queue is up)
+                            if seat.state == 0 && seat.detail != "": AppButton {
+                                height: 28px * Theme.ui-scale;
+                                pad: 10px;
+                                y: (parent.height - self.height) / 2;
+                                label: Strings.ow-copy;
+                                clicked => {
+                                    root.copy(seat.detail);
+                                }
+                            }
+                            // no link yet: the seat's transport is being
+                            // provisioned - show that work, never a blank row
+                            if seat.state == 0 && seat.detail == "" && root.outcome == 0: HorizontalLayout {
+                                spacing: 8px;
+                                padding-right: 6px;
+                                Spinner {
+                                    y: (parent.height - self.height) / 2;
+                                }
+                                Text {
+                                    text: Strings.cw-provisioning;
+                                    color: Theme.faint;
+                                    font-size: Theme.fs-cap;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            ScrollHint {
+                x: parent.width - 7px;
+                view-h: seatfl.height;
+                content-h: seatfl.viewport-height;
+                scroll-y: seatfl.viewport-y;
+            }
+        }
+    }
+}
+
+// One read-only fact row inside a folded step: caption left, value right.
+component FactRow inherits HorizontalLayout {
+    in property <string> caption;
+    in property <string> value;
+    spacing: 10px;
+    Text {
+        text: root.caption;
+        color: Theme.faint;
+        font-size: Theme.fs-cap;
+        width: 130px;
+        vertical-alignment: center;
+    }
+    Text {
+        text: root.value;
+        color: Theme.text;
+        font-size: Theme.fs-cap;
+        horizontal-stretch: 1;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+}
+
 export component AppWindow inherits Window {
     title: "MoltRepublic - node";
     // Raised 940 → 1060 so the Open screen's table fits WITHOUT a manual
@@ -1629,6 +1810,7 @@ export component AppWindow inherits Window {
             // the join half of this wizard starts clean too - the name is
             // only asked for once a link turns out to be an invite
             root.jw-member = "";
+            root.jw-fold = -1;
             // a recovery already in flight keeps its state; a fresh visit
             // starts clean
             if (!root.rv-running) {
@@ -1746,13 +1928,16 @@ export component AppWindow inherits Window {
     // the EFFECTIVE global anonymity network ("tor" | "none") — read-only
     // display on the create screen, fed from the saved settings
     in property <string> cw-net: "none";
-    property <string> cw-name;
+    in-out property <string> cw-name;
     // the founder's editable charter draft, proposed once every seat is filled
-    property <string> cw-agenda;
+    in-out property <string> cw-agenda;
     // true once the founder has proposed — hides the propose form (the members
     // are now ratifying; re-proposing a different charter would be a footgun)
-    property <bool> cw-proposed;
-    property <string> cw-member;
+    in-out property <bool> cw-proposed;
+    // the folded pile's one open entry (docs_archive/ui/founding_stack_fold.md):
+    // -1 none · 0 setup · 1 invites · 2 charter; UI-local like cw-step
+    in-out property <int> cw-fold: -1;
+    in-out property <string> cw-member;
     // the re-typed phrase proving the backup (create step 4 / join finish);
     // checked in Rust so whitespace/case never block an honest re-type
     property <string> cw-seed-check;
@@ -1824,6 +2009,8 @@ export component AppWindow inherits Window {
     // … and the join lifecycle, mirrored from the engine session:
     // step 0 = invite form, 1 = run view
     in property <int> jw-step: 0;
+    // the joiner's folded pile: -1 none · 0 invite facts · 1 charter
+    in-out property <int> jw-fold: -1;
     in property <float> jw-progress: 0.0;
     in property <int> jw-outcome: 0;
     in property <string> jw-republic;
@@ -2116,6 +2303,7 @@ export component AppWindow inherits Window {
     // the create wizard's relay picker: this node's dialable relays and the
     // founder's choice among them
     in property <[RelayPick]> cw-relay-picks;
+    in property <int> cw-relay-picked;
     callback cw-toggle-relay(int);
     property <bool> org-retention-modal-open: false;
     property <int> org-retention-draft: 7;
@@ -2560,6 +2748,7 @@ export component AppWindow inherits Window {
         root.cw-threshold = 2;
         root.cw-members = 3;
         root.cw-feat-memory = true;
+        root.cw-fold = -1;
     }
 
     init => {
@@ -3481,20 +3670,24 @@ export component AppWindow inherits Window {
                 // step 2 AND the seed step share this branch: the founding
                 // ritual lobby. Stack principle: the phase's CURRENT
                 // interaction (failure banner, wait note, seed proof or the
-                // charter) sits on top, the standing member list — the
-                // artifact of the invite step — below it. The live ritual
-                // log moved behind the footer's log button (a modal).
+                // charter) sits on top; every FINISHED step folds to a
+                // header line at the bottom. The live ritual log moved
+                // behind the footer's log button (a modal).
                 if root.cw-step == 1: VerticalLayout {
                     spacing: 12px;
-                    // the CURRENT decision must outshine the standing
-                    // context (user report 2026-08-16): while an input is
-                    // active (deliberation, or the phrase backup), the
-                    // panels stacked under it dim — the eye lands on the
-                    // form, not on the pile
-                    property <bool> input-active:
-                        (root.cw-can-propose && !root.cw-proposed && root.cw-outcome == 0)
-                        || (root.cw-proposed && root.cw-all-ratified
-                            && !root.cw-backup-confirmed && root.cw-outcome == 0);
+                    // the founder's phase: 1 invites · 2 deliberation ·
+                    // 3 charter out · 4 phrase proof · 5 backups out ·
+                    // 6 sealed · 7 failed. Every advance closes the pile,
+                    // so a fresh current step never competes with an open
+                    // record (user decision 2026-09-13)
+                    property <int> phase: root.cw-outcome == 2 ? 7
+                        : (root.cw-outcome == 1 ? 6
+                        : (root.cw-proposed
+                            ? (root.cw-all-ratified ? (root.cw-backup-confirmed ? 5 : 4) : 3)
+                            : (root.cw-can-propose ? 2 : 1)));
+                    changed phase => {
+                        root.cw-fold = -1;
+                    }
 
                     // the founding failed: say so loudly, right where the
                     // user is looking — the log line alone is too quiet for
@@ -3615,20 +3808,6 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // while the proposal is out, the founder keeps seeing
-                    // WHAT is being ratified — the same read-only view the
-                    // members ratify from
-                    if root.cw-proposed && root.cw-outcome == 0: CharterView {
-                        opacity: input-active ? 0.55 : 1;
-                        heading: Strings.wiz-step-charter;
-                        republic: root.cw-name;
-                        agenda: root.cw-agenda == "" ? Strings.jw-ratify-agenda-empty : root.cw-agenda;
-                        feat-memory: root.cw-feat-memory;
-                        feat-quests: false;
-                        feat-vault: false;
-                        feat-wallet: false;
-                    }
-
                     // ---- deliberation: the phase's current interaction, on
                     // top of the stack — its own panel, accent-framed so it
                     // reads as "input needed now". Propose & Seal sits in
@@ -3737,158 +3916,83 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // the member list: founder + one row per seat, rows turn
-                    // green as members activate their link and sign the
-                    // roster (capped, the list scrolls beyond the cap). The
-                    // ritual's standing state, stacked under the current
-                    // interaction — gone once sealed (the shared last step
-                    // is identical for founder and joiner).
-                    if root.cw-outcome != 1: Rectangle {
-                        opacity: input-active ? 0.55 : 1;
-                        // row height follows the font ladder: a fixed 44px
-                        // clipped the two stacked lines at larger app fonts
-                        // (user report 2026-08-16)
-                        property <length> seat-row-h: max(44px, Theme.fs-body * 1.4 + Theme.fs-cap * 1.4 + 16px);
-                        height: min(340px, 84px + root.cw-seats.length * (self.seat-row-h + 5px));
-                        background: Theme.panel-2;
-                        border-radius: Theme.win95 ? 0px : 8px;
-                        border-width: Theme.border-w;
-                        border-color: Theme.line;
+                    // P1: the member list IS the current step
+                    if phase == 1: FounderSeats {
+                        seats: root.cw-seats;
+                        simulated: root.cw-simulated;
+                        outcome: root.cw-outcome;
+                        sealed: root.cw-sealed;
+                        total: root.cw-total;
+                        hint-visible: true;
+                        copy(t) => {
+                            root.copy-text(t);
+                            root.show-toast(Strings.toast-copied);
+                        }
+                    }
+
+                    // ---- the folded pile, newest first: every finished step
+                    // one header line with a live summary, at most one open
+                    // (docs_archive/ui/founding_stack_fold.md) ----
+                    if root.cw-proposed: FoldedStep {
+                        title: Strings.wiz-step-charter;
+                        summary: root.cw-agenda == "" ? Strings.jw-ratify-agenda-empty : root.cw-agenda;
+                        open: root.cw-fold == 2;
+                        toggle => {
+                            root.cw-fold = root.cw-fold == 2 ? -1 : 2;
+                        }
+                        CharterView {
+                            heading: "";
+                            republic: root.cw-name;
+                            agenda: root.cw-agenda == "" ? Strings.jw-ratify-agenda-empty : root.cw-agenda;
+                            feat-memory: root.cw-feat-memory;
+                            feat-quests: false;
+                            feat-vault: false;
+                            feat-wallet: false;
+                        }
+                    }
+                    if phase != 1: FoldedStep {
+                        title: Strings.wiz-step-invites;
+                        summary: "\{root.cw-sealed} / \{root.cw-total} \{Strings.cw-sealed-word}";
+                        open: root.cw-fold == 1;
+                        toggle => {
+                            root.cw-fold = root.cw-fold == 1 ? -1 : 1;
+                        }
+                        FounderSeats {
+                            bare: true;
+                            seats: root.cw-seats;
+                            simulated: root.cw-simulated;
+                            outcome: root.cw-outcome;
+                            sealed: root.cw-sealed;
+                            total: root.cw-total;
+                            hint-visible: false;
+                            copy(t) => {
+                                root.copy-text(t);
+                                root.show-toast(Strings.toast-copied);
+                            }
+                        }
+                    }
+                    FoldedStep {
+                        title: Strings.wiz-step-setup;
+                        summary: "\{root.cw-member} · \{root.cw-threshold}-of-\{root.cw-members} · \{root.cw-relay-picked} \{Strings.fold-relays} · \{root.cw-net}";
+                        open: root.cw-fold == 0;
+                        toggle => {
+                            root.cw-fold = root.cw-fold == 0 ? -1 : 0;
+                        }
+                        FactRow { caption: Strings.cw-grp-republic; value: root.cw-name; }
+                        FactRow { caption: Strings.field-member-name; value: root.cw-member; }
+                        FactRow { caption: Strings.cw-grp-rule; value: "\{root.cw-threshold}-of-\{root.cw-members}"; }
+                        FactRow { caption: Strings.cw-net-label; value: root.cw-net; }
+                        // one line per picked relay; an unpicked one folds
+                        // to zero height so the pile shows no gaps
                         VerticalLayout {
-                            padding: 12px;
-                            spacing: 8px;
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    text: Strings.cw-members-title;
-                                    color: Theme.faint;
-                                    font-size: Theme.fs-cap;
-                                    font-weight: 700;
-                                    vertical-alignment: center;
-                                }
-                                // honest marker: these members are simulated
-                                if root.cw-simulated: Rectangle {
-                                    background: Theme.warn;
-                                    border-radius: Theme.win95 ? 0px : 4px;
-                                    HorizontalLayout {
-                                        padding-left: 6px;
-                                        padding-right: 6px;
-                                        padding-top: 2px;
-                                        padding-bottom: 2px;
-                                        Text {
-                                            text: Strings.cw-sim-badge;
-                                            color: #1a1200;
-                                            font-size: Theme.fs-cap;
-                                            font-weight: 700;
-                                        }
-                                    }
-                                }
-                                Rectangle { horizontal-stretch: 1; }
-                                Text {
-                                    text: "\{root.cw-sealed} / \{root.cw-total} \{Strings.cw-sealed-word}";
-                                    color: root.cw-outcome == 1 ? Theme.good : Theme.faint;
-                                    font-size: Theme.fs-cap;
-                                    vertical-alignment: center;
-                                }
-                            }
-                            // only while links are still being handed out —
-                            // once everyone joined the advice is stale
-                            if !root.cw-can-propose && !root.cw-proposed: Text {
-                                text: root.cw-simulated ? Strings.cw-ritual-hint-sim : Strings.cw-ritual-hint;
-                                color: root.cw-simulated ? Theme.warn : Theme.faint;
-                                font-size: Theme.fs-cap;
-                                wrap: word-wrap;
-                            }
-                            Rectangle {
-                                vertical-stretch: 1;
+                            spacing: 0;
+                            for r[i] in root.cw-relay-picks: Rectangle {
                                 clip: true;
-                                seatfl := Flickable {
+                                height: r.picked ? Theme.fs-cap * 1.6 : 0px;
+                                FactRow {
                                     width: 100%;
-                                    height: 100%;
-                                    viewport-width: self.width;
-                                    viewport-height: seatlist.preferred-height;
-                                    seatlist := VerticalLayout {
-                                        spacing: 5px;
-                                        alignment: start;
-                                        for seat in root.cw-seats: Rectangle {
-                                            height: seat-row-h;
-                                            border-radius: Theme.win95 ? 0px : 8px;
-                                            background: Theme.panel;
-                                            border-width: Theme.border-w;
-                                            // fully green only at 4 (sealed AND
-                                            // key secured, ❻½); a sealed seat
-                                            // still securing shows in-progress
-                                            border-color: seat.state == 4 ? Theme.good
-                                                : (seat.state == 2 ? Theme.warn
-                                                : (seat.state == 3 ? Theme.bad : Theme.line));
-                                            HorizontalLayout {
-                                                padding-left: 12px;
-                                                padding-right: 6px;
-                                                spacing: 10px;
-                                                // status dot: gray waiting, amber
-                                                // key-in, green sealed, red declined
-                                                Rectangle {
-                                                    width: 11px;
-                                                    height: 11px;
-                                                    border-radius: 5.5px;
-                                                    y: (parent.height - self.height) / 2;
-                                                    background: seat.state == 4 ? Theme.good
-                                                        : (seat.state == 3 ? Theme.bad
-                                                        : (seat.state == 1 || seat.state == 2 ? Theme.warn : Theme.line));
-                                                }
-                                                VerticalLayout {
-                                                    alignment: center;
-                                                    horizontal-stretch: 1;
-                                                    Text {
-                                                        text: seat.member;
-                                                        color: Theme.text;
-                                                        font-size: Theme.fs-body;
-                                                        overflow: elide;
-                                                    }
-                                                    Text {
-                                                        text: seat.detail;
-                                                        color: Theme.faint;
-                                                        font-size: Theme.fs-cap;
-                                                        overflow: elide;
-                                                    }
-                                                }
-                                                // copy the link once it is ready
-                                                // (empty until the queue is up)
-                                                if seat.state == 0 && seat.detail != "": AppButton {
-                                                    height: 28px * Theme.ui-scale;
-                                                    pad: 10px;
-                                                    y: (parent.height - self.height) / 2;
-                                                    label: Strings.ow-copy;
-                                                    clicked => {
-                                                        root.copy-text(seat.detail);
-                                                        root.show-toast(Strings.toast-copied);
-                                                    }
-                                                }
-                                                // no link yet: the seat's transport
-                                                // is being provisioned — show that
-                                                // work, never a blank row
-                                                if seat.state == 0 && seat.detail == "" && root.cw-outcome == 0: HorizontalLayout {
-                                                    spacing: 8px;
-                                                    padding-right: 6px;
-                                                    Spinner {
-                                                        y: (parent.height - self.height) / 2;
-                                                    }
-                                                    Text {
-                                                        text: Strings.cw-provisioning;
-                                                        color: Theme.faint;
-                                                        font-size: Theme.fs-cap;
-                                                        vertical-alignment: center;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                ScrollHint {
-                                    x: parent.width - 7px;
-                                    view-h: seatfl.height;
-                                    content-h: seatfl.viewport-height;
-                                    scroll-y: seatfl.viewport-y;
+                                    caption: i == 0 ? Strings.cw-grp-relays : "";
+                                    value: r.url;
                                 }
                             }
                         }
@@ -4635,6 +4739,17 @@ export component AppWindow inherits Window {
                 // shown before the seal gates entry on the backup step.
                 if root.jw-step == 1: VerticalLayout {
                     spacing: 12px;
+                    // the joiner's phase: 1 joining · 2 ratify · 3 ratified,
+                    // waiting · 4 phrase proof · 5 sealed · 6 failed. Every
+                    // advance closes the folded pile (founding_stack_fold.md)
+                    property <int> phase: root.jw-outcome == 2 ? 6
+                        : (root.jw-sealed ? 5
+                        : (root.jw-awaiting-backup ? 4
+                        : (root.jw-proposed-name == "" ? 1
+                        : (root.jw-awaiting-ratify ? 2 : 3))));
+                    changed phase => {
+                        root.jw-fold = -1;
+                    }
                     // step 2½ (❻½): the phrase-backup confirmation — BEFORE
                     // the seal, the exact twin of the founder's. Confirming
                     // releases the signed attestation; the ritual then waits
@@ -4654,12 +4769,12 @@ export component AppWindow inherits Window {
                             root.show-toast(Strings.toast-copied);
                         }
                     }
-                    // the proposed charter + features, exactly as signed —
-                    // accent-framed while the ratify decision (footer) is
-                    // pending, plain afterwards as the standing record
-                    if root.jw-proposed-name != "" && !root.jw-sealed && root.jw-outcome != 2: CharterView {
-                        accent: root.jw-awaiting-ratify;
-                        heading: root.jw-awaiting-ratify ? Strings.jw-ratify-title : Strings.wiz-step-charter;
+                    // the proposed charter + features, exactly as signed -
+                    // the current step while the ratify decision (footer)
+                    // is pending; folded into the pile once it is taken
+                    if root.jw-awaiting-ratify && !root.jw-sealed && root.jw-outcome != 2: CharterView {
+                        accent: true;
+                        heading: Strings.jw-ratify-title;
                         republic: root.jw-proposed-name;
                         agenda: root.jw-proposed-agenda == "" ? Strings.jw-ratify-agenda-empty
                             : root.jw-proposed-agenda;
@@ -4688,6 +4803,40 @@ export component AppWindow inherits Window {
                         ph-founder: Strings.jw-ph-founder;
                         failed-label: Strings.jw-failed;
                         headline: root.jw-headline;
+                    }
+
+                    // ---- the folded pile, newest first ----
+                    if root.jw-proposed-name != "" && !root.jw-awaiting-ratify: FoldedStep {
+                        title: Strings.wiz-step-charter;
+                        summary: root.jw-proposed-agenda == "" ? Strings.jw-ratify-agenda-empty : root.jw-proposed-agenda;
+                        open: root.jw-fold == 1;
+                        toggle => {
+                            root.jw-fold = root.jw-fold == 1 ? -1 : 1;
+                        }
+                        CharterView {
+                            heading: "";
+                            republic: root.jw-proposed-name;
+                            agenda: root.jw-proposed-agenda == "" ? Strings.jw-ratify-agenda-empty
+                                : root.jw-proposed-agenda;
+                            feat-memory: root.jw-feat-memory;
+                            feat-quests: root.jw-feat-quests;
+                            feat-vault: root.jw-feat-vault;
+                            feat-wallet: root.jw-feat-wallet;
+                        }
+                    }
+                    // the join facts - never the invite link itself
+                    FoldedStep {
+                        title: Strings.wiz-step-invite;
+                        summary: root.jw-inviter == "" ? "\{root.jw-member} · \{root.jw-rule}"
+                            : "\{root.jw-member} · \{root.jw-rule} · \{Strings.jw-invited-by} \{root.jw-inviter}";
+                        open: root.jw-fold == 0;
+                        toggle => {
+                            root.jw-fold = root.jw-fold == 0 ? -1 : 0;
+                        }
+                        FactRow { caption: Strings.cw-grp-republic; value: root.jw-republic; }
+                        FactRow { caption: Strings.field-member-name; value: root.jw-member; }
+                        FactRow { caption: Strings.cw-grp-rule; value: root.jw-rule; }
+                        if root.jw-inviter != "": FactRow { caption: Strings.jw-invited-by; value: root.jw-inviter; }
                     }
                 }
             }

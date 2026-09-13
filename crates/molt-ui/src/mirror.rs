@@ -733,6 +733,7 @@ pub(crate) fn apply_session(
                 .into_iter()
                 .map(|(url, picked)| RelayPick { url: url.into(), picked })
                 .collect();
+            ui.set_cw_relay_picked(picked_count(&rows));
             sync_rows(&ui.get_cw_relay_picks(), rows, |m| ui.set_cw_relay_picks(m));
         }
     }
@@ -1615,4 +1616,10 @@ pub(crate) fn spawn_mirror(ctx: &Ctx) {
             }
         }
     });
+}
+
+/// How many of the founder's relay picks are ticked - the folded setup
+/// step's header counts them.
+pub(crate) fn picked_count(rows: &[RelayPick]) -> i32 {
+    i32::try_from(rows.iter().filter(|r| r.picked).count()).unwrap_or(i32::MAX)
 }

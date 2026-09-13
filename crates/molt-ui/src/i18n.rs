@@ -802,6 +802,7 @@ lexicon! {
     cw_invites: "Invites", "Einladungen";
     cw_invites_hint: "One link per future member - share each once, over a private channel.", "Ein Link pro künftigem Mitglied - jeden nur einmal teilen, über einen privaten Kanal.";
     cw_members_title: "Members", "Mitglieder";
+    fold_relays: "relays", "Relays";
     cw_sealed_word: "sealed", "versiegelt";
     cw_sim_badge: "SIMULATION", "SIMULATION";
     cw_ritual_hint: "Share each link once, over a private channel. The republic is created once every member has activated their link and signed the roster.", "Teile jeden Link einmal, über einen privaten Kanal. Die Republik entsteht, sobald jedes Mitglied seinen Link aktiviert und die Mitgliederliste signiert hat.";

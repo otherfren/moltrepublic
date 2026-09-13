@@ -2070,7 +2070,8 @@ export component CharterView inherits Rectangle {
     VerticalLayout {
         padding: 14px;
         spacing: 8px;
-        Text {
+        // "" = no heading: inside a FoldedStep the fold's header names it
+        if root.heading != "": Text {
             text: root.heading;
             color: root.accent ? Theme.accent : Theme.text;
             font-size: Theme.fs-h2;
@@ -2163,6 +2164,84 @@ export component SealedPanel inherits RestoreWay {
         tone: Theme.good;
         label: Strings.wiz-sealed-note;
         label-color: Theme.good;
+    }
+}
+
+// A finished wizard step, folded to one header line at the bottom of the
+// column (docs_archive/ui/founding_stack_fold.md): [+|-] title ... live summary.
+// The body is height-clipped, not `if`-gated, so a live model inside keeps
+// updating while folded and the fold animates. The caller owns the
+// accordion (one open at a time) through `open` + `toggle`.
+export component FoldedStep inherits Rectangle {
+    in property <string> title;
+    in property <string> summary;
+    in property <bool> open: false;
+    callback toggle();
+    border-radius: Theme.win95 ? 0px : 8px;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    background: Theme.panel-2;
+    VerticalLayout {
+        spacing: 0;
+        fs-head := Rectangle {
+            height: max(34px, Theme.fs-body * 1.4 + 14px);
+            accessible-role: button;
+            accessible-label: root.title;
+            accessible-action-default => {
+                root.toggle();
+            }
+            TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.toggle();
+                }
+            }
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 10px;
+                Text {
+                    text: root.open ? "-" : "+";
+                    color: Theme.accent;
+                    font-size: Theme.fs-h2;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    width: 14px;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: root.title;
+                    color: root.open ? Theme.text : Theme.faint;
+                    font-size: Theme.fs-cap;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+                fs-summary := Text {
+                    text: root.summary;
+                    color: Theme.faint;
+                    font-size: Theme.fs-cap;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+            }
+        }
+        fs-body := Rectangle {
+            clip: true;
+            height: root.open ? fs-col.preferred-height : 0px;
+            animate height {
+                duration: 200ms;
+                easing: ease-in-out;
+            }
+            fs-col := VerticalLayout {
+                padding: 12px;
+                padding-top: 4px;
+                spacing: 8px;
+                alignment: start;
+                @children
+            }
+        }
     }
 }
 

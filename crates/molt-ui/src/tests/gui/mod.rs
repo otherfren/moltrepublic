@@ -13,6 +13,7 @@
 
 mod chat;
 mod files;
+mod founding_fold;
 mod layout;
 mod mirror;
 #[cfg(feature = "live-preview")]
