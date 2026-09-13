@@ -305,6 +305,9 @@ impl State {
             })
             .collect();
         tracing::warn!(%from, fork = f, dropped = dropped.len(), adopted = suffix.len(), "re-basing onto the other branch");
+        // the dropped suffix's fold order stamped cards; the other branch
+        // folds them differently
+        self.forget_wiki_stamps();
         self.adopt_chain(candidate);
         // R4: what our dropped suffix decided and theirs does not is a vote again
         for b in &dropped {
@@ -533,6 +536,9 @@ impl State {
                     } else if let Some(p) = self.proposals.get_mut(proposal_id) {
                         p.state = ProposalState::Proposed;
                     }
+                    // the displaced block was folded: the stamps above its
+                    // height belong to the fold that just changed
+                    self.forget_wiki_stamps();
                 }
                 self.after_block_applied(&block);
                 self.persist_chain_now();

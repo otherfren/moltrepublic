@@ -313,6 +313,7 @@ fn org_pending_cards_carry_current_and_proposed_state() {
         superseded: false,
         superseded_kind: None,
         withdrawn: false,
+        wiki_rev: None,
     };
     assert_eq!(
         proposals::change_summary(

@@ -490,6 +490,7 @@ fn a_material_less_open_vote_does_not_block_a_current_re_propose() {
         superseded: false,
         superseded_kind: None,
         withdrawn: false,
+        wiki_rev: None,
     };
     st.proposals.insert(1, stale);
     let mut payload = json!({"op": "persist", "id": id.to_string()});

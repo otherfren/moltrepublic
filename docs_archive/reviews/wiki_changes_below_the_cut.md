@@ -1,10 +1,21 @@
 # `wiki_changes` answers nothing below a cut, although a full holder still has the patches
 
-Status: **OPEN (2026-09-13)** - analysis and two candidate designs; §5
-needs the user's decision before the build. Found on a live seat of a
-production republic (dev build of `1356e034`). Siblings: `list_proposals_unbounded.md`,
-`supersede_verdict_survives_apply.md`. Leaves for `docs_archive/reviews/`
-with the change that closes §4.
+Status: **EXECUTED 2026-09-13** - the user chose option A (§5.1). Built
+red-first; what shipped differs from §3/§4 in these points: the stamp is
+written by the fold cache's refresh, which the apply path runs after
+every Memory block (`after_block_applied`) and after every re-projection,
+so it is a function of the chain, not of reads; a branch change (a blob
+re-anchor, a re-base, a tip displacement) forgets every stamp; the floor
+walk is strict - a repeated revision is a hole like a missing one, and
+nothing under the floor is listed; the history below the cut is parsed
+once per fold into a memo on the cache; `rev_at_cut` is `Option` - a
+pre-A3 cut (absent) keeps a floor of 1, an explicit 0 folded nothing
+away. Not built: §4.2's suffix-holder integration assertion (no seat of
+`checkpoint_under_load` becomes a suffix holder; the unit test's
+"no stamps" branch is the only pin of that path). §5.2 stands as stated:
+the live seat's current cut is not back-filled. Found on a live
+seat of a production republic (dev build of `1356e034`). Siblings:
+`list_proposals_unbounded.md`, `supersede_verdict_survives_apply.md`.
 
 ## 1. Symptom
 
@@ -84,7 +95,7 @@ rejected.
 (813 rows, cheap) and re-reads everything or diffs by `bytes`. Rejected:
 it is exactly the cost §4.11 was built to remove.
 
-## 4. Work for A, red first
+## 4. Work for A, red first (all done)
 
 1. `proposals.rs::wiki_maintenance_tests`: (a) three stamped records
    (page `a` added @1, page `b` modified @2, page `c` added @3), a cut at 2,
@@ -97,14 +108,22 @@ it is exactly the cost §4.11 was built to remove.
 2. `crates/molt-engine/tests/checkpoint_under_load.rs`: after the first
    cut, `wiki_changes since 0` on a full holder lists a, b, c and is not
    truncated; on the suffix holder (`vera` after her fetch) it is.
-3. Core field; engine stamping (`fold_wiki_from_base`,
-   `refresh_wiki_cache`'s extension loop), `below_cut_history`, the new
-   `truncated` rule; reply shape unchanged.
+3. Core field; engine stamping in `refresh_wiki_cache` (after the full
+   fold and after an extension, also one a cut ends), driven from the
+   apply path; `wiki_history_below_the_cut`, the floor, the memo; reply
+   shape unchanged.
 4. MCP tool text: "a full holder answers below its cuts from its own
    records; `truncated` says where it cannot". Spec: §4.9 A3 and §4.11
    in `knowledge_base_scale.md` get the corrected sentence.
 
-## 5. Open for the user
+## 5. Decided by the user (2026-09-13: A; the current cut stays truncated)
+
+Residuals after the review: a bulk re-projection over a cut (rejoin,
+catch-up that lands the cut together with its patches) stamps nothing
+below it - such a holder reads truncated like a suffix holder; a
+pre-A3 cut co-signed by an old build after stamps were written would
+mix two counter eras below a later cut [SPECULATION on the precondition:
+every live build writes `rev_at_cut`, and a cut is n-of-n].
 
 1. A or B - A relies on decided records never being pruned from the
    store. Is that a guarantee the product wants to keep (the archive view

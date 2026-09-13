@@ -776,15 +776,12 @@ impl State {
         surface: Surface,
         payload: &Value,
     ) -> Result<Vec<String>, MoltError> {
-        if surface != Surface::Memory
-            || payload.get("op").and_then(Value::as_str) != Some("wiki_patch")
-        {
+        if surface != Surface::Memory {
             return Ok(Vec::new());
         }
-        let Some(patch) = payload.get("value").and_then(Value::as_str) else {
+        let Some(files) = Self::wiki_patch_files(payload) else {
             return Ok(Vec::new());
         };
-        let files = molt_core::wiki_fold::parse_patch(patch);
         let paths = molt_core::wiki_fold::touched_paths(&files);
         // base-pending: there is nothing to check against, and a fabricated
         // verdict would be worse than none
@@ -1968,13 +1965,18 @@ impl State {
     /// [`State::applied_values`] builds, without its clone. Not for chat,
     /// whose log is synthesized rather than stored.
     pub(crate) fn applied_payloads(&self, surface: Surface) -> impl Iterator<Item = &Value> {
+        self.applied_entries(surface).map(|(_, v)| v)
+    }
+
+    /// [`Self::applied_payloads`] with the proposal id each entry came from.
+    pub(crate) fn applied_entries(&self, surface: Surface) -> impl Iterator<Item = (Option<u64>, &Value)> {
         debug_assert!(surface != Surface::Chat, "chat has no stored applied log");
         self.applied
             .get(&surface)
             .into_iter()
             .flatten()
             .chain(self.chain.applied.get(&surface).into_iter().flatten())
-            .map(|(_, v)| v)
+            .map(|(id, v)| (*id, v))
     }
 
     /// [`Command::WikiList`]: one page of the folded base, metadata only
@@ -2467,9 +2469,39 @@ impl State {
                 MoltError::Engine("the wiki fold cache is unavailable".to_string())
             }));
         };
+        // below the cut the cards answer; above it the cache does. A
+        // pre-A3 cut recorded no revision, so what it folded away is
+        // unknowable: the floor sits right above it. A window above the
+        // cut needs no card parsed; one below it is answered from a memo
+        // the fold cache keeps
+        let needs_cards = match (cache.base.is_some(), cache.rev_at_cut) {
+            (true, Some(at)) if since_rev < at => Some(at),
+            _ => None,
+        };
+        if let Some(at) = needs_cards {
+            if cache.below_cut.is_none() {
+                let below = self.wiki_history_below_the_cut(at);
+                if let Some(c) = self.wiki_cache.as_mut() {
+                    c.below_cut = Some(below);
+                }
+            }
+        }
+        let Some(cache) = self.wiki_cache.as_ref() else {
+            return Err(MoltError::Engine("the wiki fold cache is unavailable".to_string()));
+        };
         let wiki_rev = cache.rev;
         let base = cache.base.clone();
-        let mut changes = coalesce_wiki_changes(&cache.history, since_rev);
+        let empty: Vec<crate::WikiRevChanges> = Vec::new();
+        let (below, floor): (&[crate::WikiRevChanges], u64) = match (base.is_some(), cache.rev_at_cut) {
+            (false, _) => (&empty, 0),
+            (true, None) => (&empty, 1),
+            (true, Some(_)) if needs_cards.is_none() => (&empty, 0),
+            (true, Some(_)) => cache
+                .below_cut
+                .as_ref()
+                .map_or((&empty[..], 0), |(b, f)| (b.as_slice(), *f)),
+        };
+        let mut changes = coalesce_wiki_changes(below.iter().chain(cache.history.iter()), since_rev);
         // revision first, then path: the order an agent replays them in
         changes.sort_by(|a, b| a.rev.cmp(&b.rev).then_with(|| a.path.cmp(&b.path)));
         let total = u64::try_from(changes.len()).unwrap_or(u64::MAX);
@@ -2477,12 +2509,11 @@ impl State {
         let page = page.min(changes.len().saturating_sub(start));
         let next_cursor = (start + page < changes.len())
             .then(|| u32::try_from(start + page).unwrap_or(u32::MAX));
-        // below a folded base there is no change list at all, only a tree -
-        // so a caller asking from the start of history, or from a revision
-        // this base never reached, is TOLD rather than handed a short
-        // answer that reads as complete
-        let truncated = (base.is_some() && (since_rev == 0 || since_rev < cache.rev_at_cut))
-            || since_rev > wiki_rev;
+        // below the floor there is a tree and no complete change list - a
+        // caller asking from under it, or from a revision this base never
+        // reached, is TOLD rather than handed a short answer that reads as
+        // complete
+        let truncated = since_rev < floor || since_rev > wiki_rev;
         Ok(Reply::WikiChanges {
             changes: changes.into_iter().skip(start).take(page).collect(),
             next_cursor,
@@ -3451,13 +3482,18 @@ impl State {
     pub(crate) fn wiki_payload_paths(
         payload: &Value,
     ) -> Option<std::collections::BTreeSet<String>> {
+        Some(molt_core::wiki_fold::touched_paths(&Self::wiki_patch_files(payload)?))
+    }
+
+    /// The parsed files of a `wiki_patch` payload; `None` for any other
+    /// payload. THE extraction - the fold, the walk, the paths and the
+    /// history below a cut all read the envelope through here.
+    pub(crate) fn wiki_patch_files(payload: &Value) -> Option<Vec<molt_core::wiki_fold::PatchFile>> {
         if payload.get("op").and_then(Value::as_str) != Some("wiki_patch") {
             return None;
         }
         let patch = payload.get("value").and_then(Value::as_str)?;
-        Some(molt_core::wiki_fold::touched_paths(
-            &molt_core::wiki_fold::parse_patch(patch),
-        ))
+        Some(molt_core::wiki_fold::parse_patch(patch))
     }
 
     /// How many Memory entries each half of the fold order holds.
@@ -3485,7 +3521,10 @@ impl State {
         MoltError,
     > {
         if let Some(c) = self.wiki_cache.as_ref() {
-            if c.epoch == self.applied_epoch && (c.legacy, c.chain) == self.memory_lens() {
+            if c.epoch == self.applied_epoch
+                && (c.legacy, c.chain) == self.memory_lens()
+                && self.wiki_cache_base_held(c)
+            {
                 return Ok((std::borrow::Cow::Borrowed(&c.tree), c.rev));
             }
         }
@@ -3510,9 +3549,10 @@ impl State {
             epoch: self.applied_epoch,
             history: Vec::new(),
             base: None,
-            rev_at_cut: 0,
+            rev_at_cut: None,
+            below_cut: None,
         };
-        for payload in self.applied_payloads(Surface::Memory) {
+        for (id, payload) in self.applied_entries(Surface::Memory) {
             if let Some((want, size)) = crate::chain::base_commitment_of(payload) {
                 let held = self
                     .chain
@@ -3532,12 +3572,12 @@ impl State {
                 // being answerable
                 cache.tree.clone_from(held);
                 cache.history.clear();
-                cache.rev = crate::chain::rev_at_cut_of(payload);
-                cache.rev_at_cut = cache.rev;
+                cache.rev_at_cut = crate::chain::rev_at_cut_of(payload);
+                cache.rev = cache.rev_at_cut.unwrap_or(0);
                 cache.base = Some(want);
                 continue;
             }
-            Self::fold_wiki_step(&mut cache, payload);
+            Self::fold_wiki_step(&mut cache, id, payload);
         }
         Ok(cache)
     }
@@ -3547,20 +3587,17 @@ impl State {
     /// plus what that revision touched (§4.11). Two step implementations
     /// would let the cached history describe a different fold than the
     /// tree it rides on.
-    fn fold_wiki_step(cache: &mut crate::WikiCache, payload: &Value) {
-        if payload.get("op").and_then(Value::as_str) != Some("wiki_patch") {
-            return;
-        }
-        let Some(patch) = payload.get("value").and_then(Value::as_str) else {
+    fn fold_wiki_step(cache: &mut crate::WikiCache, id: Option<u64>, payload: &Value) {
+        let Some(files) = Self::wiki_patch_files(payload) else {
             return;
         };
-        let files = molt_core::wiki_fold::parse_patch(patch);
         if molt_core::wiki_fold::apply_patch(&mut cache.tree, &files).is_err() {
             return; // VOID: it moved nothing, so it is not a revision
         }
         cache.rev = cache.rev.saturating_add(1);
         cache.history.push(crate::WikiRevChanges {
             rev: cache.rev,
+            proposal: id,
             items: files.iter().map(wiki_touch_of).collect(),
         });
     }
@@ -3572,10 +3609,12 @@ impl State {
     pub(crate) fn refresh_wiki_cache(&mut self) {
         let (legacy, chain) = self.memory_lens();
         let epoch = self.applied_epoch;
+        let mut stamps: Vec<(u64, u64)> = Vec::new();
         let mut cache = self.wiki_cache.take().filter(|c| {
             c.epoch == epoch
                 && ((c.chain == 0 && chain == 0 && c.legacy <= legacy)
                     || (c.legacy == legacy && c.chain <= chain))
+                && self.wiki_cache_base_held(c)
         });
         if let Some(c) = cache.as_mut() {
             let tail = self
@@ -3592,18 +3631,22 @@ impl State {
                         .flatten()
                         .skip(c.chain),
                 )
-                .map(|(_, v)| v);
+                .map(|(id, v)| (*id, v));
             // a folded cut (K6) appears in the tail exactly once: the
             // extension cannot verify it against the held base, so the
             // whole fold is redone through the checking path
             let mut folded = false;
-            for payload in tail {
+            for (id, payload) in tail {
                 if crate::chain::base_commitment_of(payload).is_some() {
                     folded = true;
                     break;
                 }
-                Self::fold_wiki_step(c, payload);
+                Self::fold_wiki_step(c, id, payload);
             }
+            // what the extension folded is stamped even when a cut in the
+            // same tail forces the refold below - those are exactly the
+            // cards the refold no longer reaches
+            stamps.extend(Self::wiki_stamps_of(c));
             if folded {
                 cache = None;
             } else {
@@ -3616,6 +3659,85 @@ impl State {
             cache = self.fold_wiki_from_base().ok();
         }
         self.wiki_cache = cache;
+        // the revision a patch produced outlives the cut that folds it away:
+        // it rides the card, which the store keeps (§4.11). Per holder,
+        // like `applied_at`: written when THIS holder folds the patch.
+        stamps.extend(self.wiki_cache.as_ref().map(Self::wiki_stamps_of).unwrap_or_default());
+        for (id, rev) in stamps {
+            if let Some(p) = self.proposals.get_mut(&id) {
+                p.wiki_rev = Some(rev);
+            }
+        }
+    }
+
+    /// (proposal, revision) for every entry a fold recorded with its card.
+    fn wiki_stamps_of(cache: &crate::WikiCache) -> Vec<(u64, u64)> {
+        cache
+            .history
+            .iter()
+            .filter_map(|e| e.proposal.map(|p| (p, e.rev)))
+            .collect()
+    }
+
+    /// The history a cut folded away, from the stamped cards this holder
+    /// keeps (§4.11): the revisions at or below `rev_at_cut`, each with
+    /// what its patch touched, and the FLOOR - the lowest revision a
+    /// contiguous run of stamps reaches down from the cut (0 = the
+    /// founding). A hole (a card a re-base dropped, a suffix holder's
+    /// missing patch) ends the run, and a read below the floor is
+    /// `truncated`.
+    fn wiki_history_below_the_cut(&self, rev_at_cut: u64) -> (Vec<crate::WikiRevChanges>, u64) {
+        let mut below: Vec<crate::WikiRevChanges> = self
+            .proposals
+            .iter()
+            .filter(|(_, p)| p.surface == Surface::Memory && p.state == ProposalState::Applied)
+            .filter_map(|(id, p)| {
+                let rev = p.wiki_rev.filter(|r| *r <= rev_at_cut)?;
+                let patch = p.payload.get("value").and_then(Value::as_str)?;
+                let files = molt_core::wiki_fold::parse_patch(patch);
+                Some(crate::WikiRevChanges {
+                    rev,
+                    proposal: Some(*id),
+                    items: files.iter().map(wiki_touch_of).collect(),
+                })
+            })
+            .collect();
+        below.sort_by_key(|e| e.rev);
+        // the run of stamps down from the cut: a missing rev ends it, and so
+        // does a repeated one (two cards claiming one revision were stamped
+        // under different folds - neither is trusted)
+        let mut floor = rev_at_cut;
+        for e in below.iter().rev() {
+            if e.rev == floor && floor > 0 {
+                floor -= 1;
+            } else {
+                floor = floor.max(e.rev);
+                break;
+            }
+        }
+        below.retain(|e| e.rev > floor);
+        (below, floor)
+    }
+
+    /// Forget every stamp: the chain this holder folded them under is not
+    /// the chain it holds any more (a blob re-anchor, a re-base onto the
+    /// other branch), and a stamp from the dropped branch would make a
+    /// wrong history read complete. The fresh fold re-stamps what it
+    /// reaches; below a cut the read is truncated - honestly.
+    pub(crate) fn forget_wiki_stamps(&mut self) {
+        for p in self.proposals.values_mut().filter(|p| p.surface == Surface::Memory) {
+            p.wiki_rev = None;
+        }
+        if let Some(c) = self.wiki_cache.as_mut() {
+            c.below_cut = None;
+        }
+    }
+
+    /// A fold cached on a base this holder no longer holds is not served:
+    /// without the base every read refuses BY NAME (§4.9.6), whenever the
+    /// cache was built.
+    fn wiki_cache_base_held(&self, c: &crate::WikiCache) -> bool {
+        c.base.is_none() || self.chain.wiki_base.is_some()
     }
 
     /// Whether a pending record's wiki patch still applies to `tree` —
@@ -3683,16 +3805,10 @@ impl State {
             if self.wiki_pending.contains_key(id) {
                 continue;
             }
-            let Some(patch) = self
-                .proposals
-                .get(id)
-                .and_then(|p| p.payload.get("value"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
+            let Some(files) = self.proposals.get(id).and_then(|p| Self::wiki_patch_files(&p.payload))
             else {
                 continue; // unparseable payloads are gated at ingest
             };
-            let files = molt_core::wiki_fold::parse_patch(&patch);
             let paths = molt_core::wiki_fold::touched_paths(&files);
             self.wiki_pending
                 .insert(*id, crate::PendingPatch { files, paths });
@@ -4409,13 +4525,13 @@ fn wiki_touch_of(f: &molt_core::wiki_fold::PatchFile) -> crate::WikiTouch {
 /// caller to forget a path it never saw is a wrong answer and a
 /// `wiki_get` on it fails. Every other path reads with its LATEST kind and
 /// the revision it last moved at.
-fn coalesce_wiki_changes(
-    history: &[crate::WikiRevChanges],
+fn coalesce_wiki_changes<'a>(
+    history: impl Iterator<Item = &'a crate::WikiRevChanges>,
     since_rev: u64,
 ) -> Vec<molt_core::WikiChange> {
     let mut seen: std::collections::BTreeMap<String, (&'static str, molt_core::WikiChange)> =
         std::collections::BTreeMap::new();
-    for entry in history.iter().filter(|e| e.rev > since_rev) {
+    for entry in history.filter(|e| e.rev > since_rev) {
         for item in &entry.items {
             let mut from = item.from.clone();
             let mut first = item.kind;
@@ -4603,6 +4719,7 @@ mod size_gate_tests {
             superseded: false,
                 superseded_kind: None,
             withdrawn: false,
+            wiki_rev: None,
         };
         let (current, proposed) = change_summary(&eff, &rec);
         assert_eq!((current.as_str(), proposed.as_str()), ("7", "30"));
@@ -5020,10 +5137,12 @@ mod wiki_maintenance_tests {
         }
     }
 
-    /// **A folded cut (K6, §4.9) re-bases the revision counter.** The
-    /// patches below it are gone and post-cut revisions start from 1
-    /// again, so a window reaching under the cut cannot be answered - and
-    /// says so rather than looking complete.
+    /// **A PRE-A3 cut (no `rev_at_cut`) re-bases the revision counter.**
+    /// What it folded away is unknowable - no stamp can name a revision
+    /// under a counter that restarted - so post-cut revisions start from 1
+    /// and a window reaching under the cut says `truncated` rather than
+    /// looking complete. (A3 cuts answer from the stamped cards:
+    /// `a_full_holder_answers_below_its_cut_from_the_stamped_cards`.)
     #[test]
     fn a_folded_cut_answers_what_it_can_and_flags_the_rest() {
         let mut st = crate::tests::plain_state();
@@ -5086,6 +5205,227 @@ mod wiki_maintenance_tests {
             st.cmd_wiki_changes(0, 0, 0).expect_err("no base, no answer"),
             MoltError::WikiBasePending { .. }
         ));
+    }
+
+    /// A full holder keeps the patches a cut folds away, stamped with the
+    /// revision each produced: below the cut the change list comes from the
+    /// cards, and `truncated` marks a real hole, not the cut.
+    #[test]
+    fn a_full_holder_answers_below_its_cut_from_the_stamped_cards() {
+        let mut st = crate::tests::plain_state();
+        let card = |patch: &str| ProposalRecord {
+            surface: Surface::Memory,
+            payload: json!({ "op": "wiki_patch", "value": patch }),
+            approvals: 0,
+            state: ProposalState::Applied,
+            applied_at: 0,
+            declined_at: 0,
+            declined_by: String::new(),
+            decliners: Vec::new(),
+            voted: Vec::new(),
+            by: String::new(),
+            superseded: false,
+            superseded_kind: None,
+            withdrawn: false,
+            wiki_rev: None,
+        };
+        for (id, patch) in [(1, ADD_A), (2, MOVE_A_B), (3, ADD_C)] {
+            st.proposals.insert(id, card(patch));
+            st.chain
+                .applied
+                .entry(Surface::Memory)
+                .or_default()
+                .push((Some(id), json!({ "op": "wiki_patch", "value": patch })));
+        }
+        st.bump_applied_epoch();
+        let kinds = |list: &[molt_core::WikiChange]| {
+            list.iter()
+                .map(|c| (c.path.clone(), c.kind.clone(), c.rev, c.from.clone()))
+                .collect::<Vec<_>>()
+        };
+        // a read stamps every card with the revision its patch produced
+        let (list, _, _, truncated) = changes(&mut st, 0);
+        assert!(!truncated);
+        assert_eq!(list.len(), 2);
+        for (id, rev) in [(1, 1), (2, 2), (3, 3)] {
+            assert_eq!(st.proposals.get(&id).and_then(|p| p.wiki_rev), Some(rev), "card {id}");
+        }
+
+        // the cut folds 1 and 2 away at revision 2; 3 stays above it
+        let base = molt_core::wiki_fold::wiki_fold(&[
+            json!({ "op": "wiki_patch", "value": ADD_A }),
+            json!({ "op": "wiki_patch", "value": MOVE_A_B }),
+        ]);
+        let (hash, size) = crate::chain::wiki_base_commitment(&base);
+        st.chain.wiki_base = Some(base);
+        st.chain.applied.insert(
+            Surface::Memory,
+            vec![
+                (None, json!({ "op": "wiki_base", "hash": hash, "size": size, "rev_at_cut": 2 })),
+                (Some(3), json!({ "op": "wiki_patch", "value": ADD_C })),
+            ],
+        );
+        st.bump_applied_epoch();
+
+        let (list, wiki_rev, _, truncated) = changes(&mut st, 1);
+        assert_eq!(wiki_rev, 3);
+        assert!(!truncated, "the card answers for the revision the cut folded away");
+        assert_eq!(
+            kinds(&list),
+            vec![
+                ("notes/b.md".to_string(), "renamed".to_string(), 2, Some("notes/a.md".to_string())),
+                ("notes/c.md".to_string(), "added".to_string(), 3, None),
+            ]
+        );
+        let (list, _, _, truncated) = changes(&mut st, 0);
+        assert!(!truncated, "the stamps reach the founding");
+        assert_eq!(
+            kinds(&list),
+            vec![
+                ("notes/b.md".to_string(), "added".to_string(), 2, None),
+                ("notes/c.md".to_string(), "added".to_string(), 3, None),
+            ],
+            "added then renamed is simply new at its final path"
+        );
+
+        // the cached answer is the fresh fold's answer, across the cut
+        let cached = changes(&mut st, 0).0;
+        st.wiki_cache = None;
+        assert_eq!(changes(&mut st, 0).0, cached);
+
+        // a hole: the card of revision 1 is gone (a re-base dropped it) -
+        // below 2 nothing is complete, and nothing under the hole is listed
+        st.proposals.remove(&1);
+        st.forget_wiki_stamps();
+        let _ = changes(&mut st, 0);
+        st.proposals.get_mut(&2).expect("card").wiki_rev = Some(2);
+        if let Some(c) = st.wiki_cache.as_mut() {
+            c.below_cut = None;
+        }
+        let (list, _, _, truncated) = changes(&mut st, 0);
+        assert!(truncated, "a read under the hole is truncated");
+        assert_eq!(
+            kinds(&list),
+            vec![
+                ("notes/b.md".to_string(), "renamed".to_string(), 2, Some("notes/a.md".to_string())),
+                ("notes/c.md".to_string(), "added".to_string(), 3, None),
+            ],
+            "…and lists only what the run of stamps reaches"
+        );
+        let (list, _, _, truncated) = changes(&mut st, 1);
+        assert!(!truncated && list.len() == 2, "a read above it is complete");
+
+        // two cards claiming one revision were stamped under different
+        // folds: neither is trusted, the run ends above them
+        st.proposals.insert(1, card(ADD_A));
+        st.proposals.get_mut(&1).expect("card").wiki_rev = Some(2);
+        if let Some(c) = st.wiki_cache.as_mut() {
+            c.below_cut = None;
+        }
+        assert!(changes(&mut st, 1).3, "a duplicate stamp is a hole");
+        assert!(!changes(&mut st, 2).3);
+
+        // no stamps at all (a suffix holder): the cut is the floor, as before
+        st.forget_wiki_stamps();
+        let (list, _, _, truncated) = changes(&mut st, 1);
+        assert!(truncated);
+        assert_eq!(list.len(), 1, "only what happened above the cut");
+        assert!(!changes(&mut st, 2).3, "at the cut the cache answers alone");
+    }
+
+    /// The stamp is a function of the chain: a block's apply extends the
+    /// fold and stamps the card, with no read in between and nothing open.
+    #[test]
+    fn a_block_stamps_its_card_without_a_read() {
+        let mut b = crate::chain::test_support::Builder::new(&["petra", "walter"], 2);
+        let mut walter = crate::chain::test_support::chain_signer("walter", &b, b.blocks.clone());
+        b.commit_wiki(1, "notes/a.md", "A", &["petra", "walter"]);
+        walter.receive_block(b.blocks[1].clone());
+        b.commit_wiki(2, "notes/b.md", "B", &["petra", "walter"]);
+        walter.receive_block(b.blocks[2].clone());
+        assert_eq!(walter.proposals.get(&1).and_then(|p| p.wiki_rev), Some(1));
+        assert_eq!(walter.proposals.get(&2).and_then(|p| p.wiki_rev), Some(2));
+        // a branch change forgets them; the next fold re-stamps what it reaches
+        walter.forget_wiki_stamps();
+        assert!(walter.proposals.values().all(|p| p.wiki_rev.is_none()));
+        walter.refresh_wiki_cache();
+        assert_eq!(walter.proposals.get(&2).and_then(|p| p.wiki_rev), Some(2));
+    }
+
+    /// An A3 cut that folded only void patches records `rev_at_cut: 0`
+    /// explicitly: nothing was folded away, so a read from the founding is
+    /// complete - unlike a pre-A3 cut, which records nothing.
+    #[test]
+    fn an_explicit_zero_cut_folded_nothing_away() {
+        let mut st = crate::tests::plain_state();
+        let base = std::collections::BTreeMap::new();
+        let (hash, size) = crate::chain::wiki_base_commitment(&base);
+        st.chain.wiki_base = Some(base);
+        st.chain.applied.insert(
+            Surface::Memory,
+            vec![(None, json!({ "op": "wiki_base", "hash": hash, "size": size, "rev_at_cut": 0 }))],
+        );
+        apply(&mut st, &[ADD_C]);
+        let (list, wiki_rev, _, truncated) = changes(&mut st, 0);
+        assert_eq!((list.len(), wiki_rev), (1, 1));
+        assert!(!truncated, "an explicit 0 is not a pre-A3 cut");
+    }
+
+
+    /// A cut that arrives in the SAME tail as the patches it folds away:
+    /// the extension folds them before it meets the base entry, and their
+    /// stamps must survive the refold the cut then forces.
+    #[test]
+    fn a_cut_in_the_same_tail_still_stamps_the_patches_before_it() {
+        let mut st = crate::tests::plain_state();
+        let card = |patch: &str| ProposalRecord {
+            surface: Surface::Memory,
+            payload: json!({ "op": "wiki_patch", "value": patch }),
+            approvals: 0,
+            state: ProposalState::Applied,
+            applied_at: 0,
+            declined_at: 0,
+            declined_by: String::new(),
+            decliners: Vec::new(),
+            voted: Vec::new(),
+            by: String::new(),
+            superseded: false,
+            superseded_kind: None,
+            withdrawn: false,
+            wiki_rev: None,
+        };
+        for (id, patch) in [(1, ADD_A), (2, ADD_B), (3, ADD_C)] {
+            st.proposals.insert(id, card(patch));
+        }
+        for (id, patch) in [(1, ADD_A), (2, ADD_B)] {
+            st.chain
+                .applied
+                .entry(Surface::Memory)
+                .or_default()
+                .push((Some(id), json!({ "op": "wiki_patch", "value": patch })));
+        }
+        st.bump_applied_epoch();
+        assert!(!changes(&mut st, 0).3, "two patches, no cut: complete");
+
+        // the tail grows by the third patch AND the cut folding all three,
+        // in one extension (no epoch bump: an append, not a rebuild)
+        let base = molt_core::wiki_fold::wiki_fold(&[
+            json!({ "op": "wiki_patch", "value": ADD_A }),
+            json!({ "op": "wiki_patch", "value": ADD_B }),
+            json!({ "op": "wiki_patch", "value": ADD_C }),
+        ]);
+        let (hash, size) = crate::chain::wiki_base_commitment(&base);
+        st.chain.wiki_base = Some(base);
+        let entries = st.chain.applied.entry(Surface::Memory).or_default();
+        entries.push((Some(3), json!({ "op": "wiki_patch", "value": ADD_C })));
+        entries.push((None, json!({ "op": "wiki_base", "hash": hash, "size": size, "rev_at_cut": 3 })));
+
+        let (list, wiki_rev, _, truncated) = changes(&mut st, 2);
+        assert_eq!(wiki_rev, 3);
+        assert_eq!(st.proposals.get(&3).and_then(|p| p.wiki_rev), Some(3), "stamped before the refold");
+        assert!(!truncated, "the third patch answers from its card");
+        assert_eq!(list.len(), 1);
+        assert!(!changes(&mut st, 0).3, "and the run of stamps reaches the founding");
     }
 
     /// A rename CHAIN keeps its origin: an agent holding `notes/a.md`
@@ -5273,6 +5613,7 @@ mod wiki_maintenance_tests {
             superseded: false,
             superseded_kind: None,
             withdrawn: false,
+            wiki_rev: None,
         };
         st.proposals.insert(9, dead.clone());
         assert_eq!(

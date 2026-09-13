@@ -3047,6 +3047,14 @@ pub struct ProposalRecord {
     /// skipped when false so pre-field dumps stay byte-identical.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub withdrawn: bool,
+    /// The fold revision this wiki patch produced on THIS holder, stamped
+    /// when the fold applies it and kept across the cut that folds the
+    /// patch away - the history below a cut (`knowledge_base_scale.md`
+    /// §4.11). Per-holder display data like [`Self::applied_at`], never
+    /// consensus input: a holder that adopted the cut in bulk holds no
+    /// stamp below it. `None` = never folded here, or void. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wiki_rev: Option<u64>,
 }
 
 impl ProposalRecord {

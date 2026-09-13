@@ -340,6 +340,21 @@ async fn a_second_cut_lands_on_every_seat_after_a_reopen() {
         assert_eq!(m.2, after_first[0].2, "every seat holds the same folded base");
         assert!(m.2.is_some(), "a cut leaves a folded base behind");
     }
+    // a full holder keeps the cards the cut folded away, stamped with
+    // their revisions: the history below the cut is still answered
+    for (w, who) in [(&a, "walter"), (&b, "petra"), (&v, "vera")] {
+        match w
+            .execute(Command::WikiChanges { since_rev: 0, limit: 0, cursor: 0 })
+            .await
+            .expect("wiki changes")
+        {
+            Reply::WikiChanges { changes, truncated, .. } => {
+                assert_eq!(changes.len(), 3, "{who} lists the three documents from the founding");
+                assert!(!truncated, "{who}'s cards answer below the cut");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
 
     // vera goes silent, the other two keep working
     let vera_ws = workspace_id(&v).await;

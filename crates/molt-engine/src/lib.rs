@@ -949,15 +949,21 @@ pub(crate) struct WikiCache {
     /// changes with the whole cache.
     pub(crate) base: Option<String>,
     /// The revision the folded base itself stands at (A3): `rev` counts ON
-    /// from here, and `history` reaches back no further, so a `since_rev`
-    /// below it is answered `truncated`.
-    pub(crate) rev_at_cut: u64,
+    /// from here and `history` reaches back no further. `None` under a
+    /// pre-A3 cut, whose folded-away revisions are unknowable.
+    pub(crate) rev_at_cut: Option<u64>,
+    /// The history below the cut, from the stamped cards, with its floor -
+    /// parsed once per fold on the first read that needs it (§4.11).
+    pub(crate) below_cut: Option<(Vec<WikiRevChanges>, u64)>,
 }
 
 /// What ONE applied revision touched (§4.11), as the fold derives it.
 pub(crate) struct WikiRevChanges {
     /// The revision this patch produced.
     pub(crate) rev: u64,
+    /// The proposal the applied entry came from (`None`: legacy data), so
+    /// the revision can be stamped on its card.
+    pub(crate) proposal: Option<u64>,
     /// One entry per file the patch named.
     pub(crate) items: Vec<WikiTouch>,
 }

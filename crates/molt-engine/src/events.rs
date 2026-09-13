@@ -326,6 +326,7 @@ impl State {
                     superseded: false,
                 superseded_kind: None,
                     withdrawn: false,
+                    wiki_rev: None,
                 });
                 self.next_id = self.next_id.max(id.0.saturating_add(1));
                 let _ = self.register_parked_declines(id.0);
@@ -451,6 +452,7 @@ impl State {
                     superseded: false,
                 superseded_kind: None,
                     withdrawn: false,
+                    wiki_rev: None,
                 });
                 // within the wire id window only: a pre-gate log entry (or a
                 // hostile replay) must not poison the counter on rebuild

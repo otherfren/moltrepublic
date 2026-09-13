@@ -410,6 +410,7 @@ impl State {
                 superseded: false,
                 superseded_kind: None,
                 withdrawn: false,
+                wiki_rev: None,
             });
     }
 
@@ -568,7 +569,9 @@ impl State {
         // votes as open cards
         self.settle_cards_against_chain();
         // …and the supersede walk reaches the same terminal states a live
-        // node reached (shared_memory_real.md §4 replay determinism)
+        // node reached (shared_memory_real.md §4 replay determinism) - and
+        // the fold, with its stamps, is rebuilt now rather than on a read
+        self.refresh_wiki_cache();
         self.supersede_stale_wiki(None);
         // …and the working transport anchors. A pruned holder SEEDS them from
         // the blob: the `Restored` blocks that established them were dropped

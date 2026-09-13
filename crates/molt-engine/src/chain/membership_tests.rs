@@ -91,6 +91,7 @@ fn an_applied_membership_card_reports_the_block_signers() {
             superseded: false,
         superseded_kind: None,
             withdrawn: false,
+            wiki_rev: None,
         },
     );
     let p = peer.proposals.get(&4).cloned().expect("card");

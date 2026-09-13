@@ -648,6 +648,11 @@ impl State {
                 if *surface == Surface::Memory {
                     let moved = Self::wiki_payload_paths(payload);
                     self.note_wiki_change(moved.as_ref());
+                    // the fold cache extends by this block HERE, not on the
+                    // next read: the revision stamp on the card (§4.11) is
+                    // a function of the chain, and the walk below returns
+                    // early when nothing is open
+                    self.refresh_wiki_cache();
                     self.supersede_stale_wiki(moved.as_ref());
                 }
                 self.stash_voted(*proposal_id);
@@ -1040,6 +1045,7 @@ impl State {
                 superseded: false,
                 superseded_kind: None,
                 withdrawn: false,
+                wiki_rev: None,
             }
         });
         if inserted && surface == Surface::Memory {

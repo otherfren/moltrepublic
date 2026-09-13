@@ -376,6 +376,8 @@ impl State {
                 self.chain.head = Some(head);
                 self.chain.pending_served_blob = None;
                 self.chain.pending_blocks.retain(|h, _| *h > new_height);
+                // another branch's fold order: its stamps are not this one's
+                self.forget_wiki_stamps();
                 self.apply_chain_to_state();
                 // the re-anchor may commit to a DIFFERENT tree than the one
                 // held here; keeping that one would leave a base answering

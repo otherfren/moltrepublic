@@ -612,8 +612,12 @@ The base entry also records `rev_at_cut` (A3): the fold revision the tree
 stands at, so `wiki_rev` counts on across a cut instead of restarting at 0.
 It is derived from the group alone (previous `rev_at_cut` + the patches
 this cut folds away), so every signer computes the same number; a pre-A3
-cut carries none and reads 0. `wiki_changes` answers `truncated` for any
-`since_rev` below it - below the cut there is a tree and no history.
+cut carries none and reads 0. Below the cut the fold cache holds no
+history, but a holder that folded the patches itself keeps their cards,
+each stamped with the revision it produced (`ProposalRecord::wiki_rev`,
+2026-09-13): `wiki_changes` answers from them and flags `truncated` only
+below the lowest revision a contiguous run of stamps reaches (a fetched
+base, a card a re-base dropped, a pre-A3 cut).
 
 #### 4.9.6 Base-pending: adoption and readability decouple
 
@@ -873,15 +877,35 @@ travels the same way, and where it is `added` it DECIDES:
   FOLD (a void patch does not bump it), so a read that went back to the
   applied log instead would pay a full refold on every maintainer wake -
   which is the cost K0 exists to remove.
-- **A folded cut RE-BASES the counter.** `fold_wiki_from_base` does not
-  count the commitment as a patch, so post-cut revisions restart: the same
-  number names a different state either side of a cut, and the value alone
-  cannot say which. The reply therefore carries `base` (the commitment the
-  revisions count from, absent until this republic cuts) and `truncated`,
-  set when the window reaches under the base (`since_rev` 0 with a base
-  beneath it) or above the current revision. A FLAG, not a refusal: the
-  post-cut changes are still worth having, and refusing the natural first
-  call would be hostile.
+- **A folded cut keeps the counter (A3) and the cards keep the history.**
+  The cache's history stops at the base entry, but every patch the cut
+  folded away is still a card in the store, stamped at fold time with the
+  revision it produced (`ProposalRecord::wiki_rev`, additive). Below
+  `rev_at_cut` the read parses those cards' patches into the same
+  per-revision touches the cache records above it and coalesces both as
+  one history. The reply carries `base` (the commitment, absent until this
+  republic cuts) and `truncated`, set below the FLOOR - the lowest revision
+  a contiguous run of stamps reaches down from the cut (0 = the founding;
+  a hole ends the run: a suffix holder that fetched its base, a card a
+  re-base dropped, a pre-A3 cut whose revision is unknown) - or above the
+  current revision. A FLAG, not a refusal: the post-cut changes are still
+  worth having, and refusing the natural first call would be hostile.
+  A stamp is written where THIS holder folds the patch: the apply path
+  refreshes the fold cache after every Memory block and after every
+  re-projection, so the stamp is a function of the chain, never of a
+  read - also when the cut arrives in the same tail extension as the
+  patches. A bulk re-projection over a cut (`adopt_chain` on a rejoin, a
+  catch-up that lands the cut with its patches) starts at the base and
+  stamps nothing below it, and a branch change (a served-blob re-anchor,
+  a re-base, a tip displacement) forgets every stamp: the other branch's
+  fold order is not this one's. The floor walk is strict - a repeated
+  revision is a hole like a missing one - and nothing under the floor is
+  listed. The cards below the cut are parsed once per fold into a memo on
+  the cache, so a page read stays O(entries since `since_rev`). Stamps ride the snapshot (every 1 000
+  events or a clean close); a hard kill before the next one loses those
+  of cards a cut folded away, and the read is then truncated, never
+  wrong. Per holder, like `applied_at` - not consensus, not in the log.
+  (2026-09-13, `docs_archive/reviews/wiki_changes_below_the_cut.md`.)
 - Base-pending (§4.9.6) refuses BY NAME here, like every other wiki read.
 
 **`wiki_health { limit }`**: three lists in one reply, because they are

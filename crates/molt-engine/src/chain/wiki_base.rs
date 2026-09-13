@@ -45,10 +45,12 @@ pub(crate) fn commitment(tree: &BTreeMap<String, String>) -> (String, u64) {
 }
 
 /// The fold revision a base entry stands at (A3): a cut records where the
-/// counter had got to, so `wiki_rev` counts on instead of restarting. Absent
-/// on a pre-A3 cut, which reads as 0 - exactly the old behaviour.
-pub(crate) fn rev_at_cut_of(payload: &Value) -> u64 {
-    payload.get("rev_at_cut").and_then(Value::as_u64).unwrap_or(0)
+/// counter had got to, so `wiki_rev` counts on instead of restarting.
+/// `None` on a pre-A3 cut - the counter restarts at 0 there, and what the
+/// cut folded away is unknowable; an explicit 0 is an A3 cut that folded
+/// only void patches.
+pub(crate) fn rev_at_cut_of(payload: &Value) -> Option<u64> {
+    payload.get("rev_at_cut").and_then(Value::as_u64)
 }
 
 /// The commitment an applied Memory payload carries, if it is a folded
@@ -101,7 +103,7 @@ pub(crate) fn summarize(
                     ));
                 }
                 tree.clone_from(base);
-                rev = rev_at_cut_of(payload);
+                rev = rev_at_cut_of(payload).unwrap_or(0);
                 seeded = true;
             }
             // the patches this cut folds away — their ids stay consumed
