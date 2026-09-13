@@ -3779,6 +3779,19 @@ impl std::fmt::Display for ProposalId {
     }
 }
 
+/// Which proposals [`Command::ListProposals`] answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProposalFilter {
+    /// Still on the table: `proposed`, a held seal and a re-based patch.
+    #[default]
+    Open,
+    /// Applied, rejected, withdrawn or superseded.
+    Decided,
+    /// Both.
+    All,
+}
+
 /// The one command set. This is the single source of truth for "what the
 /// software can do"; the MCP tools and the GUI buttons are both thin shells
 /// that construct these.
@@ -4026,8 +4039,30 @@ pub enum Command {
         #[serde(default)]
         view: Option<String>,
     },
-    /// List every proposal the engine currently knows about.
-    ListProposals,
+    /// List proposals: `filter` picks open, decided or all cards, `limit`
+    /// (0 = the default page, capped) and `cursor` (continue after this id;
+    /// ids ascend) page them, `with_texts` builds `current`/`proposed` -
+    /// which the list never shows, and which cost an org fold and a patch
+    /// body per card.
+    ListProposals {
+        /// Which cards.
+        #[serde(default)]
+        filter: ProposalFilter,
+        /// Page size; 0 = the default.
+        #[serde(default)]
+        limit: u32,
+        /// Continue after this id; `None` = from the start.
+        #[serde(default)]
+        cursor: Option<u64>,
+        /// Build the before/after texts.
+        #[serde(default)]
+        with_texts: bool,
+    },
+    /// One proposal in full, texts included; an unknown id is an error.
+    ReadProposal {
+        /// The proposal id.
+        id: u64,
+    },
     /// WP4b: put a chain CHECKPOINT forward for threshold approval — the
     /// compaction cut at the CURRENT head (`upto` = head height, B-F1 in
     /// `docs_archive/chain/log_compaction.md`). The engine computes the canonical
@@ -5800,6 +5835,16 @@ impl Command {
     pub fn variant_names() -> &'static [&'static str] {
         <Command as strum::VariantNames>::VARIANTS
     }
+
+    /// Every card of a test-sized republic: one page at the engine's cap
+    /// (500), no texts - the old `ListProposals` shape. A republic past the
+    /// cap pages with `next_cursor`.
+    pub const LIST_ALL_PROPOSALS: Command = Command::ListProposals {
+        filter: ProposalFilter::All,
+        limit: 500,
+        cursor: None,
+        with_texts: false,
+    };
 }
 
 /// The synchronous answer to a [`Command`]. Streaming changes arrive separately
@@ -5946,10 +5991,17 @@ pub enum Reply {
     },
     /// A surface snapshot.
     State(SurfaceSnapshot),
-    /// The list of known proposals.
+    /// One page of proposals ([`Command::ListProposals`]), or the one card
+    /// of [`Command::ReadProposal`].
     Proposals {
-        /// Every known proposal.
+        /// The page.
         proposals: Vec<ProposalView>,
+        /// How many cards the filter matched in total.
+        #[serde(default)]
+        total: u64,
+        /// Pass back as `cursor`; `None` = the last page.
+        #[serde(default)]
+        next_cursor: Option<u64>,
     },
     /// A status summary.
     Status(StatusView),
@@ -7957,7 +8009,7 @@ mod tests {
                 channel: ChannelRef::Patch { id: ProposalId(1) },
                 repaired: Vec::new(),
             },
-            Reply::Proposals { proposals: vec![] },
+            Reply::Proposals { proposals: vec![], total: 0, next_cursor: None },
             Reply::Members { members: vec![] },
             Reply::Uploads { uploads: vec![] },
             Reply::Session(Box::default()),

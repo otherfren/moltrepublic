@@ -142,7 +142,7 @@ fn add_page(path: &str, text: &str) -> serde_json::Value {
 
 /// Approve every open foreign card this seat sees; how many it approved.
 async fn approve_open(w: &WalletHandle) -> usize {
-    let Reply::Proposals { proposals } = w.execute(Command::ListProposals).await.expect("list") else {
+    let Reply::Proposals { proposals, .. } = w.execute(Command::LIST_ALL_PROPOSALS).await.expect("list") else {
         panic!("list_proposals answers Reply::Proposals");
     };
     let mut n = 0;

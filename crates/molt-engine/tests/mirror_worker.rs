@@ -201,7 +201,7 @@ async fn wait_mirror(w: &WalletHandle, what: &str, pred: impl Fn(&molt_core::Mir
 async fn approve_op(w: &WalletHandle, op: &str) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
-        if let Reply::Proposals { proposals } = w.execute(Command::ListProposals).await.expect("list") {
+        if let Reply::Proposals { proposals, .. } = w.execute(Command::LIST_ALL_PROPOSALS).await.expect("list") {
             if let Some(p) = proposals.iter().find(|p| {
                 p.state == molt_core::ProposalState::Proposed
                     && p.payload.get("op").and_then(|v| v.as_str()) == Some(op)

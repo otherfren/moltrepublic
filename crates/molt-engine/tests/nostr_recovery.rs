@@ -111,8 +111,8 @@ async fn found_two_of_two(root: &std::path::Path, url: &str) -> (WalletHandle, W
 async fn approve_value(w: &WalletHandle, value: &str) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
-        if let Reply::Proposals { proposals } =
-            w.execute(Command::ListProposals).await.expect("list proposals")
+        if let Reply::Proposals { proposals, .. } =
+            w.execute(Command::LIST_ALL_PROPOSALS).await.expect("list proposals")
         {
             if let Some(p) = proposals.iter().find(|p| {
                 p.state == molt_core::ProposalState::Proposed
@@ -258,8 +258,8 @@ async fn a_recovery_still_verifies_after_a_sealed_pool_edit() {
     // the seal is observable as the applied entry reaching the proposals
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
-        if let Reply::Proposals { proposals } =
-            a.execute(Command::ListProposals).await.expect("list")
+        if let Reply::Proposals { proposals, .. } =
+            a.execute(Command::LIST_ALL_PROPOSALS).await.expect("list")
         {
             if proposals.iter().any(|p| p.state == molt_core::ProposalState::Applied) {
                 break;

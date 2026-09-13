@@ -22,8 +22,8 @@
 use std::net::IpAddr;
 
 use molt_core::{
-    ChannelRef, Command, MessageId, ProposalId, Reply, Screen, SessionSettings, Surface,
-    TOPIC_NAME_MAX_CHARS,
+    ChannelRef, Command, MessageId, ProposalFilter, ProposalId, Reply, Screen, SessionSettings,
+    Surface, TOPIC_NAME_MAX_CHARS,
 };
 use molt_engine::WalletHandle;
 use serde_json::{json, Value};
@@ -500,11 +500,7 @@ fn present(name: &str, args: &Value, mut value: Value) -> Result<Value, String> 
             let found = value
                 .get("proposals")
                 .and_then(Value::as_array)
-                .and_then(|list| {
-                    list.iter()
-                        .find(|p| p.get("id").and_then(Value::as_u64) == Some(id))
-                        .cloned()
-                });
+                .and_then(|list| list.first().cloned());
             match found {
                 Some(mut p) => {
                     if let Some(o) = p.as_object_mut() {
@@ -725,6 +721,17 @@ fn bool_arg(args: &Value, key: &str) -> Result<bool, String> {
     args.get(key)
         .and_then(Value::as_bool)
         .ok_or_else(|| format!("missing boolean argument `{key}`"))
+}
+
+/// An optional integer: absent or null = none.
+fn opt_u64_or_none_arg(args: &Value, key: &str) -> Result<Option<u64>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| format!("argument `{key}` must be a non-negative integer")),
+    }
 }
 
 /// A required key that may be `null`: `Ok(None)` for null, `Err` when
@@ -1715,18 +1722,34 @@ pub fn tools() -> Vec<ToolDef> {
             name: "list_proposals",
             command: "list_proposals",
             scope: Scope::Seat,
-            description: "List every proposal the engine currently knows about - HEADERS: id, surface, by, state (`withdrawn` when the proposer pulled it back), approvals/threshold, the votes, `applied_at`/`declined_at` (when it was decided; unix secs, 0 = unknown), `summary`, the `paths` a wiki patch touches, `channel`. The patch and the before/after texts are left out (a 9 KB patch was answered three times over); `with_patch: true` includes them, read_proposal {id} fetches ONE in full. Ids are minted per seat (seat k of n takes every n-th number), so gaps in the sequence are normal, not lost proposals. `superseded` says what the moved base did to a wiki patch: `\"rebase\"` = it still applies - open, votable, its votes kept, re-anchored by the engine; `\"conflict\"` = a committed change touched its paths and it no longer applies (dead, `state: \"superseded\"`); `null` = nothing moved under it, and on every decided card.",
+            description: "List proposals - by default the OPEN ones, the cards a vote can still change (`proposed`, a held seal, a re-based patch). HEADERS: id, surface, by, state (`withdrawn` when the proposer pulled it back), approvals/threshold, the votes, `applied_at`/`declined_at` (when it was decided; unix secs, 0 = unknown), `payload.summary`, the `paths` a wiki patch touches, `channel`. `state` picks `open` (default), `decided` (applied, rejected, withdrawn, superseded - the whole history since the founding) or `all`; `limit` (default 100, max 500) and `cursor` (continue after this id; ids ascend) page the answer, `total` counts the whole filter and `next_cursor` is absent on the last page. The patch and the before/after texts are left out (a 9 KB patch was answered three times over); `with_patch: true` includes them, read_proposal {id} fetches ONE in full. Ids are minted per seat (seat k of n takes every n-th number), so gaps in the sequence are normal, not lost proposals. `superseded` says what the moved base did to a wiki patch: `\"rebase\"` = it still applies - open, votable, its votes kept, re-anchored by the engine; `\"conflict\"` = a committed change touched its paths and it no longer applies (dead, `state: \"superseded\"`); `null` = nothing moved under it, and on every decided card.",
             schema: || json!({
                 "type": "object",
                 "properties": {
+                    "state": { "type": "string", "enum": ["open", "decided", "all"], "description": "optional: which cards (default open)" },
+                    "limit": { "type": "integer", "description": "optional: page size, 1..=500 (default 100)" },
+                    "cursor": { "type": "integer", "description": "optional: continue after this proposal id (a previous reply's next_cursor)" },
                     "with_patch": { "type": "boolean", "description": "optional: include payload.value, current and proposed (default false)" }
                 }
             }),
-            build: |_| Ok(Command::ListProposals),
+            build: |args| {
+                let filter = match opt_str_arg(args, "state")?.as_deref() {
+                    None | Some("open") => ProposalFilter::Open,
+                    Some("decided") => ProposalFilter::Decided,
+                    Some("all") => ProposalFilter::All,
+                    Some(other) => return Err(format!("unknown state `{other}` - open, decided or all")),
+                };
+                Ok(Command::ListProposals {
+                    filter,
+                    limit: opt_u32_arg(args, "limit")?,
+                    cursor: opt_u64_or_none_arg(args, "cursor")?,
+                    with_texts: flag_arg(args, "with_patch"),
+                })
+            },
         },
         ToolDef {
             name: "read_proposal",
-            command: "list_proposals",
+            command: "read_proposal",
             scope: Scope::Seat,
             description: "ONE proposal in full: the payload (a wiki patch under `payload.value`), the before/after texts `current` and `proposed`, the votes and the state. `superseded` reads `\"rebase\"` (the base moved, still votable, votes kept), `\"conflict\"` (dead) or `null` (nothing moved, or the card is decided) - see list_proposals. An unknown id is an error.",
             schema: || json!({
@@ -1734,10 +1757,7 @@ pub fn tools() -> Vec<ToolDef> {
                 "properties": { "id": { "type": "integer", "description": "the proposal id" } },
                 "required": ["id"]
             }),
-            build: |args| {
-                u64_arg(args, "id")?;
-                Ok(Command::ListProposals)
-            },
+            build: |args| Ok(Command::ReadProposal { id: u64_arg(args, "id")? }),
         },
         ToolDef {
             name: "status",
@@ -2946,11 +2966,14 @@ pub(crate) mod tests {
         let full = present("list_proposals", &json!({ "with_patch": true }), reply.clone()).expect("presents");
         assert_eq!(full["proposals"][1]["payload"]["value"], patch);
         assert_eq!(full["proposals"][1]["proposed"], "x");
-        let one = present("read_proposal", &json!({ "id": 5 }), reply.clone()).expect("presents");
+        // read_proposal is its own command: the engine answers the ONE card
+        let just_five = json!({ "reply": "proposals", "proposals": [reply["proposals"][1].clone()], "total": 1 });
+        let one = present("read_proposal", &json!({ "id": 5 }), just_five).expect("presents");
         assert_eq!((one["reply"].as_str(), one["id"].as_u64()), (Some("proposal"), Some(5)));
         assert_eq!(one["payload"]["value"], patch, "read_proposal is the full record");
         assert_eq!(one["state"], "proposed");
-        assert!(present("read_proposal", &json!({ "id": 9 }), reply).is_err(), "an unknown id is an error");
+        let none = json!({ "reply": "proposals", "proposals": [], "total": 0 });
+        assert!(present("read_proposal", &json!({ "id": 9 }), none).is_err(), "no card is an error");
     }
 
     /// C1 (G14): a proposal whose ready seal waits out its pacing round
@@ -3074,6 +3097,37 @@ pub(crate) mod tests {
 
     /// A well-formed message id for the argument-mapping tests.
     const HEX_ID: &str = "00112233445566778899aabbccddeeff";
+
+    /// `list_proposals` asks for the OPEN cards unless told otherwise, and
+    /// `read_proposal` is its own command - one card, not the whole map.
+    #[test]
+    fn list_proposals_builds_a_filter_and_a_page() {
+        let open = build("list_proposals", &json!({})).expect("builds");
+        assert!(matches!(
+            open,
+            Command::ListProposals { filter: ProposalFilter::Open, limit: 0, cursor: None, with_texts: false }
+        ));
+        let decided = build(
+            "list_proposals",
+            &json!({ "state": "decided", "limit": 20, "cursor": 41, "with_patch": true }),
+        )
+        .expect("builds");
+        assert!(matches!(
+            decided,
+            Command::ListProposals { filter: ProposalFilter::Decided, limit: 20, cursor: Some(41), with_texts: true }
+        ));
+        assert!(matches!(
+            build("list_proposals", &json!({ "state": "all" })).expect("builds"),
+            Command::ListProposals { filter: ProposalFilter::All, .. }
+        ));
+        let err = build("list_proposals", &json!({ "state": "later" })).expect_err("refused");
+        assert!(err.contains("open, decided or all"), "{err}");
+        assert!(matches!(
+            build("read_proposal", &json!({ "id": 7 })).expect("builds"),
+            Command::ReadProposal { id: 7 }
+        ));
+        assert!(build("read_proposal", &json!({})).is_err(), "the id is required");
+    }
 
     /// **The SEAT holds the phrase, the read-only key never does**
     /// (ADR-0007). The audit of 2026-08-26 had made the three seed fields

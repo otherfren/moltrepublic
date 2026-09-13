@@ -1,10 +1,12 @@
 # `list_proposals` answers every proposal since the founding, unbounded
 
-Status: **OPEN (2026-09-13)** - fix plan, execution-ready. Found driving
-a live seat of a production republic (dev build of `1356e034`) over MCP.
-Sibling issues from the same session: `supersede_verdict_survives_apply.md`,
-`wiki_changes_below_the_cut.md`. Leaves for `docs_archive/reviews/` with the
-change that closes §4.
+Status: **EXECUTED 2026-09-13** - built as planned in §3/§4, red-first
+(`crates/molt-engine/tests/proposal_listing.rs`, the molt-mcp build and
+present tests). Found driving a live seat of a production republic (dev
+build of `1356e034`) over MCP. Sibling issues from the same session:
+`supersede_verdict_survives_apply.md`, `wiki_changes_below_the_cut.md`.
+One deviation from §3: `cursor` is `Option<u64>` (absent = from the
+start), because id 0 is a real card (the folded base entry).
 
 ## 1. Symptom
 
@@ -79,7 +81,7 @@ and the vote pills need them; bounded by the page now); id order stays
 ascending (a caller wanting the newest decided reads `total` and pages
 from `total - limit`).
 
-## 4. Work, red first
+## 4. Work, red first (all done)
 
 1. `crates/molt-engine/tests/proposal_listing.rs` (solo threshold-1
    harness as in `read_filter.rs`): propose three, apply two →

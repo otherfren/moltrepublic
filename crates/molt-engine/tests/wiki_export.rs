@@ -235,8 +235,8 @@ async fn found_pair(root: &std::path::Path, url: &str) -> (WalletHandle, WalletH
 async fn approve_op(w: &WalletHandle, op: &str) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
-        if let Reply::Proposals { proposals } =
-            w.execute(Command::ListProposals).await.expect("list proposals")
+        if let Reply::Proposals { proposals, .. } =
+            w.execute(Command::LIST_ALL_PROPOSALS).await.expect("list proposals")
         {
             if let Some(p) = proposals.iter().find(|p| {
                 p.state == molt_core::ProposalState::Proposed

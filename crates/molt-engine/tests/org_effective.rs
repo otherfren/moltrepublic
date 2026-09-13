@@ -160,8 +160,8 @@ async fn found_pair(
 async fn approve_op(w: &WalletHandle, op: &str) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
-        if let Reply::Proposals { proposals } =
-            w.execute(Command::ListProposals).await.expect("list proposals")
+        if let Reply::Proposals { proposals, .. } =
+            w.execute(Command::LIST_ALL_PROPOSALS).await.expect("list proposals")
         {
             if let Some(p) = proposals.iter().find(|p| {
                 p.state == molt_core::ProposalState::Proposed
@@ -400,8 +400,8 @@ async fn a_sealed_pool_edit_survives_the_reopen() {
 
 /// The state a node's card for `op` currently shows, if it has one.
 async fn card_state(w: &WalletHandle, op: &str) -> Option<molt_core::ProposalState> {
-    match w.execute(Command::ListProposals).await.expect("list proposals") {
-        Reply::Proposals { proposals } => proposals
+    match w.execute(Command::LIST_ALL_PROPOSALS).await.expect("list proposals") {
+        Reply::Proposals { proposals, .. } => proposals
             .iter()
             .find(|p| p.payload.get("op").and_then(|v| v.as_str()) == Some(op))
             .map(|p| p.state),
@@ -427,8 +427,8 @@ async fn wait_for_card(w: &WalletHandle, op: &str, want: molt_core::ProposalStat
 /// Decline the pending `op` proposal once it is visible on this node.
 async fn decline_op(w: &WalletHandle, op: &str) {
     wait_for_card(w, op, molt_core::ProposalState::Proposed).await;
-    match w.execute(Command::ListProposals).await.expect("list proposals") {
-        Reply::Proposals { proposals } => {
+    match w.execute(Command::LIST_ALL_PROPOSALS).await.expect("list proposals") {
+        Reply::Proposals { proposals, .. } => {
             let p = proposals
                 .iter()
                 .find(|p| p.payload.get("op").and_then(|v| v.as_str()) == Some(op))

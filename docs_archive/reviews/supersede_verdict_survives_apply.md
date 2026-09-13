@@ -121,9 +121,9 @@ the same directory with no closing snapshot).
   card with a stale bool reads `null`, a withdrawn one too.
 
 Deferred: the live-seat verification (`list_proposals {state:
-"decided"}` reads `null` throughout) waits for the filter of
-`list_proposals_unbounded.md`; until then the heal is verified by the
-load test only.
+"decided"}` reads `null` throughout) waits for the live seat to run a
+build with this fix and the filter of `list_proposals_unbounded.md`;
+until then the heal is verified by the load test only.
 
 ## 5. Decided
 

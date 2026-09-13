@@ -1091,10 +1091,9 @@ pub(crate) async fn gather_surfaces(
                 .map(|p| proposal_row(lang, p));
             match live {
                 Some(row) => row,
-                None => match wallet.execute(Command::ListProposals).await {
-                    Ok(Reply::Proposals { proposals }) => proposals
-                        .iter()
-                        .find(|p| p.id == *id)
+                None => match wallet.execute(Command::ReadProposal { id: id.0 }).await {
+                    Ok(Reply::Proposals { proposals, .. }) => proposals
+                        .first()
                         .map(|p| proposal_row(lang, p))
                         .unwrap_or_default(),
                     _ => ProposalRowData::default(),

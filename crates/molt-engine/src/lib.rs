@@ -1772,15 +1772,13 @@ impl State {
                 Ok(Reply::State(snap))
             }
             Command::ProposeCheckpoint => self.cmd_propose_checkpoint(),
-            Command::ListProposals => {
-                let mut views: Vec<_> = self
-                    .proposals
-                    .iter()
-                    .map(|(id, p)| self.view(*id, p))
-                    .collect();
-                views.sort_by_key(|v| v.id.0);
-                Ok(Reply::Proposals { proposals: views })
-            }
+            Command::ListProposals {
+                filter,
+                limit,
+                cursor,
+                with_texts,
+            } => Ok(self.cmd_list_proposals(filter, limit, cursor, with_texts)),
+            Command::ReadProposal { id } => self.cmd_read_proposal(id),
             Command::Status => Ok(Reply::Status(self.status())),
             Command::ReadMembers => Ok(Reply::Members { members: self.members_view() }),
             Command::ReadUploads => Ok(Reply::Uploads { uploads: self.uploads_view() }),

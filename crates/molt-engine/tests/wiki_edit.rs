@@ -101,8 +101,8 @@ async fn doc(w: &WalletHandle, path: &str) -> String {
 }
 
 async fn open_proposals(w: &WalletHandle) -> usize {
-    match w.execute(Command::ListProposals).await.expect("list") {
-        Reply::Proposals { proposals } => proposals.len(),
+    match w.execute(Command::LIST_ALL_PROPOSALS).await.expect("list") {
+        Reply::Proposals { proposals, .. } => proposals.len(),
         other => panic!("unexpected: {other:?}"),
     }
 }
@@ -633,7 +633,7 @@ async fn a_superseding_edit_withdraws_the_old_proposal() {
         panic!("unexpected: {second:?}");
     };
     assert_ne!(old, new);
-    let Reply::Proposals { proposals } = w.execute(Command::ListProposals).await.expect("list") else {
+    let Reply::Proposals { proposals, .. } = w.execute(Command::LIST_ALL_PROPOSALS).await.expect("list") else {
         panic!("list");
     };
     let state = |id| proposals.iter().find(|p| p.id == id).map(|p| (p.state, p.withdrawn));

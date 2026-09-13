@@ -383,8 +383,8 @@ async fn a_second_cut_lands_on_every_seat_after_a_reopen() {
     }
 
     // the open proposal survived the cut with its own signature
-    let view = match b.execute(Command::ListProposals).await.expect("read proposals") {
-        Reply::Proposals { proposals } => proposals
+    let view = match b.execute(Command::LIST_ALL_PROPOSALS).await.expect("read proposals") {
+        Reply::Proposals { proposals, .. } => proposals
             .into_iter()
             .find(|p| p.id == open)
             .expect("the open proposal is still listed"),
@@ -455,8 +455,8 @@ async fn reopen_keeps_the_cards(hard_kill_it: bool, with_cut: bool) {
         .await
         .expect("walter reopens");
 
-    let views = match a.execute(Command::ListProposals).await.expect("list") {
-        Reply::Proposals { proposals } => proposals,
+    let views = match a.execute(Command::LIST_ALL_PROPOSALS).await.expect("list") {
+        Reply::Proposals { proposals, .. } => proposals,
         other => panic!("unexpected: {other:?}"),
     };
     let patches: Vec<_> = views

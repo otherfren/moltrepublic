@@ -1498,6 +1498,70 @@ impl State {
     }
 
     pub(crate) fn view(&self, id: u64, p: &ProposalRecord) -> ProposalView {
+        self.view_with_texts(id, p, true)
+    }
+
+    /// [`Command::ListProposals`]: one page of the cards `filter` admits,
+    /// ids ascending, `cursor` = continue after that id.
+    pub(crate) fn cmd_list_proposals(
+        &self,
+        filter: molt_core::ProposalFilter,
+        limit: u32,
+        cursor: Option<u64>,
+        with_texts: bool,
+    ) -> Reply {
+        use molt_core::ProposalFilter;
+        let page = usize::try_from(match limit {
+            0 => WIKI_PAGE_DEFAULT,
+            n => n.clamp(1, WIKI_PAGE_MAX),
+        })
+        .unwrap_or(100);
+        let mut cards: Vec<(u64, &ProposalRecord)> = self
+            .proposals
+            .iter()
+            .filter(|(_, p)| match filter {
+                ProposalFilter::Open => p.state == ProposalState::Proposed,
+                ProposalFilter::Decided => p.state != ProposalState::Proposed,
+                ProposalFilter::All => true,
+            })
+            .map(|(id, p)| (*id, p))
+            .collect();
+        cards.sort_unstable_by_key(|(id, _)| *id);
+        let total = u64::try_from(cards.len()).unwrap_or(u64::MAX);
+        let rest = &cards[cards.partition_point(|(id, _)| cursor.is_some_and(|after| *id <= after))..];
+        let next_cursor = (rest.len() > page).then(|| rest[page - 1].0);
+        let proposals = rest
+            .iter()
+            .take(page)
+            .map(|(id, p)| self.view_with_texts(*id, p, with_texts))
+            .collect();
+        Reply::Proposals {
+            proposals,
+            total,
+            next_cursor,
+        }
+    }
+
+    /// [`Command::ReadProposal`]: the one card, texts included.
+    ///
+    /// # Errors
+    /// An unknown id.
+    pub(crate) fn cmd_read_proposal(&self, id: u64) -> Result<Reply, MoltError> {
+        let p = self
+            .proposals
+            .get(&id)
+            .ok_or_else(|| MoltError::Engine(format!("unknown proposal {id}")))?;
+        Ok(Reply::Proposals {
+            proposals: vec![self.view(id, p)],
+            total: 1,
+            next_cursor: None,
+        })
+    }
+
+    /// [`Self::view`], with or without the before/after texts: the list
+    /// never shows them, and the org fold plus the patch body of every
+    /// decided card was most of what it used to answer.
+    pub(crate) fn view_with_texts(&self, id: u64, p: &ProposalRecord, texts: bool) -> ProposalView {
         // a chain-governed proposal's real progress is the count of distinct
         // collected signatures; the single-operator path counts the recorded
         // approval events (live: at most this node's own — a legacy log
@@ -1518,12 +1582,17 @@ impl State {
         } else {
             Self::operator_approved(p)
         };
-        let (mut current, proposed) = change_summary(&self.org_effective(), p);
-        // a member-profile op's Ist-Stand comes from the per-member fold,
-        // not from the org state (`member_profiles_plan.md` §4)
-        if let Some(now) = self.member_profile_current(p) {
-            current = now;
-        }
+        let (current, proposed) = if texts {
+            let (mut current, proposed) = change_summary(&self.org_effective(), p);
+            // a member-profile op's Ist-Stand comes from the per-member fold,
+            // not from the org state (`member_profiles_plan.md` §4)
+            if let Some(now) = self.member_profile_current(p) {
+                current = now;
+            }
+            (current, proposed)
+        } else {
+            (String::new(), String::new())
+        };
         // the voting row: one stance per roster member, roster order. Chain
         // governance knows exactly who signed; the single-operator path
         // claims only what it knows — this node's own vote. (A legacy log
