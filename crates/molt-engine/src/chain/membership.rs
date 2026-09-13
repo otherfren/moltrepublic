@@ -193,7 +193,7 @@ impl State {
         if self.restore_sealed(&change) {
             let open = match self.proposals.get_mut(&id) {
                 Some(p) if p.state == ProposalState::Proposed => {
-                    p.state = ProposalState::Applied;
+                    p.settle_applied();
                     true
                 }
                 _ => false,

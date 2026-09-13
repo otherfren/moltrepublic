@@ -4,7 +4,7 @@
 //! `WalletHandle` surface, one file per concern (review E8); the shared
 //! fixtures live in [`support`].
 
-mod support;
+pub(crate) mod support;
 pub(crate) use support::{plain_state, reopen_chain_signer, stored_chain_signer, tiny_bmp_header};
 
 mod chat_tests;

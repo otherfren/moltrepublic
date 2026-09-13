@@ -558,15 +558,19 @@ fn withdrawn_is_a_state(v: &mut Value) {
             // A4: `superseded` READS as the reason - "rebase" (the base moved,
             // still votable, votes kept) or "conflict" (dead). A bare `true`
             // told a caller nothing about whether to keep waiting for votes.
-            // AFTER the state rewrite above, which still reads the bool.
+            // AFTER the state rewrite above, which still reads the bool. A
+            // decided card carries no verdict: the block outranks the walk.
             if o.contains_key("superseded") {
-                let was = o.get("superseded") == Some(&Value::Bool(true));
-                let kind = match o.remove("superseded_kind") {
-                    Some(Value::String(k)) => Value::String(k),
-                    _ if was => Value::String("conflict".to_string()),
+                let kind = o.remove("superseded_kind");
+                let read = match o.get("state").and_then(Value::as_str) {
+                    Some("superseded") => Value::String("conflict".to_string()),
+                    Some("proposed" | "sealing") => match kind {
+                        Some(Value::String(k)) if k == "rebase" => Value::String(k),
+                        _ => Value::Null,
+                    },
                     _ => Value::Null,
                 };
-                o.insert("superseded".to_string(), kind);
+                o.insert("superseded".to_string(), read);
             }
             for child in o.values_mut() {
                 withdrawn_is_a_state(child);
@@ -1711,7 +1715,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "list_proposals",
             command: "list_proposals",
             scope: Scope::Seat,
-            description: "List every proposal the engine currently knows about - HEADERS: id, surface, by, state (`withdrawn` when the proposer pulled it back), approvals/threshold, the votes, `applied_at`/`declined_at` (when it was decided; unix secs, 0 = unknown), `summary`, the `paths` a wiki patch touches, `channel`. The patch and the before/after texts are left out (a 9 KB patch was answered three times over); `with_patch: true` includes them, read_proposal {id} fetches ONE in full. Ids are minted per seat (seat k of n takes every n-th number), so gaps in the sequence are normal, not lost proposals. `superseded` says what the moved base did to a wiki patch: `\"rebase\"` = it still applies - open, votable, its votes kept, re-anchored by the engine; `\"conflict\"` = a committed change touched its paths and it no longer applies (dead, `state: \"superseded\"`); `null` = nothing moved under it.",
+            description: "List every proposal the engine currently knows about - HEADERS: id, surface, by, state (`withdrawn` when the proposer pulled it back), approvals/threshold, the votes, `applied_at`/`declined_at` (when it was decided; unix secs, 0 = unknown), `summary`, the `paths` a wiki patch touches, `channel`. The patch and the before/after texts are left out (a 9 KB patch was answered three times over); `with_patch: true` includes them, read_proposal {id} fetches ONE in full. Ids are minted per seat (seat k of n takes every n-th number), so gaps in the sequence are normal, not lost proposals. `superseded` says what the moved base did to a wiki patch: `\"rebase\"` = it still applies - open, votable, its votes kept, re-anchored by the engine; `\"conflict\"` = a committed change touched its paths and it no longer applies (dead, `state: \"superseded\"`); `null` = nothing moved under it, and on every decided card.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1724,7 +1728,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "read_proposal",
             command: "list_proposals",
             scope: Scope::Seat,
-            description: "ONE proposal in full: the payload (a wiki patch under `payload.value`), the before/after texts `current` and `proposed`, the votes and the state. `superseded` reads `\"rebase\"` (the base moved, still votable, votes kept), `\"conflict\"` (dead) or `null` - see list_proposals. An unknown id is an error.",
+            description: "ONE proposal in full: the payload (a wiki patch under `payload.value`), the before/after texts `current` and `proposed`, the votes and the state. `superseded` reads `\"rebase\"` (the base moved, still votable, votes kept), `\"conflict\"` (dead) or `null` (nothing moved, or the card is decided) - see list_proposals. An unknown id is an error.",
             schema: || json!({
                 "type": "object",
                 "properties": { "id": { "type": "integer", "description": "the proposal id" } },
@@ -2918,17 +2922,22 @@ pub(crate) mod tests {
                   "superseded_kind": "conflict", "payload": {} },
                 { "id": 7, "state": "applied", "withdrawn": false, "superseded": true, "payload": {} },
                 { "id": 8, "state": "proposed", "withdrawn": false, "superseded": false,
-                  "superseded_kind": "rebase", "payload": {} }
+                  "superseded_kind": "rebase", "payload": {} },
+                { "id": 9, "state": "rejected", "withdrawn": true, "superseded": true,
+                  "superseded_kind": "conflict", "payload": {} }
             ] }),
         )
         .expect("presents");
         assert_eq!(stale["proposals"][0]["state"], "superseded", "a stale patch says so, not rejected");
         assert_eq!(stale["proposals"][1]["state"], "applied", "an applied card keeps its state");
-        // A4: the flag READS as the reason, and a re-based patch stays open
+        // A4: the flag READS as the reason, and a re-based patch stays open;
+        // a DECIDED card carries no verdict, whatever a walk once wrote
         assert_eq!(stale["proposals"][0]["superseded"], "conflict");
-        assert_eq!(stale["proposals"][1]["superseded"], "conflict", "no kind, but the bool was set");
+        assert_eq!(stale["proposals"][1]["superseded"], Value::Null, "applied outranks a stale verdict");
         assert_eq!(stale["proposals"][2]["state"], "proposed", "a re-based patch is still votable");
         assert_eq!(stale["proposals"][2]["superseded"], "rebase");
+        assert_eq!(stale["proposals"][3]["state"], "withdrawn");
+        assert_eq!(stale["proposals"][3]["superseded"], Value::Null, "pulled back is its own verdict");
         assert_eq!(p4["paths"], json!(["a.md", "b/c.md"]));
         assert_eq!(p4["channel"], json!({ "kind": "patch", "id": 4 }));
         assert!(p4.get("current").is_none() && p4.get("proposed").is_none());

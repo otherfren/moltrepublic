@@ -51,6 +51,7 @@ impl State {
     /// `None` and nothing is projected (a partially-trusted chain could fork
     /// state — `docs_archive/chain/persistent_chain.md`).
     pub(crate) fn adopt_chain(&mut self, chain: Vec<ChainBlock>) {
+        self.chain.adoption_pending = false;
         // a chain from OUTSIDE this holder's own verified prefix: always the
         // full walk, never the cache. The walk it produces is then kept, so
         // the adoption pays for the next append too.
@@ -340,14 +341,8 @@ impl State {
                 if payload.get("op").and_then(serde_json::Value::as_str) == Some("set_relays") {
                     self.adopt_pool_change();
                 }
-                // the Memory base moved — the supersede walk retires
-                // pending wiki patches it left behind (deterministic:
-                // this runs on append, catch-up and rebuild alike)
-                if *surface == Surface::Memory {
-                    let moved = Self::wiki_payload_paths(payload);
-                    self.note_wiki_change(moved.as_ref());
-                    self.supersede_stale_wiki(moved.as_ref());
-                }
+                // the supersede walk over the moved paths runs in
+                // `after_block_applied`, once the consumed card settled
             }
             // the LAST Restored block for a seat wins, and an append is the
             // last; an empty anchor leaves the previous one standing, exactly
@@ -484,7 +479,7 @@ impl State {
         }
         for (id, surface) in settle {
             if let Some(p) = self.proposals.get_mut(&id) {
-                p.state = ProposalState::Applied;
+                p.settle_applied();
             }
             self.forget_vote(id);
             self.emit(Event::Applied {

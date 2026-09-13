@@ -2371,3 +2371,66 @@ fn a_reopen_keeps_the_apply_stamp() {
         "the log-only reopen rebuilds the same stamp"
     );
 }
+
+/// A reopen replays the log tail BEFORE the chain is adopted. The supersede
+/// walk must not judge those cards against the empty legacy tree, and a
+/// sealed block outranks whatever verdict a walk once wrote: a ratified
+/// edit reads applied and clean, an open edit is still on the table - and
+/// still seals.
+#[test]
+fn a_reopen_keeps_applied_edits_clean_and_open_edits_open() {
+    let rt = crate::tests::support::rt();
+    let _guard = rt.enter();
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    let (mut walter, _tmp, dir) =
+        crate::tests::stored_chain_signer(&b, "walter", &["petra", "walter", "dora"]);
+    let patch = |value: String| json!({ "op": "wiki_patch", "summary": "~1", "value": value });
+    let p1 = propose(&mut walter, Surface::Memory, patch(wiki_add("a.md", "one")));
+    let block = b.commit_card(&walter, p1, &["petra", "dora"]);
+    walter.receive_block(block);
+    let p2 = propose(&mut walter, Surface::Memory, patch(wiki_edit_line("a.md", "one", "two")));
+    let block = b.commit_card(&walter, p2, &["petra", "dora"]);
+    walter.receive_block(block);
+    let p3 = propose(&mut walter, Surface::Memory, patch(wiki_edit_line("a.md", "two", "three")));
+    let clean = |st: &crate::State, id: u64, state: ProposalState, what: &str| {
+        let p = st.proposals.get(&id).expect("card");
+        assert_eq!(p.state, state, "{what}: state");
+        assert!(!p.superseded, "{what}: no verdict");
+        assert_eq!(p.superseded_kind, None, "{what}: no kind");
+    };
+    clean(&walter, p1, ProposalState::Applied, "live add");
+    clean(&walter, p2, ProposalState::Applied, "live edit");
+    clean(&walter, p3, ProposalState::Proposed, "live open edit");
+
+    let mut back = crate::tests::reopen_chain_signer(walter, &dir, &b, "walter", false);
+    clean(&back, p1, ProposalState::Applied, "reopened add");
+    clean(&back, p2, ProposalState::Applied, "reopened edit");
+    clean(&back, p3, ProposalState::Proposed, "reopened open edit");
+
+    // the open edit is still a vote: petra's signature seals it
+    petra_signs(&mut back, &b, 1, p3, 3);
+    assert_eq!(back.chain.blocks.len(), 4, "the reopened seat sealed the open edit");
+    clean(&back, p3, ProposalState::Applied, "sealed after the reopen");
+}
+
+/// A store written by a build that let the verdict survive the apply:
+/// loading it clears the verdict on every applied card.
+#[test]
+fn a_stored_verdict_on_an_applied_card_is_healed_on_load() {
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    b.commit_wiki(1, "a.md", "A", &["petra", "walter"]);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    {
+        let p = walter.proposals.get_mut(&1).expect("the applied card");
+        assert_eq!(p.state, ProposalState::Applied);
+        p.superseded = true;
+        p.superseded_kind = Some(molt_core::SupersededKind::Conflict);
+    }
+    let dump = walter.snapshot_now().state;
+    let mut back = crate::tests::plain_state();
+    back.restore_dump(dump);
+    let p = back.proposals.get(&1).expect("the applied card");
+    assert_eq!(p.state, ProposalState::Applied);
+    assert!(!p.superseded, "an applied card carries no verdict");
+    assert_eq!(p.superseded_kind, None);
+}

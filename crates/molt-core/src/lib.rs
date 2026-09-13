@@ -3049,6 +3049,16 @@ pub struct ProposalRecord {
     pub withdrawn: bool,
 }
 
+impl ProposalRecord {
+    /// The chain consumed this card: Applied, and whatever verdict a local
+    /// supersede walk once wrote is void - a sealed block outranks it.
+    pub fn settle_applied(&mut self) {
+        self.state = ProposalState::Applied;
+        self.superseded = false;
+        self.superseded_kind = None;
+    }
+}
+
 /// Exactly what the engine actor holds for one workspace — the snapshot
 /// payload. Replaying the full log from zero produces the same dump as any
 /// snapshot plus its tail (the keystone determinism test pins this).

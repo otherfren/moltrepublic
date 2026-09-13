@@ -22,10 +22,10 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
-use common::{await_chat_len, read_chat};
+use common::{await_chat_len, hard_kill, read_chat};
 use molt_core::{
     Command, EventEnvelope, MemberId, MeshLink, NetHealth, Reply, SessionSettings, SessionView,
     WorkspaceEvent,
@@ -163,27 +163,6 @@ async fn found_with_mesh(
     let id = read_session(&a).await.active_workspace.clone();
     assert!(!id.is_empty(), "the founded workspace is active");
     (a, hub, member_mesh, member_mls, id)
-}
-
-/// Hard-kill the engine (drop, never `CloseWorkspace`) and wait until its
-/// writer thread released the workspace LOCK. Returns the workspace dir.
-async fn hard_kill(a: WalletHandle, root: &Path, id: &str) -> PathBuf {
-    drop(a);
-    let dir = molt_storage::find_workspace_dir(root, id).expect("workspace dir");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        match molt_storage::open_workspace(&dir) {
-            Ok(_) => break, // lock free again; the guard drops right here
-            Err(_) => {
-                assert!(
-                    tokio::time::Instant::now() < deadline,
-                    "the hard-killed engine never released the workspace lock"
-                );
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        }
-    }
-    dir
 }
 
 /// (1) The mesh-up persist: once the direct mesh is established, the queue

@@ -3587,6 +3587,13 @@ impl State {
         &mut self,
         moved: Option<&std::collections::BTreeSet<String>>,
     ) {
+        // no tree to judge against yet: the walk after the adoption
+        // re-checks the tail's cards against the adopted tree (a `rebase`
+        // a live node showed is not reproduced from log + chain - known
+        // residual, `docs/reviews/known_debt.md`)
+        if self.chain.adoption_pending {
+            return;
+        }
         // the candidates always come from `proposals`: the parsed map below
         // is a CACHE, so a miss costs a parse and can never hide a card
         let cands: Vec<u64> = self

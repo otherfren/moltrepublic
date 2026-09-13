@@ -18,6 +18,13 @@ user could mistake for real.
   commit that touches secret handling **generic** (never name the file or its
   contents). When removing a secret from history, the rewrite's own commits and
   messages must not describe what was removed.
+- **Nothing from a live republic ever lands in the repo.** No wiki content
+  - not a page, a title, a path, a header value, a patch excerpt - and not
+  the republic's or its members' names, in code, tests, fixtures, docs,
+  commit messages or diagnostics. A live seat is evidence for an issue
+  doc only as counts and shapes ("320 of 328 applied cards", "a
+  two-path edit"); test fixtures are invented (page `a`, "one" -> "two").
+  Anything captured from a live node stays outside the tree.
 - **Work directly on master.** The user relies on the session's result being on
   master — other sessions build on it there. Branches/worktrees are short-lived
   tooling only (e.g. isolating parallel agents); merge back to master and delete

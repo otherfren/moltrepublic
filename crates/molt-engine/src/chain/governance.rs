@@ -635,10 +635,20 @@ impl State {
                     // that change - an own card under a colliding id must
                     // not read as a success it never had
                     if p.payload == *payload || p.by.is_empty() {
-                        p.state = ProposalState::Applied;
+                        p.settle_applied();
                     } else {
                         tracing::warn!(id = proposal_id, "a block names an id whose local card is another change");
                     }
+                }
+                // the Memory base moved: the supersede walk retires the
+                // OTHER pending patches it left behind (deterministic - the
+                // append, catch-up and rebuild paths all reach here). It
+                // runs after the settle above, because the patch just
+                // folded never applies to the tree that now contains it
+                if *surface == Surface::Memory {
+                    let moved = Self::wiki_payload_paths(payload);
+                    self.note_wiki_change(moved.as_ref());
+                    self.supersede_stale_wiki(moved.as_ref());
                 }
                 self.stash_voted(*proposal_id);
                 self.chain.pending_sigs.remove(proposal_id);
@@ -775,7 +785,7 @@ impl State {
             .collect();
         for id in ids {
             if let Some(p) = self.proposals.get_mut(&id) {
-                p.state = ProposalState::Applied;
+                p.settle_applied();
             }
             self.emit(Event::Applied {
                 id: ProposalId(id),

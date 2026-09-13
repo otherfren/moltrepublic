@@ -254,6 +254,16 @@ with the user, 2026-08-15):
   re-serve, recovery) lands against the CURRENT base: if already
   incompatible it registers straight as superseded — no zombie pending
   cards on rejoiners.
+- **The block outranks the walk** (2026-09-13,
+  `docs_archive/reviews/supersede_verdict_survives_apply.md`). The walk
+  over a block's moved paths runs AFTER its card settled (the patch just
+  folded never applies to the tree that now contains it), every Applied
+  transition clears a standing verdict (`ProposalRecord::settle_applied`),
+  a store carrying one on an applied card is healed on load, and a
+  reopen's tail replay walks nothing until the chain is adopted
+  (`ChainProjection::adoption_pending`) — the legacy fold of a chain
+  republic is an empty tree, which killed every open edit at a hard-kill
+  restart.
 - **Display.** Superseded patches list in the DENIED view next to human
   declines, visibly distinct: "superseded - base moved (#<id>)" naming
   the patch that overtook it, vs "declined by <member>".

@@ -95,22 +95,44 @@ impl Builder {
         self.blocks.push(block);
     }
 
+    /// Seal `change` at the next height with `signers`, append it, and hand
+    /// the block back for a peer to receive.
+    pub(crate) fn commit(&mut self, change: ChainChange, signers: &[&str]) -> ChainBlock {
+        let height = u64::try_from(self.blocks.len()).expect("small chain");
+        let block = self.seal(height, change, signers);
+        self.push(block.clone());
+        block
+    }
+
     /// Commit a gated Applied change signed by `signers` at the next height.
     pub(crate) fn commit_applied(&mut self, proposal_id: u64, signers: &[&str]) {
-        let height = u64::try_from(self.blocks.len()).expect("small chain");
-        let change = ChainChange::Applied {
-            proposal_id,
-            surface: Surface::Memory,
-            payload: json!({ "op": "add_note", "id": proposal_id }),
-        };
-        let block = self.seal(height, change, signers);
-        self.push(block);
+        self.commit(
+            ChainChange::Applied {
+                proposal_id,
+                surface: Surface::Memory,
+                payload: json!({ "op": "add_note", "id": proposal_id }),
+            },
+            signers,
+        );
+    }
+
+    /// Commit the wiki patch a registered card carries - the block a peer
+    /// seals for one of `st`'s own proposals.
+    pub(crate) fn commit_card(&mut self, st: &crate::State, id: u64, signers: &[&str]) -> ChainBlock {
+        let payload = st.proposals.get(&id).expect("a registered card").payload.clone();
+        self.commit(
+            ChainChange::Applied {
+                proposal_id: id,
+                surface: Surface::Memory,
+                payload,
+            },
+            signers,
+        )
     }
 
     /// Commit a ratified wiki patch (a new document) — the Memory entries
     /// a folded cut collapses into one commitment (K6).
     pub(crate) fn commit_wiki(&mut self, proposal_id: u64, path: &str, body: &str, signers: &[&str]) {
-        let height = u64::try_from(self.blocks.len()).expect("small chain");
         let lines: Vec<&str> = body.split('\n').collect();
         let mut patch = format!(
             "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
@@ -121,32 +143,32 @@ impl Builder {
             patch.push_str(l);
             patch.push('\n');
         }
-        let change = ChainChange::Applied {
-            proposal_id,
-            surface: Surface::Memory,
-            payload: json!({ "op": "wiki_patch", "value": patch }),
-        };
-        let block = self.seal(height, change, signers);
-        self.push(block);
+        self.commit(
+            ChainChange::Applied {
+                proposal_id,
+                surface: Surface::Memory,
+                payload: json!({ "op": "wiki_patch", "value": patch }),
+            },
+            signers,
+        );
     }
 
     /// Commit an Organization edit — the surface whose ops occupy
     /// last-write-wins slots (§B.6a), so a checkpoint summarizes them.
     pub(crate) fn commit_org(&mut self, proposal_id: u64, op: &str, value: &str, signers: &[&str]) {
-        let height = u64::try_from(self.blocks.len()).expect("small chain");
-        let change = ChainChange::Applied {
-            proposal_id,
-            surface: Surface::Organization,
-            payload: json!({ "op": op, "value": value }),
-        };
-        let block = self.seal(height, change, signers);
-        self.push(block);
+        self.commit(
+            ChainChange::Applied {
+                proposal_id,
+                surface: Surface::Organization,
+                payload: json!({ "op": op, "value": value }),
+            },
+            signers,
+        );
     }
 
     /// Commit a `Restored` membership block — the seat keeps its anchored
     /// identity key and re-anchors its transport key.
     pub(crate) fn commit_restored(&mut self, member: &str, nostr_pk: &str, signers: &[&str]) {
-        let height = u64::try_from(self.blocks.len()).expect("small chain");
         let change = ChainChange::Membership {
             op: MembershipOp::Restored,
             member: member.to_string(),
@@ -155,8 +177,7 @@ impl Builder {
             relays: Vec::new(),
             consent: None,
         };
-        let block = self.seal(height, change, signers);
-        self.push(block);
+        self.commit(change, signers);
     }
 
     /// A member's signing key.
@@ -261,4 +282,24 @@ pub(crate) fn consent_for(b: &Builder, member: &str, nostr_pk: &str) -> String {
             nostr_pk,
         ),
     )
+}
+
+/// A one-line page as a `wiki_patch` value: the add.
+pub(crate) fn wiki_add(path: &str, body: &str) -> String {
+    format!(
+        "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,1 @@\n+{body}\n"
+    )
+}
+
+/// A one-line page as a `wiki_patch` value: the edit of its line.
+pub(crate) fn wiki_edit_line(path: &str, from: &str, to: &str) -> String {
+    format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1,1 +1,1 @@\n-{from}\n+{to}\n")
+}
+
+/// Propose on `st` and hand back the minted id.
+pub(crate) fn propose(st: &mut crate::State, surface: Surface, payload: serde_json::Value) -> u64 {
+    match st.cmd_propose(surface, payload).expect("propose") {
+        molt_core::Reply::Proposed { id, .. } => id.0,
+        other => panic!("unexpected reply {other:?}"),
+    }
 }

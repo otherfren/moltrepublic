@@ -9,7 +9,7 @@ use crate::*;
 use molt_core::SessionSettings;
 use serde_json::json;
 
-pub(super) fn rt() -> tokio::runtime::Runtime {
+pub(crate) fn rt() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -424,12 +424,7 @@ pub(crate) fn reopen_chain_signer(
     drop(st);
     let (_opened, loaded) = molt_storage::open_workspace(dir).expect("reopen");
     let mut back = plain_state();
-    if let Some(s) = loaded.snapshot {
-        back.restore_dump(s.state);
-    }
-    for env in &loaded.tail {
-        back.apply(env);
-    }
+    back.replay_loaded(loaded.snapshot, &loaded.tail, &b.blocks);
     back.adopt_chain(b.blocks.clone());
     back.reverify_all_pending();
     back.identity_sk = Some(b.key(member).clone());

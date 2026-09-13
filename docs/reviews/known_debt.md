@@ -14,6 +14,18 @@ their concept docs (`docs/kanban/kanban_workflows.md` §2–§5+§7,
 `docs/vault/vault_threshold_disclosure.md`) — both docs carry open
 questions that gate any real build.
 
+## A `rebase` verdict is not reproduced after a hard-kill reopen
+
+From `docs_archive/reviews/supersede_verdict_survives_apply.md` §3: the
+tail replay of a reopen walks nothing until the chain is adopted, and the
+walk after the adoption is `supersede_stale_wiki(None)`, which writes no
+`Rebase` (that needs the block's `moved` paths). An open patch a live seat
+showed as `superseded: "rebase"` reads `null` on the seat that was
+hard-killed after its last snapshot; the card itself is intact and
+votable. Fix direction: walk the suffix blocks' `moved` paths in the
+adoption walk, and pin it with a propose-then-ratify ordering in
+`checkpoint_under_load.rs`.
+
 ## The live-preview GUI suite keeps every headless window until the process ends
 
 Measured 2026-09-06 (`cargo test -p molt-ui --lib --features

@@ -317,3 +317,24 @@ pub async fn slow_relay(slow: &SlowReplay) -> (nostr_relay_builder::LocalRelay, 
     let url = relay.url().await.to_string();
     (relay, url)
 }
+
+/// Hard-kill the engine (drop, never `CloseWorkspace`) and wait until its
+/// writer thread released the workspace LOCK. Returns the workspace dir.
+pub async fn hard_kill(a: WalletHandle, root: &Path, id: &str) -> std::path::PathBuf {
+    drop(a);
+    let dir = molt_storage::find_workspace_dir(root, id).expect("workspace dir");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        match molt_storage::open_workspace(&dir) {
+            Ok(_) => break, // lock free again; the guard drops right here
+            Err(_) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the hard-killed engine never released the workspace lock"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
+    dir
+}

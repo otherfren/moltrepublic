@@ -1327,6 +1327,30 @@ impl State {
     /// task. Every validation runs *before* the previously open workspace
     /// is torn down — any failure leaves it untouched (the freshly taken
     /// LOCK releases when `opened` drops on the error paths).
+    /// The replay half of a reopen, ONE function for the product and the
+    /// restart tests: the snapshot, the mint counter past the chain (the
+    /// replay's id gate would refuse a chain-consumed id the snapshot never
+    /// saw - review E1 residual), then the tail - whose Proposed cards are
+    /// walked only once the chain below them is adopted (a chain republic's
+    /// legacy fold is an empty tree).
+    pub(crate) fn replay_loaded(
+        &mut self,
+        snapshot: Option<molt_core::WorkspaceSnapshot>,
+        tail: &[molt_core::EventEnvelope],
+        chain: &[molt_core::ChainBlock],
+    ) {
+        if let Some(snap) = snapshot {
+            self.restore_dump(snap.state);
+        }
+        if let Some(top) = Self::max_applied_proposal_id(chain) {
+            self.next_id = self.next_id.max(top.saturating_add(1));
+        }
+        self.chain.adoption_pending = !chain.is_empty();
+        for env in tail {
+            self.apply(env);
+        }
+    }
+
     fn open_stored_workspace(&mut self, id: &str) -> Result<molt_core::TransportState, MoltError> {
         let root = self.workspace_root();
         let dir = molt_storage::find_workspace_dir(&root, id).ok_or_else(|| {
@@ -1379,15 +1403,7 @@ impl State {
         // point of no return: swap the actor state to the new workspace
         self.close_active_storage();
         self.reset_workspace_state();
-        if let Some(snap) = loaded.snapshot {
-            self.restore_dump(snap.state);
-        }
-        if let Some(top) = Self::max_applied_proposal_id(&chain) {
-            self.next_id = self.next_id.max(top.saturating_add(1));
-        }
-        for env in &loaded.tail {
-            self.apply(env);
-        }
+        self.replay_loaded(loaded.snapshot, &loaded.tail, &chain);
         self.next_seq = opened.next_seq;
         let prefs = opened.prefs.clone();
         // read the persisted transport state (MLS group + mesh + queue creds)

@@ -704,6 +704,10 @@ pub(crate) struct ChainProjection {
     /// governance record (`docs_archive/chain/persistent_chain.md`). Block 0 is the
     /// founding; empty when no chain-aware workspace is open.
     pub(crate) blocks: Vec<molt_core::ChainBlock>,
+    /// A reopen replays the log tail BEFORE the chain is adopted: until
+    /// then the folded tree is the legacy log's, not the republic's, and
+    /// the supersede walk must not judge a card against it.
+    pub(crate) adoption_pending: bool,
     /// DISPLAY stamps: block height → the unix seconds its `Committed`
     /// envelope carried in this node's log (refilled by the replay, empty
     /// for history the log no longer holds). Never consensus input - the
@@ -1405,6 +1409,7 @@ impl State {
                 member_relays: HashMap::new(),
                 split_noted: std::collections::HashSet::new(),
                 pending_sigs: HashMap::new(),
+                adoption_pending: false,
                 own_approvals: std::collections::BTreeSet::new(),
                 served_at: HashMap::new(),
                 pending_declines: HashMap::new(),

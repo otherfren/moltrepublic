@@ -402,7 +402,7 @@ impl State {
             WorkspaceEvent::Applied { id } => {
                 if let Some(p) = self.proposals.get_mut(&id.0) {
                     if p.state == ProposalState::Proposed {
-                        p.state = ProposalState::Applied;
+                        p.settle_applied();
                         p.applied_at = env.ts;
                         let payload = p.payload.clone();
                         let surface = p.surface;
@@ -715,6 +715,17 @@ impl State {
             }
         }
         self.proposals = dump.proposals.into_iter().collect();
+        // a store written before the block outranked the walk carries
+        // verdicts on applied cards; an applied card carries none
+        let healed = self
+            .proposals
+            .values_mut()
+            .filter(|p| p.state == ProposalState::Applied && (p.superseded || p.superseded_kind.is_some()))
+            .map(ProposalRecord::settle_applied)
+            .count();
+        if healed > 0 {
+            tracing::warn!(healed, "applied cards carried a supersede verdict - cleared");
+        }
         self.next_id = dump.next_proposal_id.max(1);
     }
 
@@ -784,6 +795,7 @@ impl State {
         self.chain.blocks.clear();
         self.chain.block_ts.clear();
         self.chain.head = None;
+        self.chain.adoption_pending = false;
         self.set_checkpoint_blob(None);
         self.chain.pending_served_blob = None;
         self.chain.applied.clear();

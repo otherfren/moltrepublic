@@ -22,31 +22,11 @@ mod common;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::{found_with_mesh, CaptureSink};
+use common::{found_with_mesh, hard_kill, CaptureSink};
 use molt_core::{Command, SessionSettings, SessionView, WorkspaceEvent};
 use molt_net::supervisor::{self, send_framed, MemLog, MemStateStore, NetConfig};
 use molt_net::{MlsChannel, MlsMember, MsgId, PeerLink};
 use tokio::sync::watch;
-
-/// Hard-kill the engine (drop, never `CloseWorkspace`) and wait until its
-/// writer thread released the workspace LOCK.
-async fn hard_kill(a: molt_engine::WalletHandle, root: &std::path::Path, id: &str) {
-    drop(a);
-    let dir = molt_storage::find_workspace_dir(root, id).expect("workspace dir");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        match molt_storage::open_workspace(&dir) {
-            Ok(_) => break, // lock free again; the guard drops right here
-            Err(_) => {
-                assert!(
-                    tokio::time::Instant::now() < deadline,
-                    "the hard-killed engine never released the workspace lock"
-                );
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        }
-    }
-}
 
 /// A chat body among the sink's captured envelopes, from the founder?
 fn has_chat(sink: &CaptureSink, body: &str) -> bool {

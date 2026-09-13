@@ -14,6 +14,9 @@
 
 use std::time::Duration;
 
+mod common;
+
+use common::hard_kill;
 use molt_core::{Command, GroupConfig, Reply, SessionSettings, SessionView, Surface};
 use molt_engine::WalletHandle;
 use nostr_relay_builder::MockRelay;
@@ -179,13 +182,9 @@ async fn propose_patch(w: &WalletHandle, patch: &str) -> molt_core::ProposalId {
     }
 }
 
-/// Ratify one patch at the 2-of-3 threshold: `a` proposes, `b` approves,
-/// and the call returns only once the block has moved `a`'s fold - the
-/// patches of this test are meant to seal one after the other.
-async fn ratify(a: &WalletHandle, b: &WalletHandle, patch: &str) {
-    let before = memory_of(a).await.1;
-    let id = propose_patch(a, patch).await;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+/// Approve on `b` as soon as the proposal's gossip has reached it - the
+/// propose returns before the wire does.
+async fn approve_once_it_arrived(b: &WalletHandle, id: molt_core::ProposalId, deadline: tokio::time::Instant) {
     loop {
         if b.execute(Command::Approve { proposal: id, note: None }).await.is_ok() {
             break;
@@ -193,6 +192,16 @@ async fn ratify(a: &WalletHandle, b: &WalletHandle, patch: &str) {
         assert!(tokio::time::Instant::now() < deadline, "the proposal never arrived");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// Ratify one patch at the 2-of-3 threshold: `a` proposes, `b` approves,
+/// and the call returns only once the block has moved `a`'s fold - the
+/// patches of this test are meant to seal one after the other.
+async fn ratify(a: &WalletHandle, b: &WalletHandle, patch: &str) {
+    let before = memory_of(a).await.1;
+    let id = propose_patch(a, patch).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    approve_once_it_arrived(b, id, deadline).await;
     loop {
         if memory_of(a).await.1 > before {
             return;
@@ -399,4 +408,91 @@ async fn a_second_cut_lands_on_every_seat_after_a_reopen() {
     for (w, who) in [(&a, "walter"), (&b, "petra"), (&v, "vera")] {
         wait_for_memory(w, who, "revision 7", |_, rev| rev == 7).await;
     }
+}
+
+fn edit(path: &str, from: &str, to: &str) -> String {
+    format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1,1 +1,1 @@\n-{from}\n+{to}\n")
+}
+
+/// The reopen twin of the supersede walk: a seat whose log holds two
+/// ratified edits and one open edit of its own comes back with the
+/// ratified ones applied and clean and the open one still on the table -
+/// and the open one still seals. A clean close writes a snapshot (the tail
+/// is empty); a hard kill leaves the tail to replay BEFORE the chain is
+/// adopted, and the walk must not judge those cards against the empty tree
+/// it sees then. With a cut in between, the reopen also has a folded base
+/// to adopt (K6) before the walk may judge anything.
+async fn reopen_keeps_the_cards(hard_kill_it: bool, with_cut: bool) {
+    let relay = MockRelay::run().await.expect("relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root = tmp.path().join("workspaces");
+    let (a, b, v) = found_three(&root, &url).await;
+
+    ratify(&a, &b, &add("a.md", "one")).await;
+    ratify(&a, &b, &edit("a.md", "one", "two")).await;
+    if with_cut {
+        a.execute(Command::ProposeCheckpoint).await.expect("cut");
+        for (w, who) in [(&a, "walter"), (&b, "petra"), (&v, "vera")] {
+            wait_cut_above(w, 0, &format!("{who}'s cut"), 90).await;
+        }
+    }
+    let open = propose_patch(&a, &edit("a.md", "two", "three")).await;
+
+    let a_ws = workspace_id(&a).await;
+    let a = if hard_kill_it {
+        hard_kill(a, &root.join("walter"), &a_ws).await;
+        // a fresh engine on the same directory: its relay comes from the
+        // settings, as every seat's did at the founding
+        let a = engine(&root.join("walter"));
+        adopt_relay(&a, &url).await;
+        a
+    } else {
+        a.execute(Command::CloseWorkspace).await.expect("walter closes");
+        a
+    };
+    a.execute(Command::OpenWorkspace { id: a_ws })
+        .await
+        .expect("walter reopens");
+
+    let views = match a.execute(Command::ListProposals).await.expect("list") {
+        Reply::Proposals { proposals } => proposals,
+        other => panic!("unexpected: {other:?}"),
+    };
+    let patches: Vec<_> = views
+        .iter()
+        .filter(|p| p.surface == Surface::Memory && p.id.0 != 0)
+        .collect();
+    assert_eq!(patches.len(), 3, "two ratified edits and the open one");
+    for p in patches {
+        let want = if p.id == open {
+            molt_core::ProposalState::Proposed
+        } else {
+            molt_core::ProposalState::Applied
+        };
+        assert_eq!(p.state, want, "#{} after the reopen", p.id.0);
+        assert!(!p.superseded, "#{} carries no verdict", p.id.0);
+        assert_eq!(p.superseded_kind, None, "#{} carries no kind", p.id.0);
+    }
+
+    // the open edit is still a vote: the second voice seals it and the
+    // reopened seat's fold moves
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    approve_once_it_arrived(&b, open, deadline).await;
+    wait_for_memory(&a, "walter", "revision 3", |_, rev| rev == 3).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_clean_reopen_keeps_a_ratified_edit_clean_and_an_open_edit_open() {
+    reopen_keeps_the_cards(false, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hard_kill_reopen_keeps_a_ratified_edit_clean_and_an_open_edit_open() {
+    reopen_keeps_the_cards(true, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hard_kill_reopen_under_a_cut_keeps_a_ratified_edit_clean_and_an_open_edit_open() {
+    reopen_keeps_the_cards(true, true).await;
 }
