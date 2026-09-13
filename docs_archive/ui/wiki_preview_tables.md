@@ -6,7 +6,7 @@ Status: **EXECUTED 2026-09-08.** Built as written here.
 
 `parse_blocks` drove pulldown-cmark without `ENABLE_TABLES`, so a pipe
 table reached the pane as one paragraph of bars. An agent-written wiki
-(Deka Knowledge) is full of them.
+is full of them.
 
 ## Model (`molt-ui/src/wiki.rs`)
 
