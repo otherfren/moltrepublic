@@ -22,8 +22,6 @@ url.workspace = true # WHATWG relay-URL parsing (relay.rs) — pure Rust, still 
 similar.workspace = true # the wiki patch EMITTER, beside its applier (wiki_patch.rs) — pure Rust, no I/O
 pulldown-cmark.workspace = true # the `upload:` reference grammar (wiki_refs.rs) — pure parser, no I/O
 zeroize.workspace = true # wipes the vault seed on drop - pure Rust, no I/O
-
-[dev-dependencies]
-# independent digest check of the roster-v3 byte-identity pin (N1); the
-# crate itself stays hash-free (no I/O, no crypto)
+# the vault's content ids (`vault::secret_id`, `vault::grant_id`) hash beside
+# their layouts; still RNG-free, no curve arithmetic (that is molt-vault)
 sha2.workspace = true

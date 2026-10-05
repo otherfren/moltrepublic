@@ -7,8 +7,9 @@ imply. Rev 3 added D11–D13 after a second review the same day
 (founding-only vault, keys in the roster, deposit is a vote, m ≤ n − 2)
 and D14–D16. Rev 4 folds in the build plan's deviations (plan §1.3,
 listed in §12) and D17 (plan Q1, user-confirmed default).
-Built so far: the contract types (stage S0). None of the cryptography is
-built yet.
+Built so far: the contract types (stage S0) and the crypto core with
+every byte layout of §5-§9 (stage S1: `crates/molt-vault`,
+`molt_core::vault`). Nothing is wired into the engine yet.
 Rev 1 (2026-08-16) is superseded: its primitives stand, its framing
 ("succession insurance" with an implied depositor protection) and its
 storage story (bundles inline in the chain) do not. §12 lists what
@@ -594,7 +595,7 @@ Rev 2/3 against rev 1:
 - `chacha20poly1305`, `x25519-dalek`, `hkdf`, `curve25519-dalek` — in the
   lockfile. The ring-free guard and the no-C posture hold.
 
-## 14. Build phases (nothing started)
+## 14. Build phases (V1 built in plan stage S1, roster-v6 aside: S2)
 
 1. **V1 spike** — dep-lock `vsss-rs`, decide the HPKE crate (ephemeral
    control), red byte-pin tests for every layout: `molt-vault-secret-v1`,

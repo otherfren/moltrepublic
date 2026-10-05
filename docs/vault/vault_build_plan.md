@@ -491,7 +491,7 @@ worktree and reruns its verification before merging.
 - **Owns:** `crates/molt-vault/**` (new), `crates/molt-core/src/vault.rs`,
   root `Cargo.toml` (`[workspace] members`, `[workspace.dependencies]`
   `molt-vault = { path = "crates/molt-vault" }`,
-  `vsss-rs = { version = "=5.1.0", default-features = false, features = ["curve25519", "zeroize"] }` (+ whatever `alloc`/`std` the split API proves to need),
+  `vsss-rs = { version = "=5.1.0", default-features = false, features = ["curve25519", "primitive", "zeroize"] }` (locked in S1: `curve25519` turns on `alloc`, whose `biguint` module needs `num`, i.e. `primitive`),
   `hpke = { version = "=0.13.0", default-features = false, features = ["x25519", "alloc"] }`,
   `rand_chacha = "0.3"`), the header comment, `Cargo.lock`.
 - **First step:** dep-lock. Add the deps, `cargo build -j 2 -p molt-vault`
@@ -542,10 +542,10 @@ worktree and reruns its verification before merging.
     `verify_deposit_shape(&dep, &VaultCtx)` (holders = every seat but the
     depositor in genesis order, counts m / n-1, hex shapes);
     `verify_deposit_sig(&dep, republic_id, depositor_identity_pk)`;
-    `check_my_share(&dep, republic_id, my_name, my_x, vault_sk) -> Result<Share, ShareFault>`;
+    `check_my_share(&dep, republic_id, &VaultCtx, my_name, vault_sk) -> Result<Share, ShareFault>`;
     `rederive_share(&dep, republic_id, vault_seed, holder) -> (share, ikmE)` (depositor side);
     `recover_secret(&dep, republic_id, vault_seed) -> s` (re-seal).
-  - `complaint.rs`: `decide(&dep, republic_id, holder, holder_vault_pk, share, ikmE) -> Outcome { Lie, BadShare, FalseComplaint }`.
+  - `complaint.rs`: `decide(&dep, republic_id, &VaultCtx, holder, share, ikmE) -> Outcome { Lie, BadShare, FalseComplaint }` (x and the founding `vault_pk` come from the ctx, never the caller).
   - `read.rs`: `read(&dep, republic_id, shares: &[(x, share)], payload_ct) -> Result<SecretText, ReadFault { bad_seats }>`.
   - `base.rs`: `verify_base(&VaultBase, republic_id, &VaultCtx)` - shape
     + sig of every deposit, every `grant_id` recomputed, readers are seats.
