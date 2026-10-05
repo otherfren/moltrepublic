@@ -4,8 +4,8 @@
 //! `docs/vault/vault_build_plan.md`). Each submodule belongs to one build
 //! stage; this file only wires them.
 
-use molt_core::vault::VaultView;
-use molt_core::{MemberId, MoltError};
+use molt_core::vault::{VaultCtx, VaultRefusal, VaultView};
+use molt_core::MoltError;
 use serde_json::Value;
 
 pub(crate) mod deposit;
@@ -14,15 +14,23 @@ pub(crate) mod grant;
 pub(crate) mod read;
 pub(crate) mod receipts;
 
-/// The vault context of ONE chain, built from its genesis roster or its
-/// anchor's `founding_identities` - never from node state (plan 1.3.8).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct VaultCtx {
-    /// The threshold.
-    pub(crate) m: u8,
-    /// `(name, identity_pk, vault_pk)` in genesis founding-table order;
-    /// a seat's Shamir x is its 1-based position here.
-    pub(crate) holders_in_genesis_order: Vec<(MemberId, String, String)>,
+/// The approve arm of a Vault op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VaultArm {
+    Deposit,
+    Grant,
+    /// The v5 mock's generic ops.
+    Mock,
+}
+
+/// Route a Vault payload; a real vault is a closed op set (plan 1.3.9).
+pub(crate) fn vault_arm(payload: &Value, real: bool) -> Result<VaultArm, MoltError> {
+    match payload.get("op").and_then(Value::as_str) {
+        Some("deposit") => Ok(VaultArm::Deposit),
+        Some("grant") => Ok(VaultArm::Grant),
+        _ if real => Err(MoltError::Vault(VaultRefusal::UnknownOp)),
+        _ => Ok(VaultArm::Mock),
+    }
 }
 
 impl crate::State {
@@ -65,10 +73,33 @@ impl crate::State {
     /// The vault arm of `approve`, by op.
     #[expect(dead_code, reason = "S3b wires it into cmd_approve")]
     pub(crate) fn vault_approve_check(&self, payload: &Value) -> Result<(), MoltError> {
-        match payload.get("op").and_then(Value::as_str) {
-            Some("deposit") => self.approve_check_deposit(payload),
-            Some("grant") => self.approve_check_grant(payload),
-            _ => Ok(()),
+        match vault_arm(payload, self.is_vault_republic())? {
+            VaultArm::Deposit => self.approve_check_deposit(payload),
+            VaultArm::Grant => self.approve_check_grant(payload),
+            VaultArm::Mock => Ok(()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Plan 1.3.9: a real vault takes deposit and grant only; the v5 mock
+    /// keeps its generic ops.
+    #[test]
+    fn approve_takes_the_closed_op_set_in_a_real_vault() {
+        for real in [false, true] {
+            assert_eq!(vault_arm(&json!({"op": "deposit"}), real).expect("deposit"), VaultArm::Deposit);
+            assert_eq!(vault_arm(&json!({"op": "grant"}), real).expect("grant"), VaultArm::Grant);
+        }
+        for other in [json!({"op": "seal_secret"}), json!({"op": "vault_base"}), json!({"op": "x"}), json!({})] {
+            assert_eq!(vault_arm(&other, false).expect("mock"), VaultArm::Mock);
+            assert!(matches!(
+                vault_arm(&other, true),
+                Err(MoltError::Vault(VaultRefusal::UnknownOp))
+            ));
         }
     }
 }

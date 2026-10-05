@@ -72,7 +72,7 @@ picture); memory add_note {title}; files persist {id} (the engine fills the \
 share's identity; a live share only), unpersist {id, at: unix now} (a \
 persistent share only), delete {id} (a temporary share - gone for good); \
 quests/wallet add_quest/transfer {title}; the vault has its own tools \
-(vault_seal, vault_grant, vault_read). Traps: founding/join/recovery need a confirmed relay \
+(vault_seal, vault_reseal, vault_grant, vault_read). Traps: founding/join/recovery need a confirmed relay \
 (relay_add, then confirm); mark_channel_read moves your PRIVATE cursor while \
 mark_read broadcasts read receipts; restore_start = offline knowledge from a \
 backup blob, recover_start = rejoin the live republic; navigate/select_* only \
@@ -2993,6 +2993,7 @@ pub(crate) mod tests {
         for name in names {
             let t = tools().into_iter().find(|t| t.name == name).expect("vault tool listed");
             assert_eq!(t.scope, Scope::Seat, "{name}");
+            assert!(INSTRUCTIONS.contains(name), "instructions miss {name}");
         }
     }
 

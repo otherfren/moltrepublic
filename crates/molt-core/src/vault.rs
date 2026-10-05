@@ -35,8 +35,70 @@ pub struct SecretHex(pub String);
 
 impl std::fmt::Debug for SecretHex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<{} hex>", self.0.len())
+    }
+}
+
+/// Raw secret bytes at rest (the vault seed). `Debug` prints only the
+/// length; wiped on drop.
+#[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
+#[serde(transparent)]
+pub struct SecretBytes(pub Vec<u8>);
+
+impl std::fmt::Debug for SecretBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "<{} bytes>", self.0.len())
     }
+}
+
+/// The vault context of ONE chain, built from its genesis roster or its
+/// anchor's `founding_identities` - never from node state (plan 1.3.8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultCtx {
+    /// The threshold.
+    pub m: u8,
+    /// `(name, identity_pk, vault_pk)` in genesis founding-table order;
+    /// a seat's Shamir x is its 1-based position here.
+    pub holders_in_genesis_order: Vec<(MemberId, String, String)>,
+}
+
+/// Why a vault command was refused (`MoltError::Vault`). `Display` is the
+/// English/MCP text; the GUI localizes per variant.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum VaultRefusal {
+    /// The founding bounds (spec §3).
+    #[error("needs 2 <= m <= n-2")]
+    Bounds,
+    /// `set_features` cannot add the vault.
+    #[error("founding only")]
+    FoundingOnly,
+    /// A joiner without vault support (D14).
+    #[error("needs a newer version: {0}")]
+    NeedsNewerVersion(MemberId),
+    /// The deposit failed this seat's check.
+    #[error("not verified")]
+    NotVerified,
+    /// The payload file is not here.
+    #[error("payload not held")]
+    PayloadNotHeld,
+    /// Only the granted reader reads.
+    #[error("not the reader")]
+    NotTheReader,
+    /// Not a vault republic.
+    #[error("no vault")]
+    NoVault,
+    /// This seat lacks its vault seed (plan 1.3.2).
+    #[error("no vault key")]
+    NoVaultKey,
+    /// The generic `propose` on the vault.
+    #[error("use vault_seal")]
+    UseVaultSeal,
+    /// Over [`VAULT_PAYLOAD_MAX`].
+    #[error("too large")]
+    TooLarge,
+    /// Outside the closed op set (plan 1.3.9).
+    #[error("unknown op")]
+    UnknownOp,
 }
 
 /// Where a deposit's ciphertext lives on the file plane.
@@ -82,6 +144,19 @@ pub struct VaultGrant {
     pub secret_id: String,
     /// The one seat that may read.
     pub reader: MemberId,
+}
+
+/// An `Applied` payload on `Surface::Vault` (contract 2.1). `VaultBase`
+/// is legal only as the fold entry of a vault cut (plan 1.3.9).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum VaultOp {
+    /// A deposit or replace.
+    Deposit(VaultDeposit),
+    /// A grant.
+    Grant(VaultGrant),
+    /// The folded base.
+    VaultBase(VaultPayloadRef),
 }
 
 /// A holder's verdict on a deposit, as last reported (status, never
@@ -463,6 +538,112 @@ mod tests {
         // the wire carries the plain string
         assert_eq!(serde_json::to_value(&text).expect("serializes"), json!("hunter2-password"));
         let hex = SecretHex("abcdef".to_string());
-        assert_eq!(format!("{hex:?}"), "<6 bytes>");
+        assert_eq!(format!("{hex:?}"), "<6 hex>");
+    }
+
+    #[test]
+    fn secret_bytes_debug_never_prints_the_bytes_and_serializes_as_a_vec() {
+        let seed = SecretBytes(vec![0xab; 32]);
+        assert_eq!(format!("{seed:?}"), "<32 bytes>");
+        let wire = serde_json::to_value(&seed).expect("serializes");
+        assert_eq!(wire, serde_json::to_value(vec![0xab_u8; 32]).expect("serializes"));
+        let back: SecretBytes = serde_json::from_value(wire).expect("deserializes");
+        assert_eq!(back, seed);
+        let ts = crate::TransportState { vault_seed: Some(seed), ..Default::default() };
+        let shown = format!("{ts:?}");
+        assert!(!shown.contains("171"), "{shown}");
+        assert!(shown.contains("<32 bytes>"), "{shown}");
+    }
+
+    /// Contract 2.1: the Applied op shapes on `Surface::Vault`, flattened.
+    #[test]
+    fn vault_op_json_shape_is_pinned() {
+        let payload = VaultPayloadRef { hash: "h".to_string(), size: 3 };
+        let dep = VaultOp::Deposit(VaultDeposit {
+            depositor: "a".to_string(),
+            name: "one".to_string(),
+            kind: "text".to_string(),
+            m: 2,
+            holders: vec!["b".to_string()],
+            commitments: vec!["c0".to_string()],
+            enc_share: vec!["e0".to_string()],
+            payload: payload.clone(),
+            nonce: "n".to_string(),
+            sig_depositor: "s".to_string(),
+        });
+        let grant = VaultOp::Grant(VaultGrant {
+            grant_id: "g".to_string(),
+            secret_id: "x".to_string(),
+            reader: "b".to_string(),
+        });
+        let base = VaultOp::VaultBase(payload);
+        let cases = [
+            (
+                dep,
+                json!({
+                    "op": "deposit", "depositor": "a", "name": "one", "kind": "text", "m": 2,
+                    "holders": ["b"], "commitments": ["c0"], "enc_share": ["e0"],
+                    "payload": { "hash": "h", "size": 3 }, "nonce": "n", "sig_depositor": "s"
+                }),
+            ),
+            (grant, json!({ "op": "grant", "grant_id": "g", "secret_id": "x", "reader": "b" })),
+            (base, json!({ "op": "vault_base", "hash": "h", "size": 3 })),
+        ];
+        for (op, want) in cases {
+            assert_eq!(serde_json::to_value(&op).expect("serializes"), want);
+            let back: VaultOp = serde_json::from_value(want).expect("deserializes");
+            assert_eq!(back, op);
+        }
+        // the closed set (plan 1.3.9): nothing else decodes
+        for other in [
+            json!({ "op": "seal_secret", "title": "a" }),
+            json!({ "op": "unknown" }),
+            json!({ "hash": "h", "size": 3 }),
+        ] {
+            assert!(serde_json::from_value::<VaultOp>(other).is_err());
+        }
+    }
+
+    #[test]
+    fn vault_labels_are_checked_at_their_edges() {
+        type Check = fn(&str) -> Result<(), String>;
+        let cases: [(Check, usize); 2] =
+            [(check_vault_name, VAULT_NAME_MAX), (check_vault_kind, VAULT_KIND_MAX)];
+        for (check, max) in cases {
+            assert!(check("").is_err());
+            assert!(check("   ").is_err());
+            assert!(check(" a").is_err());
+            assert!(check("a ").is_err());
+            assert!(check("a b").is_ok());
+            assert!(check(&"ä".repeat(max)).is_ok(), "{max} multibyte chars");
+            assert!(check(&"ä".repeat(max + 1)).is_err());
+            assert!(check("a\nb").is_err());
+            assert!(check("a\u{7f}b").is_err());
+        }
+    }
+
+    /// Contract 2.1: the English (MCP) text of every refusal.
+    #[test]
+    fn vault_refusal_text_is_pinned() {
+        let cases = [
+            (VaultRefusal::Bounds, "needs 2 <= m <= n-2"),
+            (VaultRefusal::FoundingOnly, "founding only"),
+            (VaultRefusal::NeedsNewerVersion("b".to_string()), "needs a newer version: b"),
+            (VaultRefusal::NotVerified, "not verified"),
+            (VaultRefusal::PayloadNotHeld, "payload not held"),
+            (VaultRefusal::NotTheReader, "not the reader"),
+            (VaultRefusal::NoVault, "no vault"),
+            (VaultRefusal::NoVaultKey, "no vault key"),
+            (VaultRefusal::UseVaultSeal, "use vault_seal"),
+            (VaultRefusal::TooLarge, "too large"),
+            (VaultRefusal::UnknownOp, "unknown op"),
+        ];
+        for (r, want) in cases {
+            assert_eq!(r.to_string(), want);
+        }
+        assert_eq!(
+            crate::MoltError::Vault(VaultRefusal::NoVaultKey).to_string(),
+            "vault: no vault key"
+        );
     }
 }

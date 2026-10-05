@@ -183,6 +183,36 @@ fn engine_errors_render_in_the_active_language() {
     assert!(super::localize_error(1, &e).contains("versiegelt"));
 }
 
+/// Every vault refusal has a German arm (no English reason inside a
+/// German toast); English stays the MCP text.
+#[test]
+fn vault_refusals_render_in_german() {
+    use molt_core::vault::VaultRefusal as R;
+    let all = [
+        R::Bounds,
+        R::FoundingOnly,
+        R::NeedsNewerVersion("b".to_string()),
+        R::NotVerified,
+        R::PayloadNotHeld,
+        R::NotTheReader,
+        R::NoVault,
+        R::NoVaultKey,
+        R::UseVaultSeal,
+        R::TooLarge,
+        R::UnknownOp,
+    ];
+    for r in all {
+        let english = r.to_string();
+        let e = molt_core::MoltError::Vault(r);
+        assert_eq!(super::localize_error(0, &e), e.to_string());
+        let de = super::localize_error(1, &e);
+        assert!(de.starts_with("Vault: "), "{de}");
+        assert!(!de.contains(&english), "untranslated: {de}");
+    }
+    let de = super::localize_error(1, &molt_core::MoltError::Vault(R::NeedsNewerVersion("b".to_string())));
+    assert!(de.contains(": b"), "{de}");
+}
+
 /// R1 (relay_topology_plan): the create wizard states rule 1 — ONE
 /// relay every member can reach (the join runs over the INTERSECTION;
 /// "identical pool" was a stricter, false rule that contradicted the

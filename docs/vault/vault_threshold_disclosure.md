@@ -61,7 +61,8 @@ deposit time, in one line:
   `wiki_base.bin` was skipped by every export (fix of 2026-10-05,
   "storage: back up the folded wiki base").
 - **D11 Founding only, set up in the background.** The vault can be
-  chosen only at founding; `set_features` refuses to add it later. Every
+  chosen only at founding; a new `set_features` proposal cannot add it
+  (`founding only`); historic `set_features vault` blocks keep verifying. Every
   seat's vault key is part of the founding (§6), so no seat can lack one
   and no step needs a user action.
 - **D12 A deposit is a vote.** Deposit and replace are ordinary gated
@@ -97,9 +98,13 @@ mean anything:
   2-of-3 republic a grant commits with one seat dead, and the read it
   grants is impossible. So n ≥ 4.
 
-Both are checked in the founding wizard, in `verify_seal_proposal`, and in
-`set_features` (which refuses `vault` outright, D11); the refusal names
-the reason (`needs 2 <= m <= n-2`).
+Both are checked at the founding doors (the wizard, `cmd_create_propose`,
+`verify_seal_proposal`); the refusal names the reason
+(`needs 2 <= m <= n-2`). `set_features` refuses `vault` on NEW proposals
+only (`founding only`, D11: `validate_org_payload`, `cmd_propose`,
+`cmd_approve`, `receive_proposed`); `fold_one` and `verify_chain` keep
+accepting historic `set_features vault` blocks, so live v5 republics that
+applied the mock keep verifying.
 
 ## 4. Trust model — the honest limits
 
@@ -162,8 +167,8 @@ working `nostr_pk`, same phrase) re-derives the same key from the chain.
 join, recovery and restore, because the phrase is not available at
 runtime. A holder seat of a vault republic without it fails closed: it
 refuses `approve` on the vault (`no vault key`), sends no receipt and no
-answer, and logs `vault_seed=missing` once per open; it re-derives at
-the next phrase-bearing open and persists only a result equal to its
+answer, and logs `vault_seed=missing` once per open; it never acts as a
+non-holder. It re-derives at the next phrase-bearing open and persists only a result equal to its
 founding `vault_pk`.
 
 **Encoding rule for every `‖` in this document**: each field
@@ -239,6 +244,10 @@ file per deposit.
   heights; the answer AAD binds it (§8). Validity is a projection rule: a
   grant block whose version is not current at its height commits but is
   void.
+- **Block hard-rejects** (`verify_chain`, all-or-nothing): a deposit block
+  when the record is malformed or `sig_depositor` fails; a grant block
+  when `grant_id` does not recompute or the reader is not a seat. A grant
+  on a replaced version is not among them: it commits void.
 - **A closed op set.** In a v6 chain an applied Vault payload is exactly
   `deposit` or `grant`; `vault_base` is legal only as the fold entry of a
   vault cut; anything else hard-rejects at ingest, at approve and in

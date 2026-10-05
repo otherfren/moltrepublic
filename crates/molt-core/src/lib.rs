@@ -2045,7 +2045,7 @@ pub struct TransportState {
     /// from the phrase, kept because the phrase is gone at runtime.
     /// Sensitive like `identity_sk`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vault_seed: Option<Vec<u8>>,
+    pub vault_seed: Option<vault::SecretBytes>,
     /// Vault receipts and decided reveals, last-wins per holder.
     #[serde(default, skip_serializing_if = "vault::VaultStatusStore::is_empty")]
     pub vault_status: vault::VaultStatusStore,
@@ -7866,7 +7866,7 @@ pub enum MoltError {
     },
     /// A vault command was refused; one compact reason.
     #[error("vault: {0}")]
-    Vault(String),
+    Vault(vault::VaultRefusal),
     /// The wiki index is still being built off the actor
     /// (`docs_archive/memory/knowledge_base_scale.md` §4.5/§4.6): "come back in a
     /// moment", not a fault - an empty result would be a lie.

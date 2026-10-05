@@ -122,7 +122,7 @@ Consequence: complaints ARE decidable; the spec's undecided fallback
    ALWAYS sends `vault_pk` (it cannot know the charter yet); the founder
    drops the field from the table when the charter has no vault.
 2. **`vault_ikm` is persisted** in `TransportState.vault_seed`
-   (`#[serde(default)] Option<Vec<u8>>`, beside `nostr_sk`) at founding,
+   (`#[serde(default)] Option<SecretBytes>`, beside `nostr_sk`) at founding,
    join, recovery and restore, because the phrase is not available at
    runtime (`seeds` is cleared when a workspace is sealed at rest).
    Ephemerals derive from it: `ikmE_i = HKDF(vault_ikm, "molt-vault-eph-v1" ‖ secret_id ‖ seat_i)`
@@ -190,7 +190,7 @@ Consequence: complaints ARE decidable; the spec's undecided fallback
    republic the generic `propose` on `vault` is refused (`use vault_seal`);
    deposits and grants come only from the vault commands.
 8. **The vault switch comes from the chain being walked, never from node
-   state.** `VaultCtx { m, holders_in_genesis_order: [(name, identity_pk, vault_pk)] }`
+   state.** `molt_core::vault::VaultCtx { m, holders_in_genesis_order: [(name, identity_pk, vault_pk)] }`
    is built from the genesis roster (or the anchor's
    `founding_identities`) OF THE CHAIN UNDER VERIFICATION and threaded
    through `walk_own`, `verify_chain`, `fold_one` and the base decoder; a
@@ -285,7 +285,7 @@ is new on an existing type).
 ### 2.1 molt-core
 
 - `MemberIdentity.vault_pk: String` (`default`, `skip_serializing_if = "String::is_empty"`).
-- `TransportState.vault_seed: Option<Vec<u8>>`,
+- `TransportState.vault_seed: Option<SecretBytes>`,
   `TransportState.vault_status: VaultStatusStore` (receipts and reveal
   outcomes, last-wins per holder: `BTreeMap<secret_id, BTreeMap<MemberId, VaultReceipt>>`
   + `BTreeMap<secret_id, BTreeMap<MemberId, VaultRevealOutcome>>`),
@@ -295,12 +295,17 @@ is new on an existing type).
 - `PublishJob.vault: Option<String>` (payload or base hash; routes the
   trickle like `wiki_base`).
 - `molt_core::vault` module:
-  - `SecretText(String)` (1.3.17).
+  - `SecretText(String)` (1.3.17); `SecretBytes(Vec<u8>)` (serde
+    transparent, `Debug` `<N bytes>`, zeroized on drop) for the seed.
+  - `VaultCtx { m: u8, holders_in_genesis_order: Vec<(MemberId, String, String)> }`
+    (1.3.8), shared by molt-vault and molt-engine.
   - `VaultDeposit { depositor, name, kind, m: u8, holders: Vec<String>, commitments: Vec<String>, enc_share: Vec<String>, payload: VaultPayloadRef { hash, size }, nonce: String, sig_depositor: String }`
     (hex strings; field order = canonical order).
   - `VaultGrant { grant_id, secret_id, reader }`.
   - Applied payload ops on `Surface::Vault`: `{"op":"deposit", ...VaultDeposit}`,
-    `{"op":"grant", ...VaultGrant}`; fold entry `{"op":"vault_base","hash","size"}`.
+    `{"op":"grant", ...VaultGrant}`; fold entry `{"op":"vault_base","hash","size"}`;
+    typed as `VaultOp` (serde `tag = "op"`, flattened, JSON pinned; no
+    other op decodes).
   - limits: `VAULT_PAYLOAD_MAX = 102_400`, `VAULT_NAME_MAX = 64`,
     `VAULT_KIND_MAX = 24` chars; `check_vault_name`, `check_vault_kind`
     (trimmed, non-empty, no control chars).
@@ -318,11 +323,12 @@ is new on an existing type).
   `Reply::VaultPending { secret_id, have: u8, need: u8 }`.
 - `Event::VaultReadable { secret_id }` (UI refresh when answers complete).
 - `MoltError::VaultBasePending { have: u64, size: u64, want: String }`
-  (mirrors `WikiBasePending`) and `MoltError::Vault(String)` (one compact
-  reason: `needs 2 <= m <= n-2`, `founding only`,
+  (mirrors `WikiBasePending`) and `MoltError::Vault(VaultRefusal)` (one
+  compact reason; `Display` is the MCP text, the GUI localizes per
+  variant: `needs 2 <= m <= n-2`, `founding only`,
   `needs a newer version: <seat>`, `not verified`, `payload not held`,
   `not the reader`, `no vault`, `no vault key`, `use vault_seal`,
-  `too large`).
+  `too large`, `unknown op`).
 - `SurfaceSnapshot.vault: Option<VaultView>` (Vault surface only):
 
 ```text
@@ -382,9 +388,10 @@ VaultView {
   - `vault/read.rs` (S4): `cmd_vault_read`;
   - `vault/fold.rs` (S5): `cmd_net_vault_base_fetched/_failed`;
   - `net/vault_payload.rs` (S3a): `cmd_net_vault_payload_fetched/_failed`.
-- `vault::approve_check(&self, op)` in `mod.rs` dispatches by op to the
-  deposit / grant arms; S3b wires it into `cmd_approve`, S4 only fills
-  `approve_check_grant`.
+- `vault::approve_check(&self, op)` in `mod.rs` (`vault_approve_check`)
+  dispatches by op through `vault_arm` to the deposit / grant arms; in a
+  real vault any other op is `unknown op` (1.3.9); S3b wires it into
+  `cmd_approve`, S4 only fills `approve_check_grant`.
 - `snapshot(Vault)` fills `vault: Some(VaultView { real: false, .. })`.
 
 ### 2.4 molt-mcp
