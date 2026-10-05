@@ -468,6 +468,17 @@ impl ChainWalk {
         base: Option<&BTreeMap<String, String>>,
     ) -> Result<(), String> {
         let (head, consumed) = verify_next(&self.head, block, &self.seen)?;
+        if self.vault.is_some()
+            && matches!(
+                block.change,
+                ChainChange::Checkpoint { .. } | ChainChange::CheckpointFolded { .. }
+            )
+        {
+            return Err(format!(
+                "block {}: a legacy checkpoint in a vault republic",
+                block.height
+            ));
+        }
         let cut = match &block.change {
             ChainChange::Checkpoint { upto, state_hash } => {
                 if self.folded_cut {
@@ -1125,12 +1136,11 @@ pub(crate) fn walk_suffix_chain(
     if usize::from(blob.rule_n) != blob.founding_identities.len() {
         return Err("checkpoint founding table size does not match n".to_string());
     }
-    crate::vault::check_roster_keys(
-        blob.rule_m,
-        blob.rule_n,
-        &blob.founding_identities,
-        blob.founding_features.as_deref(),
-    )?;
+    // no legacy anchor binds a vault key (the v8 layout and the rid skip
+    // it), so a keyed blob is unauthenticated; CheckpointVault binds it (S5)
+    if blob.founding_identities.iter().any(|i| !i.vault_pk.is_empty()) {
+        return Err("a legacy checkpoint cannot anchor a vault republic".to_string());
+    }
     // NO circular trust: the blob's roster is only bound by the state hash
     // the anchor sigs attest — so the roster itself must chain back to the
     // rid-bound FOUNDING table, and the anchor signatures must verify
@@ -1183,7 +1193,8 @@ pub(crate) fn walk_suffix_chain(
         // the anchor itself may already be a folded cut — from then on a
         // legacy one is refused for the rest of the walk
         folded_cut: matches!(anchor.change, ChainChange::CheckpointFolded { .. }),
-        vault: crate::vault::ctx_from_founding(blob.rule_m, &blob.founding_identities),
+        // the keyless blob checked above
+        vault: None,
     };
     for block in rest {
         walk.step(block, wiki_base)?;

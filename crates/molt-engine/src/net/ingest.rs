@@ -336,7 +336,7 @@ impl State {
                     return Ok(Reply::Ack);
                 }
                 // (6) the vault is founding-only (D11)
-                if crate::proposals::sets_vault_feature(surface, &payload) {
+                if self.adds_vault_feature(surface, &payload) {
                     tracing::warn!(from = %from, "dropping a set_features proposal adding the vault");
                     return Ok(Reply::Ack);
                 }

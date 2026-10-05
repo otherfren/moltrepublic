@@ -274,6 +274,33 @@ mod tests {
         .expect("vault is kept by the union, not by the proposal");
     }
 
+    /// D11 refuses ADDING the vault: where it is already effective (a live
+    /// v5 mock), an older peer's `set_features` naming it stays votable.
+    #[test]
+    fn set_features_naming_an_effective_vault_is_not_refused() {
+        let named = json!({ "op": "set_features", "value": "memory quests vault" });
+        let b = Builder::new(&["petra", "walter"], 2);
+        let mut st = chain_signer("petra", &b, b.blocks.clone());
+        if let Some(r) = st.replica.as_mut() {
+            r.features = Some(vec!["memory".to_string(), "vault".to_string()]);
+        }
+        wire(
+            &mut st,
+            "walter",
+            1,
+            WorkspaceEvent::Proposed { id: ProposalId(2), surface: Surface::Organization, payload: named.clone() },
+        );
+        assert!(st.proposals.contains_key(&2), "the wire twin keeps it");
+        assert!(!matches!(
+            st.cmd_approve(ProposalId(2), None),
+            Err(MoltError::Vault(VaultRefusal::FoundingOnly))
+        ));
+        assert!(!matches!(
+            st.cmd_propose(Surface::Organization, named),
+            Err(MoltError::Vault(VaultRefusal::FoundingOnly))
+        ));
+    }
+
     /// Plan 1.3.9: a real vault takes deposit and grant only; the v5 mock
     /// keeps its generic ops.
     #[test]

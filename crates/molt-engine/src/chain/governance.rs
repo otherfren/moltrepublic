@@ -981,7 +981,7 @@ impl State {
             tracing::warn!(%id, "refusing a proposal with an implausible id");
             return false;
         }
-        if crate::proposals::sets_vault_feature(surface, &payload) {
+        if self.adds_vault_feature(surface, &payload) {
             tracing::warn!(%id, %by, "refusing a set_features adding the vault");
             return false;
         }

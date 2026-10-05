@@ -124,3 +124,65 @@ fn the_walk_takes_the_vault_ctx_from_the_candidate_chain() {
     let walk = holder6.walk_own(&v5.blocks).expect("the v5 candidate verifies");
     assert!(walk.vault_ctx().is_none());
 }
+
+/// A v6 republic and its legacy cut at height 2 (`upto` 1), honestly signed.
+fn v6_with_a_legacy_cut() -> (Builder, molt_core::CheckpointState, ChainBlock) {
+    let mut b = Builder::vault();
+    b.commit_applied(1, &["a", "b"]);
+    let blob = checkpoint_state(&b.blocks, 1).expect("state@1");
+    let cut = b.seal(
+        2,
+        ChainChange::Checkpoint { upto: 1, state_hash: checkpoint_state_hash(&blob) },
+        &["a", "b"],
+    );
+    (b, blob, cut)
+}
+
+/// Until `CheckpointVault` binds `vault_pk` (S5), a v8 cut cannot carry
+/// the keys past the genesis: a v6 chain refuses both legacy variants.
+#[test]
+fn a_v6_chain_refuses_a_legacy_checkpoint() {
+    let (b, _, cut) = v6_with_a_legacy_cut();
+    let mut chain = b.blocks.clone();
+    chain.push(cut);
+    let err = verify_chain(&chain).expect_err("a legacy cut in a v6 chain");
+    assert!(err.contains("vault"), "{err}");
+
+    let folded = ChainChange::CheckpointFolded { upto: 1, state_hash: "00".repeat(32) };
+    let mut chain = b.blocks.clone();
+    chain.push(b.seal(2, folded, &["a", "b"]));
+    let err = verify_chain(&chain).expect_err("a folded legacy cut in a v6 chain");
+    assert!(err.contains("vault"), "{err}");
+}
+
+/// No v8 anchor authenticates a `vault_pk`, so a blob carrying one never
+/// bootstraps a suffix holder.
+#[test]
+fn a_suffix_walk_refuses_a_blob_with_vault_keys() {
+    let (b, blob, cut) = v6_with_a_legacy_cut();
+    let err = verify_suffix_chain(&blob, &[cut], &b.republic_id, None)
+        .expect_err("a keyed blob under a v8 anchor");
+    assert!(err.contains("vault"), "{err}");
+}
+
+/// The doors: a vault republic neither proposes, co-signs nor auto-cuts.
+#[test]
+fn a_vault_republic_never_proposes_or_signs_a_cut() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let mut b = Builder::vault();
+    b.commit_applied(1, &["a", "b"]);
+    let mut a = chain_signer("a", &b, b.blocks.clone());
+    assert!(a.is_vault_republic());
+    assert!(a.cmd_propose_checkpoint().is_err());
+    assert!(a.chain.proposal_changes.is_empty());
+
+    let mut c = chain_signer("c", &b, b.blocks.clone());
+    let ours = checkpoint_state_hash(&c.own_checkpoint_state(1, false).expect("own projection"));
+    c.receive_checkpoint_proposal(50, 1, &ours, false);
+    assert!(c.chain.proposal_changes.is_empty(), "no co-signature");
+    assert!(c.chain.pending_sigs.is_empty());
+}

@@ -457,13 +457,9 @@ pub(crate) fn change_summary(eff: &OrgEffective, p: &ProposalRecord) -> (String,
     (current, proposed)
 }
 
-/// Refuse an Organization edit whose value could never become honest
-/// effective state: an applied entry is forever (the log is append-only),
-/// so a blank name or an unparseable retention window must not get in.
-/// Local proposals only — the wire fold stays defensive on its own.
-/// A `set_features` naming the vault: D11 refuses it on every NEW proposal
-/// (propose, approve, the wire); historic blocks keep folding.
-pub(crate) fn sets_vault_feature(surface: Surface, payload: &Value) -> bool {
+/// A `set_features` naming the vault; [`State::adds_vault_feature`] is
+/// the D11 door rule built on it.
+fn sets_vault_feature(surface: Surface, payload: &Value) -> bool {
     surface == Surface::Organization
         && payload.get("op").and_then(Value::as_str) == Some("set_features")
         && payload
@@ -472,12 +468,23 @@ pub(crate) fn sets_vault_feature(surface: Surface, payload: &Value) -> bool {
             .is_some_and(|v| v.split_whitespace().any(|k| k == crate::vault::VAULT))
 }
 
+impl State {
+    /// D11: a NEW proposal (propose, approve, the wire) cannot ADD the
+    /// vault; naming an already effective one (a v5 mock) is no addition.
+    /// Historic blocks keep folding.
+    pub(crate) fn adds_vault_feature(&self, surface: Surface, payload: &Value) -> bool {
+        sets_vault_feature(surface, payload)
+            && !self.effective_features().iter().any(|f| f == crate::vault::VAULT)
+    }
+}
+
+/// Refuse an Organization edit whose value could never become honest
+/// effective state: an applied entry is forever (the log is append-only),
+/// so a blank name or an unparseable retention window must not get in.
+/// Local proposals only — the wire fold stays defensive on its own.
 fn validate_org_payload(surface: Surface, payload: &Value) -> Result<(), MoltError> {
     if surface != Surface::Organization {
         return Ok(());
-    }
-    if sets_vault_feature(surface, payload) {
-        return Err(MoltError::Vault(molt_core::vault::VaultRefusal::FoundingOnly));
     }
     let op = payload.get("op").and_then(Value::as_str).unwrap_or("");
     let value = payload.get("value").and_then(Value::as_str).unwrap_or("");
@@ -661,6 +668,9 @@ impl State {
             }
         }
         validate_org_payload(surface, &payload)?;
+        if self.adds_vault_feature(surface, &payload) {
+            return Err(MoltError::Vault(molt_core::vault::VaultRefusal::FoundingOnly));
+        }
         if surface == Surface::Files {
             self.prepare_files_proposal(&mut payload)?;
         }
@@ -876,7 +886,7 @@ impl State {
                 // (The nav hides such a surface, so a GUI member could not even
                 // SEE the card it would be co-signing.)
                 self.require_feature(p.surface)?;
-                if sets_vault_feature(p.surface, &p.payload) {
+                if self.adds_vault_feature(p.surface, &p.payload) {
                     return Err(MoltError::Vault(molt_core::vault::VaultRefusal::FoundingOnly));
                 }
                 // a Files vote is checked against THIS seat's own view of the
