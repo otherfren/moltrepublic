@@ -408,9 +408,85 @@ fn read_reply_renders_pending_then_text() {
         ("one", "")
     );
     assert!(!crate::actions::vault::vault_read_waiting(&ui, &id));
+    // the two read tasks post in any order: a late wait never hides a text
+    assert!(apply_vault_read_reply(
+        &ui,
+        &Reply::VaultPending {
+            secret_id: id.clone(),
+            have: 1,
+            need: 2
+        }
+    ));
+    let rows: Vec<VaultUnsealedRow> = ui.get_vault_unsealed().iter().collect();
+    assert_eq!(
+        (rows.len(), rows[0].text.as_str(), rows[0].status.as_str()),
+        (1, "one", ""),
+        "a late pending reply keeps the text"
+    );
     assert!(
         !apply_vault_read_reply(&ui, &Reply::Ack),
         "not a read reply"
+    );
+}
+
+/// `VaultReadable` re-reads only a row this session is waiting on; a
+/// grant nobody asked to read stays closed.
+#[test]
+fn a_readable_event_rereads_only_a_waiting_row() {
+    use crate::actions::vault::should_reread;
+    let ui = window(Some(fixture()));
+    let id = deposit_rows(&ui)[1].secret_id.to_string();
+    assert!(!should_reread(&ui, &id), "nobody asked to read it");
+    apply_vault_read_reply(
+        &ui,
+        &Reply::VaultPending {
+            secret_id: id.clone(),
+            have: 1,
+            need: 2,
+        },
+    );
+    assert!(should_reread(&ui, &id), "a waiting row re-reads");
+    assert!(!should_reread(&ui, "other"), "only that row");
+    apply_vault_read_reply(
+        &ui,
+        &Reply::VaultText {
+            secret_id: id.clone(),
+            name: "two".to_string(),
+            kind: "text".to_string(),
+            text: SecretText("one".to_string()),
+        },
+    );
+    assert!(!should_reread(&ui, &id), "a delivered text is not re-read");
+}
+
+/// The draft belongs to the outcome: a refused seal keeps the dialog and
+/// its text, an accepted one wipes both.
+#[test]
+fn a_refused_seal_keeps_the_draft() {
+    use crate::actions::vault::{seal_issued, seal_settled};
+    let ui = window(Some(fixture()));
+    ui.set_vt_seal_open(true);
+    ui.set_vt_seal_name("keys".into());
+    ui.set_vt_seal_text("s3cret".into());
+    assert!(seal_command(&ui).is_some());
+    seal_issued(&ui);
+    assert!(ui.get_vt_seal_busy(), "busy while in flight");
+    assert!(!ui.get_vt_seal_confirmable(), "no second seal meanwhile");
+    seal_settled(&ui, false);
+    assert!(ui.get_vt_seal_open(), "a refusal keeps the dialog");
+    assert_eq!(ui.get_vt_seal_text().as_str(), "s3cret");
+    assert!(!ui.get_vt_seal_busy(), "and lets the user retry");
+    seal_issued(&ui);
+    seal_settled(&ui, true);
+    assert!(!ui.get_vt_seal_open(), "a seal closes the dialog");
+    assert_eq!(ui.get_vt_seal_text().as_str(), "", "and wipes the text");
+    ui.set_vt_seal_open(true);
+    ui.set_vt_seal_text("draft".into());
+    seal_settled(&ui, true);
+    assert_eq!(
+        ui.get_vt_seal_text().as_str(),
+        "draft",
+        "a reply nobody waits on touches nothing"
     );
 }
 
@@ -582,11 +658,32 @@ fn unsealed_is_cleared_on_close() {
         active_workspace: String::new(),
         ..SessionView::default()
     };
+    ui.set_vt_seal_open(true);
+    ui.set_vt_seal_name("keys".into());
+    ui.set_vt_seal_text("s3cret".into());
+    ui.set_vt_seal_busy(true);
+    ui.set_vt_grant_open(true);
+    ui.set_vt_grant_secret("s".into());
     apply_session(&ui, &closed, false, &chat_ui);
     assert_eq!(
         ui.get_vault_unsealed().row_count(),
         0,
         "closing forgets every text"
+    );
+    assert_eq!(
+        (
+            ui.get_vt_seal_open(),
+            ui.get_vt_seal_text().as_str(),
+            ui.get_vt_seal_name().as_str(),
+            ui.get_vt_seal_busy(),
+        ),
+        (false, "", "", false),
+        "a seal draft never moves to another republic"
+    );
+    assert_eq!(
+        (ui.get_vt_grant_open(), ui.get_vt_grant_secret().as_str()),
+        (false, ""),
+        "nor does a grant"
     );
 }
 

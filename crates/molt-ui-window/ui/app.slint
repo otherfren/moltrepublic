@@ -2150,6 +2150,9 @@ export component AppWindow inherits Window {
     out property <bool> vt-seal-replace: root.vt-mine-named(root.vt-seal-name, root.vault-deposits);
     out property <bool> vt-seal-ok: root.vt-seal-name != "" && root.vt-seal-kind != ""
         && root.vt-seal-text != "" && !root.vt-seal-too-large;
+    // a seal is in flight: the dialog waits for the engine's answer
+    in-out property <bool> vt-seal-busy: false;
+    out property <bool> vt-seal-confirmable: root.vt-seal-ok && !root.vt-seal-busy;
     in-out property <bool> vt-grant-open: false;
     in-out property <string> vt-grant-secret;
     in-out property <string> vt-grant-name;
@@ -9446,15 +9449,14 @@ export component AppWindow inherits Window {
         title: Strings.vt-seal-new;
         body: "\{Strings.vt-warn-pre} \{root.vault-m} \{Strings.vt-warn-post}";
         confirm-label: Strings.vt-seal-confirm;
-        confirm-enabled: root.vt-seal-ok;
+        confirm-enabled: root.vt-seal-confirmable;
         dismissed => {
             root.vt-seal-text = "";
             root.vt-seal-open = false;
         }
+        // the dialog closes on the engine's answer, so a refusal keeps the draft
         confirmed => {
             root.vault-seal-confirm();
-            root.vt-seal-text = "";
-            root.vt-seal-open = false;
         }
         VerticalLayout {
             spacing: 12px;

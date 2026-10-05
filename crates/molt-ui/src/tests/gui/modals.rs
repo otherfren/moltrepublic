@@ -150,7 +150,17 @@ fn table() -> Vec<Dialog> {
         Dialog {
             what: "seal a secret",
             inputs: 3,
-            open: Box::new(|ui: &AppWindow| ui.set_vt_seal_open(true)),
+            // the dialog closes on the engine's answer: stand in an accepted one
+            open: Box::new(|ui: &AppWindow| {
+                let weak = ui.as_weak();
+                ui.on_vault_seal_confirm(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        crate::actions::vault::seal_issued(&ui);
+                        crate::actions::vault::seal_settled(&ui, true);
+                    }
+                });
+                ui.set_vt_seal_open(true);
+            }),
             up: Box::new(AppWindow::get_vt_seal_open),
             first: "keys",
             // name, kind, and the secret itself two Tabs on
@@ -322,6 +332,33 @@ fn a_dialog_without_inputs_still_confirms_and_cancels_on_the_keys() {
     frame();
     press(&ui, slint::platform::Key::Escape);
     assert!(!ui.get_confirm_quit_open(), "Escape cancels");
+}
+
+/// The vault grant dialog holds only the reader dropdown: Enter
+/// proposes, Escape cancels.
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_grant_dialog_confirms_and_cancels_on_the_keys() {
+    let (ui, _shown) = dialog_window();
+    let fired = Rc::new(RefCell::new(0));
+    {
+        let f = fired.clone();
+        ui.on_vault_grant_confirm(move || *f.borrow_mut() += 1);
+    }
+    let seats: Vec<slint::SharedString> = vec!["b".into(), "c".into()];
+    ui.set_vault_seats(slint::ModelRc::new(slint::VecModel::from(seats)));
+    ui.set_vt_grant_open(true);
+    frame();
+    press(&ui, slint::platform::Key::Return);
+    assert!(!ui.get_vt_grant_open(), "Enter confirms");
+    assert_eq!(*fired.borrow(), 1, "and proposes the grant");
+
+    frame();
+    ui.set_vt_grant_open(true);
+    frame();
+    press(&ui, slint::platform::Key::Escape);
+    assert!(!ui.get_vt_grant_open(), "Escape cancels");
+    assert_eq!(*fired.borrow(), 1, "without proposing");
 }
 
 /// Is `text` the PLACEHOLDER of one of the dialog's fields - one label

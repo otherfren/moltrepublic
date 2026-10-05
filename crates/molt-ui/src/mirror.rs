@@ -477,8 +477,8 @@ pub(crate) fn apply_session(
         if g.get_ws_id() != ws {
             g.set_ws_id(ws);
             g.invoke_workspace_changed();
-            // a read vault text never outlives its workspace
-            crate::actions::vault::clear_vault_reads(ui);
+            // a read text or an open vault dialog never outlives its workspace
+            crate::actions::vault::reset_vault_session(ui);
         }
     }
     let (a_state, a_status) = active
@@ -1657,7 +1657,7 @@ async fn reread_vault(wallet: &WalletHandle, weak: &slint::Weak<AppWindow>, secr
     let _ = slint::invoke_from_event_loop(move || {
         let waiting = weak2
             .upgrade()
-            .is_some_and(|ui| crate::actions::vault::vault_read_waiting(&ui, &id));
+            .is_some_and(|ui| crate::actions::vault::should_reread(&ui, &id));
         let _ = tx.send(waiting);
     });
     if rx.await.unwrap_or(false) {
