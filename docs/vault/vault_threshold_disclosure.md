@@ -69,6 +69,7 @@ deposit time, in one line:
 - **D13 m ≤ n − 2.** The vault tolerates at least one dead holder (§3).
 - **D14 Older builds never get the vault.** No compatibility path: an
   older build can neither found nor join nor run a vault republic (§6).
+- **D15 Re-seal after a complaint is offered, never automatic** (§7).
 
 ## 3. When the vault can be enabled
 
@@ -239,11 +240,24 @@ recomputes `enc_share_i` from them and the pinned `vault_pk_i`:
   named.
 
 The reveal publishes one share, which lowers that deposit's effective
-threshold to m − 1 — so every decided complaint ends with a re-seal (a
-fresh `s`, D7), and the cost lands only on the version being replaced
-anyway (plus old backups, §4). A depositor who cannot answer (gone)
-leaves the complaint open; the card stays at what is proven. A complainer
-who keeps complaining against honest re-seals is named every time.
+threshold to m − 1. **A re-seal is offered, never automatic** (D15): the
+depositor's client offers it, and since a re-seal is a replace (D7) it is
+a vote like any deposit (D12) — automatic re-seals would turn every false
+complaint into a ballot. Until it commits, every member's card shows the
+lowered threshold. The cost lands only on the version being replaced
+(plus old backups, §4). A depositor who cannot answer (gone) leaves the
+complaint open; the card stays at what is proven. A complainer who keeps
+complaining against honest re-seals is named every time.
+
+The UI says it in one line per fact, nothing more:
+
+| where | text |
+|---|---|
+| card, bad share | `bad share from <depositor>` |
+| card, false complaint | `false complaint by <holder>` |
+| card, open | `complaint open` |
+| card, after a reveal | `readable by <m-1> instead of <m>` |
+| depositor's card | that line plus a `Re-seal` button |
 
 Deciding complaints rests on the HPKE crate accepting a caller-supplied
 ephemeral (RFC 9180 `DeriveKeyPair`); the V1 spike confirms it. If neither
@@ -491,7 +505,3 @@ recorded so the record format leaves room for a refresh epoch.
    cut. Recommended: accept it (the checkpoint summarizes, it does not
    archive). Alternative: keep grant records as accumulating items — a
    few bytes each, but unbounded.
-2. **Re-seal after a decided complaint.** Recommended: the depositor's
-   client offers it and the card shows the reduced threshold until it
-   happens. Alternative: automatic — faster, but it re-seals on every
-   false complaint too, which the naming already deters.
