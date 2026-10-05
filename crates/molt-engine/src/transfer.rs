@@ -1649,6 +1649,45 @@ pub(crate) fn spawn_wiki_base_fetch(
     scope: u64,
     cmd_tx: mpsc::Sender<Envelope>,
 ) -> tokio::task::AbortHandle {
+    spawn_derived_series_fetch(channel, id, key, from, expect, scope, cmd_tx, move |done| match done {
+        Ok(bytes) => Command::NetWikiBaseFetched { bytes, generation: Some(scope) },
+        Err(reason) => Command::NetWikiBaseFailed { reason, generation: Some(scope) },
+    })
+}
+
+/// Fetch one vault payload series (plan S3a); the engine checks the bytes
+/// against `hash`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_vault_payload_fetch(
+    channel: molt_net::ritual_net::GroupChannel,
+    id: MessageId,
+    key: [u8; 32],
+    from: u64,
+    expect: molt_net::file_plane::SeriesExpect,
+    hash: String,
+    scope: u64,
+    cmd_tx: mpsc::Sender<Envelope>,
+) -> tokio::task::AbortHandle {
+    spawn_derived_series_fetch(channel, id, key, from, expect, scope, cmd_tx, move |done| match done {
+        Ok(bytes) => Command::NetVaultPayloadFetched { hash, bytes, generation: Some(scope) },
+        Err(_) => Command::NetVaultPayloadFailed { hash, generation: Some(scope) },
+    })
+}
+
+/// Fetch a series whose key and id are derived from its content (the wiki
+/// base, a vault payload): no holder registry, ask for missing pieces
+/// after a quiet spell, hand the assembled bytes to `done`.
+#[allow(clippy::too_many_arguments)]
+fn spawn_derived_series_fetch(
+    channel: molt_net::ritual_net::GroupChannel,
+    id: MessageId,
+    key: [u8; 32],
+    from: u64,
+    expect: molt_net::file_plane::SeriesExpect,
+    scope: u64,
+    cmd_tx: mpsc::Sender<Envelope>,
+    done: impl FnOnce(Result<Vec<u8>, String>) -> Command + Send + 'static,
+) -> tokio::task::AbortHandle {
     tokio::spawn(async move {
         let mut sink: Vec<u8> = Vec::new();
         let started = tokio::time::Instant::now();
@@ -1690,19 +1729,13 @@ pub(crate) fn spawn_wiki_base_fetch(
             opts,
         )
         .await;
-        let cmd = match outcome {
+        let cmd = done(match outcome {
             Ok(manifest) => {
                 sink.truncate(usize::try_from(manifest.size).unwrap_or(usize::MAX));
-                Command::NetWikiBaseFetched {
-                    bytes: sink,
-                    generation: Some(scope),
-                }
+                Ok(sink)
             }
-            Err(e) => Command::NetWikiBaseFailed {
-                reason: e.to_string(),
-                generation: Some(scope),
-            },
-        };
+            Err(e) => Err(e.to_string()),
+        });
         feed(&cmd_tx, cmd).await;
     })
     .abort_handle()

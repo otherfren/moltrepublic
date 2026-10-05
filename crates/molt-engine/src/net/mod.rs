@@ -43,7 +43,7 @@ mod ingest;
 mod presence;
 pub(crate) use presence::pill_state;
 mod recovery;
-mod vault_payload;
+pub(crate) mod vault_payload;
 #[cfg(test)]
 pub(crate) use ingest::{CHAIN_SERVE_DEBOUNCE_SECS, PARKED_READS_PER_FRAME};
 
@@ -178,6 +178,37 @@ impl EngineSink for CmdSink {
             .await;
     }
 
+    async fn vault_frame(&self, member: &MemberId, frame: &molt_net::vault_frames::VaultFrame) {
+        use molt_net::vault_frames::VaultFrame;
+        let from = member.clone();
+        let generation = self.generation;
+        let cmd = match frame {
+            VaultFrame::Receipt(f) => Command::NetVaultReceipt {
+                from,
+                secret_id: f.secret_id.clone(),
+                verdict: f.verdict.as_str().to_string(),
+                rev: f.rev,
+                generation,
+            },
+            VaultFrame::Reveal(f) => Command::NetVaultReveal {
+                from,
+                secret_id: f.secret_id.clone(),
+                holder: f.holder.clone(),
+                share: f.share.clone(),
+                ikm: f.ikm.clone(),
+                generation,
+            },
+            VaultFrame::Resp(f) => Command::NetVaultResp {
+                from,
+                grant_id: f.grant_id.clone(),
+                enc: f.enc.clone(),
+                generation,
+            },
+            VaultFrame::Ask(f) => Command::NetVaultAsk { from, grant_id: f.grant_id.clone(), generation },
+        };
+        let _ = self.execute(cmd).await;
+    }
+
     async fn rekeyed(&self, member: &MemberId) {
         let _ = self
             .execute(Command::NetPeerRekeyed {
@@ -285,6 +316,11 @@ impl supervisor::StateStore for FileStateStore {
     /// decrypted by the writer thread that owns the workspace key.
     async fn wiki_base_piece(&self, index: u32) -> Option<Vec<u8>> {
         self.handle.load_wiki_base_piece(index).await
+    }
+
+    /// Vault S3a: one piece of a held payload, decrypted on the writer.
+    async fn vault_piece(&self, file: &str, index: u32) -> Option<Vec<u8>> {
+        self.handle.load_vault_payload_piece(file, index).await
     }
 
     async fn load(&self) -> molt_core::TransportState {

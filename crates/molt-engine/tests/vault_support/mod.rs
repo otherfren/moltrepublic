@@ -49,6 +49,8 @@ pub fn engine(root: &std::path::Path) -> WalletHandle {
             .collect(),
         settings: SessionSettings {
             workspace_dir: root.display().to_string(),
+            // the file trickle at one piece a second, not fifteen
+            mirror_publish_interval_secs: 1,
             ..SessionSettings::default()
         },
         ..SessionView::default()

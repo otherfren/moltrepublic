@@ -155,6 +155,7 @@ pub(crate) struct Envelope {
 pub struct WalletHandle {
     cmd_tx: mpsc::Sender<Envelope>,
     ev_tx: broadcast::Sender<Event>,
+    vault_seams: std::sync::Arc<net::vault_payload::VaultSeams>,
 }
 
 impl WalletHandle {
@@ -173,6 +174,21 @@ impl WalletHandle {
     /// MCP event consumer read from here).
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.ev_tx.subscribe()
+    }
+
+    /// Test seam (vault plan S3a): while set, this node's payload tick
+    /// fetches nothing - an approver that does not hold the payload yet.
+    #[doc(hidden)]
+    pub fn __vault_hold_payload_fetch(&self, hold: bool) {
+        self.vault_seams.hold_fetch.store(hold, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam (vault plan S3a): name a payload this node must hold, as a
+    /// deposit would - with `bytes`, this node holds and publishes it (the
+    /// depositor). Applied on the next payload tick.
+    #[doc(hidden)]
+    pub fn __vault_name_payload(&self, secret_id: &str, hash: &str, size: u64, bytes: Option<Vec<u8>>) {
+        self.vault_seams.name(secret_id, hash, size, bytes);
     }
 }
 
@@ -403,6 +419,7 @@ fn spawn_actor(
     state.recovery.material_sink = seams.recovery_material_sink;
     state.demo_mesh = seams.demo_mesh;
     state.reopen_seam = seams.reopen_seam;
+    let vault_seams = state.vault_seams.clone();
     // the presence ticker lives as long as the actor: it re-ages the member
     // pills from their real last-seen stamps (net/presence.rs::cmd_net_presence_tick)
     state.spawn_ticker_every(Command::NetPresenceTick, PRESENCE_TICK_MS);
@@ -427,7 +444,7 @@ fn spawn_actor(
         tracing::debug!("engine actor stopped");
     });
 
-    WalletHandle { cmd_tx, ev_tx }
+    WalletHandle { cmd_tx, ev_tx, vault_seams }
 }
 
 // The one shared clock (event timestamps must not drift from the storage
@@ -679,6 +696,9 @@ pub(crate) struct FilePlane {
     /// left running for the old one would wait forever for bytes nobody
     /// has any more.
     pub(crate) wiki_base_fetching: Option<String>,
+    /// Vault S3a: the payloads this seat holds and the fetches after the
+    /// ones it must hold.
+    pub(crate) vault: crate::net::vault_payload::VaultPlane,
     pub(crate) mirror_quota_noted: bool,
     /// Verified pieces of each running mirror fetch, as last reported.
     pub(crate) mirror_progress: HashMap<molt_core::MessageId, u32>,
@@ -1112,6 +1132,8 @@ pub(crate) struct State {
     /// "this IS one but its transport secret did not load" are different
     /// faults and must not share a refusal.
     pub(crate) nostr: Option<NostrTransport>,
+    /// The vault test seams the handle reaches (never a `Command`).
+    pub(crate) vault_seams: std::sync::Arc<net::vault_payload::VaultSeams>,
     /// The kind-445 group runtime of an open Nostr workspace (N5.2), with the
     /// wakeup its outbox reads. `None` on a legacy/queue workspace, and on a
     /// Nostr one whose MLS group or relay set did not come up.
@@ -1328,6 +1350,7 @@ impl State {
                 wiki_base_fetch: None,
                 wiki_base_next_try: 0,
                 wiki_base_fetching: None,
+                vault: crate::net::vault_payload::VaultPlane::default(),
                 share_paths: HashMap::new(),
                 share_stamps: HashMap::new(),
                 downloads: HashMap::new(),
@@ -1371,6 +1394,7 @@ impl State {
             identity_sk: None,
             transport_kind: None,
             nostr: None,
+            vault_seams: std::sync::Arc::default(),
             group_net: None,
             delivery: DeliveryState {
                 last_group_ack: None,

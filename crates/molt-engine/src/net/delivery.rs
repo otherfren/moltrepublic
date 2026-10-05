@@ -335,6 +335,7 @@ impl State {
         // the mirror worker's planning beat (mirroring §3.3; gated inside)
         self.mirror_worker_tick(now);
         self.wiki_base_tick();
+        self.vault_payload_tick();
         // A2.2: held seals land once their round has passed
         self.drain_held_seals();
         Ok(Reply::Ack)
