@@ -1,8 +1,10 @@
 # Vault: majority escrow with an elected reader
 
-Status: DRAFT rev 2 (2026-10-05) — the product decisions in §2 were
+Status: DRAFT rev 3 (2026-10-05) — the product decisions in §2 were
 ratified by the user in the 2026-10-05 discussion; the protocol below is
-the design they imply, revised after an independent review the same day.
+the design they imply. Rev 3 adds D11–D13 after a second review the same
+day (founding-only vault, keys in the roster, deposit is a vote,
+m ≤ n − 2).
 Nothing of the cryptography is built; the only thing following this
 document so far is the GUI design mock (`surfaces.slint::VaultPane`).
 Rev 1 (2026-08-16) is superseded: its primitives stand, its framing
@@ -40,7 +42,8 @@ deposit time, in one line:
   heuristic).
 - **D4 Payload ≤ 100 KiB** (102 400 bytes of plaintext): a will and a few
   keys, not an archive.
-- **D5 Every member may deposit.** All seats are equal.
+- **D5 Every member may deposit, as many separate deposits as it likes**,
+  each under its own name. All seats are equal.
 - **D6 No way back.** A grant is permanent and knowledge cannot be
   revoked; the UI must not pretend otherwise.
 - **D7 Replace drops the old version.** Depositing again under the same
@@ -55,22 +58,34 @@ deposit time, in one line:
   every backup**. This decision surfaced a backup bug in the wiki itself:
   `wiki_base.bin` was skipped by every export (fix of 2026-10-05,
   "storage: back up the folded wiki base").
+- **D11 Founding only, set up in the background.** The vault can be
+  chosen only at founding; `set_features` refuses to add it later. Every
+  seat's vault key is part of the founding (§6), so no seat can lack one
+  and no step needs a user action.
+- **D12 A deposit is a vote.** Deposit and replace are ordinary gated
+  proposals at m-of-n, decided by members like any other change — not
+  approved automatically. That vote is the only bound on how much every
+  seat must hold (no count cap, no delete; replace only).
+- **D13 m ≤ n − 2.** The vault tolerates at least one dead holder (§3).
 
 ## 3. When the vault can be enabled
 
-The vault is a charter feature (`charter_features.md`), and the republic's
-shape decides whether it can mean anything:
+The vault is a charter feature (`charter_features.md`), selectable at
+founding only (D11), and the republic's shape decides whether it can
+mean anything:
 
 - **m ≥ 2.** At m = 1 Shamir hands every seat the secret itself: every
   member could read every deposit with no grant at all. A 1-of-n
   republic cannot enable the vault.
-- **m ≤ n − 1.** The depositor holds no share (§6), so a deposit is
-  reconstructable from the other n − 1 seats only if m ≤ n − 1. At m = n
-  the vault can never serve its one purpose — reading after the depositor
-  is gone — and is refused.
+- **m ≤ n − 2 (D13).** The depositor holds no share (§6), so n − 1
+  holders carry a threshold of m and the vault tolerates (n − 1) − m dead
+  holders — one fewer than governance. At m = n − 1 that is zero: in a
+  2-of-3 republic a grant commits with one seat dead, and the read it
+  grants is impossible. So n ≥ 4.
 
-Both are checked where the feature is proposed and where it is applied;
-the refusal names the reason (`needs 2 <= m <= n-1`).
+Both are checked in the founding wizard, in `verify_seal_proposal`, and in
+`set_features` (which refuses `vault` outright, D11); the refusal names
+the reason (`needs 2 <= m <= n-2`).
 
 ## 4. Trust model — the honest limits
 
@@ -84,11 +99,12 @@ the refusal names the reason (`needs 2 <= m <= n-1`).
   permanently lost (phrase gone), the vault is lost together with
   governance — no worse, and no scheme can do better without weakening m.
   The depositor's own loss is already priced in: it holds no share.
-- **A replaced version survives in old backups.** Shares are re-derivable
-  from a deposit record plus a seed (§9.4), so "drop" (D7) removes the old
-  version from the current state, not from a backup taken before. m
-  members who each kept such a backup can still read it. The UI says so
-  when replacing.
+- **A replaced version survives until the next cut, and in backups
+  forever.** Shares are re-derivable from a deposit record plus a seed
+  (§9.4), and the old deposit block stays in the chain until a cut folds
+  it away. What "drop" (D7) actually removes is the old payload file; m
+  members who kept it (or a backup holding it) can still read the old
+  version. The UI says so when replacing.
 - **The share protection is computational.** Feldman commitments publish
   `g^s`; secrecy below the threshold rests on the discrete log (and HPKE on
   X25519), not on information theory. Rev 1 claimed otherwise.
@@ -121,13 +137,18 @@ injectivity rule; never separators. Every such layout carries a
 Everything the vault keeps is a handful of small records plus one opaque
 file per deposit.
 
-- **Vault-key announcement** — `{seat, vault_pk}`, signed by the seat's
-  identity key, carried as a gated chain record on `Surface::Vault`.
-  **Pinned once per seat**: the key is derived from seed and identity,
-  neither of which ever changes, so a second announcement with a
-  different key is refused, not last-wins (last-wins would let a stolen
-  identity key redirect every future share). A client announces
-  automatically on the first open after the feature is enabled.
+- **Vault key in the roster** (D11) — when the charter selects the vault,
+  each seat's `vault_pk` is a fourth per-seat field of the sealed roster:
+  the joiner derives it during the ritual and sends it with its join, the
+  founder's table carries it, and every member checks it the way it
+  checks `nostr_pk` (sign-what-you-see: its own value is its own
+  derivation; every other one is a valid point and roster-unique). It
+  needs a conditional roster tag (`molt-roster-v6` only when a vault key
+  is present; a vault-less founding stays v5/v4 byte-identically) and
+  every recompute site moves together. Pinned by construction: there is
+  no announcement record, no vote, no seat without a key. Like `nostr_pk`
+  it has no proof of possession — a seat naming a key it cannot open only
+  loses its own shares, which it could withhold anyway.
 - **Deposit** (gated proposal → chain block) —
   `{depositor, name, kind, m, holders, commitments[m], enc_share[n-1],
   payload: {hash, size}, sig_depositor}`.
@@ -159,9 +180,8 @@ circularity with the share AAD below.
 
 Depositor-local and ephemeral until the proposal commits (chain rule):
 
-1. **Refuse early** unless the vault is enabled (§3) and every holder has
-   a pinned announcement (§6). Without the second check a seat would get
-   no share and the deposit would silently need m out of fewer seats.
+1. **Refuse early** unless the vault is enabled (§3). Every holder's key
+   is in the roster (§6), so every holder gets a share.
 2. Sample scalar `s`. `DEK = HKDF-SHA256(s, info = "molt-vault-dek-v1" ‖
    republic_id ‖ depositor ‖ name ‖ kind)`.
    `payload_ct = XChaCha20-Poly1305(DEK, text, aad = "molt-vault-payload-v1"
@@ -175,10 +195,12 @@ Depositor-local and ephemeral until the proposal commits (chain rule):
    nothing extra, it re-derives from its seed.
 5. Publish the payload file on the file plane, then propose the deposit.
 
-**Approval is verification.** A holder approves only after (a) its share
-opens and checks against the commitments, AND (b) it holds the complete
-payload file and its hash matches. Without (b) a deposit could commit
-while only the depositor holds the ciphertext, and die with them.
+**Approval is a vote, gated by verification** (D12). The deposit is an
+ordinary proposal the members decide on — name and kind visible (D8).
+A holder's client offers `approve` only after (a) its share opens and
+checks against the commitments, AND (b) it holds the complete payload
+file and its hash matches. Without (b) a deposit could commit while only
+the depositor holds the ciphertext, and die with them.
 
 **The card counts what is proven, not what committed.** The block commits
 under the ordinary chain rule (m approvals, the depositor's own possibly
@@ -187,7 +209,8 @@ depositor** have verified — `sealed` — and `hardened` once all n − 1 have.
 Only `sealed` means the depositor's absence is survivable.
 
 **Verification receipts and complaints** are not chain records. Each
-holder publishes a signed `verified` or `complaint` for a `secret_id` as a
+holder publishes a signed `verified` (share AND payload, as (a) and (b)
+above — `sealed` counts these) or `complaint` for a `secret_id` as a
 self-signed control frame, persisted at every member (last-wins per
 holder) and re-sent on start — the mirror declaration pattern
 (`mirroring.md`). They are status, not consensus, and never enter the
@@ -223,7 +246,7 @@ verify learned one share each of a secret that never entered the vault.
 
 1. **Grant:** any member proposes `VaultGrant {grant_id, secret_id,
    reader}`; it commits at m like every other change (D2: no delay). The
-   reader must have a pinned announcement, or the proposal is refused.
+   reader is any seat; its key is in the roster.
 2. **A grant binds one version.** It is valid only while its `secret_id`
    is the current version under `(depositor, name)` when it commits. A
    replace supersedes every pending grant on the old version (they drop
@@ -293,7 +316,7 @@ So the cut **folds**, with every K6 rule carried over
   survives (D7). Grants on a dropped version go with it.
 - The blob carries ONE entry, `{"op": "vault_base", "hash", "size"}`: a
   commitment to the canonical bytes (`molt-vault-base-v1`) of all current
-  announcements, deposits and grants. Receipts and complaints are not in
+  deposits and grants (the keys live in the genesis roster). Receipts and complaints are not in
   it (§7).
 - **A new fold variant, not only a tag.** As K6 needed both the v9 tag
   and `ChainChange::CheckpointFolded`, the vault fold needs a variant (or
@@ -378,7 +401,11 @@ recorded so the record format leaves room for a refresh epoch.
 
 - **No depositor protection, by decision** (D2, D3). Rev 1 implied a
   succession insurance; the honest product is a majority escrow.
-- **Enablement bounds** (§3): 2 ≤ m ≤ n − 1.
+- **Enablement bounds** (§3): 2 ≤ m ≤ n − 2 (rev 2 allowed n − 1, which
+  tolerates no dead holder).
+- **Founding only, keys in the roster** (D11). Rev 2's announcement
+  records let one seat that never opened again block every deposit.
+- **A deposit is a vote** (D12), not an automatic approval.
 - **The depositor holds no share**, and `sealed` counts other holders
   only — the depositor's own share never helps the case the vault exists
   for.
@@ -422,24 +449,29 @@ recorded so the record format leaves room for a refresh epoch.
 1. **V1 spike** — dep-lock `vsss-rs`, decide the HPKE crate (ephemeral
    control), red byte-pin tests for every layout: `molt-vault-secret-v1`,
    `-deposit-v1`, `-grant-v1`, `-share-v1`, `-payload-v1`, `-resp-v1`,
-   `-base-v1`, the announcement bytes, the vault-key and DEK info strings.
-2. **V2 deposit** — enablement bounds, announcements (pinned), payload
-   series with mandatory holding, signed deposit with verify-at-approve
+   `-base-v1`, `molt-roster-v6`, the vault-key and DEK info strings.
+2. **V2 founding** — `vault_pk` through join, table, sign-what-you-see and
+   `verify_sealed_roster`; conditional roster-v6; enablement bounds in the
+   wizard, `verify_seal_proposal` and `set_features`. Keystones: a vault
+   founding round-trips v6, a vault-less one stays byte-identical, a
+   tampered or duplicate `vault_pk` is refused by the member.
+3. **V3 deposit** — payload
+   series with mandatory holding, signed deposit with verify-gated approve
    (share AND payload), receipts, complaints and their reveal, replace.
    Keystones: a deposit commits only once the approver holds the payload;
    a forged depositor is refused by approver and verifier; each of the
    three complaint outcomes names the right seat.
-3. **V3 grant and read** — grant variant bound to a version,
+4. **V4 grant and read** — grant variant bound to a version,
    answer-on-commit and answer-on-request, reader reveal, audit list.
    Keystones: three nodes, the reader decrypts with one seat dead, a
    non-reader provably cannot, a reader restored from a pre-grant backup
    reads by re-requesting, a replace racing a grant supersedes it.
-4. **V4 fold, recovery, backup** — the fold variant and conditional tag,
+5. **V5 fold, recovery, backup** — the fold variant and conditional tag,
    the held-now rule, base-pending, export and import of the vault files.
    Keystones: deposit → cut → recover a seat → grant to that seat → it
    reads; every seat restored from backup after a cut → a grant still
    reads (the twin of `a_folded_wiki_survives_every_seat_restoring_from_backup`).
-5. **V5 share refresh** (§9.6), after v1 ships.
+6. **V6 share refresh** (§9.6), after v1 ships.
 
 ## 15. Open questions
 
