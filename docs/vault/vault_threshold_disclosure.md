@@ -67,6 +67,8 @@ deposit time, in one line:
   approved automatically. That vote is the only bound on how much every
   seat must hold (no count cap, no delete; replace only).
 - **D13 m ≤ n − 2.** The vault tolerates at least one dead holder (§3).
+- **D14 Older builds never get the vault.** No compatibility path: an
+  older build can neither found nor join nor run a vault republic (§6).
 
 ## 3. When the vault can be enabled
 
@@ -149,6 +151,15 @@ file per deposit.
   no announcement record, no vote, no seat without a key. Like `nostr_pk`
   it has no proof of possession — a seat naming a key it cannot open only
   loses its own shares, which it could withhold anyway.
+
+  **Older builds are locked out (D14), fail-closed at every door:** a
+  vault founding needs `vault_pk` in every join, so the founder refuses
+  an older joiner (`needs a newer version`); an older build meeting a v6
+  roster rejects the unknown tag; and the vault's chain variants stop an
+  older reader (additive-only rule). The `vault` feature key already
+  exists in older builds as a mock, so a v5 roster may carry it: the real
+  vault exists only where the genesis roster is v6. A `vault` key in a v5
+  feature set stays the mock forever.
 - **Deposit** (gated proposal → chain block) —
   `{depositor, name, kind, m, holders, commitments[m], enc_share[n-1],
   payload: {hash, size}, sig_depositor}`.
