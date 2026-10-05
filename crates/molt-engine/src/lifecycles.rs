@@ -2752,6 +2752,9 @@ async fn restore_task(
             ),
         )
         .await;
+        for path in &staging.dropped {
+            progress(85, format!("⚠ left out: {path}")).await;
+        }
         if let Ok(mut s) = slot.lock() {
             *s = Some(staging);
         }

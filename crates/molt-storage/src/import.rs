@@ -53,6 +53,9 @@ pub struct ImportStaging {
     pub created: u64,
     /// At-rest state of the source at export time (`"device" | "phrase"`).
     pub at_rest: String,
+    /// Entries the blob carried but the stage left out (a `wiki_base.bin`
+    /// that does not authenticate), for the restore log to name.
+    pub dropped: Vec<String>,
     /// The workspace key from the authenticated payload meta.
     workspace_key: Zeroizing<[u8; 32]>,
     /// The recovery-seed entropy, when the blob carries it (§3.6).
@@ -329,6 +332,12 @@ pub fn import_stage(
         tracing::warn!(error = %e, "the blob's wiki base does not authenticate - not restored");
     }
     let plant = |path: &str| path != "wiki_base.bin" || matches!(base_ok, Some(Ok(())));
+    let dropped: Vec<String> = archive
+        .entries
+        .iter()
+        .filter(|e| !plant(&e.path))
+        .map(|e| e.path.clone())
+        .collect();
 
     // write the staging dir (dot-invisible to the Open scan); a stale
     // staging for the same id is a leftover crash artifact — sweep it
@@ -363,6 +372,7 @@ pub fn import_stage(
         chain,
         created: archive.meta.created,
         at_rest,
+        dropped,
         workspace_key: ws_key,
         seed,
     })
@@ -689,6 +699,7 @@ mod tests {
         let dest_root = tmp.path().join("dest-root");
         std::fs::create_dir_all(&dest_root).expect("dest root");
         let staging = import_stage(&dest_root, &blob, PASS).expect("stage");
+        assert!(staging.dropped.is_empty(), "nothing dropped");
         let (sk, _pk) = crate::derive_identity_key(&seed, &id);
         let dir = staging.commit(&dest_root, false, Some(&sk)).expect("commit");
         let (opened, _loaded) = crate::open_workspace(&dir).expect("open imported");
@@ -744,6 +755,7 @@ mod tests {
         std::fs::create_dir_all(&dest_root).expect("dest root");
         let staging = import_stage(&dest_root, &blob, &phrase).expect("the restore goes through");
         assert!(!staging.dir.join("wiki_base.bin").exists(), "the foreign base is not planted");
+        assert_eq!(staging.dropped, ["wiki_base.bin"], "the dropped base is named");
         let (sk, _pk) = crate::derive_identity_key(&seed, &id);
         let restored = staging.commit(&dest_root, false, Some(&sk)).expect("commit");
         let (opened, loaded) = crate::open_workspace(&restored).expect("open restored");
