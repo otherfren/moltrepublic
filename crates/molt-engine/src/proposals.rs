@@ -4060,6 +4060,7 @@ impl State {
             wiki_docs,
             wiki_rev,
             wiki_base_pending,
+            vault: (surface == Surface::Vault).then(|| self.vault_view()),
             // the chat is one window now — nothing is filed away, so there
             // is no second view to offer or hide. Kept on the wire (always
             // false) rather than removed, so an older reader that still asks

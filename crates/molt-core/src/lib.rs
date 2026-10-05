@@ -23,6 +23,7 @@ use serde_json::Value;
 /// sequence of commit blocks (the founding is block 0). See [`chain`].
 pub mod chain;
 pub mod relay;
+pub mod vault;
 pub mod wiki_fold;
 pub mod wiki_patch;
 pub mod wiki_refs;
@@ -128,7 +129,7 @@ impl Surface {
     pub fn is_implemented(self) -> bool {
         matches!(
             self,
-            Surface::Organization | Surface::Chat | Surface::Memory | Surface::Files
+            Surface::Organization | Surface::Chat | Surface::Memory | Surface::Vault | Surface::Files
         )
     }
 
@@ -2040,6 +2041,17 @@ pub struct TransportState {
     /// declaration and every member's declaration and hold status.
     #[serde(default, skip_serializing_if = "MirrorState::is_default")]
     pub mirror: MirrorState,
+    /// The seat's vault key material (`vault_ikm`, plan 1.3.2): derived
+    /// from the phrase, kept because the phrase is gone at runtime.
+    /// Sensitive like `identity_sk`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_seed: Option<Vec<u8>>,
+    /// Vault receipts and decided reveals, last-wins per holder.
+    #[serde(default, skip_serializing_if = "vault::VaultStatusStore::is_empty")]
+    pub vault_status: vault::VaultStatusStore,
+    /// Grants this seat applied that a reorg displaced (plan 1.4).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vault_displaced: Vec<vault::VaultDisplacedGrant>,
 }
 
 /// A seat's default mirror budget per republic: 1 GiB.
@@ -2179,6 +2191,10 @@ pub struct PublishJob {
     /// written before the folded cut existed.
     #[serde(default)]
     pub wiki_base: bool,
+    /// The source is a vault payload or base: its hash. Additive like
+    /// `wiki_base`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault: Option<String>,
 }
 
 /// Whether bit `index` of a little-endian bitmap is set.
@@ -2374,6 +2390,11 @@ pub struct MemberIdentity {
     /// always fills it.
     #[serde(default)]
     pub nostr_pk: String,
+    /// The seat's vault key (X25519, lowercase hex), only in a roster-v6
+    /// founding table (`docs/vault/vault_threshold_disclosure.md` §6).
+    /// Empty everywhere else, and then absent on the wire.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub vault_pk: String,
 }
 
 /// One member's founding attestation: a signature with their identity key
@@ -4781,6 +4802,124 @@ pub enum Command {
     /// (`Reply::WikiDraft`; "" = none).
     WikiDraftLoad,
 
+    // --- the vault (docs/vault/vault_threshold_disclosure.md) ---
+    /// Deposit a text under `name`; an existing own name is replaced. A
+    /// vote like any change (D12).
+    VaultSeal {
+        /// The deposit's name (visible to all).
+        name: String,
+        /// What it is (visible to all).
+        kind: String,
+        /// The plaintext; never logged, never persisted.
+        text: vault::SecretText,
+    },
+    /// Re-deal an own deposit after a reveal (D15): a fresh secret, a vote.
+    VaultReseal {
+        /// The version to re-seal.
+        secret_id: String,
+    },
+    /// Propose `reader` as the one reader of a deposit version.
+    VaultGrant {
+        /// The version to release.
+        secret_id: String,
+        /// The seat that may read it.
+        reader: MemberId,
+    },
+    /// Read a deposit this seat was granted (`Reply::VaultText` or
+    /// `Reply::VaultPending`).
+    VaultRead {
+        /// The granted version.
+        secret_id: String,
+    },
+    /// A vault payload file arrived off the actor (engine-internal).
+    NetVaultPayloadFetched {
+        /// Its hash, lowercase hex.
+        hash: String,
+        /// The ciphertext.
+        bytes: Vec<u8>,
+        /// Fetch incarnation (stale commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// A vault payload fetch gave up (engine-internal).
+    NetVaultPayloadFailed {
+        /// Its hash, lowercase hex.
+        hash: String,
+        /// Fetch incarnation (stale commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// The folded vault base arrived off the actor (engine-internal).
+    NetVaultBaseFetched {
+        /// The base bytes.
+        bytes: Vec<u8>,
+        /// Fetch incarnation (stale commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// The vault base fetch gave up (engine-internal).
+    NetVaultBaseFailed {
+        /// Fetch incarnation (stale commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// A holder's authenticated receipt or complaint landed
+    /// (engine-internal: the transport speaks).
+    NetVaultReceipt {
+        /// The MLS-authenticated holder.
+        from: MemberId,
+        /// The deposit version.
+        secret_id: String,
+        /// `verified` or `complaint`.
+        verdict: String,
+        /// Revision; last wins.
+        rev: u64,
+        /// Transport incarnation (stale commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// A depositor's authenticated complaint reveal landed
+    /// (engine-internal).
+    NetVaultReveal {
+        /// The MLS-authenticated depositor.
+        from: MemberId,
+        /// The deposit version.
+        secret_id: String,
+        /// The complaining holder.
+        holder: MemberId,
+        /// The holder's share, hex.
+        share: vault::SecretHex,
+        /// The holder's ephemeral ikm, hex.
+        ikm: vault::SecretHex,
+        /// Transport incarnation (stale commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// A holder's authenticated answer to a grant landed (engine-internal).
+    /// The seat is the MLS sender, never a frame field (plan 1.3.4).
+    NetVaultResp {
+        /// The MLS-authenticated holder.
+        from: MemberId,
+        /// The grant answered.
+        grant_id: String,
+        /// The share sealed to the reader, hex.
+        enc: vault::SecretHex,
+        /// Transport incarnation (stale commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// A reader's authenticated request for answers landed
+    /// (engine-internal).
+    NetVaultAsk {
+        /// The MLS-authenticated reader.
+        from: MemberId,
+        /// The grant asked about.
+        grant_id: String,
+        /// Transport incarnation (stale commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+
     // --- founding-ritual transport events (engine-internal) ---
     /// A member activated their invite link: their JoinRequest arrived on
     /// the invite queue. Sent by the node's own ritual transport tasks
@@ -4824,6 +4963,10 @@ pub enum Command {
         /// relay this member cannot reach. Empty = no declaration.
         #[serde(default)]
         relays: Vec<String>,
+        /// The member's vault key (X25519, lowercase hex). Empty from an
+        /// older joiner.
+        #[serde(default)]
+        vault_pk: String,
         /// Ritual incarnation (stale ritual commands are dropped).
         #[serde(default)]
         generation: Option<u64>,
@@ -5903,6 +6046,9 @@ pub struct UiSnapshot {
     /// The topmost toast, if any.
     #[serde(default)]
     pub toast: String,
+    /// Vault rows the pane's models hold (deposits + grants).
+    #[serde(default)]
+    pub vault_rows: u32,
     /// The GUI's own monotonically increasing publish counter — lets an
     /// agent await "the click landed" (`ui_action` bumps it on perform).
     #[serde(default)]
@@ -5938,6 +6084,26 @@ pub enum Reply {
     Sent {
         /// The message id.
         id: MessageId,
+    },
+    /// A granted deposit, decrypted for its reader. Never stored.
+    VaultText {
+        /// The version read.
+        secret_id: String,
+        /// Its name.
+        name: String,
+        /// Its kind.
+        kind: String,
+        /// The plaintext.
+        text: vault::SecretText,
+    },
+    /// A read still waiting for answers.
+    VaultPending {
+        /// The version asked for.
+        secret_id: String,
+        /// Valid shares held.
+        have: u8,
+        /// Shares needed.
+        need: u8,
     },
     /// A proposal was created.
     Proposed {
@@ -6571,6 +6737,9 @@ pub struct SurfaceSnapshot {
     /// deleted its knowledge base".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wiki_base_pending: Option<WikiBaseProgress>,
+    /// Vault only: the vault's read model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault: Option<vault::VaultView>,
 }
 
 /// How much of the committed shared-memory base is here (K6).
@@ -7551,6 +7720,11 @@ pub enum Event {
         /// The poked member.
         to: MemberId,
     },
+    /// Enough answers arrived to read a granted deposit.
+    VaultReadable {
+        /// The version now readable.
+        secret_id: String,
+    },
 }
 
 /// The reach of a [`Event::SessionChanged`].
@@ -7679,6 +7853,20 @@ pub enum MoltError {
         /// The commitment itself, for the log.
         want: String,
     },
+    /// The republic folded its vault into a base this node does not hold
+    /// yet: a typed wait, never an empty vault.
+    #[error("the vault base is still arriving ({have} of {size} bytes)")]
+    VaultBasePending {
+        /// Bytes held so far.
+        have: u64,
+        /// Bytes the commitment names.
+        size: u64,
+        /// The commitment itself, for the log.
+        want: String,
+    },
+    /// A vault command was refused; one compact reason.
+    #[error("vault: {0}")]
+    Vault(String),
     /// The wiki index is still being built off the actor
     /// (`docs_archive/memory/knowledge_base_scale.md` §4.5/§4.6): "come back in a
     /// moment", not a fault - an empty result would be a lie.
@@ -8076,11 +8264,13 @@ mod tests {
                 member: "ada".to_string(),
                 identity_pk: "aa".repeat(32),
                 nostr_pk: "cc".repeat(32),
+                vault_pk: String::new(),
             },
             MemberIdentity {
                 member: "bob".to_string(),
                 identity_pk: "bb".repeat(32),
                 nostr_pk: "dd".repeat(32),
+                vault_pk: String::new(),
             },
         ];
         let bytes = roster_canonical_bytes("f00", 2, 3, &table, "charter", &[], None);
@@ -8136,6 +8326,7 @@ mod tests {
                     member: "ada".to_string(),
                     identity_pk: "\u{9}".to_string(),
                     nostr_pk: String::new(),
+                    vault_pk: String::new(),
                 }],
                 "",
                 &[],
@@ -8170,7 +8361,63 @@ mod tests {
     #[test]
     fn only_the_built_surfaces_read_as_implemented() {
         let real: Vec<Surface> = Surface::ALL.into_iter().filter(|s| s.is_implemented()).collect();
-        assert_eq!(real, vec![Surface::Organization, Surface::Chat, Surface::Memory, Surface::Files]);
+        assert_eq!(
+            real,
+            vec![Surface::Organization, Surface::Chat, Surface::Memory, Surface::Vault, Surface::Files]
+        );
+    }
+
+    /// An empty `vault_pk` keeps the pre-vault wire shape: old wire frames,
+    /// old snapshot files and every byte fixture stay identical.
+    #[test]
+    fn member_identity_without_vault_pk_serializes_as_before() {
+        let id = MemberIdentity {
+            member: "a".to_string(),
+            identity_pk: "aa".repeat(32),
+            nostr_pk: "cc".repeat(32),
+            vault_pk: String::new(),
+        };
+        let before = format!(
+            r#"{{"member":"a","identity_pk":"{}","nostr_pk":"{}"}}"#,
+            "aa".repeat(32),
+            "cc".repeat(32)
+        );
+        assert_eq!(serde_json::to_string(&id).expect("serializes"), before);
+        let back: MemberIdentity = serde_json::from_str(&before).expect("old shape decodes");
+        assert_eq!(back, id);
+        let keyed = MemberIdentity { vault_pk: "ee".repeat(32), ..id };
+        let round: MemberIdentity =
+            serde_json::from_str(&serde_json::to_string(&keyed).expect("serializes")).expect("decodes");
+        assert_eq!(round, keyed);
+    }
+
+    /// The v4 and v5 pins hold with the new field present and empty.
+    #[test]
+    fn roster_bytes_are_unchanged_by_the_vault_pk_field() {
+        use sha2::Digest;
+        let table = vec![
+            MemberIdentity {
+                member: "ada".to_string(),
+                identity_pk: "aa".repeat(32),
+                nostr_pk: "cc".repeat(32),
+                vault_pk: String::new(),
+            },
+            MemberIdentity {
+                member: "bob".to_string(),
+                identity_pk: "bb".repeat(32),
+                nostr_pk: "dd".repeat(32),
+                vault_pk: String::new(),
+            },
+        ];
+        let v4 = roster_canonical_bytes("f00", 2, 3, &table, "charter", &[], None);
+        assert_eq!(
+            hex::encode(sha2::Sha256::digest(&v4)),
+            "471faf57994f951dbbb7c57811122b296cdff8885ad41d0323997c5ea795116e"
+        );
+        let features = vec!["memory".to_string(), "wallet".to_string()];
+        let v5 = roster_canonical_bytes("f00", 1, 1, &table[..1], "charter", &[], Some(&features));
+        assert!(v5.starts_with(b"molt-roster-v5\0"));
+        assert_eq!(v5.len(), 15 + 7 + 2 + 4 + 7 + 68 + 68 + 11 + 4 + 4 + 10 + 10);
     }
 
     /// Shared Files is the seventh surface and a CORE one: never a feature
@@ -8212,6 +8459,7 @@ mod tests {
             member: "ada".to_string(),
             identity_pk: "aa".repeat(32),
             nostr_pk: "cc".repeat(32),
+            vault_pk: String::new(),
         }];
         let features = vec!["memory".to_string(), "wallet".to_string()];
         let bytes =
@@ -8281,11 +8529,13 @@ mod tests {
                 member: "petra".to_string(),
                 identity_pk: "aa".repeat(32),
                 nostr_pk: "cc".repeat(32),
+                vault_pk: String::new(),
             },
             MemberIdentity {
                 member: "walter".to_string(),
                 identity_pk: "bb".repeat(32),
                 nostr_pk: "dd".repeat(32),
+                vault_pk: String::new(),
             },
         ];
         let a = roster_canonical_bytes("f00", 2, 3, &table, "charter", &[], None);
@@ -8302,11 +8552,13 @@ mod tests {
             member: "petraa".to_string(),
             identity_pk: format!("a{}", "a".repeat(63)),
             nostr_pk: String::new(),
+            vault_pk: String::new(),
         }];
         let plain = vec![MemberIdentity {
             member: "petra".to_string(),
             identity_pk: format!("aa{}", "a".repeat(62)),
             nostr_pk: String::new(),
+            vault_pk: String::new(),
         }];
         assert_ne!(
             roster_canonical_bytes("f00", 1, 1, &shifted, "", &[], None),

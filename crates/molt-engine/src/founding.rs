@@ -383,6 +383,7 @@ impl State {
             member: founder_name.to_string(),
             identity_pk: founder_pk,
             nostr_pk: founder_nostr_pk,
+            vault_pk: String::new(),
         };
         self.net_generation += 1;
         let generation = self.net_generation;
@@ -759,6 +760,7 @@ fn spawn_founder_recv(
                     sender_npub: String::new(),
                     key_package: j.key_package,
                     relays: j.relays,
+                    vault_pk: j.vault_pk,
                     generation: Some(generation),
                 },
                 invite::RitualMsg::Signed(s) => Command::NetSealSigned {
@@ -2317,6 +2319,7 @@ mod ritual_ops {
                 member: member.clone(),
                 identity_pk,
                 nostr_pk,
+                vault_pk: String::new(),
             });
             if let Some((reply_snd, reply_wrap)) = reply_queue {
                 s.reply_snd = Some(reply_snd);
@@ -3023,11 +3026,13 @@ mod tests {
                 member: "founder".into(),
                 identity_pk: pk_a,
                 nostr_pk: npk_a.to_string(),
+                vault_pk: String::new(),
             },
             MemberIdentity {
                 member: "member".into(),
                 identity_pk: pk_b,
                 nostr_pk: npk_b.to_string(),
+                vault_pk: String::new(),
             },
         ];
         let republic_id = molt_storage::republic_id("R", 2, 2, &identities);
@@ -3531,6 +3536,7 @@ mod tests {
                 member: "founder".to_string(),
                 identity_pk: founder_pk,
                 nostr_pk: npk_founder(),
+                vault_pk: String::new(),
             },
             founder_sk,
             founder_nostr_sk: zeroize::Zeroizing::new(vec![7u8; 32]),
@@ -3718,11 +3724,13 @@ mod tests {
                     member: "founder".to_string(),
                     identity_pk: f_pk,
                     nostr_pk: npk_founder(),
+                    vault_pk: String::new(),
                 },
                 MemberIdentity {
                     member: "bob".to_string(),
                     identity_pk: join.identity_pk.clone(),
                     nostr_pk: join.nostr_pk.clone(),
+                    vault_pk: String::new(),
                 },
             ];
             let rid = molt_storage::republic_id("R", 2, 2, &identities);

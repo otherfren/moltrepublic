@@ -34,6 +34,7 @@ fn ritual() -> RitualMsg {
         reply: None,
         key_package: "dd".repeat(64),
         relays: Vec::new(),
+        vault_pk: String::new(),
     })
 }
 

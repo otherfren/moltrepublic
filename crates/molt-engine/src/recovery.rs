@@ -1062,11 +1062,13 @@ mod tests {
                 member: "petra".to_string(),
                 identity_pk: "aa".to_string(),
                 nostr_pk: "cc".to_string(),
+                vault_pk: String::new(),
             },
             MemberIdentity {
                 member: "walter".to_string(),
                 identity_pk: "bb".to_string(),
                 nostr_pk: "dd".to_string(),
+                vault_pk: String::new(),
             },
         ];
         let genesis = ChainBlock {
@@ -1137,6 +1139,7 @@ mod tests {
             member: "petra".to_string(),
             identity_pk: "aa".to_string(),
             nostr_pk: "cc".to_string(),
+            vault_pk: String::new(),
         }];
         let blob = molt_core::CheckpointState {
             founding_name: "Chess Club".to_string(),
@@ -1179,6 +1182,7 @@ mod tests {
                 member: (*m).to_string(),
                 identity_pk: (*pk).to_string(),
                 nostr_pk: "cc".repeat(32),
+                vault_pk: String::new(),
             })
             .collect();
         let rule_n = u8::try_from(members.len()).expect("small roster");

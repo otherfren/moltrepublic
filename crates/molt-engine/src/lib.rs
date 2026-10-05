@@ -54,6 +54,7 @@ pub use relay_msg::{known_log_shapes, LogShape};
 mod session;
 mod transfer;
 mod upload_refs;
+mod vault;
 mod wiki_export;
 mod wiki_index;
 
@@ -1994,6 +1995,8 @@ impl State {
                 sender_npub,
                 key_package,
                 relays,
+                // S2 takes it
+                vault_pk: _,
                 generation,
             } => self.cmd_net_join_requested(
                 seat,
@@ -2016,6 +2019,59 @@ impl State {
             Command::ConfirmSeedBackup { phrase } => self.cmd_confirm_seed_backup(&phrase),
             Command::WikiDraftSave { draft } => self.cmd_wiki_draft_save(&draft),
             Command::WikiDraftLoad => self.cmd_wiki_draft_load(),
+            // vault/
+            Command::VaultSeal { name, kind, text } => self.cmd_vault_seal(name, kind, text),
+            Command::VaultReseal { secret_id } => self.cmd_vault_reseal(secret_id),
+            Command::VaultGrant { secret_id, reader } => self.cmd_vault_grant(secret_id, reader),
+            Command::VaultRead { secret_id } => self.cmd_vault_read(secret_id),
+            Command::NetVaultPayloadFetched { hash, bytes, generation } => {
+                if !self.net_scope_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.cmd_net_vault_payload_fetched(hash, bytes)
+            }
+            Command::NetVaultPayloadFailed { hash, generation } => {
+                if !self.net_scope_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.cmd_net_vault_payload_failed(hash)
+            }
+            Command::NetVaultBaseFetched { bytes, generation } => {
+                if !self.net_scope_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.cmd_net_vault_base_fetched(bytes)
+            }
+            Command::NetVaultBaseFailed { generation } => {
+                if !self.net_scope_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.cmd_net_vault_base_failed()
+            }
+            Command::NetVaultReceipt { from, secret_id, verdict, rev, generation } => {
+                if !self.net_generation_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.cmd_net_vault_receipt(&from, secret_id, verdict, rev)
+            }
+            Command::NetVaultReveal { from, secret_id, holder, share, ikm, generation } => {
+                if !self.net_generation_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.cmd_net_vault_reveal(&from, secret_id, holder, share, ikm)
+            }
+            Command::NetVaultResp { from, grant_id, enc, generation } => {
+                if !self.net_generation_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.cmd_net_vault_resp(&from, grant_id, enc)
+            }
+            Command::NetVaultAsk { from, grant_id, generation } => {
+                if !self.net_generation_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.cmd_net_vault_ask(&from, grant_id)
+            }
             Command::NetBackupConfirmed {
                 seat,
                 sig,

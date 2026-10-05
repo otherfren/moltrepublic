@@ -211,6 +211,7 @@ impl crate::State {
             started_at: crate::now_secs(),
             stored: false,
             wiki_base: true,
+            vault: None,
         };
         tokio::spawn(async move {
             let mut queued = false;

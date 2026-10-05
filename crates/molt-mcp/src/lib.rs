@@ -71,8 +71,8 @@ set_features {value: \"memory quests\"}, set_member_image {member,value,bytes_b6
 picture); memory add_note {title}; files persist {id} (the engine fills the \
 share's identity; a live share only), unpersist {id, at: unix now} (a \
 persistent share only), delete {id} (a temporary share - gone for good); \
-quests/vault/wallet add_quest/seal_secret/ \
-transfer {title}. Traps: founding/join/recovery need a confirmed relay \
+quests/wallet add_quest/transfer {title}; the vault has its own tools \
+(vault_seal, vault_grant, vault_read). Traps: founding/join/recovery need a confirmed relay \
 (relay_add, then confirm); mark_channel_read moves your PRIVATE cursor while \
 mark_read broadcasts read receipts; restore_start = offline knowledge from a \
 backup blob, recover_start = rejoin the live republic; navigate/select_* only \
@@ -1330,12 +1330,12 @@ pub fn tools() -> Vec<ToolDef> {
             name: "propose",
             command: "propose",
             scope: Scope::Seat,
-            description: "Put an object forward for threshold approval on a gated surface. An Organization set_image payload must embed the actual image as base64 `bytes_b64` and the bytes must DECODE as a picture (png/jpeg/webp/gif/bmp, ≤8192x8192; svg is refused) - sign-what-you-see: members vote on the image, so undecodable bytes are refused here and dropped by every peer. Payload size is capped at what one relay message can carry (about 64 KiB of image for a small roster); an over-size proposal is refused with the exact figure that fits. Organization op set_features enables charter features: value = space-separated keys among memory/quests/vault/wallet, the FULL target set - it must keep every enabled feature (enable-only, never off again) and add at least one. Proposing on a surface whose feature is not enabled is refused (status.features lists the enabled set); organization, chat and files are CORE surfaces - always proposable, never in a feature set. Memory op wiki_patch is a wiki changeset vote: `value` carries a raw git-format patch (unified diffs; rename/new/deleted headers), `summary` a short count string like \"+2 -1 →1 ~34\" where `+` `-` `→` count FILES added, deleted and renamed and `~` counts changed LINES - the GUI's changeset vote emits exactly this shape and renders the patch in its diff viewer. It is the RAW form, for a caller that already holds a patch, and it is refused when the patch does not apply to the base it is proposed against; wiki_edit writes the wiki without one. A path another OPEN proposal also touches is NOT that refusal: the patch goes to the vote and reads `superseded` once the other one seals and moves the base. The proposer's own signature is the first of m; the reply names the proposal's `channel`. Ids are minted per seat, so the sequence has gaps by design.",
+            description: "Put an object forward for threshold approval on a gated surface. An Organization set_image payload must embed the actual image as base64 `bytes_b64` and the bytes must DECODE as a picture (png/jpeg/webp/gif/bmp, ≤8192x8192; svg is refused) - sign-what-you-see: members vote on the image, so undecodable bytes are refused here and dropped by every peer. Payload size is capped at what one relay message can carry (about 64 KiB of image for a small roster); an over-size proposal is refused with the exact figure that fits. Organization op set_features enables charter features: value = space-separated keys among memory/quests/wallet (vault is founding only), the FULL target set - it must keep every enabled feature (enable-only, never off again) and add at least one. Proposing on a surface whose feature is not enabled is refused (status.features lists the enabled set); organization, chat and files are CORE surfaces - always proposable, never in a feature set. Memory op wiki_patch is a wiki changeset vote: `value` carries a raw git-format patch (unified diffs; rename/new/deleted headers), `summary` a short count string like \"+2 -1 →1 ~34\" where `+` `-` `→` count FILES added, deleted and renamed and `~` counts changed LINES - the GUI's changeset vote emits exactly this shape and renders the patch in its diff viewer. It is the RAW form, for a caller that already holds a patch, and it is refused when the patch does not apply to the base it is proposed against; wiki_edit writes the wiki without one. A path another OPEN proposal also touches is NOT that refusal: the patch goes to the vote and reads `superseded` once the other one seals and moves the base. The proposer's own signature is the first of m; the reply names the proposal's `channel`. Ids are minted per seat, so the sequence has gaps by design.",
             schema: || json!({
                 "type": "object",
                 "properties": {
                     "surface": { "type": "string", "enum": gated_enum() },
-                    "payload": { "type": "object", "description": "surface-specific transition {\"op\": ...}: organization set_name/set_charter/set_chat_retention {value}, set_image {value, bytes_b64}, remove_image, set_relays {value: \"wss://a wss://b\"}, set_features {value: \"memory quests\"}, set_member_image {member, value, bytes_b64}/remove_member_image/set_member_desc {member, value} (own seat only, square picture); memory add_note {title}, wiki_patch {value: git-format patch, summary} (raw - wiki_edit is the structured way); quests add_quest {title}; vault seal_secret {title}; wallet transfer {title}; files persist {id} / unpersist {id, at} / delete {id} (id = the SHARE's chat message id from read_uploads, `at` = a unix stamp within an hour of this clock and not before the share; delete removes a temporary share for good)" }
+                    "payload": { "type": "object", "description": "surface-specific transition {\"op\": ...}: organization set_name/set_charter/set_chat_retention {value}, set_image {value, bytes_b64}, remove_image, set_relays {value: \"wss://a wss://b\"}, set_features {value: \"memory quests\"}, set_member_image {member, value, bytes_b64}/remove_member_image/set_member_desc {member, value} (own seat only, square picture); memory add_note {title}, wiki_patch {value: git-format patch, summary} (raw - wiki_edit is the structured way); quests add_quest {title}; wallet transfer {title}; vault: use vault_seal / vault_grant; files persist {id} / unpersist {id, at} / delete {id} (id = the SHARE's chat message id from read_uploads, `at` = a unix stamp within an hour of this clock and not before the share; delete removes a temporary share for good)" }
                 },
                 "required": ["surface", "payload"]
             }),
@@ -1343,6 +1343,68 @@ pub fn tools() -> Vec<ToolDef> {
                 surface: surface_arg(args)?,
                 payload: args.get("payload").cloned().unwrap_or_else(|| json!({})),
             }),
+        },
+        ToolDef {
+            name: "vault_seal",
+            command: "vault_seal",
+            scope: Scope::Seat,
+            description: "Deposit a text (at most 102400 bytes) in the vault under `name`; an own existing name is replaced. Name and kind are visible to every member, the text is not. A vote like any proposal (approve). Any m members can open it at any time - by vote for one of them, or among themselves. There is no way back.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "at most 64 chars" },
+                    "kind": { "type": "string", "description": "at most 24 chars, e.g. text, password, key, will" },
+                    "text": { "type": "string" }
+                },
+                "required": ["name", "kind", "text"]
+            }),
+            build: |args| Ok(Command::VaultSeal {
+                name: str_arg(args, "name")?,
+                kind: str_arg(args, "kind")?,
+                text: molt_core::vault::SecretText(str_arg(args, "text")?),
+            }),
+        },
+        ToolDef {
+            name: "vault_reseal",
+            command: "vault_reseal",
+            scope: Scope::Seat,
+            description: "Re-deal an own deposit after a complaint reveal lowered its threshold: a fresh secret, the same text, a new vote. Offered when the deposit's `reseal` is true.",
+            schema: || json!({
+                "type": "object",
+                "properties": { "secret_id": { "type": "string" } },
+                "required": ["secret_id"]
+            }),
+            build: |args| Ok(Command::VaultReseal { secret_id: str_arg(args, "secret_id")? }),
+        },
+        ToolDef {
+            name: "vault_grant",
+            command: "vault_grant",
+            scope: Scope::Seat,
+            description: "Propose one member as the reader of a deposit version (read_state vault: `secret_id`). Takes effect when it commits at m approvals; permanent.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "secret_id": { "type": "string" },
+                    "reader": { "type": "string", "description": "the member name" }
+                },
+                "required": ["secret_id", "reader"]
+            }),
+            build: |args| Ok(Command::VaultGrant {
+                secret_id: str_arg(args, "secret_id")?,
+                reader: str_arg(args, "reader")?,
+            }),
+        },
+        ToolDef {
+            name: "vault_read",
+            command: "vault_read",
+            scope: Scope::Seat,
+            description: "Read a deposit this seat was granted. Answers `vault_text` with the text, or `vault_pending` {have, need} while the holders' answers arrive - call again. The text is never stored.",
+            schema: || json!({
+                "type": "object",
+                "properties": { "secret_id": { "type": "string" } },
+                "required": ["secret_id"]
+            }),
+            build: |args| Ok(Command::VaultRead { secret_id: str_arg(args, "secret_id")? }),
         },
         ToolDef {
             name: "approve",
@@ -1402,7 +1464,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "read_state",
             command: "read_state",
             scope: Scope::Seat,
-            description: "Read the projected state of one surface. The entries come back under `applied` on EVERY surface, chat included - a chat message is one entry there, there is no `messages` key. A CHAT read sends read receipts for the messages it returns (retrieval is the agent's way of seeing them - agents and humans light the same dots; silent while this node's receipts are off), so there is no need to call mark_read after reading. Chat messages each carry their stable 32-char hex `id` - the handle for react_chat, delete_chat, download_file, remove_file and chat_send's `quote` - their `kind` (\"user\" = member speech, \"system\" = an engine notice), plus the channel they file under, and the snapshot enumerates every channel seen in the log (`channels`). Each enumerated patch channel carries the vote's lifecycle in `state` (\"proposed\"/\"applied\"/\"rejected\"; absent for group/topic channels and unknown referents); a decided vote's discussion stays writable - the review of an applied change and the post-mortem of a rejected one belong there. Pass `channel` to get only the messages of that view; channels are tags on the one shared stream, not boundaries, and the enumeration still lists all of them. Pass `view` (chat only) to narrow the read: \"unread\" keeps only the messages after this seat's read cursor; \"today\" and omitting it both give the whole retention window. The filters compose. On gated surfaces, `applied_ids` runs positionally parallel to `applied` and names the proposal each applied entry came from (null = origin unknown: legacy data) - the back-link from an accepted change to its `{\"kind\":\"patch\",\"id\":N}` discussion channel; it is absent on chat (messages have no proposal origin) and whenever `applied` is empty. On `files` the applied entries are the persist/unpersist votes; the tables themselves are read_uploads. On `memory` the whole folded wiki rides along - read a large base paged with wiki_list + wiki_get instead.",
+            description: "Read the projected state of one surface. The entries come back under `applied` on EVERY surface, chat included - a chat message is one entry there, there is no `messages` key. A CHAT read sends read receipts for the messages it returns (retrieval is the agent's way of seeing them - agents and humans light the same dots; silent while this node's receipts are off), so there is no need to call mark_read after reading. Chat messages each carry their stable 32-char hex `id` - the handle for react_chat, delete_chat, download_file, remove_file and chat_send's `quote` - their `kind` (\"user\" = member speech, \"system\" = an engine notice), plus the channel they file under, and the snapshot enumerates every channel seen in the log (`channels`). Each enumerated patch channel carries the vote's lifecycle in `state` (\"proposed\"/\"applied\"/\"rejected\"; absent for group/topic channels and unknown referents); a decided vote's discussion stays writable - the review of an applied change and the post-mortem of a rejected one belong there. Pass `channel` to get only the messages of that view; channels are tags on the one shared stream, not boundaries, and the enumeration still lists all of them. Pass `view` (chat only) to narrow the read: \"unread\" keeps only the messages after this seat's read cursor; \"today\" and omitting it both give the whole retention window. The filters compose. On gated surfaces, `applied_ids` runs positionally parallel to `applied` and names the proposal each applied entry came from (null = origin unknown: legacy data) - the back-link from an accepted change to its `{\"kind\":\"patch\",\"id\":N}` discussion channel; it is absent on chat (messages have no proposal origin) and whenever `applied` is empty. On `files` the applied entries are the persist/unpersist votes; the tables themselves are read_uploads. On `memory` the whole folded wiki rides along - read a large base paged with wiki_list + wiki_get instead. On `vault` the `vault` object lists deposits and grants, never a text.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -2533,7 +2595,7 @@ pub fn tools() -> Vec<ToolDef> {
                 "properties": {
                     "name": { "type": "string", "description": "the final republic name to ratify" },
                     "agenda": { "type": "string", "description": "the free-text charter/agenda to ratify" },
-                    "features": { "type": "array", "items": { "type": "string", "enum": feature_enum() }, "description": "the optional surfaces to activate (chat is always on); omitted = none. memory (the shared wiki) is real; quests, vault and wallet have no real surface yet (status.surfaces[].implemented) - the GUI wizard locks them off, prefer leaving them out" }
+                    "features": { "type": "array", "items": { "type": "string", "enum": feature_enum() }, "description": "the optional surfaces to activate (chat is always on); omitted = none. memory (the shared wiki) is real; vault is real and founding only, needs 2 <= m <= n-2; quests and wallet have no real surface yet (status.surfaces[].implemented) - the GUI wizard locks them off, prefer leaving them out" }
                 },
                 "required": ["name"]
             }),
@@ -2747,7 +2809,7 @@ pub(crate) mod tests {
         // hook; the value itself rides the settings surface as
         // `poke_wake_command` (ADR-0007), so this stays internal only
         // because it is a second door, not because it is off limits.
-        const INTERNAL: [&str; 73] = [
+        const INTERNAL: [&str; 81] = [
             // a referenced file's bytes off the local disk / mirror store
             // (wiki_files_and_images.md §3.3): the GUI's picture, an agent
             // gets download_file into its exchange folder
@@ -2815,6 +2877,18 @@ pub(crate) mod tests {
             // the mirror worker's own fetch reporting (mirroring §3.3)
             "net_mirror_progress",
             "net_mirror_done",
+            // the vault's file-plane fetches reporting (the bytes are checked
+            // against the chain) and the vault control frames landing: an
+            // agent must not forge a payload, a base, another seat's receipt,
+            // reveal or answer, or a reader's ask
+            "net_vault_payload_fetched",
+            "net_vault_payload_failed",
+            "net_vault_base_fetched",
+            "net_vault_base_failed",
+            "net_vault_receipt",
+            "net_vault_reveal",
+            "net_vault_resp",
+            "net_vault_ask",
             "net_delivered",
             "net_peer_seen",
             "net_peer_rekeyed",
@@ -2909,6 +2983,36 @@ pub(crate) mod tests {
             covered, expected,
             "the MCP tool catalogue drifted from the command set"
         );
+    }
+
+    /// The vault tools are seat tools: the read-only key never reaches a
+    /// deposit, a grant or a read.
+    #[test]
+    fn vault_tools_are_seat_scope() {
+        let names = ["vault_seal", "vault_reseal", "vault_grant", "vault_read"];
+        for name in names {
+            let t = tools().into_iter().find(|t| t.name == name).expect("vault tool listed");
+            assert_eq!(t.scope, Scope::Seat, "{name}");
+        }
+    }
+
+    /// `vault_read` answers what its description names: the text as a
+    /// plain string, or the progress.
+    #[test]
+    fn vault_read_replies_present_as_documented() {
+        let text = Reply::VaultText {
+            secret_id: "s".to_string(),
+            name: "a".to_string(),
+            kind: "text".to_string(),
+            text: molt_core::vault::SecretText("one".to_string()),
+        };
+        let v = present("vault_read", &json!({}), serde_json::to_value(&text).expect("serializes"))
+            .expect("presents");
+        assert_eq!(v, json!({ "reply": "vault_text", "secret_id": "s", "name": "a", "kind": "text", "text": "one" }));
+        let pending = Reply::VaultPending { secret_id: "s".to_string(), have: 1, need: 2 };
+        let v = present("vault_read", &json!({}), serde_json::to_value(&pending).expect("serializes"))
+            .expect("presents");
+        assert_eq!(v, json!({ "reply": "vault_pending", "secret_id": "s", "have": 1, "need": 2 }));
     }
 
     /// Every tool builds a command from its own minimal example arguments —

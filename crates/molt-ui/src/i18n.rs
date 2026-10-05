@@ -67,6 +67,10 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
         E::WikiBasePending { have, size, .. } => {
             format!("Der Wissensstand wird geholt ({have} von {size} Bytes)")
         }
+        E::VaultBasePending { have, size, .. } => {
+            format!("Der Vault wird geholt ({have} von {size} Bytes)")
+        }
+        E::Vault(t) => format!("Vault: {t}"),
         E::FeatureDisabled(k) => format!("{k}: nicht aktiviert"),
         E::AlreadyTerminal(id, st) => format!("Vorschlag #{} ist bereits {st:?}", id.0),
         E::NotTheProposer(id) => format!("Vorschlag #{}: nur wer vorschlägt, zieht zurück", id.0),

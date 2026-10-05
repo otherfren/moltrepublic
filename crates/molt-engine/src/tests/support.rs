@@ -215,11 +215,13 @@ pub(super) fn recovered_chain_with(
             member: "coordinator".to_string(),
             identity_pk: coord_pk,
             nostr_pk: "cc".repeat(32),
+            vault_pk: String::new(),
         },
         MemberIdentity {
             member: "bob".to_string(),
             identity_pk: bob_pk.clone(),
             nostr_pk: "dd".repeat(32),
+            vault_pk: String::new(),
         },
     ];
     let republic_id = molt_storage::republic_id("Guild", 1, 2, &identities);

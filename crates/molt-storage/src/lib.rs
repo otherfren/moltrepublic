@@ -3654,16 +3654,19 @@ mod tests {
                 member: "founder".into(),
                 identity_pk: "aa".repeat(32),
                 nostr_pk: "dd".repeat(32),
+                vault_pk: String::new(),
             },
             MemberIdentity {
                 member: "juno".into(),
                 identity_pk: "bb".repeat(32),
                 nostr_pk: "ee".repeat(32),
+                vault_pk: String::new(),
             },
             MemberIdentity {
                 member: "mira".into(),
                 identity_pk: "cc".repeat(32),
                 nostr_pk: "ff".repeat(32),
+                vault_pk: String::new(),
             },
         ]
     }
@@ -3681,11 +3684,13 @@ mod tests {
                 member: "ada".to_string(),
                 identity_pk: "aa".repeat(32),
                 nostr_pk: "cc".repeat(32),
+                vault_pk: String::new(),
             },
             MemberIdentity {
                 member: "bob".to_string(),
                 identity_pk: "bb".repeat(32),
                 nostr_pk: "dd".repeat(32),
+                vault_pk: String::new(),
             },
         ];
         let id = republic_id("R", 1, 2, &ids);
@@ -3717,6 +3722,7 @@ mod tests {
             member: "x".to_string(),
             identity_pk: idpk.to_string(),
             nostr_pk: npk.to_string(),
+            vault_pk: String::new(),
         };
         // a crafted anchor that CONTINUES the hash stream of the old layout:
         // <64hex> NUL <evil identity> NUL <evil anchor>

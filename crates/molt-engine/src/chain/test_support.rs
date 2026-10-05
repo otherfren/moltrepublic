@@ -37,6 +37,7 @@ impl Builder {
                 member: (*m).to_string(),
                 identity_pk: pk,
                 nostr_pk: "cc".repeat(32),
+                vault_pk: String::new(),
             });
             keys.push(((*m).to_string(), sk));
         }

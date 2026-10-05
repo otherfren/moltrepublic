@@ -124,11 +124,13 @@ fn valid_sealed_roster() -> molt_core::SealedRoster {
             member: "founder".to_string(),
             identity_pk: pk_a,
             nostr_pk: molt_net::nostr_identity(b"founder-entropy", "ticket-f").1,
+            vault_pk: String::new(),
         },
         MemberIdentity {
             member: "petra".to_string(),
             identity_pk: pk_b,
             nostr_pk: petra_nostr().1,
+            vault_pk: String::new(),
         },
     ];
     let republic_id = molt_storage::republic_id("R", 2, 2, &identities);

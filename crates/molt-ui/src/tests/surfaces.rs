@@ -192,6 +192,7 @@ fn applied_log_lines_carry_their_patch_id() {
         wiki_docs: 0,
         wiki_rev: 0,
         wiki_base_pending: None,
+        vault: None,
     };
     let data = surface_data(0, Surface::Memory, &snap, "petra", None, &HashMap::new());
     assert_eq!(data.log.len(), 2);
@@ -688,6 +689,7 @@ fn outcome_snapshot(pending: usize, applied: usize, declined: usize) -> molt_cor
         wiki_docs: 0,
         wiki_rev: 0,
         wiki_base_pending: None,
+        vault: None,
     }
 }
 

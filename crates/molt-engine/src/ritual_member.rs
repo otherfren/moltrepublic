@@ -306,6 +306,8 @@ pub(crate) async fn run_member_ladder<L: RitualLeg, R: Ratify>(
         reply: leg.reply_handover(),
         key_package: hex::encode(&key_package),
         relays: leg.declared_relays(),
+        // S2 derives it
+        vault_pk: String::new(),
     });
     leg.send(&join)
         .await
@@ -577,11 +579,13 @@ mod tests {
                 member: "founder".to_string(),
                 identity_pk: f_pk,
                 nostr_pk: molt_net::nostr_identity(b"founder-entropy", "self").1,
+                vault_pk: String::new(),
             },
             MemberIdentity {
                 member: "bob".to_string(),
                 identity_pk: seat.pk.clone(),
                 nostr_pk: seat.nostr_pk.clone(),
+                vault_pk: String::new(),
             },
         ];
         let rid = molt_storage::republic_id("R", 2, 2, &identities);

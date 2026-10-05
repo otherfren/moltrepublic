@@ -486,6 +486,7 @@ impl State {
             started_at,
             stored,
             wiki_base: false,
+            vault: None,
         };
         tokio::spawn(async move {
             let series = job.series.clone();

@@ -163,11 +163,13 @@ fn a_forged_roster_anchor_and_a_gap_upto_are_rejected() {
             member: "petra".to_string(),
             identity_pk: evil_pk1,
             nostr_pk: "ee".repeat(32),
+            vault_pk: String::new(),
         },
         MemberIdentity {
             member: "walter".to_string(),
             identity_pk: evil_pk2,
             nostr_pk: "ff".repeat(32),
+            vault_pk: String::new(),
         },
     ];
     let change = ChainChange::Checkpoint {
@@ -231,6 +233,7 @@ fn a_suffix_blob_with_an_oversized_founding_table_is_rejected() {
         member: "evil".to_string(),
         identity_pk: evil_pk,
         nostr_pk: "dd".repeat(32),
+        vault_pk: String::new(),
     });
     forged.republic_id = molt_storage::republic_id(
         &forged.founding_name,

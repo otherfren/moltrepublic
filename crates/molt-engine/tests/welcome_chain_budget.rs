@@ -128,6 +128,7 @@ fn a_pruned_republics_anchor_carries_every_applied_payload() {
         member: "walter".to_string(),
         identity_pk: "ab".repeat(32),
         nostr_pk: "cd".repeat(32),
+        vault_pk: String::new(),
     }];
     let blob = molt_core::CheckpointState {
         founding_name: "Chess Club".to_string(),

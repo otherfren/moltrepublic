@@ -179,6 +179,7 @@ pub(crate) fn spawn_founder_inbox(
                 sender_npub: sender,
                 key_package: j.key_package,
                 relays: j.relays,
+                vault_pk: j.vault_pk,
                 generation: Some(generation),
             };
             if !send_cmd(&tx, cmd).await {
@@ -1661,6 +1662,7 @@ mod tests {
             member: member.to_string(),
             identity_pk: "aa".repeat(32),
             nostr_pk: npk.to_string(),
+            vault_pk: String::new(),
         }
     }
 

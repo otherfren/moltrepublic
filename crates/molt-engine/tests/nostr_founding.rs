@@ -1004,11 +1004,13 @@ fn injected_seal(member: &str) -> (String, String) {
             member: "founder".to_string(),
             identity_pk: pk_f,
             nostr_pk: molt_net::nostr_identity(b"founder-entropy", "ticket-f").1,
+            vault_pk: String::new(),
         },
         MemberIdentity {
             member: member.to_string(),
             identity_pk: pk_m,
             nostr_pk,
+            vault_pk: String::new(),
         },
     ];
     let republic_id = molt_storage::republic_id("R", 2, 2, &identities);
@@ -1671,6 +1673,7 @@ async fn a_failed_re_activation_leaves_the_honest_seat_intact() {
                 reply: None,
                 key_package: String::new(),
                 relays: Vec::new(),
+                vault_pk: String::new(),
             }),
         )
         .await

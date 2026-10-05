@@ -407,6 +407,11 @@ pub struct JoinRequest {
     /// pre-declaration senders).
     #[serde(default)]
     pub relays: Vec<String>,
+    /// The joiner's vault key (X25519, lowercase hex), always sent by a
+    /// vault-capable build; not MAC-bound (the member's sign-what-you-see
+    /// check binds it). Empty from an older joiner, and then absent.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub vault_pk: String,
 }
 
 /// A total-loss member's activation of a recovery link (recovery_ritual.md §4):
@@ -825,6 +830,7 @@ mod tests {
                 reply: None,
                 key_package: "cc".repeat(20),
                 relays: Vec::new(),
+                vault_pk: String::new(),
             }),
             RitualMsg::Seal {
                 proposal: "{\"name\":\"Guild\"}".into(),

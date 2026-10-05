@@ -575,6 +575,7 @@ mod tests {
             started_at: 0,
             stored: false,
             wiki_base: false,
+            vault: None,
         };
         let whole = whole_series_ranges(Manifest::layout_for(3).expect("layout"));
         let jobs = vec![job("a", whole.clone()), job("b", vec![(1, 1)]), job("c", whole)];

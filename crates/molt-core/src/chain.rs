@@ -657,6 +657,7 @@ mod tests {
             member: name.to_string(),
             identity_pk: pk.to_string(),
             nostr_pk: "cc".repeat(32),
+            vault_pk: String::new(),
         }
     }
 
