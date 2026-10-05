@@ -1,0 +1,209 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//! The vault is chosen at founding only (vault spec §3, D11): the
+//! wizard box obeys `2 <= m <= n-2`, the charter echo shows the signed
+//! selection, and the Organization modal can never vote it in.
+
+use super::*;
+
+type Handle = i_slint_backend_testing::ElementHandle;
+
+/// Does `e` carry a `Text` labelled `label` among its descendants?
+fn has_text(e: &Handle, label: &str) -> bool {
+    let want = label.to_string();
+    e.query_descendants()
+        .match_predicate(move |d| d.accessible_label().is_some_and(|l| l.as_str() == want))
+        .find_first()
+        .is_some()
+}
+
+/// The `AppCheck` rows labelled `label` inside `scope`.
+fn checks_in(scope: &Handle, label: &str) -> Vec<Handle> {
+    scope
+        .query_descendants()
+        .match_type_name("AppCheck")
+        .find_all()
+        .into_iter()
+        .filter(|c| has_text(c, label))
+        .collect()
+}
+
+fn window_root(ui: &AppWindow) -> Handle {
+    i_slint_backend_testing::ElementRoot::root_element(ui)
+}
+
+fn settle() {
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(300));
+}
+
+/// The founder's charter step of an `m`-of-`n` founding, every seat in.
+/// The caller initializes the backend (once per test thread).
+fn charter_step(m: i32, n: i32) -> (AppWindow, Shown) {
+    let ui = AppWindow::new().expect("headless window");
+    ui.window().set_size(slint::PhysicalSize::new(1200, 1800));
+    ui.set_screen(AppScreen::Create);
+    ui.set_cw_name("a".into());
+    ui.set_cw_member("a".into());
+    ui.set_cw_threshold(m);
+    ui.set_cw_members(n);
+    ui.set_cw_step(1);
+    let seats: Vec<RitualSeat> = (0..n)
+        .map(|i| RitualSeat {
+            member: format!("seat {i}").into(),
+            detail: String::new().into(),
+            state: 1,
+        })
+        .collect();
+    ui.set_cw_seats(ModelRc::new(VecModel::from(seats)));
+    ui.set_cw_total(n);
+    ui.set_cw_can_propose(true);
+    apply_strings(&ui, 0);
+    let shown = show_headless(&ui);
+    settle();
+    (ui, shown)
+}
+
+fn wizard_vault_box(ui: &AppWindow) -> Handle {
+    let label = ui.global::<Strings>().get_feat_vault().to_string();
+    let mut found = checks_in(&window_root(ui), &label);
+    assert_eq!(found.len(), 1, "one vault box on the charter step");
+    found.remove(0)
+}
+
+#[test]
+fn the_vault_box_is_disabled_outside_2_to_n_minus_2() {
+    i_slint_backend_testing::init_no_event_loop();
+    for (m, n, allowed) in [(2, 3, false), (2, 4, true), (3, 4, false), (1, 4, false), (3, 5, true)] {
+        let (ui, _shown) = charter_step(m, n);
+        let hint = ui.global::<Strings>().get_feat_vault_bounds().to_string();
+        click(&ui, &wizard_vault_box(&ui));
+        assert_eq!(ui.get_cw_feat_vault(), allowed, "{m}-of-{n}: a click ticks the box iff allowed");
+        assert_eq!(
+            Handle::find_by_accessible_label(&ui, &hint).next().is_some(),
+            !allowed,
+            "{m}-of-{n}: the bounds line shows iff the box is locked"
+        );
+    }
+}
+
+#[test]
+fn a_ticked_vault_reaches_create_propose() {
+    i_slint_backend_testing::init_no_event_loop();
+    let (ui, _shown) = charter_step(2, 4);
+    assert_eq!(crate::actions::ritual::charter_features(&ui), vec!["memory".to_string()]);
+    click(&ui, &wizard_vault_box(&ui));
+    assert_eq!(
+        crate::actions::ritual::charter_features(&ui),
+        vec!["memory".to_string(), "vault".to_string()]
+    );
+}
+
+#[test]
+fn the_charter_echo_shows_the_vault() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    ui.window().set_size(slint::PhysicalSize::new(1200, 1800));
+    ui.set_screen(AppScreen::Create);
+    apply_strings(&ui, 0);
+    let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+    let sv = SessionView {
+        screen: molt_core::Screen::Create,
+        create: molt_core::CreateState {
+            run: molt_core::RunCore { step: 1, ..molt_core::RunCore::default() },
+            name: "a".to_string(),
+            features: vec!["memory".to_string(), "vault".to_string()],
+            can_propose: true,
+            ..molt_core::CreateState::default()
+        },
+        join: molt_core::JoinState {
+            proposed_features: Some(vec!["vault".to_string()]),
+            ..molt_core::JoinState::default()
+        },
+        ..SessionView::default()
+    };
+    apply_session(&ui, &sv, true, &chat_ui);
+    assert!(ui.get_jw_feat_vault(), "the joiner echo reads the proposed list");
+    // the local box stays unticked: the founder echo must read the
+    // proposed list, not the form
+    assert!(!ui.get_cw_feat_vault());
+    let _shown = show_headless(&ui);
+    ui.set_cw_proposed(true);
+    settle();
+    ui.set_cw_fold(2);
+    settle();
+    let view = Handle::find_by_element_type_name(&ui, "CharterView")
+        .next()
+        .expect("the charter fold renders its CharterView");
+    let label = ui.global::<Strings>().get_feat_vault().to_string();
+    let vault = checks_in(&view, &label);
+    assert_eq!(vault.len(), 1, "the echo has one vault row");
+    assert!(has_text(&vault[0], "✓"), "the founder echo shows the proposed vault");
+}
+
+type Proposed = Rc<RefCell<Vec<(String, String)>>>;
+
+/// The Organization features modal over a republic whose effective
+/// selection has the vault `vault_on`.
+fn org_modal(vault_on: bool) -> (AppWindow, Shown, Proposed) {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    ui.window().set_size(slint::PhysicalSize::new(1100, 800));
+    ui.set_org_feat_vault(vault_on);
+    let got: Proposed = Rc::new(RefCell::new(Vec::new()));
+    let sink = got.clone();
+    ui.on_org_propose(move |op, value| {
+        sink.borrow_mut().push((op.to_string(), value.to_string()));
+    });
+    let shown = show_headless(&ui);
+    ui.set_org_features_modal_open(true);
+    settle();
+    (ui, shown, got)
+}
+
+fn modal(ui: &AppWindow) -> Handle {
+    Handle::find_by_element_type_name(ui, "ConfirmModal")
+        .next()
+        .expect("the features dialog is up")
+}
+
+/// Click the dialog's propose button (its label, inside the button).
+fn confirm(ui: &AppWindow) {
+    let label = ui.global::<Strings>().get_oc_propose().to_string();
+    let button = modal(ui)
+        .query_descendants()
+        .match_predicate(move |d| d.accessible_label().is_some_and(|l| l.as_str() == label))
+        .find_first()
+        .expect("the propose button");
+    click(ui, &button);
+    settle();
+}
+
+#[test]
+fn the_org_modal_cannot_vote_the_vault_in() {
+    let (ui, _shown, got) = org_modal(false);
+    let s = ui.global::<Strings>();
+    let dlg = modal(&ui);
+    assert!(
+        checks_in(&dlg, &s.get_feat_vault()).is_empty()
+            && checks_in(&dlg, &format!("{}{}", s.get_feat_vault(), s.get_feat_mock())).is_empty(),
+        "no vault checkbox in the dialog"
+    );
+    assert!(has_text(&dlg, &s.get_vault_founding_only()), "the vault row says founding only");
+    confirm(&ui);
+    assert!(got.borrow().is_empty(), "nothing to propose");
+}
+
+#[test]
+fn an_org_proposal_in_a_vault_republic_carries_no_vault() {
+    let (ui, _shown, got) = org_modal(true);
+    let memory = ui.global::<Strings>().get_feat_memory().to_string();
+    let mut boxes = checks_in(&modal(&ui), &memory);
+    assert_eq!(boxes.len(), 1, "one memory box");
+    click(&ui, &boxes.remove(0));
+    confirm(&ui);
+    let got = got.borrow();
+    assert_eq!(got.len(), 1, "one proposal");
+    assert_eq!(got[0].0, "set_features");
+    let keys: Vec<&str> = got[0].1.split_whitespace().collect();
+    assert_eq!(keys, vec!["memory"], "the vault never rides a set_features value");
+}

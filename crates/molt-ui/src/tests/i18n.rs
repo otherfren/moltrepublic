@@ -317,3 +317,17 @@ fn sync_status_label_speaks_german() {
     );
     assert_eq!(sync_status_label(1, 0, 1440, 0), "Synchronisiert · vor 1 Tag");
 }
+
+/// The founding-only vault strings (vault spec §3): one fact each, no
+/// em dash, both languages.
+#[test]
+fn the_vault_founding_strings_are_compact() {
+    for l in [Lexicon::en(), Lexicon::de()] {
+        for s in [l.feat_vault_bounds, l.vault_founding_only] {
+            assert!(!s.is_empty() && !s.contains('\u{2014}'), "{s:?}");
+        }
+        assert!(l.feat_vault_bounds.contains("2 <= m <= n-2"));
+    }
+    assert_eq!(Lexicon::en().feat_vault_bounds, "needs 2 <= m <= n-2");
+    assert_eq!(Lexicon::en().vault_founding_only, "founding only");
+}

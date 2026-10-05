@@ -924,6 +924,11 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     // the final name + charter for the members to ratify (the agenda itself is
     // a local editable draft in the wizard, like the name)
     ui.set_cw_can_propose(sv.create.can_propose);
+    let cw_prop = |key: &str| sv.create.features.iter().any(|k| k == key);
+    ui.set_cw_prop_memory(cw_prop("memory"));
+    ui.set_cw_prop_quests(cw_prop("quests"));
+    ui.set_cw_prop_vault(cw_prop("vault"));
+    ui.set_cw_prop_wallet(cw_prop("wallet"));
     sync_rows(&ui.get_cw_seats(), seats, |m| ui.set_cw_seats(m));
 
     // the rejoiner's re-admission checklist (recovery_auto_approval.md §5):

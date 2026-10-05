@@ -861,6 +861,8 @@ lexicon! {
     feat_wallet: "Wallet", "Wallet";
     // suffix on an enable-able feature whose pane is still a mock (vault)
     feat_mock: " (ui mock)", " (ui mock)";
+    feat_vault_bounds: "needs 2 <= m <= n-2", "braucht 2 <= m <= n-2";
+    vault_founding_only: "founding only", "nur bei Gründung";
     jw_back_to_start: "Back to start", "Zurück zum Start";
     jw_ratify_title: "Ratify the charter", "Satzung ratifizieren";
     jw_ratify_confirm: "Confirm & join", "Bestätigen & beitreten";
