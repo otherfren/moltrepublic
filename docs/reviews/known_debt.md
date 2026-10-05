@@ -26,6 +26,30 @@ votable. Fix direction: walk the suffix blocks' `moved` paths in the
 adoption walk, and pin it with a propose-then-ratify ordering in
 `checkpoint_under_load.rs`.
 
+## An export can pair a pre-cut chain with a post-cut wiki base
+
+From the 2026-10-05 review of the wiki-base backup fix. The export reads
+`chain.state` and `wiki_base.bin` one after the other while the node runs;
+a folded cut writes the new base first and the new chain second
+(`governance.rs`). A cut landing between the two reads yields a blob whose
+base matches no commitment in its chain, and the open drops the base
+(`adopt_wiki_base`) - the one it will need once it catches up past the
+cut. Rare (a cut is a voted event) and never silent data loss while a
+holder lives, but it defeats the every-seat-restores case. Fix direction:
+read both under the workspace's writer, or keep a base that authenticates
+but does not match the current chain aside until the chain reaches its
+commitment instead of deleting it.
+
+## A wiki base near 512 MiB fails the whole backup
+
+`READ_CAP_WIKI_BASE` and the restore cap (`RESTORE_MAX_BYTES`) are both
+512 MiB, and the S3 ticker refuses an over-cap blob as a whole
+(`backup.rs`). Since 2026-10-05 the base rides every export, so a
+knowledge base near the cap stops ALL backups rather than just its own.
+Far beyond the K6 target (100 MiB), hence debt, not a defect. Fix
+direction: raise the restore cap with the base's own bound, or ship the
+base as its own S3 object beside the blob.
+
 ## Which renderer a GPU-less box should ship
 
 From `docs_archive/ui/wiki_pane_performance.md` §4 step 5 / §5 Q1-Q2: the

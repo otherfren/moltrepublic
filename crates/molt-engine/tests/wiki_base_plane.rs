@@ -200,29 +200,13 @@ async fn wait_wiki(w: &WalletHandle, what: &str, secs: u64, pred: impl Fn(u64, O
     }
 }
 
-/// The whole K6 round: two ratified patches, a folded cut that drops
-/// them, and a seat that lost its copy of the tree getting it back off
-/// the plane. Nothing here is a test double - a real relay, a real
-/// threshold, the real trickle sender.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_folded_cut_survives_a_lost_base_over_the_relay() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .with_test_writer()
-        .try_init();
-    let relay = MockRelay::run().await.expect("relay");
-    let url = relay.url().await.to_string();
-    let tmp = tempfile::tempdir().expect("tmp");
-    let root = tmp.path().join("workspaces");
-    let (a, b) = found_pair(&root, &url).await;
-
-    ratify_wiki(&a, &b, ADD_A).await;
-    ratify_wiki(&a, &b, ADD_B).await;
-    wait_wiki(&a, "petra's two documents", 30, |docs, _| docs == 2).await;
-    wait_wiki(&b, "walter's two documents", 30, |docs, _| docs == 2).await;
+/// Two ratified patches, then a folded cut both seats apply: the chain
+/// keeps only the commitment, each seat holds the tree in `wiki_base.bin`.
+async fn ratified_and_cut(a: &WalletHandle, b: &WalletHandle) {
+    ratify_wiki(a, b, ADD_A).await;
+    ratify_wiki(a, b, ADD_B).await;
+    wait_wiki(a, "petra's two documents", 30, |docs, _| docs == 2).await;
+    wait_wiki(b, "walter's two documents", 30, |docs, _| docs == 2).await;
 
     // the cut: petra proposes, walter co-signs it as correct
     a.execute(Command::ProposeCheckpoint).await.expect("cut proposed");
@@ -253,8 +237,30 @@ async fn a_folded_cut_survives_a_lost_base_over_the_relay() {
         assert!(tokio::time::Instant::now() < deadline, "walter never applied the cut");
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    wait_wiki(&a, "the wiki after the cut", 30, |docs, p| docs == 2 && p.is_none()).await;
-    wait_wiki(&b, "walter's wiki after the cut", 30, |docs, p| docs == 2 && p.is_none()).await;
+    wait_wiki(a, "the wiki after the cut", 30, |docs, p| docs == 2 && p.is_none()).await;
+    wait_wiki(b, "walter's wiki after the cut", 30, |docs, p| docs == 2 && p.is_none()).await;
+}
+
+/// The whole K6 round: two ratified patches, a folded cut that drops
+/// them, and a seat that lost its copy of the tree getting it back off
+/// the plane. Nothing here is a test double - a real relay, a real
+/// threshold, the real trickle sender.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_folded_cut_survives_a_lost_base_over_the_relay() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_test_writer()
+        .try_init();
+    let relay = MockRelay::run().await.expect("relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root = tmp.path().join("workspaces");
+    let (a, b) = found_pair(&root, &url).await;
+
+    ratified_and_cut(&a, &b).await;
 
     // walter loses his copy of the folded tree (§4.9.9: a damaged cache,
     // not a refused workspace) and reopens
@@ -286,4 +292,55 @@ async fn a_folded_cut_survives_a_lost_base_over_the_relay() {
     // …and gets it back off the plane, from the seat that still holds it
     wait_wiki(&b, "the base to arrive over the relay", 120, |docs, p| docs == 2 && p.is_none()).await;
     assert!(base.exists(), "the fetched base is kept for the next open");
+}
+
+/// The catastrophe a backup exists for: after a folded cut, EVERY seat is
+/// gone and one comes back from its backup alone. Below the cut the chain
+/// holds only the tree's hash, so the backup must carry the tree itself -
+/// with no holder left online, a base-pending seat would wait forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_folded_wiki_survives_every_seat_restoring_from_backup() {
+    let relay = MockRelay::run().await.expect("relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root = tmp.path().join("workspaces");
+    let (a, b) = found_pair(&root, &url).await;
+    ratified_and_cut(&a, &b).await;
+
+    // walter backs up after the cut
+    let ws = read_session(&b).await.workspaces.first().expect("a workspace").id.clone();
+    let blob = tmp.path().join("walter.molt.enc");
+    let pass = "correct horse battery";
+    b.execute(Command::ExportWorkspace {
+        id: ws.clone(),
+        dest: blob.display().to_string(),
+        passphrase: pass.to_string(),
+    })
+    .await
+    .expect("export kickoff");
+    let s = wait_for(&b, "the export", |s| !s.export.running && !s.export.result.is_empty()).await;
+    assert_eq!(s.export.result, "ok", "the export succeeds");
+
+    // every seat goes away: nobody is left to serve the tree
+    a.execute(Command::CloseWorkspace).await.expect("petra closes");
+    b.execute(Command::CloseWorkspace).await.expect("walter closes");
+    drop((a, b));
+    drop(relay);
+
+    // walter restores on a new device from the backup alone
+    let c = engine(&tmp.path().join("new-device"), &tmp.path().join("dl-c"));
+    c.execute(Command::RestoreStart {
+        way: "file".to_string(),
+        target: blob.display().to_string(),
+        secret: pass.to_string(),
+        replace: false,
+    })
+    .await
+    .expect("restore start");
+    let s = wait_for(&c, "the restore", |s| s.restore.run.outcome != 0).await;
+    assert_eq!(s.restore.run.outcome, 1, "the restore verifies: {:?}", s.restore.run.log);
+    c.execute(Command::RestoreFinish).await.expect("restore finish");
+
+    // the shared memory is there, not pending on a holder that cannot exist
+    wait_wiki(&c, "the restored wiki", 30, |docs, p| docs == 2 && p.is_none()).await;
 }

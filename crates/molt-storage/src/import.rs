@@ -72,12 +72,15 @@ pub struct ImportStaging {
 ///
 /// Everything §4.1 step 1 demands happens here, hard-reject: format/version
 /// gates and KDF caps (in `read_export`), an entry-path **allowlist**
-/// (`manifest.toml`, `prefs.toml`, `chain.state`, `log/*.mlog`,
-/// `snapshots/*.msnap`, `logo.<ext>` — anything else, `keys/`/
+/// (`manifest.toml`, `prefs.toml`, `chain.state`, `wiki_base.bin`,
+/// `log/*.mlog`, `snapshots/*.msnap`, `logo.<ext>` — anything else, `keys/`/
 /// `transport.state` included, rejects the whole blob), manifest ↔ header
 /// id consistency, the key-hierarchy pin, a genesis frame that decrypts
-/// under the payload's workspace key, and a `chain.state` that decrypts and
-/// parses. Blocking — call off-actor only.
+/// under the payload's workspace key, a `chain.state` that decrypts and
+/// parses. A `wiki_base.bin` is planted only when every frame
+/// authenticates under the blob's key — otherwise it is dropped, never the
+/// whole restore; its chain commitment is checked at open, like any held
+/// base. Blocking — call off-actor only.
 pub fn import_stage(
     root: &Path,
     blob: &[u8],
@@ -312,6 +315,21 @@ pub fn import_stage(
         })?,
     };
 
+    // the folded wiki base is planted only when every frame authenticates
+    // under THIS blob's key. A foreign or damaged one costs the base, never
+    // the restore: the chain, the log and the keys are what the user came
+    // for, and the base stays re-fetchable while any holder lives (the same
+    // rule the open applies, knowledge_base_scale.md §4.9.9)
+    let base_ok = archive
+        .entries
+        .iter()
+        .find(|e| e.path == "wiki_base.bin")
+        .map(|e| crate::verify_wiki_base(&ws_key, &id, &e.data));
+    if let Some(Err(e)) = &base_ok {
+        tracing::warn!(error = %e, "the blob's wiki base does not authenticate - not restored");
+    }
+    let plant = |path: &str| path != "wiki_base.bin" || matches!(base_ok, Some(Ok(())));
+
     // write the staging dir (dot-invisible to the Open scan); a stale
     // staging for the same id is a leftover crash artifact — sweep it
     let staging = root.join(format!(".import-{id_hex}"));
@@ -322,7 +340,7 @@ pub fn import_stage(
         for sub in ["keys", "log", "snapshots", "tmp"] {
             fs::create_dir_all(staging.join(sub))?;
         }
-        for entry in &archive.entries {
+        for entry in archive.entries.iter().filter(|e| plant(&e.path)) {
             let target = staging.join(&entry.path);
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)?;
@@ -356,7 +374,7 @@ pub fn import_stage(
 /// might try to smuggle in.
 fn allowed_entry(path: &str) -> bool {
     match path {
-        "manifest.toml" | "prefs.toml" | "chain.state" => true,
+        "manifest.toml" | "prefs.toml" | "chain.state" | "wiki_base.bin" => true,
         p => {
             if let Some(file) = p.strip_prefix("log/") {
                 // the per-segment key table of a compacted workspace travels
@@ -644,6 +662,95 @@ mod tests {
         assert!(crate::read_prefs(&dir).shared_files.is_empty(), "paths dropped");
     }
 
+    /// `make_ws` plus a folded wiki base written under the workspace's own
+    /// key, as a K6 cut leaves it.
+    fn make_ws_with_wiki_base(tmp: &Path, base: &[u8]) -> (PathBuf, PathBuf, Vec<u8>, String) {
+        let root = tmp.join("src-root");
+        let seed =
+            crate::seed_entropy(&crate::generate_seed_phrase().expect("gen")).expect("entropy");
+        let ws = crate::create_workspace(&root, &seed, &founded_genesis()).expect("create");
+        ws.write_chain(None, &[]).expect("chain.state");
+        ws.write_wiki_base(base).expect("wiki base");
+        let id = ws.manifest.workspace.id.clone();
+        let dir = ws.dir().to_path_buf();
+        drop(ws);
+        (root, dir, seed, id)
+    }
+
+    /// A restored workspace reads back the folded wiki base it was backed
+    /// up with (K6): after a cut it is the only copy of the shared memory
+    /// on the device, so the restore must carry it, not re-fetch it from
+    /// holders that may all be restoring too.
+    #[test]
+    fn a_restored_workspace_reads_its_backed_up_wiki_base() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (src_root, src_dir, seed, id) = make_ws_with_wiki_base(tmp.path(), b"the folded tree");
+        let blob = blob_of(&src_root, &src_dir, &ExportKey::passphrase(PASS));
+        let dest_root = tmp.path().join("dest-root");
+        std::fs::create_dir_all(&dest_root).expect("dest root");
+        let staging = import_stage(&dest_root, &blob, PASS).expect("stage");
+        let (sk, _pk) = crate::derive_identity_key(&seed, &id);
+        let dir = staging.commit(&dest_root, false, Some(&sk)).expect("commit");
+        let (opened, _loaded) = crate::open_workspace(&dir).expect("open imported");
+        assert_eq!(
+            opened.read_wiki_base().expect("readable"),
+            Some(b"the folded tree".to_vec()),
+            "the base survives the backup round-trip"
+        );
+    }
+
+    /// A `wiki_base.bin` that does not authenticate under the blob's own
+    /// workspace key (here: another workspace's) is dropped - never planted,
+    /// and never the reason the chain, log and keys fail to restore. The
+    /// honest exporter cannot produce such a blob (it checks too), so the
+    /// test re-forges a real backup with the foreign base swapped in.
+    #[test]
+    fn a_foreign_wiki_base_is_dropped_and_the_rest_restores() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let phrase = crate::generate_seed_phrase().expect("gen");
+        let seed = crate::seed_entropy(&phrase).expect("entropy");
+        let root = tmp.path().join("src-root");
+        let ws = crate::create_workspace(&root, &seed, &founded_genesis()).expect("create");
+        ws.write_chain(None, &[]).expect("chain.state");
+        ws.write_wiki_base(b"our own tree").expect("wiki base");
+        let id = ws.manifest.workspace.id.clone();
+        let dir = ws.dir().to_path_buf();
+        drop(ws);
+        let other = tmp.path().join("other");
+        std::fs::create_dir_all(&other).expect("other");
+        let (_o_root, o_dir, _o_seed, _o_id) = make_ws_with_wiki_base(&other, b"someone else's");
+        let foreign = std::fs::read(o_dir.join("wiki_base.bin")).expect("foreign base");
+
+        let honest = blob_of(&root, &dir, &ExportKey::Workspace);
+        let ws_key = crate::derive_workspace_key(&seed, &id);
+        let archive = crate::export::read_export(
+            &mut honest.as_slice(),
+            &ExportSecret::WorkspaceKey(ws_key),
+        )
+        .expect("decrypt the honest backup");
+        let entries: Vec<(&str, &[u8])> = archive
+            .entries
+            .iter()
+            .map(|e| {
+                let data: &[u8] = if e.path == "wiki_base.bin" { &foreign } else { &e.data };
+                (e.path.as_str(), data)
+            })
+            .collect();
+        assert!(entries.iter().any(|(p, _)| *p == "wiki_base.bin"), "the base was exported");
+        let meta = serde_json::to_value(&archive.meta).expect("meta json");
+        let blob = forge_blob(&id, &ws_key, &meta, &entries);
+
+        let dest_root = tmp.path().join("dest-root");
+        std::fs::create_dir_all(&dest_root).expect("dest root");
+        let staging = import_stage(&dest_root, &blob, &phrase).expect("the restore goes through");
+        assert!(!staging.dir.join("wiki_base.bin").exists(), "the foreign base is not planted");
+        let (sk, _pk) = crate::derive_identity_key(&seed, &id);
+        let restored = staging.commit(&dest_root, false, Some(&sk)).expect("commit");
+        let (opened, loaded) = crate::open_workspace(&restored).expect("open restored");
+        assert_eq!(loaded.tail.first().map(|e| e.seq), Some(1), "the log restored");
+        assert_eq!(opened.read_wiki_base().expect("readable"), None, "no base held");
+    }
+
     #[test]
     fn stage_and_commit_round_trip_into_a_fresh_root() {
         let tmp = tempfile::tempdir().expect("tmp");
@@ -808,6 +915,8 @@ mod tests {
         assert!(allowed_entry("log/keys.state"));
         assert!(!allowed_entry("log/keys.state.bak"), "only the table itself");
         assert!(allowed_entry("logo.png"));
+        assert!(allowed_entry("wiki_base.bin"));
+        assert!(!allowed_entry("log/wiki_base.bin"), "only at the root");
         for evil in [
             "transport.state",
             "keys/workspace.key",
@@ -946,26 +1055,10 @@ mod tests {
     /// (the duplicate reject fires before any manifest/genesis parse). One
     /// final chunk.
     fn forge_workspace_blob(entries: &[(&str, &[u8])]) -> (Vec<u8>, String) {
-        use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-        use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-
         let phrase = crate::generate_seed_phrase().expect("gen");
         let entropy = crate::seed_entropy(&phrase).expect("entropy");
         let id_hex = "ab".repeat(32);
-        let id = crate::id_bytes(&id_hex).expect("id");
         let ws_key = crate::derive_workspace_key(&entropy, &id_hex);
-
-        let header = crate::export::ExportHeader {
-            format: "molt-export-v1".to_string(),
-            version: 1,
-            workspace_id: id_hex.clone(),
-            key_mode: "workspace".to_string(),
-            kdf: None,
-            cipher: "xchacha20poly1305".to_string(),
-            chunk_bytes: 4096,
-            export_salt: "cd".repeat(32),
-        };
-        let header_bytes = serde_json::to_vec(&header).expect("header json");
 
         // meta: `files` must match the entry count, `seed=null` sidesteps the
         // hierarchy pin, `workspace_key` must be valid 32-byte hex
@@ -977,7 +1070,34 @@ mod tests {
             "seed": serde_json::Value::Null,
             "files": entries.len(),
         });
-        let meta_bytes = serde_json::to_vec(&meta).expect("meta json");
+        (forge_blob(&id_hex, &ws_key, &meta, entries), phrase)
+    }
+
+    /// Encrypt `meta` + `entries` as a workspace-mode `molt-export-v1` blob
+    /// for `id_hex` under `ws_key`, as ONE final chunk.
+    fn forge_blob(
+        id_hex: &str,
+        ws_key: &[u8; 32],
+        meta: &serde_json::Value,
+        entries: &[(&str, &[u8])],
+    ) -> Vec<u8> {
+        use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+        use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+
+        let id = crate::id_bytes(id_hex).expect("id");
+        let header = crate::export::ExportHeader {
+            format: "molt-export-v1".to_string(),
+            version: 1,
+            workspace_id: id_hex.to_string(),
+            key_mode: "workspace".to_string(),
+            kdf: None,
+            cipher: "xchacha20poly1305".to_string(),
+            chunk_bytes: crate::export::EXPORT_CHUNK_BYTES,
+            export_salt: "cd".repeat(32),
+        };
+        let header_bytes = serde_json::to_vec(&header).expect("header json");
+
+        let meta_bytes = serde_json::to_vec(meta).expect("meta json");
 
         let mut payload = u32::try_from(meta_bytes.len())
             .expect("meta len")
@@ -992,7 +1112,7 @@ mod tests {
         }
 
         // workspace-mode key schedule (mirrors export.rs's frozen HKDF tags)
-        let k_root = crate::hkdf32(&ws_key, "molt-export-backup-v1", &id);
+        let k_root = crate::hkdf32(ws_key, "molt-export-backup-v1", &id);
         let k_stream = crate::hkdf32(&k_root, "molt-export-stream-v1", &header_bytes);
         let cipher = XChaCha20Poly1305::new((&k_stream).into());
 
@@ -1014,6 +1134,6 @@ mod tests {
         blob.extend_from_slice(&nonce);
         blob.extend_from_slice(&u32::try_from(ct.len()).expect("ct len").to_le_bytes());
         blob.extend_from_slice(&ct);
-        (blob, phrase)
+        blob
     }
 }

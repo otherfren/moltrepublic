@@ -1393,9 +1393,9 @@ impl State {
             MoltError::Engine(format!("this workspace's chain is unreadable - {e}"))
         })?;
         // K6: the folded wiki base, if this holder keeps one. Unreadable is
-        // NOT an open refusal - the tree is a re-fetchable cache of
-        // threshold-signed content, unlike the chain, which is the trust
-        // root itself (§4.9.9)
+        // NOT an open refusal - the tree is threshold-signed content any
+        // holder can serve again, unlike the chain, which is the trust root
+        // itself (§4.9.9); exports carry it for when no holder is left
         let stored_wiki_base = opened.read_wiki_base().unwrap_or_else(|e| {
             tracing::warn!(error = %e, "the stored wiki base is unreadable - refetching");
             None

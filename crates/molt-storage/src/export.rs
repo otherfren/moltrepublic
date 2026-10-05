@@ -294,7 +294,8 @@ impl std::fmt::Debug for ExportArchive {
 ///
 /// The include/exclude table is design §3.2: manifest, prefs, every log
 /// segment (verbatim ciphertext — crash-consistent even while a writer
-/// appends), the newest snapshot, `chain.state`, the logo. `transport.state`
+/// appends), the newest snapshot, `chain.state`, the folded wiki base, the
+/// logo. `transport.state`
 /// (MLS ratchet + transport queue credentials) is **never** exported; unknown extra
 /// files are skipped and named in the outcome. Blocking (Argon2 + I/O) —
 /// call off-actor only.
@@ -365,7 +366,33 @@ fn export_dir_impl(
         }
     }
 
-    let (files, skipped) = collect_entries(ws_dir)?;
+    let (mut files, mut skipped) = collect_entries(ws_dir)?;
+    // the folded wiki base rides only when it authenticates: a rotted copy
+    // must cost the base (re-fetchable while a holder lives), never the
+    // whole backup - an import that met it would refuse everything else
+    // too. Read eagerly, so the checked bytes are the shipped bytes.
+    if let Some(at) = files.iter().position(|(rel, _)| rel == "wiki_base.bin") {
+        let (rel, src) = files.remove(at);
+        let checked = match &src {
+            ExportSource::File(path) => {
+                crate::read_capped(path, crate::READ_CAP_WIKI_BASE, "wiki_base.bin")
+                    .map_err(StorageError::from)
+            }
+            ExportSource::Bytes(bytes) => Ok(bytes.clone()),
+        }
+        .and_then(|data| crate::verify_wiki_base(&ws_key, &id, &data).map(|()| data));
+        match checked {
+            Ok(data) => {
+                files.push((rel, ExportSource::Bytes(data)));
+                files.sort_by(|a, b| a.0.cmp(&b.0));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "the wiki base does not authenticate - left out of the export");
+                skipped.push(rel);
+                skipped.sort();
+            }
+        }
+    }
 
     let kdf = match key {
         ExportKey::Passphrase(_) => {
@@ -522,7 +549,9 @@ fn collect_entries(
         let path = entry.path();
         let is_dir = entry.file_type()?.is_dir();
         match name.as_str() {
-            "manifest.toml" | "prefs.toml" | "chain.state" if !is_dir => {
+            // `wiki_base.bin`: after a K6 cut the only local copy of the
+            // shared memory (the chain keeps just its hash)
+            "manifest.toml" | "prefs.toml" | "chain.state" | "wiki_base.bin" if !is_dir => {
                 files.push((name, ExportSource::File(path)));
             }
             // §3.3 hard exclusion + runtime scratch
@@ -1040,6 +1069,75 @@ mod tests {
             .expect("decrypt");
         let e = entry(&a, "log/keys.state").expect("the key table travels");
         assert_eq!(e.data, b"a key table", "byte-identical");
+    }
+
+    /// **A folded wiki base travels with the backup** (K6). After a cut the
+    /// patch history is folded away and the chain keeps only a hash, so
+    /// `wiki_base.bin` is the one local copy of the shared memory. A backup
+    /// without it restores a wiki that exists only as a commitment - and
+    /// when every holder restores from backup, nobody can serve it.
+    #[test]
+    fn a_folded_wiki_base_travels_with_the_backup() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("root");
+        let seed =
+            crate::seed_entropy(&crate::generate_seed_phrase().expect("gen")).expect("entropy");
+        let ws = crate::create_workspace(&root, &seed, &founded()).expect("create");
+        ws.write_chain(None, &[]).expect("chain.state");
+        ws.write_wiki_base(b"the folded tree").expect("wiki base");
+        let dir = ws.dir().to_path_buf();
+        drop(ws);
+        let mut blob = Vec::new();
+        let outcome =
+            export_dir(&root, &dir, &ExportKey::passphrase(PASS), &mut blob).expect("export");
+        assert!(
+            !outcome.skipped.iter().any(|s| s == "wiki_base.bin"),
+            "the wiki base is not an unknown file: {:?}",
+            outcome.skipped
+        );
+        let a = read_export(&mut blob.as_slice(), &ExportSecret::passphrase(PASS))
+            .expect("decrypt");
+        let e = entry(&a, "wiki_base.bin").expect("the wiki base travels");
+        assert_eq!(
+            e.data,
+            fs::read(dir.join("wiki_base.bin")).expect("disk"),
+            "byte-identical"
+        );
+    }
+
+    /// A wiki base that rotted on disk is left out and NAMED - it must not
+    /// poison the backup: an import meeting it would refuse the chain, the
+    /// log and the keys along with it, and a rotating S3 retention would
+    /// push the last good copies out.
+    #[test]
+    fn a_damaged_wiki_base_is_named_and_the_rest_still_backs_up() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("root");
+        let seed =
+            crate::seed_entropy(&crate::generate_seed_phrase().expect("gen")).expect("entropy");
+        let ws = crate::create_workspace(&root, &seed, &founded()).expect("create");
+        ws.write_chain(None, &[]).expect("chain.state");
+        ws.write_wiki_base(b"the folded tree").expect("wiki base");
+        let dir = ws.dir().to_path_buf();
+        drop(ws);
+        let path = dir.join("wiki_base.bin");
+        let mut rotted = fs::read(&path).expect("base");
+        let last = rotted.len() - 1;
+        rotted[last] ^= 0x01; // flip one bit of the final AEAD tag
+        fs::write(&path, &rotted).expect("rot");
+
+        let mut blob = Vec::new();
+        let outcome =
+            export_dir(&root, &dir, &ExportKey::passphrase(PASS), &mut blob).expect("export");
+        assert!(
+            outcome.skipped.iter().any(|s| s == "wiki_base.bin"),
+            "the left-out base is named: {:?}",
+            outcome.skipped
+        );
+        let a = read_export(&mut blob.as_slice(), &ExportSecret::passphrase(PASS))
+            .expect("decrypt");
+        assert!(entry(&a, "wiki_base.bin").is_none(), "the rotted base does not travel");
+        assert!(entry(&a, "chain.state").is_some(), "everything else still does");
     }
 
     /// Round-trip keystone (storage half): everything the include table

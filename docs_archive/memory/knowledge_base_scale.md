@@ -677,6 +677,7 @@ covers proposals only).
 | Chain adopted, tree not fetched yet | base-pending, progress shown, no wiki reads answered empty |
 | Fetch never completes | never fails, never times out: a quiet persistent state, plus the one line that unblocks it - another member holding the tree must be online |
 | No dialable relay | a named republic-level condition, not silence |
+| Every seat restored from backup after a cut | the export carries `wiki_base.bin` (since 2026-10-05; it was skipped before, which left such a republic base-pending forever) - `backup_restore_design.md` §3.2 |
 | Two treeless nodes fetching from each other | "no member online holds the shared memory base" - the holder gossip already carries what is needed |
 | Local tree fails its hash | delete the store, re-enter base-pending, notice. Deliberately NOT a refused workspace open: the chain is the trust root and a damaged one is evidence, the tree is a re-fetchable cache of threshold-signed content |
 

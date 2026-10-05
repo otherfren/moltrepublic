@@ -1657,8 +1657,10 @@ impl OpenedWorkspace {
     /// reader can check what it loaded against the chain and delete it if
     /// it does not match. Written as consecutive frames because a knowledge
     /// base outgrows the single-frame ceiling every other state file
-    /// respects. NOT part of an export: it is a re-fetchable cache, and a
-    /// backup should not carry the whole wiki twice.
+    /// respects. Part of every export: after a cut the folded history is
+    /// gone and the chain keeps only the hash, so this file is the one local
+    /// copy of the shared memory - re-fetchable only while some holder
+    /// still has it.
     pub fn write_wiki_base(&self, bytes: &[u8]) -> Result<(), StorageError> {
         let key = wiki_base_key(&self.key, &self.id);
         let chunk = WIKI_BASE_CHUNK;
@@ -1683,24 +1685,7 @@ impl OpenedWorkspace {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(StorageError::Corrupt(format!("reading wiki_base.bin: {e}"))),
         };
-        let key = wiki_base_key(&self.key, &self.id);
-        let (frames, torn) = split_frames(&data);
-        if torn.is_some() {
-            return Err(StorageError::Corrupt("wiki_base.bin is torn".to_string()));
-        }
-        let mut out = Vec::with_capacity(data.len());
-        for (i, frame) in frames.iter().enumerate() {
-            let seq = u64::try_from(i).unwrap_or(u64::MAX);
-            out.extend_from_slice(&decrypt_frame(
-                &key,
-                &self.id,
-                WIKI_BASE_SEGMENT,
-                seq,
-                frame.nonce,
-                frame.ciphertext,
-            )?);
-        }
-        Ok(Some(out))
+        decode_wiki_base(&self.key, &self.id, &data).map(Some)
     }
 
     /// One piece of the stored wiki base, decrypted: what a holder
@@ -1842,6 +1827,48 @@ pub(crate) enum ChainStateFault {
     Auth(StorageError),
     /// The plaintext is no chain-state layout this build knows.
     Decode(serde_json::Error),
+}
+
+/// Decrypt one `wiki_base.bin` image (`data` = the file's bytes, or a blob
+/// entry's) into the canonical tree bytes — the ONE decoder of its framing.
+pub(crate) fn decode_wiki_base(
+    ws_key: &[u8; 32],
+    id: &[u8; 32],
+    data: &[u8],
+) -> Result<Vec<u8>, StorageError> {
+    let mut out = Vec::with_capacity(data.len());
+    for_each_wiki_base_frame(ws_key, id, data, |plain| out.extend_from_slice(&plain))?;
+    Ok(out)
+}
+
+/// Check that every frame of a `wiki_base.bin` image authenticates under
+/// this workspace's key, without holding the decrypted tree. It does NOT
+/// check the chain commitment (a base cut short at a frame boundary still
+/// passes); the open does that, as for any held base.
+pub(crate) fn verify_wiki_base(
+    ws_key: &[u8; 32],
+    id: &[u8; 32],
+    data: &[u8],
+) -> Result<(), StorageError> {
+    for_each_wiki_base_frame(ws_key, id, data, drop)
+}
+
+fn for_each_wiki_base_frame(
+    ws_key: &[u8; 32],
+    id: &[u8; 32],
+    data: &[u8],
+    mut sink: impl FnMut(Vec<u8>),
+) -> Result<(), StorageError> {
+    let key = wiki_base_key(ws_key, id);
+    let (frames, torn) = split_frames(data);
+    if torn.is_some() {
+        return Err(StorageError::Corrupt("wiki_base.bin is torn".to_string()));
+    }
+    for (i, frame) in frames.iter().enumerate() {
+        let seq = u64::try_from(i).unwrap_or(u64::MAX);
+        sink(decrypt_frame(&key, id, WIKI_BASE_SEGMENT, seq, frame.nonce, frame.ciphertext)?);
+    }
+    Ok(())
 }
 
 /// Decrypt + parse one `chain.state` image (`data` = the file's bytes, or

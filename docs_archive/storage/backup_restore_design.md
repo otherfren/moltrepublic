@@ -106,6 +106,7 @@ download + the same import path.
 | `snapshots/` — **newest valid snapshot only** | **yes** | speeds the first open after import; snapshots are droppable optimizations, so one is enough (smaller blob) |
 | `chain.state` | **yes, verbatim ciphertext** | the threshold-signed chain — the part of the backup that is *verifiable*; import decrypts it (chain sub-key is derived from `workspace_key`) and hard-verifies (§4.2) |
 | `logo.<ext>` | **yes** | applied org state materialized as a file |
+| `wiki_base.bin` | **yes** (added 2026-10-05) | the folded wiki tree a K6 cut leaves (`knowledge_base_scale.md` §4.9): below the cut the chain keeps only its hash, so this is the one local copy of the shared memory. Left out, a republic whose every seat restores from backup holds the commitment and nobody holds the content. Import checks every frame authenticates under the blob's workspace key; the open checks the commitment |
 | `keys/workspace.key` | **no** | sealed to the *exporting* device's key — dead weight anywhere else. The key itself travels inside the encrypted payload (§3.5) |
 | `keys/seed.sealed` | **no** (the *entropy* may travel in the payload, §3.5) | same reason |
 | `transport.state` | **NO — hard exclusion** | §3.3 |
@@ -330,7 +331,8 @@ import is **stage → verify → commit**:
    polite refusal, *before* any KDF work); derive `k_stream` (Argon2id caps
    enforced, §3.4); stream-decrypt chunks; validate entry paths against an
    **allowlist** (`manifest.toml`, `prefs.toml`, `chain.state`,
-   `log/NNNNNN.mlog`, `snapshots/NNNNNNNNNNNN.msnap`, `logo.<ext>` — reject
+   `wiki_base.bin`, `log/NNNNNN.mlog`, `snapshots/NNNNNNNNNNNN.msnap`,
+   `logo.<ext>` — reject
    anything else, which subsumes traversal attacks); write everything into
    a dot-staging dir `root/.import-<id>/` (invisible to the scan);
    consistency-check the key hierarchy (§3.6); decrypt the genesis frame
