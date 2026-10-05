@@ -3,7 +3,7 @@
 
 use molt_core::vault::{SecretText, VaultDeposit};
 
-use crate::hex_array;
+use crate::deposit::commitments_of;
 use crate::payload::open_payload;
 use crate::share::{combine, verify_share, Share};
 
@@ -39,6 +39,8 @@ pub struct ReadFault {
     pub need: u8,
     /// Enough shares, but the payload did not open.
     pub payload: bool,
+    /// The record's commitments do not parse; no seat is blamed.
+    pub record: bool,
 }
 
 /// Check each share against the commitments, combine any `m` valid ones,
@@ -52,15 +54,19 @@ pub fn read(
     shares: &[SeatShare],
     payload_file: &[u8],
 ) -> Result<Opened, ReadFault> {
-    let commitments: Vec<[u8; 32]> = dep
-        .commitments
-        .iter()
-        .filter_map(|c| hex_array::<32>(c))
-        .collect();
+    let Ok(commitments) = commitments_of(dep) else {
+        return Err(ReadFault {
+            bad_seats: Vec::new(),
+            have: 0,
+            need: dep.m,
+            payload: false,
+            record: true,
+        });
+    };
     let mut bad_seats = Vec::new();
     let mut good: Vec<(u8, Share)> = Vec::new();
     for s in shares {
-        if commitments.len() == dep.commitments.len() && verify_share(&commitments, s.x, &s.share) {
+        if verify_share(&commitments, s.x, &s.share) {
             if !good.iter().any(|(x, _)| *x == s.x) {
                 good.push((s.x, s.share.clone()));
             }
@@ -74,6 +80,7 @@ pub fn read(
         have,
         need: dep.m,
         payload,
+        record: false,
     };
     let s = combine(dep.m, &good).map_err(|_| fault(false))?;
     if dep.commitments.first() != Some(&hex::encode(s.commitment())) {

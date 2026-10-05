@@ -45,7 +45,7 @@ pub enum ShareFault {
 
 /// `(name, x, vault_pk)` of every holder: every seat but the depositor,
 /// genesis order, x = 1-based genesis position (plan 1.3.5).
-fn holders_of<'c>(
+pub(crate) fn holders_of<'c>(
     ctx: &'c VaultCtx,
     depositor: &str,
 ) -> Result<Vec<(&'c str, u8, &'c str)>, VaultError> {
@@ -76,7 +76,7 @@ fn eph(vault_seed: &[u8; 32], secret_id: &str, seat: &str) -> Zeroizing<[u8; 32]
     hkdf_expand::<32>(vault_seed, &eph_info(secret_id, seat))
 }
 
-fn commitments_of(dep: &VaultDeposit) -> Result<Vec<[u8; 32]>, VaultError> {
+pub(crate) fn commitments_of(dep: &VaultDeposit) -> Result<Vec<[u8; 32]>, VaultError> {
     dep.commitments
         .iter()
         .map(|c| hex_array::<32>(c).ok_or(VaultError::Shape("commitment")))
@@ -227,17 +227,24 @@ pub fn verify_deposit_sig(
     .map_err(|_| VaultError::Signature)
 }
 
-/// A holder opens its share and checks it against the commitments.
+/// A holder opens its share and checks it against the commitments at
+/// its genesis x, taken from `ctx`.
 ///
 /// # Errors
 /// The [`ShareFault`] that stopped it.
 pub fn check_my_share(
     dep: &VaultDeposit,
     republic_id: &str,
+    ctx: &VaultCtx,
     my_name: &str,
-    my_x: u8,
     vault_sk: &VaultSecretKey,
 ) -> Result<Share, ShareFault> {
+    let my_x = holders_of(ctx, &dep.depositor)
+        .map_err(|_| ShareFault::NotAHolder)?
+        .iter()
+        .find(|(n, _, _)| *n == my_name)
+        .map(|(_, x, _)| *x)
+        .ok_or(ShareFault::NotAHolder)?;
     let i = dep
         .holders
         .iter()

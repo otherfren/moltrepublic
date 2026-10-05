@@ -106,7 +106,7 @@ fn holder_shares(seats: &[Seat], ctx: &VaultCtx, dep: &VaultDeposit) -> Vec<Seat
             let seat = seats.iter().find(|s| s.name == *h).expect("a seat");
             let x = x_of(ctx, h);
             let share =
-                check_my_share(dep, RID, h, x, &seat.vault_sk).expect("an honest share checks");
+                check_my_share(dep, RID, ctx, h, &seat.vault_sk).expect("an honest share checks");
             SeatShare {
                 seat: h.clone(),
                 x,
@@ -132,6 +132,48 @@ fn vault_key_differs_per_founding_anchor_and_is_stable() {
     assert_ne!(*derive_vault_seed(&entropy, "npk-1", "ipk2"), *one);
     // the derived key is canonical
     assert_eq!(canonical_vault_pk(&pk_one), Ok(pk_one.clone()));
+}
+
+#[test]
+fn key_seal_and_deposit_derivations_are_pinned() {
+    let seed = derive_vault_seed(&[9; 32], "npk-1", "ipk");
+    assert_eq!(
+        hex::encode(*seed),
+        "ac3565819df68ad5aa677b00963766eaa48732de813e44be00a2d39fa4bfd859"
+    );
+    let (_, pk) = vault_keypair(&seed);
+    assert_eq!(
+        pk,
+        "3d675af49891d2e4be075d30fc8c1c6c60cd8ee1c7f1184484c360a2d5229345"
+    );
+    let sealed = seal_share(&pk, &Share::from_bytes([1; 32]), b"aad", &[3; 32]).expect("seals");
+    assert_eq!(hex::encode(sealed), "90ab790ecbf0704232ffe9436faeccc913b66a60e99c688a40bba4d5e2e614509acb07e2e860a005ba2ae2acd3cfe9246c41a96ba69005caa13bfd618c4718473f83d46f97d4bc418b5fcb48b9f3b2ce");
+    // the deal_seed / eph / secret chain end to end
+    let s = seats(4);
+    let c = ctx(&s, 2);
+    let (dep, _) = deposit_by(&s, &c, 0, &text("one"), &mut rng(13));
+    assert_eq!(dep.nonce, "48942ab2b0b2d4a671bbb5a579b3dde8");
+    assert_eq!(
+        dep.commitments,
+        [
+            "f80c96e8e2452db937dd1d4ef1ec6122486e0305b60c146be493af95566a5b39",
+            "e4a7384722693ea986bbb52e8f3fa5cc9c1c3ec2900847ea01d5fa997f46c92d"
+        ]
+    );
+    assert_eq!(dep.enc_share[0], "64d9e85d6c6af6063808456dcf8dc26e0bb54e34d66478a5b720b3eee91b483a0808e1f3171d8ebcc54ab164108f33905e6e96b462caa76a7e68f35ffc37ed7dc96fab6f5d3c85cc0b28c589c15bc0bb");
+    assert_eq!(
+        dep.payload.hash,
+        "77ed454c1559f1ee86e5faa94d3949910a6061a2d92856884c508b29d845c8d3"
+    );
+    let (share, ikm) = rederive_share(&dep, RID, &c, &s[0].seed, "b").expect("re-deals");
+    assert_eq!(
+        hex::encode(share.as_bytes()),
+        "31b5ff6791ebe71b07fcb05082e390cf3382fd5e10873d0fc17685760f827701"
+    );
+    assert_eq!(
+        hex::encode(*ikm),
+        "4e6422d3b50b9c0524f5441678d910a168df815dba1b80dbd0a9e41189f13d4e"
+    );
 }
 
 /// Counts every draw hpke makes.
@@ -346,30 +388,43 @@ fn a_tampered_share_fails_feldman_and_names_its_seat() {
 }
 
 #[test]
+fn a_malformed_commitment_blames_no_seat() {
+    let s = seats(4);
+    let c = ctx(&s, 2);
+    let (dep, file) = deposit_by(&s, &c, 0, &text("one"), &mut rng(12));
+    let shares = holder_shares(&s, &c, &dep);
+    let mut broken = dep.clone();
+    broken.commitments[1] = "zz".repeat(32);
+    let fault = read(&broken, RID, &shares, &file).expect_err("record fault");
+    assert!(fault.bad_seats.is_empty());
+    assert!(fault.record);
+    assert_eq!((fault.have, fault.payload), (0, false));
+}
+
+#[test]
 fn complaint_outcomes_name_the_right_party() {
     let s = seats(4);
     let c = ctx(&s, 2);
     let (dep, _) = deposit_by(&s, &c, 0, &text("one"), &mut rng(3));
     let holder = "c";
-    let hx = x_of(&c, holder);
     let hpk = &s[2].vault_pk;
     // honest record, honest reveal: the complaint was false
     let (share, ikm) = rederive_share(&dep, RID, &c, &s[0].seed, holder).expect("re-deals");
     assert_eq!(
-        check_my_share(&dep, RID, holder, hx, &s[2].vault_sk).expect("checks"),
+        check_my_share(&dep, RID, &c, holder, &s[2].vault_sk).expect("checks"),
         share
     );
     assert_eq!(
-        decide(&dep, RID, holder, hpk, hx, &share, &ikm),
+        decide(&dep, RID, &c, holder, &share, &ikm),
         Ok(VaultRevealOutcome::FalseComplaint)
     );
     // honest record, lying reveal (another share, or another ikm): a lie
     assert_eq!(
-        decide(&dep, RID, holder, hpk, hx, &tampered(&share), &ikm),
+        decide(&dep, RID, &c, holder, &tampered(&share), &ikm),
         Ok(VaultRevealOutcome::Lie)
     );
     assert_eq!(
-        decide(&dep, RID, holder, hpk, hx, &share, &[0; 32]),
+        decide(&dep, RID, &c, holder, &share, &[0; 32]),
         Ok(VaultRevealOutcome::Lie)
     );
     // a record that dealt c a bad share, revealed truthfully: bad share
@@ -384,21 +439,36 @@ fn complaint_outcomes_name_the_right_party() {
     bad.enc_share[i] =
         hex::encode(seal_share(hpk, &wrong, &share_aad(&sid, holder), &ikm).expect("seals"));
     assert_eq!(
-        check_my_share(&bad, RID, holder, hx, &s[2].vault_sk),
+        check_my_share(&bad, RID, &c, holder, &s[2].vault_sk),
         Err(ShareFault::FailsFeldman)
     );
     assert_eq!(
-        decide(&bad, RID, holder, hpk, hx, &wrong, &ikm),
+        decide(&bad, RID, &c, holder, &wrong, &ikm),
         Ok(VaultRevealOutcome::BadShare)
+    );
+    // x and the key come from the founding context, never the caller
+    assert_eq!(
+        decide(&dep, RID, &c, "z", &share, &ikm),
+        Err(VaultError::NotASeat("z".to_string()))
+    );
+    assert_eq!(
+        decide(&dep, RID, &c, "a", &share, &ikm),
+        Err(VaultError::NotASeat("a".to_string()))
+    );
+    let mut reordered = dep.clone();
+    reordered.holders.swap(0, 1);
+    assert_eq!(
+        decide(&reordered, RID, &c, holder, &share, &ikm),
+        Err(VaultError::Shape("holders"))
     );
     // the depositor itself holds no share
     assert_eq!(
-        check_my_share(&dep, RID, "a", 1, &s[0].vault_sk),
+        check_my_share(&dep, RID, &c, "a", &s[0].vault_sk),
         Err(ShareFault::NotAHolder)
     );
     // a key that is not the holder's does not open its share
     assert_eq!(
-        check_my_share(&dep, RID, holder, hx, &s[3].vault_sk),
+        check_my_share(&dep, RID, &c, holder, &s[3].vault_sk),
         Err(ShareFault::DoesNotOpen)
     );
 }
@@ -686,7 +756,17 @@ fn canonical_vault_pk_rejects_uppercase_short_and_low_order() {
     let mut p_minus_1 = [0xffu8; 32];
     p_minus_1[0] = 0xec;
     p_minus_1[31] = 0x7f;
-    for low in [le(&[0], 0), le(&[1], 0), hex::encode(p_minus_1)] {
+    // the two order-8 points, and their u + p encodings (top bit set)
+    let order_8 = [
+        "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+        "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+        "cdeb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b880",
+        "4c9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f11d7",
+    ];
+    for low in [le(&[0], 0), le(&[1], 0), hex::encode(p_minus_1)]
+        .into_iter()
+        .chain(order_8.map(str::to_string))
+    {
         assert_eq!(canonical_vault_pk(&low), Err(VaultError::Key), "{low}");
     }
     // aliases: the top bit set on a valid key, and u + p of a valid u
