@@ -7,9 +7,11 @@ imply. Rev 3 added D11–D13 after a second review the same day
 (founding-only vault, keys in the roster, deposit is a vote, m ≤ n − 2)
 and D14–D16. Rev 4 folds in the build plan's deviations (plan §1.3,
 listed in §12) and D17 (plan Q1, user-confirmed default).
-Built so far: the contract types (stage S0) and the crypto core with
+Built so far: the contract types (stage S0), the crypto core with
 every byte layout of §5-§9 (stage S1: `crates/molt-vault`,
-`molt_core::vault`). Nothing is wired into the engine yet.
+`molt_core::vault`) and the founding of §3/§6 (stage S2: roster-v6, the
+bounds, the lockout, the walked chain's vault context, the persisted
+seed). Deposits, grants and the fold are not wired yet.
 Rev 1 (2026-08-16) is superseded: its primitives stand, its framing
 ("succession insurance" with an implied depositor protection) and its
 storage story (bundles inline in the chain) do not. §12 lists what
