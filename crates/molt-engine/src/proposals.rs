@@ -457,6 +457,27 @@ pub(crate) fn change_summary(eff: &OrgEffective, p: &ProposalRecord) -> (String,
     (current, proposed)
 }
 
+/// A `set_features` naming the vault; [`State::adds_vault_feature`] is
+/// the D11 door rule built on it.
+fn sets_vault_feature(surface: Surface, payload: &Value) -> bool {
+    surface == Surface::Organization
+        && payload.get("op").and_then(Value::as_str) == Some("set_features")
+        && payload
+            .get("value")
+            .and_then(Value::as_str)
+            .is_some_and(|v| v.split_whitespace().any(|k| k == crate::vault::VAULT))
+}
+
+impl State {
+    /// D11: a NEW proposal (propose, approve, the wire) cannot ADD the
+    /// vault; naming an already effective one (a v5 mock) is no addition.
+    /// Historic blocks keep folding.
+    pub(crate) fn adds_vault_feature(&self, surface: Surface, payload: &Value) -> bool {
+        sets_vault_feature(surface, payload)
+            && !self.effective_features().iter().any(|f| f == crate::vault::VAULT)
+    }
+}
+
 /// Refuse an Organization edit whose value could never become honest
 /// effective state: an applied entry is forever (the log is append-only),
 /// so a blank name or an unparseable retention window must not get in.
@@ -647,6 +668,9 @@ impl State {
             }
         }
         validate_org_payload(surface, &payload)?;
+        if self.adds_vault_feature(surface, &payload) {
+            return Err(MoltError::Vault(molt_core::vault::VaultRefusal::FoundingOnly));
+        }
         if surface == Surface::Files {
             self.prepare_files_proposal(&mut payload)?;
         }
@@ -708,7 +732,9 @@ impl State {
                 .collect();
             let current = self.effective_features();
             for f in &current {
-                let known = Surface::parse(f).is_some_and(Surface::is_charter_feature);
+                // the vault is never proposed (D11); the union keeps it
+                let known = Surface::parse(f).is_some_and(Surface::is_charter_feature)
+                    && f != crate::vault::VAULT;
                 if known && !proposed.contains(f.as_str()) {
                     return Err(MoltError::BadPayload(format!("{f}: cannot be disabled")));
                 }
@@ -860,6 +886,9 @@ impl State {
                 // (The nav hides such a surface, so a GUI member could not even
                 // SEE the card it would be co-signing.)
                 self.require_feature(p.surface)?;
+                if self.adds_vault_feature(p.surface, &p.payload) {
+                    return Err(MoltError::Vault(molt_core::vault::VaultRefusal::FoundingOnly));
+                }
                 // a Files vote is checked against THIS seat's own view of the
                 // share - the payload arrived over the wire with no such check
                 if p.surface == Surface::Files {

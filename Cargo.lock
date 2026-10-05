@@ -4958,6 +4958,7 @@ dependencies = [
  "molt-core",
  "molt-net",
  "molt-storage",
+ "molt-vault",
  "nostr-relay-builder",
  "pulldown-cmark",
  "rustix 1.1.4",

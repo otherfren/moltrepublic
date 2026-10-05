@@ -2540,6 +2540,12 @@ pub fn put_count(out: &mut Vec<u8>, n: usize) {
 /// included), so every live v4 republic's genesis keeps verifying; `Some`
 /// emits the v5 tag plus the feature run as the final field. `Some([])` is
 /// a real, distinct value — a founder that deselected everything.
+///
+/// **v6 binds each seat's VAULT KEY** (`docs/vault/vault_threshold_disclosure.md`
+/// §6) as the fourth field of its member run, conditional on presence like
+/// v5: a table with no `vault_pk` emits v5 (or v4) bytes unchanged. The
+/// verifiers require every seat keyed and `features` present; a v6 table
+/// without features would write an empty feature run.
 pub fn roster_canonical_bytes(
     ws_id: &str,
     rule_m: u8,
@@ -2550,7 +2556,10 @@ pub fn roster_canonical_bytes(
     features: Option<&[String]>,
 ) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(if features.is_some() {
+    let keyed = members.iter().any(|m| !m.vault_pk.is_empty());
+    out.extend_from_slice(if keyed {
+        b"molt-roster-v6\0".as_slice()
+    } else if features.is_some() {
         b"molt-roster-v5\0".as_slice()
     } else {
         b"molt-roster-v4\0".as_slice()
@@ -2576,6 +2585,9 @@ pub fn roster_canonical_bytes(
         // that could collide two different rosters onto one byte form
         let npk = m.nostr_pk.as_bytes();
         put_bytes(&mut out, npk);
+        if keyed {
+            put_bytes(&mut out, m.vault_pk.as_bytes());
+        }
     }
     // the deliberated charter (DAO name is already folded into the republic id
     // that salts ws_id; the free-text agenda is bound here) — every member's
@@ -2593,7 +2605,7 @@ pub fn roster_canonical_bytes(
     // v5: the ratified feature set — entry-COUNTED then each key
     // length-prefixed, like the relay run. Written only when present, so a
     // legacy (None) table stays byte-identical to v4.
-    if let Some(f) = features {
+    if let Some(f) = features.or(if keyed { Some(&[]) } else { None }) {
         put_count(&mut out, f.len());
         for k in f {
             let b = k.as_bytes();
@@ -8418,6 +8430,126 @@ mod tests {
         let v5 = roster_canonical_bytes("f00", 1, 1, &table[..1], "charter", &[], Some(&features));
         assert!(v5.starts_with(b"molt-roster-v5\0"));
         assert_eq!(v5.len(), 15 + 7 + 2 + 4 + 7 + 68 + 68 + 11 + 4 + 4 + 10 + 10);
+    }
+
+    fn keyed_table() -> Vec<MemberIdentity> {
+        vec![
+            MemberIdentity {
+                member: "a".to_string(),
+                identity_pk: "aa".repeat(32),
+                nostr_pk: "cc".repeat(32),
+                vault_pk: "ee".repeat(32),
+            },
+            MemberIdentity {
+                member: "b".to_string(),
+                identity_pk: "bb".repeat(32),
+                nostr_pk: "dd".repeat(32),
+                vault_pk: "ff".repeat(32),
+            },
+        ]
+    }
+
+    /// BYTE-IDENTITY PIN - `molt-roster-v6`: v5 plus each seat's `vault_pk`
+    /// as the fourth field of its member run (vault spec §6).
+    #[test]
+    fn roster_v6_byte_pin() {
+        let table = keyed_table();
+        let features = vec!["vault".to_string()];
+        let bytes = roster_canonical_bytes("f00", 2, 4, &table, "charter", &[], Some(&features));
+        let put = |out: &mut Vec<u8>, b: &[u8]| {
+            out.extend_from_slice(&u32::try_from(b.len()).expect("small").to_le_bytes());
+            out.extend_from_slice(b);
+        };
+        let mut want = Vec::new();
+        want.extend_from_slice(b"molt-roster-v6\0");
+        put(&mut want, b"f00");
+        want.push(2);
+        want.push(4);
+        want.extend_from_slice(&2u32.to_le_bytes());
+        for m in &table {
+            put(&mut want, m.member.as_bytes());
+            put(&mut want, m.identity_pk.as_bytes());
+            put(&mut want, m.nostr_pk.as_bytes());
+            put(&mut want, m.vault_pk.as_bytes());
+        }
+        put(&mut want, b"charter");
+        want.extend_from_slice(&0u32.to_le_bytes());
+        want.extend_from_slice(&1u32.to_le_bytes());
+        put(&mut want, b"vault");
+        assert_eq!(bytes, want, "independently recomputed v6 layout");
+        use sha2::Digest;
+        assert_eq!(
+            hex::encode(sha2::Sha256::digest(&bytes)),
+            "e0d3bd9b5f8e9c89f439c2a5b662d9b9edd5d1e9eb96dec2e4b78e1a8630fa3f"
+        );
+    }
+
+    /// The vault key is its own length-prefixed field: moving bytes
+    /// between it and a neighbour changes the table, and a changed key
+    /// changes what every member signs.
+    #[test]
+    fn roster_v6_separates_the_vault_field() {
+        let features = vec!["vault".to_string()];
+        let table = keyed_table();
+        let bytes = roster_canonical_bytes("f00", 2, 4, &table, "charter", &[], Some(&features));
+        let mut shifted = table.clone();
+        shifted[0].nostr_pk = format!("{}e", "cc".repeat(32));
+        shifted[0].vault_pk = format!("{}e", "ee".repeat(31));
+        assert_eq!(
+            format!("{}{}", shifted[0].nostr_pk, shifted[0].vault_pk),
+            format!("{}{}", table[0].nostr_pk, table[0].vault_pk),
+            "the same bytes, split differently"
+        );
+        assert_ne!(
+            bytes,
+            roster_canonical_bytes("f00", 2, 4, &shifted, "charter", &[], Some(&features))
+        );
+        let mut swapped = table.clone();
+        swapped[1].vault_pk = "01".repeat(32);
+        assert_ne!(
+            bytes,
+            roster_canonical_bytes("f00", 2, 4, &swapped, "charter", &[], Some(&features))
+        );
+        // one key present already bumps the tag
+        let mut one = table;
+        one[1].vault_pk = String::new();
+        assert!(roster_canonical_bytes("f00", 2, 4, &one, "charter", &[], Some(&features))
+            .starts_with(b"molt-roster-v6\0"));
+    }
+
+    /// A table without vault keys stays v5 (and v4) byte-identically, even
+    /// when the feature set names the vault (the live mock republics).
+    #[test]
+    fn vaultless_roster_stays_v5_byte_identical() {
+        let mut table = keyed_table();
+        for m in &mut table {
+            m.vault_pk = String::new();
+        }
+        let features = vec!["vault".to_string()];
+        let bytes = roster_canonical_bytes("f00", 2, 4, &table, "charter", &[], Some(&features));
+        assert!(bytes.starts_with(b"molt-roster-v5\0"));
+        let put = |out: &mut Vec<u8>, b: &[u8]| {
+            out.extend_from_slice(&u32::try_from(b.len()).expect("small").to_le_bytes());
+            out.extend_from_slice(b);
+        };
+        let mut want = Vec::new();
+        want.extend_from_slice(b"molt-roster-v5\0");
+        put(&mut want, b"f00");
+        want.push(2);
+        want.push(4);
+        want.extend_from_slice(&2u32.to_le_bytes());
+        for m in &table {
+            put(&mut want, m.member.as_bytes());
+            put(&mut want, m.identity_pk.as_bytes());
+            put(&mut want, m.nostr_pk.as_bytes());
+        }
+        put(&mut want, b"charter");
+        want.extend_from_slice(&0u32.to_le_bytes());
+        want.extend_from_slice(&1u32.to_le_bytes());
+        put(&mut want, b"vault");
+        assert_eq!(bytes, want);
+        assert!(roster_canonical_bytes("f00", 2, 4, &table, "charter", &[], None)
+            .starts_with(b"molt-roster-v4\0"));
     }
 
     /// Shared Files is the seventh surface and a CORE one: never a feature

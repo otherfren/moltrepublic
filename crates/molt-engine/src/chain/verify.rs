@@ -24,6 +24,8 @@
 
 use std::collections::BTreeMap;
 
+use molt_core::vault::VaultCtx;
+
 use super::*;
 
 /// The **working transport anchor** per seat, folded from a verified chain in
@@ -227,7 +229,7 @@ fn verify_genesis(block: &ChainBlock) -> Result<ChainHead, String> {
         identities,
         agenda: _,
         relays: _,
-        features: _,
+        features,
     } = &block.change
     else {
         return Err("block 0 is not a genesis".to_string());
@@ -238,6 +240,8 @@ fn verify_genesis(block: &ChainBlock) -> Result<ChainHead, String> {
     if usize::from(*rule_n) != identities.len() {
         return Err("genesis roster size does not match n".to_string());
     }
+    // roster-v6 (plan 1.3.12): one direction only, so the v5 mock verifies
+    crate::vault::check_roster_keys(*rule_m, *rule_n, identities, features.as_deref())?;
     let rid = molt_storage::republic_id(name, *rule_m, *rule_n, identities);
     if &rid != republic_id {
         return Err("genesis republic id does not match its content".to_string());
@@ -434,9 +438,18 @@ pub(crate) struct ChainWalk {
     /// Has a folded cut been folded in? Once one has, a legacy cut is
     /// refused: what a node hashes must not depend on whether it pruned.
     folded_cut: bool,
+    /// The vault context of THIS chain, from its own genesis or anchor
+    /// (plan 1.3.8); `None` outside a roster-v6 republic.
+    vault: Option<VaultCtx>,
 }
 
 impl ChainWalk {
+    /// The vault context of the chain this walk verified.
+    #[cfg_attr(not(test), expect(dead_code, reason = "S3b judges candidate chains by it"))]
+    pub(crate) fn vault_ctx(&self) -> Option<&VaultCtx> {
+        self.vault.as_ref()
+    }
+
     /// Fold ONE block into the walk.
     ///
     /// **Atomic on failure**: every fallible check runs before any field is
@@ -455,6 +468,17 @@ impl ChainWalk {
         base: Option<&BTreeMap<String, String>>,
     ) -> Result<(), String> {
         let (head, consumed) = verify_next(&self.head, block, &self.seen)?;
+        if self.vault.is_some()
+            && matches!(
+                block.change,
+                ChainChange::Checkpoint { .. } | ChainChange::CheckpointFolded { .. }
+            )
+        {
+            return Err(format!(
+                "block {}: a legacy checkpoint in a vault republic",
+                block.height
+            ));
+        }
         let cut = match &block.change {
             ChainChange::Checkpoint { upto, state_hash } => {
                 if self.folded_cut {
@@ -485,7 +509,7 @@ impl ChainWalk {
             }
             self.folded_cut = self.folded_cut || folds;
         }
-        fold_one(&mut self.running, block)?;
+        fold_one(&mut self.running, block, self.vault.as_ref())?;
         if let Some(id) = consumed {
             self.seen.insert(id);
         }
@@ -589,8 +613,13 @@ fn genesis_base(
 /// carry the projection incrementally instead of refolding from the base
 /// at every checkpoint — O(n) instead of O(n·checkpoints)). Checkpoint and
 /// Genesis blocks are state-neutral; `consumed_ids` stays UNSORTED here
-/// and is sorted per hash in [`hash_walk_state`].
-pub(crate) fn fold_one(state: &mut molt_core::CheckpointState, block: &ChainBlock) -> Result<(), String> {
+/// and is sorted per hash in [`hash_walk_state`]. `_vault` is the walked
+/// chain's own vault context (plan 1.3.8), unused until vault ops fold.
+pub(crate) fn fold_one(
+    state: &mut molt_core::CheckpointState,
+    block: &ChainBlock,
+    _vault: Option<&VaultCtx>,
+) -> Result<(), String> {
     match &block.change {
         ChainChange::Applied {
             proposal_id,
@@ -704,11 +733,12 @@ pub(super) fn fold_state(
     blocks: &[ChainBlock],
     upto: u64,
 ) -> Result<molt_core::CheckpointState, String> {
+    let vault = crate::vault::ctx_from_founding(state.rule_m, &state.founding_identities);
     for b in blocks {
         if b.height > upto {
             break;
         }
-        fold_one(&mut state, b)?;
+        fold_one(&mut state, b, vault.as_ref())?;
     }
     state.consumed_ids.sort_unstable();
     state.upto = upto;
@@ -932,6 +962,7 @@ pub(crate) fn walk_chain(blocks: &[ChainBlock]) -> Result<ChainWalk, String> {
         floor: None,
         folded: 1,
         folded_cut: false,
+        vault: crate::vault::ctx_from_founding(*rule_m, identities),
     };
     for block in rest {
         // a genesis-rooted projection carries no base commitment, so there
@@ -1105,6 +1136,11 @@ pub(crate) fn walk_suffix_chain(
     if usize::from(blob.rule_n) != blob.founding_identities.len() {
         return Err("checkpoint founding table size does not match n".to_string());
     }
+    // no legacy anchor binds a vault key (the v8 layout and the rid skip
+    // it), so a keyed blob is unauthenticated; CheckpointVault binds it (S5)
+    if blob.founding_identities.iter().any(|i| !i.vault_pk.is_empty()) {
+        return Err("a legacy checkpoint cannot anchor a vault republic".to_string());
+    }
     // NO circular trust: the blob's roster is only bound by the state hash
     // the anchor sigs attest — so the roster itself must chain back to the
     // rid-bound FOUNDING table, and the anchor signatures must verify
@@ -1121,6 +1157,7 @@ pub(crate) fn walk_suffix_chain(
             f.member == entry.member
                 && f.identity_pk == entry.identity_pk
                 && f.nostr_pk == entry.nostr_pk
+                && f.vault_pk == entry.vault_pk
         }) {
             return Err(format!(
                 "checkpoint roster member {} is not anchored in the founding table",
@@ -1156,6 +1193,8 @@ pub(crate) fn walk_suffix_chain(
         // the anchor itself may already be a folded cut — from then on a
         // legacy one is refused for the rest of the walk
         folded_cut: matches!(anchor.change, ChainChange::CheckpointFolded { .. }),
+        // the keyless blob checked above
+        vault: None,
     };
     for block in rest {
         walk.step(block, wiki_base)?;

@@ -44,7 +44,7 @@ impl State {
     ///   staled it lands here again and re-proposes at the new head, so
     ///   there is at most one auto-propose per committed block.
     pub(super) fn maybe_auto_checkpoint(&mut self) {
-        if self.chain.blocks.len() < AUTO_CHECKPOINT_MIN_LEN {
+        if self.chain.blocks.len() < AUTO_CHECKPOINT_MIN_LEN || self.is_vault_republic() {
             return;
         }
         let Some(head) = self.chain.head.as_ref() else {
@@ -100,6 +100,13 @@ impl State {
         if !self.is_chain_governed() {
             return Err(molt_core::MoltError::BadPayload(
                 "checkpoints need a chain-governed republic".into(),
+            ));
+        }
+        // a legacy cut drops the vault keys from every signed byte; the
+        // vault's own cut comes with S5
+        if self.is_vault_republic() {
+            return Err(molt_core::MoltError::BadPayload(
+                "no checkpoints in a vault republic yet".into(),
             ));
         }
         let Some(head) = self.chain.head.as_ref() else {
@@ -175,6 +182,10 @@ impl State {
             return;
         }
         self.next_id = self.next_id.max(id.saturating_add(1));
+        if self.is_vault_republic() {
+            tracing::warn!(%id, "refusing a legacy checkpoint in a vault republic");
+            return;
+        }
         let Some(head) = self.chain.head.as_ref() else {
             return;
         };

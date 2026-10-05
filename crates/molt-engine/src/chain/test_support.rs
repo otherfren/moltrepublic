@@ -28,16 +28,86 @@ impl Builder {
 
     /// A founding whose genesis ratifies `relays` (R3b ledger tests).
     pub(crate) fn new_on_relays(members: &[&str], rule_m: u8, relays: Vec<String>) -> Builder {
+        Builder::new_full(members, rule_m, relays, None, false)
+    }
+
+    /// A founding with a feature set; `keyed` gives every seat its vault
+    /// key (a roster-v6 genesis).
+    pub(crate) fn new_with_features(
+        members: &[&str],
+        rule_m: u8,
+        features: &[&str],
+        keyed: bool,
+    ) -> Builder {
+        let features = features.iter().map(|f| (*f).to_string()).collect();
+        Builder::new_full(members, rule_m, Vec::new(), Some(features), keyed)
+    }
+
+    /// A 2-of-4 roster-v6 vault founding of `a`, `b`, `c`, `d`.
+    pub(crate) fn vault() -> Builder {
+        Builder::new_with_features(&["a", "b", "c", "d"], 2, &["vault"], true)
+    }
+
+    /// A seat's vault key as its phrase derives it: `(seed entropy, nostr_pk,
+    /// vault_pk)` for member index `i`.
+    pub(crate) fn seat_keys(i: usize) -> ([u8; 32], String, String) {
+        let entropy = [u8::try_from(i + 1).unwrap_or(1); 32];
+        let npk = molt_net::nostr_identity(&entropy, "t").1;
+        let (_, vpk) = crate::vault::seat_vault_key(&entropy, &npk, "id");
+        (entropy, npk, vpk)
+    }
+
+    /// Re-seal the genesis over `identities` (every seat signs again), so
+    /// a test can build a SELF-CONSISTENT table that breaks a roster rule.
+    pub(crate) fn reseal_genesis(&mut self, identities: Vec<MemberIdentity>) {
+        let ChainChange::Genesis { name, rule_m, rule_n, agenda, relays, features, .. } =
+            self.blocks[0].change.clone()
+        else {
+            panic!("block 0 is not a genesis");
+        };
+        let republic_id = molt_storage::republic_id(&name, rule_m, rule_n, &identities);
+        self.republic_id = republic_id.clone();
+        let change = ChainChange::Genesis {
+            name,
+            republic_id,
+            rule_m,
+            rule_n,
+            identities,
+            agenda,
+            relays,
+            features,
+        };
+        let all: Vec<String> = self.keys.iter().map(|(m, _)| m.clone()).collect();
+        let all: Vec<&str> = all.iter().map(String::as_str).collect();
+        self.blocks.clear();
+        self.head_hash = GENESIS_PREV.to_string();
+        let block = self.seal(0, change, &all);
+        self.push(block);
+    }
+
+    fn new_full(
+        members: &[&str],
+        rule_m: u8,
+        relays: Vec<String>,
+        features: Option<Vec<String>>,
+        keyed: bool,
+    ) -> Builder {
         let mut keys: Vec<(String, SigningKey)> = Vec::new();
         let mut identities: Vec<MemberIdentity> = Vec::new();
         for (i, m) in members.iter().enumerate() {
             let seed = [u8::try_from(i + 1).unwrap_or(1); 32];
             let (sk, pk) = derive_identity_key(&seed, m);
+            let (nostr_pk, vault_pk) = if keyed {
+                let (_, npk, vpk) = Builder::seat_keys(i);
+                (npk, vpk)
+            } else {
+                ("cc".repeat(32), String::new())
+            };
             identities.push(MemberIdentity {
                 member: (*m).to_string(),
                 identity_pk: pk,
-                nostr_pk: "cc".repeat(32),
-                vault_pk: String::new(),
+                nostr_pk,
+                vault_pk,
             });
             keys.push(((*m).to_string(), sk));
         }
@@ -50,7 +120,7 @@ impl Builder {
             rule_n,
             identities: identities.clone(),
             agenda: "play chess".to_string(),
-            features: None,
+            features,
             relays,
         };
         let mut b = Builder {

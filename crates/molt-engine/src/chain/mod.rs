@@ -49,6 +49,8 @@ mod projection_tests;
 mod sync_tests;
 #[cfg(test)]
 mod verify_tests;
+#[cfg(test)]
+mod vault_founding_tests;
 
 pub use verify::{verify_chain, verify_wiki_export, ChainHead, WikiExportReport};
 pub(crate) use verify::{

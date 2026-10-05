@@ -64,6 +64,9 @@ pub(crate) struct MemberSeat {
     /// Wiped on drop.
     pub(crate) nostr_sk: zeroize::Zeroizing<Vec<u8>>,
     pub(crate) nostr_pk: String,
+    /// The seat's vault key, salted with this founding `nostr_pk` (vault
+    /// spec §5). Always sent: the joiner cannot know the charter yet.
+    pub(crate) vault_pk: String,
 }
 
 impl MemberSeat {
@@ -75,6 +78,7 @@ impl MemberSeat {
         let (mut nostr_raw, nostr_pk) = molt_net::nostr_identity(&entropy, ticket);
         let nostr_sk = zeroize::Zeroizing::new(nostr_raw.to_vec());
         zeroize::Zeroize::zeroize(&mut nostr_raw);
+        let (_, vault_pk) = crate::vault::seat_vault_key(&entropy, &nostr_pk, &pk);
         Ok(MemberSeat {
             seat,
             ticket: ticket.to_string(),
@@ -82,6 +86,7 @@ impl MemberSeat {
             pk,
             nostr_sk,
             nostr_pk,
+            vault_pk,
         })
     }
 }
@@ -286,6 +291,7 @@ pub(crate) async fn run_member_ladder<L: RitualLeg, R: Ratify>(
         pk,
         nostr_sk,
         nostr_pk,
+        vault_pk,
     } = seat;
     // the MLS member, built from the *same* identity key (concept §3.3: one
     // identity anchors both the genesis table and the MLS credential). Its
@@ -306,8 +312,7 @@ pub(crate) async fn run_member_ladder<L: RitualLeg, R: Ratify>(
         reply: leg.reply_handover(),
         key_package: hex::encode(&key_package),
         relays: leg.declared_relays(),
-        // S2 derives it
-        vault_pk: String::new(),
+        vault_pk: vault_pk.clone(),
     });
     leg.send(&join)
         .await
@@ -352,7 +357,7 @@ pub(crate) async fn run_member_ladder<L: RitualLeg, R: Ratify>(
     // exact bytes to sign from the shown proposal — so what we sign provably
     // equals the name + agenda + roster we ratify (including OUR derived
     // nostr anchor: a split third anchor is rejected before we sign)
-    let table = verify_seal_proposal(&proposal, name, &pk, &nostr_pk)
+    let table = verify_seal_proposal(&proposal, name, &pk, &nostr_pk, &vault_pk)
         .map_err(|e| format!("seal proposal rejected: {e}"))?;
     // the human ratification gate: surface the charter and wait for the
     // confirm before signing
@@ -462,7 +467,7 @@ pub(crate) async fn run_member_ladder<L: RitualLeg, R: Ratify>(
     // swapped to attacker keys, all n attestations self-signed) —
     // verify_sealed_roster alone cannot catch that, it has no memory of the
     // proposal.
-    let sealed_table = verify_seal_proposal(&sealed, name, &pk, &nostr_pk)
+    let sealed_table = verify_seal_proposal(&sealed, name, &pk, &nostr_pk, &vault_pk)
         .map_err(|e| format!("distributed sealed roster rejected: {e}"))?;
     if sealed_table != table {
         return Err(
@@ -668,7 +673,7 @@ mod tests {
     async fn the_ladder_activates_signs_attests_and_collects_the_genesis() {
         let seat = bob();
         let p = proposal_for(&seat, "the pact");
-        let table = verify_seal_proposal(&p, "bob", &seat.pk, &seat.nostr_pk).expect("table");
+        let table = verify_seal_proposal(&p, "bob", &seat.pk, &seat.nostr_pk, "").expect("table");
         let pk = seat.pk.clone();
         let mut leg = ScriptedLeg {
             script: VecDeque::from(vec![

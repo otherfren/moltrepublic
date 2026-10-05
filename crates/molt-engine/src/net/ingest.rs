@@ -335,6 +335,11 @@ impl State {
                     tracing::warn!(from = %from, "dropping a set_member_desc proposal over the length cap");
                     return Ok(Reply::Ack);
                 }
+                // (6) the vault is founding-only (D11)
+                if self.adds_vault_feature(surface, &payload) {
+                    tracing::warn!(from = %from, "dropping a set_features proposal adding the vault");
+                    return Ok(Reply::Ack);
+                }
                 // announce only a genuinely NEW proposal: a WP2 re-serve or
                 // an id-collision refusal must not (re-)ring frontends
                 if self.receive_proposed(id.0, surface, payload, &from) {

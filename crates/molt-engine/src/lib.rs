@@ -1995,8 +1995,7 @@ impl State {
                 sender_npub,
                 key_package,
                 relays,
-                // S2 takes it
-                vault_pk: _,
+                vault_pk,
                 generation,
             } => self.cmd_net_join_requested(
                 seat,
@@ -2008,6 +2007,7 @@ impl State {
                 sender_npub,
                 key_package,
                 relays,
+                vault_pk,
                 generation,
             ),
             Command::NetSealSigned {
