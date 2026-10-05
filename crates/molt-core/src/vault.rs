@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! The vault's shared vocabulary (`docs/vault/vault_threshold_disclosure.md`):
-//! the chain records, the read-model view and the redacting text types.
-//! Types only; the canonical byte layouts join in S1.
+//! the chain records, the read-model view, the redacting text types and
+//! the canonical byte layouts every vault primitive hashes, signs or binds.
 
 use serde::{Deserialize, Serialize};
 
@@ -401,6 +401,391 @@ pub struct VaultView {
     pub grants: Vec<VaultGrantView>,
 }
 
+// ---------------------------------------------------------------------
+// Canonical layouts (spec §5 encoding rule): NUL-terminated tag, then the
+// field count, then every field le32-length-prefixed; a list field is
+// itself a counted run. Every tag belongs to exactly one primitive.
+// ---------------------------------------------------------------------
+
+/// The vault key derivation info (plan 1.3.1).
+pub const TAG_KEY: &str = "molt-vault-x25519-v1";
+/// [`secret_id`].
+pub const TAG_SECRET: &str = "molt-vault-secret-v1";
+/// [`deposit_signing_bytes`].
+pub const TAG_DEPOSIT: &str = "molt-vault-deposit-v1";
+/// [`grant_id`].
+pub const TAG_GRANT: &str = "molt-vault-grant-v1";
+/// [`share_aad`].
+pub const TAG_SHARE: &str = "molt-vault-share-v1";
+/// [`resp_aad`].
+pub const TAG_RESP: &str = "molt-vault-resp-v1";
+/// [`payload_aad`].
+pub const TAG_PAYLOAD: &str = "molt-vault-payload-v1";
+/// [`dek_info`].
+pub const TAG_DEK: &str = "molt-vault-dek-v1";
+/// [`eph_info`].
+pub const TAG_EPH: &str = "molt-vault-eph-v1";
+/// [`deal_info`].
+pub const TAG_DEAL: &str = "molt-vault-deal-v1";
+/// [`secret_scalar_info`].
+pub const TAG_SECRET_SCALAR: &str = "molt-vault-secret-scalar-v1";
+/// [`vault_base_canonical_bytes`].
+pub const TAG_BASE: &str = "molt-vault-base-v1";
+/// [`payload_series_info`].
+pub const TAG_PAYLOAD_SERIES: &str = "molt-vault-payload-series-v1";
+/// [`base_series_info`].
+pub const TAG_BASE_SERIES: &str = "molt-vault-base-series-v1";
+
+/// Every vault tag; pinned duplicate-free.
+pub const VAULT_TAGS: [&str; 14] = [
+    TAG_KEY,
+    TAG_SECRET,
+    TAG_DEPOSIT,
+    TAG_GRANT,
+    TAG_SHARE,
+    TAG_RESP,
+    TAG_PAYLOAD,
+    TAG_DEK,
+    TAG_EPH,
+    TAG_DEAL,
+    TAG_SECRET_SCALAR,
+    TAG_BASE,
+    TAG_PAYLOAD_SERIES,
+    TAG_BASE_SERIES,
+];
+
+enum Field<'a> {
+    One(&'a [u8]),
+    Run(Vec<&'a [u8]>),
+}
+
+fn layout(tag: &str, fields: &[Field<'_>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(tag.as_bytes());
+    out.push(0);
+    crate::put_count(&mut out, fields.len());
+    for f in fields {
+        match f {
+            Field::One(b) => crate::put_bytes(&mut out, b),
+            Field::Run(items) => {
+                crate::put_count(&mut out, items.len());
+                for i in items {
+                    crate::put_bytes(&mut out, i);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(bytes))
+}
+
+fn strs(v: &[String]) -> Vec<&[u8]> {
+    v.iter().map(String::as_bytes).collect()
+}
+
+/// HKDF info of the vault key: `founding_nostr_pk ‖ identity_pk` (plan 1.3.1).
+#[must_use]
+pub fn vault_key_info(founding_nostr_pk: &str, identity_pk: &str) -> Vec<u8> {
+    layout(TAG_KEY, &[Field::One(founding_nostr_pk.as_bytes()), Field::One(identity_pk.as_bytes())])
+}
+
+/// The preimage of [`secret_id`]: every field but `enc_share`, `nonce`,
+/// the signature and the payload size (spec §6).
+#[must_use]
+pub fn secret_id_bytes(republic_id: &str, dep: &VaultDeposit) -> Vec<u8> {
+    let m = [dep.m];
+    layout(
+        TAG_SECRET,
+        &[
+            Field::One(republic_id.as_bytes()),
+            Field::One(dep.depositor.as_bytes()),
+            Field::One(dep.name.as_bytes()),
+            Field::One(dep.kind.as_bytes()),
+            Field::One(&m),
+            Field::Run(strs(&dep.holders)),
+            Field::Run(strs(&dep.commitments)),
+            Field::One(dep.payload.hash.as_bytes()),
+        ],
+    )
+}
+
+/// A deposit version's content id, lowercase hex.
+#[must_use]
+pub fn secret_id(republic_id: &str, dep: &VaultDeposit) -> String {
+    sha256_hex(&secret_id_bytes(republic_id, dep))
+}
+
+/// What `sig_depositor` signs: every field but the signature itself.
+#[must_use]
+pub fn deposit_signing_bytes(republic_id: &str, dep: &VaultDeposit) -> Vec<u8> {
+    let m = [dep.m];
+    let size = dep.payload.size.to_le_bytes();
+    layout(
+        TAG_DEPOSIT,
+        &[
+            Field::One(republic_id.as_bytes()),
+            Field::One(dep.depositor.as_bytes()),
+            Field::One(dep.name.as_bytes()),
+            Field::One(dep.kind.as_bytes()),
+            Field::One(&m),
+            Field::Run(strs(&dep.holders)),
+            Field::Run(strs(&dep.commitments)),
+            Field::Run(strs(&dep.enc_share)),
+            Field::One(dep.payload.hash.as_bytes()),
+            Field::One(&size),
+            Field::One(dep.nonce.as_bytes()),
+        ],
+    )
+}
+
+/// The preimage of [`grant_id`].
+#[must_use]
+pub fn grant_id_bytes(secret_id: &str, reader: &str, proposal_id: u64) -> Vec<u8> {
+    let id = proposal_id.to_le_bytes();
+    layout(
+        TAG_GRANT,
+        &[Field::One(secret_id.as_bytes()), Field::One(reader.as_bytes()), Field::One(&id)],
+    )
+}
+
+/// A grant's content id, lowercase hex: survives a cut that drops heights.
+#[must_use]
+pub fn grant_id(secret_id: &str, reader: &str, proposal_id: u64) -> String {
+    sha256_hex(&grant_id_bytes(secret_id, reader, proposal_id))
+}
+
+/// HPKE AAD of a holder's dealt share.
+#[must_use]
+pub fn share_aad(secret_id: &str, seat: &str) -> Vec<u8> {
+    layout(TAG_SHARE, &[Field::One(secret_id.as_bytes()), Field::One(seat.as_bytes())])
+}
+
+/// HPKE AAD of a holder's answer to a grant.
+#[must_use]
+pub fn resp_aad(republic_id: &str, grant_id: &str, seat: &str) -> Vec<u8> {
+    layout(
+        TAG_RESP,
+        &[Field::One(republic_id.as_bytes()), Field::One(grant_id.as_bytes()), Field::One(seat.as_bytes())],
+    )
+}
+
+fn slot(tag: &str, republic_id: &str, depositor: &str, name: &str, kind: &str) -> Vec<u8> {
+    layout(
+        tag,
+        &[
+            Field::One(republic_id.as_bytes()),
+            Field::One(depositor.as_bytes()),
+            Field::One(name.as_bytes()),
+            Field::One(kind.as_bytes()),
+        ],
+    )
+}
+
+/// AEAD AAD of the payload file.
+#[must_use]
+pub fn payload_aad(republic_id: &str, depositor: &str, name: &str, kind: &str) -> Vec<u8> {
+    slot(TAG_PAYLOAD, republic_id, depositor, name, kind)
+}
+
+/// HKDF info of the payload key derived from the shared scalar.
+#[must_use]
+pub fn dek_info(republic_id: &str, depositor: &str, name: &str, kind: &str) -> Vec<u8> {
+    slot(TAG_DEK, republic_id, depositor, name, kind)
+}
+
+/// HKDF info of a holder's deterministic HPKE ephemeral.
+#[must_use]
+pub fn eph_info(secret_id: &str, seat: &str) -> Vec<u8> {
+    layout(TAG_EPH, &[Field::One(secret_id.as_bytes()), Field::One(seat.as_bytes())])
+}
+
+/// HKDF info of the dealing seed (plan 1.3.3).
+#[must_use]
+pub fn deal_info(republic_id: &str, name: &str, kind: &str, nonce: &str) -> Vec<u8> {
+    layout(
+        TAG_DEAL,
+        &[
+            Field::One(republic_id.as_bytes()),
+            Field::One(name.as_bytes()),
+            Field::One(kind.as_bytes()),
+            Field::One(nonce.as_bytes()),
+        ],
+    )
+}
+
+/// HKDF info that turns the dealing seed into the shared scalar.
+#[must_use]
+pub fn secret_scalar_info() -> Vec<u8> {
+    layout(TAG_SECRET_SCALAR, &[])
+}
+
+/// File-plane key info of a payload series (S3a).
+#[must_use]
+pub fn payload_series_info(payload_hash: &str) -> Vec<u8> {
+    layout(TAG_PAYLOAD_SERIES, &[Field::One(payload_hash.as_bytes())])
+}
+
+/// File-plane key info of the folded base series (S5).
+#[must_use]
+pub fn base_series_info(commitment: &str) -> Vec<u8> {
+    layout(TAG_BASE_SERIES, &[Field::One(commitment.as_bytes())])
+}
+
+/// A grant inside the folded base. The proposal id rides along: without
+/// it nobody could recompute `grant_id` after the cut.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct VaultBaseGrant {
+    /// The proposal the grant committed under.
+    pub proposal_id: u64,
+    /// The record.
+    pub grant: VaultGrant,
+}
+
+/// A current deposit inside the folded base, with the grants on it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct VaultBaseDeposit {
+    /// The current version under `(depositor, name)`.
+    pub deposit: VaultDeposit,
+    /// Grants on exactly this version.
+    pub grants: Vec<VaultBaseGrant>,
+}
+
+/// The folded vault (spec §9.3): every current deposit and its grants.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct VaultBase {
+    /// Current deposits.
+    pub deposits: Vec<VaultBaseDeposit>,
+}
+
+fn record_json(op: &VaultOp) -> Vec<u8> {
+    // through Value: sorted keys, the checkpoint groups' canonical JSON
+    let v = serde_json::to_value(op).expect("a vault record serializes");
+    serde_json::to_vec(&v).expect("a serde_json::Value serializes")
+}
+
+fn put_u64(out: &mut Vec<u8>, n: usize) {
+    out.extend_from_slice(
+        &u64::try_from(n)
+            .expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written")
+            .to_le_bytes(),
+    );
+}
+
+/// What a vault cut commits to: deposits in `(depositor, name)` order,
+/// each followed by its grants in `grant_id` order; a record is the
+/// canonical JSON of its Applied op.
+#[must_use]
+pub fn vault_base_canonical_bytes(base: &VaultBase) -> Vec<u8> {
+    let mut deposits: Vec<&VaultBaseDeposit> = base.deposits.iter().collect();
+    deposits.sort_by(|a, b| {
+        (&a.deposit.depositor, &a.deposit.name).cmp(&(&b.deposit.depositor, &b.deposit.name))
+    });
+    let mut out = Vec::new();
+    out.extend_from_slice(TAG_BASE.as_bytes());
+    out.push(0);
+    put_u64(&mut out, deposits.len());
+    for d in deposits {
+        crate::put_bytes(&mut out, &record_json(&VaultOp::Deposit(d.deposit.clone())));
+        let mut grants: Vec<&VaultBaseGrant> = d.grants.iter().collect();
+        grants.sort_by(|a, b| a.grant.grant_id.cmp(&b.grant.grant_id));
+        put_u64(&mut out, grants.len());
+        for g in grants {
+            out.extend_from_slice(&g.proposal_id.to_le_bytes());
+            crate::put_bytes(&mut out, &record_json(&VaultOp::Grant(g.grant.clone())));
+        }
+    }
+    out
+}
+
+/// Read back [`vault_base_canonical_bytes`]: format only, and only the
+/// canonical form (sorted, no duplicates, canonical JSON, no trailing
+/// bytes), so bytes and base map one to one. The content check is
+/// `molt_vault::verify_base`.
+///
+/// # Errors
+/// Any deviation from the canonical stream.
+pub fn decode_vault_base(bytes: &[u8]) -> Result<VaultBase, String> {
+    let mut tag = TAG_BASE.as_bytes().to_vec();
+    tag.push(0);
+    let rest = bytes
+        .strip_prefix(tag.as_slice())
+        .ok_or_else(|| "not a molt-vault-base-v1 stream".to_string())?;
+    let mut r = Reader { rest, at: 0 };
+    let count = r.u64("the deposit count")?;
+    let mut base = VaultBase::default();
+    let mut last_slot: Option<(String, String)> = None;
+    for _ in 0..count {
+        let raw = r.field("a deposit")?;
+        let deposit = match decode_record(raw)? {
+            VaultOp::Deposit(d) => d,
+            _ => return Err("a deposit slot holds another op".to_string()),
+        };
+        let slot = (deposit.depositor.clone(), deposit.name.clone());
+        if last_slot.as_ref().is_some_and(|l| *l >= slot) {
+            return Err("deposits out of order".to_string());
+        }
+        last_slot = Some(slot);
+        let n = r.u64("a grant count")?;
+        let mut grants = Vec::new();
+        let mut last_id: Option<String> = None;
+        for _ in 0..n {
+            let proposal_id = r.u64("a proposal id")?;
+            let raw = r.field("a grant")?;
+            let grant = match decode_record(raw)? {
+                VaultOp::Grant(g) => g,
+                _ => return Err("a grant slot holds another op".to_string()),
+            };
+            if last_id.as_ref().is_some_and(|l| *l >= grant.grant_id) {
+                return Err("grants out of order".to_string());
+            }
+            last_id = Some(grant.grant_id.clone());
+            grants.push(VaultBaseGrant { proposal_id, grant });
+        }
+        base.deposits.push(VaultBaseDeposit { deposit, grants });
+    }
+    if r.at != r.rest.len() {
+        return Err("trailing bytes after the base".to_string());
+    }
+    Ok(base)
+}
+
+fn decode_record(raw: &[u8]) -> Result<VaultOp, String> {
+    let op: VaultOp = serde_json::from_slice(raw).map_err(|_| "a record is not a vault op".to_string())?;
+    if record_json(&op) != raw {
+        return Err("a record is not canonical".to_string());
+    }
+    Ok(op)
+}
+
+struct Reader<'a> {
+    rest: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Reader<'a> {
+    fn take(&mut self, n: usize, what: &str) -> Result<&'a [u8], String> {
+        let end = self.at.checked_add(n).ok_or_else(|| format!("{what} overruns the stream"))?;
+        let slice = self.rest.get(self.at..end).ok_or_else(|| format!("{what} overruns the stream"))?;
+        self.at = end;
+        Ok(slice)
+    }
+
+    fn u64(&mut self, what: &str) -> Result<u64, String> {
+        let raw = self.take(8, what)?;
+        Ok(u64::from_le_bytes(raw.try_into().map_err(|_| format!("{what} is truncated"))?))
+    }
+
+    fn field(&mut self, what: &str) -> Result<&'a [u8], String> {
+        let raw = self.take(4, what)?;
+        let len = u32::from_le_bytes(raw.try_into().map_err(|_| format!("{what} is truncated"))?);
+        self.take(usize::try_from(len).map_err(|_| format!("{what} overruns the stream"))?, what)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -645,5 +1030,291 @@ mod tests {
             crate::MoltError::Vault(VaultRefusal::NoVaultKey).to_string(),
             "vault: no vault key"
         );
+    }
+
+    // --- layouts -------------------------------------------------------
+
+    /// The layout written out by hand, independent of `layout()`.
+    fn by_hand(tag: &str, fields: &[&[&[u8]]]) -> Vec<u8> {
+        let mut out = tag.as_bytes().to_vec();
+        out.push(0);
+        out.extend_from_slice(&u32::try_from(fields.len()).expect("small").to_le_bytes());
+        for f in fields {
+            // a one-element slice is a plain field; lists are marked by the
+            // caller with an explicit count below
+            for part in *f {
+                out.extend_from_slice(&u32::try_from(part.len()).expect("small").to_le_bytes());
+                out.extend_from_slice(part);
+            }
+        }
+        out
+    }
+
+    fn run(items: &[&str]) -> Vec<u8> {
+        let mut out = u32::try_from(items.len()).expect("small").to_le_bytes().to_vec();
+        for i in items {
+            out.extend_from_slice(&u32::try_from(i.len()).expect("small").to_le_bytes());
+            out.extend_from_slice(i.as_bytes());
+        }
+        out
+    }
+
+    fn digest(bytes: &[u8]) -> String {
+        use sha2::Digest;
+        hex::encode(sha2::Sha256::digest(bytes))
+    }
+
+    fn fixture_deposit() -> VaultDeposit {
+        VaultDeposit {
+            depositor: "a".to_string(),
+            name: "one".to_string(),
+            kind: "text".to_string(),
+            m: 2,
+            holders: vec!["b".to_string(), "c".to_string(), "d".to_string()],
+            commitments: vec!["c0".to_string(), "c1".to_string()],
+            enc_share: vec!["e0".to_string(), "e1".to_string(), "e2".to_string()],
+            payload: VaultPayloadRef { hash: "h".to_string(), size: 41 },
+            nonce: "n".to_string(),
+            sig_depositor: "s".to_string(),
+        }
+    }
+
+    /// Each layout against its hand-built bytes AND a golden digest: a
+    /// layout change without a tag bump goes red here.
+    fn pin(got: &[u8], want: &[u8], golden: &str) {
+        assert_eq!(got, want);
+        assert_eq!(digest(got), golden);
+    }
+
+    #[test]
+    fn byte_pins_vault_key_info() {
+        pin(
+            &vault_key_info("npk", "ipk"),
+            &by_hand(TAG_KEY, &[&[b"npk"], &[b"ipk"]]),
+            "7e4e68451f8e46ca3369b12f04af470d0603c49be4e5fb682e12d84a5980112d",
+        );
+    }
+
+    #[test]
+    fn byte_pins_secret_id() {
+        let dep = fixture_deposit();
+        let mut want = by_hand(TAG_SECRET, &[&[b"r"], &[b"a"], &[b"one"], &[b"text"], &[&[2]]]);
+        // the count says 8 fields; the two runs and the hash follow
+        want.splice(TAG_SECRET.len() + 1..TAG_SECRET.len() + 5, 8u32.to_le_bytes());
+        want.extend(run(&["b", "c", "d"]));
+        want.extend(run(&["c0", "c1"]));
+        want.extend_from_slice(&1u32.to_le_bytes());
+        want.extend_from_slice(b"h");
+        pin(&secret_id_bytes("r", &dep), &want, "9caed0f5d1dbb4a72d9012749c8e4b6574e3e4d5f8e0ea3f4299c4f4c613b47d");
+        assert_eq!(secret_id("r", &dep), digest(&want));
+        // enc_share, nonce, size and the signature stay outside the id
+        let mut other = dep.clone();
+        other.enc_share = vec!["x".to_string()];
+        other.nonce = "y".to_string();
+        other.sig_depositor = "z".to_string();
+        other.payload.size = 9;
+        assert_eq!(secret_id("r", &other), secret_id("r", &dep));
+    }
+
+    #[test]
+    fn byte_pins_deposit_signing_bytes() {
+        let dep = fixture_deposit();
+        let mut want = by_hand(TAG_DEPOSIT, &[&[b"r"], &[b"a"], &[b"one"], &[b"text"], &[&[2]]]);
+        want.splice(TAG_DEPOSIT.len() + 1..TAG_DEPOSIT.len() + 5, 11u32.to_le_bytes());
+        want.extend(run(&["b", "c", "d"]));
+        want.extend(run(&["c0", "c1"]));
+        want.extend(run(&["e0", "e1", "e2"]));
+        for f in [b"h".as_slice(), &41u64.to_le_bytes(), b"n"] {
+            want.extend_from_slice(&u32::try_from(f.len()).expect("small").to_le_bytes());
+            want.extend_from_slice(f);
+        }
+        pin(&deposit_signing_bytes("r", &dep), &want, "8de577d88851fda907ca7ee00d39e27aba252d248071339fd975456004b0b80d");
+        // the signature is the only field left out
+        let mut other = dep.clone();
+        other.sig_depositor = "z".to_string();
+        assert_eq!(deposit_signing_bytes("r", &other), deposit_signing_bytes("r", &dep));
+        for change in [
+            |d: &mut VaultDeposit| d.enc_share[0] = "x".to_string(),
+            |d: &mut VaultDeposit| d.nonce = "x".to_string(),
+            |d: &mut VaultDeposit| d.payload.size = 1,
+        ] {
+            let mut other = dep.clone();
+            change(&mut other);
+            assert_ne!(deposit_signing_bytes("r", &other), deposit_signing_bytes("r", &dep));
+        }
+    }
+
+    #[test]
+    fn byte_pins_grant_id() {
+        let want = by_hand(TAG_GRANT, &[&[b"s1"], &[b"b"], &[&7u64.to_le_bytes()]]);
+        pin(&grant_id_bytes("s1", "b", 7), &want, "c745491c059b4f8a971d25c3364ab43a07adc43c4c5da34dc07da97c44e89425");
+        assert_eq!(grant_id("s1", "b", 7), digest(&want));
+        assert_ne!(grant_id("s1", "b", 7), grant_id("s1", "b", 8));
+    }
+
+    #[test]
+    fn byte_pins_share_resp_eph() {
+        pin(&share_aad("s1", "b"), &by_hand(TAG_SHARE, &[&[b"s1"], &[b"b"]]), "1437f9a4c86339ad4cd801d4a7bd51361dac5695e1d3ca3243353e8340b3e47b");
+        pin(&resp_aad("r", "g1", "b"), &by_hand(TAG_RESP, &[&[b"r"], &[b"g1"], &[b"b"]]), "04280147db4f047d6f2ac55b4470e2de2689bc2abc220ad3271e89367d04ca5a");
+        pin(&eph_info("s1", "b"), &by_hand(TAG_EPH, &[&[b"s1"], &[b"b"]]), "a1bd4bf49ee3eaae2d929be809e4fe7c11abf18def59b151b295243127bb278b");
+    }
+
+    #[test]
+    fn byte_pins_payload_dek_deal() {
+        let four: [&[&[u8]]; 4] = [&[b"r"], &[b"a"], &[b"one"], &[b"text"]];
+        pin(&payload_aad("r", "a", "one", "text"), &by_hand(TAG_PAYLOAD, &four), "d5bb016aa817cf326b6aa26da13d644f1423c124a977b43482b787fb6557e725");
+        pin(&dek_info("r", "a", "one", "text"), &by_hand(TAG_DEK, &four), "f5c914113ec2694de9e4f3861ddf9b66f85646957c45d9594d86ae92b01330e6");
+        pin(
+            &deal_info("r", "one", "text", "n"),
+            &by_hand(TAG_DEAL, &[&[b"r"], &[b"one"], &[b"text"], &[b"n"]]),
+            "85f54af9636404aa98b3fce07ef5542fccdcf9b7d45e00b9acb0d852b7e1d08d",
+        );
+        pin(&secret_scalar_info(), &by_hand(TAG_SECRET_SCALAR, &[]), "9dc73bce8afffe907ff02d220b4eccf6acdd599fd7f0e704c56d5ca5f0d1f131");
+    }
+
+    #[test]
+    fn byte_pins_series_infos() {
+        pin(&payload_series_info("h"), &by_hand(TAG_PAYLOAD_SERIES, &[&[b"h"]]), "8ef2a63f5cf34f76d531a9b663e1768a86d576fca5f56dd50c9d6156874d1bc8");
+        pin(&base_series_info("h"), &by_hand(TAG_BASE_SERIES, &[&[b"h"]]), "1ff23e314a0cc5b7b7366b1b9297b6525c8f042584ae9431e7740c798dd0c343");
+    }
+
+    fn fixture_base() -> VaultBase {
+        let mut second = fixture_deposit();
+        second.depositor = "b".to_string();
+        let grant = |id: &str, pid| VaultBaseGrant {
+            proposal_id: pid,
+            grant: VaultGrant { grant_id: id.to_string(), secret_id: "s".to_string(), reader: "c".to_string() },
+        };
+        // deliberately out of order: the encoder sorts
+        VaultBase {
+            deposits: vec![
+                VaultBaseDeposit { deposit: second, grants: vec![] },
+                VaultBaseDeposit { deposit: fixture_deposit(), grants: vec![grant("g2", 9), grant("g1", 4)] },
+            ],
+        }
+    }
+
+    #[test]
+    fn byte_pins_vault_base() {
+        let base = fixture_base();
+        let rec = |op: VaultOp| {
+            serde_json::to_vec(&serde_json::to_value(op).expect("value")).expect("bytes")
+        };
+        let field = |out: &mut Vec<u8>, b: &[u8]| {
+            out.extend_from_slice(&u32::try_from(b.len()).expect("small").to_le_bytes());
+            out.extend_from_slice(b);
+        };
+        let mut want = b"molt-vault-base-v1\0".to_vec();
+        want.extend_from_slice(&2u64.to_le_bytes());
+        field(&mut want, &rec(VaultOp::Deposit(base.deposits[1].deposit.clone())));
+        want.extend_from_slice(&2u64.to_le_bytes());
+        for g in [&base.deposits[1].grants[1], &base.deposits[1].grants[0]] {
+            want.extend_from_slice(&g.proposal_id.to_le_bytes());
+            field(&mut want, &rec(VaultOp::Grant(g.grant.clone())));
+        }
+        field(&mut want, &rec(VaultOp::Deposit(base.deposits[0].deposit.clone())));
+        want.extend_from_slice(&0u64.to_le_bytes());
+        // sorted keys: the record is the checkpoint groups' canonical JSON
+        assert!(String::from_utf8_lossy(&want).contains(r#"{"commitments":["c0","c1"],"depositor":"a""#));
+        pin(&vault_base_canonical_bytes(&base), &want, "942231d7e85beae91e2e76a89353af3d11b97ef51ca5e2f5d95e3630ebb6edd9");
+        let empty = vault_base_canonical_bytes(&VaultBase::default());
+        let mut want_empty = b"molt-vault-base-v1\0".to_vec();
+        want_empty.extend_from_slice(&0u64.to_le_bytes());
+        assert_eq!(empty, want_empty);
+    }
+
+    #[test]
+    fn the_vault_base_decodes_only_its_canonical_form() {
+        let base = fixture_base();
+        let bytes = vault_base_canonical_bytes(&base);
+        let back = decode_vault_base(&bytes).expect("decodes");
+        assert_eq!(vault_base_canonical_bytes(&back), bytes);
+        assert_eq!(back.deposits[0].deposit.depositor, "a");
+        assert_eq!(back.deposits[0].grants[0].grant.grant_id, "g1");
+        assert_eq!(decode_vault_base(&vault_base_canonical_bytes(&VaultBase::default())), Ok(VaultBase::default()));
+
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(decode_vault_base(&trailing).is_err());
+        assert!(decode_vault_base(&bytes[..bytes.len() - 1]).is_err());
+        assert!(decode_vault_base(b"molt-vault-base-v2\0").is_err());
+
+        // a duplicate slot, a duplicate grant: not canonical
+        let mut dup = VaultBase { deposits: vec![base.deposits[1].clone(), base.deposits[1].clone()] };
+        assert!(decode_vault_base(&vault_base_canonical_bytes(&dup)).is_err());
+        dup.deposits.truncate(1);
+        let g = dup.deposits[0].grants[0].clone();
+        dup.deposits[0].grants.push(g);
+        assert!(decode_vault_base(&vault_base_canonical_bytes(&dup)).is_err());
+
+        // non-canonical JSON (spaces) and a grant in a deposit slot
+        let mut loose = b"molt-vault-base-v1\0".to_vec();
+        loose.extend_from_slice(&1u64.to_le_bytes());
+        let raw = br#"{"op": "grant", "grant_id": "g", "secret_id": "s", "reader": "b"}"#;
+        loose.extend_from_slice(&u32::try_from(raw.len()).expect("small").to_le_bytes());
+        loose.extend_from_slice(raw);
+        loose.extend_from_slice(&0u64.to_le_bytes());
+        assert!(decode_vault_base(&loose).is_err());
+    }
+
+    #[test]
+    fn layouts_are_injective_across_field_boundaries() {
+        let two: [fn(&str, &str) -> Vec<u8>; 5] = [
+            vault_key_info,
+            share_aad,
+            eph_info,
+            |a, b| resp_aad("r", a, b),
+            |a, b| grant_id_bytes(a, b, 1),
+        ];
+        for f in two {
+            assert_ne!(f("ab", "c"), f("a", "bc"));
+        }
+        type Four = fn(&str, &str, &str, &str) -> Vec<u8>;
+        let four: [Four; 3] = [payload_aad, dek_info, deal_info];
+        for f in four {
+            assert_ne!(f("ab", "c", "d", "e"), f("a", "bc", "d", "e"));
+            assert_ne!(f("a", "bc", "d", "e"), f("a", "b", "cd", "e"));
+            assert_ne!(f("a", "b", "cd", "e"), f("a", "b", "c", "de"));
+        }
+        // a holder moved across the run boundary
+        let dep = fixture_deposit();
+        let mut moved = dep.clone();
+        moved.holders = vec!["b".to_string(), "c".to_string()];
+        moved.commitments = vec!["d".to_string(), "c0".to_string(), "c1".to_string()];
+        assert_ne!(secret_id_bytes("r", &moved), secret_id_bytes("r", &dep));
+        assert_ne!(deposit_signing_bytes("r", &moved), deposit_signing_bytes("r", &dep));
+    }
+
+    #[test]
+    fn no_two_primitives_share_a_tag() {
+        let mut seen = std::collections::BTreeSet::new();
+        for t in VAULT_TAGS {
+            assert!(seen.insert(t), "{t} twice");
+            assert!(t.starts_with("molt-vault-") && t.ends_with("-v1"), "{t}");
+        }
+        // and every layout leads with its own tag
+        let dep = fixture_deposit();
+        let outputs = [
+            (TAG_KEY, vault_key_info("a", "b")),
+            (TAG_SECRET, secret_id_bytes("r", &dep)),
+            (TAG_DEPOSIT, deposit_signing_bytes("r", &dep)),
+            (TAG_GRANT, grant_id_bytes("s", "b", 1)),
+            (TAG_SHARE, share_aad("s", "b")),
+            (TAG_RESP, resp_aad("r", "g", "b")),
+            (TAG_PAYLOAD, payload_aad("r", "a", "n", "k")),
+            (TAG_DEK, dek_info("r", "a", "n", "k")),
+            (TAG_EPH, eph_info("s", "b")),
+            (TAG_DEAL, deal_info("r", "n", "k", "x")),
+            (TAG_SECRET_SCALAR, secret_scalar_info()),
+            (TAG_BASE, vault_base_canonical_bytes(&VaultBase::default())),
+            (TAG_PAYLOAD_SERIES, payload_series_info("h")),
+            (TAG_BASE_SERIES, base_series_info("h")),
+        ];
+        assert_eq!(outputs.len(), VAULT_TAGS.len());
+        for (tag, bytes) in outputs {
+            let mut head = tag.as_bytes().to_vec();
+            head.push(0);
+            assert!(bytes.starts_with(&head), "{tag}");
+        }
     }
 }

@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "molt-vault"
+description = "The vault's crypto: Shamir/Feldman dealing, HPKE share transport, payload AEAD - pure functions, no I/O."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+molt-core.workspace = true
+vsss-rs.workspace = true
+hpke.workspace = true
+rand_chacha.workspace = true
+chacha20poly1305.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true
+serde_json.workspace = true

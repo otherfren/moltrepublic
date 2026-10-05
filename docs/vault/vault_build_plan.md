@@ -491,7 +491,7 @@ worktree and reruns its verification before merging.
 - **Owns:** `crates/molt-vault/**` (new), `crates/molt-core/src/vault.rs`,
   root `Cargo.toml` (`[workspace] members`, `[workspace.dependencies]`
   `molt-vault = { path = "crates/molt-vault" }`,
-  `vsss-rs = { version = "=5.1.0", default-features = false, features = ["curve25519", "zeroize"] }` (+ whatever `alloc`/`std` the split API proves to need),
+  `vsss-rs = { version = "=5.1.0", default-features = false, features = ["curve25519", "primitive", "zeroize"] }` (locked in S1: `curve25519` turns on `alloc`, whose `biguint` module needs `num`, i.e. `primitive`),
   `hpke = { version = "=0.13.0", default-features = false, features = ["x25519", "alloc"] }`,
   `rand_chacha = "0.3"`), the header comment, `Cargo.lock`.
 - **First step:** dep-lock. Add the deps, `cargo build -j 2 -p molt-vault`
