@@ -8,10 +8,9 @@ starting any stage. The spec is authoritative for behaviour; where this
 plan deviates (section 1) the S0 contract commit amends the spec in the
 same change, so the two never disagree on master.
 
-One product decision is open and goes to the user with S0: **Q1** in
-section 1.4 (what happens to a grant answered on a branch a reorg
-displaces). S4 builds the recommended default unless the user overrules
-it; nothing before S4 depends on it.
+**Q1** in section 1.4 (a grant answered on a branch a reorg displaces)
+and the salt deviation 1.3.1 were confirmed by the user with S0: S4
+builds the recommended default (spec D17).
 
 Ground truth: master `5dda16cb`. Line numbers below are hints from that
 commit; re-locate by symbol before editing.
@@ -261,7 +260,7 @@ Consequence: complaints ARE decidable; the spec's undecided fallback
     anyway). Not prevented; the card shows it (`readable by <k> instead of <m>`,
     floored at 0) and the re-seal offer restores m.
 
-### 1.4 Open decision for the user
+### 1.4 Decision Q1 (user-confirmed: the recommended default)
 
 **Q1 - a grant answered on a branch that a reorg displaces.** D2 says a
 grant takes effect at commit. A grant block can still be displaced by a

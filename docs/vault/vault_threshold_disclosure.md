@@ -1,13 +1,14 @@
 # Vault: majority escrow with an elected reader
 
-Status: DRAFT rev 3 (2026-10-05) — the product decisions in §2 were
-ratified by the user in the 2026-10-05 discussion; the protocol below is
-the design they imply. Rev 3 adds D11–D13 after a second review the same
-day (founding-only vault, keys in the roster, deposit is a vote,
-m ≤ n − 2) and D14–D16; no open questions remain — the next step is the
-V1 spike (§14).
-Nothing of the cryptography is built; the only thing following this
-document so far is the GUI design mock (`surfaces.slint::VaultPane`).
+Status: DRAFT rev 4 (2026-10-05), being built per
+`vault_build_plan.md`. The product decisions in §2 were ratified by the
+user in the 2026-10-05 discussion; the protocol below is the design they
+imply. Rev 3 added D11–D13 after a second review the same day
+(founding-only vault, keys in the roster, deposit is a vote, m ≤ n − 2)
+and D14–D16. Rev 4 folds in the build plan's deviations (plan §1.3,
+listed in §12) and D17 (plan Q1, user-confirmed default).
+Built so far: the contract types (stage S0). None of the cryptography is
+built yet.
 Rev 1 (2026-08-16) is superseded: its primitives stand, its framing
 ("succession insurance" with an implied depositor protection) and its
 storage story (bundles inline in the chain) do not. §12 lists what
@@ -74,6 +75,12 @@ deposit time, in one line:
 - **D16 A cut drops the grant audit of replaced versions.** Who read an
   old version disappears below the cut with that version (§9.3) — the
   checkpoint summarizes, it does not archive.
+- **D17 A grant answered on a displaced branch stays audited locally**
+  (plan Q1, user-confirmed default). D2 holds: holders answer at commit.
+  A reorg above the anchor can displace a committed grant; every seat
+  that applied it keeps a persisted local line `released, then
+  displaced`, and answering is deduplicated by `grant_id`, so a re-vote
+  that commits again is not answered twice.
 
 ## 3. When the vault can be enabled
 
@@ -109,9 +116,19 @@ the reason (`needs 2 <= m <= n-2`).
 - **A replaced version survives until the next cut, and in backups
   forever.** Shares are re-derivable from a deposit record plus a seed
   (§9.4), and the old deposit block stays in the chain until a cut folds
-  it away. What "drop" (D7) actually removes is the old payload file; m
-  members who kept it (or a backup holding it) can still read the old
-  version. The UI says so when replacing.
+  it away. What "drop" (D7) actually removes is the old payload file,
+  and only at the next cut: above the anchor the chain can still reorg
+  and make the old version current again. m members who kept it (or a
+  backup holding it) can still read the old version. The UI says so when
+  replacing.
+- **The depositor's phrase opens its own deposits.** Dealing and the
+  share ephemerals derive from the depositor's vault seed (§7), so that
+  phrase recomputes every share it dealt. Not new: rev 3's seed-derived
+  ephemerals already allowed it.
+- **Chained false complaints drain the threshold.** Each reveal publishes
+  one share; k colluding complainers lower a deposit to m − k (they could
+  publish their shares out of band anyway). The card shows it, floored at
+  0, and the re-seal offer restores m.
 - **The share protection is computational.** Feldman commitments publish
   `g^s`; secrecy below the threshold rests on the discrete log (and HPKE on
   X25519), not on information theory. Rev 1 claimed otherwise.
@@ -121,18 +138,33 @@ the reason (`needs 2 <= m <= n-2`).
 | role | primitive | crate |
 |---|---|---|
 | payload encryption | XChaCha20-Poly1305 under a DEK derived from the shared scalar | `chacha20poly1305` (in tree) |
-| key sharing | Shamir over the Ristretto scalar field, Feldman-verifiable | `vsss-rs` (new) |
-| per-seat share transport | HPKE base mode (X25519-HKDF-SHA256, ChaCha20-Poly1305) | `hpke-rs` (in tree) or `hpke` — spike decides |
-| vault keypair | X25519 from `HKDF(seed, info)`, info below | `x25519-dalek`, `hkdf` (in tree) |
+| key sharing | Shamir over the Ristretto scalar field, Feldman-verifiable | `vsss-rs` 5.1.0 (new) |
+| per-seat share transport | HPKE base mode (X25519-HKDF-SHA256, ChaCha20-Poly1305) | `hpke` 0.13.0 (new; caller-supplied ephemeral) |
+| vault keypair | `DeriveKeyPair(vault_ikm)`, `vault_ikm` below | `hpke` `X25519HkdfSha256::derive_keypair`, `hkdf` (in tree) |
+| deterministic dealing | ChaCha20 from `deal_seed` (§7) | `rand_chacha` 0.3 (in lock) |
 | ids and bindings | SHA-256 over length-prefixed, entry-counted canonical bytes | in tree |
 
-**The vault key** is `HKDF(seed, "molt-vault-x25519-v1" ‖ republic_id ‖
-identity_pk)`. Both are bound on purpose: a joined seat derives its
-identity from `derive_workspace_id(entropy, "member")`, which is the SAME
-for every republic (`founding.rs::seat_identity`), so a salt borrowed from
-the identity derivation would give one phrase the same vault key in every
-republic it joined. A recovered seat (same phrase, same identity) re-derives
-the same key with no vault-specific ceremony.
+**The vault key** is `vault_ikm = HKDF-SHA256(entropy, info =
+"molt-vault-x25519-v1" ‖ founding_nostr_pk ‖ identity_pk)`,
+`(vault_sk, vault_pk) = DeriveKeyPair(vault_ikm)`. The identity alone
+would not do: a joined seat derives it from
+`derive_workspace_id(entropy, "member")`, the SAME for every republic
+(`founding.rs::seat_identity`), so one phrase would get one vault key
+everywhere. The salt is the seat's FOUNDING `nostr_pk` (rev 3 said
+`republic_id`, which is first computed after every join, so a joiner
+could not derive the key in time for its join): it is ticket-salted with
+a random ticket, so one phrase gets a different vault key in every
+republic, and it is fixed in the genesis and in
+`CheckpointState.founding_identities` for life, so a recovered seat (new
+working `nostr_pk`, same phrase) re-derives the same key from the chain.
+
+**`vault_ikm` is persisted** in `TransportState.vault_seed` at founding,
+join, recovery and restore, because the phrase is not available at
+runtime. A holder seat of a vault republic without it fails closed: it
+refuses `approve` on the vault (`no vault key`), sends no receipt and no
+answer, and logs `vault_seed=missing` once per open; it re-derives at
+the next phrase-bearing open and persists only a result equal to its
+founding `vault_pk`.
 
 **Encoding rule for every `‖` in this document**: each field
 le32-length-prefixed, the whole tuple entry-counted — the republic-id
@@ -156,6 +188,22 @@ file per deposit.
   no announcement record, no vote, no seat without a key. Like `nostr_pk`
   it has no proof of possession — a seat naming a key it cannot open only
   loses its own shares, which it could withhold anyway.
+  Every vault-capable joiner ALWAYS sends `vault_pk` (it cannot know the
+  charter yet, which is chosen after every join); the founder drops the
+  field from the table when the charter has no vault. The join MAC is
+  unchanged: the member's sign-what-you-see check of its own `vault_pk`
+  is the binding. Holders, readers and recovery read every `vault_pk`
+  from the genesis roster or `founding_identities`, never from a working
+  table, a Membership block or a frame; `verify_chain` rejects a
+  membership or recovery change that would move a seat's `vault_pk`.
+  **The roster rule is one-directional and split by door**, so live v5
+  republics carrying the mock `vault` key keep verifying: everywhere, any
+  `vault_pk` means tag v6, every seat keyed, `vault` in `features`,
+  2 ≤ m ≤ n − 2, keys canonical and unique; only a NEW founding refuses
+  `vault` without keys. **The real vault exists iff the genesis roster is
+  v6**, never by `effective_features()`; the vault switch of a walk comes
+  from the genesis (or anchor) of the chain being walked, never from node
+  state.
 
   **Older builds are locked out (D14), fail-closed at every door:** a
   vault founding needs `vault_pk` in every join, so the founder refuses
@@ -167,13 +215,18 @@ file per deposit.
   feature set stays the mock forever.
 - **Deposit** (gated proposal → chain block) —
   `{depositor, name, kind, m, holders, commitments[m], enc_share[n-1],
-  payload: {hash, size}, sig_depositor}`.
+  payload: {hash, size}, nonce, sig_depositor}`; `nonce` is 16 random
+  bytes, fresh for every deposit (§7).
   - `holders` = every seat except the depositor, in genesis founding-table
     order; a seat's Shamir x-coordinate is its 1-based position in that
     table (the depositor's position is simply unused), and `enc_share[]`
-    follows the same order.
+    follows the same order. After a cut the order is read from
+    `founding_identities` (same order), never from a working or recovery
+    table, and never re-sorted. `seat_i` in every AAD and info string is
+    the holder's member name.
   - `sig_depositor` is the depositor's identity signature over the
-    canonical record (`molt-vault-deposit-v1`). Chain blocks carry no
+    canonical record (`molt-vault-deposit-v1`, every field but the
+    signature, `enc_share` and `nonce` included). Chain blocks carry no
     proposer, so without it any member could propose a record naming
     someone else as depositor — and, under D7, replace their deposit.
     Approvers, `verify_chain` and the fold all check it.
@@ -183,7 +236,14 @@ file per deposit.
 - **Grant** (gated proposal → chain block) — `{grant_id, secret_id,
   reader}`, `grant_id = SHA-256(molt-vault-grant-v1 ‖ secret_id ‖ reader ‖
   proposal_id)`. Content-derived, so it survives a cut that drops block
-  heights; the answer AAD binds it (§8).
+  heights; the answer AAD binds it (§8). Validity is a projection rule: a
+  grant block whose version is not current at its height commits but is
+  void.
+- **A closed op set.** In a v6 chain an applied Vault payload is exactly
+  `deposit` or `grant`; `vault_base` is legal only as the fold entry of a
+  vault cut; anything else hard-rejects at ingest, at approve and in
+  `verify_chain`. The generic `propose` on the vault is refused
+  (`use vault_seal`).
 - **Payload file** — the ciphertext of the text, at most 100 KiB + 40
   bytes, carried by the file plane (§9.2).
 
@@ -198,7 +258,15 @@ Depositor-local and ephemeral until the proposal commits (chain rule):
 
 1. **Refuse early** unless the vault is enabled (§3). Every holder's key
    is in the roster (§6), so every holder gets a share.
-2. Sample scalar `s`. `DEK = HKDF-SHA256(s, info = "molt-vault-dek-v1" ‖
+2. Draw a fresh `nonce` and deal deterministically:
+   `deal_seed = HKDF(vault_ikm, "molt-vault-deal-v1" ‖ republic_id ‖ name ‖
+   kind ‖ nonce)`; `s` = wide reduction of `HKDF(deal_seed,
+   "molt-vault-secret-scalar-v1")`, the polynomial's coefficients from
+   ChaCha20 seeded with `deal_seed`. The depositor stores nothing: it
+   re-deals to answer a complaint and recovers `s` to re-seal. A reused
+   nonce would reuse `s` across versions (whose `dek_info` is identical),
+   so the fresh nonce is load-bearing.
+   `DEK = HKDF-SHA256(s, info = "molt-vault-dek-v1" ‖
    republic_id ‖ depositor ‖ name ‖ kind)`.
    `payload_ct = XChaCha20-Poly1305(DEK, text, aad = "molt-vault-payload-v1"
    ‖ republic_id ‖ depositor ‖ name ‖ kind)` — not `secret_id`, which
@@ -206,8 +274,8 @@ Depositor-local and ephemeral until the proposal commits (chain rule):
 3. Feldman-split `s` among the holders at threshold m.
 4. `enc_share_i = HPKE_seal(vault_pk_i, share_i, aad = "molt-vault-share-v1"
    ‖ secret_id ‖ seat_i)`, with the **ephemeral key derived**, not drawn:
-   `ikmE_i = HKDF(seed, "molt-vault-eph-v1" ‖ secret_id ‖ seat_i)`. This
-   is what makes a complaint decidable (below); the depositor stores
+   `ikmE_i = HKDF(vault_ikm, "molt-vault-eph-v1" ‖ secret_id ‖ seat_i)`.
+   This is what makes a complaint decidable (below); the depositor stores
    nothing extra, it re-derives from its seed.
 5. Publish the payload file on the file plane, then propose the deposit.
 
@@ -225,12 +293,13 @@ depositor** have verified — `sealed` — and `hardened` once all n − 1 have.
 Only `sealed` means the depositor's absence is survivable.
 
 **Verification receipts and complaints** are not chain records. Each
-holder publishes a signed `verified` (share AND payload, as (a) and (b)
+holder publishes a `verified` (share AND payload, as (a) and (b)
 above — `sealed` counts these) or `complaint` for a `secret_id` as a
-self-signed control frame, persisted at every member (last-wins per
-holder) and re-sent on start — the mirror declaration pattern
-(`mirroring.md`). They are status, not consensus, and never enter the
-vault base.
+control frame authenticated by its MLS sender credential (whose key IS
+the identity key; `by != from` drops it), persisted at every member
+(last-wins per holder) and re-sent on start — the mirror declaration
+pattern (`mirroring.md`). Reveals and answers are authenticated the same
+way. They are status, not consensus, and never enter the vault base.
 
 **A complaint is decided, not just shown.** On a complaint from holder i
 the depositor's client answers with `share_i` and `ikmE_i`. Anyone
@@ -264,9 +333,10 @@ The UI says it in one line per fact, nothing more:
 | depositor's card | that line plus a `Re-seal` button |
 
 Deciding complaints rests on the HPKE crate accepting a caller-supplied
-ephemeral (RFC 9180 `DeriveKeyPair`); the V1 spike confirms it. If neither
-candidate allows it, complaints stay undecided (visible only) — never a
-hand-rolled HPKE.
+ephemeral (RFC 9180 `DeriveKeyPair`): `hpke` 0.13 draws exactly one
+private-key-sized `ikm` from the caller's RNG in `encap`, so a one-shot
+RNG yielding `ikmE` gives the deterministic ephemeral (plan §1.2, pinned
+by a test). Complaints are therefore decided; never a hand-rolled HPKE.
 
 A denied proposal discards everything; holders who opened their shares to
 verify learned one share each of a secret that never entered the vault.
@@ -287,7 +357,10 @@ verify learned one share each of a secret that never entered the vault.
    reader asks — it sends `resp_i = HPKE_seal(vault_pk_reader, share_i,
    aad = "molt-vault-resp-v1" ‖ republic_id ‖ grant_id ‖ seat_i)` over the
    group channel. The AAD binds the answer to this grant (and through
-   `grant_id`, to this version and this reader).
+   `grant_id`, to this version and this reader). The answer frame carries
+   no seat: the reader takes the seat, its x-coordinate and the AAD seat
+   from the MLS sender. The reader's key is its FOUNDING `vault_pk`. A
+   grant displaced by a reorg after it was answered is D17.
 4. **Read:** the reader combines **any m valid shares** — its own if it
    holds one, plus answers — checking each against the commitments (a bad
    answer names its seat), derives the DEK, decrypts the payload file
@@ -348,13 +421,19 @@ So the cut **folds**, with every K6 rule carried over
   commitment to the canonical bytes (`molt-vault-base-v1`) of all current
   deposits and grants (the keys live in the genesis roster). Receipts and complaints are not in
   it (§7).
-- **A new fold variant, not only a tag.** As K6 needed both the v9 tag
-  and `ChainChange::CheckpointFolded`, the vault fold needs a variant (or
-  a flag inside `CheckpointFolded`) so an older build STOPS instead of
-  reading a forgery, plus a conditional checkpoint tag selected on the
-  `vault_base` entry — Vault is one of the frozen
-  `CHECKPOINT_V7_SURFACES`, so every existing cut keeps its bytes. The tag
-  rule covers a cut that folds the wiki, the vault, or both.
+- **A new fold variant, not only a tag: one variant, one tag.** Every cut
+  in a republic whose genesis is roster-v6 is
+  `ChainChange::CheckpointVault { upto, state_hash, wiki_folded }`, so an
+  older build STOPS instead of reading a forgery; its state hashes under
+  `molt-chain-checkpoint-v10` (the v9 layout plus `vault_pk` as a fourth
+  field in BOTH identity tables). The vault group is always folded to one
+  `vault_base` entry (an empty base when there was never a deposit); the
+  wiki fold stays the proposer's choice and `wiki_folded` records it.
+  Approval bytes: `molt-chain-change-v2`, discriminator 5, then the
+  `wiki_folded` byte, `upto`, `state_hash`. A `Checkpoint` /
+  `CheckpointFolded` in a v6-genesis chain is refused. Vault is one of
+  the frozen `CHECKPOINT_V7_SURFACES`, so every existing cut keeps its
+  bytes.
 - **The fold takes the base held right now** (the §4.9.5 lesson):
   propose, co-sign, verify and apply pass the vault base this node holds
   at that moment, as a parameter — never one cached in the walk.
@@ -364,8 +443,16 @@ So the cut **folds**, with every K6 rule carried over
   verified chain but not yet the base is **base-pending**: the vault
   answers a typed refusal with progress, never an empty list; it does not
   approve deposits or grants (it cannot verify them), queues its answers
-  to committed grants until the base arrives, and retires nothing against
-  an empty base.
+  to committed grants until the base arrives, retires nothing against an
+  empty base, and does not co-sign a cut.
+- **The base is re-verified, never adopted on its hash alone.** Fold,
+  catch-up and restore check the shape and `sig_depositor` of every
+  deposit and recompute every `grant_id` under the base's own context; a
+  failing base is deleted and refetched.
+- **Retirement waits for the cut.** A replaced version's payload file is
+  removed only once the replacing deposit falls below the anchor;
+  mandatory holding covers every payload named by a deposit block above
+  the anchor plus every current one.
 
 ### 9.4 Shares are derived, never stored
 
@@ -420,15 +507,36 @@ recorded so the record format leaves room for a refresh epoch.
 - HPKE/Shamir work is CPU-only and small: seal, verify, combine run in
   command handlers; the single-owner actor stays as it is.
 - Tools (co-equality): `vault_seal` (a new name deposits, an existing
-  name replaces), `vault_grant`, `vault_read` (reader side), `vault_list`
-  in `read_state` with per-deposit `committed/sealed/hardened`, open
-  complaints and grants. Approvals reuse `approve`. Answers, receipts,
+  name replaces), `vault_reseal` (§7, D15), `vault_grant`, `vault_read`
+  (reader side), and the list as `read_state(vault)` (`vault` object)
+  with per-deposit `committed/sealed/hardened`, open complaints and
+  grants. Approvals reuse `approve`. Answers, receipts,
   complaints and complaint reveals are INTERNAL.
 - The seat token reaches `vault_read` like every other seat tool (D3);
   the read-only key never sees vault content.
 
 ## 12. What changed against rev 1
 
+Rev 4 (the build plan's §1.3, 2026-10-05):
+- **The vault key is salted with the founding `nostr_pk`**, not
+  `republic_id` (§5), and `vault_ikm` is persisted, failing closed when
+  missing.
+- **Dealing is deterministic** from the depositor's seed and a fresh
+  public `nonce` (§7); the depositor's phrase opens its own deposits
+  (§4).
+- **Control frames are authenticated by the MLS sender**; answers carry
+  no seat (§7, §8).
+- **One checkpoint variant and tag for every cut of a vault republic**
+  (§9.3), the base re-verified, retirement at the cut, base-pending
+  guarding every retirement and every co-sign.
+- **The roster rule is one-directional** so v5 mock-vault republics keep
+  verifying; the real vault exists iff the genesis is v6; the walk takes
+  the vault switch from the chain it walks (§6).
+- **A closed Vault op set** and grant validity as a projection rule (§6).
+- **D17** (§2): displaced grants stay audited locally.
+- **Libraries decided** (§13).
+
+Rev 2/3 against rev 1:
 - **No depositor protection, by decision** (D2, D3). Rev 1 implied a
   succession insurance; the honest product is a majority escrow.
 - **Enablement bounds** (§3): 2 ≤ m ≤ n − 2 (rev 2 allowed n − 1, which
@@ -465,12 +573,15 @@ recorded so the record format leaves room for a refresh epoch.
 
 ## 13. Library verdict
 
-- **`vsss-rs` 6.x** — Shamir + Feldman over curve25519 groups, pure Rust,
-  maintained. The one new dependency; the V1 spike locks its exact API
-  (including caller-chosen x-coordinates) and audits its dependency slice.
-- **HPKE:** `hpke-rs` is already in the tree (OpenMLS); fallback `hpke`
-  (RFC 9180, pure Rust). The spike's deciding question is now a
-  caller-supplied ephemeral key (§7). Never hand-rolled X25519 + AEAD.
+- **`vsss-rs` 5.1.0** — Shamir + Feldman over Ristretto, pure Rust.
+  5.1.0, not 6.x: it rides the `curve25519-dalek` 4.1.3 / `rand_core` 0.6
+  stack OpenMLS already pins; 6.x would duplicate the curve stack.
+  Caller-chosen x-coordinates via `ParticipantIdGeneratorType::List`.
+- **HPKE: `hpke` 0.13.0** (RFC 9180, pure Rust, same RustCrypto
+  generation as the tree): its `encap` takes the caller's RNG, which makes
+  the deterministic ephemeral possible (§7). `hpke-rs` (in tree via
+  OpenMLS) is rejected: its only ephemeral override is a test feature
+  that would unify into OpenMLS. Never hand-rolled X25519 + AEAD.
 - `chacha20poly1305`, `x25519-dalek`, `hkdf`, `curve25519-dalek` — in the
   lockfile. The ring-free guard and the no-C posture hold.
 
