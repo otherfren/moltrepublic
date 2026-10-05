@@ -519,7 +519,7 @@ impl State {
         }
         // vault S3a: a payload every seat must hold, past the share,
         // mirror and cap gates below
-        if self.serve_vault_pieces(id, &ranges) {
+        if self.serve_vault_pieces(from, id, &ranges) {
             return Ok(Reply::Ack);
         }
         // K6: the folded wiki base is a series without a share behind it

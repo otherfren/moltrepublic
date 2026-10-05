@@ -152,7 +152,7 @@ impl State {
         Some(root.join("..").join("mirror").join(&active.id))
     }
 
-    fn member_online(&self, member: &str) -> bool {
+    pub(crate) fn member_online(&self, member: &str) -> bool {
         if *member == self.member() {
             return true;
         }

@@ -144,7 +144,7 @@ fn the_vault_payload_tick_fetches_a_missing_payload() {
     let (mut st, dep, _) = seat_with_committed("b");
     st.vault_payload_tick();
     let fetch = st.files.vault.fetches.get(&dep.payload.hash).expect("the committed payload is fetched");
-    assert!(fetch.next_try > 0, "an attempt was made");
+    assert!(fetch.handle.is_none() && !fetch.local, "no relay: the attempt is booked, nothing runs");
 
     // a pending deposit is fetched too (the approver needs it to vote)
     let b = Builder::vault();
@@ -153,7 +153,7 @@ fn the_vault_payload_tick_fetches_a_missing_payload() {
     st.vault_payload_tick();
     assert!(st.files.vault.fetches.contains_key(&pending_dep.payload.hash), "the pending one too");
 
-    // held: nothing to fetch, and the running attempt is abandoned
+    // held: nothing to fetch
     let (mut held, dep, _) = seat_with_committed("b");
     let id = sid(&held, &dep);
     mark_held(&mut held, &id);
@@ -176,6 +176,10 @@ async fn the_vault_payload_tick_never_deletes() {
     let named = sid(&st, &dep);
     let stale = "ee".repeat(32);
     let _tmp = attach_storage(&mut st, &[(&named, &file), (&stale, b"old version")]);
+    let (_tx, mut rx) = wire_commands(&mut st);
+    st.vault_payload_tick();
+    let cmd = next_cmd(&mut rx).await;
+    dispatch(&mut st, cmd);
     for _ in 0..3 {
         st.vault_payload_tick();
     }
@@ -215,6 +219,7 @@ async fn a_vault_piece_is_served_with_the_mirror_off_and_cap_zero() {
     let (mut st, dep, file) = seat_with_committed("b");
     let id = sid(&st, &dep);
     let _tmp = attach_storage(&mut st, &[(&id, &file)]);
+    mark_held(&mut st, &id);
     st.nostr = Some(crate::NostrTransport {
         sk: zeroize::Zeroizing::new(vec![1u8; 32]),
         relays: Vec::new(),
@@ -239,4 +244,267 @@ async fn a_vault_piece_is_served_with_the_mirror_off_and_cap_zero() {
         assert!(tokio::time::Instant::now() < deadline, "the vault piece was never queued");
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
+}
+
+/// Give `st` a live command channel; the receiver gets what its tasks send.
+fn wire_commands(
+    st: &mut crate::State,
+) -> (
+    tokio::sync::mpsc::Sender<crate::Envelope>,
+    tokio::sync::mpsc::Receiver<crate::Envelope>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    st.cmd_tx = tx.downgrade();
+    (tx, rx)
+}
+
+async fn next_cmd(rx: &mut tokio::sync::mpsc::Receiver<crate::Envelope>) -> molt_core::Command {
+    tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .expect("a command in time")
+        .expect("the channel is open")
+        .cmd
+}
+
+/// Run what a payload task sent through the actor's handler.
+fn dispatch(st: &mut crate::State, cmd: molt_core::Command) {
+    match cmd {
+        molt_core::Command::NetVaultPayloadFetched { hash, bytes, .. } => {
+            st.cmd_net_vault_payload_fetched(hash, bytes).expect("ack");
+        }
+        molt_core::Command::NetVaultPayloadFailed { hash, .. } => {
+            st.cmd_net_vault_payload_failed(hash).expect("ack");
+        }
+        other => panic!("unexpected command {other:?}"),
+    }
+}
+
+fn with_nostr(st: &mut crate::State) {
+    st.nostr = Some(crate::NostrTransport {
+        sk: zeroize::Zeroizing::new(vec![1u8; 32]),
+        relays: vec!["wss://relay.example.org".to_string()],
+        rotation_seed: [7u8; 32],
+    });
+    st.session.settings.relays = vec![molt_core::relay::RelayEntry {
+        url: "wss://relay.example.org".to_string(),
+        confirmed: true,
+    }];
+    st.clearnet_session = true;
+}
+
+/// Plan S3a ("the engine checks the hash at open"): a payload file on disk
+/// is held only once its bytes match the deposit's hash; a damaged copy is
+/// fetched again.
+#[tokio::test]
+async fn a_damaged_held_payload_is_fetched_again() {
+    let (mut st, dep, file) = seat_with_committed("b");
+    let id = sid(&st, &dep);
+    let mut damaged = file.clone();
+    damaged[0] ^= 1;
+    let _tmp = attach_storage(&mut st, &[(&id, &damaged)]);
+    let (_tx, mut rx) = wire_commands(&mut st);
+
+    st.vault_payload_tick();
+    assert!(
+        !st.vault_payload_held(&id),
+        "a listed file is not held unverified"
+    );
+    let cmd = next_cmd(&mut rx).await;
+    dispatch(&mut st, cmd);
+    assert!(!st.vault_payload_held(&id), "a damaged copy is not held");
+
+    st.vault_payload_tick();
+    let fetch = st
+        .files
+        .vault
+        .fetches
+        .get(&dep.payload.hash)
+        .expect("the damaged payload is fetched again");
+    assert!(!fetch.local, "from the network, not the damaged file");
+
+    // the network copy replaces the damaged file
+    st.cmd_net_vault_payload_fetched(dep.payload.hash.clone(), file.clone())
+        .expect("ack");
+    assert!(st.vault_payload_held(&id));
+    assert!(st.files.vault.fetches.is_empty());
+    let handle = st.active.as_ref().expect("active").handle.clone();
+    assert_eq!(handle.load_vault_payload(&id).await, Some(file));
+}
+
+/// An intact payload on disk is held after its check, without a fetch.
+#[tokio::test]
+async fn an_intact_payload_on_disk_is_held_after_its_check() {
+    let (mut st, dep, file) = seat_with_committed("b");
+    let id = sid(&st, &dep);
+    let _tmp = attach_storage(&mut st, &[(&id, &file)]);
+    let (_tx, mut rx) = wire_commands(&mut st);
+    st.vault_seams.hold_fetch.store(true, Ordering::SeqCst);
+
+    st.vault_payload_tick();
+    let cmd = next_cmd(&mut rx).await;
+    dispatch(&mut st, cmd);
+    assert!(
+        st.vault_payload_held(&id),
+        "the check is not a fetch: the hold seam does not block it"
+    );
+    st.vault_payload_tick();
+    assert!(st.files.vault.fetches.is_empty());
+}
+
+/// Plan S3a: a missing payload spawns a real series fetch once the seat has
+/// a relay.
+#[tokio::test]
+async fn the_tick_spawns_a_series_fetch_for_a_missing_payload() {
+    let (mut st, dep, _) = seat_with_committed("b");
+    with_nostr(&mut st);
+    let (_tx, _rx) = wire_commands(&mut st);
+    st.vault_payload_tick();
+    let fetch = st
+        .files
+        .vault
+        .fetches
+        .get_mut(&dep.payload.hash)
+        .expect("fetched");
+    let handle = fetch.handle.take().expect("a fetch task runs");
+    assert!(!fetch.local);
+    assert!(fetch.next_try > crate::now_secs(), "the next attempt waits");
+    handle.abort();
+}
+
+/// Plan S3a step 6: the hold seam stops the network fetch.
+#[tokio::test]
+async fn the_hold_seam_stops_the_fetch() {
+    let (mut st, _, _) = seat_with_committed("b");
+    with_nostr(&mut st);
+    let (_tx, _rx) = wire_commands(&mut st);
+    st.vault_seams.hold_fetch.store(true, Ordering::SeqCst);
+    st.vault_payload_tick();
+    assert!(st.files.vault.fetches.is_empty(), "no fetch while held");
+}
+
+/// A running fetch for a payload that became held is aborted and dropped.
+#[tokio::test]
+async fn a_fetch_for_a_payload_now_held_is_abandoned() {
+    let (mut st, dep, _) = seat_with_committed("b");
+    let id = sid(&st, &dep);
+    st.vault_sync_held();
+    let running = tokio::spawn(std::future::pending::<()>());
+    st.files.vault.fetches.insert(
+        dep.payload.hash.clone(),
+        VaultFetch {
+            handle: Some(running.abort_handle()),
+            next_try: 0,
+            local: false,
+        },
+    );
+    mark_held(&mut st, &id);
+    st.vault_payload_tick();
+    assert!(st.files.vault.fetches.is_empty());
+    let joined = tokio::time::timeout(std::time::Duration::from_secs(5), running)
+        .await
+        .expect("ended");
+    assert!(joined.expect_err("aborted").is_cancelled());
+}
+
+/// Wait until `st`'s publish job for `series` exists; `None` after `wait`.
+async fn vault_job(
+    st: &crate::State,
+    series: MessageId,
+    wait_ms: u64,
+) -> Option<molt_core::PublishJob> {
+    let store = st.file_store().expect("store");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
+    loop {
+        let jobs = store.load().await.file_jobs.publish;
+        if let Some(job) = jobs.into_iter().find(|j| j.series == series.to_string()) {
+            return Some(job);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// Seat `me` holding the committed payload, with `online` seen just now.
+fn serving_seat(me: &str, online: &[&str]) -> (crate::State, VaultDeposit, tempfile::TempDir) {
+    let (mut st, dep, file) = seat_with_committed(me);
+    let id = sid(&st, &dep);
+    let tmp = attach_storage(&mut st, &[(&id, &file)]);
+    with_nostr(&mut st);
+    mark_held(&mut st, &id);
+    let now = crate::now_secs();
+    let mut entry = crate::net::test_support::presence_fixture()
+        .session
+        .workspaces[0]
+        .clone();
+    let roster: Vec<String> = ["a", "b", "c", "d"].iter().map(|s| s.to_string()).collect();
+    entry.members = molt_core::roster_members(&roster, now, |n| {
+        if online.contains(&n) {
+            now
+        } else {
+            molt_core::MemberInfo::NEVER
+        }
+    });
+    st.session.active_workspace = entry.id.clone();
+    st.session.workspaces = vec![entry];
+    (st, dep, tmp)
+}
+
+/// Only the lowest-named online seat other than the asker answers a want.
+#[tokio::test]
+async fn a_seat_that_is_not_elected_does_not_answer_a_vault_want() {
+    let (mut st, dep, _tmp) = serving_seat("c", &["a"]);
+    let series = MessageId(molt_net::file_plane::vault_payload_series(
+        &dep.payload.hash,
+    ));
+    st.cmd_net_piece_wanted(&"d".to_string(), series, vec![(0, 0)])
+        .expect("ack");
+    assert!(
+        vault_job(&st, series, 300).await.is_none(),
+        "a answers, not c"
+    );
+
+    // a want repeated after the window is answered by every holder
+    st.files
+        .vault
+        .wants
+        .get_mut(&series)
+        .expect("the want is remembered")
+        .first_seen -= RETRY_EVERY_SECS;
+    st.cmd_net_piece_wanted(&"d".to_string(), series, vec![(0, 0)])
+        .expect("ack");
+    assert!(
+        vault_job(&st, series, 5_000).await.is_some(),
+        "the fallback answers"
+    );
+}
+
+/// The elected seat answers one want per series per window.
+#[tokio::test]
+async fn the_elected_seat_answers_a_vault_want_once_per_window() {
+    let (mut st, dep, _tmp) = serving_seat("c", &["a"]);
+    let series = MessageId(molt_net::file_plane::vault_payload_series(
+        &dep.payload.hash,
+    ));
+    // a asks: b is offline, so c is the lowest online seat besides a
+    st.cmd_net_piece_wanted(&"a".to_string(), series, vec![(0, 0)])
+        .expect("ack");
+    let job = vault_job(&st, series, 5_000).await.expect("c answers");
+    assert_eq!(job.ranges, vec![(0, 0)]);
+    let top = molt_net::file_plane::Manifest::layout_for(
+        molt_net::file_plane::Manifest::piece_count_for(dep.payload.size),
+    )
+    .expect("layout")
+    .top;
+    assert!(top > 0, "a second, distinct range exists");
+    st.cmd_net_piece_wanted(&"a".to_string(), series, vec![(top, top)])
+        .expect("ack");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let job = vault_job(&st, series, 0).await.expect("job");
+    assert_eq!(
+        job.ranges,
+        vec![(0, 0)],
+        "a second want within the window is not answered"
+    );
 }
