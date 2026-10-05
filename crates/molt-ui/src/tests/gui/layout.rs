@@ -840,9 +840,8 @@ fn the_s3_endpoint_moved_out_of_the_backup_tab_onto_its_own() {
     assert!(!shown(&ui, "Automatic S3 backup"), "the schedule did not follow");
 }
 
-/// The Vault mock's secrets list, headless: the deposits render, and a
-/// click on "Seal a secret" opens the dialog it was given (the button
-/// used to be dead, with a "not yet" tooltip).
+/// The Vault pane, headless: a real vault's cards render, and a click on
+/// "Seal a secret" opens its dialog.
 #[cfg(feature = "live-preview")]
 #[test]
 fn the_vault_seal_button_opens_its_dialog() {
@@ -856,14 +855,26 @@ fn the_vault_seal_button_opens_its_dialog() {
         key: "vault".into(),
         ..SurfaceTab::default()
     }])));
+    ui.set_vault_real(true);
+    ui.set_vault_m(2);
+    ui.set_vault_deposits(ModelRc::new(VecModel::from(
+        ["one", "two"]
+            .iter()
+            .map(|n| VaultDepositRow {
+                secret_id: (*n).into(),
+                name: (*n).into(),
+                state: 2,
+                can_grant: true,
+                ..VaultDepositRow::default()
+            })
+            .collect::<Vec<_>>(),
+    )));
     apply_strings(&ui, 0);
     let _shown = show_headless(&ui);
 
-    let cards: Vec<_> =
-        i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "SecretCard")
-            .collect();
-    eprintln!("secret cards: {}", cards.len());
-    assert!(cards.len() >= 6, "the sample deposits must render");
+    let cards = i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "DepositCard")
+        .count();
+    assert_eq!(cards, 2, "the deposits render");
     assert!(
         i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "ConfirmModal")
             .next()
@@ -877,28 +888,15 @@ fn the_vault_seal_button_opens_its_dialog() {
     )
     .next()
     .expect("the seal button must render");
-    let pos = button.absolute_position();
-    let size = button.size();
-    let at = slint::LogicalPosition::new(
-        pos.x + size.width / 2.0,
-        pos.y + size.height / 2.0,
-    );
-    ui.window()
-        .dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at });
-    ui.window().dispatch_event(slint::platform::WindowEvent::PointerPressed {
-        position: at,
-        button: slint::platform::PointerEventButton::Left,
-    });
-    ui.window().dispatch_event(slint::platform::WindowEvent::PointerReleased {
-        position: at,
-        button: slint::platform::PointerEventButton::Left,
-    });
+    click(&ui, &button);
+    assert!(ui.get_vt_seal_open(), "the seal dialog must open");
     assert!(
         i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "ConfirmModal")
             .next()
             .is_some(),
-        "the seal dialog must open"
+        "the seal dialog renders"
     );
+    assert_eq!(ui.get_vt_seal_kind().as_str(), "text", "the kind starts at the first preset");
 }
 
 /// **Organization → Members: every row cell starts where its header

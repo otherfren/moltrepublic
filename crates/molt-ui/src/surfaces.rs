@@ -24,7 +24,13 @@ use crate::labels::{
     expires_label, file_date_label, file_size_label, never_seen_label, seen_label, stamp_label,
     strings_pick, surface_name, unix_now, when_label,
 };
-use crate::{ChainRow, MemberVoteMark, ProposalRow, RelayChange};
+use crate::i18n::Lexicon;
+use crate::models::sync_rows;
+use crate::{
+    ChainRow, MemberVoteMark, ProposalRow, RelayChange, VaultComplaintRow, VaultDepositRow,
+    VaultGrantRow,
+};
+use molt_core::vault::VaultView;
 
 /// Rows per page of the proposal-outcome lists (a surface's pending,
 /// applied and declined votes, and the chain history). Below this the
@@ -121,6 +127,7 @@ pub(crate) fn sort_members(rows: &mut [MemberRowData], column: &str, ascending: 
 }
 
 /// Plain, `Send` snapshot of all surfaces, built off the UI thread.
+#[derive(Default)]
 pub(crate) struct SurfacesBundle {
     /// Language the labels were rendered for (0 = en, 1 = de) — the nav's
     /// sub-view names are localized when the bundle lands.
@@ -181,9 +188,12 @@ pub(crate) struct SurfacesBundle {
     pub(crate) org_stats: OrgStats,
     /// Group-channel unread count (badges the Gruppe nav row).
     pub(crate) group_unread: i32,
+    /// The vault's read model (`None` = no vault surface in this charter).
+    pub(crate) vault: Option<molt_core::vault::VaultView>,
 }
 
 /// The Organization → Status info strip, from the engine's Status reply.
+#[derive(Default)]
 pub(crate) struct OrgStats {
     /// Rendered founding date, always `YYYY-MM-DD` (a workspace without a
     /// recorded date shows the epoch, `1970-01-01`).
@@ -1110,6 +1120,10 @@ pub(crate) async fn gather_surfaces(
         quotes,
         roster: members.iter().map(|m| m.name.clone()).collect(),
     };
+    let vault = snaps
+        .iter()
+        .find(|(sf, _)| *sf == Surface::Vault)
+        .and_then(|(_, snap)| snap.vault.clone());
     let surfaces: Vec<SurfaceData> = snaps
         .iter()
         .map(|(sf, snap)| {
@@ -1147,6 +1161,7 @@ pub(crate) async fn gather_surfaces(
         list_pages,
         org_stats,
         group_unread,
+        vault,
     };
     tracing::debug!(
         ws = %active_ws,
@@ -1191,6 +1206,19 @@ pub(crate) fn surface_data(
             ..row
         }
     };
+    // a vault payload's title needs the view (a grant names its deposit,
+    // a deposit is a replace when the slot already holds a version)
+    let vault = (sf == Surface::Vault).then_some(snap.vault.as_ref()).flatten();
+    let applied_titles: Vec<String> = snap
+        .applied
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            vault
+                .and_then(|ctx| vault_title(lang, v, ctx, applied_replaces(&snap.applied[..i], v)))
+                .unwrap_or_else(|| display_title(lang, v))
+        })
+        .collect();
     let mut log: Vec<LogLineData> = if sf == Surface::Chat {
         let msgs = chat_messages(snap);
         // the retention window ("delete chat after N days") is ENGINE
@@ -1213,10 +1241,10 @@ pub(crate) fn surface_data(
         snap.applied
             .iter()
             .enumerate()
-            .map(|(i, v)| LogLineData {
+            .map(|(i, _)| LogLineData {
                 id: String::new(),
                 lead: String::new(),
-                text: display_title(lang, v),
+                text: applied_titles[i].clone(),
                 when: String::new(),
                 quote: -1,
                 quote_id: String::new(),
@@ -1245,7 +1273,15 @@ pub(crate) fn surface_data(
     let pending: Vec<ProposalRowData> = snap
         .pending
         .iter()
-        .map(|p| badge(proposal_row(lang, p)))
+        .map(|p| {
+            let row = proposal_row(lang, p);
+            let text = vault
+                .and_then(|ctx| vault_title(lang, &p.payload, ctx, pending_replaces(ctx, &p.payload)));
+            badge(match text {
+                Some(text) => ProposalRowData { text, ..row },
+                None => row,
+            })
+        })
         .collect();
     // the Declined view empties on the chat-retention rhythm — engine
     // semantics too (the read arrives pre-filtered on declined_at)
@@ -1274,10 +1310,13 @@ pub(crate) fn surface_data(
                     .flatten()
                     .and_then(|id| by_id.get(&id))
                 {
-                    Some(p) => proposal_row(lang, p),
+                    Some(p) => ProposalRowData {
+                        text: applied_titles[i].clone(),
+                        ..proposal_row(lang, p)
+                    },
                     None => ProposalRowData {
                         id: -1,
-                        text: display_title(lang, payload),
+                        text: applied_titles[i].clone(),
                         // a table CELL: the compact summary when the payload
                         // carries one AS A STRING, else the value's first
                         // line — keyed on string-ness, not key presence (a
@@ -1723,7 +1762,227 @@ pub(crate) fn display_title(lang: i32, v: &serde_json::Value) -> String {
             format!("{label} ({summary})")
         };
     }
+    if let Some(t) = vault_title(lang, v, &VaultView::default(), false) {
+        return t;
+    }
     op.and_then(|o| org_op_label(lang, o))
         .map(str::to_string)
         .unwrap_or_else(|| summarize(v))
+}
+
+/// A vault proposal's title (D8): `deposit <name> (<kind>)`,
+/// `replace <name> (<kind>)`, `grant <name> to <reader>`. A grant names
+/// its deposit through `view`; `None` = not a vault op.
+pub(crate) fn vault_title(
+    lang: i32,
+    v: &serde_json::Value,
+    view: &VaultView,
+    replace: bool,
+) -> Option<String> {
+    let lex = if lang == 1 { Lexicon::de() } else { Lexicon::en() };
+    let s = |k: &str| v.get(k).and_then(serde_json::Value::as_str);
+    match s("op")? {
+        "deposit" if s("depositor").is_some() => {
+            let head = if replace { lex.vt_t_replace } else { lex.vt_t_deposit };
+            Some(format!("{head} {} ({})", s("name")?, s("kind").unwrap_or_default()))
+        }
+        "grant" if s("grant_id").is_some() => {
+            let secret = s("secret_id").unwrap_or_default();
+            let name = view
+                .deposits
+                .iter()
+                .find(|d| d.secret_id == secret)
+                .map(|d| d.name.clone())
+                .or_else(|| {
+                    view.grants
+                        .iter()
+                        .find(|g| g.secret_id == secret)
+                        .map(|g| g.name.clone())
+                })
+                .unwrap_or_else(|| secret.chars().take(8).collect());
+            Some(format!("{} {name} {} {}", lex.vt_t_grant, lex.vt_t_to, s("reader")?))
+        }
+        _ => None,
+    }
+}
+
+/// A deposit payload's last-wins slot `(depositor, name)`.
+fn deposit_slot(v: &serde_json::Value) -> Option<(&str, &str)> {
+    if v.get("op")?.as_str()? != "deposit" {
+        return None;
+    }
+    Some((v.get("depositor")?.as_str()?, v.get("name")?.as_str()?))
+}
+
+/// An applied deposit replaces when an earlier applied block filled its
+/// slot.
+fn applied_replaces(earlier: &[serde_json::Value], v: &serde_json::Value) -> bool {
+    deposit_slot(v).is_some_and(|slot| earlier.iter().any(|e| deposit_slot(e) == Some(slot)))
+}
+
+/// A pending deposit replaces when its slot holds a committed version.
+fn pending_replaces(view: &VaultView, v: &serde_json::Value) -> bool {
+    deposit_slot(v).is_some_and(|(depositor, name)| {
+        view.deposits.iter().any(|d| {
+            d.depositor == depositor
+                && d.name == name
+                && d.state != molt_core::vault::VaultDepositState::Pending
+        })
+    })
+}
+
+/// One deposit card, rendered (spec §7 card table).
+pub(crate) fn vault_deposit_row(
+    lex: &Lexicon,
+    v: &VaultView,
+    d: &molt_core::vault::VaultDepositView,
+) -> VaultDepositRow {
+    use molt_core::vault::{VaultComplaintStatus as C, VaultDepositState as S};
+    let (state, word) = match d.state {
+        S::Pending => (0, lex.vt_st_pending),
+        S::Committed => (1, lex.vt_st_committed),
+        S::Sealed => (2, lex.vt_st_sealed),
+        S::Hardened => (3, lex.vt_st_hardened),
+    };
+    let committed = d.state != S::Pending;
+    let complaints: Vec<VaultComplaintRow> = d
+        .complaints
+        .iter()
+        .map(|c| {
+            let (text, bad) = match c.status {
+                C::Open => (lex.vt_c_open.to_string(), false),
+                C::BadShare => (format!("{} {}", lex.vt_c_bad_share, d.depositor), true),
+                C::False => (format!("{} {}", lex.vt_c_false, c.holder), false),
+                C::Lie => (format!("{} {}", lex.vt_c_lie, d.depositor), true),
+            };
+            VaultComplaintRow { text: text.into(), bad }
+        })
+        .collect();
+    let readable = if committed && d.readable_by < v.m {
+        format!("{} {} {} {}", lex.vt_readable_by, d.readable_by, lex.vt_instead_of, v.m)
+    } else {
+        String::new()
+    };
+    VaultDepositRow {
+        secret_id: d.secret_id.as_str().into(),
+        name: d.name.as_str().into(),
+        kind: d.kind.as_str().into(),
+        caption: format!("{} {} · {}", lex.vt_by, d.depositor, file_size_label(d.size)).into(),
+        state,
+        state_word: word.into(),
+        verified: format!("{}/{} {}", d.verified, d.holders, lex.vt_verified_word).into(),
+        readable: readable.into(),
+        reseal: d.reseal,
+        can_grant: committed && v.base_pending.is_none(),
+        can_read: v.grants.iter().any(|g| {
+            g.secret_id == d.secret_id
+                && g.mine
+                && g.state == molt_core::vault::VaultGrantState::Committed
+        }),
+        mine: d.mine,
+        complaints: ModelRc::new(VecModel::from(complaints)),
+    }
+}
+
+/// One grant card: the pending vote, or the audit entry
+/// `name - reader - when`.
+pub(crate) fn vault_grant_row(
+    lang: i32,
+    lex: &Lexicon,
+    g: &molt_core::vault::VaultGrantView,
+    pending: &[ProposalRowData],
+) -> VaultGrantRow {
+    use molt_core::vault::VaultGrantState as G;
+    let (state, word) = match g.state {
+        G::Pending => (0, lex.vt_g_pending),
+        G::Committed => (1, lex.vt_g_granted),
+        G::Void => (2, lex.vt_g_void),
+        G::Displaced => (3, lex.vt_g_displaced),
+    };
+    let line = match g.at.filter(|_| g.state == G::Committed) {
+        Some(at) => format!("{} - {} - {}", g.name, g.reader, when_label(lang, at)),
+        None => format!("{} - {}", g.name, g.reader),
+    };
+    let proposal = g
+        .proposal
+        .filter(|_| g.state == G::Pending)
+        .and_then(|id| i32::try_from(id).ok());
+    let vote = proposal.and_then(|id| pending.iter().find(|p| p.id == id));
+    let waiting = if g.mine && g.state == G::Committed && g.answers > 0 && g.answers < g.need {
+        format!("{} {}/{}", lex.vt_waiting, g.answers, g.need)
+    } else {
+        String::new()
+    };
+    let bad = if g.bad_answers.is_empty() {
+        String::new()
+    } else {
+        format!("{} {}", lex.vt_bad_answer, g.bad_answers.join(", "))
+    };
+    VaultGrantRow {
+        grant_id: g.grant_id.as_str().into(),
+        secret_id: g.secret_id.as_str().into(),
+        line: line.into(),
+        state,
+        state_word: word.into(),
+        dimmed: matches!(g.state, G::Void | G::Displaced),
+        mine: g.mine,
+        proposal: proposal.unwrap_or(-1),
+        votes: vote
+            .map(|p| format!("{}/{} {}", p.approvals, p.threshold, lex.vt_signed_word))
+            .unwrap_or_default()
+            .into(),
+        can_vote: vote.is_some_and(|p| p.my_vote == 0),
+        waiting: waiting.into(),
+        bad: bad.into(),
+    }
+}
+
+/// The deposit card's `sync_model` eq: its complaint lines by content,
+/// every other field by the derive.
+fn vault_deposit_eq(a: &VaultDepositRow, b: &VaultDepositRow) -> bool {
+    crate::models::models_eq(&a.complaints, &b.complaints)
+        && *b
+            == VaultDepositRow {
+                complaints: b.complaints.clone(),
+                ..a.clone()
+            }
+}
+
+/// Fill the vault pane from the bundle's `VaultView` (on the UI thread);
+/// the rows patch in place.
+pub(crate) fn apply_vault(ui: &crate::AppWindow, b: &SurfacesBundle) {
+    let lex = if b.lang == 1 { Lexicon::de() } else { Lexicon::en() };
+    let empty = VaultView::default();
+    let v = b.vault.as_ref().unwrap_or(&empty);
+    ui.set_vault_real(v.real);
+    ui.set_vault_m(i32::from(v.m));
+    ui.set_vault_n(i32::from(v.n));
+    ui.set_vault_base_pending(v.base_pending.is_some());
+    let base_line = v
+        .base_pending
+        .map(|p| format!("{} {}/{}", lex.vt_loading, p.have, p.size))
+        .unwrap_or_default();
+    ui.set_vault_base_line(base_line.into());
+    let pending: &[ProposalRowData] = b
+        .surfaces
+        .iter()
+        .find(|s| s.key == "vault")
+        .map_or(&[], |s| s.pending.as_slice());
+    let (deposits, grants): (Vec<VaultDepositRow>, Vec<VaultGrantRow>) = if v.real {
+        (
+            v.deposits.iter().map(|d| vault_deposit_row(&lex, v, d)).collect(),
+            v.grants
+                .iter()
+                .map(|g| vault_grant_row(b.lang, &lex, g, pending))
+                .collect(),
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    crate::models::sync_model(&ui.get_vault_deposits(), deposits, vault_deposit_eq, |m| {
+        ui.set_vault_deposits(m);
+    });
+    sync_rows(&ui.get_vault_grants(), grants, |m| ui.set_vault_grants(m));
+    let seats: Vec<String> = b.members.iter().map(|m| m.name.clone()).collect();
+    crate::models::sync_strings(&ui.get_vault_seats(), &seats, |m| ui.set_vault_seats(m));
 }

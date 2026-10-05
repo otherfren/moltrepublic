@@ -174,6 +174,7 @@ pub fn run_app(
     actions::ritual::wire(&ui, &ctx);
     actions::chat::wire(&ui, &ctx);
     actions::org::wire(&ui, &ctx);
+    actions::vault::wire(&ui, &ctx);
     // Quit confirmed from the modal: end the Slint event loop so `ui.run()`
     // returns and the process shuts down.
     ui.on_quit(|| {

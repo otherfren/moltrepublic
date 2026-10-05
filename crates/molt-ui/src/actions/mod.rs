@@ -9,6 +9,7 @@ pub(crate) mod org;
 pub(crate) mod relays;
 pub(crate) mod ritual;
 pub(crate) mod settings;
+pub(crate) mod vault;
 pub(crate) mod workspace;
 
 #[cfg(test)]

@@ -477,6 +477,8 @@ pub(crate) fn apply_session(
         if g.get_ws_id() != ws {
             g.set_ws_id(ws);
             g.invoke_workspace_changed();
+            // a read text or an open vault dialog never outlives its workspace
+            crate::actions::vault::reset_vault_session(ui);
         }
     }
     let (a_state, a_status) = active
@@ -1489,6 +1491,7 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     // the picture budget this republic still carries: the engine stays the
     // authority, this is what the member-picture fit aims at
     ui.set_mp_img_budget(i32::try_from(b.org_stats.image_budget).unwrap_or(i32::MAX));
+    crate::surfaces::apply_vault(ui, b);
 }
 
 /// The live-mirror task: the first full session + surfaces push, then a
@@ -1614,6 +1617,12 @@ pub(crate) fn spawn_mirror(ctx: &Ctx) {
                     });
                     push_surfaces(&w, &weak, &chat_ui).await;
                 }
+                // enough answers arrived: a read this session is waiting
+                // on re-reads; a grant nobody asked to read stays closed
+                Ok(Event::VaultReadable { secret_id }) => {
+                    reread_vault(&w, &weak, secret_id).await;
+                    push_surfaces(&w, &weak, &chat_ui).await;
+                }
                 Ok(Event::UiActionRequested { action }) => {
                     // gui_over_mcp.md, the drive half: perform the verb
                     // through the SAME callbacks a human's click takes,
@@ -1638,6 +1647,22 @@ pub(crate) fn spawn_mirror(ctx: &Ctx) {
             }
         }
     });
+}
+
+/// Re-run a vault read the Unsealed view is waiting on.
+async fn reread_vault(wallet: &WalletHandle, weak: &slint::Weak<AppWindow>, secret_id: String) {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let weak2 = weak.clone();
+    let id = secret_id.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        let waiting = weak2
+            .upgrade()
+            .is_some_and(|ui| crate::actions::vault::should_reread(&ui, &id));
+        let _ = tx.send(waiting);
+    });
+    if rx.await.unwrap_or(false) {
+        crate::actions::vault::run_read(wallet, weak, secret_id).await;
+    }
 }
 
 /// How many of the founder's relay picks are ticked - the folded setup
