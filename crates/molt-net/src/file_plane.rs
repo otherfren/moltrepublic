@@ -302,6 +302,29 @@ pub fn wiki_base_series(commitment: &str) -> Option<[u8; MSG_ID_LEN]> {
     Some(id)
 }
 
+/// **A vault payload's series key** (spec §9.2): `HKDF-SHA256(ikm = the
+/// rotation seed, info = molt_core::vault::payload_series_info(hash))`.
+/// Derived from the payload hash for the reason [`wiki_base_key`] is:
+/// every seat holds the payload and must seal the same pieces.
+pub fn vault_payload_key(rotation_seed: &[u8; 32], payload_hash: &str) -> [u8; 32] {
+    let hk = hkdf::Hkdf::<Sha256>::new(None, rotation_seed);
+    let mut out = [0u8; 32];
+    hk.expand(&molt_core::vault::payload_series_info(payload_hash), &mut out)
+        .expect("32 bytes is within the HKDF-SHA256 expand limit");
+    out
+}
+
+/// The series id a vault payload travels as: the head of
+/// `sha256(payload_series_info(hash))`, so it never meets a wiki base
+/// series (the head of a commitment) or a minted share id.
+#[must_use]
+pub fn vault_payload_series(payload_hash: &str) -> [u8; MSG_ID_LEN] {
+    let digest = Sha256::digest(molt_core::vault::payload_series_info(payload_hash));
+    let mut id = [0u8; MSG_ID_LEN];
+    id.copy_from_slice(&digest[..MSG_ID_LEN]);
+    id
+}
+
 /// Frame one piece: header + payload, zero-padded to the uniform block.
 pub fn frame_piece(index: u32, count: u32, payload: &[u8]) -> Result<Vec<u8>, NetError> {
     if payload.len() > PIECE_PAYLOAD_LEN {
@@ -1389,5 +1412,18 @@ mod tests {
             "6c911e70bba42849427e78e7a3eca17573df92b2c5f19b378c12cda2fcddf679"
         );
         assert_ne!(outer_key(&[0u8; 32]), outer_key(&[1u8; 32]));
+    }
+
+    /// A vault payload's series is its own family: derived from the hash,
+    /// stable, and never the wiki base's id or key for the same hex.
+    #[test]
+    fn a_vault_payload_series_is_its_own_family() {
+        let hash = "ab".repeat(32);
+        let seed = [9u8; 32];
+        assert_eq!(vault_payload_series(&hash), vault_payload_series(&hash));
+        assert_ne!(vault_payload_series(&hash), vault_payload_series(&"cd".repeat(32)));
+        assert_ne!(Some(vault_payload_series(&hash)), wiki_base_series(&hash));
+        assert_ne!(vault_payload_key(&seed, &hash), wiki_base_key(&seed, &hash));
+        assert_ne!(vault_payload_key(&seed, &hash), vault_payload_key(&[8u8; 32], &hash));
     }
 }

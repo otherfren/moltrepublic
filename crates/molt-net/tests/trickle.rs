@@ -284,3 +284,62 @@ fn the_publish_queue_dedups_by_series() {
     assert!(!enqueue_publish(&mut s, job(&path, &m, vec![(0, 0)])), "the whole job covers it");
     assert_eq!(whole_series_ranges(layout), vec![(layout.top, layout.top), (3, 3), (0, 2)]);
 }
+
+/// A store that holds one vault payload as `sid`.
+#[derive(Clone)]
+struct VaultStore {
+    inner: MemStateStore,
+    bytes: Arc<Vec<u8>>,
+}
+
+impl StateStore for VaultStore {
+    async fn vault_piece(&self, file: &str, index: u32) -> Option<Vec<u8>> {
+        if file != "sid" {
+            return None;
+        }
+        let at = usize::try_from(index).ok()?.checked_mul(PIECE_PAYLOAD_LEN)?;
+        let end = (at + PIECE_PAYLOAD_LEN).min(self.bytes.len());
+        (at < self.bytes.len()).then(|| self.bytes[at..end].to_vec())
+    }
+    async fn load(&self) -> molt_core::TransportState {
+        self.inner.load().await
+    }
+    async fn save(&self, state: molt_core::TransportState) {
+        self.inner.save(state).await;
+    }
+}
+
+/// **A vault payload job publishes its held pieces, and never a damaged
+/// copy** (plan S3a): the pieces come out of the store's sealed payload,
+/// and a copy whose bytes miss the committed hash drops the job unpublished.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_vault_job_publishes_the_held_payload_and_never_a_damaged_one() {
+    use sha2::Digest as _;
+    let bytes = pattern(2 * PIECE_PAYLOAD_LEN + 40);
+    let hash = hex::encode(sha2::Sha256::digest(&bytes));
+    let (m, _) = manifest_of_reader(bytes.as_slice()).expect("manifest");
+    let layout = Manifest::layout_for(m.count).expect("layout");
+    let vault_job = |hash: &str| molt_core::PublishJob {
+        path: "sid".to_string(),
+        root: String::new(),
+        vault: Some(hash.to_string()),
+        ..job(std::path::Path::new(""), &m, whole_series_ranges(layout))
+    };
+    let damaged: Vec<u8> = bytes.iter().map(|b| b ^ 1).collect();
+    for (held, expect) in [(bytes.clone(), vec![layout.top, m.count, 0, 1, 2]), (damaged, vec![])] {
+        let relay = MockRelay::run().await.expect("relay");
+        let url = relay.url().await.to_string();
+        let store = VaultStore { inner: MemStateStore::new(), bytes: Arc::new(held) };
+        store.update(|s| enqueue_publish(s, vault_job(&hash))).await;
+        let chan = GroupChannel::new(dialer(), vec![url.clone()], SEED);
+        let (_busy_tx, busy) = tokio::sync::watch::channel(false);
+        let clock = Arc::new(AtomicU64::new(unix_now()));
+        let handle = spawn_trickle(chan, store.clone(), busy, config(Duration::from_millis(20), clock));
+        handle.wake();
+        let seen = arrivals(&url, Duration::from_secs(2)).await;
+        let indices: Vec<u32> = seen.iter().map(|(i, _)| *i).collect();
+        assert_eq!(indices, expect);
+        assert!(store.load().await.file_jobs.publish.is_empty(), "the job is done either way");
+        handle.shutdown().await;
+    }
+}

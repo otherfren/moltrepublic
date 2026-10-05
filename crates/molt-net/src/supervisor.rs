@@ -394,7 +394,30 @@ const CONTROL_FRAMES: &[(&[u8], ControlParser)] = &[
             }
         }
     }),
+    // the vault (plan S3a): receipt, reveal, answer, ask - four tags, one
+    // parser, one decode; `by == from` is checked where it is dispatched
+    (crate::vault_frames::VAULT_RECEIPT_TAG, parse_vault),
+    (crate::vault_frames::VAULT_REVEAL_TAG, parse_vault),
+    (crate::vault_frames::VAULT_RESP_TAG, parse_vault),
+    (crate::vault_frames::VAULT_ASK_TAG, parse_vault),
 ];
+
+fn parse_vault(from: MemberId, frame: &[u8]) -> Option<MlsDecode> {
+    match crate::vault_frames::VaultFrame::from_frame(frame) {
+        Ok(f) => Some(MlsDecode::Vault(from, Box::new(f))),
+        Err(e) => {
+            tracing::debug!(error = %e, "dropping an unusable vault frame");
+            None
+        }
+    }
+}
+
+/// Every control-frame tag this build parses, in table order (the
+/// disjointness test: the table matches by prefix).
+#[must_use]
+pub fn control_frame_tags() -> Vec<&'static [u8]> {
+    CONTROL_FRAMES.iter().map(|(tag, _)| *tag).collect()
+}
 
 /// What the recv loop should do with one inbound MLS message.
 #[derive(Debug)]
@@ -424,6 +447,9 @@ pub(crate) enum MlsDecode {
     MirrorStatus(MemberId, Box<crate::mirror_gossip::MirrorStatusFrame>),
     /// The ask: every holder answers with its status.
     MirrorWho(MemberId),
+    /// A vault control frame (plan S3a): status and transport, never a log
+    /// event.
+    Vault(MemberId, Box<crate::vault_frames::VaultFrame>),
     /// A commit merged (epoch advanced) — ack it and retry the epoch buffer.
     /// `readmitted` names the members the commit ADDED (a recovery re-key):
     /// the consumer forwards them to the engine BEFORE anything of the new
@@ -497,6 +523,13 @@ pub trait StateStore: Send + Sync + Clone + 'static {
     /// engine's, so the default says so.
     fn wiki_base_piece(&self, index: u32) -> impl std::future::Future<Output = Option<Vec<u8>>> + Send {
         let _ = index;
+        async { None }
+    }
+    /// One plaintext piece of the vault payload stored as `file` (its
+    /// `secret_id`), decrypted for exactly this publish. `None` where the
+    /// store keeps none - every store but the engine's.
+    fn vault_piece(&self, file: &str, index: u32) -> impl std::future::Future<Output = Option<Vec<u8>>> + Send {
+        let _ = (file, index);
         async { None }
     }
     /// Load the persisted state (defaults when absent).
@@ -574,6 +607,16 @@ pub trait EngineSink: Send + Sync + Clone + 'static {
     /// `member` asks who holds what. Default no-op.
     fn mirror_who(&self, member: &MemberId) -> impl std::future::Future<Output = ()> + Send {
         let _ = member;
+        async {}
+    }
+    /// An authenticated vault frame from `member` (`frame.by() == member`
+    /// already checked). Default no-op.
+    fn vault_frame(
+        &self,
+        member: &MemberId,
+        frame: &crate::vault_frames::VaultFrame,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        let _ = (member, frame);
         async {}
     }
     /// Sends to `member` keep failing; the outbox is backing off.
@@ -1417,7 +1460,8 @@ impl<K: EngineSink> crate::epoch_hold::HeldIngest<HeldMessage> for MeshHeldInges
             | MlsDecode::PieceWanted(_, _)
             | MlsDecode::MirrorDecl(_, _)
             | MlsDecode::MirrorStatus(_, _)
-            | MlsDecode::MirrorWho(_) => {
+            | MlsDecode::MirrorWho(_)
+            | MlsDecode::Vault(_, _) => {
                 self.sink.peer_seen(&self.peer.member).await;
                 ack_all(std::mem::take(held));
                 Held::Progress
@@ -1750,6 +1794,15 @@ where
                     sink.peer_seen(&peer.member).await;
                     if from == peer.member {
                         sink.mirror_who(&from).await;
+                    }
+                    ack_all(acks);
+                }
+                MlsDecode::Vault(from, frame) => {
+                    sink.peer_seen(&peer.member).await;
+                    if from == peer.member && *frame.by() == from {
+                        sink.vault_frame(&from, &frame).await;
+                    } else {
+                        tracing::warn!(peer = %peer.member, claimed = %frame.by(), "a vault frame disowns its link - dropped");
                     }
                     ack_all(acks);
                 }

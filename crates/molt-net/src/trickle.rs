@@ -319,8 +319,14 @@ async fn tick<S: StateStore>(
     // K6: this holder's own folded wiki base. Every piece is decrypted
     // from the sealed file for exactly this publish - the knowledge base
     // never exists in plaintext on disk, the way a shared file does.
+    // a vault payload (plan S3a): the same held-source path, out of the
+    // sealed `vault/<secret_id>.bin` this seat must hold
+    if let Some(hash) = job.vault.as_deref() {
+        let source = HeldSource::Vault { file: &job.path, hash };
+        return publish_held_piece(chan, store, &job, manifests, day, source).await;
+    }
     if job.wiki_base {
-        return publish_wiki_base_piece(chan, store, &job, manifests, day).await;
+        return publish_held_piece(chan, store, &job, manifests, day, HeldSource::WikiBase).await;
     }
     let manifest = match manifests.get(&job.series) {
         Some(m) => m.clone(),
@@ -391,16 +397,35 @@ async fn tick<S: StateStore>(
     }
 }
 
-/// One piece of the folded wiki base (K6). The manifest is built once
-/// from the holder's own sealed copy and cached like any other series';
-/// a base that is not here yet HOLDS the job rather than dropping it,
-/// because the very next cut may bring it.
-async fn publish_wiki_base_piece<S: StateStore>(
+/// Where a held-source job reads its pieces: the sealed stores the
+/// trickle decrypts one piece at a time, never a plaintext file.
+enum HeldSource<'a> {
+    /// The folded wiki base (K6).
+    WikiBase,
+    /// A vault payload: the sink's file name and the committed hash.
+    Vault { file: &'a str, hash: &'a str },
+}
+
+impl HeldSource<'_> {
+    async fn piece<S: StateStore>(&self, store: &S, index: u32) -> Option<Vec<u8>> {
+        match self {
+            HeldSource::WikiBase => store.wiki_base_piece(index).await,
+            HeldSource::Vault { file, .. } => store.vault_piece(file, index).await,
+        }
+    }
+}
+
+/// One piece of a held source (the folded wiki base, a vault payload).
+/// The manifest is built once from the holder's own sealed copy and cached
+/// like any other series'; a source that is not here yet HOLDS the job
+/// rather than dropping it, because the very next cut or fetch may bring it.
+async fn publish_held_piece<S: StateStore>(
     chan: &GroupChannel,
     store: &S,
     job: &PublishJob,
     manifests: &mut HashMap<String, Manifest>,
     day: u64,
+    source: HeldSource<'_>,
 ) -> Result<(), Hold> {
     let series = job.series.clone();
     let manifest = match manifests.get(&series) {
@@ -408,22 +433,32 @@ async fn publish_wiki_base_piece<S: StateStore>(
         None => {
             let mut hashes = Vec::new();
             let mut size = 0u64;
+            let mut whole = sha2::Sha256::new();
             for i in 0..job.count {
-                let Some(piece) = store.wiki_base_piece(i).await else {
-                    tracing::debug!(series = %series, gate = "no base", "file trickle: waiting");
+                let Some(piece) = source.piece(store, i).await else {
+                    tracing::debug!(series = %series, gate = "not held", "file trickle: waiting");
                     return Err(Hold::Gated);
                 };
                 size = size.saturating_add(u64::try_from(piece.len()).unwrap_or(0));
+                whole.update(&piece);
                 hashes.push(<[u8; 32]>::from(sha2::Sha256::digest(&piece)));
             }
             let m = Manifest { count: job.count, size, hashes };
-            // no root to compare: the source IS this holder's own base, so
+            // no root to compare: the source IS this holder's own copy, so
             // the root would be a self-comparison. The size is what catches
             // a store that moved under the job, and the FETCHER checks the
             // assembled bytes against the chain's commitment.
             if m.size != job.size {
-                drop_job(store, series, "the wiki base moved since the job was queued".into()).await;
+                drop_job(store, series, "the held source moved since the job was queued".into()).await;
                 return Err(Hold::Failed);
+            }
+            // a vault payload's hash is known here, so a damaged copy is
+            // never published under it
+            if let HeldSource::Vault { hash, .. } = source {
+                if hex::encode(whole.finalize()) != hash {
+                    drop_job(store, series, "the vault payload does not match its hash".into()).await;
+                    return Err(Hold::Failed);
+                }
             }
             manifests.insert(job.series.clone(), m.clone());
             m
@@ -439,7 +474,7 @@ async fn publish_wiki_base_piece<S: StateStore>(
     let framed = match meta_piece(&manifest, index) {
         Ok(Some(meta)) => meta,
         Ok(None) => {
-            let Some(slice) = store.wiki_base_piece(index).await else {
+            let Some(slice) = source.piece(store, index).await else {
                 return Err(Hold::Gated);
             };
             match frame_piece(index, manifest.count, &slice) {
@@ -460,11 +495,11 @@ async fn publish_wiki_base_piece<S: StateStore>(
     match publish_piece_paced(chan, &outer_key(&key), &framed, stamp).await {
         Ok(_) => {
             advance(store, job, day).await;
-            tracing::debug!(series = %series, index, "file trickle: wiki base piece published");
+            tracing::debug!(series = %series, index, "file trickle: held piece published");
             Ok(())
         }
         Err(e) => {
-            tracing::debug!(series = %series, index, error = %e, "file trickle: wiki base piece held");
+            tracing::debug!(series = %series, index, error = %e, "file trickle: held piece held");
             Err(Hold::Failed)
         }
     }

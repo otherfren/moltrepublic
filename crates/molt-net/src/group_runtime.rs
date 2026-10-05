@@ -1292,6 +1292,7 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
             | MlsDecode::MirrorDecl(..)
             | MlsDecode::MirrorStatus(..)
             | MlsDecode::MirrorWho(..)
+            | MlsDecode::Vault(..)
             | MlsDecode::Discard
             | MlsDecode::Failed(_)
     ) {
@@ -1368,6 +1369,15 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
         MlsDecode::MirrorWho(from) => {
             sink.peer_seen(&from).await;
             sink.mirror_who(&from).await;
+            Ingest::Nothing
+        }
+        MlsDecode::Vault(from, frame) => {
+            sink.peer_seen(&from).await;
+            if *frame.by() != from {
+                tracing::warn!(%from, claimed = %frame.by(), "a vault frame disowns its sender - dropped");
+                return Ingest::Nothing;
+            }
+            sink.vault_frame(&from, &frame).await;
             Ingest::Nothing
         }
         // the two arms the mesh supervisor implements and this loop did not:
@@ -2928,6 +2938,92 @@ mod tests {
             "the relay is back but the held frame waits for an append that never comes",
         )
         .await;
+        handle.shutdown().await;
+    }
+
+    /// **A vault frame speaks only for its MLS sender** (plan S3a, 1.3.4):
+    /// alice's frame claiming `by = cara` is dropped; her own goes through.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_vault_frame_whose_by_is_not_the_sender_is_dropped() {
+        use crate::mls::MlsMember;
+        use crate::vault_frames::{VaultAskFrame, VaultFrame, VAULT_V};
+        use ed25519_dalek::SigningKey;
+        use nostr_relay_builder::MockRelay;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Sink(Arc<Mutex<Vec<(MemberId, VaultFrame)>>>);
+        impl EngineSink for Sink {
+            async fn deliver(
+                &self,
+                _from: &MemberId,
+                _env: molt_core::EventEnvelope,
+            ) -> Result<(), crate::NetError> {
+                Ok(())
+            }
+            async fn peer_seen(&self, _m: &MemberId) {}
+            async fn send_failed(&self, _m: &MemberId, _r: &str) {}
+            async fn vault_frame(&self, member: &MemberId, frame: &VaultFrame) {
+                self.0.lock().expect("sink").push((member.clone(), frame.clone()));
+            }
+        }
+
+        let key = |s: u8| SigningKey::from_bytes(&[s; 32]);
+        let mut alice = MlsMember::new(&key(1), "alice").expect("alice");
+        let bob = MlsMember::new(&key(2), "bob").expect("bob");
+        alice.create_group().expect("group");
+        let welcome = alice
+            .add_members(&[bob.key_package().expect("bob kp")])
+            .expect("add")
+            .expect("a welcome");
+        let mut bob = bob;
+        bob.join_from_welcome(&welcome).expect("bob joins");
+
+        let relay = MockRelay::run().await.expect("relay");
+        let url = relay.url().await.to_string();
+        let seed = [7u8; 32];
+        let alice_chan =
+            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![url.clone()], seed);
+        let alice_mls = MlsChannel::new(alice);
+        let ask = |by: &str, id: char| {
+            VaultFrame::Ask(VaultAskFrame {
+                v: VAULT_V,
+                by: by.to_string(),
+                grant_id: std::iter::repeat_n(id, 64).collect(),
+            })
+        };
+
+        let sink = Sink::default();
+        let (_wake, wake_rx) = watch::channel(0u64);
+        let (health_tx, _health) = watch::channel(GroupHealth::default());
+        let bob_chan = crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![url], seed);
+        let handle = spawn_group(
+            bob_chan,
+            MlsChannel::new(bob),
+            GroupNetConfig::fast("bob".into(), vec!["alice".into()]),
+            crate::MemLog::default(),
+            crate::MemStateStore::default(),
+            sink.clone(),
+            wake_rx,
+            health_tx,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+        for frame in [ask("cara", 'a'), ask("alice", 'b')] {
+            let sealed = alice_mls.group_control_frame(&frame.to_frame()).expect("sealed");
+            alice_chan
+                .publish_frame(&sealed.exporter, &sealed.ciphertext)
+                .await
+                .expect("publish");
+        }
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        while sink.0.lock().expect("sink").is_empty() {
+            assert!(tokio::time::Instant::now() < deadline, "the honest vault frame never arrived");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let got = sink.0.lock().expect("sink").clone();
+        assert_eq!(got, vec![("alice".to_string(), ask("alice", 'b'))], "only the honest frame passes");
         handle.shutdown().await;
     }
 }

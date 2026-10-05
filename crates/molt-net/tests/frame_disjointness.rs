@@ -95,3 +95,29 @@ fn the_ack_tag_cannot_be_confused_with_a_json_frame() {
         "an event envelope must never look like an ack control frame"
     );
 }
+
+/// **The vault's four tags never shadow another control frame** (plan
+/// S3a). The control table matches by PREFIX, so a tag that starts with
+/// another tag would be parsed by the wrong parser; every tag leads with
+/// NUL, so none reads as JSON.
+#[test]
+fn vault_frame_tags_are_disjoint() {
+    use molt_net::vault_frames::VAULT_TAGS;
+    let all = molt_net::supervisor::control_frame_tags();
+    for tag in VAULT_TAGS {
+        assert!(all.contains(&tag), "the control table parses {:?}", String::from_utf8_lossy(tag));
+    }
+    for (i, a) in all.iter().enumerate() {
+        assert_eq!(a.first(), Some(&0u8), "{:?} leads with NUL", String::from_utf8_lossy(a));
+        for (j, b) in all.iter().enumerate() {
+            if i != j {
+                assert!(
+                    !b.starts_with(a),
+                    "{:?} shadows {:?}",
+                    String::from_utf8_lossy(a),
+                    String::from_utf8_lossy(b)
+                );
+            }
+        }
+    }
+}

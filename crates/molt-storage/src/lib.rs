@@ -107,6 +107,9 @@ pub(crate) const READ_CAP_CONTENT: u64 = 16 * 1024 * 1024; // wiki draft / logo 
 /// `knowledge_base_scale.md` §3 sizes it at 100 MiB. The cap is a local
 /// DoS ceiling on a damaged or planted file, not a product limit.
 pub(crate) const READ_CAP_WIKI_BASE: u64 = 512 * 1024 * 1024;
+/// A vault payload: the 100 KiB plaintext cap plus the AEAD, in a few
+/// frames - 1 MiB is far above any honest file.
+pub(crate) const READ_CAP_VAULT_PAYLOAD: u64 = 1024 * 1024;
 
 /// The ONE sanctioned whole-file read (L8): metadata-checked against the
 /// cap before the bytes are touched. An over-cap file surfaces as
@@ -147,9 +150,16 @@ const KEYS_SEGMENT: u64 = u64::MAX - 3;
 /// AAD segment number that marks the `wiki_base.bin` frames (K6: the folded
 /// wiki tree a compaction cut committed to).
 const WIKI_BASE_SEGMENT: u64 = u64::MAX - 4;
+/// AAD segment number that marks the `vault_base.bin` frames (vault plan
+/// S5: the folded vault a cut committed to).
+#[allow(dead_code)] // S5 writes the sink
+const VAULT_BASE_SEGMENT: u64 = u64::MAX - 5;
+/// AAD segment number that marks the `vault/<secret_id>.bin` frames (vault
+/// plan S3a: one deposit's payload ciphertext).
+const VAULT_PAYLOAD_SEGMENT: u64 = u64::MAX - 6;
 /// The lowest reserved marker — a log file numbered at or above it is
 /// ignored (see [`list_sorted`]).
-const RESERVED_SEGMENT_FLOOR: u64 = WIKI_BASE_SEGMENT;
+const RESERVED_SEGMENT_FLOOR: u64 = VAULT_PAYLOAD_SEGMENT;
 /// Plaintext per wiki-base frame: EXACTLY one file-plane piece
 /// (`molt_net::file_plane::PIECE_PAYLOAD_LEN`, cross-checked by a static
 /// assertion in molt-engine - this crate sits below molt-net and cannot
@@ -1696,45 +1706,14 @@ impl OpenedWorkspace {
     /// # Errors
     /// Unreadable, or a frame that does not authenticate.
     pub fn read_wiki_base_piece(&self, index: u32) -> Result<Option<Vec<u8>>, StorageError> {
-        use std::io::{Read as _, Seek as _};
-        let path = self.dir.join("wiki_base.bin");
-        let mut file = match fs::File::open(&path) {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(StorageError::Corrupt(format!("reading wiki_base.bin: {e}"))),
-        };
-        let Some(at) = usize::try_from(index)
-            .ok()
-            .and_then(|i| i.checked_mul(WIKI_BASE_STRIDE))
-            .and_then(|o| u64::try_from(o).ok())
-        else {
-            return Ok(None);
-        };
-        if file.seek(std::io::SeekFrom::Start(at)).is_err() {
-            return Ok(None);
-        }
-        let mut buf = vec![0u8; WIKI_BASE_STRIDE];
-        let mut filled = 0;
-        while filled < buf.len() {
-            match file.read(&mut buf[filled..]) {
-                Ok(0) => break,
-                Ok(n) => filled += n,
-                Err(e) => return Err(StorageError::Corrupt(format!("reading wiki_base.bin: {e}"))),
-            }
-        }
-        let (frames, _) = split_frames(&buf[..filled]);
-        let Some(frame) = frames.first() else {
-            return Ok(None);
-        };
-        decrypt_frame(
+        read_stride_piece(
+            &self.dir.join("wiki_base.bin"),
             &wiki_base_key(&self.key, &self.id),
             &self.id,
             WIKI_BASE_SEGMENT,
-            u64::from(index),
-            frame.nonce,
-            frame.ciphertext,
+            index,
+            "wiki_base.bin",
         )
-        .map(Some)
     }
 
     /// Drop the stored wiki base — the answer to bytes that fail their
@@ -1749,6 +1728,76 @@ impl OpenedWorkspace {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(StorageError::Corrupt(format!("removing wiki_base.bin: {e}"))),
         }
+    }
+
+    /// **A vault payload** (plan S3a, spec §9.2): the deposit's ciphertext,
+    /// sealed at rest again under a key derived from `secret_id`, so a file
+    /// renamed to another deposit's name does not open. Fixed-stride frames
+    /// of one file-plane piece each, like the wiki base.
+    ///
+    /// # Errors
+    /// `secret_id` is not 64 lowercase hex, or the write fails.
+    pub fn write_vault_payload(&self, secret_id: &str, bytes: &[u8]) -> Result<(), StorageError> {
+        let rel = vault_payload_rel(secret_id)?;
+        let key = vault_payload_key(&self.key, secret_id);
+        let mut out = Vec::with_capacity(bytes.len() + 128);
+        for (i, part) in bytes.chunks(WIKI_BASE_CHUNK).chain(bytes.is_empty().then_some(&[][..])).enumerate() {
+            let seq = u64::try_from(i).unwrap_or(u64::MAX);
+            out.extend_from_slice(&encode_frame(&key, &self.id, VAULT_PAYLOAD_SEGMENT, seq, part)?);
+        }
+        fs::create_dir_all(self.dir.join(VAULT_DIR))?;
+        write_atomic(&self.dir, &rel, &out, true)
+    }
+
+    /// The stored payload of `secret_id`, or `None` when not held.
+    ///
+    /// # Errors
+    /// Unreadable, or a frame that does not authenticate.
+    pub fn read_vault_payload(&self, secret_id: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        let rel = vault_payload_rel(secret_id)?;
+        let data = match read_capped(&self.dir.join(&rel), READ_CAP_VAULT_PAYLOAD, "vault payload") {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(StorageError::Corrupt(format!("reading {rel}: {e}"))),
+        };
+        let key = vault_payload_key(&self.key, secret_id);
+        let mut out = Vec::with_capacity(data.len());
+        for_each_frame(&key, &self.id, VAULT_PAYLOAD_SEGMENT, &data, &rel, |p| out.extend_from_slice(&p))?;
+        Ok(Some(out))
+    }
+
+    /// One decrypted piece of the stored payload of `secret_id`: a seek and
+    /// one frame decrypt.
+    ///
+    /// # Errors
+    /// Unreadable, or a frame that does not authenticate.
+    pub fn read_vault_payload_piece(
+        &self,
+        secret_id: &str,
+        index: u32,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let rel = vault_payload_rel(secret_id)?;
+        let key = vault_payload_key(&self.key, secret_id);
+        read_stride_piece(&self.dir.join(&rel), &key, &self.id, VAULT_PAYLOAD_SEGMENT, index, &rel)
+    }
+
+    /// Drop the stored payload of `secret_id` (absent is not an error).
+    ///
+    /// # Errors
+    /// The file exists but cannot be removed.
+    pub fn remove_vault_payload(&self, secret_id: &str) -> Result<(), StorageError> {
+        let rel = vault_payload_rel(secret_id)?;
+        match fs::remove_file(self.dir.join(&rel)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(StorageError::Corrupt(format!("removing {rel}: {e}"))),
+        }
+    }
+
+    /// The `secret_id`s whose payload this holder keeps, sorted.
+    #[must_use]
+    pub fn list_vault_payloads(&self) -> Vec<String> {
+        list_vault_payloads(&self.dir)
     }
 
     /// Read every envelope with `seq >= from_seq` from the log — the
@@ -1811,6 +1860,107 @@ fn wiki_base_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
     Zeroizing::new(hkdf32(ws_key, "molt-wiki-base", id))
 }
 
+/// The `secret_id`s with a payload file under `ws_dir/vault/`, sorted;
+/// anything else there is ignored.
+#[must_use]
+pub fn list_vault_payloads(ws_dir: &Path) -> Vec<String> {
+    let Ok(rd) = fs::read_dir(ws_dir.join(VAULT_DIR)) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = rd
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.strip_suffix(".bin").map(str::to_string))
+        .filter(|stem| is_secret_id(stem))
+        .collect();
+    out.sort();
+    out
+}
+
+/// The vault payloads' folder inside a workspace.
+const VAULT_DIR: &str = "vault";
+
+/// A payload's file is named by its `secret_id`: 64 lowercase hex, no
+/// other path part.
+fn is_secret_id(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn vault_payload_rel(secret_id: &str) -> Result<String, StorageError> {
+    if !is_secret_id(secret_id) {
+        return Err(StorageError::Corrupt("a vault payload name is not a secret id".to_string()));
+    }
+    Ok(format!("{VAULT_DIR}/{secret_id}.bin"))
+}
+
+/// The sub-key of one payload file: bound to its `secret_id`, which
+/// already commits to the payload hash.
+fn vault_payload_key(ws_key: &[u8; 32], secret_id: &str) -> Zeroizing<[u8; 32]> {
+    Zeroizing::new(hkdf32(ws_key, "molt-vault-payload", secret_id.as_bytes()))
+}
+
+/// Decrypt every frame of a multi-frame state file under one key and
+/// segment marker; a torn tail is an error.
+fn for_each_frame(
+    key: &[u8; 32],
+    id: &[u8; 32],
+    segment: u64,
+    data: &[u8],
+    what: &str,
+    mut sink: impl FnMut(Vec<u8>),
+) -> Result<(), StorageError> {
+    let (frames, torn) = split_frames(data);
+    if torn.is_some() {
+        return Err(StorageError::Corrupt(format!("{what} is torn")));
+    }
+    for (i, frame) in frames.iter().enumerate() {
+        let seq = u64::try_from(i).unwrap_or(u64::MAX);
+        sink(decrypt_frame(key, id, segment, seq, frame.nonce, frame.ciphertext)?);
+    }
+    Ok(())
+}
+
+/// Frame `index` of a fixed-stride multi-frame file, decrypted: one seek,
+/// one frame. `None` when the file or the frame is absent.
+fn read_stride_piece(
+    path: &Path,
+    key: &[u8; 32],
+    id: &[u8; 32],
+    segment: u64,
+    index: u32,
+    what: &str,
+) -> Result<Option<Vec<u8>>, StorageError> {
+    use std::io::{Read as _, Seek as _};
+    let mut file = match fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(StorageError::Corrupt(format!("reading {what}: {e}"))),
+    };
+    let Some(at) = usize::try_from(index)
+        .ok()
+        .and_then(|i| i.checked_mul(WIKI_BASE_STRIDE))
+        .and_then(|o| u64::try_from(o).ok())
+    else {
+        return Ok(None);
+    };
+    if file.seek(std::io::SeekFrom::Start(at)).is_err() {
+        return Ok(None);
+    }
+    let mut buf = vec![0u8; WIKI_BASE_STRIDE];
+    let mut filled = 0;
+    while filled < buf.len() {
+        match file.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) => return Err(StorageError::Corrupt(format!("reading {what}: {e}"))),
+        }
+    }
+    let (frames, _) = split_frames(&buf[..filled]);
+    let Some(frame) = frames.first() else {
+        return Ok(None);
+    };
+    decrypt_frame(key, id, segment, u64::from(index), frame.nonce, frame.ciphertext).map(Some)
+}
+
 /// The `transport.state` sub-key.
 fn transport_state_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
     Zeroizing::new(hkdf32(ws_key, "molt-transport-state", id))
@@ -1857,18 +2007,10 @@ fn for_each_wiki_base_frame(
     ws_key: &[u8; 32],
     id: &[u8; 32],
     data: &[u8],
-    mut sink: impl FnMut(Vec<u8>),
+    sink: impl FnMut(Vec<u8>),
 ) -> Result<(), StorageError> {
     let key = wiki_base_key(ws_key, id);
-    let (frames, torn) = split_frames(data);
-    if torn.is_some() {
-        return Err(StorageError::Corrupt("wiki_base.bin is torn".to_string()));
-    }
-    for (i, frame) in frames.iter().enumerate() {
-        let seq = u64::try_from(i).unwrap_or(u64::MAX);
-        sink(decrypt_frame(&key, id, WIKI_BASE_SEGMENT, seq, frame.nonce, frame.ciphertext)?);
-    }
-    Ok(())
+    for_each_frame(&key, id, WIKI_BASE_SEGMENT, data, "wiki_base.bin", sink)
 }
 
 /// Decrypt + parse one `chain.state` image (`data` = the file's bytes, or
@@ -2870,6 +3012,24 @@ enum WriterMsg {
         index: u32,
         reply: tokio::sync::oneshot::Sender<Option<Vec<u8>>>,
     },
+    /// Vault S3a: persist (or drop, on `None`) one payload, acking when
+    /// durable.
+    PersistVaultPayload {
+        secret_id: String,
+        bytes: Option<Vec<u8>>,
+        ack: mpsc::SyncSender<bool>,
+    },
+    /// Vault S3a: one decrypted payload piece (the publish path).
+    LoadVaultPayloadPiece {
+        secret_id: String,
+        index: u32,
+        reply: tokio::sync::oneshot::Sender<Option<Vec<u8>>>,
+    },
+    /// Vault S3a: one whole decrypted payload.
+    LoadVaultPayload {
+        secret_id: String,
+        reply: tokio::sync::oneshot::Sender<Option<Vec<u8>>>,
+    },
     Close(mpsc::SyncSender<()>),
 }
 
@@ -3213,6 +3373,40 @@ impl StorageHandle {
             .send_from_async(WriterMsg::LoadWikiBasePiece { index, reply: tx })
             .await
         {
+            return None;
+        }
+        rx.await.ok().flatten()
+    }
+
+    /// Vault S3a: persist the payload of `secret_id` (`None` drops it),
+    /// acking when durable.
+    #[must_use]
+    pub fn persist_vault_payload_blocking(&self, secret_id: &str, bytes: Option<Vec<u8>>) -> bool {
+        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
+        let msg = WriterMsg::PersistVaultPayload { secret_id: secret_id.to_string(), bytes, ack: ack_tx };
+        if self.tx.send(msg).is_err() {
+            return false;
+        }
+        ack_rx.recv().unwrap_or(false)
+    }
+
+    /// Vault S3a: one decrypted piece of a held payload, for the trickle
+    /// sender. `None` when not held, past its end, or the writer is gone.
+    pub async fn load_vault_payload_piece(&self, secret_id: &str, index: u32) -> Option<Vec<u8>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let msg = WriterMsg::LoadVaultPayloadPiece { secret_id: secret_id.to_string(), index, reply: tx };
+        if !self.send_from_async(msg).await {
+            return None;
+        }
+        rx.await.ok().flatten()
+    }
+
+    /// Vault S3a: a whole held payload. `None` when not held, unreadable,
+    /// or the writer is gone.
+    pub async fn load_vault_payload(&self, secret_id: &str) -> Option<Vec<u8>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let msg = WriterMsg::LoadVaultPayload { secret_id: secret_id.to_string(), reply: tx };
+        if !self.send_from_async(msg).await {
             return None;
         }
         rx.await.ok().flatten()
@@ -3588,6 +3782,32 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                             None
                         });
                         let _ = reply.send(piece);
+                    }
+                    Ok(WriterMsg::PersistVaultPayload { secret_id, bytes, ack }) => {
+                        let wrote = match &bytes {
+                            Some(b) => ws.write_vault_payload(&secret_id, b),
+                            None => ws.remove_vault_payload(&secret_id),
+                        };
+                        let mut ok = true;
+                        if let Err(e) = wrote.and_then(|()| ws.sync()) {
+                            fail(&failed_flag, "vault payload write", &e);
+                            ok = false;
+                        }
+                        let _ = ack.send(ok);
+                    }
+                    Ok(WriterMsg::LoadVaultPayloadPiece { secret_id, index, reply }) => {
+                        let piece = ws.read_vault_payload_piece(&secret_id, index).unwrap_or_else(|e| {
+                            tracing::warn!(error = %e, index, "vault payload piece unreadable");
+                            None
+                        });
+                        let _ = reply.send(piece);
+                    }
+                    Ok(WriterMsg::LoadVaultPayload { secret_id, reply }) => {
+                        let bytes = ws.read_vault_payload(&secret_id).unwrap_or_else(|e| {
+                            tracing::warn!(error = %e, "vault payload unreadable");
+                            None
+                        });
+                        let _ = reply.send(bytes);
                     }
                     Ok(WriterMsg::Snapshot(snap)) => {
                         if let Err(e) = ws.sync().and_then(|()| ws.write_snapshot(&snap)) {
@@ -4564,6 +4784,79 @@ mod tests {
         ws.remove_wiki_base().expect("remove");
         assert_eq!(ws.read_wiki_base().expect("read"), None);
         ws.remove_wiki_base().expect("removing twice is not an error");
+    }
+
+    fn vault_ws(root: &Path) -> OpenedWorkspace {
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        create_workspace(root, &seed, &founded(42)).expect("create")
+    }
+
+    /// Plan S3a: a payload round-trips through `vault/<secret_id>.bin`
+    /// across several pieces, is served piece by piece, and never sits on
+    /// disk as the bytes it holds.
+    #[test]
+    fn a_vault_payload_round_trips_sealed_at_rest() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let ws = vault_ws(tmp.path());
+        let sid = "ab".repeat(32);
+        assert_eq!(ws.read_vault_payload(&sid).expect("read"), None, "not held");
+        assert!(ws.list_vault_payloads().is_empty());
+
+        let payload: Vec<u8> = b"one two ".iter().copied().cycle().take(2 * WIKI_BASE_CHUNK + 40).collect();
+        ws.write_vault_payload(&sid, &payload).expect("write");
+        assert_eq!(ws.read_vault_payload(&sid).expect("read"), Some(payload.clone()));
+        for (index, want) in payload.chunks(WIKI_BASE_CHUNK).enumerate() {
+            let got = ws
+                .read_vault_payload_piece(&sid, u32::try_from(index).expect("index"))
+                .expect("piece")
+                .expect("present");
+            assert_eq!(got, want, "piece {index}");
+        }
+        assert_eq!(ws.read_vault_payload_piece(&sid, 3).expect("past the end"), None);
+        let raw = fs::read(ws.dir().join("vault").join(format!("{sid}.bin"))).expect("raw");
+        assert!(!raw.windows(16).any(|w| w == &payload[..16]), "sealed at rest");
+        assert_eq!(ws.list_vault_payloads(), vec![sid.clone()]);
+
+        assert!(ws.write_vault_payload("../escape", b"x").is_err(), "the name is a secret_id");
+        assert!(ws.write_vault_payload(&"AB".repeat(32), b"x").is_err());
+
+        ws.remove_vault_payload(&sid).expect("remove");
+        assert_eq!(ws.read_vault_payload(&sid).expect("read"), None);
+        ws.remove_vault_payload(&sid).expect("removing twice is not an error");
+        assert!(ws.list_vault_payloads().is_empty());
+    }
+
+    /// Plan S3a: the key is bound to the file's `secret_id`, so deposit B's
+    /// file renamed to A's name fails to decrypt instead of serving B as A.
+    #[test]
+    fn two_vault_files_cannot_swap() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let ws = vault_ws(tmp.path());
+        let (a, b) = ("aa".repeat(32), "bb".repeat(32));
+        ws.write_vault_payload(&a, b"one").expect("a");
+        ws.write_vault_payload(&b, b"two").expect("b");
+        let dir = ws.dir().join("vault");
+        fs::copy(dir.join(format!("{b}.bin")), dir.join(format!("{a}.bin"))).expect("swap");
+        assert!(ws.read_vault_payload(&a).is_err(), "B's bytes do not open as A");
+        assert!(ws.read_vault_payload_piece(&a, 0).is_err());
+        assert_eq!(ws.read_vault_payload(&b).expect("b").as_deref(), Some(&b"two"[..]));
+    }
+
+    /// Plan S3a: the two vault markers sit below the wiki base's, and the
+    /// reserved floor moves down with them - a planted log file at either
+    /// number is ignored, never the active segment.
+    #[test]
+    fn segment_floor_ignores_the_vault_markers() {
+        assert_eq!(RESERVED_SEGMENT_FLOOR, VAULT_PAYLOAD_SEGMENT);
+        const { assert!(VAULT_PAYLOAD_SEGMENT < VAULT_BASE_SEGMENT && VAULT_BASE_SEGMENT < WIKI_BASE_SEGMENT) };
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = make_ws(tmp.path(), 2);
+        for no in [VAULT_PAYLOAD_SEGMENT, VAULT_BASE_SEGMENT] {
+            std::fs::write(dir.join("log").join(format!("{no}.mlog")), b"").expect("plant");
+        }
+        let (ws, loaded) = open_workspace(&dir).expect("opens despite the planted files");
+        assert_eq!(loaded.tail.len(), 3);
+        assert!(ws.seg_no < VAULT_PAYLOAD_SEGMENT);
     }
 
     /// WP4b stage 5: the FIRST pruned chain persist raises the manifest
