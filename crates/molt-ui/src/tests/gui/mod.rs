@@ -24,6 +24,8 @@ mod ritual_log;
 mod seed_confirm;
 mod snapshot;
 mod tab_order;
+#[cfg(feature = "live-preview")]
+mod vault_charter;
 mod version_panel;
 mod wiki;
 #[cfg(feature = "live-preview")]

@@ -1951,8 +1951,8 @@ export component AppWindow inherits Window {
     pure callback seed-matches(string, string) -> bool;
     // the rejoin phrase area's word chips, toned in Rust by the BIP-39 list
     pure callback seed-rows(string) -> [SeedRow];
-    property <int> cw-threshold: 2;
-    property <int> cw-members: 3;
+    in-out property <int> cw-threshold: 2;
+    in-out property <int> cw-members: 3;
     // the configured workspace root (mirrored from the session settings)
     // and the live on-disk folder preview it yields for the typed name —
     // re-evaluated on every keystroke via the two-way bound cw-name
@@ -1986,12 +1986,19 @@ export component AppWindow inherits Window {
     // the one charter length limit, engine and UI alike (AGENDA_MAX)
     property <int> cw-agenda-max: 4096;
     // the charter step's feature selection (charter_features.md): chat is
-    // core and not a property; shared memory defaults on.
-    // kanban/vault/wallet are locked off in the wizard (not built yet) and
-    // have NO properties — re-introduce checkbox + property + Rust read
-    // whole when they ship. Read by the Rust create-propose handler, reset
-    // when a ritual starts.
+    // core and not a property; shared memory defaults on; kanban/wallet
+    // are locked off (not built). Read by the Rust create-propose
+    // handler, reset with the form.
     in-out property <bool> cw-feat-memory: true;
+    in-out property <bool> cw-feat-vault: false;
+    // vault spec §3: m >= 2 and m <= n-2; m and n are fixed at setup
+    out property <bool> cw-vault-allowed: root.cw-threshold >= 2
+        && root.cw-threshold <= root.cw-members - 2;
+    // the proposed (signed) selection, mirrored from the engine session
+    in property <bool> cw-prop-memory;
+    in property <bool> cw-prop-quests;
+    in property <bool> cw-prop-vault;
+    in property <bool> cw-prop-wallet;
     // the members are in-process simulations (no real network yet): the
     // lobby shows a SIMULATION badge so it is never mistaken for a real
     // off-band exchange
@@ -2320,9 +2327,8 @@ export component AppWindow inherits Window {
     in property <bool> org-feat-quests;
     in property <bool> org-feat-vault;
     in property <bool> org-feat-wallet;
-    property <bool> org-features-modal-open: false;
+    in-out property <bool> org-features-modal-open: false;
     property <bool> of-memory-draft;
-    property <bool> of-vault-draft;
     in-out property <bool> org-relays-modal-open: false;
     // R6 pool-edit modal: the draft as ROWS plus the space-joined payload
     // string — the Rust side keeps the two in step (set-relay-draft-rows)
@@ -2754,6 +2760,7 @@ export component AppWindow inherits Window {
         root.cw-threshold = 2;
         root.cw-members = 3;
         root.cw-feat-memory = true;
+        root.cw-feat-vault = false;
         root.cw-fold = -1;
     }
 
@@ -3879,11 +3886,10 @@ export component AppWindow inherits Window {
                                 horizontal-alignment: right;
                             }
                             // the feature selection, ratified with the
-                            // charter: chat is core (locked on); kanban,
-                            // vault and wallet are not built yet (locked
-                            // off); the rest is this republic's choice -
-                            // enable-only forever, so a vote can add but
-                            // never remove
+                            // charter: chat is core (locked on); kanban
+                            // and wallet are not built yet (locked off);
+                            // the vault is founding-only and bounded by
+                            // m and n
                             // content-sized, anchored left - the panel must
                             // not stretch across the step's width
                             HorizontalLayout {
@@ -3912,11 +3918,21 @@ export component AppWindow inherits Window {
                                             }
                                             Row {
                                                 AppCheck { width: 180px; label: Strings.feat-quests; checked: false; enabled: false; }
-                                                AppCheck { width: 180px; label: Strings.feat-vault; checked: false; enabled: false; }
+                                                AppCheck {
+                                                    width: 180px;
+                                                    label: Strings.feat-vault;
+                                                    checked <=> root.cw-feat-vault;
+                                                    enabled: root.cw-vault-allowed;
+                                                }
                                             }
                                             Row {
                                                 AppCheck { width: 180px; label: Strings.feat-wallet; checked: false; enabled: false; }
                                             }
+                                        }
+                                        if !root.cw-vault-allowed: Text {
+                                            text: Strings.feat-vault-bounds;
+                                            color: Theme.faint;
+                                            font-size: Theme.fs-cap;
                                         }
                                     }
                                 }
@@ -3952,10 +3968,10 @@ export component AppWindow inherits Window {
                             heading: "";
                             republic: root.cw-name;
                             agenda: root.cw-agenda == "" ? Strings.jw-ratify-agenda-empty : root.cw-agenda;
-                            feat-memory: root.cw-feat-memory;
-                            feat-quests: false;
-                            feat-vault: false;
-                            feat-wallet: false;
+                            feat-memory: root.cw-prop-memory;
+                            feat-quests: root.cw-prop-quests;
+                            feat-vault: root.cw-prop-vault;
+                            feat-wallet: root.cw-prop-wallet;
                         }
                     }
                     if phase != 1: FoldedStep {
@@ -6304,7 +6320,6 @@ export component AppWindow inherits Window {
                                             tooltip-left: true;
                                             clicked => {
                                                 root.of-memory-draft = root.org-feat-memory;
-                                                root.of-vault-draft = root.org-feat-vault;
                                                 root.org-features-modal-open = true;
                                             }
                                         }
@@ -9674,8 +9689,7 @@ export component AppWindow inherits Window {
         title: Strings.cw-features;
         body: "";
         confirm-label: Strings.oc-propose;
-        confirm-enabled: (root.of-memory-draft && !root.org-feat-memory)
-            || (root.of-vault-draft && !root.org-feat-vault);
+        confirm-enabled: root.of-memory-draft && !root.org-feat-memory;
         dismissed => {
             root.org-features-modal-open = false;
         }
@@ -9687,11 +9701,11 @@ export component AppWindow inherits Window {
             // touched (review 2026-08-12)
             // quests and wallet have no draft (locked below) — but an
             // ALREADY enabled one must ride along: the target set is
-            // enable-only
+            // enable-only. The vault never rides: founding only, and the
+            // engine keeps it by union.
             root.org-propose("set_features",
                 (root.of-memory-draft || root.org-feat-memory ? " memory" : "")
                 + (root.org-feat-quests ? " quests" : "")
-                + (root.of-vault-draft || root.org-feat-vault ? " vault" : "")
                 + (root.org-feat-wallet ? " wallet" : ""));
         }
         VerticalLayout {
@@ -9709,13 +9723,22 @@ export component AppWindow inherits Window {
                 checked: root.org-feat-quests;
                 enabled: false;
             }
-            // vault: locked in the wizard, but voted in here - a mock pane
-            // behind a real charter feature, and the label says so (user
-            // decision 2026-08-29)
-            AppCheck {
-                label: Strings.feat-vault + Strings.feat-mock;
-                checked <=> root.of-vault-draft;
-                enabled: !root.org-feat-vault;
+            // vault: founding only (vault spec D11), never a vote
+            HorizontalLayout {
+                height: 28px * Theme.ui-scale;
+                spacing: 10px;
+                Text {
+                    text: Strings.feat-vault;
+                    color: Theme.dim;
+                    font-size: Theme.fs-body;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: Strings.vault-founding-only;
+                    color: Theme.faint;
+                    font-size: Theme.fs-cap;
+                    vertical-alignment: center;
+                }
             }
             AppCheck {
                 label: Strings.feat-wallet;

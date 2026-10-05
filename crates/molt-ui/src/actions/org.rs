@@ -170,7 +170,10 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             if !surface.is_gated() {
                 return;
             }
-            let payload = serde_json::json!({ "op": default_op(surface), "title": title });
+            let Some(op) = default_op(surface) else {
+                return;
+            };
+            let payload = serde_json::json!({ "op": op, "title": title });
             cx.issue(Command::Propose { surface, payload });
         });
     }

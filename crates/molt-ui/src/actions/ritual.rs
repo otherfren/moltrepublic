@@ -211,20 +211,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     {
         let cx = ctx.clone();
         ui.on_create_propose(move |name, agenda| {
-            // the wizard's checkbox selection; the engine canonicalizes
-            let features = cx
-                .weak
-                .upgrade()
-                .map(|ui| {
-                    // quests/vault/wallet have no wizard checkbox (locked
-                    // off, not built) — no property to read until they ship
-                    [(ui.get_cw_feat_memory(), "memory")]
-                    .into_iter()
-                    .filter(|(on, _)| *on)
-                    .map(|(_, key)| key.to_string())
-                    .collect()
-                })
-                .unwrap_or_default();
+            let features = cx.weak.upgrade().map(|ui| charter_features(&ui)).unwrap_or_default();
             cx.issue(
                 Command::CreatePropose {
                     name: name.to_string(),
@@ -428,4 +415,14 @@ pub(crate) fn seed_word_rows(text: &str) -> Vec<Vec<(i32, String, i32)>> {
         })
         .collect();
     toned.chunks(4).map(<[_]>::to_vec).collect()
+}
+
+/// The wizard's checkbox selection for `CreatePropose`; the engine
+/// canonicalizes. Quests and wallet have no wizard checkbox yet.
+pub(crate) fn charter_features(ui: &AppWindow) -> Vec<String> {
+    [(ui.get_cw_feat_memory(), "memory"), (ui.get_cw_feat_vault(), "vault")]
+        .into_iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, key)| key.to_string())
+        .collect()
 }
