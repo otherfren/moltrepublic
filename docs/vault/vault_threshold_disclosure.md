@@ -4,7 +4,8 @@ Status: DRAFT rev 3 (2026-10-05) — the product decisions in §2 were
 ratified by the user in the 2026-10-05 discussion; the protocol below is
 the design they imply. Rev 3 adds D11–D13 after a second review the same
 day (founding-only vault, keys in the roster, deposit is a vote,
-m ≤ n − 2).
+m ≤ n − 2) and D14–D16; no open questions remain — the next step is the
+V1 spike (§14).
 Nothing of the cryptography is built; the only thing following this
 document so far is the GUI design mock (`surfaces.slint::VaultPane`).
 Rev 1 (2026-08-16) is superseded: its primitives stand, its framing
@@ -70,6 +71,9 @@ deposit time, in one line:
 - **D14 Older builds never get the vault.** No compatibility path: an
   older build can neither found nor join nor run a vault republic (§6).
 - **D15 Re-seal after a complaint is offered, never automatic** (§7).
+- **D16 A cut drops the grant audit of replaced versions.** Who read an
+  old version disappears below the cut with that version (§9.3) — the
+  checkpoint summarizes, it does not archive.
 
 ## 3. When the vault can be enabled
 
@@ -338,7 +342,8 @@ So the cut **folds**, with every K6 rule carried over
 
 - Deposits are a last-write-wins slot keyed `(depositor, name)`, the
   depositor authenticated by `sig_depositor` — only the current version
-  survives (D7). Grants on a dropped version go with it.
+  survives (D7). Grants on a dropped version go with it, audit included
+  (D16).
 - The blob carries ONE entry, `{"op": "vault_base", "hash", "size"}`: a
   commitment to the canonical bytes (`molt-vault-base-v1`) of all current
   deposits and grants (the keys live in the genesis roster). Receipts and complaints are not in
@@ -497,11 +502,3 @@ recorded so the record format leaves room for a refresh epoch.
    reads; every seat restored from backup after a cut → a grant still
    reads (the twin of `a_folded_wiki_survives_every_seat_restoring_from_backup`).
 6. **V6 share refresh** (§9.6), after v1 ships.
-
-## 15. Open questions
-
-1. **Grant audit at a cut.** A replaced deposit takes its grants with it
-   (§9.3), so the audit of who read an OLD version disappears below the
-   cut. Recommended: accept it (the checkpoint summarizes, it does not
-   archive). Alternative: keep grant records as accumulating items — a
-   few bytes each, but unbounded.
