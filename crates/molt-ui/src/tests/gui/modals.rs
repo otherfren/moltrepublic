@@ -12,13 +12,13 @@ use super::*;
 /// welcome screen carries no input of its own, so every `TextInput` the
 /// query finds belongs to the modal.
 #[cfg(feature = "live-preview")]
-fn dialog_window() -> AppWindow {
+fn dialog_window() -> (AppWindow, Shown) {
     i_slint_backend_testing::init_no_event_loop();
     let ui = AppWindow::new().expect("headless window");
     apply_strings(&ui, 0);
     ui.window().set_size(slint::PhysicalSize::new(1100, 800));
-    ui.show().expect("show headless");
-    ui
+    let shown = show_headless(&ui);
+    (ui, shown)
 }
 
 /// One frame, so a freshly created dialog runs its `init`.
@@ -220,7 +220,7 @@ fn table() -> Vec<Dialog> {
 #[cfg(feature = "live-preview")]
 #[test]
 fn every_dialog_opens_on_its_first_input_and_enter_confirms() {
-    let ui = dialog_window();
+    let (ui, _shown) = dialog_window();
     for d in table() {
         // a confirm may navigate (the bucket restore does): every dialog
         // starts from the input-free welcome screen
@@ -268,7 +268,7 @@ fn every_dialog_opens_on_its_first_input_and_enter_confirms() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn escape_cancels_every_dialog_from_inside_its_field() {
-    let ui = dialog_window();
+    let (ui, _shown) = dialog_window();
     for d in table() {
         ui.set_screen(AppScreen::Choice);
         (d.open)(&ui);
@@ -286,7 +286,7 @@ fn escape_cancels_every_dialog_from_inside_its_field() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn the_relay_field_adds_on_enter_rather_than_confirming() {
-    let ui = dialog_window();
+    let (ui, _shown) = dialog_window();
     let added: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     {
         let a = added.clone();
@@ -310,7 +310,7 @@ fn the_relay_field_adds_on_enter_rather_than_confirming() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn a_dialog_without_inputs_still_confirms_and_cancels_on_the_keys() {
-    let ui = dialog_window();
+    let (ui, _shown) = dialog_window();
     ui.set_confirm_quit_open(true);
     frame();
     assert_eq!(inputs(&ui).len(), 0, "it has no field at all");
@@ -358,7 +358,7 @@ fn placeholder_of_a_field(ui: &AppWindow, text: &str) -> bool {
 #[cfg(feature = "live-preview")]
 #[test]
 fn the_dialogs_drop_the_captions_their_placeholders_carry() {
-    let ui = dialog_window();
+    let (ui, _shown) = dialog_window();
     let seen = |label: &str| {
         i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, label).count() > 0
     };

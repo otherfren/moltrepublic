@@ -54,7 +54,7 @@ fn the_chat_author_name_keeps_its_width_inside_the_poke_menu_wrapper() {
     // the repeaters only materialize on a shown window in the main screen
     ui.set_screen(AppScreen::Main);
     ui.set_selected_surface("chat".into());
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
 
     let names: Vec<_> =
         i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "ChatRow::author-name")
@@ -127,7 +127,7 @@ fn a_right_click_on_a_poke_site_opens_the_menu() {
     ui.set_screen(AppScreen::Main);
     ui.set_selected_surface("chat".into());
     apply_strings(&ui, 0);
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
     // the author is the own seat in this fixture — make it a POKABLE
     // name so the area is enabled (the gate is what `Poke.can` decides)
     ui.global::<Poke>().set_me("petra".into());
@@ -160,7 +160,7 @@ fn a_right_click_on_a_poke_site_opens_the_menu() {
 #[test]
 fn a_right_click_on_a_member_row_opens_the_poke_menu() {
     i_slint_backend_testing::init_no_event_loop();
-    let ui = members_window(true);
+    let (ui, _shown) = members_window(true);
     let label = ui.global::<Strings>().get_mem_poke().to_string();
     assert!(!label.is_empty(), "the fixture must carry the menu title");
     assert!(
@@ -194,7 +194,7 @@ fn a_right_click_on_a_member_row_opens_the_poke_menu() {
 #[test]
 fn with_poking_off_the_member_row_still_offers_the_entry_greyed() {
     i_slint_backend_testing::init_no_event_loop();
-    let ui = members_window(false);
+    let (ui, _shown) = members_window(false);
     let label = ui.global::<Strings>().get_mem_poke().to_string();
     assert!(!label.is_empty(), "the fixture must carry the menu title");
     assert!(
@@ -219,7 +219,7 @@ fn with_poking_off_the_member_row_still_offers_the_entry_greyed() {
 #[test]
 fn the_own_seats_row_offers_no_poke_menu() {
     i_slint_backend_testing::init_no_event_loop();
-    let ui = members_window(true);
+    let (ui, _shown) = members_window(true);
     let label = ui.global::<Strings>().get_mem_poke().to_string();
     let rows: Vec<_> =
         i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "AppWindow::om-row-menu")
@@ -257,7 +257,7 @@ fn the_clipped_presence_pill_still_opens_its_poke_menu() {
         last: "2 min ago".into(),
         state: 0,
     }])));
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
 
     let label = ui.global::<Strings>().get_mem_poke().to_string();
     assert!(!label.is_empty(), "the fixture must carry the menu title");

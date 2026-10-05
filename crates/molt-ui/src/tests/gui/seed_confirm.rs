@@ -12,7 +12,7 @@ type Handle = i_slint_backend_testing::ElementHandle;
 /// The founder at the backup proof: proposed, everyone ratified, the
 /// phrase not yet confirmed.
 #[cfg(feature = "live-preview")]
-fn founder_at_backup_proof() -> AppWindow {
+fn founder_at_backup_proof() -> (AppWindow, Shown) {
     i_slint_backend_testing::init_no_event_loop();
     let ui = AppWindow::new().expect("headless window");
     ui.window().set_size(slint::PhysicalSize::new(1200, 900));
@@ -31,8 +31,8 @@ fn founder_at_backup_proof() -> AppWindow {
     ui.set_cw_backup_confirmed(false);
     ui.set_cw_seed("abandon ability able about above absent absorb abstract absurd abuse access accident".into());
     apply_strings(&ui, 0);
-    ui.show().expect("show headless");
-    ui
+    let shown = show_headless(&ui);
+    (ui, shown)
 }
 
 #[cfg(feature = "live-preview")]
@@ -45,7 +45,7 @@ fn inside(outer: &Handle, inner: &Handle) -> bool {
 #[cfg(feature = "live-preview")]
 #[test]
 fn the_backup_proof_is_typed_into_an_area_not_a_line() {
-    let ui = founder_at_backup_proof();
+    let (ui, _shown) = founder_at_backup_proof();
     let step = Handle::find_by_element_type_name(&ui, "SeedConfirmStep")
         .next()
         .expect("the backup proof renders");

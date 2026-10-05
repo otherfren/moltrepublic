@@ -23,7 +23,7 @@ fn the_relays_tab_comes_before_the_anonymity_tab() {
     ui.set_active_workspace("w".into());
     apply_strings(&ui, 0);
     ui.window().set_size(slint::PhysicalSize::new(1600, 900));
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
     let s = ui.global::<Strings>();
     let relays = tab_x(&ui, s.get_set_tab_relays().as_ref());
     let anon = tab_x(&ui, s.get_set_tab_anon().as_ref());

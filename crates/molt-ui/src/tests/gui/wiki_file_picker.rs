@@ -8,7 +8,7 @@ use super::*;
 
 /// A Shared-Memory window with one open document, the picker's stage.
 #[cfg(feature = "live-preview")]
-fn picker_window(content: &str) -> AppWindow {
+fn picker_window(content: &str) -> (AppWindow, Shown) {
     i_slint_backend_testing::init_no_event_loop();
     let ui = AppWindow::new().expect("headless window");
     apply_strings(&ui, 0);
@@ -30,9 +30,9 @@ fn picker_window(content: &str) -> AppWindow {
     g.invoke_base_arrived();
     let id = g.get_nav_rows().row_data(0).expect("nav row").id;
     ui.window().set_size(slint::PhysicalSize::new(1400, 900));
-    ui.show().expect("show headless");
+    let shown = show_headless(&ui);
     g.invoke_nav_open(id);
-    ui
+    (ui, shown)
 }
 
 /// One share, as `read_uploads` projects it.
@@ -109,7 +109,7 @@ fn only_a_persistent_share_the_grammar_can_name_reaches_the_picker() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn the_file_button_opens_the_picker_on_its_search_field() {
-    let ui = picker_window("# A\n\nprose.\n");
+    let (ui, _shown) = picker_window("# A\n\nprose.\n");
     let g = ui.global::<WikiState>();
     // the engine read the open fires - once, not once per sync
     let asked = Rc::new(RefCell::new(0_u32));
@@ -138,7 +138,7 @@ fn the_file_button_opens_the_picker_on_its_search_field() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn escape_cancels_the_picker_and_drops_its_needle() {
-    let ui = picker_window("# A\n\nprose.\n");
+    let (ui, _shown) = picker_window("# A\n\nprose.\n");
     let g = ui.global::<WikiState>();
     g.invoke_file_open();
     g.set_file_modal_open(true);
@@ -161,7 +161,7 @@ fn escape_cancels_the_picker_and_drops_its_needle() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn enter_in_the_search_field_takes_the_top_row() {
-    let ui = picker_window("# A\n\nprose.\n");
+    let (ui, _shown) = picker_window("# A\n\nprose.\n");
     let g = ui.global::<WikiState>();
     g.invoke_file_open();
     g.set_file_modal_open(true);
@@ -188,7 +188,7 @@ fn enter_in_the_search_field_takes_the_top_row() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn typing_filters_the_picker_over_name_and_sharer() {
-    let ui = picker_window("# A\n\nprose.\n");
+    let (ui, _shown) = picker_window("# A\n\nprose.\n");
     let g = ui.global::<WikiState>();
     g.invoke_file_open();
     g.set_file_modal_open(true);
@@ -220,7 +220,7 @@ fn typing_filters_the_picker_over_name_and_sharer() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn a_click_on_a_row_writes_the_reference_at_the_caret() {
-    let ui = picker_window("# A\n\nSiehe hier.\n");
+    let (ui, _shown) = picker_window("# A\n\nSiehe hier.\n");
     let g = ui.global::<WikiState>();
     // the raw editor is open and the caret sits after "Siehe"
     g.invoke_edit_toggle();
@@ -272,7 +272,7 @@ fn a_click_on_a_row_writes_the_reference_at_the_caret() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn the_written_reference_is_the_one_the_grammar_reads_back() {
-    let ui = picker_window("# A\n\nprose.\n");
+    let (ui, _shown) = picker_window("# A\n\nprose.\n");
     let g = ui.global::<WikiState>();
     g.invoke_file_open();
     g.set_file_modal_open(true);
@@ -299,7 +299,7 @@ fn the_empty_picker_offers_the_jump_to_shared_files() {
     let _guard = rt.enter();
     let (w, _) = node_with_chat(tmp.path());
 
-    let ui = picker_window("# A\n\nprose.\n");
+    let (ui, _shown) = picker_window("# A\n\nprose.\n");
     let cx = Ctx {
         rt: rt.handle().clone(),
         wallet: w.clone(),
@@ -348,7 +348,7 @@ fn the_empty_picker_offers_the_jump_to_shared_files() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn the_file_picker_fits_the_window_at_every_font_size() {
-    let ui = picker_window("# A\n\nprose.\n");
+    let (ui, _shown) = picker_window("# A\n\nprose.\n");
     ui.window().set_size(slint::PhysicalSize::new(1100, 760));
     let g = ui.global::<WikiState>();
     for font in [14.0_f32, 20.0, 26.0] {

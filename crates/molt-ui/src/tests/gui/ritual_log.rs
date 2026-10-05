@@ -5,7 +5,7 @@
 use super::*;
 
 #[cfg(feature = "live-preview")]
-fn founder_running(warnings: i32) -> AppWindow {
+fn founder_running(warnings: i32) -> (AppWindow, Shown) {
     i_slint_backend_testing::init_no_event_loop();
     let ui = AppWindow::new().expect("headless window");
     ui.window().set_size(slint::PhysicalSize::new(1200, 900));
@@ -13,8 +13,8 @@ fn founder_running(warnings: i32) -> AppWindow {
     ui.set_cw_step(1);
     ui.set_cw_log_warnings(warnings);
     apply_strings(&ui, 0);
-    ui.show().expect("show headless");
-    ui
+    let shown = show_headless(&ui);
+    (ui, shown)
 }
 
 #[cfg(feature = "live-preview")]
@@ -26,7 +26,7 @@ fn log_button(ui: &AppWindow, label: &str) -> bool {
 #[cfg(feature = "live-preview")]
 #[test]
 fn the_log_button_counts_refusals_and_warnings() {
-    let ui = founder_running(0);
+    let (ui, _shown) = founder_running(0);
     let title = ui.global::<Strings>().get_cw_log_title().to_string();
     assert!(log_button(&ui, &title), "a clean log: the plain title");
     ui.set_cw_log_warnings(2);

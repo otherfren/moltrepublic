@@ -388,7 +388,7 @@ fn a_file_cards_click_carries_the_file_name() {
         ..SurfaceTab::default()
     }])));
     apply_strings(&ui, 0);
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
 
     let asked: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = asked.clone();

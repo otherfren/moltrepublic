@@ -274,7 +274,7 @@ fn both_upload_tables_page_at_fifteen_rows_apart() {
 
 /// A Shared Files window with rows pushed straight into the models.
 #[cfg(feature = "live-preview")]
-fn files_window(rows: Vec<UploadRow>) -> AppWindow {
+fn files_window(rows: Vec<UploadRow>) -> (AppWindow, Shown) {
     let ui = AppWindow::new().expect("headless window");
     ui.window().set_size(slint::PhysicalSize::new(1200, 800));
     ui.set_screen(AppScreen::Main);
@@ -286,8 +286,8 @@ fn files_window(rows: Vec<UploadRow>) -> AppWindow {
     }])));
     ui.set_org_uploads(ModelRc::new(VecModel::from(rows)));
     apply_strings(&ui, 0);
-    ui.show().expect("show headless");
-    ui
+    let shown = show_headless(&ui);
+    (ui, shown)
 }
 
 /// The pager rows currently on screen.
@@ -340,7 +340,7 @@ fn each_uploads_table_pages_its_own_list() {
         available: true,
         ..UploadRow::default()
     };
-    let ui = files_window(vec![row("protokoll.pdf", false)]);
+    let (ui, _shown) = files_window(vec![row("protokoll.pdf", false)]);
     ui.set_org_persistent(ModelRc::new(VecModel::from(vec![row("charta.pdf", true)])));
     let stepped: Rc<RefCell<Vec<(String, String, i32)>>> = Rc::new(RefCell::new(Vec::new()));
     let sink = stepped.clone();
@@ -379,7 +379,7 @@ fn each_uploads_table_pages_its_own_list() {
 #[test]
 fn the_info_button_opens_the_checksum_modal_with_the_full_hash() {
     i_slint_backend_testing::init_no_event_loop();
-    let ui = files_window(vec![UploadRow {
+    let (ui, _shown) = files_window(vec![UploadRow {
         id: "cc".repeat(16).into(),
         name: "protokoll.pdf".into(),
         user: "walter".into(),
@@ -413,7 +413,7 @@ fn the_type_column_header_lines_up_with_its_cells() {
         available: true,
         ..UploadRow::default()
     };
-    let ui = files_window(vec![row("PDF"), row(""), row("SPREADSHEET")]);
+    let (ui, _shown) = files_window(vec![row("PDF"), row(""), row("SPREADSHEET")]);
     let boxes = |id: &str| -> Vec<(f32, f32)> {
         i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, id)
             .filter(|e| e.size().width > 0.0)
@@ -446,7 +446,7 @@ fn the_type_column_header_lines_up_with_its_cells() {
 #[test]
 fn the_mirror_row_controls_share_one_centre_line() {
     i_slint_backend_testing::init_no_event_loop();
-    let ui = files_window(vec![UploadRow {
+    let (ui, _shown) = files_window(vec![UploadRow {
         id: "cc".repeat(16).into(),
         name: "plan.pdf".into(),
         user: "walter".into(),
@@ -535,7 +535,7 @@ fn the_persistent_table_carries_the_mirror_switch_quota_and_holder_count() {
 #[test]
 fn the_uploads_filter_text_is_vertically_centred() {
     i_slint_backend_testing::init_no_event_loop();
-    let ui = files_window(vec![UploadRow {
+    let (ui, _shown) = files_window(vec![UploadRow {
         id: "dd".repeat(16).into(),
         name: "protokoll.pdf".into(),
         ..UploadRow::default()
@@ -635,7 +635,7 @@ fn the_delete_button_sits_right_of_persist_and_fires_its_callback() {
         delete_vote: delete_vote.into(),
         ..UploadRow::default()
     };
-    let ui = files_window(vec![row("")]);
+    let (ui, _shown) = files_window(vec![row("")]);
     // the temporary table is wider than the default window with this
     // column; a clipped element is not in the tested tree at all
     ui.window().set_size(slint::PhysicalSize::new(1700, 800));
@@ -695,7 +695,7 @@ fn the_download_button_carries_the_rows_name_in_both_tables() {
         online: true,
         ..UploadRow::default()
     };
-    let ui = files_window(vec![row.clone()]);
+    let (ui, _shown) = files_window(vec![row.clone()]);
     // the download column is off a 1200px window (a clipped element is
     // not in the tested tree at all)
     ui.window().set_size(slint::PhysicalSize::new(1700, 800));

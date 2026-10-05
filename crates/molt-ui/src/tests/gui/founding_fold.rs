@@ -11,7 +11,7 @@ type Handle = i_slint_backend_testing::ElementHandle;
 
 /// The founder's lobby with `n` seats, `joined` of them activated.
 #[cfg(feature = "live-preview")]
-fn founder_lobby(n: usize, joined: usize) -> AppWindow {
+fn founder_lobby(n: usize, joined: usize) -> (AppWindow, Shown) {
     i_slint_backend_testing::init_no_event_loop();
     let ui = AppWindow::new().expect("headless window");
     ui.window().set_size(slint::PhysicalSize::new(1200, 900));
@@ -30,8 +30,8 @@ fn founder_lobby(n: usize, joined: usize) -> AppWindow {
     ui.set_cw_total(i32::try_from(n).expect("small n"));
     ui.set_cw_can_propose(joined == n);
     apply_strings(&ui, 0);
-    ui.show().expect("show headless");
-    ui
+    let shown = show_headless(&ui);
+    (ui, shown)
 }
 
 /// Every `FoldedStep` on screen, top to bottom.
@@ -66,7 +66,7 @@ fn header_h(ui: &AppWindow, title: &str) -> f32 {
 #[cfg(feature = "live-preview")]
 #[test]
 fn while_links_are_handed_out_the_members_stay_unfolded_and_only_setup_folds() {
-    let ui = founder_lobby(3, 1);
+    let (ui, _shown) = founder_lobby(3, 1);
     let setup = ui.global::<Strings>().get_wiz_step_setup().to_string();
     let f = folds(&ui);
     assert_eq!(f.len(), 1, "P1: the setup is the only finished step");
@@ -83,7 +83,7 @@ fn while_links_are_handed_out_the_members_stay_unfolded_and_only_setup_folds() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn once_every_seat_joined_the_members_fold_beneath_the_charter_form() {
-    let ui = founder_lobby(3, 3);
+    let (ui, _shown) = founder_lobby(3, 3);
     let s = ui.global::<Strings>();
     let invites = s.get_wiz_step_invites().to_string();
     let setup = s.get_wiz_step_setup().to_string();
@@ -103,7 +103,7 @@ fn once_every_seat_joined_the_members_fold_beneath_the_charter_form() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn one_folded_step_opens_at_a_time() {
-    let ui = founder_lobby(3, 3);
+    let (ui, _shown) = founder_lobby(3, 3);
     let s = ui.global::<Strings>();
     let invites = s.get_wiz_step_invites().to_string();
     let setup = s.get_wiz_step_setup().to_string();
@@ -134,7 +134,7 @@ fn one_folded_step_opens_at_a_time() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn a_phase_advance_closes_the_open_fold_and_folds_the_charter() {
-    let ui = founder_lobby(3, 3);
+    let (ui, _shown) = founder_lobby(3, 3);
     let s = ui.global::<Strings>();
     let invites = s.get_wiz_step_invites().to_string();
     let charter = s.get_wiz_step_charter().to_string();
@@ -158,7 +158,7 @@ fn a_phase_advance_closes_the_open_fold_and_folds_the_charter() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn the_folded_invites_header_counts_the_sealed_seats_live() {
-    let ui = founder_lobby(4, 4);
+    let (ui, _shown) = founder_lobby(4, 4);
     ui.set_cw_proposed(true);
     let word = ui.global::<Strings>().get_cw_sealed_word().to_string();
     ui.set_cw_sealed(1);
@@ -184,7 +184,7 @@ fn the_joiner_folds_the_ratified_charter_and_the_join_facts() {
     ui.set_jw_proposed_agenda("we meet on tuesdays".into());
     ui.set_jw_awaiting_ratify(true);
     apply_strings(&ui, 0);
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
     let s = ui.global::<Strings>();
     let invite = s.get_wiz_step_invite().to_string();
     let charter = s.get_wiz_step_charter().to_string();

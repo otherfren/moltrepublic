@@ -689,7 +689,7 @@ fn a_linked_entry_opens_its_target() {
         .expect("nav row")
         .id;
     ui.window().set_size(slint::PhysicalSize::new(1400, 900));
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
     g.invoke_nav_open(id);
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
     let links: Vec<String> = (0..g.get_links().row_count())
@@ -737,7 +737,7 @@ fn the_changeset_panel_stays_one_row_however_long_the_stack_gets() {
     g.set_base_rev(1);
     g.invoke_base_arrived();
     ui.window().set_size(slint::PhysicalSize::new(1400, 900));
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
     let geom = |id: &str| {
         i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, id)
             .find(|e| e.size().height > 0.0)
@@ -788,7 +788,7 @@ fn the_changes_modal_holds_the_whole_stack() {
     g.set_base_rev(1);
     g.invoke_base_arrived();
     ui.window().set_size(slint::PhysicalSize::new(1400, 900));
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
     for _ in 0..12 {
         g.invoke_new_file();
     }
@@ -856,7 +856,7 @@ fn a_document_without_a_header_offers_tags_and_then_wears_them() {
     };
 
     ui.window().set_size(slint::PhysicalSize::new(1400, 900));
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
 
     open("bare.md");
     assert!(g.get_can_add_tags(), "a header-less document offers tags");
@@ -933,7 +933,7 @@ fn a_semantic_link_is_written_from_the_toolbar_the_editor_and_the_navigator() {
             .id
     };
     ui.window().set_size(slint::PhysicalSize::new(1400, 900));
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
     g.invoke_nav_open(row_id("a.md"));
 
     // 1) the toolbar button
@@ -1292,7 +1292,7 @@ fn the_link_modal_switches_to_a_qualified_header_write() {
         .expect("nav row")
         .id;
     ui.window().set_size(slint::PhysicalSize::new(1400, 900));
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
     g.invoke_nav_open(a);
 
     g.invoke_link_open("".into());
@@ -1347,7 +1347,7 @@ fn a_pending_base_replaces_the_empty_state() {
     let _wiki = wire_wiki(&ui);
     let g = ui.global::<WikiState>();
     ui.window().set_size(slint::PhysicalSize::new(1400, 900));
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
 
     let empty = ui.global::<Strings>().get_mem_empty().to_string();
     let seen = |label: &str| {
@@ -1395,7 +1395,7 @@ fn reveal_scrolls_the_navigator_to_the_marked_row() {
     g.invoke_base_arrived();
     assert_eq!(g.get_nav_rows().row_count(), 1, "a base folder starts closed");
     ui.window().set_size(slint::PhysicalSize::new(1400, 900));
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
     g.invoke_open_link("people/person-55.md".into());
     assert!(g.get_doc_open());
     assert!(g.get_can_reveal(), "a document is active: reveal is on");
@@ -1424,7 +1424,7 @@ fn reveal_scrolls_the_navigator_to_the_marked_row() {
 /// The wiki pane shown headless over a base of `paths` - the fixture the
 /// navigator tests below drive with real mouse events.
 #[cfg(feature = "live-preview")]
-fn nav_window(paths: &[&str]) -> AppWindow {
+fn nav_window(paths: &[&str]) -> (AppWindow, Shown) {
     i_slint_backend_testing::init_no_event_loop();
     let ui = AppWindow::new().expect("headless window");
     apply_strings(&ui, 0);
@@ -1449,9 +1449,9 @@ fn nav_window(paths: &[&str]) -> AppWindow {
     g.set_base_rev(1);
     g.invoke_base_arrived();
     ui.window().set_size(slint::PhysicalSize::new(1400, 900));
-    ui.show().expect("show headless");
+    let shown = show_headless(&ui);
     settle();
-    ui
+    (ui, shown)
 }
 
 /// Every element tree of a navigator row (by its named parts).
@@ -1470,7 +1470,7 @@ fn nav_row_trees(ui: &AppWindow, id: &str) -> Vec<i_slint_backend_testing::Eleme
 fn the_navigator_renders_a_viewports_worth_of_rows() {
     let paths: Vec<String> = (0..200).map(|i| format!("note-{i:03}.md")).collect();
     let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
-    let ui = nav_window(&refs);
+    let (ui, _shown) = nav_window(&refs);
     let g = ui.global::<WikiState>();
     assert_eq!(g.get_nav_rows().row_count(), 200, "every file is a row");
     let nav = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "ScrollBody::fl")
@@ -1491,7 +1491,7 @@ fn the_navigator_renders_a_viewports_worth_of_rows() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn a_right_click_on_a_file_row_marks_it_and_opens_the_pane_menu() {
-    let ui = nav_window(&["alpha.md", "beta.md", "gamma.md"]);
+    let (ui, _shown) = nav_window(&["alpha.md", "beta.md", "gamma.md"]);
     let g = ui.global::<WikiState>();
     let verb = ui.global::<Strings>().get_mem_menu_copy_link().to_string();
     assert!(!verb.is_empty(), "the fixture must carry the menu title");
@@ -1523,7 +1523,7 @@ fn a_right_click_on_a_file_row_marks_it_and_opens_the_pane_menu() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn a_right_click_on_a_folder_row_marks_it_and_opens_the_folder_menu() {
-    let ui = nav_window(&["team/roles.md", "note.md"]);
+    let (ui, _shown) = nav_window(&["team/roles.md", "note.md"]);
     let g = ui.global::<WikiState>();
     let s = ui.global::<Strings>();
     let folder_verb = s.get_mem_tb_new_file().to_string();
@@ -1557,7 +1557,7 @@ fn a_right_click_on_a_folder_row_marks_it_and_opens_the_folder_menu() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn a_mark_leaves_the_row_label_metrics_alone() {
-    let ui = nav_window(&["deleted-note.md", "keeper.md"]);
+    let (ui, _shown) = nav_window(&["deleted-note.md", "keeper.md"]);
     let g = ui.global::<WikiState>();
     let id = nav_id(&ui, "deleted-note.md");
     g.invoke_nav_delete(id);
@@ -1633,7 +1633,7 @@ fn a_mark_repaints_its_rows_not_the_window() {
     g.set_base_docs(ModelRc::new(VecModel::from(docs)));
     g.set_base_rev(1);
     g.invoke_base_arrived();
-    ui.show().expect("show");
+    let _shown = show_headless(&ui);
     let mut frame = || {
         let mut region = None;
         win.draw_if_needed(|r| {
@@ -1670,7 +1670,7 @@ fn a_mark_repaints_its_rows_not_the_window() {
 fn a_new_file_brings_its_rename_input_into_view() {
     let paths: Vec<String> = (0..200).map(|i| format!("note-{i:03}.md")).collect();
     let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
-    let ui = nav_window(&refs);
+    let (ui, _shown) = nav_window(&refs);
     let g = ui.global::<WikiState>();
     g.invoke_new_file();
     settle();
@@ -1697,7 +1697,7 @@ fn a_new_file_brings_its_rename_input_into_view() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn a_long_link_bearing_paragraph_stays_inside_the_pane() {
-    let ui = nav_window(&["a.md"]);
+    let (ui, _shown) = nav_window(&["a.md"]);
     let g = ui.global::<WikiState>();
     let long = "Team der [[Solution depotnahe Module]] mit dem Scope Workflow Depotservice \
         und Depotarchiv. Vision: ein flexibles Workflow-Tool mit Dokumentenverwaltung, das \
@@ -1729,7 +1729,7 @@ fn a_long_link_bearing_paragraph_stays_inside_the_pane() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn a_single_click_on_a_navigator_row_opens_the_document() {
-    let ui = nav_window(&["alpha.md", "beta.md"]);
+    let (ui, _shown) = nav_window(&["alpha.md", "beta.md"]);
     let g = ui.global::<WikiState>();
     let rows = nav_row_trees(&ui, "MemoryPane::filerow");
     click(&ui, &rows[1]);
@@ -1746,7 +1746,7 @@ fn a_single_click_on_a_navigator_row_opens_the_document() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn a_plain_run_after_a_link_rides_in_the_links_row() {
-    let ui = nav_window(&["a.md"]);
+    let (ui, _shown) = nav_window(&["a.md"]);
     let g = ui.global::<WikiState>();
     let long = "Für Neue im Projekt: [[Projekthandbuch DBD 2.0]], [[Neue Mitarbeitende onboarden]], \
         [[Digitaler Arbeitsplatz einrichten]], [[Aufwände und Abwesenheiten erfassen]]. Zur \
@@ -1782,7 +1782,7 @@ fn a_plain_run_after_a_link_rides_in_the_links_row() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn a_double_click_on_a_navigator_row_still_opens_the_document() {
-    let ui = nav_window(&["alpha.md", "beta.md"]);
+    let (ui, _shown) = nav_window(&["alpha.md", "beta.md"]);
     let g = ui.global::<WikiState>();
     let rows = nav_row_trees(&ui, "MemoryPane::filerow");
     click(&ui, &rows[0]);
@@ -1823,7 +1823,7 @@ fn the_authoring_modals_fit_the_window_at_every_font_size() {
         .expect("nav row")
         .id;
     ui.window().set_size(slint::PhysicalSize::new(1100, 760));
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
     g.invoke_nav_open(id);
 
     // the DIALOG's own extent, not the window's: a modal is a scrim over
@@ -1901,7 +1901,7 @@ fn dropping_a_tag_row_redraws_the_rows_that_stay() {
     let rows = g.get_nav_rows();
     let id = rows.row_data(0).expect("nav row").id;
     ui.window().set_size(slint::PhysicalSize::new(1100, 800));
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
     g.invoke_nav_open(id);
 
     let shown = |ui: &AppWindow| -> Vec<String> {
@@ -1968,7 +1968,7 @@ fn tab_switches_the_wiki_document_between_preview_and_the_raw_editor() {
     g.invoke_base_arrived();
     let id = g.get_nav_rows().row_data(0).expect("nav row").id;
     ui.window().set_size(slint::PhysicalSize::new(1400, 900));
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
     g.invoke_nav_open(id);
     assert!(g.get_doc_open(), "the document is open");
     assert!(!g.get_editing(), "…and starts in preview");
@@ -2075,7 +2075,7 @@ fn an_inline_predicate_shows_its_claim_over_the_link() {
         g.invoke_nav_open(row.id);
     };
     ui.window().set_size(slint::PhysicalSize::new(1400, 900));
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
     open("anna.md");
 
     // the predicate is the TOOLTIP, never the text: the sentence reads as
@@ -2134,7 +2134,7 @@ fn an_inline_predicate_shows_its_claim_over_the_link() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn a_tag_pill_pads_its_label_symmetrically() {
-    let ui = tagged_doc_window("---\ntags: [alpha]\n---\n# A\n\nprose.\n");
+    let (ui, _shown) = tagged_doc_window("---\ntags: [alpha]\n---\n# A\n\nprose.\n");
     for font in [14.0_f32, 20.0, 26.0] {
         ui.global::<Theme>().set_fs_app(font);
         let pill = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "TagFlow::tag-pill")
@@ -2172,7 +2172,7 @@ fn a_tag_pill_pads_its_label_symmetrically() {
 
 /// One wiki document open in the Memory pane's preview, headless.
 #[cfg(feature = "live-preview")]
-fn tagged_doc_window(content: &str) -> AppWindow {
+fn tagged_doc_window(content: &str) -> (AppWindow, Shown) {
     i_slint_backend_testing::init_no_event_loop();
     let ui = AppWindow::new().expect("headless window");
     apply_strings(&ui, 0);
@@ -2195,9 +2195,9 @@ fn tagged_doc_window(content: &str) -> AppWindow {
     g.invoke_base_arrived();
     let id = g.get_nav_rows().row_data(0).expect("nav row").id;
     ui.window().set_size(slint::PhysicalSize::new(1400, 900));
-    ui.show().expect("show headless");
+    let shown = show_headless(&ui);
     g.invoke_nav_open(id);
-    ui
+    (ui, shown)
 }
 
 /// **The preview opens on what the document IS.** The tag pills are the
@@ -2207,7 +2207,7 @@ fn tagged_doc_window(content: &str) -> AppWindow {
 #[cfg(feature = "live-preview")]
 #[test]
 fn the_preview_opens_with_the_header_band_at_the_top_edge() {
-    let ui = tagged_doc_window(
+    let (ui, _shown) = tagged_doc_window(
         "---\ntags: [alpha]\ntype: person\n---\n# A\n\nprose.\n",
     );
     let at = |id: &str| {
@@ -2256,7 +2256,7 @@ fn the_preview_opens_with_the_header_band_at_the_top_edge() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn a_headerless_document_shows_no_rule() {
-    let ui = tagged_doc_window("# A\n\nprose.\n");
+    let (ui, _shown) = tagged_doc_window("# A\n\nprose.\n");
     assert_eq!(
         i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "MemoryPane::head-rule")
             .count(),
@@ -2271,7 +2271,7 @@ fn a_headerless_document_shows_no_rule() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn header_relations_flow_side_by_side_and_wrap() {
-    let ui = tagged_doc_window(
+    let (ui, _shown) = tagged_doc_window(
         "---\ntype: person\nborn: 1975\nworks_at: \"[[b.md|Acme]]\"\n---\n# A\n\nprose.\n",
     );
     let chips = |ui: &AppWindow| -> Vec<(f32, f32, f32)> {
@@ -2306,7 +2306,7 @@ fn header_relations_flow_side_by_side_and_wrap() {
 #[test]
 fn a_long_relation_value_elides_under_the_chip_cap() {
     let long = "x".repeat(400);
-    let ui = tagged_doc_window(&format!(
+    let (ui, _shown) = tagged_doc_window(&format!(
         "---\nnote: \"{long}\"\ntype: person\n---\n# A\n\nprose.\n"
     ));
     let widest = i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "RelChip")
@@ -2324,7 +2324,7 @@ fn a_long_relation_value_elides_under_the_chip_cap() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn a_header_link_sits_on_the_chip_centre_line() {
-    let ui = tagged_doc_window(
+    let (ui, _shown) = tagged_doc_window(
         "---\ntype: person\nsubcategory_of: \"[[b.md|Robots]]\"\n---\n# A\n\nprose.\n",
     );
     let mid = |e: &i_slint_backend_testing::ElementHandle| {
@@ -2417,7 +2417,7 @@ fn a_page_change_takes_the_link_hint_with_it() {
     g.set_base_rev(1);
     g.invoke_base_arrived();
     ui.window().set_size(slint::PhysicalSize::new(1400, 900));
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
 
     let tip = |ui: &AppWindow| ui.global::<HintTip>().get_label().to_string();
     let park = |ui: &AppWindow| {
@@ -2486,7 +2486,7 @@ fn a_page_change_takes_the_link_hint_with_it() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn an_unreadable_header_stays_visible_as_prose() {
-    let ui = tagged_doc_window("---\ntags: [alpha]\n# A\n\nprose.\n");
+    let (ui, _shown) = tagged_doc_window("---\ntags: [alpha]\n# A\n\nprose.\n");
     let g = ui.global::<WikiState>();
     let blocks: Vec<String> = (0..g.get_blocks().row_count())
         .filter_map(|i| g.get_blocks().row_data(i))
@@ -2511,7 +2511,7 @@ fn an_unreadable_header_stays_visible_as_prose() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn the_tag_modal_opens_on_its_first_row_and_enter_saves() {
-    let ui = tagged_doc_window("# A\n\nprose.\n");
+    let (ui, _shown) = tagged_doc_window("# A\n\nprose.\n");
     let g = ui.global::<WikiState>();
     g.invoke_tag_open();
     g.set_tag_modal_open(true);
@@ -2548,7 +2548,7 @@ fn the_tag_modal_opens_on_its_first_row_and_enter_saves() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn the_link_modal_opens_on_the_target_filter_and_tab_walks() {
-    let ui = tagged_doc_window("# A\n\nprose.\n");
+    let (ui, _shown) = tagged_doc_window("# A\n\nprose.\n");
     let g = ui.global::<WikiState>();
     g.invoke_link_open("".into());
     g.set_link_modal_open(true);
@@ -2577,7 +2577,7 @@ fn the_link_modal_opens_on_the_target_filter_and_tab_walks() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn the_link_modal_drops_the_captions_its_placeholders_carry() {
-    let ui = tagged_doc_window("# A\n\nprose.\n");
+    let (ui, _shown) = tagged_doc_window("# A\n\nprose.\n");
     let g = ui.global::<WikiState>();
     g.invoke_link_open("".into());
     g.set_link_modal_open(true);
@@ -2813,7 +2813,7 @@ fn a_vote_over_unfetched_bytes_is_queued_and_fires_on_arrival() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn a_drafted_document_carries_its_meta_line_at_the_foot() {
-    let ui = tagged_doc_window("# A\n\nprose.\n");
+    let (ui, _shown) = tagged_doc_window("# A\n\nprose.\n");
     let g = ui.global::<WikiState>();
     g.invoke_new_file();
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
@@ -2854,7 +2854,7 @@ fn tag_pills(ui: &AppWindow) -> Vec<i_slint_backend_testing::ElementHandle> {
 #[test]
 fn many_tag_pills_wrap_inside_the_pane() {
     let tags: Vec<String> = (0..12).map(|i| format!("longish-tag-{i:02}")).collect();
-    let ui = tagged_doc_window(&format!(
+    let (ui, _shown) = tagged_doc_window(&format!(
         "---\ntags: [{}]\n---\n# A\n\nprose.\n",
         tags.join(", ")
     ));
@@ -2885,7 +2885,7 @@ fn many_tag_pills_wrap_inside_the_pane() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn a_few_tag_pills_stay_on_one_row_at_natural_widths() {
-    let ui = tagged_doc_window("---\ntags: [a, bbbbbbbbbbbb, cc]\n---\n# A\n\nprose.\n");
+    let (ui, _shown) = tagged_doc_window("---\ntags: [a, bbbbbbbbbbbb, cc]\n---\n# A\n\nprose.\n");
     let pills = tag_pills(&ui);
     assert_eq!(pills.len(), 3, "one pill per tag");
     let mut rows: Vec<i32> =
@@ -3099,7 +3099,7 @@ fn wiki_pane_paint_cost_offscreen() {
     g.set_base_rev(1);
     g.invoke_base_arrived();
     g.invoke_fold_all(true); // base folders start closed; the probe wants every row
-    ui.show().expect("show");
+    let _shown = show_headless(&ui);
     let mut frame = |label: &str| {
         let t = std::time::Instant::now();
         let mut region = None;

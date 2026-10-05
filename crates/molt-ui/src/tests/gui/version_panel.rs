@@ -24,7 +24,7 @@ fn the_version_panel_sits_left_of_the_config_path_on_one_row() {
     ui.set_app_version("0.0.8".into());
     apply_strings(&ui, 0);
     ui.window().set_size(slint::PhysicalSize::new(1200, 900));
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
 
     let version = text_labelled(&ui, "v0.0.8").expect("the version renders");
     let path = text_labelled(&ui, "config.toml").expect("the config file name renders");

@@ -29,13 +29,43 @@ mod wiki;
 #[cfg(feature = "live-preview")]
 mod wiki_files;
 mod wiki_file_picker;
+#[cfg(feature = "live-preview")]
+mod window_lifetime;
 
 use super::*;
+
+/// A headless window shown by [`show_headless`]; dropping it hides the
+/// window again.
+///
+/// A shown Slint window holds a strong reference to its own component
+/// (`WindowInner::show` keeps it until `hide`), and the component holds
+/// the window adapter: a cycle that dropping every `AppWindow` handle
+/// does not break. Unhidden, each shown test window stayed resident
+/// until the process ended (~200 MB in a debug build, the whole
+/// interpreter-compiled UI) - which is what OOM-killed the GUI suite
+/// run in one process. Pinned by `window_lifetime.rs`.
+#[must_use = "bind it (`let _shown = …`): dropping it hides the window"]
+struct Shown(AppWindow);
+
+impl Drop for Shown {
+    fn drop(&mut self) {
+        // A failure to hide only means the window stays resident - the
+        // old behaviour - so it must not turn a passing test into a panic.
+        let _ = self.0.hide();
+    }
+}
+
+/// Show `ui` on the testing backend; the returned guard hides it again
+/// when the test is done with it. The ONLY way a GUI test shows a window.
+fn show_headless(ui: &AppWindow) -> Shown {
+    ui.show().expect("show headless");
+    Shown(ui.clone_strong())
+}
 
 /// Organization → Members with two seats, rendered headless. `on` is
 /// the applied poke switch the menus gate on.
 #[cfg(feature = "live-preview")]
-fn members_window(on: bool) -> AppWindow {
+fn members_window(on: bool) -> (AppWindow, Shown) {
     let ui = AppWindow::new().expect("headless window");
     ui.window().set_size(slint::PhysicalSize::new(1200, 800));
     ui.set_screen(AppScreen::Main);
@@ -53,8 +83,8 @@ fn members_window(on: bool) -> AppWindow {
     ui.global::<Poke>().set_me("walter".into());
     ui.global::<Poke>().set_on(on);
     apply_strings(&ui, 0);
-    ui.show().expect("show headless");
-    ui
+    let shown = show_headless(&ui);
+    (ui, shown)
 }
 
 /// Type one character into the focused element.

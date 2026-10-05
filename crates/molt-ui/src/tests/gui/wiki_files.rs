@@ -47,7 +47,7 @@ fn resolved(u: Option<molt_core::UploadView>, local: molt_core::LocalCopy) -> Re
 /// bridge asked the engine about - recorded from before the first sync,
 /// because a reference is CLAIMED the moment it is asked about.
 #[cfg(feature = "live-preview")]
-fn page_asking(body: &str) -> (AppWindow, Rc<RefCell<Vec<String>>>) {
+fn page_asking(body: &str) -> (AppWindow, Rc<RefCell<Vec<String>>>, Shown) {
     i_slint_backend_testing::init_no_event_loop();
     reset_file_refs();
     let ui = AppWindow::new().expect("headless window");
@@ -84,14 +84,15 @@ fn page_asking(body: &str) -> (AppWindow, Rc<RefCell<Vec<String>>>) {
         .id;
     g.invoke_nav_open(id);
     ui.window().set_size(slint::PhysicalSize::new(1400, 900));
-    ui.show().expect("show headless");
+    let shown = show_headless(&ui);
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
-    (ui, asked)
+    (ui, asked, shown)
 }
 
 #[cfg(feature = "live-preview")]
-fn page(body: &str) -> AppWindow {
-    page_asking(body).0
+fn page(body: &str) -> (AppWindow, Shown) {
+    let (ui, _, shown) = page_asking(body);
+    (ui, shown)
 }
 
 /// The image block of the open page.
@@ -211,7 +212,7 @@ fn every_reference_state_renders_its_word() {
             "reading",
         ),
     ];
-    let ui = page(&format!("Intro\n\n![Netz](upload:{HEX})\n"));
+    let (ui, _shown) = page(&format!("Intro\n\n![Netz](upload:{HEX})\n"));
     for (answer, want_state, want_word) in cases {
         file_resolved(&ui, HEX, Some(answer));
         let b = image_block(&ui);
@@ -238,7 +239,7 @@ fn every_reference_state_renders_its_word() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn a_malformed_reference_reads_as_unknown_without_asking() {
-    let (ui, asked) = page_asking("Intro\n\n![Netz](upload:abc)\n");
+    let (ui, asked, _shown) = page_asking("Intro\n\n![Netz](upload:abc)\n");
     patch_file_rows(&ui);
     assert_eq!(image_block(&ui).file_state, file_state::UNKNOWN);
     assert!(asked.borrow().is_empty(), "a malformed hex is never asked about");
@@ -254,7 +255,7 @@ fn a_file_links_click_filters_shared_files_to_that_one_file() {
     let rt = rt();
     let _guard = rt.enter();
     let (w, _) = node_with_chat(tmp.path());
-    let ui = page(&format!("Read [Bericht Q3](upload:{HEX}) today.\n"));
+    let (ui, _shown) = page(&format!("Read [Bericht Q3](upload:{HEX}) today.\n"));
     let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
     let ctx = Ctx {
         rt: rt.handle().clone(),
@@ -307,7 +308,7 @@ fn a_file_links_click_filters_shared_files_to_that_one_file() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn a_ready_pictures_click_opens_the_large_view_and_escape_closes_it() {
-    let ui = page(&format!("Intro\n\n![Netz](upload:{HEX})\n"));
+    let (ui, _shown) = page(&format!("Intro\n\n![Netz](upload:{HEX})\n"));
     let want = file_resolved(
         &ui,
         HEX,
@@ -341,7 +342,7 @@ fn a_ready_pictures_click_opens_the_large_view_and_escape_closes_it() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn an_arriving_picture_patches_the_row_in_place() {
-    let ui = page(&format!("# Head\n\nIntro\n\n![Netz](upload:{HEX})\n\nAfter.\n"));
+    let (ui, _shown) = page(&format!("# Head\n\nIntro\n\n![Netz](upload:{HEX})\n\nAfter.\n"));
     let g = ui.global::<WikiState>();
     let before = g.get_blocks();
     let texts: Vec<slint::SharedString> = (0..before.row_count())
@@ -390,7 +391,7 @@ fn an_arriving_picture_patches_the_row_in_place() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn a_reference_is_asked_about_once_however_often_the_face_syncs() {
-    let (ui, asked) = page_asking(&format!(
+    let (ui, asked, _shown) = page_asking(&format!(
         "![Netz](upload:{HEX})\n\nSee [Bericht](upload:{HEX}) and [Plan](upload:aaaaaaaaaaaa).\n"
     ));
     for _ in 0..5 {
@@ -411,7 +412,7 @@ fn a_reference_is_asked_about_once_however_often_the_face_syncs() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn a_ghost_picture_renders_flat_and_offers_no_verb() {
-    let ui = page(&format!("Intro\n\n![Netz](upload:{HEX})\n\nAfter.\n"));
+    let (ui, _shown) = page(&format!("Intro\n\n![Netz](upload:{HEX})\n\nAfter.\n"));
     let g = ui.global::<WikiState>();
     file_resolved(
         &ui,
@@ -451,7 +452,7 @@ fn a_ghost_picture_renders_flat_and_offers_no_verb() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn a_transfer_and_a_completed_mirror_both_re_resolve_their_reference() {
-    let (ui, asked) = page_asking(&format!("Intro\n\n![Netz](upload:{HEX})\n"));
+    let (ui, asked, _shown) = page_asking(&format!("Intro\n\n![Netz](upload:{HEX})\n"));
     file_resolved(
         &ui,
         HEX,
@@ -532,7 +533,7 @@ fn a_page_bigger_than_the_picture_budget_settles_instead_of_looping() {
         .iter()
         .map(|h| format!("![p](upload:{h})\n\n"))
         .collect();
-    let (ui, asked) = page_asking(&body);
+    let (ui, asked, _shown) = page_asking(&body);
     // one 2x2 RGBA decode is 16 bytes: a 24-byte budget holds one
     set_image_budget(24);
     for (i, hex) in hexes.iter().enumerate() {
@@ -577,7 +578,7 @@ fn a_page_bigger_than_the_picture_budget_settles_instead_of_looping() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn a_workspace_switch_re_resolves_even_at_the_same_base_revision() {
-    let (ui, asked) = page_asking(&format!("Intro\n\n![Netz](upload:{HEX})\n"));
+    let (ui, asked, _shown) = page_asking(&format!("Intro\n\n![Netz](upload:{HEX})\n"));
     let g = ui.global::<WikiState>();
     file_resolved(
         &ui,
@@ -620,7 +621,7 @@ fn a_workspace_switch_re_resolves_even_at_the_same_base_revision() {
 #[cfg(feature = "live-preview")]
 #[test]
 fn a_non_picture_written_as_an_image_reads_as_a_card_with_the_jump() {
-    let ui = page(&format!("Intro\n\n![Netz](upload:{HEX})\n"));
+    let (ui, _shown) = page(&format!("Intro\n\n![Netz](upload:{HEX})\n"));
     for (name, kind) in [("bericht.pdf", "PDF"), ("plan.svg", "Image")] {
         let want = file_resolved(
             &ui,

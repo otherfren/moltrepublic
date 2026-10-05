@@ -34,7 +34,7 @@ fn a_long_accepted_value_elides_inside_its_cell() {
         ..SurfaceTab::default()
     }])));
     apply_strings(&ui, 0);
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
 
     let table = i_slint_backend_testing::ElementHandle::find_by_element_type_name(
         &ui,
@@ -143,7 +143,7 @@ fn a_long_member_name_grows_its_pill_and_keeps_the_last_seen_label() {
         seat("ada", "2 min ago"),
         seat("bob", "just now"),
     ])));
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
     let short = measure(&ui);
 
     // a name of ordinary length still fits, but the pill has to GROW for
@@ -226,7 +226,7 @@ fn the_details_panel_pulls_the_phrase_and_drops_it_on_hide() {
         let a = asked.clone();
         ui.on_reveal_seed(move |id| a.borrow_mut().push(id.to_string()));
     }
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
     let click = |label: String| {
         let h = i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, label.as_str())
             .next()
@@ -288,7 +288,7 @@ fn every_button_keeps_its_label_at_the_largest_font() {
             ..WorkspaceItem::default()
         },
     ])));
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
     let mut checked = assert_buttons_scale(&ui, "open");
     assert!(checked > 3, "the Open screen must render its buttons");
 
@@ -541,7 +541,7 @@ fn a_nav_hint_disappears_when_the_pointer_leaves_the_row() {
     ])));
     ui.set_screen(AppScreen::Main);
     ui.set_selected_surface("organization".into());
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
 
     let rows: Vec<_> =
         i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "SurfaceRow")
@@ -638,7 +638,7 @@ fn the_org_settings_pencils_stay_inside_the_card_and_line_up() {
     ui.set_org_relays(ModelRc::new(VecModel::from(vec![
         slint::SharedString::from("wss://relay.example"),
     ])));
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
 
     for font in [14.0_f32, 24.0] {
         ui.global::<Theme>().set_fs_app(font);
@@ -735,7 +735,7 @@ fn the_settings_tabs_stay_one_line_and_the_bar_wraps_when_it_must() {
     ui.set_active_workspace("w".into());
     apply_strings(&ui, 1); // German — the widest titles
     ui.window().set_size(slint::PhysicalSize::new(1600, 900));
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
 
     let rows_at = |ui: &AppWindow| -> Vec<f32> {
         let mut ys: Vec<f32> =
@@ -790,7 +790,7 @@ fn the_s3_endpoint_moved_out_of_the_backup_tab_onto_its_own() {
     ui.set_screen(AppScreen::Settings);
     apply_strings(&ui, 0);
     ui.window().set_size(slint::PhysicalSize::new(1600, 900));
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
 
     let shown = |ui: &AppWindow, label: &str| {
         i_slint_backend_testing::ElementHandle::find_by_accessible_label(ui, label)
@@ -857,7 +857,7 @@ fn the_vault_seal_button_opens_its_dialog() {
         ..SurfaceTab::default()
     }])));
     apply_strings(&ui, 0);
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
 
     let cards: Vec<_> =
         i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "SecretCard")
@@ -910,7 +910,7 @@ fn the_vault_seal_button_opens_its_dialog() {
 #[test]
 fn the_members_table_header_lines_up_with_its_rows() {
     i_slint_backend_testing::init_no_event_loop();
-    let ui = members_window(false);
+    let (ui, _shown) = members_window(false);
     ui.set_org_chain_governed(true);
     let seat = |name: &str, last: &str, uploads: i32| MemberRow {
         name: name.into(),
@@ -967,7 +967,7 @@ fn the_mcp_tab_carries_its_own_read_only_key() {
     ui.set_set_tab(6);
     ui.set_cfg_mcp_token("seatkey".into());
     ui.set_cfg_mcp_read_token("".into());
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
 
     let shown = |label: &str| {
         i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, label)
@@ -1019,7 +1019,7 @@ fn the_settings_tabs_keep_a_gap_to_the_panel_when_they_wrap() {
     ui.set_screen(AppScreen::Settings);
     apply_strings(&ui, 1); // the German titles are the wide ones
     ui.window().set_size(slint::PhysicalSize::new(900, 900));
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
 
     let bottom_of = |id: &str| -> Option<f32> {
         i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, id)
@@ -1064,7 +1064,7 @@ fn the_settings_tabs_keep_a_gap_to_the_panel_when_they_wrap() {
 #[test]
 fn the_chat_compose_box_is_as_tall_as_the_buttons_beside_it() {
     i_slint_backend_testing::init_no_event_loop();
-    let ui = chat_pane_window(true);
+    let (ui, _shown) = chat_pane_window(true);
     for font in [14.0_f32, 18.0, 26.0] {
         ui.global::<Theme>().set_fs_app(font);
         let box_ = geometry(&ui, "AppWindow::ch-compose");
@@ -1089,7 +1089,7 @@ fn the_chat_compose_box_is_as_tall_as_the_buttons_beside_it() {
 #[test]
 fn the_chat_draft_and_its_placeholder_are_centred_in_the_box() {
     i_slint_backend_testing::init_no_event_loop();
-    let ui = chat_pane_window(true);
+    let (ui, _shown) = chat_pane_window(true);
     for font in [14.0_f32, 18.0, 26.0] {
         ui.global::<Theme>().set_fs_app(font);
         let (_, y, _, h) = geometry(&ui, "AppWindow::ch-compose");
@@ -1113,7 +1113,7 @@ fn the_chat_draft_and_its_placeholder_are_centred_in_the_box() {
 fn every_chat_panel_gap_is_one_pane_gap() {
     i_slint_backend_testing::init_no_event_loop();
     for patch in [true, false] {
-        let ui = chat_pane_window(patch);
+        let (ui, _shown) = chat_pane_window(patch);
         for font in [14.0_f32, 22.0] {
             ui.global::<Theme>().set_fs_app(font);
             let gap = ui.global::<Theme>().get_pane_gap();
@@ -1171,7 +1171,7 @@ fn every_chat_panel_gap_is_one_pane_gap() {
 /// The chat pane with a wiki-patch decision selected (`patch`) or the
 /// plain group chat, rendered headless.
 #[cfg(feature = "live-preview")]
-fn chat_pane_window(patch: bool) -> AppWindow {
+fn chat_pane_window(patch: bool) -> (AppWindow, Shown) {
     let ui = AppWindow::new().expect("headless window");
     ui.window().set_size(slint::PhysicalSize::new(1400, 900));
     ui.set_screen(AppScreen::Main);
@@ -1196,8 +1196,8 @@ fn chat_pane_window(patch: bool) -> AppWindow {
         ..SurfaceTab::default()
     }])));
     apply_strings(&ui, 0);
-    ui.show().expect("show headless");
-    ui
+    let shown = show_headless(&ui);
+    (ui, shown)
 }
 
 /// `(x, y, width, height)` of one element.
@@ -1290,7 +1290,7 @@ fn every_outcome_panel_pages_its_own_list() {
     ui.window().set_size(slint::PhysicalSize::new(1200, 800));
     ui.set_screen(AppScreen::Main);
     apply_strings(&ui, 0);
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
     let stepped: Rc<RefCell<Vec<(String, String, i32)>>> = Rc::new(RefCell::new(Vec::new()));
     let sink = stepped.clone();
     ui.on_page_list(move |surface, list, delta| {
@@ -1377,7 +1377,7 @@ fn every_decided_votes_table_shows_the_decision_date() {
     ui.window().set_size(slint::PhysicalSize::new(1200, 800));
     ui.set_screen(AppScreen::Main);
     apply_strings(&ui, 0);
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
     let stamp = "2026-06-02 13:37";
     let text = |id: &str| {
         i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, id)

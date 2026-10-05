@@ -73,7 +73,7 @@ fn the_backup_restore_modal_drives_the_s3_pipeline() {
     }
     let label = ui.global::<Strings>().get_bk_restore().to_string();
     assert!(!label.is_empty(), "the label must be applied before searching");
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
     // control BEFORE the modal: nothing wears the label on this screen
     assert!(
         i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, label.as_str())
@@ -146,7 +146,7 @@ fn the_orphan_restore_button_sits_in_the_local_column_and_fits() {
     apply_session(&ui, &sv, true, &chat_ui);
     ui.set_screen(AppScreen::Settings);
     ui.set_set_tab(2);
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
     let btn = i_slint_backend_testing::ElementHandle::find_by_element_id(
         &ui,
         "AppWindow::bkr-btn",
@@ -191,7 +191,7 @@ fn a_double_click_on_an_orphan_row_arms_the_restore_modal() {
     apply_session(&ui, &sv, true, &chat_ui);
     ui.set_screen(AppScreen::Settings);
     ui.set_set_tab(2);
-    ui.show().expect("show headless");
+    let _shown = show_headless(&ui);
     let rows: Vec<_> = i_slint_backend_testing::ElementHandle::find_by_element_id(
         &ui,
         "AppWindow::bk-row",

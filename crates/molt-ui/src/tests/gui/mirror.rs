@@ -182,7 +182,7 @@ fn an_unchanged_surfaces_push_paints_nothing() {
         .expect("surfaces")
         .1;
     apply_surfaces(&ui, &b);
-    ui.show().expect("show offscreen");
+    let _shown = show_headless(&ui);
 
     let mut quiet = false;
     for _ in 0..10 {
@@ -266,7 +266,7 @@ fn surfaces_push_frame_cost_offscreen() {
     g.set_base_rev(1);
     g.invoke_base_arrived();
     g.invoke_fold_all(true);
-    ui.show().expect("show offscreen");
+    let _shown = show_headless(&ui);
     println!("rows={}", g.get_nav_rows().row_count());
     frame("first (cold)");
     frame("idle");

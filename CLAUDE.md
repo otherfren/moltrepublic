@@ -492,11 +492,14 @@ both verified red-without/green-with).
   GUI-logic TESTS in seconds: `CARGO_TARGET_DIR=target/dev-ui
   SLINT_LIVE_PREVIEW=1 cargo test -p molt-ui --lib --features
   molt-ui/live-preview` (2026-08-15: 129 tests in ~11 s incl. build; 180 tests by
-  2026-09-03; 283 by 2026-09-06). **Run the GUI tests in SHARDS** - one
-  process per `tests::gui::<module>` filter, the non-GUI rest with
-  `-- --skip tests::gui`: every headless window stays resident until the
-  process ends (50-100 MB each, `docs/reviews/known_debt.md`), and the
-  whole suite in one process reached 12 GiB and was OOM-killed
+  2026-09-03; 283 by 2026-09-06). The whole suite runs in ONE process:
+  352 tests at a 347 MB peak (2026-10-05, `--test-threads=1`, 7 GiB box).
+  **A GUI test shows its window ONLY via `show_headless(&ui)`** and binds
+  the guard (`let _shown = …`; helpers return `(ui, shown)`): a shown
+  Slint window keeps its component alive until `hide`, so a bare
+  `.show()` left every window resident (~200 MB each in debug) until the
+  12 GiB OOM kill that used to force running the suite in shards
+  (`tests/gui/window_lifetime.rs` pins both the freeing and the rule)
   — iterate there, and run the expensive window build ONCE per change-set.
   Dev-only: never enable the feature by default in a Cargo.toml. The .slint compiler still runs fully, so
   `dev-ui.sh build` catches .slint errors and API breaks in molt-ui, and
