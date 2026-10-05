@@ -20,7 +20,7 @@
 // the nav sub-view icons, the reaction pills and the emoji palette.
 import "assets/fonts/Twemoji.Mozilla.ttf";
 
-import { Theme, Strings, HintTip, WikiState, PatchView, Poke, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, RecoverSeatRow, SeedRow, SeedWord, InvitePreview, LinkPreview, BackupRow, ChainRow, RelayItem, RelayPick } from "theme.slint";
+import { Theme, Strings, HintTip, WikiState, PatchView, Poke, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, RecoverSeatRow, SeedRow, SeedWord, InvitePreview, LinkPreview, BackupRow, ChainRow, RelayItem, RelayPick, VaultDepositRow, VaultGrantRow, VaultUnsealedRow } from "theme.slint";
 import {
     AppButton, AppField, AppArea, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
     ConfirmModal, DotLabel, InsetWell, WordChip
@@ -1775,6 +1775,7 @@ export component AppWindow inherits Window {
         || root.mp-img-open
         || root.mp-desc-open
         || root.vt-seal-open
+        || root.vt-grant-open
         || root.wizard-log-open;
     changed any-modal-open => {
         if (!root.any-modal-open) {
@@ -2121,17 +2122,42 @@ export component AppWindow inherits Window {
     // state, a non-empty error is the failed state
     in-out property <string> recovery-link;
     in-out property <string> recovery-link-error;
-    // Vault (design mock): the seal dialog's draft and the one deposit a
-    // confirmed seal has produced in this session
+    // Vault (vault_threshold_disclosure.md): the pane's rows arrive from
+    // Rust (the engine's VaultView); the seal and grant dialogs' drafts
+    in property <bool> vault-real;
+    in property <int> vault-m;
+    in property <int> vault-n;
+    in property <bool> vault-base-pending;
+    in property <string> vault-base-line;
+    in property <[VaultDepositRow]> vault-deposits;
+    in property <[VaultGrantRow]> vault-grants;
+    // texts read in this session: UI memory only, cleared on close
+    in-out property <[VaultUnsealedRow]> vault-unsealed;
+    // the seats a grant can name
+    in property <[string]> vault-seats;
+    // molt_core::vault::VAULT_PAYLOAD_MAX (a test pins the two equal)
+    in property <int> vault-text-max: 102400;
     in-out property <bool> vt-seal-open: false;
-    property <string> vt-seal-title;
-    property <string> vt-seal-desc;
-    property <string> vt-seal-secret;
-    property <string> vt-seal-glyph: "🔑";
-    property <bool> vt-new-set: false;
-    property <string> vt-new-name;
-    property <string> vt-new-desc;
-    property <string> vt-new-glyph;
+    in-out property <string> vt-seal-name;
+    in-out property <string> vt-seal-kind: "text";
+    in-out property <string> vt-seal-text;
+    // Slint counts chars, the cap counts UTF-8 bytes
+    pure callback vt-text-bytes(string) -> int;
+    // an own deposit already carries this name: the seal replaces it
+    pure callback vt-mine-named(string, [VaultDepositRow]) -> bool;
+    out property <int> vt-seal-bytes: root.vt-text-bytes(root.vt-seal-text);
+    out property <bool> vt-seal-too-large: root.vt-seal-bytes > root.vault-text-max;
+    out property <bool> vt-seal-replace: root.vt-mine-named(root.vt-seal-name, root.vault-deposits);
+    out property <bool> vt-seal-ok: root.vt-seal-name != "" && root.vt-seal-kind != ""
+        && root.vt-seal-text != "" && !root.vt-seal-too-large;
+    in-out property <bool> vt-grant-open: false;
+    in-out property <string> vt-grant-secret;
+    in-out property <string> vt-grant-name;
+    in-out property <int> vt-grant-reader: 0;
+    callback vault-seal-confirm();
+    callback vault-grant-confirm();
+    callback vault-read(string /* secret-id */);
+    callback vault-reseal(string /* secret-id */);
     in-out property <bool> recover-link-open: false;
     // Closing the link dialog ACKNOWLEDGES the notice that opened it: the
     // session keeps a notice until something replaces it, so an unacknowledged
@@ -2680,7 +2706,10 @@ export component AppWindow inherits Window {
             // like every other field dialog: once a field holds the focus its
             // own Escape bubbles here, so this branch is what keeps the dialog
             // cancellable by keyboard
+            root.vt-seal-text = "";
             root.vt-seal-open = false;
+        } else if (root.vt-grant-open) {
+            root.vt-grant-open = false;
         } else if (root.org-charter-modal-open) {
             root.org-charter-modal-open = false;
         } else if (root.org-name-modal-open) {
@@ -7374,19 +7403,36 @@ export component AppWindow inherits Window {
                         }
                         if s.key == "vault" && root.selected-view != "proposals": VaultPane {
                             view: root.selected-view;
-                            me: root.node-member;
-                            new-set: root.vt-new-set;
-                            new-name: root.vt-new-name;
-                            new-desc: root.vt-new-desc;
-                            new-glyph: root.vt-new-glyph;
+                            real: root.vault-real;
+                            base-pending: root.vault-base-pending;
+                            base-line: root.vault-base-line;
+                            deposits: root.vault-deposits;
+                            grants: root.vault-grants;
+                            unsealed: root.vault-unsealed;
                             seal-clicked => {
-                                root.vt-seal-title = "";
-                                root.vt-seal-desc = "";
-                                root.vt-seal-secret = "";
+                                root.vt-seal-name = "";
+                                root.vt-seal-kind = "text";
+                                root.vt-seal-text = "";
                                 root.vt-seal-open = true;
                             }
-                            unseal-requested(secret, reader) => {
-                                root.show-toast("\{Strings.vt-mock-note}: \{secret} → \{reader}");
+                            grant-clicked(id, name) => {
+                                root.vt-grant-secret = id;
+                                root.vt-grant-name = name;
+                                root.vt-grant-reader = 0;
+                                root.vt-grant-open = true;
+                            }
+                            read-clicked(id) => {
+                                root.vault-read(id);
+                            }
+                            reseal-clicked(id) => {
+                                root.vault-reseal(id);
+                            }
+                            approve(id) => {
+                                root.approve(id);
+                            }
+                            copy(text) => {
+                                root.copy-text(text);
+                                root.show-toast(Strings.toast-copied);
                             }
                         }
                         if s.key == "wallet" && root.selected-view != "status": WalletPane {
@@ -9391,39 +9437,32 @@ export component AppWindow inherits Window {
     }
 
     // =================================================================
-    // Modal: seal a secret (Vault — DESIGN MOCK, like the pane it opens
-    // from). Title, one describing line, a pictogram and the text itself;
-    // confirming deposits it into the pane's list and says, in the toast,
-    // that nothing left this window.
+    // Modal: seal a secret (vault spec §1, §4, D4). Name, kind and the
+    // text; the warning names who can open it, a replace says what stays.
     // =================================================================
     if root.vt-seal-open: vts-dlg := ConfirmModal {
-        dialog-width: 520px;
+        dialog-width: 560px;
         child-focus: true;
         title: Strings.vt-seal-new;
-        body: Strings.vt-seal-body;
+        body: "\{Strings.vt-warn-pre} \{root.vault-m} \{Strings.vt-warn-post}";
         confirm-label: Strings.vt-seal-confirm;
-        confirm-enabled: root.vt-seal-title != "" && root.vt-seal-secret != "";
+        confirm-enabled: root.vt-seal-ok;
         dismissed => {
+            root.vt-seal-text = "";
             root.vt-seal-open = false;
         }
         confirmed => {
+            root.vault-seal-confirm();
+            root.vt-seal-text = "";
             root.vt-seal-open = false;
-            root.vt-new-name = root.vt-seal-title;
-            root.vt-new-desc = root.vt-seal-desc;
-            root.vt-new-glyph = root.vt-seal-glyph;
-            root.vt-new-set = true;
-            root.show-toast(Strings.vt-mock-note);
         }
         VerticalLayout {
             spacing: 12px;
-            // two look-alike one-line fields whose placeholders are an
-            // EXAMPLE and the word "optional" - the captions are what
-            // tells them apart, so they stay
             FieldLabel {
-                label: Strings.vt-f-title;
+                label: Strings.vt-f-name;
                 AppField {
-                    text <=> root.vt-seal-title;
-                    placeholder: Strings.vt-f-title-ph;
+                    text <=> root.vt-seal-name;
+                    placeholder: Strings.vt-f-name-ph;
                     init => {
                         self.focus-input();
                     }
@@ -9432,44 +9471,86 @@ export component AppWindow inherits Window {
                     }
                 }
             }
-            FieldLabel {
-                label: Strings.vt-f-desc;
-                AppField {
-                    text <=> root.vt-seal-desc;
-                    placeholder: Strings.vt-f-desc-ph;
-                    accepted => {
-                        vts-dlg.confirm-from-field();
-                    }
-                }
+            if root.vt-seal-replace: Text {
+                text: "\{Strings.vt-replaces} \{root.vt-seal-name}. \{Strings.vt-replaces-tail}";
+                color: Theme.warn;
+                font-size: Theme.fs-cap;
+                wrap: word-wrap;
             }
             FieldLabel {
-                label: Strings.vt-f-icon;
-                // pictograms ride the Twemoji font (AppButton.emoji), never
-                // a plain-text label
-                HorizontalLayout {
+                label: Strings.vt-f-kind;
+                VerticalLayout {
                     spacing: 6px;
-                    alignment: start;
-                    for g in ["🔑", "📄", "🗝️", "🔐", "💳", "🧾"]: AppButton {
-                        width: 44px * Theme.ui-scale;
-                        height: 34px * Theme.ui-scale;
-                        pad: 0px;
-                        emoji: g;
-                        primary: root.vt-seal-glyph == g;
-                        clicked => {
-                            root.vt-seal-glyph = g;
+                    AppField {
+                        text <=> root.vt-seal-kind;
+                        accepted => {
+                            vts-dlg.confirm-from-field();
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+                        for k in ["text", "password", "key", "will"]: AppButton {
+                            height: 28px * Theme.ui-scale;
+                            pad: 10px;
+                            label: k;
+                            primary: root.vt-seal-kind == k;
+                            clicked => {
+                                root.vt-seal-kind = k;
+                            }
                         }
                     }
                 }
             }
             AppArea {
-                height: 120px;
+                height: 140px;
                 // a draft must not drive the dialog's width
                 preferred-width: 0px;
-                text <=> root.vt-seal-secret;
+                text <=> root.vt-seal-text;
                 placeholder: Strings.vt-f-secret-ph;
                 ctrl-accepted => {
                     vts-dlg.confirm-from-field();
                 }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: end;
+                if root.vt-seal-too-large: Text {
+                    text: Strings.vt-too-large;
+                    color: Theme.bad;
+                    font-size: Theme.fs-cap;
+                }
+                Text {
+                    text: "\{root.vt-seal-bytes} / \{root.vault-text-max}";
+                    color: root.vt-seal-too-large ? Theme.bad : Theme.faint;
+                    font-size: Theme.fs-cap;
+                }
+            }
+        }
+    }
+
+    // =================================================================
+    // Modal: grant one reader (vault spec §8, D1, D6) - a vote.
+    // =================================================================
+    if root.vt-grant-open: ConfirmModal {
+        dialog-width: 460px;
+        title: "\{Strings.vt-grant-title}: \{root.vt-grant-name}";
+        body: Strings.vt-grant-body;
+        confirm-label: Strings.oc-propose;
+        confirm-enabled: root.vault-seats.length > 0;
+        dismissed => {
+            root.vt-grant-open = false;
+        }
+        confirmed => {
+            root.vault-grant-confirm();
+            root.vt-grant-open = false;
+        }
+        FieldLabel {
+            label: Strings.vt-f-reader;
+            AppDropdown {
+                height: 34px * Theme.ui-scale;
+                model: root.vault-seats;
+                current-index <=> root.vt-grant-reader;
             }
         }
     }

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// DESIGN MOCKS for the four staged surfaces: Memory (shared brain), Quests
-// (planning Kanban), Vault (sealed secrets, threshold-elected disclosure)
-// and Wallet (Monero multisig).
+// DESIGN MOCKS for the three staged surfaces: Memory (shared brain), Quests
+// (planning Kanban) and Wallet (Monero multisig); the Vault pane is real
+// (its rows come from the engine's VaultView).
 //
 // These panes are badged UX drafts to iterate on look & feel — every dataset
 // below is .slint-side sample data, never engine state. Actions either work
@@ -21,7 +21,7 @@
 // Each pane is one component taking only the selected sub-view key, so the
 // panes stay independently editable under scripts/dev-ui.sh hot-reload.
 
-import { Theme, Strings, HintTip, WikiState, WikiNavRow, WikiTabRow, WikiBlock, WikiSpan, WikiProp } from "theme.slint";
+import { Theme, Strings, HintTip, WikiState, WikiNavRow, WikiTabRow, WikiBlock, WikiSpan, WikiProp, VaultDepositRow, VaultGrantRow, VaultUnsealedRow } from "theme.slint";
 import { AppButton, AppField, AppArea, AppDropdown, ScrollHint, DotLabel, InsetWell } from "components.slint";
 
 // ---------------------------------------------------------------------------
@@ -69,6 +69,8 @@ component PaneHeader inherits VerticalLayout {
     in property <string> glyph;
     in property <string> title;
     in property <string> hint: "";
+    // a real pane (the vault) carries no mock badge
+    in property <bool> mock: true;
     spacing: 5px;
     HorizontalLayout {
         spacing: 10px;
@@ -95,7 +97,7 @@ component PaneHeader inherits VerticalLayout {
             font-weight: 700;
             vertical-alignment: center;
         }
-        VerticalLayout {
+        if root.mock: VerticalLayout {
             alignment: center;
             MockBadge { }
         }
@@ -3752,67 +3754,27 @@ export component QuestsPane inherits VerticalLayout {
 }
 
 // ---------------------------------------------------------------------------
-// Vault — sealed secrets, threshold-elected disclosure
+// Vault - sealed secrets, threshold-elected disclosure
 // ---------------------------------------------------------------------------
 //
-// The model (docs/vault/vault_threshold_disclosure.md): a deposit is
-// encrypted and its key Shamir-shared across ALL seats; a threshold vote
-// elects ONE reader; the share holders then re-seal their shares to that
-// member alone. Everyone else — voters included — sees only THAT the grant
-// happened, never the content.
+// docs/vault/vault_threshold_disclosure.md: the rows arrive pre-rendered
+// from the engine's VaultView (molt-ui surfaces.rs); this pane only lays
+// them out and routes the four vault commands.
 
-struct MockSecret {
-    name: string,
-    desc: string, // the depositor's own line about it ("" = none)
-    glyph: string, // 🔑 credential · 📄 document
-    by: string,
-    when: string,
-    need: int, // unseals at `need` of `total` re-sealed shares
-    total: int,
-    verified: int, // seats whose share passed the commitment check
-    sealing: bool, // committed, shares still hardening (§4: pre-commit deposits are ephemeral and live in Proposals)
-    unsealed: bool, // a granted deposit reads "unsealed" instead of its threshold
+// The state chip of a deposit card (spec §7: what is proven, not what
+// committed).
+component VaultStateChip inherits TagChip {
+    in property <int> state;
+    glyph: root.state == 0 ? "⏳" : (root.state == 3 ? "🛡️" : (root.state == 2 ? "🔒" : "📥"));
+    muted: root.state == 0;
+    tone: root.state >= 2 ? Theme.good : Theme.accent;
 }
 
-struct MockSigner {
-    name: string,
-    signed: bool,
-}
-
-// The lifecycle of one access request: vote (threshold elects the reader)
-// → unseal (share holders re-encrypt to the reader) → granted | denied.
-enum VtReqState { vote, unseal, granted, denied }
-
-// One access request walking `VtReqState`.
-struct MockRequest {
-    secret: string,
-    reader: string, // the ONE member the vote elects
-    by: string,
-    reason: string,
-    state: VtReqState,
-    // the ONE per-phase progress count: vote signatures while voting,
-    // re-sealed shares while unsealing (frozen at the outcome after)
-    done: int,
-    need: int,
-    when: string, // outcome age (granted/denied states)
-    signers: [MockSigner], // vote: ✍️ marks · unseal: 🧩 marks (no reader)
-}
-
-// One entry of the unsealed audit list: content only when `mine`.
-struct MockUnsealed {
-    name: string,
-    reader: string,
-    mine: bool, // the local member is the elected reader
-    content: string,
-    when: string,
-}
-
-component SecretCard inherits Rectangle {
-    in property <MockSecret> s;
-    // the roster the reader is elected from, and this card's pick
-    in property <[string]> members;
-    property <int> reader: 0;
-    callback unseal-requested(string /* secret */, string /* reader */);
+component DepositCard inherits Rectangle {
+    in property <VaultDepositRow> d;
+    callback grant(string /* secret-id */, string /* name */);
+    callback read(string /* secret-id */);
+    callback reseal(string /* secret-id */);
     background: Theme.panel-2;
     border-radius: Theme.win95 ? 0px : 10px;
     border-width: Theme.border-w;
@@ -3820,218 +3782,157 @@ component SecretCard inherits Rectangle {
     HorizontalLayout {
         padding: 12px;
         spacing: 12px;
-        // the seal plate — the vault's signature element; a rounded square,
-        // amber-ringed with an hourglass while the seats still verify their
-        // shares
-        Rectangle {
-            width: 52px;
-            height: 52px;
-            y: (parent.height - self.height) / 2;
-            border-radius: Theme.win95 ? 0px : 12px;
-            background: Theme.accent-soft;
-            border-width: Theme.border-w;
-            border-color: root.s.sealing ? Theme.warn : Theme.accent;
-            clip: true;
-            Text {
-                text: root.s.glyph;
-                font-family: "Twemoji Mozilla";
-                font-size: 22px;
-                width: 100%;
-                height: 100%;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-            Rectangle {
-                x: parent.width - 17px;
-                y: parent.height - 17px;
-                width: 15px;
-                height: 15px;
-                border-radius: 4px;
-                background: Theme.panel;
-                Text {
-                    text: root.s.sealing ? "⏳" : (root.s.unsealed ? "🔓" : "🔒");
-                    font-family: "Twemoji Mozilla";
-                    font-size: 9px;
-                    width: 100%;
-                    height: 100%;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
-        }
         VerticalLayout {
             spacing: 5px;
             horizontal-stretch: 1;
             alignment: center;
-            Text {
-                text: root.s.name;
-                color: Theme.text;
-                font-size: Theme.fs-body;
-                font-weight: 700;
-                overflow: elide;
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: root.d.name;
+                    color: Theme.text;
+                    font-size: Theme.fs-body;
+                    font-weight: 700;
+                    overflow: elide;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    TagChip {
+                        label: root.d.kind;
+                        muted: true;
+                    }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
             }
             Text {
-                text: "\{Strings.vt-sealed-by} \{root.s.by} · \{root.s.when}";
+                text: root.d.caption;
                 color: Theme.faint;
                 font-size: Theme.fs-cap;
                 overflow: elide;
             }
-            // ONE state line: the release threshold as share dots while the
-            // deposit is closed, the plain word once it has been opened —
-            // and the depositor's own description beside it, when there is one
             HorizontalLayout {
-                spacing: 4px;
-                if !root.s.unsealed: HorizontalLayout {
-                    spacing: 4px;
-                    for i in root.s.total: Rectangle {
-                        width: 9px;
-                        height: 9px;
-                        border-radius: 4.5px;
-                        y: (parent.height - self.height) / 2;
-                        background: i < root.s.need ? Theme.accent : transparent;
-                        border-width: 1px;
-                        border-color: i < root.s.need ? Theme.accent : Theme.faint;
-                    }
-                }
-                Text {
-                    text: root.s.unsealed
-                        ? Strings.vt-unsealed-word
-                        : "  \{Strings.vt-opens-at} \{root.s.need} \{Strings.cw-rule-b} \{root.s.total}";
-                    color: root.s.unsealed ? Theme.good : Theme.dim;
-                    font-size: Theme.fs-cap;
-                    vertical-alignment: center;
-                }
-                // the description takes whatever is left and elides — a
-                // wrapping Text would report its whole line as preferred
-                // width and push the row past the card
-                Text {
-                    text: root.s.desc == "" ? "" : "· \{root.s.desc}";
-                    color: Theme.faint;
-                    font-size: Theme.fs-cap;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                    preferred-width: 0px;
-                    overflow: elide;
-                }
-            }
-            if root.s.sealing: HorizontalLayout {
+                spacing: 6px;
                 alignment: start;
-                TagChip {
-                    glyph: "⏳";
-                    label: "\{Strings.vt-sealing} - \{root.s.verified}/\{root.s.total} \{Strings.vt-verified-word}";
+                VaultStateChip {
+                    state: root.d.state;
+                    label: root.d.state-word;
+                }
+                if root.d.state > 0: TagChip {
+                    label: root.d.verified;
                     muted: true;
                 }
             }
+            if root.d.readable != "": Text {
+                text: root.d.readable;
+                color: Theme.warn;
+                font-size: Theme.fs-cap;
+            }
+            for c in root.d.complaints: Text {
+                text: c.text;
+                color: c.bad ? Theme.bad : Theme.warn;
+                font-size: Theme.fs-cap;
+            }
         }
-        // electing a reader is what a deposit is FOR: the pick and the
-        // request sit on the card, not behind a second screen. An already
-        // unsealed deposit has nothing to request.
-        if !root.s.unsealed: HorizontalLayout {
+        HorizontalLayout {
             spacing: 6px;
             alignment: end;
-            // the layout centres them against the card - an x/y-anchored
-            // child inside a layout is the collapse trap, not the idiom
             cross-axis-alignment: center;
-            AppDropdown {
-                width: 120px;
-                height: 30px;
-                model: root.members;
-                current-index <=> root.reader;
+            if root.d.reseal: AppButton {
+                height: 30px * Theme.ui-scale;
+                pad: 10px;
+                emoji: "🔏";
+                label: Strings.vt-reseal;
+                clicked => {
+                    root.reseal(root.d.secret-id);
+                }
             }
-            AppButton {
+            if root.d.can-grant: AppButton {
                 height: 30px * Theme.ui-scale;
                 pad: 10px;
                 emoji: "🗳️";
-                label: Strings.vt-request-unseal;
+                label: Strings.vt-grant;
                 clicked => {
-                    root.unseal-requested(root.s.name, root.members[root.reader]);
+                    root.grant(root.d.secret-id, root.d.name);
+                }
+            }
+            if root.d.can-read: AppButton {
+                height: 30px * Theme.ui-scale;
+                pad: 10px;
+                primary: true;
+                emoji: "🔓";
+                label: Strings.vt-read;
+                clicked => {
+                    root.read(root.d.secret-id);
                 }
             }
         }
     }
 }
 
-// The card-top idiom the vault cards share: bold elided title, quiet
-// right-aligned caption.
-component CardHead inherits HorizontalLayout {
-    in property <string> title;
-    in property <string> caption;
-    spacing: 8px;
-    Text {
-        text: root.title;
-        color: Theme.text;
-        font-size: Theme.fs-body;
-        font-weight: 700;
-        overflow: elide;
-        horizontal-stretch: 1;
-    }
-    Text {
-        text: root.caption;
-        color: Theme.faint;
-        font-size: Theme.fs-cap;
-        vertical-alignment: center;
-    }
-}
-
-component RequestCard inherits Rectangle {
-    in property <MockRequest> r;
-    // the signer mark this request's phase awards (derived, one place)
-    property <string> mark: root.r.state == VtReqState.vote ? "✍️" : "🧩";
+component GrantCard inherits Rectangle {
+    in property <VaultGrantRow> g;
+    callback approve(int /* proposal */);
     background: Theme.panel-2;
     border-radius: Theme.win95 ? 0px : 10px;
     border-width: Theme.border-w;
     border-color: Theme.line;
+    opacity: root.g.dimmed ? 0.55 : 1.0;
     VerticalLayout {
         padding: 12px;
-        spacing: 8px;
-        CardHead {
-            title: root.r.secret;
-            caption: "\{Strings.vt-requested-by} \{root.r.by}";
-        }
-        // the elected reader — the request's one deciding fact
+        spacing: 6px;
         HorizontalLayout {
-            alignment: start;
-            TagChip {
-                glyph: "👤";
-                label: "→ \{root.r.reader}";
+            spacing: 8px;
+            Text {
+                text: root.g.line;
+                color: Theme.text;
+                font-size: Theme.fs-body;
+                font-weight: 600;
+                overflow: elide;
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+            }
+            VerticalLayout {
+                alignment: center;
+                TagChip {
+                    glyph: root.g.state == 1 ? "🔓" : "";
+                    label: root.g.state-word;
+                    muted: root.g.state != 1;
+                }
+            }
+            if root.g.state == 0 && root.g.proposal >= 0: AppButton {
+                height: 30px * Theme.ui-scale;
+                pad: 10px;
+                emoji: "✍️";
+                label: Strings.mv-approve;
+                enabled: root.g.can-vote;
+                clicked => {
+                    root.approve(root.g.proposal);
+                }
             }
         }
-        Text {
-            text: root.r.reason;
+        if root.g.votes != "": Text {
+            text: root.g.votes;
             color: Theme.dim;
             font-size: Theme.fs-cap;
-            wrap: word-wrap;
         }
-        if root.r.state == VtReqState.vote || root.r.state == VtReqState.unseal: SigMeter {
-            signed: root.r.done;
-            need: root.r.need;
-            word: root.r.state == VtReqState.unseal
-                ? Strings.vt-resealed-word : Strings.vt-signed-word;
+        if root.g.waiting != "": Text {
+            text: root.g.waiting;
+            color: Theme.dim;
+            font-size: Theme.fs-cap;
         }
-        if root.r.state == VtReqState.vote || root.r.state == VtReqState.unseal: HorizontalLayout {
-            spacing: 6px;
-            alignment: start;
-            for m in root.r.signers: TagChip {
-                glyph: m.signed ? root.mark : "";
-                label: m.name;
-                muted: !m.signed;
-            }
-        }
-        if root.r.state == VtReqState.granted: GlyphCaption {
-            glyph: "🔓";
-            label: "\{Strings.vt-granted-word} · \{root.r.when} · \{Strings.vt-only-by} \{root.r.reader}";
-            tone: Theme.good;
-        }
-        if root.r.state == VtReqState.denied: GlyphCaption {
-            glyph: "🚫";
-            label: "\{Strings.vt-denied-word} · \{root.r.when} · \{root.r.done}/\{root.r.need} \{Strings.vt-signed-word}";
+        if root.g.bad != "": Text {
+            text: root.g.bad;
+            color: Theme.bad;
+            font-size: Theme.fs-cap;
         }
     }
 }
 
 component UnsealedCard inherits Rectangle {
-    in property <MockUnsealed> u;
-    // pure view-state: the toggle only shows/hides sample content
+    in property <VaultUnsealedRow> u;
+    callback copy(string);
     property <bool> shown: false;
     background: Theme.panel-2;
     border-radius: Theme.win95 ? 0px : 10px;
@@ -4040,30 +3941,27 @@ component UnsealedCard inherits Rectangle {
     VerticalLayout {
         padding: 12px;
         spacing: 8px;
-        CardHead {
-            title: root.u.name;
-            caption: "\{Strings.vt-granted-word} · \{root.u.when}";
-        }
-        // mine: the eye chip + reveal toggle — foreign: only the lock,
-        // which IS the zero-knowledge story
         HorizontalLayout {
-            spacing: 6px;
+            spacing: 8px;
+            Text {
+                text: root.u.name;
+                color: Theme.text;
+                font-size: Theme.fs-body;
+                font-weight: 700;
+                overflow: elide;
+                vertical-alignment: center;
+            }
             VerticalLayout {
                 alignment: center;
                 TagChip {
-                    glyph: root.u.mine ? "👁️" : "🔒";
-                    label: root.u.mine
-                        ? Strings.vt-only-you
-                        : "\{Strings.vt-only-by} \{root.u.reader}";
-                    muted: !root.u.mine;
+                    label: root.u.kind;
+                    muted: true;
                 }
             }
             Rectangle {
                 horizontal-stretch: 1;
             }
-            // the shared peek idiom (settings token): eye icon button,
-            // primary while revealed, tooltip not label, no auto-remask
-            if root.u.mine: AppButton {
+            if root.u.status == "": AppButton {
                 pad: 10px;
                 icon: @image-url("assets/eye.svg");
                 icon-set: true;
@@ -4073,56 +3971,48 @@ component UnsealedCard inherits Rectangle {
                     root.shown = !root.shown;
                 }
             }
+            if root.u.status == "": AppButton {
+                pad: 10px;
+                label: Strings.vt-copy;
+                clicked => {
+                    root.copy(root.u.text);
+                }
+            }
         }
-        if root.u.mine: InsetWell {
-            text: root.u.content;
+        if root.u.status != "": Text {
+            text: root.u.status;
+            color: Theme.dim;
+            font-size: Theme.fs-cap;
+        }
+        if root.u.status == "": InsetWell {
+            text: root.u.text;
             revealed: root.shown;
         }
     }
 }
 
+// A quiet one-line placeholder inside a pane panel.
+component VaultNote inherits Text {
+    color: Theme.faint;
+    font-size: Theme.fs-cap;
+    wrap: word-wrap;
+}
+
 export component VaultPane inherits VerticalLayout {
     in property <string> view;
-    // this node's seat, and the one secret a mock seal has produced in this
-    // session (the pane's sample list is a literal - a new deposit rides its
-    // own properties instead)
-    in property <string> me;
-    in property <bool> new-set;
-    in property <string> new-name;
-    in property <string> new-desc;
-    in property <string> new-glyph;
+    in property <bool> real;
+    in property <bool> base-pending;
+    in property <string> base-line;
+    in property <[VaultDepositRow]> deposits;
+    in property <[VaultGrantRow]> grants;
+    in property <[VaultUnsealedRow]> unsealed;
     callback seal-clicked();
-    callback unseal-requested(string /* secret */, string /* reader */);
+    callback grant-clicked(string /* secret-id */, string /* name */);
+    callback read-clicked(string /* secret-id */);
+    callback reseal-clicked(string /* secret-id */);
+    callback approve(int /* proposal */);
+    callback copy(string);
     spacing: 8px;
-
-    // sample data — design mock only, never engine state
-    property <[MockSecret]> secrets: [
-        { name: "Treasury seed phrase", desc: "25 words, the founding wallet", glyph: "🔑", by: "petra", when: "at the founding", need: 3, total: 4, verified: 4, sealing: false, unsealed: false },
-        { name: "S3 backup credentials", desc: "", glyph: "🔑", by: "walter", when: "2 w", need: 3, total: 4, verified: 4, sealing: false, unsealed: false },
-        { name: "Emergency contact list", desc: "Phone numbers for the four seats", glyph: "📄", by: "mara", when: "1 m", need: 3, total: 4, verified: 4, sealing: false, unsealed: false },
-        { name: "Domain registrar login", desc: "", glyph: "🔑", by: "petra", when: "2 h", need: 3, total: 4, verified: 2, sealing: true, unsealed: false },
-        // a GRANT does not remove the deposit — granted secrets stay
-        // listed (vault_threshold_disclosure.md §5), and read as unsealed
-        { name: "Old relay admin password", desc: "Rotated after the provider notice", glyph: "🔑", by: "walter", when: "3 m", need: 3, total: 4, verified: 4, sealing: false, unsealed: true },
-        { name: "Budget sheet key (2025)", desc: "", glyph: "📄", by: "petra", when: "6 m", need: 3, total: 4, verified: 4, sealing: false, unsealed: true },
-    ];
-    // the roster this mock elects a reader from
-    property <[string]> members: ["petra", "walter", "mara", "jonas"];
-    property <[MockRequest]> requests: [
-        { secret: "S3 backup credentials", reader: "jonas", by: "walter", reason: "Walter hands the bucket ops to jonas.", state: VtReqState.vote, done: 2, need: 3, when: "", signers: [
-            { name: "walter", signed: true }, { name: "petra", signed: true }, { name: "mara", signed: false }, { name: "jonas", signed: false }] },
-        { secret: "Emergency contact list", reader: "petra", by: "mara", reason: "The yearly check that the numbers still work.", state: VtReqState.unseal, done: 2, need: 3, when: "", signers: [
-            { name: "walter", signed: true }, { name: "mara", signed: true }, { name: "jonas", signed: false }] },
-        { secret: "Old relay admin password", reader: "walter", by: "walter", reason: "Rotating the relay after the provider notice.", state: VtReqState.granted, done: 3, need: 3, when: "2 m", signers: [] },
-        // every grant is ON RECORD — the unsealed "Budget sheet key" entry
-        // has its granted request here, visibly
-        { secret: "Budget sheet key (2025)", reader: "petra", by: "petra", reason: "Quarterly budget close.", state: VtReqState.granted, done: 3, need: 3, when: "5 m", signers: [] },
-        { secret: "Treasury seed phrase", reader: "jonas", by: "jonas", reason: "Backup access while petra travels.", state: VtReqState.denied, done: 1, need: 3, when: "3 w", signers: [] },
-    ];
-    property <[MockUnsealed]> unsealed: [
-        { name: "Budget sheet key (2025)", reader: "", mine: true, content: "age1q…8vte - decrypts budget-2025.age in the uploads", when: "5 m" },
-        { name: "Old relay admin password", reader: "walter", mine: false, content: "", when: "2 m" },
-    ];
 
     if root.view == "secrets": VerticalLayout {
         spacing: 8px;
@@ -4130,8 +4020,9 @@ export component VaultPane inherits VerticalLayout {
             glyph: "🔐";
             title: Strings.vt-title-secrets;
             hint: Strings.vt-hint-secrets;
+            mock: false;
         }
-        HorizontalLayout {
+        if root.real && !root.base-pending: HorizontalLayout {
             alignment: start;
             vt-seal-btn := AppButton {
                 emoji: "🔏";
@@ -4143,29 +4034,28 @@ export component VaultPane inherits VerticalLayout {
             }
         }
         PanePanel {
-            if root.new-set: SecretCard {
-                s: {
-                    name: root.new-name,
-                    desc: root.new-desc,
-                    glyph: root.new-glyph,
-                    by: root.me,
-                    when: "now",
-                    need: 3,
-                    total: 4,
-                    verified: 1,
-                    sealing: true,
-                    unsealed: false,
-                };
-                members: root.members;
-                unseal-requested(secret, reader) => {
-                    root.unseal-requested(secret, reader);
-                }
+            if !root.real: VaultNote {
+                text: Strings.vt-needs-vault;
             }
-            for s in root.secrets: SecretCard {
-                s: s;
-                members: root.members;
-                unseal-requested(secret, reader) => {
-                    root.unseal-requested(secret, reader);
+            if root.real && root.base-pending: VaultNote {
+                text: root.base-line;
+            }
+            if root.real && !root.base-pending && root.deposits.length == 0: VaultNote {
+                text: Strings.vt-empty-secrets;
+            }
+            if root.real && !root.base-pending: VerticalLayout {
+                spacing: 10px;
+                for d in root.deposits: DepositCard {
+                    d: d;
+                    grant(id, name) => {
+                        root.grant-clicked(id, name);
+                    }
+                    read(id) => {
+                        root.read-clicked(id);
+                    }
+                    reseal(id) => {
+                        root.reseal-clicked(id);
+                    }
                 }
             }
         }
@@ -4177,21 +4067,23 @@ export component VaultPane inherits VerticalLayout {
             glyph: "📤";
             title: Strings.vt-title-requests;
             hint: Strings.vt-hint-requests;
-        }
-        HorizontalLayout {
-            alignment: start;
-            AppButton {
-                emoji: "🗳️";
-                label: Strings.vt-request;
-                primary: true;
-                enabled: false;
-                tooltip: Strings.not-implemented-yet;
-                tooltip-below: true;
-            }
+            mock: false;
         }
         PanePanel {
-            for r in root.requests: RequestCard {
-                r: r;
+            if !root.real: VaultNote {
+                text: Strings.vt-needs-vault;
+            }
+            if root.real && root.grants.length == 0: VaultNote {
+                text: Strings.vt-empty-grants;
+            }
+            if root.real: VerticalLayout {
+                spacing: 10px;
+                for g in root.grants: GrantCard {
+                    g: g;
+                    approve(id) => {
+                        root.approve(id);
+                    }
+                }
             }
         }
     }
@@ -4202,13 +4094,32 @@ export component VaultPane inherits VerticalLayout {
             glyph: "🔓";
             title: Strings.vt-title-unsealed;
             hint: Strings.vt-hint-unsealed;
+            mock: false;
         }
         PanePanel {
-            for u in root.unsealed: UnsealedCard {
-                u: u;
+            if !root.real: VaultNote {
+                text: Strings.vt-needs-vault;
+            }
+            if root.real && root.unsealed.length == 0: VaultNote {
+                text: Strings.vt-empty-unsealed;
+            }
+            if root.real: VerticalLayout {
+                spacing: 10px;
+                for u in root.unsealed: UnsealedCard {
+                    u: u;
+                    copy(text) => {
+                        root.copy(text);
+                    }
+                }
             }
         }
     }
+}
+
+// A signer mark on a mock card (the wallet pane).
+struct MockSigner {
+    name: string,
+    signed: bool,
 }
 
 // ---------------------------------------------------------------------------

@@ -153,7 +153,7 @@ fn table() -> Vec<Dialog> {
             open: Box::new(|ui: &AppWindow| ui.set_vt_seal_open(true)),
             up: Box::new(AppWindow::get_vt_seal_open),
             first: "keys",
-            // title, description, and the secret itself two Tabs on
+            // name, kind, and the secret itself two Tabs on
             also: Some((2, "s3cret")),
             ctrl: true,
         },
@@ -386,7 +386,7 @@ fn the_dialogs_drop_the_captions_their_placeholders_carry() {
     frame();
     assert!(!seen("Secret"), "the secret's caption is its placeholder");
     assert!(
-        seen("Title") && !placeholder_of_a_field(&ui, "Title"),
+        seen("Name") && !placeholder_of_a_field(&ui, "Name"),
         "two look-alike fields keep their captions"
     );
 }
