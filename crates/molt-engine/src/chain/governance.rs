@@ -981,6 +981,10 @@ impl State {
             tracing::warn!(%id, "refusing a proposal with an implausible id");
             return false;
         }
+        if crate::proposals::sets_vault_feature(surface, &payload) {
+            tracing::warn!(%id, %by, "refusing a set_features adding the vault");
+            return false;
+        }
         // L3: a flooding proposer may only crowd ITSELF — the newest card
         // is refused (the WP2 re-serve re-earns an honest one later), and
         // another member's cards are never evicted

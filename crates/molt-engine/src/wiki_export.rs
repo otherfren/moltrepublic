@@ -347,13 +347,15 @@ absent, else `0x02 F(consent)`.
 
     "molt-roster-v4\0"          (no feature set)
     "molt-roster-v5\0"          (feature set present)
+    "molt-roster-v6\0"          (vault keys present)
     F(republic_id) rule_m rule_n le32(count)
-    per identity in table order: F(member) F(identity_pk) F(nostr_pk)
+    per identity in table order: F(member) F(identity_pk) F(nostr_pk) [ F(vault_pk) ]
     F(agenda) le32(relay count) per relay: F(relay)
     [ le32(feature count) per feature: F(feature) ]
 
 `rule_m` and `rule_n` are single bytes. The feature run is written only when
-the genesis carries one, which is also what selects the tag.
+the genesis carries one, which is also what selects the tag; `F(vault_pk)`
+appears in every identity exactly when the tag is v6.
 
 **republic_id** is the lowercase hex SHA-256 of
 

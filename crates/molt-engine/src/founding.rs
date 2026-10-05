@@ -156,13 +156,25 @@ impl RitualRuntime {
 
     /// The final identity table in ritual order: founder first, then seat
     /// order. `None` until every seat's key is collected.
+    /// Vault keys only when the charter chose the vault (spec §6).
     fn full_identities(&self) -> Option<Vec<MemberIdentity>> {
         let mut out = Vec::with_capacity(self.seats.len() + 1);
         out.push(self.founder.clone());
         for s in &self.seats {
             out.push(s.identity.clone()?);
         }
+        if !self.has_vault() {
+            for id in &mut out {
+                id.vault_pk.clear();
+            }
+        }
         Some(out)
+    }
+
+    fn has_vault(&self) -> bool {
+        self.features
+            .as_ref()
+            .is_some_and(|f| f.iter().any(|k| k == crate::vault::VAULT))
     }
 
     /// The republic's neutral, content-derived id — the roster salt every
@@ -379,11 +391,14 @@ impl State {
         // (nostr.rs) extends to the accepted secret's hops
         let founder_nostr_sk = zeroize::Zeroizing::new(founder_nostr_raw.to_vec());
         zeroize::Zeroize::zeroize(&mut founder_nostr_raw);
+        // kept always; `full_identities` drops it when the charter has no vault
+        let (_, founder_vault_pk) =
+            crate::vault::seat_vault_key(&entropy, &founder_nostr_pk, &founder_pk);
         let founder = MemberIdentity {
             member: founder_name.to_string(),
             identity_pk: founder_pk,
             nostr_pk: founder_nostr_pk,
-            vault_pk: String::new(),
+            vault_pk: founder_vault_pk,
         };
         self.net_generation += 1;
         let generation = self.net_generation;
@@ -1194,6 +1209,8 @@ pub(crate) fn verify_sealed_roster(s: &molt_core::SealedRoster) -> Result<(), St
     if let Some(features) = &s.features {
         molt_core::verify_canonical_features(features)?;
     }
+    // an existing chain's door: one direction only (v5 + vault = the mock)
+    crate::vault::check_roster_keys(s.rule_m, s.rule_n, &s.identities, s.features.as_deref())?;
     // recompute over the sealed charter too: if the founder put a different
     // name/agenda in the genesis than the members ratified, their signatures
     // (made over the Seal's table) fail here — the charter is tamper-evident
@@ -1316,12 +1333,14 @@ pub fn verify_seat_proof(
 /// future gift-wrapped material (Welcomes, recovery) would flow to the
 /// attacker. Recomputing the table here (rather than trusting an opaque blob)
 /// is what makes the signature a ratification of exactly the name + agenda +
-/// roster the member is shown.
+/// roster the member is shown. A vault table (roster-v6) must carry our own
+/// derived `vault_pk`; a vault-less one simply leaves our derivation unused.
 pub(crate) fn verify_seal_proposal(
     proposal: &molt_core::SealedRoster,
     name: &str,
     pk: &str,
     nostr_pk: &str,
+    vault_pk: &str,
 ) -> Result<Vec<u8>, String> {
     let rid = molt_storage::republic_id(
         &proposal.name,
@@ -1360,6 +1379,17 @@ pub(crate) fn verify_seal_proposal(
     // like the m-of-n mismatch gate.
     if let Some(features) = &proposal.features {
         molt_core::verify_canonical_features(features)?;
+    }
+    // the vault key (spec §6): a NEW founding, so both directions; ours
+    // must be our own derivation
+    let vault = crate::vault::check_new_founding_keys(
+        proposal.rule_m,
+        proposal.rule_n,
+        &proposal.identities,
+        proposal.features.as_deref(),
+    )?;
+    if vault && our_seat.vault_pk != vault_pk {
+        return Err("the proposed roster anchors a vault key for us that we did not derive".to_string());
     }
     Ok(molt_core::roster_canonical_bytes(
         &proposal.republic_id,
@@ -2131,6 +2161,7 @@ mod ritual_ops {
             sender_npub: String,
             key_package: String,
             relays: Vec<String>,
+            vault_pk: String,
             generation: Option<u64>,
         ) -> Result<molt_core::Reply, molt_core::MoltError> {
             if !self.ritual_generation_current(generation) {
@@ -2269,6 +2300,27 @@ mod ritual_ops {
                     "that transport key is already used by another seat - refused".to_string(),
                 );
             }
+            // the vault key (spec §6): empty = an older joiner (the charter
+            // decides later); otherwise canonical and unique like the anchor.
+            // Not MAC-bound: the member's sign-what-you-see check binds it.
+            if !vault_pk.is_empty() {
+                if molt_vault::canonical_vault_pk(&vault_pk).ok().as_deref() != Some(vault_pk.as_str()) {
+                    tracing::warn!(seat, %member, "founding join rejected: invalid vault key");
+                    return self.refuse_join(idx, "malformed vault key - refused".to_string());
+                }
+                let taken = ritual.founder.vault_pk == vault_pk
+                    || ritual.seats.iter().enumerate().any(|(i, other)| {
+                        !(re_anchoring && i == idx)
+                            && other.identity.as_ref().is_some_and(|x| x.vault_pk == vault_pk)
+                    });
+                if taken {
+                    tracing::warn!(seat, %member, "founding join rejected: vault key already anchored");
+                    return self.refuse_join(
+                        idx,
+                        "that vault key is already used by another seat - refused".to_string(),
+                    );
+                }
+            }
             // the reply address: on Nostr it IS the MAC-bound nostr anchor
             // (no queue handover travels); on loopback the member advertised
             // a reply queue, without which the seat can never be sealed
@@ -2319,7 +2371,7 @@ mod ritual_ops {
                 member: member.clone(),
                 identity_pk,
                 nostr_pk,
-                vault_pk: String::new(),
+                vault_pk,
             });
             if let Some((reply_snd, reply_wrap)) = reply_queue {
                 s.reply_snd = Some(reply_snd);
@@ -2479,6 +2531,23 @@ mod ritual_ops {
                 return Err(molt_core::MoltError::Create(
                     "every member must join before you propose the charter".to_string(),
                 ));
+            }
+            // the vault (spec §3, §6, D14): the bounds, and a key from every seat
+            if features.iter().any(|f| f == crate::vault::VAULT) {
+                use molt_core::vault::VaultRefusal;
+                if !crate::vault::bounds_ok(ritual.rule_m, ritual.rule_n) {
+                    return Err(molt_core::MoltError::Vault(VaultRefusal::Bounds));
+                }
+                if let Some(old) = ritual
+                    .seats
+                    .iter()
+                    .filter_map(|s| s.identity.as_ref())
+                    .find(|i| i.vault_pk.is_empty())
+                {
+                    return Err(molt_core::MoltError::Vault(VaultRefusal::NeedsNewerVersion(
+                        old.member.clone(),
+                    )));
+                }
             }
             // the final, ratified name feeds the republic id + canonical bytes;
             // keep the ritual and the session in lock-step so finalize (which
@@ -3192,7 +3261,7 @@ mod tests {
             (seat.member.clone(), seat.identity_pk.clone(), seat.nostr_pk.clone())
         };
         assert!(
-            verify_seal_proposal(&lying, &name, &pk, &npk).is_err(),
+            verify_seal_proposal(&lying, &name, &pk, &npk, "").is_err(),
             "the ratifying member refuses the same table"
         );
     }
@@ -3343,7 +3412,7 @@ mod tests {
         let p = valid_roster(); // acts as a proposal; attestations are ignored
         let pk = &p.identities[1].identity_pk; // "member"
         let npk = &p.identities[1].nostr_pk;
-        let table = verify_seal_proposal(&p, "member", pk, npk).expect("a member ratifies");
+        let table = verify_seal_proposal(&p, "member", pk, npk, "").expect("a member ratifies");
         // the returned bytes are exactly the canonical table over the charter,
         // so a signature over them ratifies precisely this name + agenda + roster
         let expect =
@@ -3357,7 +3426,7 @@ mod tests {
         p.republic_id = "deadbeef".to_string();
         let pk = p.identities[1].identity_pk.clone();
         let npk = p.identities[1].nostr_pk.clone();
-        assert!(verify_seal_proposal(&p, "member", &pk, &npk).is_err());
+        assert!(verify_seal_proposal(&p, "member", &pk, &npk, "").is_err());
     }
 
     #[test]
@@ -3365,10 +3434,10 @@ mod tests {
         let p = valid_roster();
         let npk = p.identities[1].nostr_pk.clone();
         // right name, wrong key → not us
-        assert!(verify_seal_proposal(&p, "member", &"00".repeat(32), &npk).is_err());
+        assert!(verify_seal_proposal(&p, "member", &"00".repeat(32), &npk, "").is_err());
         // our key, but under a name not in the roster → not us
         let pk = p.identities[1].identity_pk.clone();
-        assert!(verify_seal_proposal(&p, "impostor", &pk, &npk).is_err());
+        assert!(verify_seal_proposal(&p, "impostor", &pk, &npk, "").is_err());
     }
 
     /// N1 PIN — sign-what-you-see extends to the THIRD anchor: a proposal
@@ -3384,7 +3453,7 @@ mod tests {
         let pk = p.identities[1].identity_pk.clone();
         let ours = p.identities[1].nostr_pk.clone();
         // the honest proposal passes the 3-anchor self-check
-        assert!(verify_seal_proposal(&p, "member", &pk, &ours).is_ok());
+        assert!(verify_seal_proposal(&p, "member", &pk, &ours, "").is_ok());
         // same roster, but our seat carries a nostr anchor we never derived
         let mut split = p.clone();
         split.identities[1].nostr_pk = "ee".repeat(32);
@@ -3397,7 +3466,7 @@ mod tests {
             &split.identities,
         );
         assert!(
-            verify_seal_proposal(&split, "member", &pk, &ours).is_err(),
+            verify_seal_proposal(&split, "member", &pk, &ours, "").is_err(),
             "a split nostr anchor must be rejected before signing"
         );
     }
@@ -3427,7 +3496,7 @@ mod tests {
             ours.clone(),                   // duplicates OUR anchor
         ] {
             assert!(
-                verify_seal_proposal(&with_founder_anchor(&bad), "member", &pk, &ours).is_err(),
+                verify_seal_proposal(&with_founder_anchor(&bad), "member", &pk, &ours, "").is_err(),
                 "a foreign anchor {:?}… must be rejected before we sign",
                 &bad[..bad.len().min(12)]
             );
@@ -3439,9 +3508,9 @@ mod tests {
         let mut p = valid_roster();
         let pk = p.identities[1].identity_pk.clone();
         let npk = p.identities[1].nostr_pk.clone();
-        let before = verify_seal_proposal(&p, "member", &pk, &npk).expect("ok");
+        let before = verify_seal_proposal(&p, "member", &pk, &npk, "").expect("ok");
         p.agenda = "a different charter".to_string();
-        let after = verify_seal_proposal(&p, "member", &pk, &npk).expect("ok");
+        let after = verify_seal_proposal(&p, "member", &pk, &npk, "").expect("ok");
         assert_ne!(before, after, "a changed agenda changes the bytes we sign");
     }
 
@@ -3453,11 +3522,11 @@ mod tests {
         let mut p = valid_roster();
         let pk = p.identities[1].identity_pk.clone();
         let npk = p.identities[1].nostr_pk.clone();
-        let legacy = verify_seal_proposal(&p, "member", &pk, &npk).expect("ok");
+        let legacy = verify_seal_proposal(&p, "member", &pk, &npk, "").expect("ok");
         p.features = Some(Vec::new());
-        let none_picked = verify_seal_proposal(&p, "member", &pk, &npk).expect("ok");
+        let none_picked = verify_seal_proposal(&p, "member", &pk, &npk, "").expect("ok");
         p.features = Some(vec!["memory".to_string(), "wallet".to_string()]);
-        let picked = verify_seal_proposal(&p, "member", &pk, &npk).expect("ok");
+        let picked = verify_seal_proposal(&p, "member", &pk, &npk, "").expect("ok");
         assert_ne!(legacy, none_picked, "Some([]) is not the legacy absence");
         assert_ne!(none_picked, picked, "the selection changes the bytes we sign");
     }
@@ -3469,7 +3538,7 @@ mod tests {
         let pk = p.identities[1].identity_pk.clone();
         let npk = p.identities[1].nostr_pk.clone();
         p.features = Some(vec!["wallet".to_string(), "memory".to_string()]);
-        assert!(verify_seal_proposal(&p, "member", &pk, &npk)
+        assert!(verify_seal_proposal(&p, "member", &pk, &npk, "")
             .is_err_and(|e| e.contains("not canonical")));
     }
 
@@ -3484,10 +3553,10 @@ mod tests {
         let pk = p.identities[1].identity_pk.clone();
         let npk = p.identities[1].nostr_pk.clone();
         p.features = Some(vec!["memory".to_string(), "zzz".to_string()]);
-        assert!(verify_seal_proposal(&p, "member", &pk, &npk)
+        assert!(verify_seal_proposal(&p, "member", &pk, &npk, "")
             .is_err_and(|e| e.contains("unknown feature: zzz")));
         p.features = Some(vec!["chat".to_string(), "memory".to_string()]);
-        assert!(verify_seal_proposal(&p, "member", &pk, &npk)
+        assert!(verify_seal_proposal(&p, "member", &pk, &npk, "")
             .is_err_and(|e| e.contains("chat is always on")));
     }
 
@@ -3579,6 +3648,7 @@ mod tests {
                 String::new(),
                 kp.to_string(),
                 Vec::new(),
+                String::new(),
                 None,
             )
             .expect("handler never errors");
@@ -3832,7 +3902,7 @@ mod tests {
             // attestation over the swapped table anyway. On THIS path the
             // ratified-bytes comparison is the only gate that can fire.)
             assert!(
-                verify_seal_proposal(&sealed, "bob", &join.identity_pk, &join.nostr_pk).is_ok(),
+                verify_seal_proposal(&sealed, "bob", &join.identity_pk, &join.nostr_pk, "").is_ok(),
                 "the forgery must clear verify_seal_proposal for the byte pin to be the gate"
             );
             send(
@@ -3927,5 +3997,284 @@ mod tests {
         let err =
             FoundingInvite::parse(&format!("{preview}/{v1}")).expect_err("v1 must refuse");
         assert!(err.contains("older build"), "honest v1 error: {err}");
+    }
+
+    // --- the vault founding (vault build plan S2) ---------------------------
+
+    const VAULT_NAMES: [&str; 5] = ["a", "b", "c", "d", "e"];
+
+    /// Seat `i` of a vault fixture with its real keys: identity, nostr anchor
+    /// and the vault key that phrase derives for it.
+    fn vault_seat(i: usize) -> (molt_storage::SigningKey, MemberIdentity) {
+        let entropy = [u8::try_from(i + 20).expect("small"); 32];
+        let name = VAULT_NAMES[i].to_string();
+        let (sk, pk) = molt_storage::derive_identity_key(&entropy, &name);
+        let npk = molt_net::nostr_identity(&entropy, "t").1;
+        let (_, vpk) = crate::vault::seat_vault_key(&entropy, &npk, &pk);
+        (sk, MemberIdentity { member: name, identity_pk: pk, nostr_pk: npk, vault_pk: vpk })
+    }
+
+    /// Recompute the id and every attestation over the roster as it stands.
+    fn reseal(r: &mut SealedRoster, sks: &[molt_storage::SigningKey]) {
+        r.republic_id = molt_storage::republic_id(&r.name, r.rule_m, r.rule_n, &r.identities);
+        r.roster = r.identities.iter().map(|i| i.member.clone()).collect();
+        let table = molt_core::roster_canonical_bytes(
+            &r.republic_id,
+            r.rule_m,
+            r.rule_n,
+            &r.identities,
+            &r.agenda,
+            &r.relays,
+            r.features.as_deref(),
+        );
+        r.attestations = r
+            .identities
+            .iter()
+            .zip(sks)
+            .map(|(id, sk)| RosterAttestation {
+                member: id.member.clone(),
+                sig: molt_storage::identity_sign(sk, &table),
+            })
+            .collect();
+    }
+
+    /// A fully signed `m`-of-`n` vault roster.
+    fn vault_roster(m: u8, n: u8) -> (SealedRoster, Vec<molt_storage::SigningKey>) {
+        let (sks, identities): (Vec<_>, Vec<_>) = (0..usize::from(n)).map(vault_seat).unzip();
+        let mut r = SealedRoster {
+            name: "R".into(),
+            republic_id: String::new(),
+            rule_m: m,
+            rule_n: n,
+            roster: Vec::new(),
+            identities,
+            attestations: Vec::new(),
+            agenda: "charter".into(),
+            relays: Vec::new(),
+            features: Some(vec!["vault".to_string()]),
+            founded_ts: 0,
+        };
+        reseal(&mut r, &sks);
+        (r, sks)
+    }
+
+    /// Seat `b` (index 1) ratifying `p` with its own derivation.
+    fn ratify_as_b(p: &SealedRoster) -> Result<Vec<u8>, String> {
+        let me = vault_seat(1).1;
+        verify_seal_proposal(p, &me.member, &me.identity_pk, &me.nostr_pk, &me.vault_pk)
+    }
+
+    #[test]
+    fn verify_seal_proposal_rejects_a_tampered_own_vault_pk() {
+        let (p, sks) = vault_roster(2, 4);
+        ratify_as_b(&p).expect("the honest vault roster ratifies");
+        let mut t = p;
+        t.identities[1].vault_pk = vault_seat(4).1.vault_pk;
+        reseal(&mut t, &sks);
+        let err = ratify_as_b(&t).expect_err("a vault key we did not derive");
+        assert!(err.contains("vault"), "{err}");
+    }
+
+    #[test]
+    fn verify_seal_proposal_rejects_a_duplicate_vault_pk() {
+        let (mut p, sks) = vault_roster(2, 4);
+        p.identities[3].vault_pk = p.identities[2].vault_pk.clone();
+        reseal(&mut p, &sks);
+        assert!(ratify_as_b(&p).is_err());
+    }
+
+    #[test]
+    fn verify_seal_proposal_rejects_a_malformed_vault_pk() {
+        let (base, sks) = vault_roster(2, 4);
+        let upper = base.identities[2].vault_pk.to_uppercase();
+        for bad in ["ff".repeat(32), upper, "ee".repeat(31), String::new()] {
+            let mut p = base.clone();
+            p.identities[2].vault_pk = bad;
+            reseal(&mut p, &sks);
+            assert!(ratify_as_b(&p).is_err());
+        }
+    }
+
+    #[test]
+    fn verify_seal_proposal_rejects_vault_outside_the_bounds() {
+        for (m, n) in [(2, 3), (1, 4)] {
+            let (p, _) = vault_roster(m, n);
+            let err = ratify_as_b(&p).expect_err("outside 2 <= m <= n-2");
+            assert!(err.contains("needs 2 <= m <= n-2"), "{m}-of-{n}: {err}");
+        }
+    }
+
+    #[test]
+    fn verify_seal_proposal_rejects_vault_keys_without_the_vault_feature() {
+        let (mut p, sks) = vault_roster(2, 4);
+        p.features = Some(vec!["memory".to_string()]);
+        reseal(&mut p, &sks);
+        assert!(ratify_as_b(&p).is_err());
+    }
+
+    /// A NEW founding refuses `vault` without keys; the same table as an
+    /// existing chain's roster is the v5 mock and verifies.
+    #[test]
+    fn verify_seal_proposal_rejects_the_vault_feature_without_keys() {
+        let (mut p, sks) = vault_roster(2, 4);
+        for id in &mut p.identities {
+            id.vault_pk.clear();
+        }
+        reseal(&mut p, &sks);
+        assert!(ratify_as_b(&p).is_err(), "a new founding needs the keys");
+        verify_sealed_roster(&p).expect("an existing mock roster verifies");
+    }
+
+    /// A vault-less charter: the founder dropped the keys, the member's own
+    /// derivation is simply unused.
+    #[test]
+    fn verify_seal_proposal_accepts_a_vaultless_table_from_a_vault_capable_seat() {
+        let (mut p, sks) = vault_roster(2, 4);
+        p.features = Some(vec!["memory".to_string()]);
+        for id in &mut p.identities {
+            id.vault_pk.clear();
+        }
+        reseal(&mut p, &sks);
+        let table = ratify_as_b(&p).expect("ratifies");
+        assert!(table.starts_with(b"molt-roster-v5\0"));
+    }
+
+    #[test]
+    fn verify_sealed_roster_rejects_a_swapped_vault_pk() {
+        let (mut p, _) = vault_roster(2, 4);
+        verify_sealed_roster(&p).expect("the honest vault roster verifies");
+        let one = p.identities[1].vault_pk.clone();
+        p.identities[1].vault_pk = p.identities[2].vault_pk.clone();
+        p.identities[2].vault_pk = one;
+        assert!(verify_sealed_roster(&p).is_err());
+    }
+
+    /// A founder-side ritual of `n` seats at `m`, every seat joined; seat
+    /// index `keyless` (if any) joined without a vault key (an older build).
+    fn vault_ritual(m: u8, n: u8, keyless: Option<usize>) -> State {
+        let mut st = crate::tests::plain_state();
+        let (founder_sk, founder) = vault_seat(0);
+        let seats = (1..usize::from(n))
+            .map(|i| {
+                let (_, mut id) = vault_seat(i);
+                if keyless == Some(i) {
+                    id.vault_pk.clear();
+                }
+                SeatRuntime { identity: Some(id), ..bare_seat(&format!("t{i}")) }
+            })
+            .collect();
+        st.net_ritual = Some(RitualRuntime {
+            transport: LoopbackHub::calm().transport(),
+            name: "R".to_string(),
+            agenda: String::new(),
+            charter_proposed: false,
+            founded_ts: 0,
+            features: None,
+            rule_m: m,
+            rule_n: n,
+            founder,
+            founder_sk,
+            founder_nostr_sk: zeroize::Zeroizing::new(vec![7u8; 32]),
+            seats,
+            generation: 0,
+            _sim: Vec::new(),
+            seq: std::sync::atomic::AtomicU64::new(0),
+            nostr: None,
+        });
+        st
+    }
+
+    fn propose_vault(st: &mut State) -> Result<molt_core::Reply, molt_core::MoltError> {
+        st.cmd_create_propose("R".to_string(), "charter".to_string(), vec!["vault".to_string()])
+    }
+
+    #[test]
+    fn create_propose_refuses_vault_for_an_older_joiner() {
+        let mut st = vault_ritual(2, 4, Some(1));
+        let err = propose_vault(&mut st).expect_err("b sent no vault key");
+        assert!(matches!(
+            err,
+            molt_core::MoltError::Vault(molt_core::vault::VaultRefusal::NeedsNewerVersion(ref s)) if s == "b"
+        ), "{err}");
+        assert!(!st.net_ritual.as_ref().expect("ritual").charter_proposed, "nothing proposed");
+    }
+
+    #[test]
+    fn create_propose_refuses_vault_at_2_of_3() {
+        let mut st = vault_ritual(2, 3, None);
+        let err = propose_vault(&mut st).expect_err("2-of-3 is outside the bounds");
+        assert!(matches!(err, molt_core::MoltError::Vault(molt_core::vault::VaultRefusal::Bounds)), "{err}");
+    }
+
+    /// The table carries the keys iff the charter chose the vault.
+    #[test]
+    fn create_propose_keys_the_table_only_for_a_vault_charter() {
+        let mut st = vault_ritual(2, 4, None);
+        propose_vault(&mut st).expect("2-of-4, every seat keyed");
+        let ids = st.net_ritual.as_ref().expect("ritual").sealed_identities();
+        assert!(ids.iter().all(|i| !i.vault_pk.is_empty()));
+
+        let mut st = vault_ritual(2, 4, Some(2));
+        st.cmd_create_propose("R".to_string(), String::new(), vec!["memory".to_string()])
+            .expect("no vault, an older joiner is fine");
+        let ids = st.net_ritual.as_ref().expect("ritual").sealed_identities();
+        assert!(ids.iter().all(|i| i.vault_pk.is_empty()), "the founder drops the keys");
+    }
+
+    /// The join door normalizes-or-rejects the vault key like the nostr
+    /// anchor: malformed or another seat's key is refused without spending
+    /// the ticket; empty is an older joiner.
+    #[test]
+    fn a_join_validates_the_vault_key() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let mut st = vault_ritual(2, 4, None);
+        let (founder_vpk, b) = {
+            let r = st.net_ritual.as_mut().expect("ritual");
+            r.seats[0].identity = None;
+            (r.founder.vault_pk.clone(), vault_seat(1).1)
+        };
+        let b_sk = vault_seat(1).0;
+        let kp = hex::encode(
+            molt_net::MlsMember::new(&b_sk, "b").expect("mls").key_package().expect("kp"),
+        );
+        let reply = serde_json::to_string(&invite::ReplyHandover {
+            server: String::new(),
+            queue_id: "aa".to_string(),
+            wrap: "ef".repeat(32),
+        })
+        .expect("handover json");
+        let join = |st: &mut State, vpk: &str| {
+            st.cmd_net_join_requested(
+                0,
+                b.member.clone(),
+                b.identity_pk.clone(),
+                b.nostr_pk.clone(),
+                invite::join_mac("t1", &b.member, &b.identity_pk, &b.nostr_pk),
+                reply.clone(),
+                String::new(),
+                kp.clone(),
+                Vec::new(),
+                vpk.to_string(),
+                None,
+            )
+            .expect("handler never errors");
+            st.net_ritual.as_ref().expect("ritual").seats[0].identity.clone()
+        };
+        let c_vpk = vault_seat(2).1.vault_pk;
+        for bad in ["ff".repeat(32), "zz".repeat(32), b.vault_pk.to_uppercase(), founder_vpk, c_vpk]
+        {
+            assert!(join(&mut st, &bad).is_none(), "refused: {bad}");
+        }
+        let anchored = join(&mut st, &b.vault_pk).expect("the ticket stayed usable");
+        assert_eq!(anchored.vault_pk, b.vault_pk);
+
+        let mut st = vault_ritual(2, 4, None);
+        st.net_ritual.as_mut().expect("ritual").seats[0].identity = None;
+        let anchored = join(&mut st, "").expect("an older joiner");
+        assert!(anchored.vault_pk.is_empty());
     }
 }

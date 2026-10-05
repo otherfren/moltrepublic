@@ -178,6 +178,17 @@ impl State {
         } else {
             nostr_sk.clone().map(zeroize::Zeroizing::new)
         };
+        // the vault seed (plan 1.3.2): from the phrase and this seat's
+        // FOUNDING row, kept only when it re-derives the founding vault_pk
+        let vault_seed = signing_key.as_ref().and_then(|sk| {
+            let pk = hex::encode(sk.verifying_key().to_bytes());
+            let founding = match (chain.first().map(|b| &b.change), &checkpoint_blob) {
+                (Some(molt_core::ChainChange::Genesis { identities, .. }), _) => identities.as_slice(),
+                (_, Some(blob)) => blob.founding_identities.as_slice(),
+                _ => sealed.identities.as_slice(),
+            };
+            crate::vault::seed_for_seat(&entropy, founding, &pk)
+        });
         if mls_snapshot.is_some() || !mesh.is_empty() || !chain.is_empty() {
             let ts = molt_core::TransportState {
                 mls: mls_snapshot,
@@ -187,6 +198,7 @@ impl State {
                 kind: shape.kind,
                 relays: shape.relays,
                 rotation_seed: shape.rotation_seed,
+                vault_seed: if chain.is_empty() { None } else { vault_seed },
                 ..Default::default()
             };
             opened.write_transport_state(&ts).map_err(|e| err(e.to_string()))?;

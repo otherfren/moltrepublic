@@ -567,7 +567,7 @@ fn the_fold_creates_a_missing_group_at_its_all_position() {
         },
         &["petra", "walter"],
     );
-    fold_one(&mut st, &block).expect("folds");
+    fold_one(&mut st, &block, None).expect("folds");
     assert_eq!(
         st.applied.iter().map(|(s, _)| *s).collect::<Vec<_>>(),
         Surface::CHECKPOINT_V7_SURFACES.to_vec(),

@@ -461,9 +461,23 @@ pub(crate) fn change_summary(eff: &OrgEffective, p: &ProposalRecord) -> (String,
 /// effective state: an applied entry is forever (the log is append-only),
 /// so a blank name or an unparseable retention window must not get in.
 /// Local proposals only — the wire fold stays defensive on its own.
+/// A `set_features` naming the vault: D11 refuses it on every NEW proposal
+/// (propose, approve, the wire); historic blocks keep folding.
+pub(crate) fn sets_vault_feature(surface: Surface, payload: &Value) -> bool {
+    surface == Surface::Organization
+        && payload.get("op").and_then(Value::as_str) == Some("set_features")
+        && payload
+            .get("value")
+            .and_then(Value::as_str)
+            .is_some_and(|v| v.split_whitespace().any(|k| k == crate::vault::VAULT))
+}
+
 fn validate_org_payload(surface: Surface, payload: &Value) -> Result<(), MoltError> {
     if surface != Surface::Organization {
         return Ok(());
+    }
+    if sets_vault_feature(surface, payload) {
+        return Err(MoltError::Vault(molt_core::vault::VaultRefusal::FoundingOnly));
     }
     let op = payload.get("op").and_then(Value::as_str).unwrap_or("");
     let value = payload.get("value").and_then(Value::as_str).unwrap_or("");
@@ -708,7 +722,9 @@ impl State {
                 .collect();
             let current = self.effective_features();
             for f in &current {
-                let known = Surface::parse(f).is_some_and(Surface::is_charter_feature);
+                // the vault is never proposed (D11); the union keeps it
+                let known = Surface::parse(f).is_some_and(Surface::is_charter_feature)
+                    && f != crate::vault::VAULT;
                 if known && !proposed.contains(f.as_str()) {
                     return Err(MoltError::BadPayload(format!("{f}: cannot be disabled")));
                 }
@@ -860,6 +876,9 @@ impl State {
                 // (The nav hides such a surface, so a GUI member could not even
                 // SEE the card it would be co-signing.)
                 self.require_feature(p.surface)?;
+                if sets_vault_feature(p.surface, &p.payload) {
+                    return Err(MoltError::Vault(molt_core::vault::VaultRefusal::FoundingOnly));
+                }
                 // a Files vote is checked against THIS seat's own view of the
                 // share - the payload arrived over the wire with no such check
                 if p.surface == Surface::Files {
