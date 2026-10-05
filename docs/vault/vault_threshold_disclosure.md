@@ -1,220 +1,454 @@
-# Vault: threshold-elected disclosure
+# Vault: majority escrow with an elected reader
 
-Status: DRAFT (2026-08-16) — algorithm design for discussion. Nothing of the
-cryptography is built; the only thing following this document so far is the
-GUI design mock (`surfaces.slint::VaultPane`). Open questions in §10 must be
-discussed with the user before any build phase starts.
+Status: DRAFT rev 2 (2026-10-05) — the product decisions in §2 were
+ratified by the user in the 2026-10-05 discussion; the protocol below is
+the design they imply, revised after an independent review the same day.
+Nothing of the cryptography is built; the only thing following this
+document so far is the GUI design mock (`surfaces.slint::VaultPane`).
+Rev 1 (2026-08-16) is superseded: its primitives stand, its framing
+("succession insurance" with an implied depositor protection) and its
+storage story (bundles inline in the chain) do not. §12 lists what
+changed and why.
 
-## 1. Product idea
+## 1. What the vault is — and what it is not
 
-Members deposit secret data (passwords, private keys, recovery material) into
-the republic's vault as **succession insurance**: if the depositor dies or
-disappears, the DAO must not die with them. But the vault is not a shared
-folder — nobody can read a deposit by default. Access is granted by a
-**threshold vote that elects ONE member as the reader**; after the vote, only
-that member can decrypt the secret. Everyone else — including every voter —
-learns only *that* the grant happened, never the content.
+A member deposits a short text (a last will, server passwords, API keys)
+so the republic can still fulfil its purpose when that member is gone.
+Nobody can read a deposit by default. **Any m members can, at any time,
+vote ONE member in as its reader**; from then on that member can decrypt
+it, and every other member sees only that the grant happened.
 
-"Zero-knowledge" here means, precisely:
+It is **not a dead man's switch** in the literal sense. A switch fires on
+absence, and a republic cannot observe absence: humans and agents are
+indistinguishable seats, and a seat can run forever with nobody behind it.
+The trigger is the majority, not the silence. It is also **not a private
+safe**: the depositor has no veto and no delay to object in. The vault
+has exactly the power the republic's governance already has — whoever
+holds m votes can sign blocks, and can open the escrow. The UI says so at
+deposit time, in one line:
 
-- Below the threshold, **nothing** leaks — not to a single member, not to any
-  coalition smaller than m, not to relays (information-theoretic for the key
-  shares, AEAD for the payload).
-- At the threshold, the honest protocol reveals the secret **only to the
-  elected reader**, and every step is verifiable — a cheating depositor or a
-  cheating share-holder is *detected and named*, not silently tolerated.
-- This is threshold cryptography with verifiable secret sharing, not a
-  ZK-proof system; the label describes the user-visible property.
+> Any m members can open this at any time - by vote for one of them, or among themselves. There is no way back.
 
-## 2. Trust model — the honest limits
+## 2. Decisions (user, 2026-10-05)
 
-- **m colluding members can always reconstruct any secret**, vote or no vote.
-  This is inherent to *every* threshold scheme: the coalition jointly holds
-  the key. It is exactly the trust model the chain already runs on (m
-  colluders can also forge blocks). The vault adds no weaker link.
-- **Knowledge cannot be revoked.** Once granted, the reader knows the secret
-  forever. There is no "one-time view" that cryptography can enforce; the UI
-  must not pretend otherwise.
-- **If more than n−m seats are permanently lost, the vault is lost** — the
-  same availability bound as chain governance. That is the point: the secret
-  survives any minority loss, including the depositor's death.
+- **D1 One reader.** A grant names exactly one member; only that member
+  can decrypt.
+- **D2 No veto, no delay.** A grant takes effect the moment it commits at
+  m approvals.
+- **D3 Humans and agents are the same.** No step anywhere in the vault may
+  depend on telling them apart (no human-only confirmation, no liveness
+  heuristic).
+- **D4 Payload ≤ 100 KiB** (102 400 bytes of plaintext): a will and a few
+  keys, not an archive.
+- **D5 Every member may deposit.** All seats are equal.
+- **D6 No way back.** A grant is permanent and knowledge cannot be
+  revoked; the UI must not pretend otherwise.
+- **D7 Replace drops the old version.** Depositing again under the same
+  name replaces the deposit; honest clients drop the old version's
+  material.
+- **D8 Name and kind are visible** to all members — nobody votes blind on
+  what they release.
+- **D9 One threshold.** The republic's m, everywhere: approving a deposit,
+  granting, reconstructing. Share refresh (§9.6) comes later, not in v1.
+- **D10 The vault lives where the wiki lives**: in the chain on disk,
+  folded at a cut, its bulk on the file plane — and **all of it is in
+  every backup**. This decision surfaced a backup bug in the wiki itself:
+  `wiki_base.bin` was skipped by every export (fix of 2026-10-05,
+  "storage: back up the folded wiki base").
 
-## 3. Primitives (all already pure-Rust posture, see §7)
+## 3. When the vault can be enabled
+
+The vault is a charter feature (`charter_features.md`), and the republic's
+shape decides whether it can mean anything:
+
+- **m ≥ 2.** At m = 1 Shamir hands every seat the secret itself: every
+  member could read every deposit with no grant at all. A 1-of-n
+  republic cannot enable the vault.
+- **m ≤ n − 1.** The depositor holds no share (§6), so a deposit is
+  reconstructable from the other n − 1 seats only if m ≤ n − 1. At m = n
+  the vault can never serve its one purpose — reading after the depositor
+  is gone — and is refused.
+
+Both are checked where the feature is proposed and where it is applied;
+the refusal names the reason (`needs 2 <= m <= n-1`).
+
+## 4. Trust model — the honest limits
+
+- **m members can always read any deposit.** By vote (the design) or out
+  of band (m share holders pool their shares). No scheme that lets m
+  honest members release can stop m dishonest ones. This is the trust
+  model the chain already runs on.
+- **Knowledge is irrevocable** (D6). After a grant, the reader knows the
+  content forever. Rotating the actual passwords is the only real undo.
+- **Availability equals the republic's.** If more than n − m seats are
+  permanently lost (phrase gone), the vault is lost together with
+  governance — no worse, and no scheme can do better without weakening m.
+  The depositor's own loss is already priced in: it holds no share.
+- **A replaced version survives in old backups.** Shares are re-derivable
+  from a deposit record plus a seed (§9.4), so "drop" (D7) removes the old
+  version from the current state, not from a backup taken before. m
+  members who each kept such a backup can still read it. The UI says so
+  when replacing.
+- **The share protection is computational.** Feldman commitments publish
+  `g^s`; secrecy below the threshold rests on the discrete log (and HPKE on
+  X25519), not on information theory. Rev 1 claimed otherwise.
+
+## 5. Primitives (pure Rust, see §13)
 
 | role | primitive | crate |
 |---|---|---|
-| payload encryption | XChaCha20-Poly1305, random 256-bit DEK | `chacha20poly1305` (in tree) |
-| key sharing | Shamir over the Ristretto scalar field, **Feldman-verifiable** | `vsss-rs` (new) |
-| per-seat share transport | HPKE base mode (X25519-HKDF-SHA256 + ChaCha20-Poly1305) | `hpke-rs` (in tree) or `hpke` — spike decides |
-| vault keypair | X25519, derived `HKDF(identity_seed, "molt-vault-x25519-v1")` | `x25519-dalek`, `hkdf` (in tree) |
-| bindings/ids | SHA-256 over length-prefixed canonical bytes | in tree |
+| payload encryption | XChaCha20-Poly1305 under a DEK derived from the shared scalar | `chacha20poly1305` (in tree) |
+| key sharing | Shamir over the Ristretto scalar field, Feldman-verifiable | `vsss-rs` (new) |
+| per-seat share transport | HPKE base mode (X25519-HKDF-SHA256, ChaCha20-Poly1305) | `hpke-rs` (in tree) or `hpke` — spike decides |
+| vault keypair | X25519 from `HKDF(seed, info)`, info below | `x25519-dalek`, `hkdf` (in tree) |
+| ids and bindings | SHA-256 over length-prefixed, entry-counted canonical bytes | in tree |
 
-The **vault key** is a dedicated X25519 keypair per seat, deterministically
-derived from the identity seed (clean domain separation instead of
-Ed25519→X25519 conversion of the roster key). Each seat announces its vault
-public key ONCE, signed by its roster Ed25519 identity key; every member
-verifies and pins it (persistent state). Because it is seed-derived, a
-recovered seat re-derives the secret key and regains access to all its
-shares from replicated state — recovery needs no vault-specific ceremony.
+**The vault key** is `HKDF(seed, "molt-vault-x25519-v1" ‖ republic_id ‖
+identity_pk)`. Both are bound on purpose: a joined seat derives its
+identity from `derive_workspace_id(entropy, "member")`, which is the SAME
+for every republic (`founding.rs::seat_identity`), so a salt borrowed from
+the identity derivation would give one phrase the same vault key in every
+republic it joined. A recovered seat (same phrase, same identity) re-derives
+the same key with no vault-specific ceremony.
 
-## 4. Deposit ("seal")
+**Encoding rule for every `‖` in this document**: each field
+le32-length-prefixed, the whole tuple entry-counted — the republic-id
+injectivity rule; never separators. Every such layout carries a
+`molt-vault-*-v1` tag and a byte-pin test (§14).
 
-Depositor-local, ephemeral until the proposal commits (chain rule):
+## 6. The records
 
-1. Sample scalar `s ← Z_l`; `DEK = HKDF-SHA256(s, "molt-vault-dek-v1")`.
-2. `payload_ct = XChaCha20-Poly1305(DEK, payload, aad = header bytes)`.
-3. Feldman-split `s` into n shares at threshold m (one per seat, m = the
-   republic threshold); publish the Feldman commitments `C_0..C_{m-1}`.
-4. For each seat i: `enc_share_i = HPKE_seal(vault_pk_i, share_i,
-   aad = secret_id ‖ seat_i)`.
-5. The sealed bundle `{header, payload_ct, commitments, enc_share_1..n}` is
-   the body of a **`seal_secret` proposal** (Vault is a gated surface —
-   deposits ride the existing threshold governance, which also stops spam).
+Everything the vault keeps is a handful of small records plus one opaque
+file per deposit.
 
-`secret_id` = SHA-256 over `molt-vault-secret-v1` canonical bytes: tag,
-republic id, depositor seat, name, kind, payload_ct hash, m, n, commitments —
-every field le32-length-prefixed and entry-counted (the injectivity rule from
-the republic-id fix; never separators).
+- **Vault-key announcement** — `{seat, vault_pk}`, signed by the seat's
+  identity key, carried as a gated chain record on `Surface::Vault`.
+  **Pinned once per seat**: the key is derived from seed and identity,
+  neither of which ever changes, so a second announcement with a
+  different key is refused, not last-wins (last-wins would let a stolen
+  identity key redirect every future share). A client announces
+  automatically on the first open after the feature is enabled.
+- **Deposit** (gated proposal → chain block) —
+  `{depositor, name, kind, m, holders, commitments[m], enc_share[n-1],
+  payload: {hash, size}, sig_depositor}`.
+  - `holders` = every seat except the depositor, in genesis founding-table
+    order; a seat's Shamir x-coordinate is its 1-based position in that
+    table (the depositor's position is simply unused), and `enc_share[]`
+    follows the same order.
+  - `sig_depositor` is the depositor's identity signature over the
+    canonical record (`molt-vault-deposit-v1`). Chain blocks carry no
+    proposer, so without it any member could propose a record naming
+    someone else as depositor — and, under D7, replace their deposit.
+    Approvers, `verify_chain` and the fold all check it.
+  - For n = 5, m = 3: four 80-byte HPKE shares (32 encapsulated key,
+    32 share, 16 tag) plus three 32-byte commitments — well inside the
+    proposal budget. The payload ciphertext is NOT in the record.
+- **Grant** (gated proposal → chain block) — `{grant_id, secret_id,
+  reader}`, `grant_id = SHA-256(molt-vault-grant-v1 ‖ secret_id ‖ reader ‖
+  proposal_id)`. Content-derived, so it survives a cut that drops block
+  heights; the answer AAD binds it (§8).
+- **Payload file** — the ciphertext of the text, at most 100 KiB + 40
+  bytes, carried by the file plane (§9.2).
 
-**Approval doubles as share verification.** A member approves the proposal
-only after (a) HPKE-opening its own share and (b) checking it against the
-Feldman commitments. The approval signature (existing position-bound chain
-signature) thus attests "my share is valid". Consequences:
+`secret_id` = SHA-256 over `molt-vault-secret-v1` ‖ republic id ‖
+depositor ‖ name ‖ kind ‖ m ‖ holders ‖ commitments ‖ payload hash. It
+covers the commitments and the payload but not `enc_share` — no
+circularity with the share AAD below.
 
-- At m approvals the block commits: m *proven-good* shares exist, so the
-  secret is **releasable** from that moment — no extra ceremony.
-- The remaining seats verify on catch-up; the card shows "verified k of n"
-  until k = n ("fully hardened"). A share that fails verification flags the
-  secret visibly (`share invalid`) and names the depositor — detected, never
-  silent.
-- A denied proposal discards the bundle; nothing was persisted (ephemeral
-  until commit, like the ritual).
+## 7. Deposit
 
-Members store their decrypted share only inside the existing at-rest-sealed
-local store — and can always re-derive it from the replicated bundle.
+Depositor-local and ephemeral until the proposal commits (chain rule):
 
-## 5. Grant (the vote) and unseal (the re-encryption)
+1. **Refuse early** unless the vault is enabled (§3) and every holder has
+   a pinned announcement (§6). Without the second check a seat would get
+   no share and the deposit would silently need m out of fewer seats.
+2. Sample scalar `s`. `DEK = HKDF-SHA256(s, info = "molt-vault-dek-v1" ‖
+   republic_id ‖ depositor ‖ name ‖ kind)`.
+   `payload_ct = XChaCha20-Poly1305(DEK, text, aad = "molt-vault-payload-v1"
+   ‖ republic_id ‖ depositor ‖ name ‖ kind)` — not `secret_id`, which
+   hashes the ciphertext and would be circular.
+3. Feldman-split `s` among the holders at threshold m.
+4. `enc_share_i = HPKE_seal(vault_pk_i, share_i, aad = "molt-vault-share-v1"
+   ‖ secret_id ‖ seat_i)`, with the **ephemeral key derived**, not drawn:
+   `ikmE_i = HKDF(seed, "molt-vault-eph-v1" ‖ secret_id ‖ seat_i)`. This
+   is what makes a complaint decidable (below); the depositor stores
+   nothing extra, it re-derives from its seed.
+5. Publish the payload file on the file plane, then propose the deposit.
 
-1. **Request:** any member proposes `VaultGrant { secret_id, reader,
-   reason }` — an additive `ChainChange` variant, so the vote IS the existing
-   chain governance: position-bound signatures over
-   `republic_id ‖ height ‖ change`, sealed deterministically at m.
-2. **Unseal:** on seeing the committed grant block, every share-holding seat
-   computes `resp_i = HPKE_seal(vault_pk_reader, share_i,
-   aad = "molt-vault-resp-v1" ‖ republic_id ‖ secret_id ‖ grant_height ‖
-   reader ‖ seat_i)` and publishes it on the group channel. The AAD binds the
-   response to THIS grant and THIS reader — a response cannot be replayed for
-   another grant or redirected to another recipient.
-3. **Read:** the reader HPKE-opens incoming responses, verifies each share
-   against the public Feldman commitments (a bad or missing responder is
-   thereby *identified by seat*), Lagrange-combines any m valid shares → `s`
-   → DEK → decrypts `payload_ct` locally. The plaintext is displayed, never
-   persisted — it is re-derived on demand from the persisted responses, so
-   the grant survives restart and recovery.
+**Approval is verification.** A holder approves only after (a) its share
+opens and checks against the commitments, AND (b) it holds the complete
+payload file and its hash matches. Without (b) a deposit could commit
+while only the depositor holds the ciphertext, and die with them.
+
+**The card counts what is proven, not what committed.** The block commits
+under the ordinary chain rule (m approvals, the depositor's own possibly
+among them). The card reads `committed` until **m holders other than the
+depositor** have verified — `sealed` — and `hardened` once all n − 1 have.
+Only `sealed` means the depositor's absence is survivable.
+
+**Verification receipts and complaints** are not chain records. Each
+holder publishes a signed `verified` or `complaint` for a `secret_id` as a
+self-signed control frame, persisted at every member (last-wins per
+holder) and re-sent on start — the mirror declaration pattern
+(`mirroring.md`). They are status, not consensus, and never enter the
+vault base.
+
+**A complaint is decided, not just shown.** On a complaint from holder i
+the depositor's client answers with `share_i` and `ikmE_i`. Anyone
+recomputes `enc_share_i` from them and the pinned `vault_pk_i`:
+
+- the recomputed ciphertext differs from the record → the answer is a
+  lie; the depositor is named;
+- it matches and `share_i` fails the Feldman check → the depositor dealt
+  a bad share; the depositor is named;
+- it matches and passes → the complaint was false; the complainer is
+  named.
+
+The reveal publishes one share, which lowers that deposit's effective
+threshold to m − 1 — so every decided complaint ends with a re-seal (a
+fresh `s`, D7), and the cost lands only on the version being replaced
+anyway (plus old backups, §4). A depositor who cannot answer (gone)
+leaves the complaint open; the card stays at what is proven. A complainer
+who keeps complaining against honest re-seals is named every time.
+
+Deciding complaints rests on the HPKE crate accepting a caller-supplied
+ephemeral (RFC 9180 `DeriveKeyPair`); the V1 spike confirms it. If neither
+candidate allows it, complaints stay undecided (visible only) — never a
+hand-rolled HPKE.
+
+A denied proposal discards everything; holders who opened their shares to
+verify learned one share each of a secret that never entered the vault.
+
+## 8. Grant and read
+
+1. **Grant:** any member proposes `VaultGrant {grant_id, secret_id,
+   reader}`; it commits at m like every other change (D2: no delay). The
+   reader must have a pinned announcement, or the proposal is refused.
+2. **A grant binds one version.** It is valid only while its `secret_id`
+   is the current version under `(depositor, name)` when it commits. A
+   replace supersedes every pending grant on the old version (they drop
+   the way a stale wiki patch drops at a re-base), and seats stop
+   answering committed grants on a replaced version. Nobody can release a
+   version the voters did not see, and a grant can never commit against
+   content nobody holds any more.
+3. **Unseal:** when a seat sees a committed grant — and again whenever the
+   reader asks — it sends `resp_i = HPKE_seal(vault_pk_reader, share_i,
+   aad = "molt-vault-resp-v1" ‖ republic_id ‖ grant_id ‖ seat_i)` over the
+   group channel. The AAD binds the answer to this grant (and through
+   `grant_id`, to this version and this reader).
+4. **Read:** the reader combines **any m valid shares** — its own if it
+   holds one, plus answers — checking each against the commitments (a bad
+   answer names its seat), derives the DEK, decrypts the payload file
+   locally and shows the text. A reader who holds a share needs m − 1
+   answers, so one dead seat never blocks a read; the depositor as reader
+   holds none and needs m (and knows the content anyway).
+
+**Answers are never stored, only re-requested.** A grant is permanent
+chain state, so re-answering reveals nothing new. A reader who lost its
+device, restored a backup from before the grant, or recovered with a
+fresh MLS leaf (which cannot decrypt older group messages) simply asks
+again. The plaintext is never persisted either.
 
 Everyone else's client shows the grant as an audit entry — name, reader,
-height, time — with the content permanently locked. That contrast (my entry
-opens, the neighbour's entry shows only who may read it) is the UI's
-zero-knowledge story.
+when — with the content locked.
 
-What a cheater can and cannot do:
+## 9. Storage, cut, recovery, backup
 
-- **Depositor** distributing bad shares → caught at approval (§4); with < m
-  approvals the secret never enters the vault.
-- **Share-holder** sending garbage at unseal → the reader's commitment check
-  names the seat; any m honest responses suffice.
-- **Voter coalition < m** → grant never commits, shares never move.
-- **Re-routing**: approvals are position-bound chain signatures naming the
-  reader; responses are AAD-bound to grant and reader. Neither can be
-  spliced onto a different reader.
-- **Out-of-band collusion ≥ m** → reconstructs regardless (§2) — no scheme
-  allowing m honest members to release can prevent m dishonest ones.
+The rule every vault byte obeys: **it can be rebuilt from the phrase, the
+current chain, the surviving seats, and any one backup.** Nothing lives
+only in the ephemeral log or only on one device.
 
-## 6. What was considered and rejected
+### 9.1 The chain
 
-- **Threshold encryption with a DKG** (threshold ElGamal / BLS,
-  `threshold_crypto`-style): one shared public key, no per-secret share
-  distribution. Rejected: needs a DKG ceremony and resharing machinery on
-  membership change — but this product FIXED n and m at founding forever
-  (product decision 2026-07-11), which removes the one advantage; and it
-  drags in pairing crypto. Per-secret Shamir is smaller, and its shares ride
-  infrastructure we already run.
-- **Plain Shamir without VSS** (`sharks` et al.): a lying depositor could
-  hand out inconsistent shares and nobody would know until the release
-  fails. Verifiability is the point; rejected.
-- **Delivering shares as MLS group messages**: the group channel is readable
-  by ALL members — shares must be per-seat confidential. Hence the HPKE
-  envelope per seat *inside* the group-encrypted transport.
-- **Feldman vs Pedersen**: Feldman commitments leak `g^s`; for a one-time
-  random scalar fed through HKDF this is standard and harmless (DDH), and
-  Feldman lets the READER verify shares against the same commitments the
-  depositors published. Pedersen hides `g^s` but breaks that direct check.
-  Feldman, with the tradeoff recorded here.
+Announcement, deposit and grant blocks are small (§6) and ride the
+existing gated governance, additive-only.
 
-## 7. Library verdict (don't hand-roll — checked 2026-08-16)
+### 9.2 The payload on the file plane
 
-- **`vsss-rs` 6.0.1** — "Verifiable Secret Sharing Schemes", pure Rust,
-  no-std, Shamir + Feldman + Pedersen over `elliptic-curve`/curve25519
-  groups; actively maintained (last release 2026-07-31), ~1.7M downloads.
-  The ONE new dependency. A dep-lock spike (wallet-plan §6 pattern) locks
-  its exact API and audits its dependency slice before build start.
-- **HPKE**: `hpke-rs` 0.6.1 is ALREADY in the tree (OpenMLS's HPKE). Prefer
-  reusing it; fallback `hpke` 0.14.0 (RFC 9180, pure Rust, ~7.7M downloads)
-  if hpke-rs's public API turns out unergonomic outside OpenMLS. Spike
-  decides; never hand-rolled X25519+AEAD.
-- `chacha20poly1305` 0.10, `x25519-dalek` 2.0, `hkdf` 0.12,
-  `curve25519-dalek` 4.1 — all already in the lockfile.
-- Everything pure Rust: the ring-free guard and the no-C posture hold.
+Each payload file is its own series on the file plane, with its own job
+family beside the share family and the wiki base family
+(`knowledge_base_scale.md` §4.9.7): a `kind` the resume routes, a
+`PieceWanted` answer path keyed by the payload hash, a sink beside
+`chain.state` (`vault/<secret_id>.bin`, sealed at rest). 100 KiB is three
+44 000-byte pieces.
 
-## 8. Engine and state integration (sketch)
+**Holding is mandatory, not mirror consent.** Every seat of a
+vault-enabled republic holds every current payload — outside the mirror
+on/off switch and outside the mirror quota. At 100 KiB per deposit it is
+not a resource question, and a vault that only consenting seats hold
+would make its availability a matter of preference settings.
 
-- Vault-key announcements, sealed bundles, and grant responses are
-  replicated persistent state; bundles and grants are chain blocks
-  (`ChainChange` additive-only). All of it must survive WP4a compaction and
-  ride the checkpoint like other applied projections — an integration point
-  the build phase pins with tests, byte-layout tags versioned
-  (`molt-vault-*-v1`) with byte-pin tests like roster/checkpoint.
-- Engine stays a single-owner actor: HPKE/Shamir work is CPU-only and cheap,
-  so seal/verify/combine run inside command handlers; no new async pattern.
-- Co-equality: new commands surface as MCP tools — `vault_seal`,
-  `vault_request` (the grant proposal), `vault_read` (reader-side reveal),
-  vault lists in `read_state`; approvals reuse the existing `approve`.
-  Net-side response ingestion is INTERNAL.
+### 9.3 The cut folds the vault like the wiki
 
-## 9. Build phasing (after ratification — nothing started)
+Without a fold, every record would accumulate in the checkpoint blob —
+the trust root a rejoiner is handed, which already strains a 65 408-byte
+gift-wrap cap (`log_compaction.md` §B.6a). Enough deposits would make
+recovery into the republic silently impossible.
 
-1. **V1 spike**: dep-lock `vsss-rs`, decide `hpke-rs` vs `hpke`, red
-   byte-pin tests for the three `molt-vault-*-v1` layouts.
-2. **V2 seal**: vault-key announcement, `seal_secret` proposal with
-   verify-at-approve, secrets list real (TDD: two-instance seal keystone).
-3. **V3 grant**: `VaultGrant` chain variant, response task, reader reveal,
-   audit list (keystone: three nodes, elected reader decrypts, non-reader
-   provably cannot).
-4. **V4 polish**: MCP tools, recovery/compaction keystones, UI de-mock.
+So the cut **folds**, with every K6 rule carried over
+(`knowledge_base_scale.md` §4.9.3–§4.9.6):
 
-## 10. Open questions (the discussion this document starts)
+- Deposits are a last-write-wins slot keyed `(depositor, name)`, the
+  depositor authenticated by `sig_depositor` — only the current version
+  survives (D7). Grants on a dropped version go with it.
+- The blob carries ONE entry, `{"op": "vault_base", "hash", "size"}`: a
+  commitment to the canonical bytes (`molt-vault-base-v1`) of all current
+  announcements, deposits and grants. Receipts and complaints are not in
+  it (§7).
+- **A new fold variant, not only a tag.** As K6 needed both the v9 tag
+  and `ChainChange::CheckpointFolded`, the vault fold needs a variant (or
+  a flag inside `CheckpointFolded`) so an older build STOPS instead of
+  reading a forgery, plus a conditional checkpoint tag selected on the
+  `vault_base` entry — Vault is one of the frozen
+  `CHECKPOINT_V7_SURFACES`, so every existing cut keeps its bytes. The tag
+  rule covers a cut that folds the wiki, the vault, or both.
+- **The fold takes the base held right now** (the §4.9.5 lesson):
+  propose, co-sign, verify and apply pass the vault base this node holds
+  at that moment, as a parameter — never one cached in the walk.
+- **Once folded, always folded**: an unfolded vault cut after a folded
+  anchor is refused.
+- The vault base is a file-plane series like the wiki base. A node with a
+  verified chain but not yet the base is **base-pending**: the vault
+  answers a typed refusal with progress, never an empty list; it does not
+  approve deposits or grants (it cannot verify them), queues its answers
+  to committed grants until the base arrives, and retires nothing against
+  an empty base.
 
-- **Unseal quorum off by one?** The elected reader holds a share too: m
-  shares INCLUDING the own one means m−1 answers suffice — the mock's
-  meter currently waits for m answers from the n−1 other seats, so one
-  dead seat would show every grant "pending" forever (exactly the
-  succession scenario). Decide the counting rule before the meter is
-  real.
+### 9.4 Shares are derived, never stored
 
-1. **Threshold shape.** Recommended: ONE threshold — the republic's m — for
-   deposit, vote and reconstruction alike ("security comes from the
-   threshold alone", no per-secret knobs). Alternative: per-secret k ∈
-   [m..n] chosen at seal (the treasury seed at n-of-n) — buys depositor
-   control, costs a veto by every dead seat, which cuts against the
-   succession idea. Decide.
-2. **Deposit gating.** Recommended: deposits are ordinary gated proposals
-   (§4, approval = share verification). Alternative: ungated deposits with a
-   separate n-of-n verification round — faster to seal, second ceremony.
-3. **Response duty.** Recommended: EVERY seat responds to a committed grant
-   (fastest completion; reveals nothing extra). Alternative: only approvers.
-4. **Grant durability.** Recommended: a grant is permanent (honest — see
-   §2); the audit entry says so. Alternative UX with expiring *display* only.
-5. **Payload bound.** Vault payloads ride the transport publish budget, so:
-   small secrets inline (cap ~a few KiB); anything larger goes into the
-   existing encrypted file plane with the FILE KEY as the vault secret.
-   Confirm this split.
+A seat never writes its decrypted share anywhere: it opens it from the
+deposit record with its vault key whenever needed. Backups hold no
+plaintext shares, and a recovered seat needs nothing but its phrase.
+
+### 9.5 Recovery and backup
+
+- **Recovery ritual** (phrase only): same identity, so the same vault key.
+  The rejoiner adopts the chain, fetches the vault base and the payload
+  files from any holder, and can answer and read like before.
+- **Export and S3 backup** carry `vault_base.bin` and `vault/*.bin`,
+  following the wiki-base pattern of 2026-10-05: the export ships a file
+  only if it authenticates and names one it leaves out; the import plants
+  only files that authenticate under the blob's key and drops the rest —
+  a rotted vault file costs that file (re-fetchable while a holder lives),
+  never the restore. The open checks the commitments. A republic in which
+  every seat restores from backup after a cut keeps its vault.
+- **Total loss** (phrase gone): that seat's shares are gone for good — the
+  bound of §4.
+
+### 9.6 Later: share refresh
+
+Shares hang off seeds that never rotate. An attacker who collects m
+phrases over the years can read everything deposited before. The
+countermeasure is proactive refresh: every holder periodically adds a
+share of a random zero-polynomial, after which old shares are worthless.
+With n and m fixed for life it is unusually simple here. Not in v1 (D9);
+recorded so the record format leaves room for a refresh epoch.
+
+## 10. What a cheater can and cannot do
+
+- **Forge someone's deposit or replace it** → `sig_depositor` fails;
+  approvers, `verify_chain` and the fold refuse it.
+- **Depositor hands out bad shares** → the holders complain; the reveal
+  names the depositor; the card never reaches `sealed` on bad shares.
+- **Member files false complaints** → the reveal names the complainer.
+- **Depositor withholds the payload** → nobody can approve (§7 (b)); the
+  deposit never commits.
+- **Share holder answers with garbage** → the reader's commitment check
+  names the seat; any m − 1 honest answers (plus an own share) suffice.
+- **Coalition below m** → no grant commits, no answer is sent.
+- **Re-routing an answer** → the AAD binds `grant_id`; an answer cannot be
+  replayed for another grant or opened by another seat.
+- **Release a version nobody voted on** → a grant binds one `secret_id`
+  and dies with its version (§8.2).
+- **m share holders out of band** → read everything (§4). Inherent.
+
+## 11. Engine and MCP
+
+- HPKE/Shamir work is CPU-only and small: seal, verify, combine run in
+  command handlers; the single-owner actor stays as it is.
+- Tools (co-equality): `vault_seal` (a new name deposits, an existing
+  name replaces), `vault_grant`, `vault_read` (reader side), `vault_list`
+  in `read_state` with per-deposit `committed/sealed/hardened`, open
+  complaints and grants. Approvals reuse `approve`. Answers, receipts,
+  complaints and complaint reveals are INTERNAL.
+- The seat token reaches `vault_read` like every other seat tool (D3);
+  the read-only key never sees vault content.
+
+## 12. What changed against rev 1
+
+- **No depositor protection, by decision** (D2, D3). Rev 1 implied a
+  succession insurance; the honest product is a majority escrow.
+- **Enablement bounds** (§3): 2 ≤ m ≤ n − 1.
+- **The depositor holds no share**, and `sealed` counts other holders
+  only — the depositor's own share never helps the case the vault exists
+  for.
+- **Deposits are signed by the depositor**; chain blocks carry no
+  proposer.
+- **Payloads moved off the block** to the file plane. The proposal budget
+  (`payload_fits`, roughly 95 KiB of plaintext at the default 128 KiB
+  publish budget, less for larger rosters) cannot carry 100 KiB plus the
+  record, and inline bundles would accumulate in the checkpoint blob.
+- **The cut folds the vault** into a committed base, with every K6 rule.
+- **Answers are re-requested, never stored**, and bind a content-derived
+  `grant_id` instead of a block height a cut drops.
+- **Grants bind a version**; a replace supersedes them.
+- **Unseal quorum settled:** any m valid shares (rev 1's open question).
+- **Approval also proves the payload is held.**
+- **Complaints are decided** by a deterministic-ephemeral reveal.
+- **The vault key binds `republic_id` and `identity_pk`.**
+- **Feldman vs Pedersen, corrected.** Rev 1 rejected Pedersen because the
+  reader could not verify answers — wrong: answers would carry
+  `(s_i, t_i)` and verify the same way. Feldman stays (smaller records,
+  one check against public commitments), with its computational secrecy
+  stated (§4).
+- Rejected and still rejected: threshold encryption with a DKG (n and m
+  are fixed, which removes its one advantage; pairing crypto), plain
+  Shamir without VSS (a lying depositor goes unnoticed), shares as plain
+  MLS messages (the group channel is readable by all).
+
+## 13. Library verdict
+
+- **`vsss-rs` 6.x** — Shamir + Feldman over curve25519 groups, pure Rust,
+  maintained. The one new dependency; the V1 spike locks its exact API
+  (including caller-chosen x-coordinates) and audits its dependency slice.
+- **HPKE:** `hpke-rs` is already in the tree (OpenMLS); fallback `hpke`
+  (RFC 9180, pure Rust). The spike's deciding question is now a
+  caller-supplied ephemeral key (§7). Never hand-rolled X25519 + AEAD.
+- `chacha20poly1305`, `x25519-dalek`, `hkdf`, `curve25519-dalek` — in the
+  lockfile. The ring-free guard and the no-C posture hold.
+
+## 14. Build phases (nothing started)
+
+1. **V1 spike** — dep-lock `vsss-rs`, decide the HPKE crate (ephemeral
+   control), red byte-pin tests for every layout: `molt-vault-secret-v1`,
+   `-deposit-v1`, `-grant-v1`, `-share-v1`, `-payload-v1`, `-resp-v1`,
+   `-base-v1`, the announcement bytes, the vault-key and DEK info strings.
+2. **V2 deposit** — enablement bounds, announcements (pinned), payload
+   series with mandatory holding, signed deposit with verify-at-approve
+   (share AND payload), receipts, complaints and their reveal, replace.
+   Keystones: a deposit commits only once the approver holds the payload;
+   a forged depositor is refused by approver and verifier; each of the
+   three complaint outcomes names the right seat.
+3. **V3 grant and read** — grant variant bound to a version,
+   answer-on-commit and answer-on-request, reader reveal, audit list.
+   Keystones: three nodes, the reader decrypts with one seat dead, a
+   non-reader provably cannot, a reader restored from a pre-grant backup
+   reads by re-requesting, a replace racing a grant supersedes it.
+4. **V4 fold, recovery, backup** — the fold variant and conditional tag,
+   the held-now rule, base-pending, export and import of the vault files.
+   Keystones: deposit → cut → recover a seat → grant to that seat → it
+   reads; every seat restored from backup after a cut → a grant still
+   reads (the twin of `a_folded_wiki_survives_every_seat_restoring_from_backup`).
+5. **V5 share refresh** (§9.6), after v1 ships.
+
+## 15. Open questions
+
+1. **Grant audit at a cut.** A replaced deposit takes its grants with it
+   (§9.3), so the audit of who read an OLD version disappears below the
+   cut. Recommended: accept it (the checkpoint summarizes, it does not
+   archive). Alternative: keep grant records as accumulating items — a
+   few bytes each, but unbounded.
+2. **Re-seal after a decided complaint.** Recommended: the depositor's
+   client offers it and the card shows the reduced threshold until it
+   happens. Alternative: automatic — faster, but it re-seals on every
+   false complaint too, which the naming already deters.
