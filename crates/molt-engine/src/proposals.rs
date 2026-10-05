@@ -586,6 +586,19 @@ impl State {
     pub(crate) fn cmd_propose(
         &mut self,
         surface: Surface,
+        payload: Value,
+    ) -> Result<Reply, MoltError> {
+        // plan 1.3.7: deposits and grants come only from the vault commands
+        if surface == Surface::Vault && self.is_vault_republic() {
+            return Err(MoltError::Vault(molt_core::vault::VaultRefusal::UseVaultSeal));
+        }
+        self.propose_payload(surface, payload)
+    }
+
+    /// The propose path behind [`State::cmd_propose`] and the vault commands.
+    pub(crate) fn propose_payload(
+        &mut self,
+        surface: Surface,
         mut payload: Value,
     ) -> Result<Reply, MoltError> {
         if !surface.is_gated() {
@@ -893,6 +906,11 @@ impl State {
                 // share - the payload arrived over the wire with no such check
                 if p.surface == Surface::Files {
                     self.check_files_vote(&p.payload)?;
+                }
+                // re-checked on every call: a card can reach the pool
+                // without the wire check (a replay, a re-vote)
+                if p.surface == Surface::Vault {
+                    self.vault_approve_check(&p.payload)?;
                 }
                 // D2 (last vote counts, decided 2026-08-16): an approve over
                 // the own standing decline RETRACTS the decline below — the
@@ -1465,9 +1483,13 @@ impl State {
             self.emit(Event::Applied { id, surface });
             if surface == Surface::Organization {
                 self.after_org_applied();
-            } else if surface == Surface::Files {
+            } else if surface == Surface::Files || surface == Surface::Vault {
                 if let Some(payload) = self.proposals.get(&id.0).map(|p| p.payload.clone()) {
-                    self.after_files_applied(&payload);
+                    if surface == Surface::Files {
+                        self.after_files_applied(&payload);
+                    } else {
+                        self.after_vault_applied(&payload);
+                    }
                 }
             }
         }

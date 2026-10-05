@@ -190,6 +190,21 @@ impl WalletHandle {
     pub fn __vault_name_payload(&self, secret_id: &str, hash: &str, size: u64, bytes: Option<Vec<u8>>) {
         self.vault_seams.name(secret_id, hash, size, bytes);
     }
+
+    /// Test seam (vault plan S3b): while set, this node skips the vault
+    /// ingest and approve checks - a seat running modified code.
+    #[doc(hidden)]
+    pub fn __vault_skip_checks(&self, skip: bool) {
+        self.vault_seams.skip_checks.store(skip, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam (vault plan S3b): seal `text` as a deposit of `depositor`,
+    /// signed with this seat's key - a forged record. Runs on the next
+    /// payload tick.
+    #[doc(hidden)]
+    pub fn __vault_seal_as(&self, depositor: &str, name: &str, kind: &str, text: &str) {
+        self.vault_seams.forge(depositor, name, kind, text);
+    }
 }
 
 /// Start the engine on the current `tokio` runtime and return a handle to it.
@@ -1118,6 +1133,10 @@ pub(crate) struct State {
     /// approvals for the persistent chain; `None` when no chain-aware workspace
     /// is open (or a pre-chain workspace).
     pub(crate) identity_sk: Option<molt_storage::SigningKey>,
+    /// This seat's vault seed (plan 1.3.2), loaded beside
+    /// [`State::identity_sk`]; `None` outside a vault republic, or where it
+    /// is missing (a holder then fails closed).
+    pub(crate) vault_seed: Option<zeroize::Zeroizing<[u8; 32]>>,
     /// The open workspace's transport discriminator, from its sealed
     /// `transport.state`. Read FIRST wherever the two shapes diverge — a
     /// Nostr republic carries no queue creds or mesh links by design, not by
@@ -1392,6 +1411,7 @@ impl State {
             next_seq: 1,
             replica: None,
             identity_sk: None,
+            vault_seed: None,
             transport_kind: None,
             nostr: None,
             vault_seams: std::sync::Arc::default(),

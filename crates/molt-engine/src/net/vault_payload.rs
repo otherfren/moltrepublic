@@ -97,7 +97,11 @@ pub(crate) struct VaultPlane {
 #[derive(Default)]
 pub(crate) struct VaultSeams {
     pub(crate) hold_fetch: AtomicBool,
+    /// This node skips the vault ingest and approve checks (a dishonest seat).
+    pub(crate) skip_checks: AtomicBool,
     staged: Mutex<Vec<(NamedPayload, Option<Vec<u8>>)>>,
+    /// `(claimed depositor, name, kind, text)` to seal under this seat's key.
+    forged: Mutex<Vec<(String, String, String, molt_core::vault::SecretText)>>,
 }
 
 impl VaultSeams {
@@ -110,6 +114,16 @@ impl VaultSeams {
 
     fn take(&self) -> Vec<(NamedPayload, Option<Vec<u8>>)> {
         self.staged.lock().map(|mut s| std::mem::take(&mut *s)).unwrap_or_default()
+    }
+
+    pub(crate) fn forge(&self, depositor: &str, name: &str, kind: &str, text: &str) {
+        if let Ok(mut f) = self.forged.lock() {
+            f.push((depositor.to_string(), name.to_string(), kind.to_string(), molt_core::vault::SecretText(text.to_string())));
+        }
+    }
+
+    fn take_forged(&self) -> Vec<(String, String, String, molt_core::vault::SecretText)> {
+        self.forged.lock().map(|mut f| std::mem::take(&mut *f)).unwrap_or_default()
     }
 }
 
@@ -193,6 +207,11 @@ impl crate::State {
             }
             self.files.vault.seam_named.push(named);
         }
+        for (depositor, name, kind, text) in self.vault_seams.take_forged() {
+            if let Err(e) = self.vault_seal_inner(&depositor, &name, &kind, &text) {
+                tracing::warn!(error = %e, "vault: seam seal refused");
+            }
+        }
         let missing: Vec<NamedPayload> = self
             .vault_named_payloads()
             .into_iter()
@@ -268,7 +287,7 @@ impl crate::State {
 
     /// Check `bytes` against what `named` commits to and persist them.
     /// Returns whether the payload is now held.
-    fn vault_store_payload(&mut self, named: &NamedPayload, bytes: &[u8]) -> bool {
+    pub(crate) fn vault_store_payload(&mut self, named: &NamedPayload, bytes: &[u8]) -> bool {
         if !payload_matches(named, bytes) {
             tracing::warn!(secret_id = %named.secret_id, "vault payload: hash mismatch");
             return false;

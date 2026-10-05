@@ -1456,6 +1456,10 @@ impl State {
             .as_deref()
             .and_then(|b| <[u8; 32]>::try_from(b).ok())
             .map(|arr| molt_storage::SigningKey::from_bytes(&arr));
+        self.vault_seed = transport_state.vault_seed.as_ref().and_then(crate::vault::seed_array);
+        if self.is_vault_republic() && self.vault_seed.is_none() {
+            tracing::warn!("vault_seed=missing");
+        }
         // …and, beside it, the Nostr transport material this seat needs to
         // speak as itself after a reopen (N4b §8.8 step 5a). Without it a
         // survivor holds its governance key but cannot address a gift wrap,

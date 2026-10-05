@@ -189,6 +189,7 @@ impl State {
             };
             crate::vault::seed_for_seat(&entropy, founding, &pk)
         });
+        let adopt_vault_seed = vault_seed.as_ref().and_then(crate::vault::seed_array);
         if mls_snapshot.is_some() || !mesh.is_empty() || !chain.is_empty() {
             let ts = molt_core::TransportState {
                 mls: mls_snapshot,
@@ -233,6 +234,7 @@ impl State {
         // the next reopen)
         if !chain.is_empty() {
             self.identity_sk = signing_key;
+            self.vault_seed = adopt_vault_seed;
             self.set_checkpoint_blob(checkpoint_blob);
             self.adopt_chain(chain);
             self.note_governance_readiness();

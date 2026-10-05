@@ -150,6 +150,13 @@ impl State {
         let Some(change) = self.proposal_change(id) else {
             return;
         };
+        // the vault gate holds on every path that signs, not only `approve`
+        if let ChainChange::Applied { surface: Surface::Vault, payload, .. } = &change {
+            if let Err(e) = self.vault_approve_check(payload) {
+                tracing::warn!(id, error = %e, "vault: not signing");
+                return;
+            }
+        }
         let bytes = approval_bytes(&self.republic_id(), height, &change);
         let sig = molt_storage::identity_sign(sk, &bytes);
         let me = self.member();
@@ -670,6 +677,8 @@ impl State {
                     self.after_org_applied();
                 } else if *surface == Surface::Files {
                     self.after_files_applied(payload);
+                } else if *surface == Surface::Vault {
+                    self.after_vault_applied(payload);
                 }
             }
             // a re-admission committed: on EVERY node, a threshold-approved
@@ -985,6 +994,12 @@ impl State {
             tracing::warn!(%id, %by, "refusing a set_features adding the vault");
             return false;
         }
+        if surface == Surface::Vault {
+            if let Err(e) = self.vault_wire_check(id, &payload) {
+                tracing::warn!(%id, %by, error = %e, "vault: refusing a proposal");
+                return false;
+            }
+        }
         // L3: a flooding proposer may only crowd ITSELF — the newest card
         // is refused (the WP2 re-serve re-earns an honest one later), and
         // another member's cards are never evicted
@@ -1052,6 +1067,9 @@ impl State {
                 wiki_rev: None,
             }
         });
+        if inserted && surface == Surface::Vault {
+            self.after_vault_proposed(id);
+        }
         if inserted && surface == Surface::Memory {
             // registration-time check (shared_memory_real.md §4): a patch
             // learned LATE against an already-moved base registers

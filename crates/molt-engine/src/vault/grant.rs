@@ -39,11 +39,9 @@ impl crate::State {
 }
 
 /// A grant committed: answer it if this seat holds a share.
-#[expect(dead_code, reason = "S3b calls it, S4 fills it")]
 pub(crate) fn on_commit(_st: &mut crate::State, _grant_id: &str) {}
 
 /// A reorg displaced an applied grant (plan 1.4).
-#[expect(dead_code, reason = "S3b calls it, S4 fills it")]
 pub(crate) fn on_displaced(_st: &mut crate::State, _grant_id: &str) {}
 
 /// Grant cards.

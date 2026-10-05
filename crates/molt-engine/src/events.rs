@@ -770,6 +770,7 @@ impl State {
         }
         self.replica = None;
         self.identity_sk = None;
+        self.vault_seed = None;
         self.transport_kind = None;
         self.nostr = None;
         // the recovery inboxes are INBOUND-only (they subscribe and read), so

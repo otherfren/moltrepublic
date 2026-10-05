@@ -141,6 +141,11 @@ pub(crate) fn seed_for_seat(
     Some(molt_core::vault::SecretBytes(seed.to_vec()))
 }
 
+/// A persisted seed as the 32 bytes it must be; anything else is missing.
+pub(crate) fn seed_array(b: &molt_core::vault::SecretBytes) -> Option<zeroize::Zeroizing<[u8; 32]>> {
+    <[u8; 32]>::try_from(b.0.as_slice()).ok().map(zeroize::Zeroizing::new)
+}
+
 impl crate::State {
     /// The adopted chain's vault context; `None` outside a vault republic.
     /// For commands and the view only - a walk takes the context of the
@@ -164,7 +169,6 @@ impl crate::State {
     }
 
     /// The republic folded its vault into a base this node does not hold.
-    #[expect(dead_code, reason = "S3b guards with it, S5 fills it")]
     pub(crate) fn vault_base_pending(&self) -> bool {
         false
     }
@@ -187,8 +191,10 @@ impl crate::State {
     }
 
     /// The vault arm of `approve`, by op.
-    #[expect(dead_code, reason = "S3b wires it into cmd_approve")]
     pub(crate) fn vault_approve_check(&self, payload: &Value) -> Result<(), MoltError> {
+        if self.vault_seams.skip_checks.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(());
+        }
         match vault_arm(payload, self.is_vault_republic())? {
             VaultArm::Deposit => self.approve_check_deposit(payload),
             VaultArm::Grant => self.approve_check_grant(payload),

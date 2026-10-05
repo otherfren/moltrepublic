@@ -186,6 +186,11 @@ impl State {
             tracing::warn!(%id, "refusing a legacy checkpoint in a vault republic");
             return;
         }
+        // plan 1.3.15: no co-sign of a cut over a vault base not held here
+        if self.vault_base_pending() {
+            tracing::warn!(%id, "vault: base pending, not co-signing a cut");
+            return;
+        }
         let Some(head) = self.chain.head.as_ref() else {
             return;
         };
@@ -419,6 +424,8 @@ impl State {
                                 org_touched = true;
                             } else if *surface == Surface::Files {
                                 self.after_files_applied(payload);
+                            } else if *surface == Surface::Vault {
+                                self.after_vault_applied(payload);
                             }
                         }
                         ChainChange::Membership {

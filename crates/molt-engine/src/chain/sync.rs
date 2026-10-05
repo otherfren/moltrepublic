@@ -323,6 +323,7 @@ impl State {
                 }
             }
         }
+        self.vault_displaced(&dropped, &kept);
         // the adopted suffix's bookkeeping (emits, cleared sigs, the re-base
         // of every open card onto the new head)
         for b in &suffix {
@@ -539,6 +540,13 @@ impl State {
                     // the displaced block was folded: the stamps above its
                     // height belong to the fold that just changed
                     self.forget_wiki_stamps();
+                }
+                if let Some(b) = displaced.as_ref() {
+                    let kept: BTreeSet<u64> = match &block.change {
+                        ChainChange::Applied { proposal_id, .. } => BTreeSet::from([*proposal_id]),
+                        _ => BTreeSet::new(),
+                    };
+                    self.vault_displaced(std::slice::from_ref(b), &kept);
                 }
                 self.after_block_applied(&block);
                 self.persist_chain_now();

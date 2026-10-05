@@ -33,7 +33,6 @@ impl crate::State {
 }
 
 /// A deposit (pending or committed) appeared: check, send the receipt.
-#[expect(dead_code, reason = "S3b calls it, S3c fills it")]
 pub(crate) fn on_deposit(_st: &mut crate::State, _secret_id: &str) {}
 
 /// Receipt counts and complaint lines.

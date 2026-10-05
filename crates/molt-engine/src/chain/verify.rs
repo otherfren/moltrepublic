@@ -445,7 +445,7 @@ pub(crate) struct ChainWalk {
 
 impl ChainWalk {
     /// The vault context of the chain this walk verified.
-    #[cfg_attr(not(test), expect(dead_code, reason = "S3b judges candidate chains by it"))]
+    #[cfg_attr(not(test), expect(dead_code, reason = "only the tests read it back"))]
     pub(crate) fn vault_ctx(&self) -> Option<&VaultCtx> {
         self.vault.as_ref()
     }
@@ -613,12 +613,13 @@ fn genesis_base(
 /// carry the projection incrementally instead of refolding from the base
 /// at every checkpoint — O(n) instead of O(n·checkpoints)). Checkpoint and
 /// Genesis blocks are state-neutral; `consumed_ids` stays UNSORTED here
-/// and is sorted per hash in [`hash_walk_state`]. `_vault` is the walked
-/// chain's own vault context (plan 1.3.8), unused until vault ops fold.
+/// and is sorted per hash in [`hash_walk_state`]. `vault` is the walked
+/// chain's own vault context (plan 1.3.8): in a vault republic every Vault
+/// block is checked here, before anything folds (plan 1.3.9, 1.3.10).
 pub(crate) fn fold_one(
     state: &mut molt_core::CheckpointState,
     block: &ChainBlock,
-    _vault: Option<&VaultCtx>,
+    vault: Option<&VaultCtx>,
 ) -> Result<(), String> {
     match &block.change {
         ChainChange::Applied {
@@ -626,6 +627,10 @@ pub(crate) fn fold_one(
             surface,
             payload,
         } => {
+            if let (Some(ctx), Surface::Vault) = (vault, surface) {
+                crate::vault::deposit::check_vault_op(&state.republic_id, *proposal_id, payload, ctx)
+                    .map_err(|e| format!("block {}: vault {e}", block.height))?;
+            }
             if !state.applied.iter().any(|(s, _)| s == surface) {
                 // a surface outside the frozen set: its group is born with
                 // its first entry, at its Surface::ALL position
