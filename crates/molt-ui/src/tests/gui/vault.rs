@@ -9,7 +9,7 @@ use molt_core::vault::{
     VaultGrantState, VaultGrantView, VaultMyCheck, VaultView,
 };
 
-use molt_core::SurfaceSnapshot;
+use molt_core::{MoltError, SurfaceSnapshot};
 
 use super::*;
 use crate::actions::vault::{
@@ -781,4 +781,130 @@ fn model_rows_patch_in_place() {
         "2/3 verified",
         "the patch landed"
     );
+}
+
+// --- against a real engine (U3): one engine, no relay, so a deposit
+// stays pending at m = 2; commit, grant and read are the lab's proof
+// (`scripts/vault_lab.py`).
+
+/// One engine with its window and the mirror's own state.
+struct Node {
+    w: WalletHandle,
+    ui: AppWindow,
+    last: Arc<Mutex<Option<SessionSettings>>>,
+    chat_ui: Arc<Mutex<ChatUiState>>,
+}
+
+/// Open the one stored workspace under `root` in a fresh engine and
+/// mirror it into a fresh window.
+fn open_stored(root: &std::path::Path, rt: &tokio::runtime::Runtime) -> Node {
+    if !BACKEND.with(|b| b.replace(true)) {
+        i_slint_backend_testing::init_no_event_loop();
+    }
+    let (w, _) = node_with_chat(root);
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    wire_local(&ui);
+    let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+    let last: Arc<Mutex<Option<SessionSettings>>> = Arc::new(Mutex::new(None));
+    rt.block_on(async {
+        let id = molt_storage::scan_workspaces(root)
+            .first()
+            .map(|e| e.info().id)
+            .expect("the workspace is on disk");
+        w.execute(Command::OpenWorkspace { id })
+            .await
+            .expect("the stored workspace opens");
+        mirror(&w, &ui, &last, &chat_ui).await;
+    });
+    Node { w, ui, last, chat_ui }
+}
+
+/// Fill the seal dialog the way a human does and confirm it on the engine.
+fn seal_from_the_pane(
+    w: &WalletHandle,
+    ui: &AppWindow,
+    rt: &tokio::runtime::Runtime,
+    name: &str,
+    text: &str,
+) -> Result<Reply, MoltError> {
+    ui.set_vt_seal_name(name.into());
+    ui.set_vt_seal_kind("text".into());
+    ui.set_vt_seal_text(text.into());
+    let cmd = seal_command(ui).expect("the dialog builds a seal");
+    rt.block_on(w.execute(cmd))
+}
+
+#[test]
+fn the_vault_pane_shows_a_real_engine_deposit_as_pending() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    drop(vault_workspace_on_disk(tmp.path(), 2, &["a", "b", "c", "d"]).0);
+    let Node { w, ui, last, chat_ui } = open_stored(tmp.path(), &rt);
+    assert!(ui.get_vault_real(), "a roster-v6 genesis is a real vault");
+    assert_eq!((ui.get_vault_m(), ui.get_vault_n()), (2, 4));
+    assert!(deposit_rows(&ui).is_empty());
+
+    seal_from_the_pane(&w, &ui, &rt, "a", "one").expect("the engine takes the seal");
+    rt.block_on(mirror(&w, &ui, &last, &chat_ui));
+
+    let rows = deposit_rows(&ui);
+    assert_eq!(rows.len(), 1, "one card: {rows:?}");
+    assert_eq!(
+        (
+            rows[0].name.as_str(),
+            rows[0].kind.as_str(),
+            rows[0].state,
+            rows[0].state_word.as_str()
+        ),
+        ("a", "text", 0, "pending")
+    );
+    assert!(rows[0].mine, "the own deposit");
+    assert!(!rows[0].can_grant, "a pending version cannot be granted");
+    let tab = surface_tab(&ui, "vault").expect("the vault tab");
+    assert_eq!(tab.pending.row_count(), 1, "the deposit's proposal card");
+}
+
+#[test]
+fn a_v5_mock_vault_workspace_shows_one_line() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    drop(chain_workspace_on_disk(tmp.path(), 2, &["a", "b", "c", "d"], false).0);
+    let Node { w, ui, .. } = open_stored(tmp.path(), &rt);
+    assert!(surface_tab(&ui, "vault").is_some(), "the feature lists the tab");
+    assert!(!ui.get_vault_real(), "no seat keys: the one-line pane");
+    assert_eq!(ui.get_vault_deposits().row_count(), 0);
+    let refused = seal_from_the_pane(&w, &ui, &rt, "a", "one");
+    assert!(
+        matches!(
+            refused,
+            Err(MoltError::Vault(molt_core::vault::VaultRefusal::NoVault))
+        ),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn ui_snapshot_counts_vault_rows() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    drop(vault_workspace_on_disk(tmp.path(), 2, &["a", "b", "c", "d"]).0);
+    let Node { w, ui, last, chat_ui } = open_stored(tmp.path(), &rt);
+    assert_eq!(crate::mirror::build_ui_snapshot(&ui).vault_rows, 0);
+    seal_from_the_pane(&w, &ui, &rt, "a", "one").expect("seal a");
+    seal_from_the_pane(&w, &ui, &rt, "b", "two").expect("seal b");
+    rt.block_on(mirror(&w, &ui, &last, &chat_ui));
+    assert_eq!(deposit_rows(&ui).len(), 2);
+    assert_eq!(crate::mirror::build_ui_snapshot(&ui).vault_rows, 2);
+}
+
+#[test]
+fn ui_snapshot_counts_grant_rows_too() {
+    let ui = window(Some(fixture()));
+    assert_eq!(deposit_rows(&ui).len(), 3);
+    assert_eq!(grant_rows(&ui).len(), 1);
+    assert_eq!(crate::mirror::build_ui_snapshot(&ui).vault_rows, 4);
 }

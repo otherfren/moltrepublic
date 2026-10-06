@@ -317,8 +317,10 @@ pub(crate) fn build_ui_snapshot(ui: &AppWindow) -> molt_core::UiSnapshot {
         wizard,
         toast: ui.get_toast_text().to_string(),
         generation: UI_PUBLISH_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1,
-        // U3 counts the pane's rows
-        vault_rows: 0,
+        vault_rows: u32::try_from(
+            ui.get_vault_deposits().row_count() + ui.get_vault_grants().row_count(),
+        )
+        .unwrap_or(u32::MAX),
     }
 }
 
