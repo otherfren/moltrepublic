@@ -900,3 +900,11 @@ fn ui_snapshot_counts_vault_rows() {
     assert_eq!(deposit_rows(&ui).len(), 2);
     assert_eq!(crate::mirror::build_ui_snapshot(&ui).vault_rows, 2);
 }
+
+#[test]
+fn ui_snapshot_counts_grant_rows_too() {
+    let ui = window(Some(fixture()));
+    assert_eq!(deposit_rows(&ui).len(), 3);
+    assert_eq!(grant_rows(&ui).len(), 1);
+    assert_eq!(crate::mirror::build_ui_snapshot(&ui).vault_rows, 4);
+}

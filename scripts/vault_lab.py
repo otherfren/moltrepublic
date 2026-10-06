@@ -382,12 +382,17 @@ def cmd_join(_a):
     print("founded")
 
 
-def secret_of(n, name, reader=None):
+def secret_of(n, name, reader=None, depositor=None):
     """The current committed version named `name` as `n` sees it."""
     v = n.vault()
     deps = [d for d in v.get("deposits", []) if d.get("name") == name]
+    if depositor:
+        deps = [d for d in deps if d.get("depositor") == depositor]
     if not deps:
         raise LabError(f"{n.name}: no deposit named {name}")
+    owners = sorted({d.get("depositor") for d in deps})
+    if len(owners) > 1:
+        raise LabError(f"ambiguous name={name} depositors={','.join(owners)}")
     if reader:
         granted = {
             g["secret_id"]
@@ -411,7 +416,7 @@ def cmd_grant(a):
     state = load()
     by = a.by or headless(state)[0]
     n = node(state, by)
-    sid = secret_of(n, a.name)
+    sid = secret_of(n, a.name, depositor=a.depositor)
     r = n.tool("vault_grant", {"secret_id": sid, "reader": a.reader})
     print(f"{by} proposed grant {a.name} to {a.reader} proposal={r.get('id', r)}")
 
@@ -431,12 +436,15 @@ def cmd_approve(a):
     approved = 0
     quiet_since = time.time()
     deadline = time.time() + a.timeout
+    open_ids = set()
     while time.time() < deadline:
         busy = False
+        open_ids = set()
         for s, n in nodes.items():
             for surface in ("vault", "organization"):
                 for p in n.pending(surface):
                     busy = True
+                    open_ids.add(p["id"])
                     key = (s, p["id"])
                     if p.get("approved_by_me") or p.get("declined_by_me") or key in refused:
                         continue
@@ -457,6 +465,9 @@ def cmd_approve(a):
         elif time.time() - quiet_since > a.settle:
             break
         time.sleep(2)
+    else:
+        print(f"timeout pending={sorted(open_ids)}")
+        sys.exit(1)
     print(f"approved={approved} refused={len(refused)}")
     if refused:
         sys.exit(1)
@@ -465,7 +476,7 @@ def cmd_approve(a):
 def cmd_read(a):
     state = load()
     n = node(state, a.seat)
-    sid = secret_of(n, a.name, reader=a.seat)
+    sid = secret_of(n, a.name, reader=a.seat, depositor=a.depositor)
     deadline = time.time() + a.timeout
     while True:
         ok, v = n.try_tool("vault_read", {"secret_id": sid})
@@ -564,6 +575,7 @@ def main():
     g.add_argument("name")
     g.add_argument("reader")
     g.add_argument("--by", default="")
+    g.add_argument("--depositor", default="")
     ap = sub.add_parser("approve")
     ap.add_argument("--timeout", type=int, default=300)
     ap.add_argument("--settle", type=int, default=15)
@@ -571,6 +583,7 @@ def main():
     r.add_argument("seat")
     r.add_argument("name")
     r.add_argument("--timeout", type=int, default=180)
+    r.add_argument("--depositor", default="")
     for verb in ("stop", "start"):
         sub.add_parser(verb).add_argument("seat")
     sub.add_parser("status")
