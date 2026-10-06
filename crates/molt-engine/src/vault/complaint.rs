@@ -79,28 +79,26 @@ pub(crate) fn answer(st: &mut crate::State, dep: &VaultDeposit, sid: &str, holde
     sent
 }
 
-/// Re-send every reveal of this seat's deposits: each holder that
-/// complained or was already answered (only ever on a complaint).
-pub(crate) fn resend_reveals(st: &mut crate::State, known: &BTreeMap<String, VaultDeposit>) -> bool {
+/// Every reveal of this seat's deposits to re-send, `(secret_id, holder)`:
+/// each holder that complained or was already answered (only ever on a
+/// complaint).
+pub(crate) fn reveals_to_resend(st: &crate::State, known: &BTreeMap<String, VaultDeposit>) -> Vec<(String, MemberId)> {
     let me = st.member();
-    let mut sent = true;
+    let mut out = Vec::new();
     for (sid, dep) in known.iter().filter(|(_, d)| d.depositor == me) {
         let receipts = st.vault_rx.status.receipts.get(sid);
         let reveals = st.vault_rx.status.reveals.get(sid);
-        let holders: Vec<MemberId> = dep
-            .holders
-            .iter()
-            .filter(|h| {
-                receipts.and_then(|r| r.get(*h)).is_some_and(|r| !r.verified)
-                    || reveals.is_some_and(|r| r.contains_key(*h))
-            })
-            .cloned()
-            .collect();
-        for h in holders {
-            sent &= answer(st, dep, sid, &h);
-        }
+        out.extend(
+            dep.holders
+                .iter()
+                .filter(|h| {
+                    receipts.and_then(|r| r.get(*h)).is_some_and(|r| !r.verified)
+                        || reveals.is_some_and(|r| r.contains_key(*h))
+                })
+                .map(|h| (sid.clone(), h.clone())),
+        );
     }
-    sent
+    out
 }
 
 /// Whether `share` lies on `dep`'s polynomial at `holder`'s genesis x.

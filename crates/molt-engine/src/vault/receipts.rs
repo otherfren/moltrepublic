@@ -30,6 +30,9 @@ pub(crate) const LAB_ENV: &str = "MOLT_VAULT_LAB_COMPLAIN";
 /// Own receipts and reveals go out again this often (and at every start).
 const RESEND_SECS: u64 = 60 * 60;
 
+/// Resent frames queued per beat, well under the group's control queue.
+const RESEND_BATCH: usize = 16;
+
 /// A receipt for a deposit not seen here yet is kept only while the store
 /// names fewer versions than this.
 const UNKNOWN_MAX: usize = 256;
@@ -78,6 +81,9 @@ pub(crate) struct ReceiptRuntime {
     pub(crate) checked: BTreeMap<String, bool>,
     /// When own receipts and reveals were last re-sent (0 = next tick).
     pub(crate) resent_at: u64,
+    /// A resend round in progress, and the last frame it queued.
+    resending: bool,
+    resend_cursor: Option<Resend>,
     /// The anchor height the store was last pruned at.
     pub(crate) pruned_at: Option<u64>,
     /// Reveals for a deposit not seen here yet.
@@ -87,6 +93,17 @@ pub(crate) struct ReceiptRuntime {
     /// Persist order: the newest snapshot wins the store.
     persist_seq: u64,
     persisted: Arc<AtomicU64>,
+    /// Tests: a control queue with `room` free slots instead of the group.
+    #[cfg(test)]
+    pub(crate) test_queue: Option<TestQueue>,
+}
+
+/// The test stand-in for the group runtime's control queue.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct TestQueue {
+    pub(crate) room: usize,
+    pub(crate) sent: Vec<VaultFrame>,
 }
 
 impl ReceiptRuntime {
@@ -94,6 +111,13 @@ impl ReceiptRuntime {
     pub(crate) fn loaded(status: VaultStatusStore) -> Self {
         Self { status, ..Self::default() }
     }
+}
+
+/// One resent frame; the order is the round's order.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Resend {
+    Receipt(String),
+    Reveal(String, MemberId),
 }
 
 /// Every deposit known here: each committed version above the anchor and
@@ -127,8 +151,26 @@ pub(crate) fn known_deposit(st: &crate::State, sid: &str) -> Option<VaultDeposit
 }
 
 /// Publish one vault frame on the group.
-pub(crate) fn publish(st: &crate::State, frame: &VaultFrame) -> bool {
+pub(crate) fn publish(st: &mut crate::State, frame: &VaultFrame) -> bool {
+    #[cfg(test)]
+    if let Some(q) = st.vault_rx.test_queue.as_mut() {
+        if q.room == 0 {
+            return false;
+        }
+        q.room -= 1;
+        q.sent.push(frame.clone());
+        return true;
+    }
     st.group_net.as_ref().is_some_and(|g| g.handle.publish_control(frame.to_frame()))
+}
+
+/// Whether frames can go out at all.
+fn online(st: &crate::State) -> bool {
+    #[cfg(test)]
+    if st.vault_rx.test_queue.is_some() {
+        return true;
+    }
+    st.group_net.is_some()
 }
 
 /// Write the store back off the actor; a later snapshot is never
@@ -155,7 +197,7 @@ pub(crate) fn persist(st: &mut crate::State) {
     });
 }
 
-fn send_receipt(st: &crate::State, sid: &str, verified: bool, rev: u64) -> bool {
+fn send_receipt(st: &mut crate::State, sid: &str, verified: bool, rev: u64) -> bool {
     let frame = VaultFrame::Receipt(VaultReceiptFrame {
         v: VAULT_V,
         by: st.member(),
@@ -167,21 +209,21 @@ fn send_receipt(st: &crate::State, sid: &str, verified: bool, rev: u64) -> bool 
 }
 
 /// Record and send this holder's own verdict; the revision moves only
-/// when the verdict does.
-fn record_own(st: &mut crate::State, sid: &str, verified: bool) {
+/// when the verdict does. An unchanged receipt is left to the resend
+/// round. Returns whether the store changed.
+fn record_own(st: &mut crate::State, sid: &str, verified: bool) -> bool {
     let me = st.member();
     let now = crate::now_secs();
     let slot = st.vault_rx.status.receipts.entry(sid.to_string()).or_default();
     let rev = match slot.get(&me) {
-        Some(r) if r.verified == verified => r.rev,
+        Some(r) if r.verified == verified => return false,
         Some(r) => now.max(r.rev.saturating_add(1)),
         None => now.max(1),
     };
     slot.insert(me, VaultReceipt { verified, rev });
-    persist(st);
     send_receipt(st, sid, verified, rev);
     tracing::info!(secret_id = %sid, verified, "vault: receipt");
-    st.emit_session(SessionScope::Full);
+    true
 }
 
 /// Check every deposit this holder has not checked yet whose payload is
@@ -197,6 +239,7 @@ fn sweep(st: &mut crate::State) {
     let rid = st.republic_id();
     let (sk, _) = molt_vault::vault_keypair(&seed);
     let complain = st.vault_seams.lab.complain.load(Ordering::SeqCst);
+    let mut changed = false;
     for (sid, dep) in live_deposits(st) {
         if dep.depositor == me
             || !dep.holders.contains(&me)
@@ -210,7 +253,11 @@ fn sweep(st: &mut crate::State) {
         if !ok {
             tracing::warn!(secret_id = %sid, depositor = %dep.depositor, "vault: own share fails");
         }
-        record_own(st, &sid, ok && !complain);
+        changed |= record_own(st, &sid, ok && !complain);
+    }
+    if changed {
+        persist(st);
+        st.emit_session(SessionScope::Full);
     }
 }
 
@@ -237,22 +284,55 @@ pub(crate) fn tick(st: &mut crate::State, now: u64) {
     if anchor.is_some() && anchor != st.vault_rx.pruned_at && prune_at_cut(st) {
         st.vault_rx.pruned_at = anchor;
     }
-    if st.group_net.is_none()
-        || (st.vault_rx.resent_at != 0 && now.saturating_sub(st.vault_rx.resent_at) < RESEND_SECS)
-    {
+    let due = st.vault_rx.resent_at == 0 || now.saturating_sub(st.vault_rx.resent_at) >= RESEND_SECS;
+    if !online(st) || !(due || st.vault_rx.resending) {
         return;
     }
-    let me = st.member();
+    st.vault_rx.resending = true;
     let known = live_deposits(st);
-    let mut sent = true;
-    for (sid, by) in &st.vault_rx.status.receipts {
-        if let (Some(r), true) = (by.get(&me), known.contains_key(sid)) {
-            sent &= send_receipt(st, sid, r.verified, r.rev);
+    let cursor = st.vault_rx.resend_cursor.clone();
+    let rest = resend_items(st, &known).into_iter().filter(|i| cursor.as_ref().map_or(true, |c| i > c));
+    for (queued, item) in rest.enumerate() {
+        // a full queue or a spent batch: the next beat resumes here
+        if queued == RESEND_BATCH || !resend_one(st, &known, &item) {
+            return;
         }
+        st.vault_rx.resend_cursor = Some(item);
     }
-    sent &= complaint::resend_reveals(st, &known);
-    if sent {
-        st.vault_rx.resent_at = now.max(1);
+    st.vault_rx.resending = false;
+    st.vault_rx.resend_cursor = None;
+    st.vault_rx.resent_at = now.max(1);
+}
+
+/// This seat's receipts and reveals for the live deposits, in round order.
+fn resend_items(st: &crate::State, known: &BTreeMap<String, VaultDeposit>) -> Vec<Resend> {
+    let me = st.member();
+    let mut items: Vec<Resend> = st
+        .vault_rx
+        .status
+        .receipts
+        .iter()
+        .filter(|(sid, by)| by.contains_key(&me) && known.contains_key(*sid))
+        .map(|(sid, _)| Resend::Receipt(sid.clone()))
+        .collect();
+    items.extend(complaint::reveals_to_resend(st, known).into_iter().map(|(sid, h)| Resend::Reveal(sid, h)));
+    items.sort();
+    items
+}
+
+fn resend_one(st: &mut crate::State, known: &BTreeMap<String, VaultDeposit>, item: &Resend) -> bool {
+    match item {
+        Resend::Receipt(sid) => {
+            let me = st.member();
+            match st.vault_rx.status.receipts.get(sid).and_then(|by| by.get(&me)).cloned() {
+                Some(r) => send_receipt(st, sid, r.verified, r.rev),
+                None => true,
+            }
+        }
+        Resend::Reveal(sid, holder) => match known.get(sid) {
+            Some(dep) => complaint::answer(st, dep, sid, holder),
+            None => true,
+        },
     }
 }
 

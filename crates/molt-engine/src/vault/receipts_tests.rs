@@ -489,3 +489,86 @@ fn vault_lab_feature_is_off_by_default() {
     let release = std::fs::read_to_string(root.join("scripts/build-release.sh")).expect("release script");
     assert!(!release.contains("vault-lab"), "the release build names vault-lab");
 }
+
+fn queue(st: &mut crate::State, room: usize) {
+    st.vault_rx.test_queue.get_or_insert_with(TestQueue::default).room = room;
+}
+
+fn sent_receipts(st: &crate::State) -> Vec<String> {
+    st.vault_rx
+        .test_queue
+        .as_ref()
+        .map(|q| q.sent.iter().filter_map(|f| match f {
+            VaultFrame::Receipt(r) => Some(r.secret_id.clone()),
+            _ => None,
+        }).collect())
+        .unwrap_or_default()
+}
+
+fn pending_card(payload: Value, by: &str) -> molt_core::ProposalRecord {
+    molt_core::ProposalRecord {
+        surface: Surface::Vault,
+        payload,
+        approvals: 0,
+        state: ProposalState::Proposed,
+        applied_at: 0,
+        declined_at: 0,
+        declined_by: String::new(),
+        decliners: Vec::new(),
+        voted: Vec::new(),
+        by: by.to_string(),
+        superseded: false,
+        superseded_kind: None,
+        withdrawn: false,
+        wiki_rev: None,
+    }
+}
+
+/// `c` holds a verified receipt of each of `n` pending deposits of `a`.
+fn many_receipts(n: u64) -> crate::State {
+    let b = Builder::vault();
+    let mut st = seat("c", &b, b.blocks.clone());
+    for i in 0..n {
+        let (dep, _) = deposit(&b, "a", &format!("n{i}"), "one");
+        let sid = secret_id(&b.republic_id, &dep);
+        st.proposals.insert(100 + i, pending_card(op(&dep), "a"));
+        st.vault_rx.status.receipts.entry(sid.clone()).or_default().insert("c".to_string(), VaultReceipt { verified: true, rev: 1 });
+        st.vault_rx.checked.insert(sid, true);
+    }
+    st
+}
+
+/// The resend never floods the control queue: a small batch per beat, a
+/// full queue resumes where it stopped, and the round ends once.
+#[test]
+fn the_resend_is_paced_and_resumes_after_a_full_queue() {
+    let mut st = many_receipts(40);
+    queue(&mut st, 10);
+    tick(&mut st, 1_000);
+    assert_eq!(sent_receipts(&st).len(), 10, "stopped at the full queue");
+    assert_eq!(st.vault_rx.resent_at, 0, "the round is not done");
+    for _ in 0..3 {
+        queue(&mut st, 64);
+        tick(&mut st, 1_001);
+        assert!(st.vault_rx.test_queue.as_ref().map_or(0, |q| q.room) >= 64 - RESEND_BATCH, "one batch per beat");
+    }
+    let sent = sent_receipts(&st);
+    assert_eq!(sent.len(), 40, "each once");
+    assert_eq!(sent.iter().collect::<BTreeSet<_>>().len(), 40);
+    assert_eq!(st.vault_rx.resent_at, 1_001);
+    tick(&mut st, 1_002);
+    assert_eq!(sent_receipts(&st).len(), 40, "not again before the next round");
+}
+
+/// The startup sweep re-checks a deposit whose receipt is stored; the
+/// unchanged receipt goes out once, with the resend round.
+#[test]
+fn an_unchanged_receipt_is_not_sent_twice_at_start() {
+    let (b, dep, file, sid) = committed();
+    let mut st = seat("c", &b, b.blocks.clone());
+    hold(&mut st, &dep, &sid, &file);
+    st.vault_rx.status.receipts.entry(sid.clone()).or_default().insert("c".to_string(), VaultReceipt { verified: true, rev: 5 });
+    queue(&mut st, 64);
+    tick(&mut st, 1_000);
+    assert_eq!(sent_receipts(&st), [sid]);
+}
