@@ -98,7 +98,7 @@ fn pending(st: &mut crate::State, id: u64, payload: Value) {
 }
 
 /// Attach a real workspace directory whose `vault/` holds `files`.
-fn attach_storage(st: &mut crate::State, files: &[(&str, &[u8])]) -> tempfile::TempDir {
+pub(crate) fn attach_storage(st: &mut crate::State, files: &[(&str, &[u8])]) -> tempfile::TempDir {
     let tmp = tempfile::tempdir().expect("tmp");
     let seed = molt_storage::seed_entropy(&molt_storage::generate_seed_phrase().expect("phrase"))
         .expect("entropy");
@@ -279,7 +279,7 @@ fn dispatch(st: &mut crate::State, cmd: molt_core::Command) {
     }
 }
 
-fn with_nostr(st: &mut crate::State) {
+pub(crate) fn with_nostr(st: &mut crate::State) {
     st.nostr = Some(crate::NostrTransport {
         sk: zeroize::Zeroizing::new(vec![1u8; 32]),
         relays: vec!["wss://relay.example.org".to_string()],

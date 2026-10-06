@@ -79,7 +79,7 @@ impl State {
                 .chain.proposal_changes
                 .values()
                 .any(|c| CutKind::of(c).is_some());
-        if vote_open {
+        if vote_open || self.vault_base_pending() || self.wiki_base_pending() {
             return;
         }
         match self.cmd_propose_checkpoint() {

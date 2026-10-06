@@ -374,8 +374,20 @@ fn a_tampered_vault_base_is_refetched() {
     let mut tampered = bytes.clone();
     let last = tampered.len() - 2;
     tampered[last] ^= 0x01;
+    let _tmp = crate::net::vault_payload::tests::attach_storage(&mut st, &[]);
+    crate::net::vault_payload::tests::with_nostr(&mut st);
+    let dir = st.active.as_ref().expect("storage").dir.clone();
+    let handle = st.active.as_ref().expect("storage").handle.clone();
+    assert!(handle.persist_vault_base_blocking(Some(tampered.clone())));
+    let ws_file = dir.join("vault_base.bin");
+    assert!(ws_file.exists());
     assert!(!st.adopt_vault_base(Some(tampered)));
+    assert!(!ws_file.exists(), "the refused bytes are deleted");
     assert!(st.vault_base_pending(), "still pending: the beat fetches again");
+    st.files.vault_base.next_try = 0;
+    st.vault_base_tick();
+    let want = st.vault_base_committed().map(|(h, _)| h);
+    assert_eq!(st.files.vault_base.fetching, want, "a new fetch started");
     assert!(st.cmd_net_vault_base_fetched(bytes).is_ok());
     assert!(!st.vault_base_pending());
     assert_eq!(st.vault_view().deposits.len(), 1);
@@ -432,6 +444,76 @@ fn a_replaced_payload_is_retired_at_the_cut() {
     let (s1, s2) = (secret_id(&b.republic_id, &v1), secret_id(&b.republic_id, &v2));
     assert!(st.vault_payload_held(&s1), "kept until the cut (plan 1.3.14)");
     seal_cut(&mut st, &b, false);
+    assert!(st.vault_payload_held(&s1), "not before the pruned chain is written");
+    st.vault_payload_tick();
+    assert!(!st.vault_payload_held(&s1), "the replaced version retired");
+    assert!(st.vault_payload_held(&s2), "the current one stays");
+}
+
+type Version = (VaultDeposit, Vec<u8>);
+
+/// Two versions of `x` on the full chain, and the holder `a` that sealed
+/// the cut over them.
+fn two_versions_cut() -> (Builder, crate::State, [Version; 2]) {
+    let mut b = Builder::vault();
+    let v1 = deposit(&b, "a", "a", "x", "one");
+    let v2 = deposit(&b, "a", "a", "x", "two");
+    b.commit(applied(10, op(&v1.0)), &["a", "b"]);
+    b.commit(applied(12, op(&v2.0)), &["a", "b"]);
+    let mut holder = seat("a", &b);
+    seal_cut(&mut holder, &b, false);
+    (b, holder, [v1, v2])
+}
+
+/// `st` holds both versions; returns their secret ids.
+fn hold_both(st: &mut crate::State, b: &Builder, vs: &[Version; 2]) -> (String, String) {
+    for (dep, file) in vs {
+        hold(st, b, dep, file);
+    }
+    (secret_id(&b.republic_id, &vs[0].0), secret_id(&b.republic_id, &vs[1].0))
+}
+
+fn base_bytes(holder: &crate::State) -> Vec<u8> {
+    vault_base_canonical_bytes(holder.chain.vault_base.as_ref().expect("held"))
+}
+
+/// Plan 1.3.14 on the catch-up path: a seat offline at the cut adopts
+/// the pruned suffix, then its base; the replaced version retires then.
+#[test]
+fn a_replaced_payload_retires_after_a_catch_up_onto_the_cut() {
+    let rt = runtime();
+    let _g = rt.enter();
+    let (b, holder, vs) = two_versions_cut();
+    let mut lag = seat("c", &b);
+    let (s1, s2) = hold_both(&mut lag, &b, &vs);
+    let anchor = holder.chain.blocks[0].clone();
+    lag.chain.pending_served_blob = holder.chain.checkpoint_blob.clone();
+    lag.chain.pending_blocks.insert(anchor.height, anchor.clone());
+    lag.try_adopt_from_blob();
+    assert_eq!(lag.chain.head.as_ref().expect("head").height, anchor.height, "the suffix adopted");
+    assert!(lag.vault_base_pending());
+    lag.vault_payload_tick();
+    assert!(lag.vault_payload_held(&s1), "nothing retires against a missing base");
+    lag.cmd_net_vault_base_fetched(base_bytes(&holder)).expect("ack");
+    assert!(!lag.vault_base_pending());
+    lag.vault_payload_tick();
+    assert!(!lag.vault_payload_held(&s1), "the replaced version retired");
+    assert!(lag.vault_payload_held(&s2), "the current one stays");
+}
+
+/// The same once a base-pending seat's base arrives.
+#[test]
+fn a_replaced_payload_retires_once_a_pending_base_arrives() {
+    let rt = runtime();
+    let _g = rt.enter();
+    let (b, holder, vs) = two_versions_cut();
+    let mut st = seat_on("c", &b, holder.chain.checkpoint_blob.clone(), holder.chain.blocks.clone());
+    assert!(st.vault_base_pending());
+    let (s1, s2) = hold_both(&mut st, &b, &vs);
+    st.vault_payload_tick();
+    assert!(st.vault_payload_held(&s1), "nothing retires against a missing base");
+    st.cmd_net_vault_base_fetched(base_bytes(&holder)).expect("ack");
+    st.vault_payload_tick();
     assert!(!st.vault_payload_held(&s1), "the replaced version retired");
     assert!(st.vault_payload_held(&s2), "the current one stays");
 }
@@ -466,17 +548,29 @@ fn holder_x_coordinates_survive_a_cut_and_a_recovery() {
     molt_vault::check_my_share(&x, &b.republic_id, &after, "c", &sk).expect("c's share still opens");
 }
 
-#[test]
-fn a_recovered_seat_without_a_matching_seed_refuses_to_persist_it() {
-    let rt = runtime();
-    let _g = rt.enter();
+/// The stored `vault_seed` once the spawned persist had its turn.
+async fn stored_seed(st: &crate::State) -> Option<Vec<u8>> {
+    let handle = st.active.as_ref().expect("storage").handle.clone();
+    for _ in 0..100 {
+        if let Some(seed) = handle.load_transport_state().await.vault_seed {
+            return Some(seed.0.clone());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    None
+}
+
+#[tokio::test]
+async fn a_recovered_seat_without_a_matching_seed_refuses_to_persist_it() {
     // the fixture's keys were derived for another identity: a mismatch
     let b = Builder::vault();
     let (entropy, _, _) = Builder::seat_keys(0);
     let mut st = seat("a", &b);
+    let _tmp = crate::net::vault_payload::tests::attach_storage(&mut st, &[]);
     st.vault_seed = None;
     assert!(!st.vault_seed_from_entropy(&entropy));
     assert!(st.vault_seed.is_none(), "a mismatch is never kept");
+    assert_eq!(stored_seed(&st).await, None, "nor stored");
 
     // a founding table keyed for this seat's real identity: re-derived,
     // and after a cut it reads the anchor's founding table
@@ -490,8 +584,10 @@ fn a_recovered_seat_without_a_matching_seed_refuses_to_persist_it() {
     seal_cut(&mut holder, &b, false);
     let blob = holder.chain.checkpoint_blob.clone().expect("blob");
     let mut st = seat_on("a", &b, Some(blob), holder.chain.blocks.clone());
+    let _tmp = crate::net::vault_payload::tests::attach_storage(&mut st, &[]);
     st.vault_seed = None;
     assert!(st.vault_seed_from_entropy(&entropy));
     let want = molt_vault::derive_vault_seed(&entropy, &npk, &pk);
     assert_eq!(st.vault_seed.as_deref(), Some(&*want));
+    assert_eq!(stored_seed(&st).await.as_deref(), Some(&want[..]), "and stored");
 }

@@ -763,10 +763,6 @@ impl State {
                         self.set_checkpoint_blob(Some(blob));
                         self.chain.blocks.retain(|b| b.height >= anchor_height);
                         self.apply_chain_to_state();
-                        // plan 1.3.14: replaced payloads retire at the cut
-                        if kind.vault {
-                            self.vault_retire_at_cut();
-                        }
                         // A4: the cut re-based every open patch; it killed none
                         self.mark_open_wiki_patches_rebased();
                         self.emit(Event::CheckpointSealed {

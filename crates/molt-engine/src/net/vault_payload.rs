@@ -91,6 +91,8 @@ pub(crate) struct VaultPlane {
     pub(crate) wants: BTreeMap<MessageId, VaultWant>,
     /// Payloads named through the test seam.
     pub(crate) seam_named: Vec<NamedPayload>,
+    /// The anchor (`upto`) whose replaced payloads are retired.
+    pub(crate) retired_at: Option<u64>,
 }
 
 /// The handle's vault test seams; never a `Command`.
@@ -225,6 +227,7 @@ impl crate::State {
             .map(|a| molt_storage::list_vault_payloads(&a.dir).into_iter().collect())
             .unwrap_or_default();
         self.files.vault.held_scope = Some(self.net_scope);
+        self.files.vault.retired_at = None;
     }
 
     /// The 1 s beat: check a copy on disk first, else start one fetch per
@@ -232,6 +235,11 @@ impl crate::State {
     /// held payload.
     pub(crate) fn vault_payload_tick(&mut self) {
         self.vault_sync_held();
+        // plan 1.3.14 on every path to a cut, after the pruned chain is on disk
+        let anchor = self.chain.checkpoint_blob.as_ref().map(|b| b.upto);
+        if anchor.is_some() && anchor != self.files.vault.retired_at && self.vault_retire_at_cut() {
+            self.files.vault.retired_at = anchor;
+        }
         for (named, bytes) in self.vault_seams.take() {
             if let Some(bytes) = bytes {
                 if self.vault_store_payload(&named, &bytes) {
@@ -478,4 +486,4 @@ impl crate::State {
 
 #[cfg(test)]
 #[path = "vault_payload_tests.rs"]
-mod tests;
+pub(crate) mod tests;

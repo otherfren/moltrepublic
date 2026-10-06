@@ -128,10 +128,11 @@ impl crate::State {
     }
 
     /// Plan 1.3.14: once a cut dropped the blocks naming a replaced
-    /// version, its payload file goes; never while base-pending.
-    pub(crate) fn vault_retire_at_cut(&mut self) {
-        if self.vault_base_pending() {
-            return;
+    /// version, its payload file goes; never while base-pending. Returns
+    /// whether every such file is gone.
+    pub(crate) fn vault_retire_at_cut(&mut self) -> bool {
+        if !self.is_vault_republic() || self.vault_base_pending() {
+            return false;
         }
         self.vault_sync_held();
         let named: BTreeSet<String> =
@@ -152,6 +153,7 @@ impl crate::State {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
+        let mut retired = 0usize;
         for sid in &gone {
             if let Some(a) = &self.active {
                 if !a.handle.persist_vault_payload_blocking(sid, None) {
@@ -160,10 +162,12 @@ impl crate::State {
             }
             self.files.vault.held.remove(sid);
             self.files.vault.on_disk.remove(sid);
+            retired += 1;
         }
         if !gone.is_empty() {
-            tracing::info!(retired = gone.len(), "vault payload: retired at the cut");
+            tracing::info!(count = retired, failed = gone.len() - retired, "vault_payload=retired");
         }
+        retired == gone.len()
     }
 
     /// The founding table of the adopted chain: the genesis, or after a cut
@@ -231,13 +235,13 @@ impl crate::State {
         if !durable {
             tracing::warn!("vault_base=fetched persisted=false");
         }
-        tracing::info!(deposits = self.chain.vault_base.as_ref().map_or(0, |b| b.deposits.len()), "vault base: complete");
+        tracing::info!(deposits = self.chain.vault_base.as_ref().map_or(0, |b| b.deposits.len()), "vault_base=adopted");
         self.after_vault_base_adopted();
         Ok(Reply::Ack)
     }
 
     pub(crate) fn cmd_net_vault_base_failed(&mut self) -> Result<Reply, MoltError> {
-        tracing::debug!("vault base: fetch did not complete");
+        tracing::debug!("vault_base=fetch_incomplete");
         Ok(Reply::Ack)
     }
 }

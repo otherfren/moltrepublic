@@ -78,7 +78,7 @@ impl crate::State {
         let (Some(cmd_tx), Some(channel)) = (self.cmd_tx.upgrade(), self.nostr_file_channel()) else {
             return;
         };
-        tracing::info!(hash = %series.hash, size = series.size, "vault base: fetching");
+        tracing::info!(hash = %series.hash, size = series.size, "vault_base=fetching");
         let from = crate::now_secs().saturating_sub(24 * 60 * 60);
         self.files.vault_base.fetch = Some(crate::transfer::spawn_vault_base_fetch(
             channel,
@@ -113,7 +113,7 @@ impl crate::State {
             .take(molt_net::piece_want::PIECE_WANT_MAX_RANGES)
             .collect();
         if !ranges.is_empty() {
-            tracing::debug!(%id, ranges = ranges.len(), "vault base: pieces wanted");
+            tracing::debug!(%id, ranges = ranges.len(), "vault_base=wanted");
             self.enqueue_vault_base_publish(&series, ranges);
         }
         true
