@@ -1457,6 +1457,7 @@ impl State {
             .and_then(|b| <[u8; 32]>::try_from(b).ok())
             .map(|arr| molt_storage::SigningKey::from_bytes(&arr));
         self.vault_seed = transport_state.vault_seed.as_ref().and_then(crate::vault::seed_array);
+        self.vault_rx = crate::vault::receipts::ReceiptRuntime::loaded(transport_state.vault_status.clone());
         if self.is_vault_republic() && self.vault_seed.is_none() {
             tracing::warn!("vault_seed=missing");
         }

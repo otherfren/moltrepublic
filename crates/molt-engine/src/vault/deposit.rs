@@ -64,7 +64,7 @@ fn refusal(e: molt_vault::VaultError) -> MoltError {
 
 /// The OS RNG behind a ChaCha stream: the deposit nonce and the AEAD
 /// nonce (plan 1.3.3: fresh for every deposit).
-fn os_rng() -> Result<rand_chacha::ChaCha20Rng, MoltError> {
+pub(crate) fn os_rng() -> Result<rand_chacha::ChaCha20Rng, MoltError> {
     use rand_chacha::rand_core::SeedableRng as _;
     let mut seed = zeroize::Zeroizing::new([0u8; 32]);
     getrandom::getrandom(seed.as_mut()).map_err(|e| MoltError::Engine(format!("os rng: {e}")))?;
@@ -134,6 +134,13 @@ impl crate::State {
         let rid = self.republic_id();
         let input = molt_vault::DepositInput { republic_id: &rid, depositor, name, kind, text, ctx: &ctx };
         let (dep, file) = molt_vault::build_deposit(&input, &seed, &sk, &mut os_rng()?).map_err(refusal)?;
+        self.vault_propose_deposit(dep, &file)
+    }
+
+    /// Hold `file` and propose `dep`; the payload is published once the
+    /// proposal exists.
+    pub(crate) fn vault_propose_deposit(&mut self, dep: VaultDeposit, file: &[u8]) -> Result<Reply, MoltError> {
+        let rid = self.republic_id();
         let named = NamedPayload {
             secret_id: secret_id(&rid, &dep),
             hash: dep.payload.hash.clone(),
@@ -144,7 +151,7 @@ impl crate::State {
         // the payload is held before the proposal exists: the own co-sign
         // needs it, and so does every approver fetching from here
         self.vault_sync_held();
-        if !self.vault_store_payload(&named, &file) {
+        if !self.vault_store_payload(&named, file) {
             return Err(MoltError::Storage("vault payload not stored".to_string()));
         }
         match self.propose_payload(Surface::Vault, payload) {

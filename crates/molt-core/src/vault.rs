@@ -191,13 +191,16 @@ pub struct VaultStatusStore {
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub reveals:
         std::collections::BTreeMap<String, std::collections::BTreeMap<MemberId, VaultRevealOutcome>>,
+    /// `secret_id` -> holders whose real share a reveal published, lie or not.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub valid_reveals: std::collections::BTreeMap<String, std::collections::BTreeSet<MemberId>>,
 }
 
 impl VaultStatusStore {
     /// Nothing recorded.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.receipts.is_empty() && self.reveals.is_empty()
+        self.receipts.is_empty() && self.reveals.is_empty() && self.valid_reveals.is_empty()
     }
 }
 

@@ -3622,6 +3622,8 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                             ts.mirror.rev = state.mirror.rev;
                             ts.mirror.decls = state.mirror.decls;
                             ts.mirror.status = state.mirror.status;
+                            // …and the vault receipts (vault plan S3c), same posture
+                            ts.vault_status = state.vault_status;
                             if let Err(e) = ws.write_transport_state(&ts) {
                                 fail(&failed_flag, "transport.state write", &e);
                             }
@@ -5365,6 +5367,27 @@ mod tests {
         assert_eq!(ws.next_seq, 7);
         assert_eq!(loaded.snapshot.expect("snap").at_seq, 6);
         assert!(loaded.tail.is_empty()); // everything is under the snapshot floor
+    }
+
+    /// Vault S3c: the receipts ride the transport save, as the mirror gossip does.
+    #[test]
+    fn a_transport_save_carries_the_vault_status() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let created = create_workspace(&root, &seed, &founded(1)).expect("create");
+        let dir = created.dir().to_path_buf();
+        let handle = start_writer(created);
+        let mut status = molt_core::vault::VaultStatusStore::default();
+        status
+            .receipts
+            .entry("ab".repeat(32))
+            .or_default()
+            .insert("b".to_string(), molt_core::vault::VaultReceipt { verified: true, rev: 3 });
+        handle.save_transport_state(TransportState { vault_status: status.clone(), ..TransportState::default() });
+        handle.close(None);
+        let (ws, _loaded) = open_workspace(&dir).expect("reopen");
+        assert_eq!(ws.read_transport_state().vault_status, status);
     }
 
     /// The clean-close crypto merge (MLS snapshot + queue creds) must NOT clobber

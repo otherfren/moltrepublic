@@ -12,6 +12,12 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Dev only, never a default, never in a release build: with it compiled in,
+# MOLT_VAULT_LAB_COMPLAIN=1 at spawn makes this node's holder receipts
+# complain (vault build plan S3c step 7).
+vault-lab = []
+
 [dependencies]
 molt-core.workspace = true
 molt-config.workspace = true
