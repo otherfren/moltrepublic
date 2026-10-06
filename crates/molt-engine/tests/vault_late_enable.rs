@@ -2,7 +2,7 @@
 #![allow(missing_docs)]
 
 //! **The vault, prepared at every founding and enabled by vote**
-//! (`docs/vault/vault_late_enable.md`, E2-E5): a founding without the
+//! (`docs_archive/vault/vault_late_enable.md`, E2-E5): a founding without the
 //! vault is still roster-v6 with every seed persisted but shows no vault;
 //! a `set_features` vote switches it on, across a cut and a recovery.
 

@@ -1,8 +1,17 @@
 # Vault: prepared at every founding, enabled by vote
 
-Status: PLAN (2026-10-06), open work. Amends D11 and D14 of
-`docs_archive/vault/vault_threshold_disclosure.md` (rev 4 -> rev 5) in
-the change that lands the behaviour. Ground truth: master `2fbc8d84`.
+Status: EXECUTED 2026-10-06 (a record, not instructions - the spec
+`vault_threshold_disclosure.md` rev 5 is the authority). Amended D11 and
+D14 of the spec in the change that landed the behaviour (`5df3d343`).
+Ground truth was master `2fbc8d84`.
+
+Deviations from the plan as written: none in behaviour. The refusal
+text is the existing disabled-feature form `vault: not enabled`. The
+"enabled" predicate reads the founding features from the chain (genesis
+or anchor), not the node's replica. The holder check after an enabling
+block reuses the idempotent receipt sweep. The integration, MCP and
+nav tests were written after the engine change they pin; their unit
+twins were seen red first.
 
 ## 1. Decisions (user, 2026-10-06; ratified)
 
