@@ -849,9 +849,13 @@ worktree and reruns its verification before merging.
      for `secret_id`s no longer current are pruned - never while
      `vault_base_pending()` (1.3.15).
   6. Seams for `tests/vault_complaints.rs` (rule 0, `#[doc(hidden)] pub`):
-     `__vault_seal_with_deposit(dep, payload_ct)` (propose a hand-built,
-     dishonestly dealt deposit) and `__vault_lie_on_reveal(bool)` (this
-     depositor's reveals carry a wrong share).
+     `__vault_seal_with_bad_share(name, kind, text, holder)` (the engine
+     deals honestly, replaces `holder`'s share by one off the polynomial
+     sealed with the derived ephemeral, re-signs, and reveals that share -
+     a test cannot hand-build the record: it needs the depositor's seed
+     and identity key), `__vault_lie_on_reveal(bool)` (this depositor's
+     reveals carry a wrong share) and `__vault_complain(bool)` (the
+     step-7 switch without the feature, for the false-complaint tests).
   7. `vault-lab` feature (dev only, never default, never in
      `scripts/build-release.sh`): when compiled in AND
      `MOLT_VAULT_LAB_COMPLAIN=1` is set at spawn, this node's holder

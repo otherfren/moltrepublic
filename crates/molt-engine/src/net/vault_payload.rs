@@ -102,6 +102,8 @@ pub(crate) struct VaultSeams {
     staged: Mutex<Vec<(NamedPayload, Option<Vec<u8>>)>>,
     /// `(claimed depositor, name, kind, text)` to seal under this seat's key.
     forged: Mutex<Vec<(String, String, String, molt_core::vault::SecretText)>>,
+    /// The receipt and reveal seams (S3c).
+    pub(crate) lab: crate::vault::receipts::LabSeams,
     /// Stands in for S5's base check in unit tests.
     #[cfg(test)]
     base_pending: AtomicBool,
@@ -240,6 +242,7 @@ impl crate::State {
                 tracing::warn!(error = %e, "vault: seam seal refused");
             }
         }
+        crate::vault::receipts::seam_tick(self);
         let missing: Vec<NamedPayload> = self
             .vault_named_payloads()
             .into_iter()
@@ -357,6 +360,7 @@ impl crate::State {
         if stored {
             self.files.vault.fetches.remove(&hash);
             tracing::info!(hash = %hash, "vault payload: held");
+            crate::vault::receipts::on_payload_held(self);
             self.emit_session(SessionScope::Full);
         } else if local {
             tracing::warn!(hash = %hash, "vault payload: copy on disk damaged");

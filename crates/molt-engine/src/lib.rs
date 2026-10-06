@@ -205,6 +205,27 @@ impl WalletHandle {
     pub fn __vault_seal_as(&self, depositor: &str, name: &str, kind: &str, text: &str) {
         self.vault_seams.forge(depositor, name, kind, text);
     }
+
+    /// Test seam (vault plan S3c): seal `text` with a share off the
+    /// polynomial for `holder`, and reveal that share on a complaint - a
+    /// dishonest dealer. Runs on the next payload tick.
+    #[doc(hidden)]
+    pub fn __vault_seal_with_bad_share(&self, name: &str, kind: &str, text: &str, holder: &str) {
+        self.vault_seams.lab.stage_bad_share(name, kind, text, holder);
+    }
+
+    /// Test seam (vault plan S3c): this depositor's reveals carry a wrong share.
+    #[doc(hidden)]
+    pub fn __vault_lie_on_reveal(&self, lie: bool) {
+        self.vault_seams.lab.lie_on_reveal.store(lie, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam (vault plan S3c): this holder's receipts report a
+    /// complaint whatever its check says (the `vault-lab` switch).
+    #[doc(hidden)]
+    pub fn __vault_complain(&self, complain: bool) {
+        self.vault_seams.lab.complain.store(complain, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// Start the engine on the current `tokio` runtime and return a handle to it.
@@ -435,6 +456,10 @@ fn spawn_actor(
     state.demo_mesh = seams.demo_mesh;
     state.reopen_seam = seams.reopen_seam;
     let vault_seams = state.vault_seams.clone();
+    if vault::receipts::lab_complain_at_spawn() {
+        tracing::warn!("vault_lab=complain");
+        vault_seams.lab.complain.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
     // the presence ticker lives as long as the actor: it re-ages the member
     // pills from their real last-seen stamps (net/presence.rs::cmd_net_presence_tick)
     state.spawn_ticker_every(Command::NetPresenceTick, PRESENCE_TICK_MS);
@@ -1137,6 +1162,8 @@ pub(crate) struct State {
     /// [`State::identity_sk`]; `None` outside a vault republic, or where it
     /// is missing (a holder then fails closed).
     pub(crate) vault_seed: Option<zeroize::Zeroizing<[u8; 32]>>,
+    /// Vault receipts, complaints and reveals of the open workspace.
+    pub(crate) vault_rx: vault::receipts::ReceiptRuntime,
     /// The open workspace's transport discriminator, from its sealed
     /// `transport.state`. Read FIRST wherever the two shapes diverge — a
     /// Nostr republic carries no queue creds or mesh links by design, not by
@@ -1412,6 +1439,7 @@ impl State {
             replica: None,
             identity_sk: None,
             vault_seed: None,
+            vault_rx: vault::receipts::ReceiptRuntime::default(),
             transport_kind: None,
             nostr: None,
             vault_seams: std::sync::Arc::default(),

@@ -46,8 +46,15 @@ async fn seal(w: &WalletHandle, name: &str, text: &str) -> ProposalId {
     }
 }
 
+/// `Committed` matches every in-chain state: receipts move a card on to
+/// `sealed` and `hardened` (S3c).
 fn has(v: &VaultView, name: &str, state: VaultDepositState) -> bool {
-    v.deposits.iter().any(|d| d.name == name && d.state == state)
+    let in_chain = |s: VaultDepositState| {
+        matches!(s, VaultDepositState::Committed | VaultDepositState::Sealed | VaultDepositState::Hardened)
+    };
+    v.deposits.iter().any(|d| {
+        d.name == name && (d.state == state || (state == VaultDepositState::Committed && in_chain(d.state)))
+    })
 }
 
 async fn approvals(w: &WalletHandle, id: ProposalId) -> usize {

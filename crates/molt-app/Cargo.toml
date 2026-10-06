@@ -29,6 +29,9 @@ live-preview = ["molt-ui/live-preview"]
 # program is drivable over MCP. Opt-in per build AND per run
 # (MOLT_UI_TESTING=1); never a default.
 ui-testing = ["dep:i-slint-backend-testing"]
+# Dev-only vault complaint lab (vault build plan S3c): passes through to
+# molt-engine; never a default, never in a release build.
+vault-lab = ["molt-engine/vault-lab"]
 
 [dependencies]
 molt-core.workspace = true
