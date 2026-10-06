@@ -150,10 +150,10 @@ impl State {
         let Some(change) = self.proposal_change(id) else {
             return;
         };
-        // plan 1.3.15: no cut over a vault base not held here, own or co-signed
+        // plan 1.3.15: no cut over a base (vault or wiki) not held here
         if CutKind::of(&change).is_some() && (self.vault_base_pending() || self.wiki_base_pending())
         {
-            tracing::warn!(id, "vault: base pending, not signing a cut");
+            tracing::warn!(id, reason = "base_pending", "cut not signed");
             return;
         }
         // the vault gate holds on every path that signs, not only `approve`

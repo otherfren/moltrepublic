@@ -107,6 +107,7 @@ download + the same import path.
 | `chain.state` | **yes, verbatim ciphertext** | the threshold-signed chain — the part of the backup that is *verifiable*; import decrypts it (chain sub-key is derived from `workspace_key`) and hard-verifies (§4.2) |
 | `logo.<ext>` | **yes** | applied org state materialized as a file |
 | `wiki_base.bin` | **yes** (added 2026-10-05) | the folded wiki tree a K6 cut leaves (`knowledge_base_scale.md` §4.9): below the cut the chain keeps only its hash, so this is the one local copy of the shared memory. Left out, a republic whose every seat restores from backup holds the commitment and nobody holds the content. Import checks every frame authenticates under the blob's workspace key; the open checks the commitment |
+| `vault_base.bin`, `vault/<secret_id>.bin` | **yes** (vault S5, `docs/vault/vault_threshold_disclosure.md` §9.5) | the folded vault base and the payloads of the current deposits. Same rule as `wiki_base.bin`: the export ships a file only if it authenticates (a payload under the key its 64-hex stem derives) and names one it leaves out; the import plants only authenticating files and lists the rest in `dropped`; the open re-verifies the base under its own vault context |
 | `keys/workspace.key` | **no** | sealed to the *exporting* device's key — dead weight anywhere else. The key itself travels inside the encrypted payload (§3.5) |
 | `keys/seed.sealed` | **no** (the *entropy* may travel in the payload, §3.5) | same reason |
 | `transport.state` | **NO — hard exclusion** | §3.3 |
@@ -331,7 +332,8 @@ import is **stage → verify → commit**:
    polite refusal, *before* any KDF work); derive `k_stream` (Argon2id caps
    enforced, §3.4); stream-decrypt chunks; validate entry paths against an
    **allowlist** (`manifest.toml`, `prefs.toml`, `chain.state`,
-   `wiki_base.bin`, `log/NNNNNN.mlog`, `snapshots/NNNNNNNNNNNN.msnap`,
+   `wiki_base.bin`, `vault_base.bin`, `vault/<64 hex>.bin`,
+   `log/NNNNNN.mlog`, `snapshots/NNNNNNNNNNNN.msnap`,
    `logo.<ext>` — reject
    anything else, which subsumes traversal attacks); write everything into
    a dot-staging dir `root/.import-<id>/` (invisible to the scan);
