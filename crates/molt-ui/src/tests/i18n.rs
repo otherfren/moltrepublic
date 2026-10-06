@@ -324,11 +324,18 @@ fn sync_status_label_speaks_german() {
 #[test]
 fn the_vault_founding_strings_are_compact() {
     for l in [Lexicon::en(), Lexicon::de()] {
-        for s in [l.feat_vault_bounds, l.vault_newer_republic] {
+        for s in [l.feat_vault_bounds, l.feat_vault_low, l.feat_vault_high, l.vault_newer_republic] {
             assert!(!s.is_empty() && !s.contains('\u{2014}'), "{s:?}");
+            // plain words, no formula
+            assert!(!s.contains("<=") && !s.contains(" m ") && !s.contains("n-"), "{s:?}");
         }
-        assert!(l.feat_vault_bounds.contains("2 <= m <= n-2"));
     }
-    assert_eq!(Lexicon::en().feat_vault_bounds, "needs 2 <= m <= n-2");
+    assert_eq!(Lexicon::en().feat_vault_low, "needs a threshold of 2 or more");
+    assert_eq!(Lexicon::en().feat_vault_high, "needs 2 more members than the threshold");
+    assert_eq!(Lexicon::de().feat_vault_low, "braucht Schwelle ab 2");
+    assert_eq!(Lexicon::de().feat_vault_high, "braucht 2 Mitglieder mehr als die Schwelle");
     assert_eq!(Lexicon::en().vault_newer_republic, "needs a newer republic");
+    let bounds = molt_core::vault::VaultRefusal::Bounds;
+    assert_eq!(crate::i18n::localize_vault_refusal(0, &bounds), Lexicon::en().feat_vault_bounds);
+    assert_eq!(crate::i18n::localize_vault_refusal(1, &bounds), Lexicon::de().feat_vault_bounds);
 }

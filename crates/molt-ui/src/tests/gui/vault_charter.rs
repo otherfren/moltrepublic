@@ -74,15 +74,30 @@ fn the_vault_box_is_disabled_outside_2_to_n_minus_2() {
     i_slint_backend_testing::init_no_event_loop();
     for (m, n, allowed) in [(2, 3, false), (2, 4, true), (3, 4, false), (1, 4, false), (3, 5, true)] {
         let (ui, _shown) = charter_step(m, n);
-        let hint = ui.global::<Strings>().get_feat_vault_bounds().to_string();
+        let s = ui.global::<Strings>();
+        let low = s.get_feat_vault_low().to_string();
+        let high = s.get_feat_vault_high().to_string();
         click(&ui, &wizard_vault_box(&ui));
         assert_eq!(ui.get_cw_feat_vault(), allowed, "{m}-of-{n}: a click ticks the box iff allowed");
-        assert_eq!(
-            Handle::find_by_accessible_label(&ui, &hint).next().is_some(),
-            !allowed,
-            "{m}-of-{n}: the bounds line shows iff the box is locked"
-        );
+        let shown = |t: &str| Handle::find_by_accessible_label(&ui, t).next().is_some();
+        assert_eq!(shown(&low), !allowed && m < 2, "{m}-of-{n}: the low line");
+        assert_eq!(shown(&high), !allowed && m >= 2, "{m}-of-{n}: the high line");
     }
+}
+
+/// The reason sits on the vault box's own line, not below the grid.
+#[test]
+fn the_vault_reason_sits_beside_the_box() {
+    i_slint_backend_testing::init_no_event_loop();
+    let (ui, _shown) = charter_step(3, 4);
+    let high = ui.global::<Strings>().get_feat_vault_high().to_string();
+    let reason = Handle::find_by_accessible_label(&ui, &high).next().expect("reason shown");
+    let check = wizard_vault_box(&ui);
+    let (cy, ch) = (check.absolute_position().y, check.size().height);
+    let (ry, rh) = (reason.absolute_position().y, reason.size().height);
+    let mid = ry + rh / 2.0;
+    assert!(mid > cy && mid < cy + ch, "reason centre {mid} within the box row {cy}..{}", cy + ch);
+    assert!(reason.absolute_position().x > check.absolute_position().x, "right of the box");
 }
 
 /// E1: every founding prepares the vault; ticking it is opt-in.

@@ -46,14 +46,18 @@ pub(crate) fn localize_headline(lang: i32, phrase: &str) -> String {
     .to_string()
 }
 
-/// One vault refusal in the active language (English = the MCP text).
+/// One vault refusal in the active language (English = the MCP text,
+/// except the bounds, which the UI says in plain words).
 pub(crate) fn localize_vault_refusal(lang: i32, r: &molt_core::vault::VaultRefusal) -> String {
     use molt_core::vault::VaultRefusal as R;
     if lang != 1 {
+        if matches!(r, R::Bounds) {
+            return Lexicon::en().feat_vault_bounds.to_string();
+        }
         return r.to_string();
     }
     match r {
-        R::Bounds => "braucht 2 <= m <= n-2".to_string(),
+        R::Bounds => Lexicon::de().feat_vault_bounds.to_string(),
         R::NeedsNewerRepublic => "braucht eine neuere Republik".to_string(),
         R::NeedsNewerVersion(seat) => format!("braucht eine neuere Version: {seat}"),
         R::NotVerified => "nicht geprüft".to_string(),
@@ -867,7 +871,9 @@ lexicon! {
     feat_wallet: "Wallet", "Wallet";
     // suffix on an enable-able feature whose pane is still a mock (vault)
     feat_mock: " (ui mock)", " (ui mock)";
-    feat_vault_bounds: "needs 2 <= m <= n-2", "braucht 2 <= m <= n-2";
+    feat_vault_bounds: "needs a threshold of 2 or more and 2 more members than that", "braucht Schwelle ab 2 und 2 Mitglieder mehr als die Schwelle";
+    feat_vault_low: "needs a threshold of 2 or more", "braucht Schwelle ab 2";
+    feat_vault_high: "needs 2 more members than the threshold", "braucht 2 Mitglieder mehr als die Schwelle";
     vault_newer_republic: "needs a newer republic", "braucht eine neuere Republik";
     jw_back_to_start: "Back to start", "Zurück zum Start";
     jw_ratify_title: "Ratify the charter", "Satzung ratifizieren";

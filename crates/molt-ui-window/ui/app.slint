@@ -3955,21 +3955,25 @@ export component AppWindow inherits Window {
                                             }
                                             Row {
                                                 AppCheck { width: 180px; label: Strings.feat-quests; checked: false; enabled: false; }
-                                                AppCheck {
-                                                    width: 180px;
-                                                    label: Strings.feat-vault;
-                                                    checked <=> root.cw-feat-vault;
-                                                    enabled: root.cw-vault-allowed;
+                                                HorizontalLayout {
+                                                    spacing: 10px;
+                                                    AppCheck {
+                                                        width: 180px;
+                                                        label: Strings.feat-vault;
+                                                        checked <=> root.cw-feat-vault;
+                                                        enabled: root.cw-vault-allowed;
+                                                    }
+                                                    if !root.cw-vault-allowed: Text {
+                                                        text: root.cw-threshold < 2 ? Strings.feat-vault-low : Strings.feat-vault-high;
+                                                        color: Theme.faint;
+                                                        font-size: Theme.fs-cap;
+                                                        vertical-alignment: center;
+                                                    }
                                                 }
                                             }
                                             Row {
                                                 AppCheck { width: 180px; label: Strings.feat-wallet; checked: false; enabled: false; }
                                             }
-                                        }
-                                        if !root.cw-vault-allowed: Text {
-                                            text: Strings.feat-vault-bounds;
-                                            color: Theme.faint;
-                                            font-size: Theme.fs-cap;
                                         }
                                     }
                                 }
