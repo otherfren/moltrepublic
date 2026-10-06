@@ -216,7 +216,7 @@ impl Surface {
                 ("secrets", "Secrets"),
                 // access requests: a threshold vote elects ONE reader; the
                 // committed grant re-seals the key shares to that member
-                // alone (docs/vault/vault_threshold_disclosure.md)
+                // alone (docs_archive/vault/vault_threshold_disclosure.md)
                 ("requests", "Requests"),
                 ("proposals", "Proposals"),
                 ("unsealed", "Unsealed"),
@@ -2391,7 +2391,7 @@ pub struct MemberIdentity {
     #[serde(default)]
     pub nostr_pk: String,
     /// The seat's vault key (X25519, lowercase hex), only in a roster-v6
-    /// founding table (`docs/vault/vault_threshold_disclosure.md` §6).
+    /// founding table (`docs_archive/vault/vault_threshold_disclosure.md` §6).
     /// Empty everywhere else, and then absent on the wire.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub vault_pk: String,
@@ -2541,7 +2541,7 @@ pub fn put_count(out: &mut Vec<u8>, n: usize) {
 /// emits the v5 tag plus the feature run as the final field. `Some([])` is
 /// a real, distinct value — a founder that deselected everything.
 ///
-/// **v6 binds each seat's VAULT KEY** (`docs/vault/vault_threshold_disclosure.md`
+/// **v6 binds each seat's VAULT KEY** (`docs_archive/vault/vault_threshold_disclosure.md`
 /// §6) as the fourth field of its member run, conditional on presence like
 /// v5: a table with no `vault_pk` emits v5 (or v4) bytes unchanged. The
 /// verifiers require every seat keyed and `features` present; a v6 table
@@ -4814,7 +4814,7 @@ pub enum Command {
     /// (`Reply::WikiDraft`; "" = none).
     WikiDraftLoad,
 
-    // --- the vault (docs/vault/vault_threshold_disclosure.md) ---
+    // --- the vault (docs_archive/vault/vault_threshold_disclosure.md) ---
     /// Deposit a text under `name`; an existing own name is replaced. A
     /// vote like any change (D12).
     VaultSeal {

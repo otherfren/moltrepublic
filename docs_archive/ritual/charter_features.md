@@ -183,6 +183,10 @@ surface lands (the established stepwise-UI modus; never fake, always badged).
   *Amended 2026-08-29 (user decision): the Organization modal locks
   Kanban too; Vault stays enable-able there and carries " (ui mock)"
   after the name, in the modal and in the Status list.*
+  *Amended 2026-10-06 (vault built, `docs_archive/vault/vault_threshold_disclosure.md`
+  D11-D13): Vault is REAL and FOUNDING ONLY - a wizard choice greyed
+  outside `2 <= m <= n-2`, never added by `set_features` (the Organization
+  modal shows it locked with `founding only`; the engine refuses it).*
 - **Ratification card:** between agenda and the confirm/decline buttons, the
   five rows with their on/off state — the member sees the whole selection it
   signs, not only the enabled part. Read-only.
@@ -201,7 +205,8 @@ surface lands (the established stepwise-UI modus; never fake, always badged).
   security comes from the threshold alone).
 - No disable path, no "hide again" — monotone by fold.
 - No real Quests/Vault/Wallet implementations — their panes stay
-  DESIGN-MOCK-badged; this plan only governs visibility.
+  DESIGN-MOCK-badged; this plan only governs visibility. (The Vault became
+  real 2026-10-06, founding only, see D8.)
 - No invite-preview change (the invitee sees the selection at ratification,
   where it signs it).
 

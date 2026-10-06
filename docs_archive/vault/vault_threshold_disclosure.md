@@ -1,17 +1,10 @@
 # Vault: majority escrow with an elected reader
 
-Status: DRAFT rev 4 (2026-10-05), being built per
-`vault_build_plan.md`. The product decisions in §2 were ratified by the
-user in the 2026-10-05 discussion; the protocol below is the design they
-imply. Rev 3 added D11–D13 after a second review the same day
-(founding-only vault, keys in the roster, deposit is a vote, m ≤ n − 2)
-and D14–D16. Rev 4 folds in the build plan's deviations (plan §1.3,
-listed in §12) and D17 (plan Q1, user-confirmed default).
-Built so far: the contract types (stage S0), the crypto core with
-every byte layout of §5-§9 (stage S1: `crates/molt-vault`,
-`molt_core::vault`) and the founding of §3/§6 (stage S2: roster-v6, the
-bounds, the lockout, the walked chain's vault context, the persisted
-seed). Deposits, grants and the fold are not wired yet.
+Status: SHIPPING SPEC, rev 4 (2026-10-05), built 2026-10-06 per
+`vault_build_plan.md` (executed; deviations in plan §1.3, listed in §12;
+D17 is plan Q1, user-confirmed default). The product decisions in §2
+were ratified by the user on 2026-10-05. Open: V6 share refresh (§9.6,
+`docs/reviews/known_debt.md`).
 Rev 1 (2026-08-16) is superseded: its primitives stand, its framing
 ("succession insurance" with an implied depositor protection) and its
 storage story (bundles inline in the chain) do not. §12 lists what
@@ -608,7 +601,7 @@ Rev 2/3 against rev 1:
 - `chacha20poly1305`, `x25519-dalek`, `hkdf`, `curve25519-dalek` — in the
   lockfile. The ring-free guard and the no-C posture hold.
 
-## 14. Build phases (V1 built in plan stage S1, roster-v6 aside: S2)
+## 14. Build phases (executed: V1-V5 built in plan stages S0-S6, 2026-10-06; V6 open)
 
 1. **V1 spike** — dep-lock `vsss-rs`, decide the HPKE crate (ephemeral
    control), red byte-pin tests for every layout: `molt-vault-secret-v1`,

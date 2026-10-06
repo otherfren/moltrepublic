@@ -23,7 +23,8 @@
 #
 # Surfaces (`molt_core::Surface`) are not crates: each plugs into molt-engine
 # behind the same gated-proposal contract inside these crates; the open surface
-# plans (wallet, kanban, vault) live under docs/.
+# plans (wallet, kanban) live under docs/, the shipped vault's spec under
+# docs_archive/vault/.
 
 [workspace]
 resolver = "2"
@@ -88,7 +89,7 @@ tokio-socks        = "0.5"    # SOCKS5h client (Tor dialing, per-host isolation 
 tokio-tungstenite  = { version = "0.26", default-features = false, features = ["handshake"] }
 futures-util       = { version = "0.3", default-features = false, features = ["sink"] }
 httparse           = "1"      # NIP-11 response-head parsing (already in the tree via tungstenite)
-# the vault (molt-vault, docs/vault/vault_build_plan.md 1.2): vsss-rs 5 and
+# the vault (molt-vault, docs_archive/vault/vault_build_plan.md 1.2): vsss-rs 5 and
 # hpke 0.13 ride the curve25519-dalek 4 / RustCrypto generation OpenMLS
 # pins; their successors would duplicate the curve stack. Pinned exactly:
 # the dealing and ephemeral byte-pins rest on their RNG consumption.

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The vault's shared vocabulary (`docs/vault/vault_threshold_disclosure.md`):
+//! The vault's shared vocabulary (`docs_archive/vault/vault_threshold_disclosure.md`):
 //! the chain records, the read-model view, the redacting text types and
 //! the canonical byte layouts every vault primitive hashes, signs or binds.
 

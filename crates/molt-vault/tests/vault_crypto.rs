@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #![allow(missing_docs)]
 
-//! S1 of `docs/vault/vault_build_plan.md`: every invariant the vault's
+//! S1 of `docs_archive/vault/vault_build_plan.md`: every invariant the vault's
 //! crypto core pins. Fixtures are invented seats `a`..`e`.
 
 use ed25519_dalek::SigningKey;

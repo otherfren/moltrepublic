@@ -8,7 +8,7 @@ top of each:
 - **Current specifications of shipping behaviour** — the "read first"
   authorities CLAUDE.md points at (founding ritual, persistent chain, chat
   bus, delivery guarantee, Nostr transport, relay pool, MCP security,
-  reproducible builds) and the ADRs. These are LIVE: consult them as the
+  reproducible builds, the vault) and the ADRs. These are LIVE: consult them as the
   authority for how the shipped thing works, and keep them current when the
   behaviour changes.
 - **Historical records** — superseded designs, executed plans, and analysis a
@@ -64,6 +64,11 @@ them stay LIVE (see the top of this file); the executed plans are records.
   2026-08-15), `ritual/charter_features.md` (built 2026-08-12),
   `ritual/recovery_approval_design.md` (built 2026-08-08),
   `storage/backup_restore_design.md` (stories 9/10/12/13 shipped)
+
+**Vault, built 2026-10-06.**
+
+- Live specification: `vault/vault_threshold_disclosure.md`
+- Executed plan: `vault/vault_build_plan.md`
 
 ## Rules
 

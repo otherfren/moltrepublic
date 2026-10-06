@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""A 2-of-4 vault republic on one machine (docs/vault/vault_build_plan.md U3, section 5).
+"""A 2-of-4 vault republic on one machine (docs_archive/vault/vault_build_plan.md U3, section 5).
 
 Headless seats s1..sN run the live-preview `moltd` built with the
 `vault-lab` feature and are driven over MCP; the GUI is the fourth seat

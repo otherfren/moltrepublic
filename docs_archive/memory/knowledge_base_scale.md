@@ -649,7 +649,7 @@ directory. So the tree gets its own job family beside the share family -
 a `kind` on the publish/fetch jobs so `resume_file_jobs` routes it, a
 second answer path for `PieceWanted` keyed by the tree hash, and a sink
 that writes beside `chain.state` rather than into `download_dir`.
-The vault base (`docs/vault/vault_threshold_disclosure.md` §9.3) is the
+The vault base (`docs_archive/vault/vault_threshold_disclosure.md` §9.3) is the
 third family on the same pattern: `vault_base.bin`, series and key derived
 from `molt-vault-base-series-v1`, every holder answers.
 

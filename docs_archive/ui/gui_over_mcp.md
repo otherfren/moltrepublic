@@ -87,6 +87,7 @@ What a test needs to assert, not a widget tree:
   (the empty-chat bug was invisible without that last one);
 - the nav: the rows it offers per surface, their badges;
 - pending decisions: count and quorum text;
+- the vault pane: `vault_rows`, the deposit and grant rows its models hold;
 - the wizards: which step/phase, which fields are armed;
 - the topmost toast, if any.
 

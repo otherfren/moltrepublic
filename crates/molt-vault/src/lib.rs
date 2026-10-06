@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The vault's crypto (`docs/vault/vault_threshold_disclosure.md`, plan
-//! `docs/vault/vault_build_plan.md` S1): Shamir/Feldman dealing over
+//! The vault's crypto (`docs_archive/vault/vault_threshold_disclosure.md`, plan
+//! `docs_archive/vault/vault_build_plan.md` S1): Shamir/Feldman dealing over
 //! Ristretto (`vsss-rs`), HPKE share transport with a caller-derived
 //! ephemeral (`hpke`), the payload AEAD, deposit signing and the checks
 //! every holder, reader, approver and fold runs.

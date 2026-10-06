@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The vault's four control frames (`docs/vault/vault_threshold_disclosure.md`
+//! The vault's four control frames (`docs_archive/vault/vault_threshold_disclosure.md`
 //! §7, §8.3; plan stage S3a): a holder's receipt or complaint, the
 //! depositor's complaint reveal, a holder's answer to a grant, and a
 //! reader's ask. Status and transport, never chain state; authenticated by

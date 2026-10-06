@@ -1,6 +1,8 @@
 # Vault: build plan
 
-Status: OPEN PLAN, revision 2 (2026-10-05), after a security/state-model
+Status: EXECUTED 2026-10-06 (S0-S6 and U1-U3 on master; a record, not
+instructions - the spec beside it is the authority). Revision 2
+(2026-10-05), after a security/state-model
 review and an executability review (review log at the end). Executes
 `vault_threshold_disclosure.md` (rev 3, D1-D16) stage by stage. Every
 stage below is written for one subagent; read the spec in full before
@@ -461,7 +463,7 @@ worktree and reruns its verification before merging.
   JoinRequest: `molt-net/tests/frame_disjointness.rs`,
   `molt-engine/tests/{nostr_ritual_adversarial.rs, nostr_founding.rs}`),
   `crates/molt-mcp/src/lib.rs`, molt-app sites a new variant breaks,
-  `docs/vault/vault_threshold_disclosure.md` (rev 4 status + §4, §5, §6,
+  `docs_archive/vault/vault_threshold_disclosure.md` (rev 4 status + §4, §5, §6,
   §7, §8, §9.3, §12, §13 amendments of section 1.3; Q1 noted as open).
 - **Red tests first:**
   - core `vault_view_json_shape_is_pinned` - the JSON of a filled

@@ -4,15 +4,23 @@ Status: **OPEN WORK.** The surviving deferred items whose home documents
 were executed and archived. One entry per item, with its fix direction;
 an item leaves in the change that closes it.
 
-## Story 14 remainder — real backends for Kanban and Vault
+## Story 14 remainder — a real backend for Kanban
 
 From `docs_archive/ui/mock_todo.md` §14. Memory is REAL
-(`docs_archive/memory/shared_memory_real.md`); the Wallet is ratified
-but not started (`docs/chain/wallet_treasury_design.md`, first step the
-dep-lock spike); Kanban and Vault have fresh design-mock rounds and
-their concept docs (`docs/kanban/kanban_workflows.md` §2–§5+§7,
-`docs/vault/vault_threshold_disclosure.md`) — both docs carry open
-questions that gate any real build.
+(`docs_archive/memory/shared_memory_real.md`), the Vault is REAL
+(`docs_archive/vault/vault_threshold_disclosure.md`, founding only); the
+Wallet is ratified but not started (`docs/chain/wallet_treasury_design.md`,
+first step the dep-lock spike); Kanban has a fresh design-mock round and
+its concept doc (`docs/kanban/kanban_workflows.md` §2–§5+§7), which
+carries open questions that gate any real build.
+
+## Vault share refresh (V6)
+
+From `docs_archive/vault/vault_threshold_disclosure.md` §9.6 and §14 step
+6: shares hang off seeds that never rotate, so m phrases collected over
+the years read every earlier deposit. Fix direction: proactive refresh
+(each holder adds a share of a random zero-polynomial) under a refresh
+epoch in the deposit record; needs its own plan.
 
 ## A `rebase` verdict is not reproduced after a hard-kill reopen
 

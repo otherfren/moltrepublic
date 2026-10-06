@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Vault callbacks (`docs/vault/vault_threshold_disclosure.md` §7, §8):
+//! Vault callbacks (`docs_archive/vault/vault_threshold_disclosure.md` §7, §8):
 //! pure builders from the dialogs' state to the four vault commands, the
 //! read reply rendered into this session's Unsealed rows, and the glue
 //! that wires both to the engine.

@@ -102,7 +102,8 @@ rituals), `chain/persistent_chain.md` (the state model), `chat/chat_bus.md`,
 and the user-owned relay pool), `transport/delivery_guarantee.md`,
 `security/mcp-security.md` (the MCP endpoint and the agent's host boundary),
 `ui/gui_over_mcp.md` (driving and reading the GUI headless),
-`build/reproducible-builds.md`, and the ADRs under `adr/`.
+`vault/vault_threshold_disclosure.md` (the vault: threshold escrow with an
+elected reader), `build/reproducible-builds.md`, and the ADRs under `adr/`.
 
 After moving or renaming any document run **`python3
 scripts/check-doc-refs.py`** (exit 0 = clean). Code comments cite doc paths
@@ -116,7 +117,9 @@ Strict crate layering: a lower crate never depends on a higher one, and there is
 **one** command set (`molt_core::Command`) executed in **one** place
 (`molt-engine`); every frontend (MCP, GUI) drives that same set as a co-equal
 operator. `molt-core` holds the Command/Event/Surface contract and has **no
-I/O**. Order: core → config → storage → net → engine → mcp → ui → app.
+I/O**. Order: core → config → storage → net → engine → mcp → ui → app;
+`molt-vault` (the vault's crypto, pure functions) sits beside them on core
+only, used by engine and ui.
 
 The engine is a single-owner actor: command handlers are synchronous and never
 await I/O. Off-actor work (transport round-trips, the join ritual) runs in spawned
@@ -182,13 +185,15 @@ finding, the same as a bug.
   relay pool (R3), and `molt-roster-v5` the ratified FEATURE selection
   (`docs_archive/ritual/charter_features.md`) — **conditionally: `features: None`
   emits v4 bytes byte-identically**, which is what keeps live republics
-  verifying) — bump the tag if you change the byte layout, and update
+  verifying), and `molt-roster-v6` each seat's `vault_pk` as a fourth member
+  field (`docs_archive/vault/vault_threshold_disclosure.md` §6, conditional
+  the same way: a table with no `vault_pk` emits v5/v4 bytes unchanged) — bump the tag if you change the byte layout, and update
   every recompute site (founder canonical, `verify_sealed_roster`,
   `verify_seal_proposal`, the tests) together or signatures silently break.
   The same rule holds for its sibling layouts: `molt-republic-id-v2`
   (`molt_storage::republic_id` — le32-length-prefixed + entry-counted, so the
   preimage stays injective for arbitrary field content; never regress it to
-  separators) and `molt-chain-checkpoint-v8`
+  separators) and `molt-chain-checkpoint-v10`
   (`molt_core::checkpoint_canonical_bytes` — both identity tables hash all
   three anchors (v2), the ratified relay pool rides along (v3), the applied
   projection is SUMMARIZED rather than archived (v4, `applied_lww_slot`),
@@ -202,7 +207,11 @@ finding, the same as a bug.
   first entry, so a cut made before that surface existed keeps its bytes
   and its JSON shape; under v8 a presence byte precedes the feature run,
   the group count is explicit, and every group present is hashed, so a
-  phantom group fails the signed hash). A new surface therefore only
+  phantom group fails the signed hash), the wiki folded to one
+  commitment entry (v9, `knowledge_base_scale.md` §4.9.3), and `vault_pk`
+  in both identity tables (v10, a vault republic only; its cut is its own
+  `ChainChange::CheckpointVault` variant, so an older build stops instead
+  of hashing differently). A new surface therefore only
   extends `Surface::ALL`, never the frozen set; its first applied block
   strands any seat on a build that predates it (`charter_features.md`
   D1)). Each has byte-pin tests that go red on an unbumped change.

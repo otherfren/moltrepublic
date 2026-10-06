@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! **The vault** (`docs/vault/vault_threshold_disclosure.md`, built per
-//! `docs/vault/vault_build_plan.md`). Each submodule belongs to one build
+//! **The vault** (`docs_archive/vault/vault_threshold_disclosure.md`, built per
+//! `docs_archive/vault/vault_build_plan.md`). Each submodule belongs to one build
 //! stage; this file only wires them.
 
 use molt_core::vault::{VaultCtx, VaultRefusal, VaultView};
