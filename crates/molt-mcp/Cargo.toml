@@ -29,3 +29,8 @@ http = "1"
 http-body-util = "0.1"
 bytes = "1"
 tower-service = "0.3"
+
+[dev-dependencies]
+# the vault tool test founds a real republic over an in-process relay
+tempfile.workspace = true
+nostr-relay-builder.workspace = true
