@@ -53,3 +53,5 @@ i-slint-backend-testing = "1.17"
 # invalidate. Layering-legal (net sits below engine, which molt-ui already
 # depends on); the shipped GUI still talks to the engine only.
 molt-net.workspace = true
+# TEST-ONLY: the vault fixtures derive each seat's real vault key.
+molt-vault.workspace = true

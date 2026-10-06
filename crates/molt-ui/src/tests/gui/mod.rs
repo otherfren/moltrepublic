@@ -259,6 +259,115 @@ fn workspace_on_disk(
     (ws, now)
 }
 
+/// A vault republic ON DISK as seat `roster[0]`: a
+/// threshold-signed roster-v6 genesis (every seat keyed, `vault` in the
+/// features) and this seat's identity key and vault seed in its
+/// transport state - what a finished vault founding leaves behind.
+fn vault_workspace_on_disk(
+    root: &std::path::Path,
+    rule_m: u8,
+    roster: &[&str],
+) -> (molt_storage::OpenedWorkspace, u64) {
+    chain_workspace_on_disk(root, rule_m, roster, true)
+}
+
+/// A signed chain genesis with the `vault` feature; `keyed = false` is
+/// the v5 mock vault (the feature without seat keys).
+fn chain_workspace_on_disk(
+    root: &std::path::Path,
+    rule_m: u8,
+    roster: &[&str],
+    keyed: bool,
+) -> (molt_storage::OpenedWorkspace, u64) {
+    let phrase = molt_storage::generate_seed_phrase().expect("phrase");
+    let own = molt_storage::seed_entropy(&phrase).expect("entropy");
+    let mut keys = Vec::new();
+    let mut identities = Vec::new();
+    let mut own_seed = None;
+    for (i, member) in roster.iter().enumerate() {
+        let entropy = if i == 0 {
+            own.clone()
+        } else {
+            vec![u8::try_from(i).expect("small roster"); 32]
+        };
+        let (sk, identity_pk) = molt_storage::derive_identity_key(&entropy, member);
+        let nostr_pk = molt_net::nostr_identity(&entropy, "t").1;
+        let vault_pk = if keyed {
+            let seed = molt_vault::derive_vault_seed(&entropy, &nostr_pk, &identity_pk);
+            let pk = molt_vault::vault_keypair(&seed).1;
+            if i == 0 {
+                own_seed = Some(molt_core::vault::SecretBytes(seed.to_vec()));
+            }
+            pk
+        } else {
+            String::new()
+        };
+        identities.push(molt_core::MemberIdentity {
+            member: (*member).to_string(),
+            identity_pk,
+            nostr_pk,
+            vault_pk,
+        });
+        keys.push(sk);
+    }
+    let name = "DevTest".to_string();
+    let rule_n = u8::try_from(roster.len()).expect("roster fits u8");
+    let republic_id = molt_storage::republic_id(&name, rule_m, rule_n, &identities);
+    let features = Some(vec!["vault".to_string()]);
+    let change = molt_core::ChainChange::Genesis {
+        name: name.clone(),
+        republic_id: republic_id.clone(),
+        rule_m,
+        rule_n,
+        identities: identities.clone(),
+        agenda: "keep secrets".to_string(),
+        relays: Vec::new(),
+        features: features.clone(),
+    };
+    let bytes = molt_core::approval_bytes(&republic_id, 0, &change);
+    let attestations: Vec<molt_core::RosterAttestation> = roster
+        .iter()
+        .zip(&keys)
+        .map(|(member, sk)| molt_core::RosterAttestation {
+            member: (*member).to_string(),
+            sig: molt_storage::identity_sign(sk, &bytes),
+        })
+        .collect();
+    let block = molt_core::ChainBlock {
+        height: 0,
+        prev: molt_core::GENESIS_PREV.to_string(),
+        change,
+        sigs: attestations.clone(),
+    };
+    let sealed = molt_core::SealedRoster {
+        name,
+        republic_id,
+        rule_m,
+        rule_n,
+        roster: roster.iter().map(|s| (*s).to_string()).collect(),
+        identities,
+        attestations,
+        relays: Vec::new(),
+        agenda: "keep secrets".to_string(),
+        features,
+        founded_ts: 0,
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let ws = molt_storage::create_workspace(root, &own, &sealed.into_genesis(roster[0], now))
+        .expect("create");
+    ws.write_chain(None, &[block]).expect("chain");
+    ws.write_transport_state(&molt_core::TransportState {
+        identity_sk: Some(keys[0].to_bytes().to_vec()),
+        vault_seed: own_seed,
+        ..molt_core::TransportState::default()
+    })
+    .expect("transport state");
+    (ws, now)
+}
+
 /// The live-mirror's own two steps (session push, then surfaces
 /// gather + apply), in its own order. The apply runs DIRECTLY rather
 /// than through `invoke_from_event_loop`: the headless backend never
