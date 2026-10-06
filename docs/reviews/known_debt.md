@@ -10,7 +10,7 @@ From `docs_archive/ui/mock_todo.md` §14. Memory is REAL
 (`docs_archive/memory/shared_memory_real.md`), the Vault is REAL
 (`docs_archive/vault/vault_threshold_disclosure.md`, prepared at every
 founding, enabled at founding or by vote); the
-Wallet's rev 2 awaits ratification (`docs/chain/wallet_treasury_design.md`,
+Wallet's rev 3 awaits ratification (`docs/chain/wallet_treasury_design.md`,
 Stage 1 only; first step the dependency lock, spending gated on SA+L); Kanban has a fresh design-mock round and
 its concept doc (`docs/kanban/kanban_workflows.md` §2–§5+§7), which
 carries open questions that gate any real build.
