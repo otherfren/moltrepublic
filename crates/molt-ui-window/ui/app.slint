@@ -2145,10 +2145,12 @@ export component AppWindow inherits Window {
     pure callback vt-text-bytes(string) -> int;
     // an own deposit already carries this name: the seal replaces it
     pure callback vt-mine-named(string, [VaultDepositRow]) -> bool;
+    // a name or kind the seal builder takes (not blank)
+    pure callback vt-label-ok(string) -> bool;
     out property <int> vt-seal-bytes: root.vt-text-bytes(root.vt-seal-text);
     out property <bool> vt-seal-too-large: root.vt-seal-bytes > root.vault-text-max;
     out property <bool> vt-seal-replace: root.vt-mine-named(root.vt-seal-name, root.vault-deposits);
-    out property <bool> vt-seal-ok: root.vt-seal-name != "" && root.vt-seal-kind != ""
+    out property <bool> vt-seal-ok: root.vt-label-ok(root.vt-seal-name) && root.vt-label-ok(root.vt-seal-kind)
         && root.vt-seal-text != "" && !root.vt-seal-too-large;
     // a seal is in flight: the dialog waits for the engine's answer
     in-out property <bool> vt-seal-busy: false;

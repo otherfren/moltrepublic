@@ -19,7 +19,7 @@ pub(crate) fn seal_command(ui: &AppWindow) -> Option<Command> {
     let name = ui.get_vt_seal_name().trim().to_string();
     let kind = ui.get_vt_seal_kind().trim().to_string();
     let text = ui.get_vt_seal_text().to_string();
-    if name.is_empty() || kind.is_empty() || text.is_empty() || text.len() > VAULT_PAYLOAD_MAX {
+    if !label_ok(&name) || !label_ok(&kind) || text.is_empty() || text.len() > VAULT_PAYLOAD_MAX {
         return None;
     }
     Some(Command::VaultSeal {
@@ -27,6 +27,11 @@ pub(crate) fn seal_command(ui: &AppWindow) -> Option<Command> {
         kind,
         text: SecretText(text),
     })
+}
+
+/// A name or kind the builder takes; also the dialog's `vt-label-ok`.
+fn label_ok(s: &str) -> bool {
+    !s.trim().is_empty()
 }
 
 /// The grant dialog's pick as a `VaultGrant`; `None` without a seat.
@@ -158,6 +163,7 @@ pub(crate) fn reset_vault_session(ui: &AppWindow) {
 pub(crate) fn wire_local(ui: &AppWindow) {
     ui.set_vault_text_max(i32::try_from(VAULT_PAYLOAD_MAX).unwrap_or(i32::MAX));
     ui.on_vt_text_bytes(|text| i32::try_from(text.len()).unwrap_or(i32::MAX));
+    ui.on_vt_label_ok(|s| label_ok(&s));
     ui.on_vt_mine_named(|name, deposits| {
         let name = name.trim();
         !name.is_empty()

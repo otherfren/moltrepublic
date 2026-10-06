@@ -152,6 +152,7 @@ fn table() -> Vec<Dialog> {
             inputs: 3,
             // the dialog closes on the engine's answer: stand in an accepted one
             open: Box::new(|ui: &AppWindow| {
+                crate::actions::vault::wire_local(ui);
                 let weak = ui.as_weak();
                 ui.on_vault_seal_confirm(move || {
                     if let Some(ui) = weak.upgrade() {
