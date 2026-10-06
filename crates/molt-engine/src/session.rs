@@ -1461,6 +1461,7 @@ impl State {
         if self.is_vault_republic() && self.vault_seed.is_none() {
             tracing::warn!("vault_seed=missing");
         }
+        self.vault_load_displaced(transport_state.vault_displaced.clone());
         // …and, beside it, the Nostr transport material this seat needs to
         // speak as itself after a reopen (N4b §8.8 step 5a). Without it a
         // survivor holds its governance key but cannot address a gift wrap,

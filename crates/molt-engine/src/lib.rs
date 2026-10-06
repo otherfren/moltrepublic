@@ -1180,6 +1180,8 @@ pub(crate) struct State {
     pub(crate) nostr: Option<NostrTransport>,
     /// The vault test seams the handle reaches (never a `Command`).
     pub(crate) vault_seams: std::sync::Arc<net::vault_payload::VaultSeams>,
+    /// Grant answers and asks of the open workspace (vault plan S4).
+    pub(crate) vault_grants: vault::grant::GrantRuntime,
     /// The kind-445 group runtime of an open Nostr workspace (N5.2), with the
     /// wakeup its outbox reads. `None` on a legacy/queue workspace, and on a
     /// Nostr one whose MLS group or relay set did not come up.
@@ -1443,6 +1445,7 @@ impl State {
             transport_kind: None,
             nostr: None,
             vault_seams: std::sync::Arc::default(),
+            vault_grants: vault::grant::GrantRuntime::default(),
             group_net: None,
             delivery: DeliveryState {
                 last_group_ack: None,
