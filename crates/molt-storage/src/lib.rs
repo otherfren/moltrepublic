@@ -110,6 +110,9 @@ pub(crate) const READ_CAP_WIKI_BASE: u64 = 512 * 1024 * 1024;
 /// A vault payload: the 100 KiB plaintext cap plus the AEAD, in a few
 /// frames - 1 MiB is far above any honest file.
 pub(crate) const READ_CAP_VAULT_PAYLOAD: u64 = 1024 * 1024;
+/// The folded vault base: current deposits of a few KiB each - a local
+/// ceiling on a damaged or planted file.
+pub(crate) const READ_CAP_VAULT_BASE: u64 = 64 * 1024 * 1024;
 
 /// The ONE sanctioned whole-file read (L8): metadata-checked against the
 /// cap before the bytes are touched. An over-cap file surfaces as
@@ -152,7 +155,6 @@ const KEYS_SEGMENT: u64 = u64::MAX - 3;
 const WIKI_BASE_SEGMENT: u64 = u64::MAX - 4;
 /// AAD segment number that marks the `vault_base.bin` frames (vault plan
 /// S5: the folded vault a cut committed to).
-#[allow(dead_code)] // S5 writes the sink
 const VAULT_BASE_SEGMENT: u64 = u64::MAX - 5;
 /// AAD segment number that marks the `vault/<secret_id>.bin` frames (vault
 /// plan S3a: one deposit's payload ciphertext).
@@ -1730,6 +1732,65 @@ impl OpenedWorkspace {
         }
     }
 
+    /// **The folded vault base** (vault plan S5, spec §9.3): the canonical
+    /// `molt-vault-base-v1` bytes a vault cut commits to, sealed at rest in
+    /// fixed-stride frames like the wiki base.
+    ///
+    /// # Errors
+    /// The write fails.
+    pub fn write_vault_base(&self, bytes: &[u8]) -> Result<(), StorageError> {
+        let key = vault_base_key(&self.key, &self.id);
+        let mut out = Vec::with_capacity(bytes.len() + 128);
+        for (i, part) in bytes.chunks(WIKI_BASE_CHUNK).chain(bytes.is_empty().then_some(&[][..])).enumerate() {
+            let seq = u64::try_from(i).unwrap_or(u64::MAX);
+            out.extend_from_slice(&encode_frame(&key, &self.id, VAULT_BASE_SEGMENT, seq, part)?);
+        }
+        write_atomic(&self.dir, "vault_base.bin", &out, true)
+    }
+
+    /// The stored vault base, or `None` when this holder keeps none.
+    ///
+    /// # Errors
+    /// Unreadable, over the cap, or a frame that does not authenticate.
+    pub fn read_vault_base(&self) -> Result<Option<Vec<u8>>, StorageError> {
+        let data = match read_capped(&self.dir.join("vault_base.bin"), READ_CAP_VAULT_BASE, "vault_base.bin") {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(StorageError::Corrupt(format!("reading vault_base.bin: {e}"))),
+        };
+        let mut out = Vec::with_capacity(data.len());
+        let key = vault_base_key(&self.key, &self.id);
+        for_each_frame(&key, &self.id, VAULT_BASE_SEGMENT, &data, "vault_base.bin", |p| out.extend_from_slice(&p))?;
+        Ok(Some(out))
+    }
+
+    /// One decrypted piece of the stored vault base, for the trickle.
+    ///
+    /// # Errors
+    /// Unreadable, or a frame that does not authenticate.
+    pub fn read_vault_base_piece(&self, index: u32) -> Result<Option<Vec<u8>>, StorageError> {
+        read_stride_piece(
+            &self.dir.join("vault_base.bin"),
+            &vault_base_key(&self.key, &self.id),
+            &self.id,
+            VAULT_BASE_SEGMENT,
+            index,
+            "vault_base.bin",
+        )
+    }
+
+    /// Drop the stored vault base (absent is not an error).
+    ///
+    /// # Errors
+    /// The file exists but cannot be removed.
+    pub fn remove_vault_base(&self) -> Result<(), StorageError> {
+        match fs::remove_file(self.dir.join("vault_base.bin")) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(StorageError::Corrupt(format!("removing vault_base.bin: {e}"))),
+        }
+    }
+
     /// **A vault payload** (plan S3a, spec §9.2): the deposit's ciphertext,
     /// sealed at rest again under a key derived from `secret_id`, so a file
     /// renamed to another deposit's name does not open. Fixed-stride frames
@@ -1858,6 +1919,35 @@ fn chain_state_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
 /// The `wiki_base.bin` sub-key (K6).
 fn wiki_base_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
     Zeroizing::new(hkdf32(ws_key, "molt-wiki-base", id))
+}
+
+/// The `vault_base.bin` sub-key (vault S5).
+fn vault_base_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    Zeroizing::new(hkdf32(ws_key, "molt-vault-base", id))
+}
+
+/// Check every frame of a `vault_base.bin` image under this workspace's
+/// key (the commitment is the open's check).
+pub(crate) fn verify_vault_base(ws_key: &[u8; 32], id: &[u8; 32], data: &[u8]) -> Result<(), StorageError> {
+    for_each_frame(&vault_base_key(ws_key, id), id, VAULT_BASE_SEGMENT, data, "vault_base.bin", drop)
+}
+
+/// Check every frame of a `vault/<stem>.bin` image under the key its stem
+/// derives: a payload filed under another deposit's name does not open.
+pub(crate) fn verify_vault_payload(
+    ws_key: &[u8; 32],
+    id: &[u8; 32],
+    secret_id: &str,
+    data: &[u8],
+) -> Result<(), StorageError> {
+    let rel = vault_payload_rel(secret_id)?;
+    for_each_frame(&vault_payload_key(ws_key, secret_id), id, VAULT_PAYLOAD_SEGMENT, data, &rel, drop)
+}
+
+/// The `secret_id` of a `vault/<stem>.bin` path, when it is one.
+pub(crate) fn vault_payload_stem(rel: &str) -> Option<&str> {
+    let stem = rel.strip_prefix("vault/")?.strip_suffix(".bin")?;
+    is_secret_id(stem).then_some(stem)
 }
 
 /// The `secret_id`s with a payload file under `ws_dir/vault/`, sorted;
@@ -3012,6 +3102,16 @@ enum WriterMsg {
         index: u32,
         reply: tokio::sync::oneshot::Sender<Option<Vec<u8>>>,
     },
+    /// Vault S5: persist (or drop, on `None`) the folded vault base.
+    PersistVaultBase {
+        bytes: Option<Vec<u8>>,
+        ack: mpsc::SyncSender<bool>,
+    },
+    /// Vault S5: one decrypted piece of the stored vault base.
+    LoadVaultBasePiece {
+        index: u32,
+        reply: tokio::sync::oneshot::Sender<Option<Vec<u8>>>,
+    },
     /// Vault S3a: persist (or drop, on `None`) one payload, acking when
     /// durable.
     PersistVaultPayload {
@@ -3373,6 +3473,26 @@ impl StorageHandle {
             .send_from_async(WriterMsg::LoadWikiBasePiece { index, reply: tx })
             .await
         {
+            return None;
+        }
+        rx.await.ok().flatten()
+    }
+
+    /// Vault S5: persist the folded vault base (`None` drops it), acking
+    /// when durable.
+    #[must_use]
+    pub fn persist_vault_base_blocking(&self, bytes: Option<Vec<u8>>) -> bool {
+        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
+        if self.tx.send(WriterMsg::PersistVaultBase { bytes, ack: ack_tx }).is_err() {
+            return false;
+        }
+        ack_rx.recv().unwrap_or(false)
+    }
+
+    /// Vault S5: one decrypted piece of the stored vault base.
+    pub async fn load_vault_base_piece(&self, index: u32) -> Option<Vec<u8>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if !self.send_from_async(WriterMsg::LoadVaultBasePiece { index, reply: tx }).await {
             return None;
         }
         rx.await.ok().flatten()
@@ -3781,6 +3901,25 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                     Ok(WriterMsg::LoadWikiBasePiece { index, reply }) => {
                         let piece = ws.read_wiki_base_piece(index).unwrap_or_else(|e| {
                             tracing::warn!(error = %e, index, "wiki base piece unreadable");
+                            None
+                        });
+                        let _ = reply.send(piece);
+                    }
+                    Ok(WriterMsg::PersistVaultBase { bytes, ack }) => {
+                        let wrote = match &bytes {
+                            Some(b) => ws.write_vault_base(b),
+                            None => ws.remove_vault_base(),
+                        };
+                        let mut ok = true;
+                        if let Err(e) = wrote.and_then(|()| ws.sync()) {
+                            fail(&failed_flag, "vault_base.bin write", &e);
+                            ok = false;
+                        }
+                        let _ = ack.send(ok);
+                    }
+                    Ok(WriterMsg::LoadVaultBasePiece { index, reply }) => {
+                        let piece = ws.read_vault_base_piece(index).unwrap_or_else(|e| {
+                            tracing::warn!(error = %e, index, "vault base piece unreadable");
                             None
                         });
                         let _ = reply.send(piece);
