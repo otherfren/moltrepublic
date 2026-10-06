@@ -2543,9 +2543,10 @@ pub fn put_count(out: &mut Vec<u8>, n: usize) {
 ///
 /// **v6 binds each seat's VAULT KEY** (`docs_archive/vault/vault_threshold_disclosure.md`
 /// §6) as the fourth field of its member run, conditional on presence like
-/// v5: a table with no `vault_pk` emits v5 (or v4) bytes unchanged. The
-/// verifiers require every seat keyed and `features` present; a v6 table
-/// without features would write an empty feature run.
+/// v5: a table with no `vault_pk` emits v5 (or v4) bytes unchanged. A v6
+/// table without features writes an empty feature run - the same bytes as
+/// `Some([])` - so the verifiers refuse a keyed table without a feature set
+/// (every seat keyed, `features` present).
 pub fn roster_canonical_bytes(
     ws_id: &str,
     rule_m: u8,

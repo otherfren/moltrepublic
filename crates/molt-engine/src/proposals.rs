@@ -4412,7 +4412,12 @@ impl State {
             // a recovery link is FOR an unreachable member)
             chain_governed: self.is_chain_governed(),
             chain_diverged: self.chain.diverged.values().cloned().collect(),
-            features: self.effective_features(),
+            // the nav renders this list: a prepared vault only once enabled
+            features: self
+                .effective_features()
+                .into_iter()
+                .filter(|f| Surface::parse(f).map_or(true, |s| self.feature_on(s)))
+                .collect(),
             vault_enable: self.vault_enable(),
             // the honest downscale target a frontend fits a picture to
             // before proposing — this republic's own derived headroom

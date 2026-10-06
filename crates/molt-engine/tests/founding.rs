@@ -102,6 +102,7 @@ async fn founding_seals_a_verifiable_roster_on_disk() {
         attestations,
         republic_id,
         agenda,
+        features,
         ..
     } = &genesis.body
     else {
@@ -130,7 +131,17 @@ async fn founding_seals_a_verifiable_roster_on_disk() {
 
     // THE guarantee: every attestation verifies against the anchored key
     // over the one canonical table
-    let table = molt_core::roster_canonical_bytes(republic_id, *rule_m, *rule_n, identities, agenda, &[], None);
+    // every founding is keyed (the vault prepared), so it carries a feature set
+    assert!(identities.iter().all(|i| !i.vault_pk.is_empty()) && features.is_some());
+    let table = molt_core::roster_canonical_bytes(
+        republic_id,
+        *rule_m,
+        *rule_n,
+        identities,
+        agenda,
+        &[],
+        features.as_deref(),
+    );
     for att in attestations {
         let identity = identities
             .iter()

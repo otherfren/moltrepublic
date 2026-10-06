@@ -618,3 +618,61 @@ fn a_failed_vault_base_write_rolls_the_wiki_base_back() {
     assert!(st.chain.wiki_base.is_none());
     assert!(!dir.join("wiki_base.bin").exists(), "the new wiki base stayed on disk");
 }
+
+/// A prepared republic (keyed, `memory` only) and `a` pruned onto its
+/// first cut.
+fn prepared_cut() -> (Builder, crate::State) {
+    let mut b = Builder::new_with_features(&SEATS, 2, &["memory"], true);
+    b.commit_org(5, "set_name", "x", &["a", "b"]);
+    let mut st = seat("a", &b);
+    seal_cut(&mut st, &b, false);
+    b.push(st.chain.blocks[0].clone());
+    (b, st)
+}
+
+/// Review HIGH-1: an anchor blob with keys but no feature set is refused
+/// before anything else is trusted.
+#[test]
+fn an_anchor_with_keys_and_no_feature_set_is_refused() {
+    let (b, st) = prepared_cut();
+    let mut blob = st.chain.checkpoint_blob.clone().expect("pruned onto the cut");
+    blob.founding_features = None;
+    // every seat re-signs the forged state, so only the roster rule is left
+    let anchor = &st.chain.blocks[0];
+    let ChainChange::CheckpointVault { upto, wiki_folded, .. } = anchor.change.clone() else {
+        panic!("a vault cut");
+    };
+    let state_hash = crate::chain::checkpoint_state_hash(&blob);
+    let forged = b.seal(anchor.height, ChainChange::CheckpointVault { upto, state_hash, wiki_folded }, &SEATS);
+    let err = crate::chain::verify_suffix_chain(&blob, &[forged], &b.republic_id, None)
+        .expect_err("keys without a feature set");
+    assert!(err.contains("feature set"), "{err}");
+}
+
+/// Review LOW-4 (E5): a suffix holder on a prepared blob refuses a vault
+/// block before the enabling block, and takes it after.
+#[test]
+fn a_suffix_holder_refuses_a_vault_block_before_enabling() {
+    let (b, mut st) = prepared_cut();
+    let (dep, _) = deposit(&b, "a", "a", "n", "one");
+    let mut early = b.clone();
+    let blk = early.commit(applied(10, op(&dep)), &["a", "b"]);
+    let len = st.chain.blocks.len();
+    st.receive_block(blk);
+    assert_eq!(st.chain.blocks.len(), len, "not adopted before enabling");
+
+    let mut late = b.clone();
+    let on = late.commit(
+        ChainChange::Applied {
+            proposal_id: 9,
+            surface: Surface::Organization,
+            payload: serde_json::json!({ "op": "set_features", "value": "memory vault" }),
+        },
+        &["a", "b"],
+    );
+    let blk = late.commit(applied(10, op(&dep)), &["a", "b"]);
+    st.receive_block(on);
+    st.receive_block(blk);
+    assert_eq!(st.chain.blocks.len(), len + 2, "adopted after the enabling block");
+    assert!(st.is_vault_republic());
+}

@@ -198,3 +198,13 @@ fn a_vault_republic_proposes_and_signs_only_the_vault_cut() {
     assert!(matches!(c.chain.proposal_changes.get(&52), Some(ChainChange::CheckpointVault { .. })));
     assert!(c.chain.pending_sigs.contains_key(&52), "co-signed");
 }
+
+/// Review HIGH-1: v6 bytes of `features: None` equal those of `Some([])`,
+/// so a keyed table without a feature set would let a shipper swap the
+/// two under every signature. Every door refuses it.
+#[test]
+fn a_keyed_genesis_without_a_feature_set_is_refused() {
+    let b = Builder::keyed_without_features(&["a", "b", "c", "d"], 2);
+    let err = verify_chain(&b.blocks).expect_err("keys without a feature set");
+    assert!(err.contains("feature set"), "{err}");
+}

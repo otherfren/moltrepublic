@@ -821,3 +821,85 @@ fn a_racing_pending_replace_is_superseded_by_the_commit() {
     let p = st.proposals.get(&18).expect("the card");
     assert!(p.state == ProposalState::Rejected && p.superseded, "the racing replace is superseded");
 }
+
+/// Review LOW-2: an out-of-bounds enable block enables nothing, and the
+/// node says so - no `on`, no nav row, no vault card signed.
+#[test]
+fn an_out_of_bounds_enable_shows_nothing_and_signs_nothing() {
+    let mut b = Builder::new_with_features(&SEATS[..3], 2, &["memory"], true);
+    b.commit_org(9, "set_features", "memory vault", &["a", "b"]);
+    let mut st = seat("a", &b, b.blocks.clone());
+    assert!(!st.is_vault_republic());
+    assert_eq!(st.vault_enable(), molt_core::vault::VaultEnable::Bounds);
+    assert!(!st.status().features.iter().any(|f| f == "vault"), "no nav row");
+    let (dep, _) = deposit(&b, "b", "b", "n", "one");
+    st.proposals.insert(30, card(op(&dep), "b"));
+    not_enabled(st.cmd_approve(ProposalId(30), None));
+    assert!(signed_by(&st, 30).is_empty());
+}
+
+/// Review LOW-4 (E5): prepared but disabled sends nothing - no receipt,
+/// no payload fetch, no piece served - until the enabling block.
+#[test]
+fn a_prepared_vault_sends_nothing_until_enabled() {
+    let mut b = prepared();
+    let (dep, file) = deposit(&b, "b", "b", "n", "one");
+    let mut st = seat("a", &b, b.blocks.clone());
+    st.proposals.insert(30, card(op(&dep), "b"));
+    let sid = secret_id(&b.republic_id, &dep);
+    st.vault_sync_held();
+    st.files.vault.held.insert(sid.clone());
+    crate::vault::receipts::tick(&mut st, 1_000);
+    assert!(st.vault_rx.status.receipts.is_empty(), "no receipt");
+    st.vault_payload_tick();
+    assert!(st.files.vault.fetches.is_empty(), "no fetch");
+    assert!(st.vault_named_payloads().is_empty());
+    let series = molt_core::MessageId(molt_net::file_plane::vault_payload_series(&dep.payload.hash));
+    assert!(!st.serve_vault_pieces("c", series, &[(0, 0)]), "not a series this seat serves");
+
+    b.commit_org(9, "set_features", "memory vault", &["a", "b"]);
+    let mut st = seat("a", &b, b.blocks.clone());
+    st.proposals.insert(30, card(op(&dep), "b"));
+    hold(&mut st, &b, &dep, &file);
+    crate::vault::receipts::tick(&mut st, 1_000);
+    assert!(st.vault_rx.status.receipts.contains_key(&sid), "the receipt once enabled");
+}
+
+/// Review LOW-4 (E5): a reorg that drops the enabling block hides the
+/// vault again and takes the deposit of the dropped branch with it.
+#[test]
+fn a_reorg_dropping_the_enable_block_hides_the_vault_again() {
+    let base = prepared();
+    let rid = base.republic_id.clone();
+    let mut lose = base.clone();
+    lose.commit_org(9, "set_features", "memory vault", &["a", "b"]);
+    let (dep, file) = deposit(&lose, "a", "a", "n", "one");
+    lose.commit(applied(10, op(&dep)), &["a", "b"]);
+    let note = |n: u64| ChainChange::Applied {
+        proposal_id: n,
+        surface: Surface::Memory,
+        payload: json!({ "op": "add_note", "id": n }),
+    };
+    let lost_at_1 = crate::chain::block_hash(&rid, &lose.blocks[1]);
+    let mut win = (100..)
+        .map(|n| {
+            let mut w = base.clone();
+            w.commit(note(n), &["a", "b"]);
+            w
+        })
+        .find(|w| crate::chain::block_hash(&rid, &w.blocks[1]) < lost_at_1)
+        .expect("a smaller fork block");
+    win.commit(note(99), &["a", "b"]);
+
+    let mut st = seat("c", &lose, lose.blocks.clone());
+    hold(&mut st, &lose, &dep, &file);
+    assert!(st.is_vault_republic());
+    assert!(st.vault_state().is_current(&secret_id(&rid, &dep)));
+    for blk in [&win.blocks[2], &win.blocks[1]] {
+        st.receive_block_from("b", blk.clone());
+    }
+    assert_eq!(st.chain.blocks, win.blocks, "re-based onto the other branch");
+    assert!(!st.is_vault_republic(), "hidden again");
+    assert!(st.snapshot(Surface::Vault, None, None).vault.is_none());
+    assert!(st.vault_state().versions.is_empty(), "the deposit went with its branch");
+}

@@ -588,7 +588,9 @@ impl State {
             // every real founding waits for the founder's explicit charter
             charter_proposed: self.ritual_sim,
             founded_ts: crate::now_secs(),
-            features: None,
+            // a keyed table needs a feature set (the sim seam keeps the
+            // legacy baseline it had as `None`); the charter replaces it
+            features: Some(molt_core::Surface::LEGACY_FEATURES.iter().map(ToString::to_string).collect()),
             rule_m,
             rule_n,
             founder,
@@ -4148,6 +4150,19 @@ mod tests {
         reseal(&mut p, &sks);
         let table = ratify_as_b(&p).expect("ratifies");
         assert!(table.starts_with(b"molt-roster-v5\0"));
+    }
+
+    /// Review HIGH-1: a keyed table must carry its feature set, at the
+    /// ratify door and the sealed door.
+    #[test]
+    fn a_keyed_table_without_a_feature_set_is_refused() {
+        let (mut p, sks) = vault_roster(2, 4);
+        p.features = None;
+        reseal(&mut p, &sks);
+        let err = ratify_as_b(&p).expect_err("ratify");
+        assert!(err.contains("feature set"), "{err}");
+        let err = verify_sealed_roster(&p).expect_err("sealed");
+        assert!(err.contains("feature set"), "{err}");
     }
 
     #[test]

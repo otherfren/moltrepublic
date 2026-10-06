@@ -143,9 +143,13 @@ async fn call(port: u16, token: &str, name: &str, args: Value) -> Result<Value, 
 }
 
 async fn vault(port: u16) -> Value {
+    vault_opt(port).await.expect("the vault object")
+}
+
+/// The vault object, `None` while the vault is not enabled.
+async fn vault_opt(port: u16) -> Option<Value> {
     let v = call(port, SEAT, "read_state", json!({ "surface": "vault" })).await.expect("read_state");
-    // absent while the vault is not enabled
-    v.get("vault").cloned().unwrap_or(Value::Null)
+    v.get("vault").filter(|v| !v.is_null()).cloned()
 }
 
 async fn wait_vault(port: u16, what: &str, pred: impl Fn(&Value) -> bool) -> Value {
@@ -258,8 +262,7 @@ async fn vault_tools_refuse_until_enabled() {
         let err = call(a, SEAT, tool, args).await.expect_err("refused while disabled");
         assert!(err.contains("vault: not enabled"), "{tool}: {err}");
     }
-    let state = call(a, SEAT, "read_state", json!({ "surface": "vault" })).await.expect("read_state");
-    assert!(state.get("vault").is_none_or(Value::is_null), "no vault section: {state}");
+    assert!(vault_opt(a).await.is_none(), "no vault section");
     let status = call(a, SEAT, "status", json!({})).await.expect("status");
     assert_eq!(status["vault_enable"], json!("offer"), "{status}");
 
@@ -280,7 +283,11 @@ async fn vault_tools_refuse_until_enabled() {
         assert!(tokio::time::Instant::now() < deadline, "the card never reached b");
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    wait_vault(a, "the vault switched on", |v| v["real"] == json!(true)).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    while !vault_opt(a).await.is_some_and(|v| v["real"] == json!(true)) {
+        assert!(tokio::time::Instant::now() < deadline, "the vault never switched on");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
     let status = call(a, SEAT, "status", json!({})).await.expect("status");
     assert_eq!(status["vault_enable"], json!("on"), "{status}");
     call(a, SEAT, "vault_seal", json!({ "name": "n", "kind": "text", "text": "one" })).await.expect("seal once enabled");

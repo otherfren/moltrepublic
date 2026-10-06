@@ -917,6 +917,21 @@ fn the_vault_nav_hides_until_the_enabling_block() {
     }
 }
 
+/// Review LOW-2: an enable block outside `2 <= m <= n-2` enables nothing,
+/// so no nav row, and the modal names the bounds.
+#[test]
+fn an_out_of_bounds_enable_block_shows_no_vault() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    drop(prepared_workspace_on_disk(tmp.path(), 2, &["a", "b", "c"], true).0);
+    let Node { ui, .. } = open_stored(tmp.path(), &rt);
+    assert!(surface_tab(&ui, "vault").is_none(), "no vault tab");
+    assert!(!ui.get_vault_real());
+    assert!(!ui.get_org_feat_vault());
+    assert_eq!(ui.get_org_vault_enable(), 3, "bounds");
+}
+
 #[test]
 fn ui_snapshot_counts_vault_rows() {
     let tmp = tempfile::tempdir().expect("tmp");

@@ -43,6 +43,12 @@ impl Builder {
         Builder::new_full(members, rule_m, Vec::new(), Some(features), keyed)
     }
 
+    /// A keyed genesis with NO feature set - the shape a chain shipper
+    /// could forge, since its bytes equal those of `Some([])`.
+    pub(crate) fn keyed_without_features(members: &[&str], rule_m: u8) -> Builder {
+        Builder::new_full(members, rule_m, Vec::new(), None, true)
+    }
+
     /// A 2-of-4 roster-v6 vault founding of `a`, `b`, `c`, `d`.
     pub(crate) fn vault() -> Builder {
         Builder::new_with_features(&["a", "b", "c", "d"], 2, &["vault"], true)

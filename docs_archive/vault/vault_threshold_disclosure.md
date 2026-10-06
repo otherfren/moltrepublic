@@ -222,7 +222,9 @@ file per deposit.
   **The roster rule is one-directional and split by door**, so live v5
   republics carrying the mock `vault` key keep verifying: everywhere, any
   `vault_pk` means tag v6, every seat keyed, keys canonical and unique,
-  and 2 ≤ m ≤ n − 2 when `vault` is in `features` (keys without `vault`
+  a feature set present (v6 writes a missing one as an empty run, so
+  `None` and `Some([])` must not both exist), and 2 ≤ m ≤ n − 2 when
+  `vault` is in `features` (keys without `vault`
   are the prepared vault); only a NEW founding refuses `vault` without
   keys. **The real vault exists iff the genesis roster is v6** (it is
   then prepared), and it is ON iff it is also enabled (§3) - never by

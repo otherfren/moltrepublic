@@ -240,13 +240,20 @@ impl State {
         set.into_iter().collect()
     }
 
+    /// Is `surface`'s feature on? A prepared vault is on only where its
+    /// chain enables it (bounds included), not merely by the feature key.
+    pub(crate) fn feature_on(&self, surface: Surface) -> bool {
+        if surface == Surface::Vault && self.is_vault_prepared() {
+            return self.is_vault_republic();
+        }
+        self.effective_features().iter().any(|f| f == surface.as_str())
+    }
+
     /// The D7 gate: refuse an optional surface the charter has not enabled.
     /// The nav HIDES such a surface; this is the engine-side twin an MCP
     /// agent meets (co-equality — clickable or refused must be one verdict).
     pub(crate) fn require_feature(&self, surface: Surface) -> Result<(), molt_core::MoltError> {
-        if surface.is_charter_feature()
-            && !self.effective_features().iter().any(|f| f == surface.as_str())
-        {
+        if surface.is_charter_feature() && !self.feature_on(surface) {
             return Err(molt_core::MoltError::FeatureDisabled(surface.as_str()));
         }
         Ok(())

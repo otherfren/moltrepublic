@@ -62,10 +62,10 @@ fn has_vault(features: Option<&[String]>) -> bool {
 }
 
 /// The roster rule every door applies (plan 1.3.12): any vault key means
-/// every seat keyed with canonical, unique keys - a prepared vault (E2);
-/// `vault` in the features of a keyed table also needs the bounds. A table
-/// without keys passes, `vault` or not (the v5 mock). Returns whether the
-/// table is keyed.
+/// every seat keyed with canonical, unique keys and a feature set - a
+/// prepared vault (E2); `vault` in the features of a keyed table also needs
+/// the bounds. A table without keys passes, `vault` or not (the v5 mock).
+/// Returns whether the table is keyed.
 pub(crate) fn check_roster_keys(
     rule_m: u8,
     rule_n: u8,
@@ -74,6 +74,10 @@ pub(crate) fn check_roster_keys(
 ) -> Result<bool, String> {
     if identities.iter().all(|i| i.vault_pk.is_empty()) {
         return Ok(false);
+    }
+    // v6 writes `None` and `Some([])` as the same bytes: only one may exist
+    if features.is_none() {
+        return Err("vault keys without a feature set".to_string());
     }
     if has_vault(features) && !bounds_ok(rule_m, rule_n) {
         return Err(VaultRefusal::Bounds.to_string());
@@ -242,11 +246,12 @@ impl crate::State {
     pub(crate) fn vault_enable(&self) -> molt_core::vault::VaultEnable {
         use molt_core::vault::VaultEnable;
         match self.vault_founding_ctx() {
-            _ if self.effective_features().iter().any(|f| f == VAULT) => VaultEnable::On,
-            None => VaultEnable::NeedsNewerRepublic,
             Some(ctx) if self.vault_on_chain(&ctx) => VaultEnable::On,
             Some(ctx) if ctx_bounds_ok(&ctx) => VaultEnable::Offer,
             Some(_) => VaultEnable::Bounds,
+            // the v5 mock
+            None if self.effective_features().iter().any(|f| f == VAULT) => VaultEnable::On,
+            None => VaultEnable::NeedsNewerRepublic,
         }
     }
 
@@ -366,10 +371,15 @@ mod tests {
     /// E4: a roster-v5 genesis has no keys, so no vote can add the vault.
     #[test]
     fn set_features_vault_needs_a_newer_republic_on_v5() {
-        let b = Builder::new(&["petra", "walter"], 2);
-        let mut st = chain_signer("petra", &b, b.blocks.clone());
-        assert!(st.is_chain_governed());
-        every_door_refuses(&mut st, "walter", &VaultRefusal::NeedsNewerRepublic);
+        // roster-v4 (no feature set) and the real v5 shape
+        for b in [
+            Builder::new(&["petra", "walter"], 2),
+            Builder::new_with_features(&["petra", "walter"], 2, &["memory"], false),
+        ] {
+            let mut st = genesis_seat("petra", &b, b.blocks.clone());
+            assert!(st.is_chain_governed() && !st.is_vault_prepared());
+            every_door_refuses(&mut st, "walter", &VaultRefusal::NeedsNewerRepublic);
+        }
     }
 
     /// E4: a prepared republic outside `2 <= m <= n-2` cannot enable it.
@@ -402,12 +412,17 @@ mod tests {
     /// mock's `set_features vault` keeps verifying.
     #[test]
     fn a_historic_set_features_vault_block_still_verifies() {
-        let mut b = Builder::new(&["petra", "walter"], 2);
-        b.commit_org(10, "set_features", "memory vault", &["petra", "walter"]);
-        crate::chain::verify_chain(&b.blocks).expect("the historic block verifies");
-        let st = chain_signer("petra", &b, b.blocks.clone());
-        assert!(st.effective_features().iter().any(|f| f == VAULT), "the mock is effective");
-        assert!(!st.is_vault_republic(), "and stays the mock");
+        for mut b in [
+            Builder::new(&["petra", "walter"], 2),
+            Builder::new_with_features(&["petra", "walter"], 2, &["memory"], false),
+        ] {
+            b.commit_org(10, "set_features", "memory vault", &["petra", "walter"]);
+            crate::chain::verify_chain(&b.blocks).expect("the historic block verifies");
+            let st = genesis_seat("petra", &b, b.blocks.clone());
+            assert!(st.effective_features().iter().any(|f| f == VAULT), "the mock is effective");
+            assert!(!st.is_vault_republic(), "and stays the mock");
+            assert_eq!(st.vault_enable(), molt_core::vault::VaultEnable::On);
+        }
     }
 
     /// The vault is never a keep-requirement: a republic where it is
