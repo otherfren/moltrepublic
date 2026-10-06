@@ -29,7 +29,7 @@ impl crate::State {
         }
         // an empty projection must not read as `not the reader`
         if self.vault_base_pending() {
-            return Err(MoltError::VaultBasePending { have: 0, size: 0, want: String::new() });
+            return Err(self.vault_base_pending_error());
         }
         let me = self.member();
         let vs = self.vault_state();

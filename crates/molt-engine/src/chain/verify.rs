@@ -135,7 +135,9 @@ pub(super) fn chain_block_view(block: &ChainBlock) -> molt_core::ChainBlockView 
         }
         // one display kind for both: what the row says ("state summarized
         // up to N") is the same, folded or not
-        ChainChange::Checkpoint { upto, .. } | ChainChange::CheckpointFolded { upto, .. } => (
+        ChainChange::Checkpoint { upto, .. }
+        | ChainChange::CheckpointFolded { upto, .. }
+        | ChainChange::CheckpointVault { upto, .. } => (
             "checkpoint",
             String::new(),
             serde_json::Value::from(*upto),
@@ -361,7 +363,9 @@ fn verify_next(
         // structural checks only — the CONTENT check (recompute the
         // projection at `upto`, compare `state_hash`) runs in the chain
         // walkers, which hold the blocks/base needed to recompute
-        ChainChange::Checkpoint { upto, .. } | ChainChange::CheckpointFolded { upto, .. } => {
+        ChainChange::Checkpoint { upto, .. }
+        | ChainChange::CheckpointFolded { upto, .. }
+        | ChainChange::CheckpointVault { upto, .. } => {
             // EXACTLY the predecessor: a smaller upto would leave blocks in
             // (upto, height) that neither the blob nor a suffix carries —
             // their applied ids would escape the double-apply guard and
@@ -462,37 +466,31 @@ impl ChainWalk {
     /// built with kept verifying against an empty tree after the holder
     /// adopted its real one, and refused the very cut it had co-signed
     /// (round 3, D9).
-    pub(super) fn step(
-        &mut self,
-        block: &ChainBlock,
-        base: Option<&BTreeMap<String, String>>,
-    ) -> Result<(), String> {
+    pub(super) fn step(&mut self, block: &ChainBlock, held: Held<'_>) -> Result<(), String> {
         let (head, consumed) = verify_next(&self.head, block, &self.seen)?;
-        if self.vault.is_some()
-            && matches!(
-                block.change,
-                ChainChange::Checkpoint { .. } | ChainChange::CheckpointFolded { .. }
-            )
-        {
-            return Err(format!(
-                "block {}: a legacy checkpoint in a vault republic",
-                block.height
-            ));
-        }
-        let cut = match &block.change {
-            ChainChange::Checkpoint { upto, state_hash } => {
-                if self.folded_cut {
-                    return Err(format!(
-                        "block {}: a legacy checkpoint after a folded cut",
-                        block.height
-                    ));
-                }
-                Some((*upto, state_hash, false))
+        let cut = CutKind::of(&block.change);
+        if let Some((_, _, kind)) = cut {
+            // one variant per republic kind (plan 1.3.6)
+            if self.vault.is_some() != kind.vault {
+                return Err(format!(
+                    "block {}: {}",
+                    block.height,
+                    if kind.vault {
+                        "a vault checkpoint outside a vault republic"
+                    } else {
+                        "a legacy checkpoint in a vault republic"
+                    }
+                ));
             }
-            ChainChange::CheckpointFolded { upto, state_hash } => Some((*upto, state_hash, true)),
-            _ => None,
-        };
-        if let Some((upto, state_hash, folds)) = cut {
+            // once folded, always folded (K6)
+            if self.folded_cut && !kind.wiki {
+                return Err(format!(
+                    "block {}: a legacy checkpoint after a folded cut",
+                    block.height
+                ));
+            }
+        }
+        if let Some((upto, state_hash, kind)) = cut {
             if let Some(floor) = self.floor {
                 if upto < floor {
                     return Err(format!(
@@ -502,12 +500,12 @@ impl ChainWalk {
             }
             // the running state IS the state at `upto` (upto == height - 1,
             // enforced in verify_next), so the content check needs no refold
-            if &hash_walk_state(&self.running, upto, folds, base)? != state_hash {
+            if hash_walk_state(&self.running, upto, kind, held)? != state_hash {
                 return Err(format!(
                     "checkpoint at upto {upto} does not match this chain's own projection"
                 ));
             }
-            self.folded_cut = self.folded_cut || folds;
+            self.folded_cut = self.folded_cut || kind.wiki;
         }
         fold_one(&mut self.running, block, self.vault.as_ref())?;
         if let Some(id) = consumed {
@@ -695,7 +693,8 @@ pub(crate) fn fold_one(
         // the fold that produces a folded cut's bytes runs at hash time
         ChainChange::Genesis { .. }
         | ChainChange::Checkpoint { .. }
-        | ChainChange::CheckpointFolded { .. } => {}
+        | ChainChange::CheckpointFolded { .. }
+        | ChainChange::CheckpointVault { .. } => {}
     }
     Ok(())
 }
@@ -713,13 +712,13 @@ pub(crate) fn fold_one(
 fn hash_walk_state(
     state: &molt_core::CheckpointState,
     upto: u64,
-    folded: bool,
-    base: Option<&BTreeMap<String, String>>,
+    kind: CutKind,
+    held: Held<'_>,
 ) -> Result<String, String> {
     let mut at = state.clone();
     at.upto = upto;
     at.consumed_ids.sort_unstable();
-    Ok(super::wiki_base::fold_cut(&mut at, folded, base)?.1)
+    Ok(super::wiki_base::fold_cut(&mut at, kind, held)?.hash)
 }
 
 /// Fold further verified blocks (heights `<= upto`) onto a base state —
@@ -972,7 +971,7 @@ pub(crate) fn walk_chain(blocks: &[ChainBlock]) -> Result<ChainWalk, String> {
     for block in rest {
         // a genesis-rooted projection carries no base commitment, so there
         // is no tree to fold onto
-        walk.step(block, None)?;
+        walk.step(block, Held::default())?;
     }
     Ok(walk)
 }
@@ -1080,7 +1079,7 @@ pub(crate) fn verify_suffix_chain(
     expected_republic_id: &str,
     wiki_base: Option<&BTreeMap<String, String>>,
 ) -> Result<ChainHead, String> {
-    Ok(walk_suffix_chain(blob, blocks, expected_republic_id, wiki_base)?.head)
+    Ok(walk_suffix_chain(blob, blocks, expected_republic_id, Held::wiki(wiki_base))?.head)
 }
 
 /// [`verify_suffix_chain`], keeping the walk — the pruned holder's twin of
@@ -1093,22 +1092,21 @@ pub(crate) fn walk_suffix_chain(
     blob: &molt_core::CheckpointState,
     blocks: &[ChainBlock],
     expected_republic_id: &str,
-    wiki_base: Option<&BTreeMap<String, String>>,
+    held: Held<'_>,
 ) -> Result<ChainWalk, String> {
     let Some((anchor, rest)) = blocks.split_first() else {
         return Err("empty suffix chain".to_string());
     };
-    // either cut anchors a suffix: after the first FOLDED cut every holder
+    // any cut anchors a suffix: after the first FOLDED cut every holder
     // prunes to it, so blocks[0] IS a folded anchor from then on
-    let (ChainChange::Checkpoint { upto, state_hash }
-    | ChainChange::CheckpointFolded { upto, state_hash }) = &anchor.change
-    else {
+    let Some((upto, state_hash, anchor_kind)) = CutKind::of(&anchor.change) else {
         return Err("suffix chain does not start with a checkpoint".to_string());
     };
+    let upto = &upto;
     if blob.upto != *upto {
         return Err("checkpoint blob does not cover the anchored upto".to_string());
     }
-    if &checkpoint_state_hash(blob) != state_hash {
+    if checkpoint_state_hash(blob) != state_hash {
         return Err("checkpoint blob does not match the signed state hash".to_string());
     }
     // a checkpoint anchor can never be the genesis (height 0); the checked
@@ -1141,10 +1139,23 @@ pub(crate) fn walk_suffix_chain(
     if usize::from(blob.rule_n) != blob.founding_identities.len() {
         return Err("checkpoint founding table size does not match n".to_string());
     }
-    // no legacy anchor binds a vault key (the v8 layout and the rid skip
-    // it), so a keyed blob is unauthenticated; CheckpointVault binds it (S5)
-    if blob.founding_identities.iter().any(|i| !i.vault_pk.is_empty()) {
-        return Err("a legacy checkpoint cannot anchor a vault republic".to_string());
+    // only a vault anchor binds the keys (checkpoint-v10; the rid skips
+    // them), and a vault republic takes no other anchor (plan 1.3.6)
+    let keyed = blob.founding_identities.iter().any(|i| !i.vault_pk.is_empty());
+    if keyed != anchor_kind.vault {
+        return Err(if keyed {
+            "a legacy checkpoint cannot anchor a vault republic".to_string()
+        } else {
+            "a vault checkpoint needs a vault republic".to_string()
+        });
+    }
+    if keyed {
+        crate::vault::check_roster_keys(
+            blob.rule_m,
+            blob.rule_n,
+            &blob.founding_identities,
+            blob.founding_features.as_deref(),
+        )?;
     }
     // NO circular trust: the blob's roster is only bound by the state hash
     // the anchor sigs attest — so the roster itself must chain back to the
@@ -1197,12 +1208,12 @@ pub(crate) fn walk_suffix_chain(
         folded: 1,
         // the anchor itself may already be a folded cut — from then on a
         // legacy one is refused for the rest of the walk
-        folded_cut: matches!(anchor.change, ChainChange::CheckpointFolded { .. }),
-        // the keyless blob checked above
-        vault: None,
+        folded_cut: anchor_kind.wiki,
+        // the anchor's own founding table (plan 1.3.8)
+        vault: crate::vault::ctx_from_founding(blob.rule_m, &blob.founding_identities),
     };
     for block in rest {
-        walk.step(block, wiki_base)?;
+        walk.step(block, held)?;
     }
     Ok(walk)
 }

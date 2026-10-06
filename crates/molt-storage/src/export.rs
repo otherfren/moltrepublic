@@ -367,32 +367,48 @@ fn export_dir_impl(
     }
 
     let (mut files, mut skipped) = collect_entries(ws_dir)?;
-    // the folded wiki base rides only when it authenticates: a rotted copy
-    // must cost the base (re-fetchable while a holder lives), never the
-    // whole backup - an import that met it would refuse everything else
-    // too. Read eagerly, so the checked bytes are the shipped bytes.
-    if let Some(at) = files.iter().position(|(rel, _)| rel == "wiki_base.bin") {
-        let (rel, src) = files.remove(at);
+    // the folded bases and the vault payloads ride only when they
+    // authenticate: a rotted copy must cost that file (re-fetchable while a
+    // holder lives), never the whole backup - an import that met it would
+    // refuse everything else too. Read eagerly, so the checked bytes are
+    // the shipped bytes.
+    let checked_kind = |rel: &str| -> Option<u64> {
+        match rel {
+            "wiki_base.bin" => Some(crate::READ_CAP_WIKI_BASE),
+            "vault_base.bin" => Some(crate::READ_CAP_VAULT_BASE),
+            r if crate::vault_payload_stem(r).is_some() => Some(crate::READ_CAP_VAULT_PAYLOAD),
+            _ => None,
+        }
+    };
+    let mut kept = Vec::with_capacity(files.len());
+    for (rel, src) in files {
+        let Some(cap) = checked_kind(&rel) else {
+            kept.push((rel, src));
+            continue;
+        };
         let checked = match &src {
-            ExportSource::File(path) => {
-                crate::read_capped(path, crate::READ_CAP_WIKI_BASE, "wiki_base.bin")
-                    .map_err(StorageError::from)
-            }
+            ExportSource::File(path) => crate::read_capped(path, cap, &rel).map_err(StorageError::from),
             ExportSource::Bytes(bytes) => Ok(bytes.clone()),
         }
-        .and_then(|data| crate::verify_wiki_base(&ws_key, &id, &data).map(|()| data));
-        match checked {
-            Ok(data) => {
-                files.push((rel, ExportSource::Bytes(data)));
-                files.sort_by(|a, b| a.0.cmp(&b.0));
+        .and_then(|data| {
+            match rel.as_str() {
+                "wiki_base.bin" => crate::verify_wiki_base(&ws_key, &id, &data),
+                "vault_base.bin" => crate::verify_vault_base(&ws_key, &id, &data),
+                r => crate::verify_vault_payload(&ws_key, &id, crate::vault_payload_stem(r).unwrap_or_default(), &data),
             }
+            .map(|()| data)
+        });
+        match checked {
+            Ok(data) => kept.push((rel, ExportSource::Bytes(data))),
             Err(e) => {
-                tracing::warn!(error = %e, "the wiki base does not authenticate - left out of the export");
+                tracing::warn!(file = %rel, error = %e, "export_skip reason=unauthenticated");
                 skipped.push(rel);
-                skipped.sort();
             }
         }
     }
+    files = kept;
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    skipped.sort();
 
     let kdf = match key {
         ExportKey::Passphrase(_) => {
@@ -551,8 +567,23 @@ fn collect_entries(
         match name.as_str() {
             // `wiki_base.bin`: after a K6 cut the only local copy of the
             // shared memory (the chain keeps just its hash)
-            "manifest.toml" | "prefs.toml" | "chain.state" | "wiki_base.bin" if !is_dir => {
+            "manifest.toml" | "prefs.toml" | "chain.state" | "wiki_base.bin" | "vault_base.bin"
+                if !is_dir =>
+            {
                 files.push((name, ExportSource::File(path)));
+            }
+            // the vault payloads (spec §9.5): `<secret_id>.bin` only
+            "vault" if is_dir => {
+                for f in fs::read_dir(&path)? {
+                    let f = f?;
+                    let f_name = f.file_name().to_string_lossy().into_owned();
+                    let rel = format!("vault/{f_name}");
+                    if crate::vault_payload_stem(&rel).is_some() && f.file_type()?.is_file() {
+                        files.push((rel, ExportSource::File(f.path())));
+                    } else if !f_name.starts_with('.') {
+                        skipped.push(rel);
+                    }
+                }
             }
             // §3.3 hard exclusion + runtime scratch
             "transport.state" | "LOCK" => {}
@@ -1138,6 +1169,81 @@ mod tests {
             .expect("decrypt");
         assert!(entry(&a, "wiki_base.bin").is_none(), "the rotted base does not travel");
         assert!(entry(&a, "chain.state").is_some(), "everything else still does");
+    }
+
+    fn sid(c: char) -> String {
+        std::iter::repeat_n(c, 64).collect()
+    }
+
+    /// Spec §9.5: after a cut the vault base and the current payloads are
+    /// the only local copies; a backup carries them.
+    #[test]
+    fn a_vault_base_and_payloads_travel_with_the_backup() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("root");
+        let seed =
+            crate::seed_entropy(&crate::generate_seed_phrase().expect("gen")).expect("entropy");
+        let ws = crate::create_workspace(&root, &seed, &founded()).expect("create");
+        ws.write_chain(None, &[]).expect("chain.state");
+        ws.write_vault_base(b"the folded vault").expect("vault base");
+        ws.write_vault_payload(&sid('a'), b"one").expect("payload");
+        let dir = ws.dir().to_path_buf();
+        drop(ws);
+        let mut blob = Vec::new();
+        let outcome =
+            export_dir(&root, &dir, &ExportKey::passphrase(PASS), &mut blob).expect("export");
+        assert!(outcome.skipped.is_empty(), "nothing unknown: {:?}", outcome.skipped);
+        let a = read_export(&mut blob.as_slice(), &ExportSecret::passphrase(PASS))
+            .expect("decrypt");
+        let base = entry(&a, "vault_base.bin").expect("the vault base travels");
+        assert_eq!(base.data, fs::read(dir.join("vault_base.bin")).expect("disk"));
+        let rel = format!("vault/{}.bin", sid('a'));
+        let payload = entry(&a, &rel).expect("the payload travels");
+        assert_eq!(payload.data, fs::read(dir.join(&rel)).expect("disk"));
+    }
+
+    /// A rotted vault file is left out and named; the rest backs up.
+    #[test]
+    fn a_damaged_vault_file_is_named_and_the_rest_still_backs_up() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("root");
+        let seed =
+            crate::seed_entropy(&crate::generate_seed_phrase().expect("gen")).expect("entropy");
+        let ws = crate::create_workspace(&root, &seed, &founded()).expect("create");
+        ws.write_chain(None, &[]).expect("chain.state");
+        ws.write_vault_base(b"the folded vault").expect("vault base");
+        ws.write_vault_payload(&sid('a'), b"one").expect("payload");
+        ws.write_vault_payload(&sid('b'), b"two").expect("payload");
+        let dir = ws.dir().to_path_buf();
+        drop(ws);
+        let rot = |rel: &str| {
+            let path = dir.join(rel);
+            let mut bytes = fs::read(&path).expect("file");
+            let last = bytes.len() - 1;
+            bytes[last] ^= 0x01;
+            fs::write(&path, &bytes).expect("rot");
+        };
+        rot("vault_base.bin");
+        let bad = format!("vault/{}.bin", sid('a'));
+        rot(&bad);
+        // a payload renamed to another deposit does not open under its stem
+        let good = format!("vault/{}.bin", sid('b'));
+        let moved = format!("vault/{}.bin", sid('c'));
+        fs::copy(dir.join(&good), dir.join(&moved)).expect("copy");
+
+        let mut blob = Vec::new();
+        let outcome =
+            export_dir(&root, &dir, &ExportKey::passphrase(PASS), &mut blob).expect("export");
+        for named in ["vault_base.bin", bad.as_str(), moved.as_str()] {
+            assert!(outcome.skipped.iter().any(|s| s == named), "{named}: {:?}", outcome.skipped);
+        }
+        let a = read_export(&mut blob.as_slice(), &ExportSecret::passphrase(PASS))
+            .expect("decrypt");
+        assert!(entry(&a, "vault_base.bin").is_none());
+        assert!(entry(&a, &bad).is_none());
+        assert!(entry(&a, &moved).is_none());
+        assert!(entry(&a, &good).is_some(), "the sound payload still travels");
+        assert!(entry(&a, "chain.state").is_some());
     }
 
     /// Round-trip keystone (storage half): everything the include table

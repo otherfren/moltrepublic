@@ -43,6 +43,7 @@ mod ingest;
 mod presence;
 pub(crate) use presence::pill_state;
 mod recovery;
+pub(crate) mod vault_base;
 pub(crate) mod vault_payload;
 #[cfg(test)]
 pub(crate) use ingest::{CHAIN_SERVE_DEBOUNCE_SECS, PARKED_READS_PER_FRAME};
@@ -321,6 +322,11 @@ impl supervisor::StateStore for FileStateStore {
     /// Vault S3a: one piece of a held payload, decrypted on the writer.
     async fn vault_piece(&self, file: &str, index: u32) -> Option<Vec<u8>> {
         self.handle.load_vault_payload_piece(file, index).await
+    }
+
+    /// Vault S5: one piece of the held vault base.
+    async fn vault_base_piece(&self, index: u32) -> Option<Vec<u8>> {
+        self.handle.load_vault_base_piece(index).await
     }
 
     async fn load(&self) -> molt_core::TransportState {

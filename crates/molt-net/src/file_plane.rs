@@ -325,6 +325,27 @@ pub fn vault_payload_series(payload_hash: &str) -> [u8; MSG_ID_LEN] {
     id
 }
 
+/// **The folded vault base's series key** (vault S5): `HKDF-SHA256(ikm =
+/// the rotation seed, info = molt_core::vault::base_series_info(commitment))`,
+/// derived for the reason [`wiki_base_key`] is.
+pub fn vault_base_key(rotation_seed: &[u8; 32], commitment: &str) -> [u8; 32] {
+    let hk = hkdf::Hkdf::<Sha256>::new(None, rotation_seed);
+    let mut out = [0u8; 32];
+    hk.expand(&molt_core::vault::base_series_info(commitment), &mut out)
+        .expect("32 bytes is within the HKDF-SHA256 expand limit");
+    out
+}
+
+/// The series id the folded vault base travels as: the head of
+/// `sha256(base_series_info(commitment))`.
+#[must_use]
+pub fn vault_base_series(commitment: &str) -> [u8; MSG_ID_LEN] {
+    let digest = Sha256::digest(molt_core::vault::base_series_info(commitment));
+    let mut id = [0u8; MSG_ID_LEN];
+    id.copy_from_slice(&digest[..MSG_ID_LEN]);
+    id
+}
+
 /// Frame one piece: header + payload, zero-padded to the uniform block.
 pub fn frame_piece(index: u32, count: u32, payload: &[u8]) -> Result<Vec<u8>, NetError> {
     if payload.len() > PIECE_PAYLOAD_LEN {
@@ -1425,5 +1446,20 @@ mod tests {
         assert_ne!(Some(vault_payload_series(&hash)), wiki_base_series(&hash));
         assert_ne!(vault_payload_key(&seed, &hash), wiki_base_key(&seed, &hash));
         assert_ne!(vault_payload_key(&seed, &hash), vault_payload_key(&[8u8; 32], &hash));
+    }
+
+    /// The folded vault base is a third family: never a payload's or the
+    /// wiki base's id or key for the same hex (vault S5).
+    #[test]
+    fn a_vault_base_series_is_its_own_family() {
+        let hash = "ab".repeat(32);
+        let seed = [9u8; 32];
+        assert_eq!(vault_base_series(&hash), vault_base_series(&hash));
+        assert_ne!(vault_base_series(&hash), vault_base_series(&"cd".repeat(32)));
+        assert_ne!(vault_base_series(&hash), vault_payload_series(&hash));
+        assert_ne!(Some(vault_base_series(&hash)), wiki_base_series(&hash));
+        assert_ne!(vault_base_key(&seed, &hash), vault_payload_key(&seed, &hash));
+        assert_ne!(vault_base_key(&seed, &hash), wiki_base_key(&seed, &hash));
+        assert_ne!(vault_base_key(&seed, &hash), vault_base_key(&[8u8; 32], &hash));
     }
 }

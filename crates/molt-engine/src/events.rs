@@ -803,6 +803,12 @@ impl State {
         self.set_checkpoint_blob(None);
         self.chain.pending_served_blob = None;
         self.chain.applied.clear();
+        // vault S5: the old workspace's base and its fetch
+        self.set_vault_base(None);
+        if let Some(h) = self.files.vault_base.fetch.take() {
+            h.abort();
+        }
+        self.files.vault_base = crate::net::vault_base::VaultBasePlane::default();
         self.chain.pending_sigs.clear();
         self.chain.own_approvals.clear();
         self.chain.served_at.clear();

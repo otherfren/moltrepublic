@@ -1655,6 +1655,23 @@ pub(crate) fn spawn_wiki_base_fetch(
     })
 }
 
+/// Fetch the folded vault base series (vault S5); the engine checks the
+/// bytes against the commitment and re-verifies them.
+pub(crate) fn spawn_vault_base_fetch(
+    channel: molt_net::ritual_net::GroupChannel,
+    id: MessageId,
+    key: [u8; 32],
+    from: u64,
+    expect: molt_net::file_plane::SeriesExpect,
+    scope: u64,
+    cmd_tx: mpsc::Sender<Envelope>,
+) -> tokio::task::AbortHandle {
+    spawn_derived_series_fetch(channel, id, key, from, expect, scope, cmd_tx, move |done| match done {
+        Ok(bytes) => Command::NetVaultBaseFetched { bytes, generation: Some(scope) },
+        Err(_) => Command::NetVaultBaseFailed { generation: Some(scope) },
+    })
+}
+
 /// Fetch one vault payload series (plan S3a); the engine checks the bytes
 /// against `hash`.
 #[allow(clippy::too_many_arguments)]

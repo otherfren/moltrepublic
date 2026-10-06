@@ -323,21 +323,26 @@ pub fn import_stage(
     // the restore: the chain, the log and the keys are what the user came
     // for, and the base stays re-fetchable while any holder lives (the same
     // rule the open applies, knowledge_base_scale.md §4.9.9)
-    let base_ok = archive
-        .entries
-        .iter()
-        .find(|e| e.path == "wiki_base.bin")
-        .map(|e| crate::verify_wiki_base(&ws_key, &id, &e.data));
-    if let Some(Err(e)) = &base_ok {
-        tracing::warn!(error = %e, "the blob's wiki base does not authenticate - not restored");
-    }
-    let plant = |path: &str| path != "wiki_base.bin" || matches!(base_ok, Some(Ok(())));
+    // The vault base and payloads follow the same rule (spec §9.5); a
+    // payload must open under the key its own stem derives.
     let dropped: Vec<String> = archive
         .entries
         .iter()
-        .filter(|e| !plant(&e.path))
-        .map(|e| e.path.clone())
+        .filter_map(|e| {
+            let checked = match e.path.as_str() {
+                "wiki_base.bin" => crate::verify_wiki_base(&ws_key, &id, &e.data),
+                "vault_base.bin" => crate::verify_vault_base(&ws_key, &id, &e.data),
+                p => match crate::vault_payload_stem(p) {
+                    Some(stem) => crate::verify_vault_payload(&ws_key, &id, stem, &e.data),
+                    None => return None,
+                },
+            };
+            let err = checked.err()?;
+            tracing::warn!(file = %e.path, error = %err, "import_drop reason=unauthenticated");
+            Some(e.path.clone())
+        })
         .collect();
+    let plant = |path: &str| !dropped.iter().any(|d| d == path);
 
     // write the staging dir (dot-invisible to the Open scan); a stale
     // staging for the same id is a leftover crash artifact — sweep it
@@ -384,8 +389,11 @@ pub fn import_stage(
 /// might try to smuggle in.
 fn allowed_entry(path: &str) -> bool {
     match path {
-        "manifest.toml" | "prefs.toml" | "chain.state" | "wiki_base.bin" => true,
+        "manifest.toml" | "prefs.toml" | "chain.state" | "wiki_base.bin" | "vault_base.bin" => true,
         p => {
+            if p.starts_with("vault/") {
+                return crate::vault_payload_stem(p).is_some();
+            }
             if let Some(file) = p.strip_prefix("log/") {
                 // the per-segment key table of a compacted workspace travels
                 // with its segments (WP4a) — without it the restored log is
@@ -761,6 +769,99 @@ mod tests {
         let (opened, loaded) = crate::open_workspace(&restored).expect("open restored");
         assert_eq!(loaded.tail.first().map(|e| e.seq), Some(1), "the log restored");
         assert_eq!(opened.read_wiki_base().expect("readable"), None, "no base held");
+    }
+
+    /// Spec §9.5: a vault file that does not authenticate under the blob's
+    /// key (another workspace's, or a payload under another stem) costs
+    /// that file; the rest restores, and the dropped ones are named.
+    #[test]
+    fn a_foreign_vault_file_is_dropped_and_the_rest_restores() {
+        let sid = |c: char| -> String { std::iter::repeat_n(c, 64).collect() };
+        let tmp = tempfile::tempdir().expect("tmp");
+        let phrase = crate::generate_seed_phrase().expect("gen");
+        let seed = crate::seed_entropy(&phrase).expect("entropy");
+        let root = tmp.path().join("src-root");
+        let ws = crate::create_workspace(&root, &seed, &founded_genesis()).expect("create");
+        ws.write_chain(None, &[]).expect("chain.state");
+        ws.write_vault_base(b"our vault").expect("vault base");
+        ws.write_vault_payload(&sid('a'), b"one").expect("payload a");
+        ws.write_vault_payload(&sid('b'), b"two").expect("payload b");
+        let id = ws.manifest.workspace.id.clone();
+        let dir = ws.dir().to_path_buf();
+        drop(ws);
+        let other = tmp.path().join("other");
+        std::fs::create_dir_all(&other).expect("other");
+        let (_o_root, o_dir, _o_seed, _o_id) = make_ws_with_wiki_base(&other, b"x");
+        {
+            let (o_ws, _) = crate::open_workspace(&o_dir).expect("open other");
+            o_ws.write_vault_base(b"their vault").expect("foreign base");
+        }
+        let foreign_base = std::fs::read(o_dir.join("vault_base.bin")).expect("foreign base");
+        let a_rel = format!("vault/{}.bin", sid('a'));
+        let b_rel = format!("vault/{}.bin", sid('b'));
+        let b_bytes = std::fs::read(dir.join(&b_rel)).expect("payload b");
+
+        let honest = blob_of(&root, &dir, &ExportKey::Workspace);
+        let ws_key = crate::derive_workspace_key(&seed, &id);
+        let archive = crate::export::read_export(
+            &mut honest.as_slice(),
+            &ExportSecret::WorkspaceKey(ws_key),
+        )
+        .expect("decrypt the honest backup");
+        // the base swapped for a foreign one, payload a replaced by b's
+        // frames (authentic, but under the wrong stem)
+        let entries: Vec<(&str, &[u8])> = archive
+            .entries
+            .iter()
+            .map(|e| {
+                let data: &[u8] = match e.path.as_str() {
+                    "vault_base.bin" => &foreign_base,
+                    p if p == a_rel => &b_bytes,
+                    _ => &e.data,
+                };
+                (e.path.as_str(), data)
+            })
+            .collect();
+        assert!(entries.iter().any(|(p, _)| *p == a_rel), "the payload was exported");
+        let meta = serde_json::to_value(&archive.meta).expect("meta json");
+        let blob = forge_blob(&id, &ws_key, &meta, &entries);
+
+        let dest_root = tmp.path().join("dest-root");
+        std::fs::create_dir_all(&dest_root).expect("dest root");
+        let staging = import_stage(&dest_root, &blob, &phrase).expect("the restore goes through");
+        assert!(!staging.dir.join("vault_base.bin").exists());
+        assert!(!staging.dir.join(&a_rel).exists());
+        assert_eq!(staging.dropped, [a_rel.clone(), "vault_base.bin".to_string()]);
+        let (sk, _pk) = crate::derive_identity_key(&seed, &id);
+        let restored = staging.commit(&dest_root, false, Some(&sk)).expect("commit");
+        let (opened, _) = crate::open_workspace(&restored).expect("open restored");
+        assert_eq!(opened.read_vault_base().expect("readable"), None);
+        assert_eq!(opened.read_vault_payload(&sid('b')).expect("readable"), Some(b"two".to_vec()));
+        assert_eq!(opened.list_vault_payloads(), [sid('b')]);
+    }
+
+    /// Vault files ride the allowlist only as `vault_base.bin` and
+    /// `vault/<64 lowercase hex>.bin`.
+    #[test]
+    fn the_import_allowlist_takes_only_hex_vault_files() {
+        let hex: String = "0123456789abcdef".repeat(4);
+        assert!(allowed_entry("vault_base.bin"));
+        assert!(allowed_entry(&format!("vault/{hex}.bin")));
+        for evil in [
+            "vault/".to_string(),
+            "vault/x.bin".to_string(),
+            format!("vault/{}.bin", hex.to_uppercase()),
+            format!("vault/{}.bin", &hex[1..]),
+            format!("vault/{hex}0.bin"),
+            format!("vault/{hex}.bin.tmp"),
+            format!("vault/a/{hex}.bin"),
+            format!("vault/../{hex}.bin"),
+            format!("log/{hex}.bin"),
+            "log/vault_base.bin".to_string(),
+            "vault_base.bin.bak".to_string(),
+        ] {
+            assert!(!allowed_entry(&evil), "{evil}");
+        }
     }
 
     #[test]
