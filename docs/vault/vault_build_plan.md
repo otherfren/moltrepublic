@@ -207,7 +207,8 @@ Consequence: complaints ARE decidable; the spec's undecided fallback
     commits but is void (nobody answers, the card says `void`). Deposit
     blocks are hard-rejected by `verify_chain` when malformed or when
     `sig_depositor` fails; grant blocks when `grant_id` does not recompute
-    or the reader is not a seat.
+    or the reader is not a seat. A deposit whose signed `replaces` is not
+    its slot's current version commits void the same way (spec §6).
 11. **Join MAC unchanged.** `vault_pk` rides `JoinRequest` with
     `#[serde(default)]`; on Nostr the gift-wrap is signed by the joiner's
     transport key, and on every path the member's sign-what-you-see check
@@ -253,7 +254,11 @@ Consequence: complaints ARE decidable; the spec's undecided fallback
     text type is `molt_core::vault::SecretText(String)` (serde
     transparent, `Debug` prints `<N bytes>`), used in `Command::VaultSeal`
     and `Reply::VaultText`; frame and command structs carrying shares,
-    `ikmE` or `enc` derive a redacting `Debug` as well.
+    `ikmE` or `enc` derive a redacting `Debug` as well. `Share` and
+    `SecretScalar` wipe on drop, and `deal`/`combine`/`verify_share` wipe
+    the share and secret copies vsss-rs hands back. Accepted residual:
+    vsss-rs's internal polynomial and the deal rng's key state cannot be
+    wiped from outside (process memory only, never disk or logs).
 18. **Chained false complaints drain the threshold - inherent, stated.**
     Each reveal publishes the complainer's share; k colluding complainers
     lower a deposit to m - k (they could publish their shares out of band

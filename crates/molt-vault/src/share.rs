@@ -117,16 +117,18 @@ pub fn deal(deal_seed: &[u8; 32], m: u8, xs: &[u8]) -> Result<Dealt, VaultError>
     let s = secret_from_seed(deal_seed);
     let ids: Vec<Id> = xs.iter().copied().map(id).collect();
     let rng = rand_chacha::ChaCha20Rng::from_seed(*deal_seed);
-    let (shares, verifiers) =
-        vsss_rs::feldman::split_secret_with_participant_generator::<VShare, Verifier>(
-            usize::from(m),
-            xs.len(),
-            &IdentifierPrimeField(WrappedScalar(s.0)),
-            None,
-            rng,
-            &[ParticipantIdGeneratorType::list(&ids)],
-        )
-        .map_err(|_| VaultError::Deal)?;
+    // vsss-rs's own polynomial and the rng's key state stay unwiped (plan 1.3.17)
+    let mut secret = IdentifierPrimeField(WrappedScalar(s.0));
+    let split = vsss_rs::feldman::split_secret_with_participant_generator::<VShare, Verifier>(
+        usize::from(m),
+        xs.len(),
+        &secret,
+        None,
+        rng,
+        &[ParticipantIdGeneratorType::list(&ids)],
+    );
+    secret.0 .0.zeroize();
+    let (mut dealt, verifiers) = split.map_err(|_| VaultError::Deal)?;
     let commitments =
         <Vec<Verifier> as FeldmanVerifierSet<VShare, Verifier>>::verifiers(&verifiers)
             .iter()
@@ -134,9 +136,12 @@ pub fn deal(deal_seed: &[u8; 32], m: u8, xs: &[u8]) -> Result<Dealt, VaultError>
             .collect();
     let shares = xs
         .iter()
-        .zip(shares)
+        .zip(&dealt)
         .map(|(x, sh)| (*x, Share(sh.1 .0 .0.to_bytes())))
         .collect();
+    for sh in &mut dealt {
+        sh.1 .0 .0.zeroize();
+    }
     Ok(Dealt {
         s,
         shares,
@@ -170,8 +175,10 @@ pub fn verify_share(commitments: &[[u8; 32]], x: u8, share: &Share) -> bool {
     if commitments.is_empty() || x == 0 {
         return false;
     }
-    let sh: VShare = (id(x), IdentifierPrimeField(WrappedScalar(v)));
-    <Vec<Verifier> as FeldmanVerifierSet<VShare, Verifier>>::verify_share(&set, &sh).is_ok()
+    let mut sh: VShare = (id(x), IdentifierPrimeField(WrappedScalar(v)));
+    let ok = <Vec<Verifier> as FeldmanVerifierSet<VShare, Verifier>>::verify_share(&set, &sh).is_ok();
+    sh.1 .0 .0.zeroize();
+    ok
 }
 
 /// Lagrange-combine the first `m` shares with distinct x.
@@ -180,7 +187,7 @@ pub fn verify_share(commitments: &[[u8; 32]], x: u8, share: &Share) -> bool {
 /// [`VaultError::Threshold`] with fewer than `m` distinct, canonical shares.
 pub fn combine(m: u8, shares: &[(u8, Share)]) -> Result<SecretScalar, VaultError> {
     let mut seen = std::collections::BTreeSet::new();
-    let picked: Vec<VShare> = shares
+    let mut picked: Vec<VShare> = shares
         .iter()
         .filter(|(x, _)| *x != 0 && seen.insert(*x))
         .filter_map(|(x, sh)| {
@@ -189,9 +196,16 @@ pub fn combine(m: u8, shares: &[(u8, Share)]) -> Result<SecretScalar, VaultError
         })
         .take(usize::from(m))
         .collect();
-    if m < 2 || picked.len() < usize::from(m) {
-        return Err(VaultError::Threshold);
+    let combined = if m < 2 || picked.len() < usize::from(m) {
+        Err(VaultError::Threshold)
+    } else {
+        picked.combine().map_err(|_| VaultError::Threshold)
+    };
+    for sh in &mut picked {
+        sh.1 .0 .0.zeroize();
     }
-    let s = picked.combine().map_err(|_| VaultError::Threshold)?;
-    Ok(SecretScalar(s.0 .0))
+    let mut s = combined?;
+    let out = SecretScalar(s.0 .0);
+    s.0 .0.zeroize();
+    Ok(out)
 }
