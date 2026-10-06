@@ -170,6 +170,10 @@ impl crate::State {
 
     /// The republic folded its vault into a base this node does not hold.
     pub(crate) fn vault_base_pending(&self) -> bool {
+        #[cfg(test)]
+        if self.vault_seams.base_pending() {
+            return true;
+        }
         false
     }
 

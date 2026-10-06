@@ -267,25 +267,35 @@ impl crate::State {
     }
 
     /// Spec §8.2: a pending grant on a replaced version drops like a stale
-    /// wiki patch. A version not committed here yet is not judged.
+    /// wiki patch; one whose version is no longer replaced (a reorg) is a
+    /// vote again. A version not committed here is not judged.
     pub(crate) fn supersede_stale_vault_grants(&mut self) {
         if self.vault_base_pending() {
             return;
         }
         let st = self.vault_state();
-        let stale: Vec<u64> = self
-            .proposals
-            .iter()
-            .filter(|(_, p)| p.surface == Surface::Vault && p.state == ProposalState::Proposed)
-            .filter_map(|(id, p)| match serde_json::from_value::<VaultOp>(p.payload.clone()) {
-                Ok(VaultOp::Grant(g))
-                    if st.versions.contains_key(&g.secret_id) && !st.is_current(&g.secret_id) =>
+        let mut stale = Vec::new();
+        let mut revived = Vec::new();
+        for (id, p) in &self.proposals {
+            if p.surface != Surface::Vault {
+                continue;
+            }
+            let Ok(VaultOp::Grant(g)) = serde_json::from_value::<VaultOp>(p.payload.clone()) else {
+                continue;
+            };
+            let replaced = st.versions.contains_key(&g.secret_id) && !st.is_current(&g.secret_id);
+            match p.state {
+                ProposalState::Proposed if replaced => stale.push(*id),
+                ProposalState::Rejected
+                    if !replaced
+                        && p.superseded
+                        && p.superseded_kind == Some(molt_core::SupersededKind::Conflict) =>
                 {
-                    Some(*id)
+                    revived.push(*id);
                 }
-                _ => None,
-            })
-            .collect();
+                _ => {}
+            }
+        }
         for id in stale {
             if let Some(p) = self.proposals.get_mut(&id) {
                 p.state = ProposalState::Rejected;
@@ -294,6 +304,14 @@ impl crate::State {
             }
             self.stash_voted(id);
             tracing::info!(id, "vault: grant superseded by a replace");
+        }
+        for id in revived {
+            if let Some(p) = self.proposals.get_mut(&id) {
+                p.state = ProposalState::Proposed;
+                p.superseded = false;
+                p.superseded_kind = None;
+            }
+            tracing::info!(id, "vault: grant open again after a reorg");
         }
     }
 
@@ -308,6 +326,8 @@ impl crate::State {
                 continue;
             }
             if let Ok(VaultOp::Grant(g)) = serde_json::from_value::<VaultOp>(payload.clone()) {
+                #[cfg(test)]
+                self.vault_seams.note_displaced(&g.grant_id);
                 super::grant::on_displaced(self, &g.grant_id);
             }
         }

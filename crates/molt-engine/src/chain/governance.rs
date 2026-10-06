@@ -150,6 +150,13 @@ impl State {
         let Some(change) = self.proposal_change(id) else {
             return;
         };
+        // plan 1.3.15: no cut over a vault base not held here, own or co-signed
+        if matches!(change, ChainChange::Checkpoint { .. } | ChainChange::CheckpointFolded { .. })
+            && self.vault_base_pending()
+        {
+            tracing::warn!(id, "vault: base pending, not signing a cut");
+            return;
+        }
         // the vault gate holds on every path that signs, not only `approve`
         if let ChainChange::Applied { surface: Surface::Vault, payload, .. } = &change {
             if let Err(e) = self.vault_approve_check(payload) {

@@ -347,6 +347,31 @@ fn a_replace_supersedes_pending_grants_and_keeps_the_old_payload() {
     assert!(st.proposals.get(&16).is_some_and(|p| p.superseded));
 }
 
+fn grant_op(sid: &str, reader: &str, id: u64) -> Value {
+    let g = VaultGrant { grant_id: grant_id(sid, reader, id), secret_id: sid.to_string(), reader: reader.into() };
+    serde_json::to_value(VaultOp::Grant(g)).expect("json")
+}
+
+/// The reopen path (cards replay first, then the chain re-projects)
+/// reaches the same superseded state a live node did.
+#[test]
+fn a_replace_supersede_survives_a_reopen() {
+    let mut b = Builder::vault();
+    let (x, _) = deposit(&b, "a", "a", "n", "one");
+    b.commit(applied(10, op(&x)), &["a", "b"]);
+    let sid_x = secret_id(&b.republic_id, &x);
+    let (y, _) = deposit(&b, "a", "a", "n", "two");
+    b.commit(applied(14, op(&y)), &["a", "b"]);
+
+    let mut st = seat("c", &b, Vec::new());
+    st.proposals.insert(12, card(grant_op(&sid_x, "d", 12), "d"));
+    st.adopt_chain(b.blocks.clone());
+    assert!(st.chain.head.is_some());
+    let g = st.proposals.get(&12).expect("the grant card");
+    assert_eq!(g.state, ProposalState::Rejected);
+    assert!(g.superseded);
+}
+
 #[test]
 fn a_reorged_replace_keeps_the_old_payload() {
     let mut b = Builder::vault();
@@ -360,6 +385,8 @@ fn a_reorged_replace_keeps_the_old_payload() {
     hold(&mut st, &b, &y, &yf);
     let (sid_x, sid_y) = (secret_id(&b.republic_id, &x), secret_id(&b.republic_id, &y));
     assert!(st.vault_state().is_current(&sid_y));
+    assert!(st.receive_proposed(16, Surface::Vault, grant_op(&sid_x, "d", 16), "d"));
+    assert!(st.proposals.get(&16).is_some_and(|p| p.superseded), "a grant on the replaced version");
 
     // a contender at the replace's height that wins the tip tie-break
     let link = |blk: &ChainBlock| {
@@ -383,6 +410,97 @@ fn a_reorged_replace_keeps_the_old_payload() {
     assert!(!vs.versions.contains_key(&sid_y));
     assert!(st.vault_payload_held(&sid_x), "and its file is still here");
     assert!(st.vault_payload_held(&sid_y), "nothing was deleted");
+    let g = st.proposals.get(&16).expect("the grant card");
+    assert_eq!(g.state, ProposalState::Proposed, "the grant is a vote again");
+    assert!(!g.superseded && g.superseded_kind.is_none());
+}
+
+/// The deep re-base (`try_reorg`): both branches' payloads stay, the
+/// projection follows the adopted branch, a grant the new branch
+/// re-commits is not displaced, one it drops is.
+#[test]
+fn a_deep_reorg_follows_the_adopted_branch() {
+    let mut base = Builder::vault();
+    let (x, xf) = deposit(&base, "a", "a", "n", "one");
+    base.commit(applied(10, op(&x)), &["a", "b"]);
+    let rid = base.republic_id.clone();
+    let sid_x = secret_id(&rid, &x);
+    let (y, yf) = deposit(&base, "a", "a", "n", "two");
+    let sid_y = secret_id(&rid, &y);
+
+    let mut lose = base.clone();
+    lose.commit(applied(12, grant_op(&sid_x, "d", 12)), &["a", "b"]);
+    lose.commit(applied(13, grant_op(&sid_x, "b", 13)), &["a", "b"]);
+    lose.commit(applied(14, op(&y)), &["a", "b"]);
+    let note = |n: u64| ChainChange::Applied {
+        proposal_id: n,
+        surface: Surface::Memory,
+        payload: json!({ "op": "add_note", "id": n }),
+    };
+    let lost_at_2 = crate::chain::block_hash(&rid, &lose.blocks[2]);
+    let mut win = (100..)
+        .map(|n| {
+            let mut w = base.clone();
+            w.commit(note(n), &["a", "b"]);
+            w
+        })
+        .find(|w| crate::chain::block_hash(&rid, &w.blocks[2]) < lost_at_2)
+        .expect("a smaller fork block");
+    win.commit(applied(12, grant_op(&sid_x, "d", 12)), &["a", "b"]);
+    win.commit(note(99), &["a", "b"]);
+
+    let mut st = seat("c", &lose, lose.blocks.clone());
+    hold(&mut st, &lose, &x, &xf);
+    hold(&mut st, &lose, &y, &yf);
+    assert!(st.receive_proposed(16, Surface::Vault, grant_op(&sid_x, "c", 16), "c"));
+    assert!(st.proposals.get(&16).is_some_and(|p| p.superseded));
+
+    for blk in [&win.blocks[4], &win.blocks[3], &win.blocks[2]] {
+        st.receive_block_from("b", blk.clone());
+    }
+    assert_eq!(st.chain.blocks, win.blocks, "re-based onto the other branch");
+    let vs = st.vault_state();
+    assert!(vs.is_current(&sid_x));
+    assert!(!vs.versions.contains_key(&sid_y));
+    assert_eq!(vs.grants.len(), 1);
+    assert!(st.vault_payload_held(&sid_x) && st.vault_payload_held(&sid_y));
+    assert_eq!(
+        st.vault_seams.displaced_grants(),
+        [grant_id(&sid_x, "b", 13)],
+        "only the grant the new branch drops"
+    );
+    assert_eq!(st.proposals.get(&16).map(|p| p.state), Some(ProposalState::Proposed));
+}
+
+/// Plan 1.3.15: a node without the base signs no cut, its own included.
+#[test]
+fn a_base_pending_node_signs_no_cut() {
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    b.commit_applied(1, &["petra", "walter"]);
+    let mut petra = crate::chain::test_support::chain_signer("petra", &b, b.blocks.clone());
+    let mut walter = crate::chain::test_support::chain_signer("walter", &b, b.blocks.clone());
+    let id = match petra.cmd_propose_checkpoint().expect("propose") {
+        Reply::Proposed { id, .. } => id.0,
+        other => panic!("unexpected: {other:?}"),
+    };
+    let Some(ChainChange::Checkpoint { upto, state_hash }) = petra.chain.proposal_changes.get(&id).cloned() else {
+        panic!("a cut");
+    };
+
+    let mut pending = crate::chain::test_support::chain_signer("petra", &b, b.blocks.clone());
+    pending.vault_seams.set_base_pending(true);
+    let own = match pending.cmd_propose_checkpoint().expect("propose") {
+        Reply::Proposed { id, .. } => id.0,
+        other => panic!("unexpected: {other:?}"),
+    };
+    assert!(!pending.chain.pending_sigs.contains_key(&own), "no own signature");
+
+    walter.vault_seams.set_base_pending(true);
+    walter.receive_checkpoint_proposal(id, upto, &state_hash, false);
+    assert!(!walter.chain.pending_sigs.contains_key(&id), "no co-signature");
+    walter.vault_seams.set_base_pending(false);
+    walter.receive_checkpoint_proposal(id, upto, &state_hash, false);
+    assert!(walter.chain.pending_sigs.contains_key(&id), "signs once the base is held");
 }
 
 #[test]

@@ -102,6 +102,12 @@ pub(crate) struct VaultSeams {
     staged: Mutex<Vec<(NamedPayload, Option<Vec<u8>>)>>,
     /// `(claimed depositor, name, kind, text)` to seal under this seat's key.
     forged: Mutex<Vec<(String, String, String, molt_core::vault::SecretText)>>,
+    /// Stands in for S5's base check in unit tests.
+    #[cfg(test)]
+    base_pending: AtomicBool,
+    /// Every grant id a reorg reported displaced.
+    #[cfg(test)]
+    displaced: Mutex<Vec<String>>,
 }
 
 impl VaultSeams {
@@ -120,6 +126,28 @@ impl VaultSeams {
         if let Ok(mut f) = self.forged.lock() {
             f.push((depositor.to_string(), name.to_string(), kind.to_string(), molt_core::vault::SecretText(text.to_string())));
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_base_pending(&self, on: bool) {
+        self.base_pending.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn base_pending(&self) -> bool {
+        self.base_pending.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn note_displaced(&self, grant_id: &str) {
+        if let Ok(mut d) = self.displaced.lock() {
+            d.push(grant_id.to_string());
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn displaced_grants(&self) -> Vec<String> {
+        self.displaced.lock().map(|d| d.clone()).unwrap_or_default()
     }
 
     fn take_forged(&self) -> Vec<(String, String, String, molt_core::vault::SecretText)> {

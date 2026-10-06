@@ -573,6 +573,7 @@ impl State {
         // the fold, with its stamps, is rebuilt now rather than on a read
         self.refresh_wiki_cache();
         self.supersede_stale_wiki(None);
+        self.supersede_stale_vault_grants();
         // …and the working transport anchors. A pruned holder SEEDS them from
         // the blob: the `Restored` blocks that established them were dropped
         // at the cut, and the roster keeps each seat's founding anchor by
