@@ -218,7 +218,88 @@ fn chained_false_complaints_floor_readable_by_at_zero() {
     reveal(&mut st, &b, &dep, "d");
     let c = card(&st, &sid);
     assert_eq!(c.readable_by, 0, "floored");
+    assert_eq!(c.complaints.len(), 2, "d never complained");
     assert!(!c.reseal, "not this seat's deposit");
+}
+
+#[test]
+fn an_unsolicited_reveal_names_no_one_but_still_counts() {
+    let (b, dep, _, sid) = committed();
+    let mut st = seat("c", &b, b.blocks.clone());
+    receipt(&mut st, "d", &sid, "verified", 1);
+    reveal(&mut st, &b, &dep, "d");
+    let c = card(&st, &sid);
+    assert!(c.complaints.is_empty(), "d never complained");
+    assert_eq!(c.readable_by, 1, "d's share is public");
+}
+
+/// A reveal of `holder` by `a`: its honest share with `c`'s ephemeral
+/// (a lie that still publishes the real share), or a flipped share with
+/// the right ephemeral (a lie that publishes nothing usable).
+fn lie(st: &mut crate::State, b: &Builder, dep: &VaultDeposit, holder: &str, share_valid: bool) {
+    let ctx = ctx_of(b);
+    let (share, ikm) = molt_vault::rederive_share(dep, &b.republic_id, &ctx, &seed_of(0), holder).expect("dealt");
+    let (_, other_ikm) = molt_vault::rederive_share(dep, &b.republic_id, &ctx, &seed_of(0), "c").expect("c");
+    let mut bytes = *share.as_bytes();
+    let ikm = if share_valid {
+        *other_ikm
+    } else {
+        bytes[0] ^= 1;
+        *ikm
+    };
+    st.cmd_net_vault_reveal(
+        &"a".to_string(),
+        secret_id(&b.republic_id, dep),
+        holder.to_string(),
+        SecretHex(hex::encode(bytes)),
+        SecretHex(hex::encode(ikm)),
+    )
+    .expect("ack");
+}
+
+fn restarted(st: &crate::State, b: &Builder, member: &str) -> crate::State {
+    let json = serde_json::to_string(&st.vault_rx.status).expect("json");
+    let mut again = seat(member, b, b.blocks.clone());
+    again.vault_rx = ReceiptRuntime::loaded(serde_json::from_str(&json).expect("parsed"));
+    again
+}
+
+#[test]
+fn a_lie_that_publishes_the_share_counts_after_a_restart() {
+    let (b, dep, _, sid) = committed();
+    let mut st = seat("d", &b, b.blocks.clone());
+    receipt(&mut st, "b", &sid, "complaint", 1);
+    lie(&mut st, &b, &dep, "b", true);
+    assert_eq!(card(&st, &sid).readable_by, 1);
+    let again = restarted(&st, &b, "d");
+    let c = card(&again, &sid);
+    assert_eq!(c.complaints, [line("b", VaultComplaintStatus::Lie)]);
+    assert_eq!(c.readable_by, 1, "the published share survives the restart");
+}
+
+#[test]
+fn an_honest_reveal_after_a_lie_counts_the_share() {
+    let (b, dep, _, sid) = committed();
+    let mut st = seat("d", &b, b.blocks.clone());
+    receipt(&mut st, "b", &sid, "complaint", 1);
+    lie(&mut st, &b, &dep, "b", false);
+    assert_eq!(card(&st, &sid).readable_by, 2, "the flipped share is no share");
+    reveal(&mut st, &b, &dep, "b");
+    let c = card(&st, &sid);
+    assert_eq!(c.complaints, [line("b", VaultComplaintStatus::Lie)], "a lie stays a lie");
+    assert_eq!(c.readable_by, 1);
+    assert_eq!(card(&restarted(&st, &b, "d"), &sid).readable_by, 1);
+}
+
+#[test]
+fn a_replaced_version_gets_no_receipt() {
+    let (mut b, old_dep, old_file, old) = committed();
+    let (y, _) = deposit(&b, "a", "n", "two");
+    b.commit(ChainChange::Applied { proposal_id: 12, surface: Surface::Vault, payload: op(&y) }, &["a", "b"]);
+    let mut st = seat("c", &b, b.blocks.clone());
+    hold(&mut st, &old_dep, &old, &old_file);
+    on_payload_held(&mut st);
+    assert!(!st.vault_rx.status.receipts.contains_key(&old), "replaced");
 }
 
 #[test]

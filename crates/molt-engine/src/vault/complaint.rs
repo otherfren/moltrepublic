@@ -80,7 +80,7 @@ pub(crate) fn answer(st: &mut crate::State, dep: &VaultDeposit, sid: &str, holde
 }
 
 /// Re-send every reveal of this seat's deposits: each holder that
-/// complained or was already decided.
+/// complained or was already answered (only ever on a complaint).
 pub(crate) fn resend_reveals(st: &mut crate::State, known: &BTreeMap<String, VaultDeposit>) -> bool {
     let me = st.member();
     let mut sent = true;
@@ -163,16 +163,22 @@ pub(crate) fn take_reveal(
             return;
         }
     };
-    if outcome == VaultRevealOutcome::Lie && on_polynomial(st, &dep, holder, &share) {
-        st.vault_rx.leaked.insert((sid.to_string(), holder.to_string()));
+    let valid = outcome == VaultRevealOutcome::FalseComplaint || on_polynomial(st, &dep, holder, &share);
+    let rx = &mut st.vault_rx.status;
+    let newly_valid =
+        valid && rx.valid_reveals.entry(sid.to_string()).or_default().insert(holder.to_string());
+    let slot = rx.reveals.entry(sid.to_string()).or_default();
+    let decided = match slot.get(holder) {
+        Some(VaultRevealOutcome::Lie) => false,
+        Some(o) => *o != outcome,
+        None => true,
+    };
+    if decided {
+        slot.insert(holder.to_string(), outcome);
     }
-    let slot = st.vault_rx.status.reveals.entry(sid.to_string()).or_default();
-    match slot.get(holder) {
-        Some(VaultRevealOutcome::Lie) => return,
-        Some(o) if *o == outcome => return,
-        _ => {}
+    if !decided && !newly_valid {
+        return;
     }
-    slot.insert(holder.to_string(), outcome);
     persist(st);
     tracing::info!(secret_id = %sid, holder = %holder, outcome = ?outcome, "vault: complaint decided");
     st.emit_session(SessionScope::Full);

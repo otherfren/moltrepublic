@@ -78,8 +78,6 @@ pub(crate) struct ReceiptRuntime {
     pub(crate) checked: BTreeMap<String, bool>,
     /// When own receipts and reveals were last re-sent (0 = next tick).
     pub(crate) resent_at: u64,
-    /// Revealed shares on the polynomial although the reveal lied.
-    pub(crate) leaked: BTreeSet<(String, MemberId)>,
     /// The anchor height the store was last pruned at.
     pub(crate) pruned_at: Option<u64>,
     /// Reveals for a deposit not seen here yet.
@@ -113,6 +111,15 @@ pub(crate) fn known_deposits(st: &crate::State) -> BTreeMap<String, VaultDeposit
         }
     }
     out
+}
+
+/// The known deposits that are current or pending: replaced versions get
+/// no more receipts or reveals.
+fn live_deposits(st: &crate::State) -> BTreeMap<String, VaultDeposit> {
+    let vs = st.vault_state();
+    let mut known = known_deposits(st);
+    known.retain(|sid, _| vs.is_current(sid) || !vs.versions.contains_key(sid));
+    known
 }
 
 pub(crate) fn known_deposit(st: &crate::State, sid: &str) -> Option<VaultDeposit> {
@@ -190,7 +197,7 @@ fn sweep(st: &mut crate::State) {
     let rid = st.republic_id();
     let (sk, _) = molt_vault::vault_keypair(&seed);
     let complain = st.vault_seams.lab.complain.load(Ordering::SeqCst);
-    for (sid, dep) in known_deposits(st) {
+    for (sid, dep) in live_deposits(st) {
         if dep.depositor == me
             || !dep.holders.contains(&me)
             || st.vault_rx.checked.contains_key(&sid)
@@ -236,7 +243,7 @@ pub(crate) fn tick(st: &mut crate::State, now: u64) {
         return;
     }
     let me = st.member();
-    let known = known_deposits(st);
+    let known = live_deposits(st);
     let mut sent = true;
     for (sid, by) in &st.vault_rx.status.receipts {
         if let (Some(r), true) = (by.get(&me), known.contains_key(sid)) {
@@ -264,18 +271,15 @@ pub(crate) fn prune_at_cut(st: &mut crate::State) -> bool {
     if st.vault_base_pending() {
         return false;
     }
-    let vs = st.vault_state();
-    let keep: BTreeSet<String> = known_deposits(st)
-        .into_keys()
-        .filter(|sid| vs.is_current(sid) || !vs.versions.contains_key(sid))
-        .collect();
+    let keep: BTreeSet<String> = live_deposits(st).into_keys().collect();
     let rx = &mut st.vault_rx;
-    let before = (rx.status.receipts.len(), rx.status.reveals.len());
+    let lens = |s: &VaultStatusStore| (s.receipts.len(), s.reveals.len(), s.valid_reveals.len());
+    let before = lens(&rx.status);
     rx.status.receipts.retain(|sid, _| keep.contains(sid));
     rx.status.reveals.retain(|sid, _| keep.contains(sid));
-    rx.leaked.retain(|(sid, _)| keep.contains(sid));
+    rx.status.valid_reveals.retain(|sid, _| keep.contains(sid));
     rx.checked.retain(|sid, _| keep.contains(sid));
-    if before != (rx.status.receipts.len(), rx.status.reveals.len()) {
+    if before != lens(&rx.status) {
         persist(st);
     }
     true
@@ -431,6 +435,7 @@ pub(crate) fn fill(st: &crate::State, view: &mut VaultView) {
             .collect();
         let receipts = rx.status.receipts.get(&card.secret_id);
         let reveals = rx.status.reveals.get(&card.secret_id);
+        let shared = rx.status.valid_reveals.get(&card.secret_id);
         let mut verified = 0usize;
         let mut valid = 0usize;
         let mut lines = Vec::new();
@@ -440,17 +445,17 @@ pub(crate) fn fill(st: &crate::State, view: &mut VaultView) {
             if receipt.is_some_and(|r| r.verified) {
                 verified += 1;
             }
-            if outcome == Some(VaultRevealOutcome::FalseComplaint)
-                || rx.leaked.contains(&(card.secret_id.clone(), (*h).clone()))
-            {
+            let complained = receipt.is_some_and(|r| !r.verified);
+            if outcome == Some(VaultRevealOutcome::FalseComplaint) || shared.is_some_and(|s| s.contains(*h)) {
                 valid += 1;
             }
             let status = match outcome {
                 Some(VaultRevealOutcome::Lie) => VaultComplaintStatus::Lie,
                 Some(VaultRevealOutcome::BadShare) => VaultComplaintStatus::BadShare,
-                Some(VaultRevealOutcome::FalseComplaint) => VaultComplaintStatus::False,
-                None if receipt.is_some_and(|r| !r.verified) => VaultComplaintStatus::Open,
-                None => continue,
+                // spec §7 decides a reveal only on a complaint
+                Some(VaultRevealOutcome::FalseComplaint) if complained => VaultComplaintStatus::False,
+                None if complained => VaultComplaintStatus::Open,
+                _ => continue,
             };
             lines.push(VaultComplaintView { holder: (*h).clone(), status });
         }

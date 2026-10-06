@@ -6,6 +6,7 @@
 //! a reveal lowers the threshold the card shows, and a re-seal is a vote
 //! that deals a fresh secret.
 
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use molt_core::vault::{
@@ -161,6 +162,50 @@ async fn a_reveal_lowers_readable_by_and_offers_reseal() {
     }
 }
 
+/// Every formatted tracing line of this test binary, from the first call on.
+#[derive(Clone, Default)]
+struct Captured(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if let Ok(mut b) = self.0.lock() {
+            b.extend_from_slice(buf);
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn capture() -> &'static Captured {
+    static CAPTURED: OnceLock<Captured> = OnceLock::new();
+    CAPTURED.get_or_init(|| {
+        let captured = Captured::default();
+        let sink = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter("molt_engine=trace,molt_net=trace,molt_vault=trace,molt_storage=trace,molt_core=trace")
+            .with_writer(move || sink.clone())
+            .finish();
+        tracing::subscriber::set_global_default(subscriber).expect("the only subscriber");
+        captured
+    })
+}
+
+/// Every file under `dir`, raw.
+fn files_under(dir: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).expect("dir").flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(files_under(&path));
+        } else if let Ok(bytes) = std::fs::read(&path) {
+            out.push((path, bytes));
+        }
+    }
+    out
+}
+
 /// Re-seal after a false complaint and wait until it commits: `(old, new)`.
 async fn reseal_committed(all: &[WalletHandle], old: &str) -> String {
     wait_vault(&all[0], "the re-seal offer", |v| current(v).is_some_and(|d| d.reseal)).await;
@@ -172,6 +217,8 @@ async fn reseal_committed(all: &[WalletHandle], old: &str) -> String {
     let v = wait_vault(&all[0], "the re-seal card", |v| v.deposits.iter().any(|d| d.proposal == Some(id.0))).await;
     let card = v.deposits.iter().find(|d| d.proposal == Some(id.0)).expect("the card");
     assert_eq!(card.replaces.as_deref(), Some(old));
+    let shown = all[0].execute(Command::ReadProposal { id: id.0 }).await.expect("read proposal");
+    assert!(!format!("{shown:?}").contains(TEXT), "the re-seal card carries the text");
     assert!(current(&v).is_some_and(|d| !d.reseal), "no second offer while the re-seal is open");
     tokio::time::sleep(Duration::from_secs(3)).await;
     let v = vault_view(&all[0]).await;
@@ -190,6 +237,7 @@ async fn a_reseal_is_a_vote_and_restores_the_threshold() {
     let relay = MockRelay::run().await.expect("in-process relay");
     let url = relay.url().await.to_string();
     let tmp = tempfile::tempdir().expect("tmp");
+    let captured = capture();
     let (all, old) = deposit_with(tmp.path(), &url, Some(1), false, 2).await;
     reseal_committed(&all, &old).await;
     for w in &all {
@@ -209,6 +257,12 @@ async fn a_reseal_is_a_vote_and_restores_the_threshold() {
             assert!(!s.contains(TEXT), "{name}: the text is in its {what}");
         }
     }
+    for (path, bytes) in files_under(tmp.path()) {
+        assert!(!bytes.windows(TEXT.len()).any(|w| w == TEXT.as_bytes()), "the text is in {}", path.display());
+    }
+    let logs = String::from_utf8_lossy(&captured.0.lock().expect("lock")).into_owned();
+    assert!(logs.contains("vault: re-seal"), "the capture works");
+    assert!(!logs.contains(TEXT), "a log line carries the text");
 }
 
 fn deposits_of(chain: &[molt_core::ChainBlock]) -> Vec<VaultDeposit> {
