@@ -316,13 +316,10 @@ async fn tick<S: StateStore>(
             }
         };
     }
-    // K6: this holder's own folded wiki base. Every piece is decrypted
-    // from the sealed file for exactly this publish - the knowledge base
-    // never exists in plaintext on disk, the way a shared file does.
-    // a vault payload (plan S3a): the same held-source path, out of the
-    // sealed `vault/<secret_id>.bin` this seat must hold
+    // a vault payload (S3a) or the folded vault base (S5): read out of the
+    // sealed store, checked against its hash
     if let Some(hash) = job.vault.as_deref() {
-        // no file name: the folded vault base (vault S5)
+        // no file name: the base
         let source = if job.path.is_empty() {
             HeldSource::VaultBase { hash }
         } else {
@@ -330,6 +327,9 @@ async fn tick<S: StateStore>(
         };
         return publish_held_piece(chan, store, &job, manifests, day, source).await;
     }
+    // K6: this holder's own folded wiki base. Every piece is decrypted
+    // from the sealed file for exactly this publish - the knowledge base
+    // never exists in plaintext on disk, the way a shared file does.
     if job.wiki_base {
         return publish_held_piece(chan, store, &job, manifests, day, HeldSource::WikiBase).await;
     }
