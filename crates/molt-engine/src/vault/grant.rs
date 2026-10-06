@@ -423,11 +423,14 @@ pub(crate) fn on_commit(st: &mut crate::State, grant_id: &str) {
     let name = live.deposit.name.clone();
     let reader = live.grant.reader.clone();
     let rt = st.grants_rt();
+    // `answered` is per incarnation: a displaced line this incarnation never
+    // committed was answered (or dropped) by an earlier one
+    let earlier = !rt.seen.contains_key(grant_id) && rt.displaced.iter().any(|d| d.grant_id == grant_id);
     rt.seen.insert(
         grant_id.to_string(),
         VaultDisplacedGrant { grant_id: grant_id.to_string(), name, reader },
     );
-    let done = rt.answered.contains(grant_id) || rt.displaced.iter().any(|d| d.grant_id == grant_id);
+    let done = rt.answered.contains(grant_id) || earlier;
     if !live.valid {
         tracing::info!(grant_id, "vault: grant void");
         return;

@@ -436,18 +436,7 @@ fn a_reorged_grant_is_not_answered_twice_and_stays_audited() {
     wire(&mut c, "a", 1, WorkspaceEvent::Committed(g_block.clone()));
     assert_eq!(answers_sent(&c).len(), 1);
 
-    // a contender at the grant's height that wins the tip tie-break
-    let link = |blk: &ChainBlock| molt_storage::content_hash(&molt_core::chain::block_link_bytes(&b.republic_id, blk));
-    let z = (100..)
-        .map(|n| {
-            fork_base.seal(
-                2,
-                ChainChange::Applied { proposal_id: n, surface: Surface::Memory, payload: serde_json::json!({ "op": "add_note", "id": n }) },
-                &["a", "b"],
-            )
-        })
-        .find(|z| link(z) < link(&g_block))
-        .expect("a smaller contender");
+    let z = contender(&fork_base, &g_block);
     wire(&mut c, "b", 1, WorkspaceEvent::Committed(z.clone()));
     assert_eq!(c.chain.blocks.last(), Some(&z), "the grant was displaced");
     let card = grant_card_of(&c.vault_view(), &gid).clone();
@@ -570,4 +559,70 @@ fn an_answer_that_was_not_queued_is_not_counted() {
     c.grants_rt().publish_fails = false;
     c.cmd_net_vault_ask(&"d".to_string(), gid).expect("ack");
     assert_eq!(answers_sent(&c).len(), 3, "a dropped answer throttles the next ask");
+}
+
+#[test]
+fn a_grant_queued_then_displaced_is_answered_once_when_it_recommits() {
+    let (b, _, _, sid) = deposited();
+    let fork_base = b.clone();
+    let mut lose = b.clone();
+    let g_block = lose.commit(applied(12, grant_op(&sid, "d", 12)), &["a", "b"]);
+    let mut c = seat("c", &b, b.blocks.clone());
+    c.vault_seams.set_base_pending(true);
+    wire(&mut c, "a", 1, WorkspaceEvent::Committed(g_block.clone()));
+    assert!(answers_sent(&c).is_empty(), "queued");
+
+    let z = contender(&fork_base, &g_block);
+    wire(&mut c, "b", 1, WorkspaceEvent::Committed(z.clone()));
+    assert_eq!(c.vault_grants.displaced.len(), 1, "the audit line is kept");
+
+    c.vault_seams.set_base_pending(false);
+    c.vault_flush_queued();
+    let mut win = fork_base;
+    win.push(z);
+    let again = win.commit(applied(12, grant_op(&sid, "d", 12)), &["a", "b"]);
+    wire(&mut c, "b", 2, WorkspaceEvent::Committed(again));
+    assert_eq!(answers_sent(&c).len(), 1, "answered exactly once");
+}
+
+/// A block at `g_block`'s height on `fork_base` that wins the tip tie-break.
+fn contender(fork_base: &Builder, g_block: &ChainBlock) -> ChainBlock {
+    let link = |blk: &ChainBlock| molt_storage::content_hash(&molt_core::chain::block_link_bytes(&fork_base.republic_id, blk));
+    (100..)
+        .map(|n| {
+            fork_base.seal(
+                2,
+                ChainChange::Applied { proposal_id: n, surface: Surface::Memory, payload: serde_json::json!({ "op": "add_note", "id": n }) },
+                &["a", "b"],
+            )
+        })
+        .find(|z| link(z) < link(g_block))
+        .expect("a smaller contender")
+}
+
+#[tokio::test]
+async fn a_displaced_line_reaches_the_disk_and_survives_a_reopen() {
+    let (b, _, _, sid) = deposited();
+    let mut lose = b.clone();
+    let g_block = lose.commit(applied(12, grant_op(&sid, "d", 12)), &["a", "b"]);
+    let mut c = seat("c", &b, b.blocks.clone());
+    let _tmp = crate::net::vault_payload::tests::attach_storage(&mut c, &[]);
+    let dir = c.active.as_ref().expect("active").dir.clone();
+    wire(&mut c, "a", 1, WorkspaceEvent::Committed(g_block.clone()));
+    wire(&mut c, "b", 1, WorkspaceEvent::Committed(contender(&b, &g_block)));
+    assert_eq!(c.vault_grants.displaced.len(), 1);
+
+    let handle = c.active.as_ref().expect("active").handle.clone();
+    let mut on_disk = Vec::new();
+    for _ in 0..200 {
+        on_disk = handle.load_transport_state().await.vault_displaced;
+        if !on_disk.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(on_disk.len(), 1, "the audit line was written");
+    handle.close(None);
+    let (ws, _) = molt_storage::open_workspace(&dir).expect("reopen");
+    assert_eq!(ws.read_transport_state().vault_displaced, c.vault_grants.displaced);
 }

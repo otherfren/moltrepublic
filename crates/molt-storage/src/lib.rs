@@ -3748,6 +3748,12 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                             if state.vault_seed.is_some() {
                                 ts.vault_seed = state.vault_seed;
                             }
+                            // append-only union: a stale clone never erases an audit line
+                            for d in state.vault_displaced {
+                                if !ts.vault_displaced.iter().any(|x| x.grant_id == d.grant_id) {
+                                    ts.vault_displaced.push(d);
+                                }
+                            }
                             if let Err(e) = ws.write_transport_state(&ts) {
                                 fail(&failed_flag, "transport.state write", &e);
                             }
@@ -5549,6 +5555,26 @@ mod tests {
         handle.close(None);
         let (ws, _loaded) = open_workspace(&dir).expect("reopen");
         assert_eq!(ws.read_transport_state().vault_seed, Some(vault));
+    }
+
+    #[test]
+    fn a_transport_save_keeps_the_displaced_grant_lines() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let created = create_workspace(&root, &seed, &founded(1)).expect("create");
+        let dir = created.dir().to_path_buf();
+        let handle = start_writer(created);
+        let line = molt_core::vault::VaultDisplacedGrant {
+            grant_id: "g".to_string(),
+            name: "n".to_string(),
+            reader: "d".to_string(),
+        };
+        handle.save_transport_state(TransportState { vault_displaced: vec![line.clone()], ..TransportState::default() });
+        handle.save_transport_state(TransportState::default());
+        handle.close(None);
+        let (ws, _loaded) = open_workspace(&dir).expect("reopen");
+        assert_eq!(ws.read_transport_state().vault_displaced, vec![line]);
     }
 
     /// The clean-close crypto merge (MLS snapshot + queue creds) must NOT clobber
