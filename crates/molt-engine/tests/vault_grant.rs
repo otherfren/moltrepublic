@@ -178,16 +178,60 @@ async fn a_non_reader_cannot_decrypt() {
         assert!(!g.mine && g.answers == 0 && g.bad_answers.is_empty(), "{g:?}");
     }
 
-    // nothing anyone persisted carries the text
+    // nothing anyone persisted carries the text, nor any holder's share
+    let mut disks = Vec::new();
+    let mut shares = Vec::new();
     for (name, ws) in close_and_open(tmp.path(), &all).await {
-        let log = serde_json::to_string(&ws.read_log_from(1).expect("log")).expect("json");
-        let transport = serde_json::to_string(&ws.read_transport_state()).expect("json");
+        let ts = ws.read_transport_state();
         let (_, chain) = ws.read_chain().expect("chain");
+        shares.extend(own_share(&name, &ts, &chain));
+        let log = serde_json::to_string(&ws.read_log_from(1).expect("log")).expect("json");
+        let transport = serde_json::to_string(&ts).expect("json");
         let chain = serde_json::to_string(&chain).expect("json");
-        for (what, s) in [("log", &log), ("transport", &transport), ("chain", &chain)] {
+        disks.push((name, [("log", log), ("transport", transport), ("chain", chain)]));
+    }
+    assert_eq!(shares.len(), 3, "every seat but the depositor holds a share");
+    for (name, files) in &disks {
+        for (what, s) in files {
             assert!(!s.contains(text), "{name}: the text is in its {what}");
+            for (holder, hex, json) in &shares {
+                assert!(!s.contains(hex) && !s.contains(json), "{name}: {holder}'s share is in its {what}");
+            }
         }
     }
+}
+
+/// `name`'s share of the deposit on `chain`, opened with the vault seed
+/// its `transport.state` keeps: `(name, hex, json bytes)`.
+fn own_share(
+    name: &str,
+    ts: &molt_core::TransportState,
+    chain: &[molt_core::ChainBlock],
+) -> Option<(String, String, String)> {
+    let ChainChange::Genesis { republic_id, rule_m, identities, .. } = &chain.first()?.change else {
+        return None;
+    };
+    let ctx = molt_core::vault::VaultCtx {
+        m: *rule_m,
+        holders_in_genesis_order: identities
+            .iter()
+            .map(|i| (i.member.clone(), i.identity_pk.clone(), i.vault_pk.clone()))
+            .collect(),
+    };
+    let dep = chain.iter().find_map(|b| match &b.change {
+        ChainChange::Applied { surface: Surface::Vault, payload, .. } => {
+            match serde_json::from_value::<molt_core::vault::VaultOp>(payload.clone()) {
+                Ok(molt_core::vault::VaultOp::Deposit(d)) => Some(d),
+                _ => None,
+            }
+        }
+        _ => None,
+    })?;
+    let seed = <[u8; 32]>::try_from(ts.vault_seed.as_ref()?.0.as_slice()).ok()?;
+    let (sk, _) = molt_vault::vault_keypair(&seed);
+    let share = molt_vault::check_my_share(&dep, republic_id, &ctx, name, &sk).ok()?;
+    let bytes = share.as_bytes();
+    Some((name.to_string(), hex::encode(bytes), serde_json::to_string(bytes.as_slice()).expect("json")))
 }
 
 fn copy_dir(from: &std::path::Path, to: &std::path::Path) {

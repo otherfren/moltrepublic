@@ -353,6 +353,20 @@ fn a_bad_answer_names_its_seat_and_the_read_still_succeeds_with_m_good() {
     refused(b_seat.cmd_vault_read(sid), &VaultRefusal::NotTheReader);
 }
 
+/// What `st` would write: the snapshot its log replays to, the grant part
+/// of `transport.state`, the cards, the chain and the view.
+fn persisted(st: &crate::State) -> Vec<(&'static str, String)> {
+    let mut ts = molt_core::TransportState::default();
+    merge_displaced(&mut ts, &st.vault_grants.displaced);
+    vec![
+        ("snapshot", serde_json::to_string(&st.snapshot_now()).expect("json")),
+        ("transport", serde_json::to_string(&ts).expect("json")),
+        ("cards", serde_json::to_string(&st.proposals).expect("json")),
+        ("chain", serde_json::to_string(&st.chain.blocks).expect("json")),
+        ("view", serde_json::to_string(&st.vault_view()).expect("json")),
+    ]
+}
+
 #[test]
 fn the_plaintext_is_never_persisted() {
     let mut b = Builder::vault();
@@ -373,10 +387,7 @@ fn the_plaintext_is_never_persisted() {
     assert!(logs.contains("dispatch"), "the capture works");
     assert!(!logs.contains(text), "a log line carries the text");
     assert!(!format!("{reply:?}").contains(text));
-    let cards = serde_json::to_string(&d.proposals).expect("json");
-    let chain = serde_json::to_string(&d.chain.blocks).expect("json");
-    let view = serde_json::to_string(&d.vault_view()).expect("json");
-    for (what, s) in [("cards", cards), ("chain", chain), ("view", view)] {
+    for (what, s) in persisted(&d) {
         assert!(!s.contains(text), "the text is in the {what}");
     }
 }
@@ -407,12 +418,9 @@ fn opened_shares_are_never_persisted() {
     });
     assert!(!logs.contains(&c_share), "a log line carries the share");
     for st in &states {
-        let cards = serde_json::to_string(&st.proposals).expect("json");
-        let chain = serde_json::to_string(&st.chain.blocks).expect("json");
-        let view = serde_json::to_string(&st.vault_view()).expect("json");
         let frames = st.vault_grants.sent.iter().map(|f| String::from_utf8_lossy(&f.to_frame()).to_string()).collect::<String>();
-        for s in [cards, chain, view, frames] {
-            assert!(!s.contains(&c_share));
+        for (what, s) in persisted(st).into_iter().chain([("frames", frames)]) {
+            assert!(!s.contains(&c_share), "the share is in the {what}");
         }
     }
 }
@@ -489,4 +497,77 @@ fn a_base_pending_seat_queues_its_answer() {
     let mut d = seat("d", &b, b.blocks.clone());
     d.vault_seams.set_base_pending(true);
     assert!(matches!(d.cmd_vault_read(String::new()), Err(MoltError::VaultBasePending { .. })));
+}
+
+fn line(gid: &str) -> VaultDisplacedGrant {
+    VaultDisplacedGrant { grant_id: gid.to_string(), name: "n".to_string(), reader: "d".to_string() }
+}
+
+#[test]
+fn displaced_persists_merge_in_any_order_and_survive_a_reopen() {
+    let (b, _, _, sid) = deposited();
+    let (g1, g2) = (grant_id(&sid, "d", 12), grant_id(&sid, "d", 14));
+    // one reorg, two persist tasks: the longer snapshot lands first
+    let mut ts = molt_core::TransportState::default();
+    assert!(merge_displaced(&mut ts, &[line(&g1), line(&g2)]));
+    merge_displaced(&mut ts, &[line(&g1)]);
+    assert!(!merge_displaced(&mut ts, &[line(&g2)]), "nothing new");
+    let on_disk: molt_core::TransportState =
+        serde_json::from_str(&serde_json::to_string(&ts).expect("json")).expect("json");
+
+    let mut c = seat("c", &b, b.blocks.clone());
+    c.vault_load_displaced(on_disk.vault_displaced);
+    let v = c.vault_view();
+    for g in [&g1, &g2] {
+        assert_eq!(grant_card_of(&v, g).state, VaultGrantState::Displaced);
+    }
+}
+
+#[test]
+fn a_pending_read_asks_once_per_ten_seconds() {
+    let (b, x, xf, sid) = granted(&[12]);
+    let mut d = reader(&b, &x, &xf);
+    for _ in 0..2 {
+        assert!(matches!(d.cmd_vault_read(sid.clone()), Ok(Reply::VaultPending { have: 1, need: 2, .. })));
+    }
+    let asks = d.vault_grants.sent.iter().filter(|f| matches!(f, VaultFrame::Ask(_))).count();
+    assert_eq!(asks, 1);
+}
+
+#[test]
+fn a_grant_recommitted_after_a_reopen_is_not_answered_again() {
+    let (b, _, _, sid) = deposited();
+    let change = applied(12, grant_op(&sid, "d", 12));
+    let link = |blk: &ChainBlock| molt_storage::content_hash(&molt_core::chain::block_link_bytes(&b.republic_id, blk));
+    let mut twins: Vec<ChainBlock> = [["a", "b"], ["a", "c"], ["a", "d"], ["b", "c"], ["b", "d"], ["c", "d"]]
+        .iter()
+        .map(|s| b.seal(2, change.clone(), s))
+        .collect();
+    twins.sort_by_key(|blk| link(blk));
+    let (win, lose) = (twins[0].clone(), twins[5].clone());
+    // c answered `lose` before it closed; it reopens on that chain
+    let mut chain = b.blocks.clone();
+    chain.push(lose);
+    let mut c = seat("c", &b, chain);
+    c.vault_load_displaced(Vec::new());
+
+    // the same grant at the same height wins the tie-break: kept, re-applied
+    wire(&mut c, "b", 1, WorkspaceEvent::Committed(win.clone()));
+    assert_eq!(c.chain.blocks.last(), Some(&win), "the twin was adopted");
+    assert!(answers_sent(&c).is_empty(), "answered again after a reopen");
+}
+
+#[test]
+fn an_answer_that_was_not_queued_is_not_counted() {
+    let (b, _, _, sid) = granted(&[12]);
+    let gid = grant_id(&sid, "d", 12);
+    let mut c = seat("c", &b, b.blocks[..2].to_vec());
+    c.grants_rt().publish_fails = true;
+    wire(&mut c, "a", 1, WorkspaceEvent::Committed(b.blocks[2].clone()));
+    assert!(!c.vault_grants.answered.contains(&gid), "a dropped answer counts as answered");
+
+    c.cmd_net_vault_ask(&"d".to_string(), gid.clone()).expect("ack");
+    c.grants_rt().publish_fails = false;
+    c.cmd_net_vault_ask(&"d".to_string(), gid).expect("ack");
+    assert_eq!(answers_sent(&c).len(), 3, "a dropped answer throttles the next ask");
 }

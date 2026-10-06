@@ -29,10 +29,12 @@ pub(crate) enum Answer {
 pub(crate) struct GrantRuntime {
     /// The workspace incarnation (`net_scope`) this belongs to.
     scope: Option<u64>,
-    /// Grants this seat answered on commit.
+    /// Grants this seat answered on commit, or found applied at open.
     answered: BTreeSet<String>,
     /// `(grant_id, asker)` -> when last answered on request.
     asked: BTreeMap<(String, MemberId), u64>,
+    /// Reader side: `grant_id` -> when this seat last asked.
+    last_ask: BTreeMap<String, u64>,
     /// Committed grants waiting for the vault base.
     queued: BTreeSet<String>,
     /// Reader side: `grant_id` -> answering seat -> answer.
@@ -49,6 +51,22 @@ pub(crate) struct GrantRuntime {
     /// Payload bytes for reads in unit tests (no storage there).
     #[cfg(test)]
     pub(crate) payloads: BTreeMap<String, Vec<u8>>,
+    /// Unit tests: the publish queue refuses.
+    #[cfg(test)]
+    pub(crate) publish_fails: bool,
+}
+
+/// Fold `lines` into the persisted audit; whether anything changed. A
+/// merge: one reorg's persist tasks may land in any order.
+pub(crate) fn merge_displaced(s: &mut molt_core::TransportState, lines: &[VaultDisplacedGrant]) -> bool {
+    let mut changed = false;
+    for d in lines {
+        if !s.vault_displaced.iter().any(|x| x.grant_id == d.grant_id) {
+            s.vault_displaced.push(d.clone());
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// A committed grant as this seat sees it now.
@@ -100,9 +118,14 @@ impl crate::State {
         (self.vault_grants.scope == Some(self.net_scope)).then_some(&self.vault_grants)
     }
 
-    /// The persisted displaced-grant audit, at open.
+    /// At open, after the chain: the persisted displaced audit, and every
+    /// grant already applied counts as answered, so a reorg re-applying one
+    /// does not answer it again (Q1).
     pub(crate) fn vault_load_displaced(&mut self, displaced: Vec<VaultDisplacedGrant>) {
-        self.grants_rt().displaced = displaced;
+        let applied: BTreeSet<String> = self.vault_state().grants.iter().map(|g| g.grant.grant_id.clone()).collect();
+        let rt = self.grants_rt();
+        rt.displaced = displaced;
+        rt.answered.extend(applied);
     }
 
     /// The committed grant `grant_id` and its version.
@@ -120,7 +143,12 @@ impl crate::State {
     fn vault_publish(&mut self, frame: VaultFrame) -> bool {
         let bytes = frame.to_frame();
         #[cfg(test)]
-        self.grants_rt().sent.push(frame);
+        {
+            self.grants_rt().sent.push(frame);
+            if self.group_net.is_none() {
+                return !self.vault_grants.publish_fails;
+            }
+        }
         self.group_net.as_ref().is_some_and(|g| g.handle.publish_control(bytes))
     }
 
@@ -228,7 +256,10 @@ impl crate::State {
             grant_id: live.grant.grant_id.clone(),
             enc: SecretHex(hex::encode(enc)),
         });
-        self.vault_publish(frame);
+        if !self.vault_publish(frame) {
+            tracing::warn!(grant_id = %live.grant.grant_id, "vault: answer not queued");
+            return false;
+        }
         tracing::info!(grant_id = %live.grant.grant_id, reader = %live.grant.reader, "vault: answered");
         true
     }
@@ -331,8 +362,10 @@ impl crate::State {
         out
     }
 
-    /// Ask the holders to answer every grant of `secret_id` to this seat.
+    /// Ask the holders to answer every grant of `secret_id` to this seat,
+    /// at most once per `ASK_EVERY_SECS` per grant.
     pub(crate) fn vault_ask(&mut self, secret_id: &str) {
+        let now = crate::now_secs();
         let me = self.member();
         let grants: Vec<String> = self
             .vault_state()
@@ -341,8 +374,13 @@ impl crate::State {
             .filter(|g| !g.void && g.grant.secret_id == secret_id && g.grant.reader == me)
             .map(|g| g.grant.grant_id.clone())
             .collect();
-        for grant_id in grants {
-            self.vault_publish(VaultFrame::Ask(VaultAskFrame { v: VAULT_V, by: me.clone(), grant_id }));
+        let rt = self.grants_rt();
+        rt.last_ask.retain(|_, t| now.saturating_sub(*t) < ASK_EVERY_SECS);
+        let due: Vec<String> = grants.into_iter().filter(|g| !rt.last_ask.contains_key(g)).collect();
+        for grant_id in due {
+            if self.vault_publish(VaultFrame::Ask(VaultAskFrame { v: VAULT_V, by: me.clone(), grant_id: grant_id.clone() })) {
+                self.grants_rt().last_ask.insert(grant_id, now);
+            }
         }
     }
 
@@ -369,10 +407,7 @@ impl crate::State {
         tokio::spawn(async move {
             use molt_net::supervisor::StateStore as _;
             store
-                .update(|s| {
-                    s.vault_displaced = displaced;
-                    true
-                })
+                .update(|s| merge_displaced(s, &displaced))
                 .await;
         });
     }
