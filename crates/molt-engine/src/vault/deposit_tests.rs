@@ -699,6 +699,7 @@ fn a_seal_names_the_current_version() {
     let deps: Vec<VaultDeposit> = st
         .proposals
         .values()
+        .filter(|p| p.state == ProposalState::Proposed)
         .filter_map(|p| match serde_json::from_value::<VaultOp>(p.payload.clone()) {
             Ok(VaultOp::Deposit(d)) => Some(d),
             _ => None,
