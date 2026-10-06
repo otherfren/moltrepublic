@@ -718,6 +718,9 @@ pub(crate) struct ProposalRowData {
     /// Unread messages in this proposal's discussion channel (the 💬
     /// button's badge); 0 = caught up.
     pub(crate) unread: i32,
+    /// Why approve is grayed ("" = approvable): a vault deposit this seat
+    /// has not verified yet (spec §7).
+    pub(crate) blocked: String,
 }
 
 /// Read status + every surface snapshot into a bundle the window can apply.
@@ -1277,6 +1280,8 @@ pub(crate) fn surface_data(
             let row = proposal_row(lang, p);
             let text = vault
                 .and_then(|ctx| vault_title(lang, &p.payload, ctx, pending_replaces(ctx, &p.payload)));
+            let blocked = vault.and_then(|v| vault_vote_block(v, p.id.0)).map(|r| crate::i18n::localize_vault_refusal(lang, &r));
+            let row = ProposalRowData { blocked: blocked.unwrap_or_default(), ..row };
             badge(match text {
                 Some(text) => ProposalRowData { text, ..row },
                 None => row,
@@ -1473,6 +1478,7 @@ pub(crate) fn to_proposal_row(p: &ProposalRowData) -> ProposalRow {
         applied: p.applied,
         withdrawn: p.withdrawn,
         unread: p.unread,
+        blocked: p.blocked.as_str().into(),
     }
 }
 
@@ -1647,6 +1653,7 @@ pub(crate) fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRo
         applied: p.state == molt_core::ProposalState::Applied,
         withdrawn: p.withdrawn,
         unread: 0, // filled by the caller where the unread map is at hand
+        blocked: String::new(),
     }
 }
 
@@ -1821,6 +1828,20 @@ fn applied_replaces(earlier: &[serde_json::Value], v: &serde_json::Value) -> boo
 }
 
 /// A pending deposit replaces when its slot holds a committed version.
+/// Spec §7: a holder approves a deposit only once its share checks and
+/// the payload is here.
+fn vault_vote_block(view: &VaultView, proposal: u64) -> Option<molt_core::vault::VaultRefusal> {
+    use molt_core::vault::{VaultMyCheck, VaultRefusal};
+    let d = view.deposits.iter().find(|d| d.proposal == Some(proposal) && !d.mine)?;
+    if !d.held {
+        Some(VaultRefusal::PayloadNotHeld)
+    } else if d.my_check != VaultMyCheck::Ok {
+        Some(VaultRefusal::NotVerified)
+    } else {
+        None
+    }
+}
+
 fn pending_replaces(view: &VaultView, v: &serde_json::Value) -> bool {
     deposit_slot(v).is_some_and(|(depositor, name)| {
         view.deposits.iter().any(|d| {

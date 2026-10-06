@@ -345,6 +345,21 @@ fn seal_confirm_builds_vault_seal() {
     assert!(seal_command(&ui).is_none(), "no text, no seal");
 }
 
+/// The confirm gate is the builder's: a blank name or kind grays it.
+#[test]
+fn a_blank_name_or_kind_grays_the_seal_confirm() {
+    let ui = window(Some(fixture()));
+    ui.set_vt_seal_text("one".into());
+    ui.set_vt_seal_name("a".into());
+    assert!(ui.get_vt_seal_confirmable());
+    for (name, kind) in [("  ", "text"), ("a", " ")] {
+        ui.set_vt_seal_name(name.into());
+        ui.set_vt_seal_kind(kind.into());
+        assert!(seal_command(&ui).is_none());
+        assert!(!ui.get_vt_seal_confirmable(), "{name:?}/{kind:?} is confirmable");
+    }
+}
+
 #[test]
 fn grant_confirm_builds_vault_grant() {
     let ui = window(Some(fixture()));
@@ -907,4 +922,43 @@ fn ui_snapshot_counts_grant_rows_too() {
     assert_eq!(deposit_rows(&ui).len(), 3);
     assert_eq!(grant_rows(&ui).len(), 1);
     assert_eq!(crate::mirror::build_ui_snapshot(&ui).vault_rows, 4);
+}
+
+/// Spec §7: approve is offered only once this seat's share checks and the
+/// payload is here; otherwise the card grays it and names why.
+fn unverified_fixture() -> VaultView {
+    let mut v = fixture();
+    let mut arriving = deposit("four", "b", VaultDepositState::Pending, 0);
+    (arriving.proposal, arriving.held, arriving.my_check) = (Some(7), false, VaultMyCheck::Pending);
+    let mut ok = deposit("five", "b", VaultDepositState::Pending, 0);
+    ok.proposal = Some(8);
+    let mut bad = deposit("six", "c", VaultDepositState::Pending, 0);
+    (bad.proposal, bad.my_check) = (Some(10), VaultMyCheck::Bad);
+    let mut own = deposit("seven", "a", VaultDepositState::Pending, 0);
+    (own.proposal, own.my_check) = (Some(11), VaultMyCheck::None);
+    v.deposits.extend([arriving, ok, bad, own]);
+    v
+}
+
+#[test]
+fn an_unverified_deposit_grays_approve_with_its_reason() {
+    let b = bundle(Some(unverified_fixture()));
+    let blocked: Vec<(i32, String)> = b.surfaces[0]
+        .pending
+        .iter()
+        .map(|p| (p.id, p.blocked.clone()))
+        .collect();
+    let want = [(7, "payload not held"), (8, ""), (10, "not verified"), (11, "")];
+    assert_eq!(blocked, want.map(|(id, r)| (id, r.to_string())));
+    assert_eq!(to_proposal_row(&b.surfaces[0].pending[0]).blocked.as_str(), "payload not held");
+}
+
+#[cfg(feature = "live-preview")]
+#[test]
+fn an_unverified_deposit_card_names_its_reason() {
+    type H = i_slint_backend_testing::ElementHandle;
+    let ui = window(Some(unverified_fixture()));
+    let _shown = vault_screen(&ui, "proposals");
+    assert_eq!(H::find_by_accessible_label(&ui, "payload not held").count(), 1);
+    assert_eq!(H::find_by_accessible_label(&ui, "not verified").count(), 1);
 }

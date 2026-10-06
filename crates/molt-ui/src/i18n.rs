@@ -46,6 +46,28 @@ pub(crate) fn localize_headline(lang: i32, phrase: &str) -> String {
     .to_string()
 }
 
+/// One vault refusal in the active language (English = the MCP text).
+pub(crate) fn localize_vault_refusal(lang: i32, r: &molt_core::vault::VaultRefusal) -> String {
+    use molt_core::vault::VaultRefusal as R;
+    if lang != 1 {
+        return r.to_string();
+    }
+    match r {
+        R::Bounds => "braucht 2 <= m <= n-2".to_string(),
+        R::FoundingOnly => "nur bei der Gründung".to_string(),
+        R::NeedsNewerVersion(seat) => format!("braucht eine neuere Version: {seat}"),
+        R::NotVerified => "nicht geprüft".to_string(),
+        R::PayloadNotHeld => "Inhalt nicht hier".to_string(),
+        R::NotTheReader => "nicht der Leser".to_string(),
+        R::NoVault => "kein Vault".to_string(),
+        R::NoVaultKey => "kein Vault-Schlüssel".to_string(),
+        R::UseVaultSeal => "vault_seal benutzen".to_string(),
+        R::TooLarge => "zu groß".to_string(),
+        R::UnknownOp => "unbekannte Operation".to_string(),
+        R::Stale => "veraltete Version".to_string(),
+    }
+}
+
 /// E2 (`i18n_error_codes_plan.md`): render a [`MoltError`] in the ACTIVE
 /// language. English stays the engine `Display` verbatim (MCP parity);
 /// the German arms are authored here, compact, with engine-diagnostic
@@ -70,24 +92,7 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
         E::VaultBasePending { have, size, .. } => {
             format!("Der Vault wird geholt ({have} von {size} Bytes)")
         }
-        E::Vault(r) => {
-            use molt_core::vault::VaultRefusal as R;
-            let de = match r {
-                R::Bounds => "braucht 2 <= m <= n-2".to_string(),
-                R::FoundingOnly => "nur bei der Gründung".to_string(),
-                R::NeedsNewerVersion(seat) => format!("braucht eine neuere Version: {seat}"),
-                R::NotVerified => "nicht geprüft".to_string(),
-                R::PayloadNotHeld => "Inhalt nicht hier".to_string(),
-                R::NotTheReader => "nicht der Leser".to_string(),
-                R::NoVault => "kein Vault".to_string(),
-                R::NoVaultKey => "kein Vault-Schlüssel".to_string(),
-                R::UseVaultSeal => "vault_seal benutzen".to_string(),
-                R::TooLarge => "zu groß".to_string(),
-                R::UnknownOp => "unbekannte Operation".to_string(),
-                R::Stale => "veraltete Version".to_string(),
-            };
-            format!("Vault: {de}")
-        }
+        E::Vault(r) => format!("Vault: {}", localize_vault_refusal(lang, r)),
         E::FeatureDisabled(k) => format!("{k}: nicht aktiviert"),
         E::AlreadyTerminal(id, st) => format!("Vorschlag #{} ist bereits {st:?}", id.0),
         E::NotTheProposer(id) => format!("Vorschlag #{}: nur wer vorschlägt, zieht zurück", id.0),

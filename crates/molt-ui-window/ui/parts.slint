@@ -1842,10 +1842,16 @@ export component ProposalCard inherits Rectangle {
                 emoji: "👍";
                 label: Strings.mv-approve;
                 primary: true;
-                enabled: root.p.my-vote == 0;
+                enabled: root.p.my-vote == 0 && root.p.blocked == "";
                 clicked => {
                     root.approve();
                 }
+            }
+            if !root.read-only && root.p.blocked != "": Text {
+                text: root.p.blocked;
+                color: Theme.faint;
+                font-size: Theme.fs-cap;
+                vertical-alignment: center;
             }
             if !root.read-only: AppButton {
                 emoji: "👎";

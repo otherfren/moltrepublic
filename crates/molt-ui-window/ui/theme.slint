@@ -146,6 +146,9 @@ export struct ProposalRow {
     withdrawn: bool,
     // unread entries in the vote's discussion channel (💬 badge; 0 = none)
     unread: int,
+    // why approve is grayed ("" = approvable): a vault deposit this seat
+    // has not verified yet
+    blocked: string,
 }
 
 // One member of a republic with its last-sync info (mock data).
