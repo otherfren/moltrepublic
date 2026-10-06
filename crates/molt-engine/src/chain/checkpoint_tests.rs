@@ -1041,13 +1041,13 @@ fn a_folded_cut_without_its_base_is_refused_by_name() {
     let mut suffix = vec![anchor];
     suffix.push(b.blocks[3].clone());
     let mut folded_state = fold_state(blob.clone(), &suffix, 3).expect("fold the suffix");
-    let (_, second) = super::wiki_base::fold_cut(&mut folded_state, true, Some(&with_base))
+    let second = super::wiki_base::fold_cut(&mut folded_state, CutKind { wiki: true, vault: false }, Held::wiki(Some(&with_base)))
         .expect("the holder that has the base can fold");
     let cut = b.seal(
         4,
         ChainChange::CheckpointFolded {
             upto: 3,
-            state_hash: second,
+            state_hash: second.hash,
         },
         &["petra", "walter"],
     );
@@ -1198,7 +1198,7 @@ fn a_cut_re_bases_an_open_patch_and_a_conflict_kills_one() {
     }
 
     // the cut seals (n-of-n)
-    let hash = walter.own_cut_hash(1, true).expect("folded projection");
+    let hash = walter.own_cut_hash(1, walter.cut_kind(true)).expect("folded projection");
     walter.receive_checkpoint_proposal(40, 1, &hash, true);
     let change = ChainChange::CheckpointFolded {
         upto: 1,

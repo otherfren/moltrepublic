@@ -174,7 +174,7 @@ impl crate::State {
         if self.vault_seams.base_pending() {
             return true;
         }
-        false
+        self.vault_base_pending_now()
     }
 
     /// The vault surface's read model.
@@ -186,8 +186,13 @@ impl crate::State {
                 .replica
                 .as_ref()
                 .map_or(0, |r| u8::try_from(r.roster.len()).unwrap_or(u8::MAX)),
+            base_pending: self.vault_base_progress(),
             ..VaultView::default()
         };
+        // a pending base is a typed state, never an empty vault
+        if view.base_pending.is_some() {
+            return view;
+        }
         deposit::fill(self, &mut view);
         receipts::fill(self, &mut view);
         grant::fill(self, &mut view);

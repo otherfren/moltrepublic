@@ -1400,6 +1400,11 @@ impl State {
             tracing::warn!(error = %e, "the stored wiki base is unreadable - refetching");
             None
         });
+        // vault S5: the folded vault base, the same posture
+        let stored_vault_base = opened.read_vault_base().unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "vault_base=unreadable action=refetch");
+            None
+        });
         // point of no return: swap the actor state to the new workspace
         self.close_active_storage();
         self.reset_workspace_state();
@@ -1447,6 +1452,8 @@ impl State {
         // it here: bytes that do not answer the commitment are deleted, and
         // the holder goes base-pending rather than reading a wrong wiki.
         self.adopt_wiki_base(stored_wiki_base);
+        // re-verified under the chain's own vault context (plan 1.3.16)
+        self.adopt_vault_base(stored_vault_base);
         // the wiki indexes are built OFF the actor and EAGERLY: by the time
         // a human searches, the answer is usually already there, and the
         // first search does not pay for parsing the whole base (§4.5/§4.6)
@@ -1459,7 +1466,18 @@ impl State {
         self.vault_seed = transport_state.vault_seed.as_ref().and_then(crate::vault::seed_array);
         self.vault_rx = crate::vault::receipts::ReceiptRuntime::loaded(transport_state.vault_status.clone());
         if self.is_vault_republic() && self.vault_seed.is_none() {
-            tracing::warn!("vault_seed=missing");
+            // a restore or a crash left it out: the phrase this device keeps
+            // re-derives it, checked against the founding vault_pk
+            let root = self.workspace_root();
+            let entropy = self
+                .active
+                .as_ref()
+                .and_then(|a| molt_storage::read_sealed_seed(&root, &a.dir, id))
+                .and_then(|p| molt_storage::seed_entropy(&p).ok());
+            let rederived = entropy.is_some_and(|e| self.vault_seed_from_entropy(&e));
+            if !rederived {
+                tracing::warn!("vault_seed=missing");
+            }
         }
         self.vault_load_displaced(transport_state.vault_displaced.clone());
         // …and, beside it, the Nostr transport material this seat needs to

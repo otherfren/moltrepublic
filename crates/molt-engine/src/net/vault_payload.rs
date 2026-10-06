@@ -187,8 +187,11 @@ impl crate::State {
             .filter(|p| p.surface == Surface::Vault && p.state == ProposalState::Proposed && !p.withdrawn)
             .map(|p| &p.payload);
         let mut out: BTreeMap<String, NamedPayload> = BTreeMap::new();
+        // the current versions a held base names (S5)
+        let based = self.vault_base_payloads();
         for named in self
             .applied_payloads(Surface::Vault)
+            .chain(based.iter())
             .chain(pending)
             .filter_map(|v| deposit_named(v, &rid))
             .chain(self.files.vault.seam_named.iter().cloned())

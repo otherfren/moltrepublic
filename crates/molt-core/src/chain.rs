@@ -174,6 +174,19 @@ pub enum ChainChange {
         /// memory group summarized.
         state_hash: String,
     },
+    /// The only cut a roster-v6 (vault) republic takes (vault plan 1.3.6):
+    /// the vault group always folds to one `vault_base` entry, the wiki
+    /// fold stays the proposer's choice and `wiki_folded` records it. Its
+    /// state hashes under `molt-chain-checkpoint-v10`. Its own variant so
+    /// an older build stops instead of computing a different hash.
+    CheckpointVault {
+        /// The last folded-in block, as in [`ChainChange::Checkpoint`].
+        upto: u64,
+        /// SHA-256 (lowercase hex) over the canonical v10 state bytes.
+        state_hash: String,
+        /// The memory group is folded too.
+        wiki_folded: bool,
+    },
 }
 
 /// One committed block in the persistent chain: a threshold-signed change plus
@@ -300,6 +313,17 @@ pub fn approval_bytes(republic_id: &str, height: u64, change: &ChainChange) -> V
                 ChainChange::CheckpointFolded { .. } => 4,
                 _ => 3,
             });
+            out.extend_from_slice(&upto.to_le_bytes());
+            put_bytes(&mut out, state_hash.as_bytes());
+            out
+        }
+        ChainChange::CheckpointVault { upto, state_hash, wiki_folded } => {
+            let mut out = Vec::new();
+            out.extend_from_slice(b"molt-chain-change-v2\0");
+            put_bytes(&mut out, republic_id.as_bytes());
+            out.extend_from_slice(&height.to_le_bytes());
+            out.push(5);
+            out.push(u8::from(*wiki_folded));
             out.extend_from_slice(&upto.to_le_bytes());
             put_bytes(&mut out, state_hash.as_bytes());
             out
@@ -480,7 +504,9 @@ pub fn applied_lww_slot(surface: Surface, payload: &Value) -> Option<String> {
 }
 
 /// **What checkpoint signers hash.** The canonical, versioned
-/// serialization of [`CheckpointState`] (`molt-chain-checkpoint-v8` — v8
+/// serialization of [`CheckpointState`] (`molt-chain-checkpoint-v10` for a
+/// vault republic: the v9 wide layout plus `vault_pk` in both identity
+/// tables; `molt-chain-checkpoint-v8` — v8
 /// carries an applied group for a surface outside the frozen
 /// [`Surface::CHECKPOINT_V7_SURFACES`], conditionally: the group exists
 /// only once that surface holds state, so every cut made before it keeps
@@ -538,11 +564,21 @@ fn canonical_bytes_over(s: &CheckpointState, groups: &[(&str, &[(u64, Value)])])
     });
     // v9 inherits the v8 layout wholesale: an explicit group count and the
     // feature-set presence byte.
-    let later = later || folded;
+    // v10: a vault republic's cut (vault plan 1.3.6) - the v9 wide layout
+    // plus `vault_pk` as a fourth field in BOTH identity tables, the only
+    // record of the keys once the genesis is pruned.
+    let vault = s
+        .founding_identities
+        .iter()
+        .chain(&s.roster)
+        .any(|i| !i.vault_pk.is_empty());
+    let later = later || folded || vault;
     // v7 carries the ratified founding FEATURE SET — conditionally, like
     // roster-v5 itself: a state without one (every pre-v5 republic) hashes
     // byte-identically to v6, so existing checkpoints keep verifying.
-    out.extend_from_slice(if folded {
+    out.extend_from_slice(if vault {
+        b"molt-chain-checkpoint-v10\0".as_slice()
+    } else if folded {
         b"molt-chain-checkpoint-v9\0".as_slice()
     } else if later {
         b"molt-chain-checkpoint-v8\0".as_slice()
@@ -560,6 +596,9 @@ fn canonical_bytes_over(s: &CheckpointState, groups: &[(&str, &[(u64, Value)])])
         put_bytes(&mut out, i.member.as_bytes());
         put_bytes(&mut out, i.identity_pk.as_bytes());
         put_bytes(&mut out, i.nostr_pk.as_bytes());
+        if vault {
+            put_bytes(&mut out, i.vault_pk.as_bytes());
+        }
     }
     put_bytes(&mut out, s.agenda.as_bytes());
     // v3: the ratified relay pool. Without it a pruned republic's summary
@@ -586,6 +625,9 @@ fn canonical_bytes_over(s: &CheckpointState, groups: &[(&str, &[(u64, Value)])])
         put_bytes(&mut out, i.member.as_bytes());
         put_bytes(&mut out, i.identity_pk.as_bytes());
         put_bytes(&mut out, i.nostr_pk.as_bytes());
+        if vault {
+            put_bytes(&mut out, i.vault_pk.as_bytes());
+        }
     }
     if later {
         out.extend_from_slice(&u64::try_from(groups.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
@@ -1446,5 +1488,187 @@ mod tests {
             RosterAttestation { member: "petra".to_string(), sig: "11".to_string() },
         ]);
         assert_eq!(block_link_bytes("f00", &a), block_link_bytes("f00", &b));
+    }
+
+    // -----------------------------------------------------------------
+    // checkpoint-v10 and CheckpointVault (vault plan S5, 1.3.6)
+    // -----------------------------------------------------------------
+
+    fn keyed(name: &str, pk: &str, vault: &str) -> MemberIdentity {
+        MemberIdentity { vault_pk: vault.to_string(), ..ident(name, pk) }
+    }
+
+    fn vault_entry(hash: &str, size: u64) -> (u64, Value) {
+        (0, json!({ "op": "vault_base", "hash": hash, "size": size }))
+    }
+
+    /// A vault republic's cut: keyed tables, the vault group folded.
+    fn v10_state() -> CheckpointState {
+        let mut s = pinned_state();
+        s.founding_identities = vec![keyed("petra", "aa", "11"), keyed("walter", "bb", "22")];
+        s.roster = s.founding_identities.clone();
+        s.founding_features = Some(vec!["vault".to_string()]);
+        s.applied = Surface::CHECKPOINT_V7_SURFACES
+            .into_iter()
+            .map(|sf| (sf, if sf == Surface::Vault { vec![vault_entry("ee", 19)] } else { Vec::new() }))
+            .collect();
+        s
+    }
+
+    #[test]
+    fn checkpoint_v10_byte_pin() {
+        let s = v10_state();
+        let put = |out: &mut Vec<u8>, b: &[u8]| {
+            out.extend_from_slice(&u32::try_from(b.len()).unwrap_or(0).to_le_bytes());
+            out.extend_from_slice(b);
+        };
+        let table = |want: &mut Vec<u8>| {
+            want.extend_from_slice(&2u64.to_le_bytes());
+            for (m, pk, v) in [("petra", "aa", "11"), ("walter", "bb", "22")] {
+                put(want, m.as_bytes());
+                put(want, pk.as_bytes());
+                put(want, "cc".repeat(32).as_bytes());
+                put(want, v.as_bytes());
+            }
+        };
+        let mut want = Vec::new();
+        want.extend_from_slice(b"molt-chain-checkpoint-v10\0");
+        put(&mut want, b"f00");
+        put(&mut want, b"Chess Club");
+        want.push(2);
+        want.push(2);
+        table(&mut want);
+        put(&mut want, b"play chess");
+        want.extend_from_slice(&1u64.to_le_bytes());
+        put(&mut want, b"wss://relay.example");
+        // the v8 wide form: presence byte, then the feature run
+        want.push(1);
+        want.extend_from_slice(&1u64.to_le_bytes());
+        put(&mut want, b"vault");
+        table(&mut want);
+        want.extend_from_slice(&6u64.to_le_bytes());
+        for sf in Surface::CHECKPOINT_V7_SURFACES {
+            put(&mut want, sf.as_str().as_bytes());
+            if sf == Surface::Vault {
+                want.extend_from_slice(&1u64.to_le_bytes());
+                want.extend_from_slice(&0u64.to_le_bytes());
+                put(&mut want, br#"{"hash":"ee","op":"vault_base","size":19}"#);
+            } else {
+                want.extend_from_slice(&0u64.to_le_bytes());
+            }
+        }
+        want.extend_from_slice(&2u64.to_le_bytes());
+        want.extend_from_slice(&3u64.to_le_bytes());
+        want.extend_from_slice(&7u64.to_le_bytes());
+        want.extend_from_slice(&1u64.to_le_bytes());
+        put(&mut want, b"petra");
+        put(&mut want, "ab".repeat(32).as_bytes());
+        want.extend_from_slice(&1u64.to_le_bytes());
+        put(&mut want, b"petra");
+        want.extend_from_slice(&1u64.to_le_bytes());
+        put(&mut want, b"wss://other.example");
+        want.extend_from_slice(&9u64.to_le_bytes());
+        assert_eq!(
+            checkpoint_canonical_bytes(&s),
+            want,
+            "the v10 layout moved - bump the tag and move this pin with it"
+        );
+    }
+
+    /// `founding_identities` is the only record of the vault keys after the
+    /// genesis is pruned: both tables bind them.
+    #[test]
+    fn checkpoint_v10_hashes_vault_pk_in_both_tables() {
+        let s = v10_state();
+        let base = checkpoint_canonical_bytes(&s);
+        let mut founding = s.clone();
+        founding.founding_identities[1].vault_pk = "33".to_string();
+        let mut roster = s.clone();
+        roster.roster[1].vault_pk = "33".to_string();
+        assert_ne!(checkpoint_canonical_bytes(&founding), base);
+        assert_ne!(checkpoint_canonical_bytes(&roster), base);
+        assert_ne!(checkpoint_canonical_bytes(&founding), checkpoint_canonical_bytes(&roster));
+    }
+
+    /// The tag is the vault's whether or not the wiki folded too.
+    #[test]
+    fn checkpoint_v10_with_and_without_wiki_fold() {
+        let plain = v10_state();
+        let mut wiki = v10_state();
+        if let Some((_, g)) = wiki.applied.iter_mut().find(|(sf, _)| *sf == Surface::Memory) {
+            g.push((0, json!({ "op": "wiki_base", "hash": "ab", "size": 3, "rev_at_cut": 1 })));
+        }
+        let a = checkpoint_canonical_bytes(&plain);
+        let b = checkpoint_canonical_bytes(&wiki);
+        assert!(a.starts_with(b"molt-chain-checkpoint-v10\0"));
+        assert!(b.starts_with(b"molt-chain-checkpoint-v10\0"));
+        assert_ne!(a, b);
+    }
+
+    /// A republic that never got a deposit still folds to one entry; a
+    /// keyless state never takes the vault tag.
+    #[test]
+    fn checkpoint_v10_with_an_empty_vault_base() {
+        let mut s = v10_state();
+        if let Some((_, g)) = s.applied.iter_mut().find(|(sf, _)| *sf == Surface::Vault) {
+            *g = vec![vault_entry("e3", 27)];
+        }
+        let b = checkpoint_canonical_bytes(&s);
+        assert!(b.starts_with(b"molt-chain-checkpoint-v10\0"));
+        assert_ne!(b, checkpoint_canonical_bytes(&v10_state()));
+        assert!(checkpoint_canonical_bytes(&pinned_state()).starts_with(b"molt-chain-checkpoint-v6\0"));
+    }
+
+    #[test]
+    fn checkpoint_vault_approval_bytes_pin() {
+        let put = |out: &mut Vec<u8>, b: &[u8]| {
+            out.extend_from_slice(&u32::try_from(b.len()).unwrap_or(0).to_le_bytes());
+            out.extend_from_slice(b);
+        };
+        let mut seen = Vec::new();
+        for wiki_folded in [false, true] {
+            let c = ChainChange::CheckpointVault { upto: 9, state_hash: "ab".to_string(), wiki_folded };
+            let mut want = b"molt-chain-change-v2\0".to_vec();
+            put(&mut want, b"f00");
+            want.extend_from_slice(&10u64.to_le_bytes());
+            want.push(5);
+            want.push(u8::from(wiki_folded));
+            want.extend_from_slice(&9u64.to_le_bytes());
+            put(&mut want, b"ab");
+            assert_eq!(approval_bytes("f00", 10, &c), want);
+            seen.push(want);
+        }
+        for legacy in [
+            ChainChange::Checkpoint { upto: 9, state_hash: "ab".to_string() },
+            ChainChange::CheckpointFolded { upto: 9, state_hash: "ab".to_string() },
+        ] {
+            let b = approval_bytes("f00", 10, &legacy);
+            assert!(seen.iter().all(|v| *v != b));
+        }
+        assert_ne!(seen[0], seen[1]);
+    }
+
+    /// The additive-only rule: a build that predates the variant refuses
+    /// the block instead of reading it as something else.
+    #[test]
+    fn an_older_reader_stops_at_checkpoint_vault() {
+        #[derive(Debug, Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case")]
+        #[allow(dead_code)]
+        enum Older {
+            Genesis {},
+            Applied {},
+            Membership {},
+            Checkpoint { upto: u64, state_hash: String },
+            CheckpointFolded { upto: u64, state_hash: String },
+        }
+        let c = ChainChange::CheckpointVault { upto: 9, state_hash: "ab".to_string(), wiki_folded: true };
+        let json = serde_json::to_value(&c).expect("serializes");
+        assert_eq!(json.get("kind").and_then(Value::as_str), Some("checkpoint_vault"));
+        assert!(serde_json::from_value::<Older>(json.clone()).is_err());
+        let legacy = serde_json::to_value(ChainChange::Checkpoint { upto: 9, state_hash: "ab".to_string() })
+            .expect("serializes");
+        assert!(serde_json::from_value::<Older>(legacy).is_ok(), "the twin decodes");
+        assert_eq!(serde_json::from_value::<ChainChange>(json).expect("round trip"), c);
     }
 }

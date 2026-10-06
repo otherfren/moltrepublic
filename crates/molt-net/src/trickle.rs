@@ -322,7 +322,12 @@ async fn tick<S: StateStore>(
     // a vault payload (plan S3a): the same held-source path, out of the
     // sealed `vault/<secret_id>.bin` this seat must hold
     if let Some(hash) = job.vault.as_deref() {
-        let source = HeldSource::Vault { file: &job.path, hash };
+        // no file name: the folded vault base (vault S5)
+        let source = if job.path.is_empty() {
+            HeldSource::VaultBase { hash }
+        } else {
+            HeldSource::Vault { file: &job.path, hash }
+        };
         return publish_held_piece(chan, store, &job, manifests, day, source).await;
     }
     if job.wiki_base {
@@ -404,6 +409,8 @@ enum HeldSource<'a> {
     WikiBase,
     /// A vault payload: the sink's file name and the committed hash.
     Vault { file: &'a str, hash: &'a str },
+    /// The folded vault base and its commitment.
+    VaultBase { hash: &'a str },
 }
 
 impl HeldSource<'_> {
@@ -411,6 +418,7 @@ impl HeldSource<'_> {
         match self {
             HeldSource::WikiBase => store.wiki_base_piece(index).await,
             HeldSource::Vault { file, .. } => store.vault_piece(file, index).await,
+            HeldSource::VaultBase { .. } => store.vault_base_piece(index).await,
         }
     }
 }
@@ -454,7 +462,7 @@ async fn publish_held_piece<S: StateStore>(
             }
             // a vault payload's hash is known here, so a damaged copy is
             // never published under it
-            if let HeldSource::Vault { hash, .. } = source {
+            if let HeldSource::Vault { hash, .. } | HeldSource::VaultBase { hash } = source {
                 if hex::encode(whole.finalize()) != hash {
                     drop_job(store, series, "the vault payload does not match its hash".into()).await;
                     return Err(Hold::Failed);

@@ -151,8 +151,7 @@ impl State {
             return;
         };
         // plan 1.3.15: no cut over a vault base not held here, own or co-signed
-        if matches!(change, ChainChange::Checkpoint { .. } | ChainChange::CheckpointFolded { .. })
-            && self.vault_base_pending()
+        if CutKind::of(&change).is_some() && (self.vault_base_pending() || self.wiki_base_pending())
         {
             tracing::warn!(id, "vault: base pending, not signing a cut");
             return;
@@ -430,10 +429,7 @@ impl State {
         // drops history every seat has to be able to reproduce, and it has
         // no hurry - a silent seat leaves the cut pending, and the next
         // committed block re-proposes it at the new head.
-        let need = if matches!(
-            change,
-            ChainChange::Checkpoint { .. } | ChainChange::CheckpointFolded { .. }
-        ) {
+        let need = if CutKind::of(&change).is_some() {
             head.identities.len()
         } else {
             usize::from(head.rule_m)
@@ -728,35 +724,49 @@ impl State {
             // proposal bookkeeping (the committer also cleans by id in
             // adopt_committed_block; receivers find it by content). Local
             // block-dropping below `upto` is stage 4.
-            ChainChange::Checkpoint { upto, .. } | ChainChange::CheckpointFolded { upto, .. } => {
-                let folded = matches!(block.change, ChainChange::CheckpointFolded { .. });
+            ChainChange::Checkpoint { .. }
+            | ChainChange::CheckpointFolded { .. }
+            | ChainChange::CheckpointVault { .. } => {
+                let Some((upto, _, kind)) = CutKind::of(&block.change) else {
+                    return;
+                };
                 self.forget_votes_for(&block.change);
                 // B-F2: drop the summarized history locally, automatically —
                 // the vote just confirmed this summary is correct. The blob
                 // becomes the holder's trust anchor; the chain keeps the
                 // checkpoint block and everything after it.
-                let upto = *upto;
                 let anchor_height = block.height;
                 // NOT persisted here: every caller of `after_block_applied`
                 // writes the chain once after it (the seal, the tie-break,
                 // the catch-up batch), and the cut is part of that write
-                match self.own_cut_state(upto, folded) {
+                match self.own_cut_state(upto, kind) {
                     // K6: the folded tree reaches the DISK before the
                     // patches that produce it are dropped. Losing that
                     // order once loses the wiki: the blocks are gone and
                     // the commitment names bytes nobody kept.
-                    Ok((_, Some(tree), _)) if !self.persist_wiki_base(Some(&tree)) => {
+                    Ok((_, folded)) if folded.tree.as_ref().is_some_and(|t| !self.persist_wiki_base(Some(t))) => {
                         tracing::error!(
                             "the folded wiki base did not reach the disk - keeping full history"
                         );
                     }
-                    Ok((blob, tree, _)) => {
-                        if let Some(tree) = tree {
+                    // the vault base likewise (spec §9.3)
+                    Ok((_, folded)) if folded.vault.as_ref().is_some_and(|b| !self.persist_vault_base(Some(b))) => {
+                        tracing::error!("vault_base=not_persisted action=keep_history");
+                    }
+                    Ok((blob, folded)) => {
+                        if let Some(tree) = folded.tree {
                             self.chain.wiki_base = Some(tree);
+                        }
+                        if let Some(base) = folded.vault {
+                            self.set_vault_base(Some(base));
                         }
                         self.set_checkpoint_blob(Some(blob));
                         self.chain.blocks.retain(|b| b.height >= anchor_height);
                         self.apply_chain_to_state();
+                        // plan 1.3.14: replaced payloads retire at the cut
+                        if kind.vault {
+                            self.vault_retire_at_cut();
+                        }
                         // A4: the cut re-based every open patch; it killed none
                         self.mark_open_wiki_patches_rebased();
                         self.emit(Event::CheckpointSealed {
@@ -840,7 +850,7 @@ impl State {
             .chain.proposal_changes
             .iter()
             .filter(|(_, c)| {
-                matches!(c, ChainChange::Checkpoint { upto, .. } if *upto < head_height)
+                CutKind::of(c).is_some_and(|(upto, _, _)| upto < head_height)
             })
             .map(|(id, _)| *id)
             .collect();
@@ -883,7 +893,7 @@ impl State {
     pub(crate) fn walk_own(&self, blocks: &[ChainBlock]) -> Result<ChainWalk, String> {
         match &self.chain.checkpoint_blob {
             None => walk_chain(blocks),
-            Some(blob) => walk_suffix_chain(blob, blocks, &self.republic_id(), self.held_wiki_base()),
+            Some(blob) => walk_suffix_chain(blob, blocks, &self.republic_id(), self.held_bases()),
         }
     }
 
@@ -908,7 +918,7 @@ impl State {
         };
         // the base as this holder holds it NOW, not as the cached walk once
         // saw it (D9)
-        let stepped = walk.step(block, self.chain.wiki_base.as_ref());
+        let stepped = walk.step(block, self.held_bases());
         let head = walk.head.clone();
         self.chain.walk = Some(walk);
         stepped.map(|()| head)
@@ -922,7 +932,14 @@ impl State {
         upto: u64,
         folded: bool,
     ) -> Result<molt_core::CheckpointState, String> {
-        Ok(self.own_cut_state(upto, folded)?.0)
+        Ok(self.own_cut_state(upto, self.cut_kind(folded))?.0)
+    }
+
+    /// The cut this holder proposes or verifies: a vault republic's is
+    /// always [`ChainChange::CheckpointVault`] (plan 1.3.6), `wiki` the
+    /// wiki choice either way.
+    pub(crate) fn cut_kind(&self, wiki: bool) -> CutKind {
+        CutKind { wiki, vault: self.is_vault_republic() }
     }
 
     /// The state hash this holder attests for a cut at `upto` - the value
@@ -930,8 +947,8 @@ impl State {
     ///
     /// # Errors
     /// See [`State::own_cut_state`].
-    pub(crate) fn own_cut_hash(&self, upto: u64, folded: bool) -> Result<String, String> {
-        Ok(self.own_cut_state(upto, folded)?.2)
+    pub(crate) fn own_cut_hash(&self, upto: u64, kind: CutKind) -> Result<String, String> {
+        Ok(self.own_cut_state(upto, kind)?.1.hash)
     }
 
     /// The cut's state, the tree a folded one commits to - the bytes this
@@ -948,16 +965,25 @@ impl State {
     pub(crate) fn own_cut_state(
         &self,
         upto: u64,
-        folded: bool,
-    ) -> Result<(molt_core::CheckpointState, Option<WikiTree>, String), String> {
+        kind: CutKind,
+    ) -> Result<(molt_core::CheckpointState, FoldedCut), String> {
         let mut state = match &self.chain.checkpoint_blob {
             None => checkpoint_state(&self.chain.blocks, upto)?,
             // the anchor block in chain[0] is state-neutral for the fold
             Some(blob) => fold_state(blob.clone(), &self.chain.blocks, upto)?,
         };
-        let (tree, hash) =
-            super::wiki_base::fold_cut(&mut state, folded, self.held_wiki_base())?;
-        Ok((state, tree, hash))
+        let folded = super::wiki_base::fold_cut(&mut state, kind, self.held_bases())?;
+        Ok((state, folded))
+    }
+
+    /// Every base this holder keeps right now.
+    pub(crate) fn held_bases(&self) -> Held<'_> {
+        Held { wiki: self.chain.wiki_base.as_ref(), vault: self.vault_base_now() }
+    }
+
+    /// The wiki is folded into a commitment this node does not hold.
+    pub(crate) fn wiki_base_pending(&self) -> bool {
+        self.wiki_base_committed().is_some() && self.chain.wiki_base.is_none()
     }
 
     /// The ratified wiki tree this holder keeps for its blob's commitment
@@ -1278,18 +1304,17 @@ impl State {
         // is registered only at the current head ("ONE cut per head").
         if let Some(head) = self.chain.head.as_ref() {
             for (id, change) in &self.chain.proposal_changes {
-                let (upto, state_hash, folded) = match change {
-                    ChainChange::Checkpoint { upto, state_hash } => (*upto, state_hash, false),
-                    ChainChange::CheckpointFolded { upto, state_hash } => (*upto, state_hash, true),
-                    _ => continue,
+                let Some((upto, state_hash, kind)) = CutKind::of(change) else {
+                    continue;
                 };
+                let folded = kind.wiki;
                 if upto != head.height {
                     continue;
                 }
                 events.push(WorkspaceEvent::CheckpointProposed {
                     id: ProposalId(*id),
                     upto,
-                    state_hash: state_hash.clone(),
+                    state_hash: state_hash.to_string(),
                     folded,
                 });
             }

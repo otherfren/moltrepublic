@@ -489,11 +489,11 @@ fn a_base_pending_node_signs_no_cut() {
 
     let mut pending = crate::chain::test_support::chain_signer("petra", &b, b.blocks.clone());
     pending.vault_seams.set_base_pending(true);
-    let own = match pending.cmd_propose_checkpoint().expect("propose") {
-        Reply::Proposed { id, .. } => id.0,
-        other => panic!("unexpected: {other:?}"),
-    };
-    assert!(!pending.chain.pending_sigs.contains_key(&own), "no own signature");
+    assert!(
+        matches!(pending.cmd_propose_checkpoint(), Err(MoltError::VaultBasePending { .. })),
+        "no own cut"
+    );
+    assert!(pending.chain.pending_sigs.is_empty(), "no own signature");
 
     walter.vault_seams.set_base_pending(true);
     walter.receive_checkpoint_proposal(id, upto, &state_hash, false);

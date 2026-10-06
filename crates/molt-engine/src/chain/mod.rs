@@ -32,6 +32,7 @@ mod governance;
 mod membership;
 mod projection;
 mod sync;
+pub(crate) mod vault_base;
 mod verify;
 mod wiki_base;
 
@@ -59,8 +60,71 @@ pub(crate) use verify::{
 };
 #[cfg(test)]
 pub(crate) use verify::block_hash;
+#[cfg(test)]
+pub(crate) use verify::walk_suffix_chain;
 /// The ratified wiki as the fold produces it: path -> document.
 pub(crate) type WikiTree = std::collections::BTreeMap<String, String>;
+
+/// The folded bases a holder keeps RIGHT NOW - passed to every fold, never
+/// cached in a walk (the §4.9.5 lesson, D9).
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Held<'a> {
+    /// The ratified wiki tree behind a wiki commitment.
+    pub(crate) wiki: Option<&'a WikiTree>,
+    /// The vault base behind a vault commitment.
+    pub(crate) vault: Option<&'a molt_core::vault::VaultBase>,
+}
+
+impl<'a> Held<'a> {
+    /// Only a wiki tree.
+    pub(crate) fn wiki(wiki: Option<&'a WikiTree>) -> Self {
+        Self { wiki, vault: None }
+    }
+}
+
+/// Which groups a cut folds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct CutKind {
+    /// The memory group (`CheckpointFolded`, or `CheckpointVault` with
+    /// `wiki_folded`).
+    pub(crate) wiki: bool,
+    /// The vault group (`CheckpointVault`).
+    pub(crate) vault: bool,
+}
+
+impl CutKind {
+    /// The cut a change commits to, `None` for a non-cut.
+    pub(crate) fn of(change: &ChainChange) -> Option<(u64, &str, Self)> {
+        match change {
+            ChainChange::Checkpoint { upto, state_hash } => Some((*upto, state_hash, Self::default())),
+            ChainChange::CheckpointFolded { upto, state_hash } => {
+                Some((*upto, state_hash, Self { wiki: true, vault: false }))
+            }
+            ChainChange::CheckpointVault { upto, state_hash, wiki_folded } => {
+                Some((*upto, state_hash, Self { wiki: *wiki_folded, vault: true }))
+            }
+            _ => None,
+        }
+    }
+
+    /// The change a cut of this kind is.
+    pub(crate) fn change(self, upto: u64, state_hash: String) -> ChainChange {
+        match (self.vault, self.wiki) {
+            (true, wiki_folded) => ChainChange::CheckpointVault { upto, state_hash, wiki_folded },
+            (false, true) => ChainChange::CheckpointFolded { upto, state_hash },
+            (false, false) => ChainChange::Checkpoint { upto, state_hash },
+        }
+    }
+}
+
+/// What a cut fold yields: the wiki tree and the vault base a holder must
+/// keep once the folded entries are dropped, and the state hash.
+#[derive(Debug, Clone)]
+pub(crate) struct FoldedCut {
+    pub(crate) tree: Option<WikiTree>,
+    pub(crate) vault: Option<molt_core::vault::VaultBase>,
+    pub(crate) hash: String,
+}
 
 pub(crate) use wiki_base::{base_commitment_of, commitment as wiki_base_commitment, rev_at_cut_of};
 pub(crate) use governance::PendingApproval;

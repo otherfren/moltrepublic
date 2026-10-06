@@ -159,15 +159,22 @@ fn summarize_state(
 /// The group commits to a base this holder does not hold, or is malformed.
 pub(crate) fn fold_cut(
     state: &mut molt_core::CheckpointState,
-    folded: bool,
-    held: Option<&BTreeMap<String, String>>,
-) -> Result<(Option<BTreeMap<String, String>>, String), String> {
-    if !folded {
-        return Ok((None, super::checkpoint_state_hash(state)));
-    }
-    let empty = BTreeMap::new();
-    let tree = summarize_state(state, held.unwrap_or(&empty))?;
-    Ok((tree, super::checkpoint_state_hash(state)))
+    cut: super::CutKind,
+    held: super::Held<'_>,
+) -> Result<super::FoldedCut, String> {
+    let tree = if cut.wiki {
+        let empty = BTreeMap::new();
+        summarize_state(state, held.wiki.unwrap_or(&empty))?
+    } else {
+        None
+    };
+    // a vault cut always folds the vault group (plan 1.3.6)
+    let vault = if cut.vault {
+        Some(super::vault_base::summarize_state(state, held.vault)?)
+    } else {
+        None
+    };
+    Ok(super::FoldedCut { tree, vault, hash: super::checkpoint_state_hash(state) })
 }
 
 /// Is there anything to fold? A cut proposes the folded variant only when

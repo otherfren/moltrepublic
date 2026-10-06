@@ -180,7 +180,7 @@ impl crate::State {
             return Err(MoltError::Vault(VaultRefusal::NotVerified));
         };
         if self.vault_base_pending() {
-            return Err(MoltError::VaultBasePending { have: 0, size: 0, want: String::new() });
+            return Err(self.vault_base_pending_error());
         }
         let me = self.member();
         let mine = dep.depositor == me;
@@ -218,6 +218,19 @@ impl crate::State {
         let rid = self.republic_id();
         let mut st = VaultState::default();
         for value in self.applied_payloads(Surface::Vault) {
+            // the folded base seeds the projection (S5); a pending one
+            // seeds nothing, and every caller checks base-pending first
+            if crate::chain::vault_base::base_commitment_of(value).is_some() {
+                for d in self.vault_base_now().map(|b| b.deposits.as_slice()).unwrap_or_default() {
+                    let sid = secret_id(&rid, &d.deposit);
+                    st.current.insert((d.deposit.depositor.clone(), d.deposit.name.clone()), sid.clone());
+                    st.versions.insert(sid, VaultVersion { deposit: d.deposit.clone(), replaces: None });
+                    for g in &d.grants {
+                        st.grants.push(VaultAppliedGrant { grant: g.grant.clone(), void: false });
+                    }
+                }
+                continue;
+            }
             match serde_json::from_value::<VaultOp>(value.clone()) {
                 Ok(VaultOp::Deposit(dep)) => {
                     let sid = secret_id(&rid, &dep);

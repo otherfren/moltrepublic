@@ -44,7 +44,7 @@ impl State {
     ///   staled it lands here again and re-proposes at the new head, so
     ///   there is at most one auto-propose per committed block.
     pub(super) fn maybe_auto_checkpoint(&mut self) {
-        if self.chain.blocks.len() < AUTO_CHECKPOINT_MIN_LEN || self.is_vault_republic() {
+        if self.chain.blocks.len() < AUTO_CHECKPOINT_MIN_LEN {
             return;
         }
         let Some(head) = self.chain.head.as_ref() else {
@@ -78,7 +78,7 @@ impl State {
             || self
                 .chain.proposal_changes
                 .values()
-                .any(|c| matches!(c, ChainChange::Checkpoint { .. }));
+                .any(|c| CutKind::of(c).is_some());
         if vote_open {
             return;
         }
@@ -102,12 +102,9 @@ impl State {
                 "checkpoints need a chain-governed republic".into(),
             ));
         }
-        // a legacy cut drops the vault keys from every signed byte; the
-        // vault's own cut comes with S5
-        if self.is_vault_republic() {
-            return Err(molt_core::MoltError::BadPayload(
-                "no checkpoints in a vault republic yet".into(),
-            ));
+        // plan 1.3.15: a node missing a base cannot fold it
+        if self.vault_base_pending() {
+            return Err(self.vault_base_pending_error());
         }
         let Some(head) = self.chain.head.as_ref() else {
             return Err(molt_core::MoltError::BadPayload("no chain head".into()));
@@ -119,25 +116,14 @@ impl State {
         // K6: a republic with a wiki folds it into one commitment; one
         // without has nothing to fold and keeps the legacy bytes
         let folded = super::wiki_base::FOLD_CUTS && super::wiki_base::worth_folding(&unfolded);
-        // the SAME fold every co-signer and the receive path run (D9)
+        // the SAME fold every co-signer and the receive path run (D9); a
+        // vault republic's cut is always the vault variant (plan 1.3.6)
+        let kind = self.cut_kind(folded);
         let state_hash = self
-            .own_cut_hash(upto, folded)
+            .own_cut_hash(upto, kind)
             .map_err(molt_core::MoltError::BadPayload)?;
         let id = self.mint_proposal_id();
-        self.chain.proposal_changes.insert(
-            id,
-            if folded {
-                ChainChange::CheckpointFolded {
-                    upto,
-                    state_hash: state_hash.clone(),
-                }
-            } else {
-                ChainChange::Checkpoint {
-                    upto,
-                    state_hash: state_hash.clone(),
-                }
-            },
-        );
+        self.chain.proposal_changes.insert(id, kind.change(upto, state_hash.clone()));
         let me = self.member();
         let env = self.make_env(
             me,
@@ -182,10 +168,6 @@ impl State {
             return;
         }
         self.next_id = self.next_id.max(id.saturating_add(1));
-        if self.is_vault_republic() {
-            tracing::warn!(%id, "refusing a legacy checkpoint in a vault republic");
-            return;
-        }
         let Some(head) = self.chain.head.as_ref() else {
             return;
         };
@@ -193,7 +175,9 @@ impl State {
             tracing::debug!(%id, upto, head = head.height, "ignoring a checkpoint cut that is not our head");
             return;
         }
-        let ours = match self.own_cut_hash(upto, folded) {
+        // the variant comes from OUR genesis; `folded` is the wiki choice
+        let kind = self.cut_kind(folded);
+        let ours = match self.own_cut_hash(upto, kind) {
             Ok(hash) => hash,
             Err(e) => {
                 tracing::warn!(%id, error = %e, "cannot recompute the proposed checkpoint state");
@@ -211,17 +195,7 @@ impl State {
         // of a human-decision change (or let human approvals of that
         // proposal silently sign checkpoint bytes). Refuse any occupied id
         // that is not this exact checkpoint.
-        let this = if folded {
-            ChainChange::CheckpointFolded {
-                upto,
-                state_hash: state_hash.to_string(),
-            }
-        } else {
-            ChainChange::Checkpoint {
-                upto,
-                state_hash: state_hash.to_string(),
-            }
-        };
+        let this = kind.change(upto, state_hash.to_string());
         if !self.id_free_for(id, &this) {
             tracing::warn!(%id, "refusing a checkpoint proposal whose id names a different change");
             return;
@@ -379,7 +353,7 @@ impl State {
             let Some(next) = h.checked_add(1) else { break };
             h = next;
         }
-        match verify_suffix_chain(&blob, &candidate, &self.republic_id(), self.held_wiki_base()) {
+        match walk_suffix_chain(&blob, &candidate, &self.republic_id(), self.held_bases()).map(|w| w.head) {
             Ok(head) => {
                 let new_height = head.height;
                 self.set_checkpoint_blob(Some(blob));
@@ -394,6 +368,7 @@ impl State {
                 // held here; keeping that one would leave a base answering
                 // no commitment (D9) where a fetch belongs
                 self.drop_a_stale_wiki_base();
+                self.drop_a_stale_vault_base();
                 // The cards are settled: `apply_chain_to_state` folded the
                 // blob's consumed ids (else they zombie as Proposed and the
                 // re-base re-signs them into dead gossip — review finding)

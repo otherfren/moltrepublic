@@ -739,6 +739,8 @@ pub(crate) struct FilePlane {
     /// Vault S3a: the payloads this seat holds and the fetches after the
     /// ones it must hold.
     pub(crate) vault: crate::net::vault_payload::VaultPlane,
+    /// Vault S5: the fetch of the folded vault base.
+    pub(crate) vault_base: crate::net::vault_base::VaultBasePlane,
     pub(crate) mirror_quota_noted: bool,
     /// Verified pieces of each running mirror fetch, as last reported.
     pub(crate) mirror_progress: HashMap<molt_core::MessageId, u32>,
@@ -799,6 +801,13 @@ pub(crate) struct ChainProjection {
     /// fetched (base-pending) - the two are told apart by whether the
     /// blob's memory group carries a commitment.
     pub(crate) wiki_base: Option<std::collections::BTreeMap<String, String>>,
+    /// Vault S5: the verified vault base behind the commitment the vault
+    /// group carries after a vault cut (spec §9.3). `None` = no cut behind
+    /// this holder, or base-pending.
+    pub(crate) vault_base: Option<molt_core::vault::VaultBase>,
+    /// The commitment of [`Self::vault_base`], kept beside it so the many
+    /// base-pending checks never rehash it.
+    pub(crate) vault_base_hash: Option<String>,
     /// The gated surfaces' applied logs **derived from the chain** — a separate
     /// projection from the legacy log-driven [`State::applied`] so the two never
     /// collide: a single-operator workspace keeps its counted governance in
@@ -1399,6 +1408,7 @@ impl State {
                 wiki_base_next_try: 0,
                 wiki_base_fetching: None,
                 vault: crate::net::vault_payload::VaultPlane::default(),
+                vault_base: crate::net::vault_base::VaultBasePlane::default(),
                 share_paths: HashMap::new(),
                 share_stamps: HashMap::new(),
                 downloads: HashMap::new(),
@@ -1485,6 +1495,8 @@ impl State {
                 pending_served_blob: None,
                 checkpoint_blob: None,
                 wiki_base: None,
+                vault_base: None,
+                vault_base_hash: None,
                 applied: HashMap::new(),
                 applied_sigs: HashMap::new(),
                 anchors: HashMap::new(),

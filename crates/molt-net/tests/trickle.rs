@@ -343,3 +343,61 @@ async fn a_vault_job_publishes_the_held_payload_and_never_a_damaged_one() {
         handle.shutdown().await;
     }
 }
+
+/// A store that holds one folded vault base.
+#[derive(Clone)]
+struct VaultBaseStore {
+    inner: MemStateStore,
+    bytes: Arc<Vec<u8>>,
+}
+
+impl StateStore for VaultBaseStore {
+    async fn vault_base_piece(&self, index: u32) -> Option<Vec<u8>> {
+        let at = usize::try_from(index).ok()?.checked_mul(PIECE_PAYLOAD_LEN)?;
+        let end = (at + PIECE_PAYLOAD_LEN).min(self.bytes.len());
+        (at < self.bytes.len()).then(|| self.bytes[at..end].to_vec())
+    }
+    async fn vault_piece(&self, _file: &str, _index: u32) -> Option<Vec<u8>> {
+        None
+    }
+    async fn load(&self) -> molt_core::TransportState {
+        self.inner.load().await
+    }
+    async fn save(&self, state: molt_core::TransportState) {
+        self.inner.save(state).await;
+    }
+}
+
+/// **A vault base job (no file name) publishes the held base**, and a copy
+/// that misses the commitment drops the job unpublished (vault S5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_vault_base_job_publishes_the_held_base_and_never_a_damaged_one() {
+    use sha2::Digest as _;
+    let bytes = pattern(PIECE_PAYLOAD_LEN + 7);
+    let hash = hex::encode(sha2::Sha256::digest(&bytes));
+    let (m, _) = manifest_of_reader(bytes.as_slice()).expect("manifest");
+    let layout = Manifest::layout_for(m.count).expect("layout");
+    let base_job = molt_core::PublishJob {
+        path: String::new(),
+        root: String::new(),
+        vault: Some(hash.clone()),
+        ..job(std::path::Path::new(""), &m, whole_series_ranges(layout))
+    };
+    let damaged: Vec<u8> = bytes.iter().map(|b| b ^ 1).collect();
+    for (held, expect) in [(bytes.clone(), vec![layout.top, m.count, 0, 1]), (damaged, vec![])] {
+        let relay = MockRelay::run().await.expect("relay");
+        let url = relay.url().await.to_string();
+        let store = VaultBaseStore { inner: MemStateStore::new(), bytes: Arc::new(held) };
+        store.update(|s| enqueue_publish(s, base_job.clone())).await;
+        let chan = GroupChannel::new(dialer(), vec![url.clone()], SEED);
+        let (_busy_tx, busy) = tokio::sync::watch::channel(false);
+        let clock = Arc::new(AtomicU64::new(unix_now()));
+        let handle = spawn_trickle(chan, store.clone(), busy, config(Duration::from_millis(20), clock));
+        handle.wake();
+        let seen = arrivals(&url, Duration::from_secs(2)).await;
+        let indices: Vec<u32> = seen.iter().map(|(i, _)| *i).collect();
+        assert_eq!(indices, expect);
+        assert!(store.load().await.file_jobs.publish.is_empty(), "the job is done either way");
+        handle.shutdown().await;
+    }
+}

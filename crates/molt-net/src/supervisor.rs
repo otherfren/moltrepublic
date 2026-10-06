@@ -525,6 +525,12 @@ pub trait StateStore: Send + Sync + Clone + 'static {
         let _ = index;
         async { None }
     }
+    /// One plaintext piece of the folded vault base (vault S5). `None`
+    /// where the store keeps none - every store but the engine's.
+    fn vault_base_piece(&self, index: u32) -> impl std::future::Future<Output = Option<Vec<u8>>> + Send {
+        let _ = index;
+        async { None }
+    }
     /// One plaintext piece of the vault payload stored as `file` (its
     /// `secret_id`), decrypted for exactly this publish. `None` where the
     /// store keeps none - every store but the engine's.

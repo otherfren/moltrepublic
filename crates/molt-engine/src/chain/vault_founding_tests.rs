@@ -138,8 +138,8 @@ fn v6_with_a_legacy_cut() -> (Builder, molt_core::CheckpointState, ChainBlock) {
     (b, blob, cut)
 }
 
-/// Until `CheckpointVault` binds `vault_pk` (S5), a v8 cut cannot carry
-/// the keys past the genesis: a v6 chain refuses both legacy variants.
+/// Only `CheckpointVault` binds `vault_pk` (checkpoint-v10), so a legacy cut
+/// cannot carry the keys past the genesis: a v6 chain refuses both variants.
 #[test]
 fn a_v6_chain_refuses_a_legacy_checkpoint() {
     let (b, _, cut) = v6_with_a_legacy_cut();
@@ -165,9 +165,10 @@ fn a_suffix_walk_refuses_a_blob_with_vault_keys() {
     assert!(err.contains("vault"), "{err}");
 }
 
-/// The doors: a vault republic neither proposes, co-signs nor auto-cuts.
+/// The doors (S5): a vault republic proposes and co-signs only the vault
+/// cut, whatever the wiki choice on the wire.
 #[test]
-fn a_vault_republic_never_proposes_or_signs_a_cut() {
+fn a_vault_republic_proposes_and_signs_only_the_vault_cut() {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -177,12 +178,20 @@ fn a_vault_republic_never_proposes_or_signs_a_cut() {
     b.commit_applied(1, &["a", "b"]);
     let mut a = chain_signer("a", &b, b.blocks.clone());
     assert!(a.is_vault_republic());
-    assert!(a.cmd_propose_checkpoint().is_err());
-    assert!(a.chain.proposal_changes.is_empty());
+    a.cmd_propose_checkpoint().expect("the vault cut");
+    assert!(a
+        .chain
+        .proposal_changes
+        .values()
+        .all(|c| matches!(c, ChainChange::CheckpointVault { wiki_folded: false, .. })));
 
     let mut c = chain_signer("c", &b, b.blocks.clone());
-    let ours = checkpoint_state_hash(&c.own_checkpoint_state(1, false).expect("own projection"));
-    c.receive_checkpoint_proposal(50, 1, &ours, false);
-    assert!(c.chain.proposal_changes.is_empty(), "no co-signature");
-    assert!(c.chain.pending_sigs.is_empty());
+    // the legacy v8 hash is not what a vault seat attests
+    let legacy = checkpoint_state_hash(&checkpoint_state(&b.blocks, 1).expect("state"));
+    c.receive_checkpoint_proposal(50, 1, &legacy, false);
+    assert!(c.chain.pending_sigs.is_empty(), "no co-signature on a legacy hash");
+    let ours = c.own_cut_hash(1, c.cut_kind(false)).expect("own projection");
+    c.receive_checkpoint_proposal(52, 1, &ours, false);
+    assert!(matches!(c.chain.proposal_changes.get(&52), Some(ChainChange::CheckpointVault { .. })));
+    assert!(c.chain.pending_sigs.contains_key(&52), "co-signed");
 }
