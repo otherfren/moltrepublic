@@ -7464,6 +7464,10 @@ pub struct StatusView {
     /// MCP agent meets the same gate the nav renders (co-equality).
     #[serde(default)]
     pub features: Vec<String>,
+    /// Whether a `set_features` vote can switch the vault on here
+    /// (vault spec §3).
+    #[serde(default)]
+    pub vault_enable: crate::vault::VaultEnable,
     /// Decoded image bytes a `set_member_image` proposal can still carry in
     /// THIS republic (the derived transport headroom, which shrinks as the
     /// roster grows). The honest downscale target for a frontend fitting a

@@ -901,6 +901,22 @@ fn a_v5_mock_vault_workspace_shows_one_line() {
     );
 }
 
+/// E5: a prepared vault has no nav row until the enabling block commits;
+/// then the tab and the real pane appear.
+#[test]
+fn the_vault_nav_hides_until_the_enabling_block() {
+    for enabled in [false, true] {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let rt = rt();
+        let _guard = rt.enter();
+        drop(prepared_workspace_on_disk(tmp.path(), 2, &["a", "b", "c", "d"], enabled).0);
+        let Node { ui, .. } = open_stored(tmp.path(), &rt);
+        assert_eq!(surface_tab(&ui, "vault").is_some(), enabled, "enabled={enabled}: the vault tab");
+        assert_eq!(ui.get_vault_real(), enabled, "enabled={enabled}: the real pane");
+        assert!(surface_tab(&ui, "memory").is_some(), "the other features stay");
+    }
+}
+
 #[test]
 fn ui_snapshot_counts_vault_rows() {
     let tmp = tempfile::tempdir().expect("tmp");

@@ -1673,7 +1673,8 @@ async fn a_failed_re_activation_leaves_the_honest_seat_intact() {
                 reply: None,
                 key_package: String::new(),
                 relays: Vec::new(),
-                vault_pk: String::new(),
+                // a current build's request: refused for the key it claims
+                vault_pk: molt_vault::vault_keypair(&[6u8; 32]).1,
             }),
         )
         .await

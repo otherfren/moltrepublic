@@ -155,26 +155,16 @@ impl RitualRuntime {
     }
 
     /// The final identity table in ritual order: founder first, then seat
-    /// order. `None` until every seat's key is collected.
-    /// Vault keys only when the charter chose the vault (spec §6).
+    /// order. `None` until every seat's key is collected. Every seat's
+    /// vault key rides along, the vault chosen or not: every founding
+    /// prepares it (vault spec §6, E2).
     fn full_identities(&self) -> Option<Vec<MemberIdentity>> {
         let mut out = Vec::with_capacity(self.seats.len() + 1);
         out.push(self.founder.clone());
         for s in &self.seats {
             out.push(s.identity.clone()?);
         }
-        if !self.has_vault() {
-            for id in &mut out {
-                id.vault_pk.clear();
-            }
-        }
         Some(out)
-    }
-
-    fn has_vault(&self) -> bool {
-        self.features
-            .as_ref()
-            .is_some_and(|f| f.iter().any(|k| k == crate::vault::VAULT))
     }
 
     /// The republic's neutral, content-derived id — the roster salt every
@@ -2300,26 +2290,32 @@ mod ritual_ops {
                     "that transport key is already used by another seat - refused".to_string(),
                 );
             }
-            // the vault key (spec §6): empty = an older joiner (the charter
-            // decides later); otherwise canonical and unique like the anchor.
-            // Not MAC-bound: the member's sign-what-you-see check binds it.
-            if !vault_pk.is_empty() {
-                if molt_vault::canonical_vault_pk(&vault_pk).ok().as_deref() != Some(vault_pk.as_str()) {
-                    tracing::warn!(seat, %member, "founding join rejected: invalid vault key");
-                    return self.refuse_join(idx, "malformed vault key - refused".to_string());
-                }
-                let taken = ritual.founder.vault_pk == vault_pk
-                    || ritual.seats.iter().enumerate().any(|(i, other)| {
-                        !(re_anchoring && i == idx)
-                            && other.identity.as_ref().is_some_and(|x| x.vault_pk == vault_pk)
-                    });
-                if taken {
-                    tracing::warn!(seat, %member, "founding join rejected: vault key already anchored");
-                    return self.refuse_join(
-                        idx,
-                        "that vault key is already used by another seat - refused".to_string(),
-                    );
-                }
+            // the vault key (spec §6): every founding prepares the vault, so
+            // empty = an older build, locked out (D14); otherwise canonical
+            // and unique like the anchor. Not MAC-bound: the member's
+            // sign-what-you-see check binds it.
+            if vault_pk.is_empty() {
+                tracing::warn!(seat, %member, "founding join rejected: no vault key");
+                return self.refuse_join(
+                    idx,
+                    molt_core::vault::VaultRefusal::NeedsNewerVersion(member).to_string(),
+                );
+            }
+            if molt_vault::canonical_vault_pk(&vault_pk).ok().as_deref() != Some(vault_pk.as_str()) {
+                tracing::warn!(seat, %member, "founding join rejected: invalid vault key");
+                return self.refuse_join(idx, "malformed vault key - refused".to_string());
+            }
+            let taken = ritual.founder.vault_pk == vault_pk
+                || ritual.seats.iter().enumerate().any(|(i, other)| {
+                    !(re_anchoring && i == idx)
+                        && other.identity.as_ref().is_some_and(|x| x.vault_pk == vault_pk)
+                });
+            if taken {
+                tracing::warn!(seat, %member, "founding join rejected: vault key already anchored");
+                return self.refuse_join(
+                    idx,
+                    "that vault key is already used by another seat - refused".to_string(),
+                );
             }
             // the reply address: on Nostr it IS the MAC-bound nostr anchor
             // (no queue handover travels); on loopback the member advertised
@@ -2532,12 +2528,10 @@ mod ritual_ops {
                     "every member must join before you propose the charter".to_string(),
                 ));
             }
-            // the vault (spec §3, §6, D14): the bounds, and a key from every seat
-            if features.iter().any(|f| f == crate::vault::VAULT) {
+            // the vault (spec §3, §6, D14): a key from every seat, always
+            // (every founding prepares it); the bounds when it is ticked
+            {
                 use molt_core::vault::VaultRefusal;
-                if !crate::vault::bounds_ok(ritual.rule_m, ritual.rule_n) {
-                    return Err(molt_core::MoltError::Vault(VaultRefusal::Bounds));
-                }
                 if let Some(old) = ritual
                     .seats
                     .iter()
@@ -2547,6 +2541,11 @@ mod ritual_ops {
                     return Err(molt_core::MoltError::Vault(VaultRefusal::NeedsNewerVersion(
                         old.member.clone(),
                     )));
+                }
+                if features.iter().any(|f| f == crate::vault::VAULT)
+                    && !crate::vault::bounds_ok(ritual.rule_m, ritual.rule_n)
+                {
+                    return Err(molt_core::MoltError::Vault(VaultRefusal::Bounds));
                 }
             }
             // the final, ratified name feeds the republic id + canonical bytes;
@@ -3648,7 +3647,7 @@ mod tests {
                 String::new(),
                 kp.to_string(),
                 Vec::new(),
-                String::new(),
+                crate::vault::seat_vault_key(member.as_bytes(), npk, pk).1,
                 None,
             )
             .expect("handler never errors");
@@ -4104,12 +4103,23 @@ mod tests {
         }
     }
 
+    /// E2: every new founding is keyed; without `vault` ticked the keys
+    /// prepare it, inside the bounds or not.
     #[test]
-    fn verify_seal_proposal_rejects_vault_keys_without_the_vault_feature() {
-        let (mut p, sks) = vault_roster(2, 4);
-        p.features = Some(vec!["memory".to_string()]);
-        reseal(&mut p, &sks);
-        assert!(ratify_as_b(&p).is_err());
+    fn verify_seal_proposal_accepts_vault_keys_without_the_vault_feature() {
+        for (m, n) in [(2, 4), (2, 3)] {
+            let (mut p, sks) = vault_roster(m, n);
+            p.features = Some(vec!["memory".to_string()]);
+            reseal(&mut p, &sks);
+            let table = ratify_as_b(&p).expect("a prepared vault ratifies");
+            assert!(table.starts_with(b"molt-roster-v6\0"), "{m}-of-{n}");
+            verify_sealed_roster(&p).expect("and verifies sealed");
+            // our own key is still ours to check
+            let mut t = p.clone();
+            t.identities[1].vault_pk = vault_seat(4).1.vault_pk;
+            reseal(&mut t, &sks);
+            assert!(ratify_as_b(&t).is_err(), "{m}-of-{n}: a key we did not derive");
+        }
     }
 
     /// A NEW founding refuses `vault` without keys; the same table as an
@@ -4125,10 +4135,11 @@ mod tests {
         verify_sealed_roster(&p).expect("an existing mock roster verifies");
     }
 
-    /// A vault-less charter: the founder dropped the keys, the member's own
-    /// derivation is simply unused.
+    /// An older founder's keyless table: the member's own derivation is
+    /// unused and the roster stays v5 byte for byte (E3 locks out older
+    /// joiners, not older founders).
     #[test]
-    fn verify_seal_proposal_accepts_a_vaultless_table_from_a_vault_capable_seat() {
+    fn verify_seal_proposal_accepts_a_keyless_table_from_an_older_founder() {
         let (mut p, sks) = vault_roster(2, 4);
         p.features = Some(vec!["memory".to_string()]);
         for id in &mut p.identities {
@@ -4188,6 +4199,19 @@ mod tests {
         st.cmd_create_propose("R".to_string(), "charter".to_string(), vec!["vault".to_string()])
     }
 
+    /// E3: an older joiner is refused whatever the charter.
+    #[test]
+    fn create_propose_refuses_an_older_joiner_without_the_vault() {
+        let mut st = vault_ritual(2, 4, Some(1));
+        let err = st
+            .cmd_create_propose("R".to_string(), String::new(), vec!["memory".to_string()])
+            .expect_err("b sent no vault key");
+        assert!(matches!(
+            err,
+            molt_core::MoltError::Vault(molt_core::vault::VaultRefusal::NeedsNewerVersion(ref s)) if s == "b"
+        ), "{err}");
+    }
+
     #[test]
     fn create_propose_refuses_vault_for_an_older_joiner() {
         let mut st = vault_ritual(2, 4, Some(1));
@@ -4206,19 +4230,29 @@ mod tests {
         assert!(matches!(err, molt_core::MoltError::Vault(molt_core::vault::VaultRefusal::Bounds)), "{err}");
     }
 
-    /// The table carries the keys iff the charter chose the vault.
+    /// E2: the table carries every key, the vault ticked or not.
     #[test]
-    fn create_propose_keys_the_table_only_for_a_vault_charter() {
+    fn create_propose_keys_the_table_without_the_vault() {
         let mut st = vault_ritual(2, 4, None);
         propose_vault(&mut st).expect("2-of-4, every seat keyed");
         let ids = st.net_ritual.as_ref().expect("ritual").sealed_identities();
         assert!(ids.iter().all(|i| !i.vault_pk.is_empty()));
 
-        let mut st = vault_ritual(2, 4, Some(2));
+        let mut st = vault_ritual(2, 4, None);
         st.cmd_create_propose("R".to_string(), String::new(), vec!["memory".to_string()])
-            .expect("no vault, an older joiner is fine");
+            .expect("no vault ticked");
         let ids = st.net_ritual.as_ref().expect("ritual").sealed_identities();
-        assert!(ids.iter().all(|i| i.vault_pk.is_empty()), "the founder drops the keys");
+        assert!(ids.iter().all(|i| !i.vault_pk.is_empty()), "the keys stay: prepared");
+    }
+
+    /// E2: the bounds gate the tick, not the preparation.
+    #[test]
+    fn create_propose_prepares_outside_the_bounds() {
+        let mut st = vault_ritual(2, 3, None);
+        st.cmd_create_propose("R".to_string(), String::new(), vec!["memory".to_string()])
+            .expect("2-of-3 without the vault");
+        let ids = st.net_ritual.as_ref().expect("ritual").sealed_identities();
+        assert!(ids.iter().all(|i| !i.vault_pk.is_empty()));
     }
 
     /// The join door normalizes-or-rejects the vault key like the nostr
@@ -4271,10 +4305,48 @@ mod tests {
         }
         let anchored = join(&mut st, &b.vault_pk).expect("the ticket stayed usable");
         assert_eq!(anchored.vault_pk, b.vault_pk);
+    }
 
+    /// E3: a joiner without a vault key is an older build - refused at the
+    /// join door, ticket unspent, the log names why.
+    #[test]
+    fn a_join_without_a_vault_key_is_refused() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
         let mut st = vault_ritual(2, 4, None);
         st.net_ritual.as_mut().expect("ritual").seats[0].identity = None;
-        let anchored = join(&mut st, "").expect("an older joiner");
-        assert!(anchored.vault_pk.is_empty());
+        let (b_sk, b) = vault_seat(1);
+        let kp = hex::encode(
+            molt_net::MlsMember::new(&b_sk, "b").expect("mls").key_package().expect("kp"),
+        );
+        let reply = serde_json::to_string(&invite::ReplyHandover {
+            server: String::new(),
+            queue_id: "aa".to_string(),
+            wrap: "ef".repeat(32),
+        })
+        .expect("handover json");
+        st.cmd_net_join_requested(
+            0,
+            b.member.clone(),
+            b.identity_pk.clone(),
+            b.nostr_pk.clone(),
+            invite::join_mac("t1", &b.member, &b.identity_pk, &b.nostr_pk),
+            reply,
+            String::new(),
+            kp,
+            Vec::new(),
+            String::new(),
+            None,
+        )
+        .expect("handler never errors");
+        assert!(st.net_ritual.as_ref().expect("ritual").seats[0].identity.is_none(), "not anchored");
+        assert!(
+            st.session.create.run.log.iter().any(|l| l.contains("needs a newer version")),
+            "{:?}",
+            st.session.create.run.log
+        );
     }
 }

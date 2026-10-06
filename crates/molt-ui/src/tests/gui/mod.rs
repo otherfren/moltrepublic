@@ -279,6 +279,29 @@ fn chain_workspace_on_disk(
     roster: &[&str],
     keyed: bool,
 ) -> (molt_storage::OpenedWorkspace, u64) {
+    chain_workspace_with(root, rule_m, roster, keyed, &["vault"], false)
+}
+
+/// A prepared vault (roster-v6, `memory` only) ON DISK as `roster[0]`;
+/// `enabled` appends the committed `set_features` block that switches the
+/// vault on (vault spec E4).
+fn prepared_workspace_on_disk(
+    root: &std::path::Path,
+    rule_m: u8,
+    roster: &[&str],
+    enabled: bool,
+) -> (molt_storage::OpenedWorkspace, u64) {
+    chain_workspace_with(root, rule_m, roster, true, &["memory"], enabled)
+}
+
+fn chain_workspace_with(
+    root: &std::path::Path,
+    rule_m: u8,
+    roster: &[&str],
+    keyed: bool,
+    features: &[&str],
+    enabled: bool,
+) -> (molt_storage::OpenedWorkspace, u64) {
     let phrase = molt_storage::generate_seed_phrase().expect("phrase");
     let own = molt_storage::seed_entropy(&phrase).expect("entropy");
     let mut keys = Vec::new();
@@ -313,7 +336,7 @@ fn chain_workspace_on_disk(
     let name = "DevTest".to_string();
     let rule_n = u8::try_from(roster.len()).expect("roster fits u8");
     let republic_id = molt_storage::republic_id(&name, rule_m, rule_n, &identities);
-    let features = Some(vec!["vault".to_string()]);
+    let features = Some(features.iter().map(|f| (*f).to_string()).collect::<Vec<_>>());
     let change = molt_core::ChainChange::Genesis {
         name: name.clone(),
         republic_id: republic_id.clone(),
@@ -339,6 +362,26 @@ fn chain_workspace_on_disk(
         change,
         sigs: attestations.clone(),
     };
+    let mut chain = vec![block];
+    if enabled {
+        let change = molt_core::ChainChange::Applied {
+            proposal_id: 1,
+            surface: Surface::Organization,
+            payload: serde_json::json!({ "op": "set_features", "value": "memory vault" }),
+        };
+        let bytes = molt_core::approval_bytes(&republic_id, 1, &change);
+        let prev = molt_storage::content_hash(&molt_core::block_link_bytes(&republic_id, &chain[0]));
+        let sigs = roster
+            .iter()
+            .zip(&keys)
+            .take(usize::from(rule_m))
+            .map(|(member, sk)| molt_core::RosterAttestation {
+                member: (*member).to_string(),
+                sig: molt_storage::identity_sign(sk, &bytes),
+            })
+            .collect();
+        chain.push(molt_core::ChainBlock { height: 1, prev, change, sigs });
+    }
     let sealed = molt_core::SealedRoster {
         name,
         republic_id,
@@ -358,7 +401,7 @@ fn chain_workspace_on_disk(
         .unwrap_or(0);
     let ws = molt_storage::create_workspace(root, &own, &sealed.into_genesis(roster[0], now))
         .expect("create");
-    ws.write_chain(None, &[block]).expect("chain");
+    ws.write_chain(None, &chain).expect("chain");
     ws.write_transport_state(&molt_core::TransportState {
         identity_sk: Some(keys[0].to_bytes().to_vec()),
         vault_seed: own_seed,

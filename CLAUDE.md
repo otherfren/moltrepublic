@@ -187,7 +187,10 @@ finding, the same as a bug.
   emits v4 bytes byte-identically**, which is what keeps live republics
   verifying), and `molt-roster-v6` each seat's `vault_pk` as a fourth member
   field (`docs_archive/vault/vault_threshold_disclosure.md` §6, conditional
-  the same way: a table with no `vault_pk` emits v5/v4 bytes unchanged) — bump the tag if you change the byte layout, and update
+  the same way: a table with no `vault_pk` emits v5/v4 bytes unchanged;
+  every new founding is keyed - the vault prepared, enabled at founding
+  or by a later `set_features` vote - so only an older founder's table
+  stays v5/v4) — bump the tag if you change the byte layout, and update
   every recompute site (founder canonical, `verify_sealed_roster`,
   `verify_seal_proposal`, the tests) together or signatures silently break.
   The same rule holds for its sibling layouts: `molt-republic-id-v2`
@@ -209,7 +212,8 @@ finding, the same as a bug.
   the group count is explicit, and every group present is hashed, so a
   phantom group fails the signed hash), the wiki folded to one
   commitment entry (v9, `knowledge_base_scale.md` §4.9.3), and `vault_pk`
-  in both identity tables (v10, a vault republic only; its cut is its own
+  in both identity tables (v10, a roster-v6 republic only, enabled or
+  only prepared; its cut is its own
   `ChainChange::CheckpointVault` variant, so an older build stops instead
   of hashing differently). A new surface therefore only
   extends `Surface::ALL`, never the frozen set; its first applied block

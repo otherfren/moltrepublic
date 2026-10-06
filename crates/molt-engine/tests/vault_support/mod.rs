@@ -159,3 +159,159 @@ pub async fn close_and_open(
     }
     out
 }
+
+/// The vault section of `read_state(vault)`; `None` while hidden (E5).
+pub async fn vault_view(w: &WalletHandle) -> Option<molt_core::vault::VaultView> {
+    match w
+        .execute(Command::ReadState { surface: molt_core::Surface::Vault, channel: None, view: None })
+        .await
+        .expect("read vault")
+    {
+        Reply::State(s) => s.vault,
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+pub async fn wait_vault(
+    w: &WalletHandle,
+    what: &str,
+    pred: impl Fn(&molt_core::vault::VaultView) -> bool,
+) -> molt_core::vault::VaultView {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+    loop {
+        if let Some(v) = vault_view(w).await {
+            if pred(&v) {
+                return v;
+            }
+        }
+        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for: {what}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+pub fn proposed(r: Reply) -> molt_core::ProposalId {
+    match r {
+        Reply::Proposed { id, .. } => id,
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// Wait until `w` holds a pending proposal `id` on `surface`, then approve.
+pub async fn approve_card(w: &WalletHandle, surface: molt_core::Surface, id: molt_core::ProposalId) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        let snap = match w
+            .execute(Command::ReadState { surface, channel: None, view: None })
+            .await
+            .expect("read state")
+        {
+            Reply::State(s) => s,
+            other => panic!("unexpected: {other:?}"),
+        };
+        if snap.pending.iter().any(|p| p.id == id) {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "card {} never arrived", id.0);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    w.execute(Command::Approve { proposal: id, note: None }).await.expect("approved");
+}
+
+/// `all[0]` proposes the vault, `all[1]` makes it m; every seat sees it on.
+pub async fn enable_vault(all: &[WalletHandle]) {
+    let payload = serde_json::json!({ "op": "set_features", "value": "memory vault" });
+    let id = proposed(
+        all[0]
+            .execute(Command::Propose { surface: molt_core::Surface::Organization, payload })
+            .await
+            .expect("the enable vote"),
+    );
+    approve_card(&all[1], molt_core::Surface::Organization, id).await;
+    for w in all {
+        wait_vault(w, "the vault to switch on", |v| v.real).await;
+    }
+}
+
+/// `a` deposits `text` under `n`, `b` approves once it holds the payload;
+/// every seat in `all` holds the committed version. Its `secret_id`.
+pub async fn deposited(all: &[WalletHandle], text: &str) -> String {
+    use molt_core::vault::{SecretText, VaultDepositState};
+    let cmd = Command::VaultSeal { name: "n".into(), kind: "text".into(), text: SecretText(text.into()) };
+    let id = proposed(all[0].execute(cmd).await.expect("sealed"));
+    wait_vault(&all[1], "the payload to arrive", |v| {
+        v.deposits.iter().any(|d| d.proposal == Some(id.0) && d.held)
+    })
+    .await;
+    all[1].execute(Command::Approve { proposal: id, note: None }).await.expect("approved");
+    let mut sid = String::new();
+    for w in all {
+        let v = wait_vault(w, "the deposit to commit and arrive", |v| {
+            v.deposits.iter().any(|d| d.name == "n" && d.state != VaultDepositState::Pending && d.held)
+        })
+        .await;
+        sid = v.deposits.iter().find(|d| d.name == "n").expect("card").secret_id.clone();
+    }
+    sid
+}
+
+async fn has_cut(w: &WalletHandle) -> bool {
+    match w.execute(Command::ReadChain).await.expect("read chain") {
+        Reply::Chain { blocks, .. } => blocks.iter().any(|v| v.kind == "checkpoint"),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// `all[0]` proposes a cut; every seat co-signs and applies it.
+pub async fn cut_all(all: &[WalletHandle]) {
+    all[0].execute(Command::ProposeCheckpoint).await.expect("cut proposed");
+    for (i, w) in all.iter().enumerate() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+        while !has_cut(w).await {
+            assert!(tokio::time::Instant::now() < deadline, "{} never applied the cut", NAMES[i]);
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+}
+
+/// `proposer` names `reader` for `sid`, `approver` makes it m; waits until
+/// `reader_w` sees it committed.
+pub async fn granted(
+    proposer: &WalletHandle,
+    approver: &WalletHandle,
+    reader_w: &WalletHandle,
+    sid: &str,
+    reader: &str,
+) {
+    let id = proposed(
+        proposer
+            .execute(Command::VaultGrant { secret_id: sid.to_string(), reader: reader.to_string() })
+            .await
+            .expect("grant proposed"),
+    );
+    let v = wait_vault(approver, "the grant card", |v| v.grants.iter().any(|g| g.proposal == Some(id.0))).await;
+    let gid = v.grants.iter().find(|g| g.proposal == Some(id.0)).expect("card").grant_id.clone();
+    approver.execute(Command::Approve { proposal: id, note: None }).await.expect("grant approved");
+    wait_vault(reader_w, "the grant to commit", |v| {
+        v.grants
+            .iter()
+            .any(|g| g.grant_id == gid && g.state == molt_core::vault::VaultGrantState::Committed)
+    })
+    .await;
+}
+
+/// Read until the text arrives; a pending answer or a base still arriving
+/// asks again.
+pub async fn read_text(w: &WalletHandle, sid: &str) -> String {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+    loop {
+        match w.execute(Command::VaultRead { secret_id: sid.to_string() }).await {
+            Ok(Reply::VaultText { text, .. }) => return text.0,
+            Ok(Reply::VaultPending { have, need, .. }) => {
+                assert!(tokio::time::Instant::now() < deadline, "still {have} of {need}");
+            }
+            Err(e) => assert!(tokio::time::Instant::now() < deadline, "read: {e}"),
+            Ok(other) => panic!("unexpected: {other:?}"),
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}

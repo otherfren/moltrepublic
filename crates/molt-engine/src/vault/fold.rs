@@ -19,7 +19,7 @@ static EMPTY: VaultBase = VaultBase { deposits: Vec::new() };
 impl crate::State {
     /// The commitment the vault group carries after a vault cut.
     pub(crate) fn vault_base_committed(&self) -> Option<(String, u64)> {
-        if !self.is_vault_republic() {
+        if !self.is_vault_prepared() {
             return None;
         }
         self.applied_payloads(Surface::Vault).find_map(base_commitment_of)
@@ -89,7 +89,7 @@ impl crate::State {
             Err("hash".to_string())
         } else {
             molt_core::vault::decode_vault_base(&bytes).and_then(|base| {
-                let ctx = self.vault_ctx().ok_or("no vault")?;
+                let ctx = self.vault_founding_ctx().ok_or("no vault")?;
                 molt_vault::verify_base(&base, &self.republic_id(), &ctx)
                     .map(|()| base)
                     .map_err(|e| e.to_string())
@@ -131,7 +131,7 @@ impl crate::State {
     /// version, its payload file goes; never while base-pending. Returns
     /// whether every such file is gone.
     pub(crate) fn vault_retire_at_cut(&mut self) -> bool {
-        if !self.is_vault_republic() || self.vault_base_pending() {
+        if !self.is_vault_prepared() || self.vault_base_pending() {
             return false;
         }
         self.vault_sync_held();
@@ -186,7 +186,7 @@ impl crate::State {
     /// phrase entropy and its FOUNDING row, and keep and persist it only
     /// when it re-derives the founding `vault_pk`. Returns whether it did.
     pub(crate) fn vault_seed_from_entropy(&mut self, entropy: &[u8]) -> bool {
-        if !self.is_vault_republic() || self.vault_seed.is_some() {
+        if !self.is_vault_prepared() || self.vault_seed.is_some() {
             return false;
         }
         let Some(pk) = self.identity_sk.as_ref().map(|sk| hex::encode(sk.verifying_key().to_bytes())) else {

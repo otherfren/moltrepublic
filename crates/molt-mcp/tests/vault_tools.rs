@@ -56,8 +56,8 @@ async fn adopt_relay(w: &WalletHandle, url: &str) {
     w.execute(Command::RelayClearnetSession { unlock: true }).await.expect("unlock");
 }
 
-/// A 2-of-4 vault republic over `url`, founder first.
-async fn found(root: &std::path::Path, url: &str) -> Vec<WalletHandle> {
+/// A 2-of-4 republic with `features` over `url`, founder first.
+async fn found(root: &std::path::Path, url: &str, features: &[&str]) -> Vec<WalletHandle> {
     let a = engine(&root.join(NAMES[0]));
     adopt_relay(&a, url).await;
     a.execute(Command::CreateStart { name: "R".into(), member: "a".into(), threshold: 2, members: 4, relays: Vec::new() })
@@ -77,7 +77,8 @@ async fn found(root: &std::path::Path, url: &str) -> Vec<WalletHandle> {
     }
     let a = &all[0];
     wait_for(a, "every join", |s| s.create.can_propose).await;
-    a.execute(Command::CreatePropose { name: "R".into(), agenda: "one".into(), features: vec!["vault".into()] })
+    let features = features.iter().map(|f| (*f).to_string()).collect();
+    a.execute(Command::CreatePropose { name: "R".into(), agenda: "one".into(), features })
         .await
         .expect("charter");
     let seed = session(a).await.create.seed.clone();
@@ -143,7 +144,8 @@ async fn call(port: u16, token: &str, name: &str, args: Value) -> Result<Value, 
 
 async fn vault(port: u16) -> Value {
     let v = call(port, SEAT, "read_state", json!({ "surface": "vault" })).await.expect("read_state");
-    v.get("vault").cloned().expect("the vault object")
+    // absent while the vault is not enabled
+    v.get("vault").cloned().unwrap_or(Value::Null)
 }
 
 async fn wait_vault(port: u16, what: &str, pred: impl Fn(&Value) -> bool) -> Value {
@@ -171,7 +173,7 @@ async fn vault_tools_drive_seal_grant_read() {
     let relay = MockRelay::run().await.expect("relay");
     let url = relay.url().await.to_string();
     let tmp = tempfile::tempdir().expect("tmp");
-    let all = found(tmp.path(), &url).await;
+    let all = found(tmp.path(), &url, &["vault"]).await;
     let mut ports = Vec::new();
     for w in &all {
         ports.push(serve(w).await);
@@ -234,4 +236,52 @@ async fn the_read_only_key_never_reaches_vault_read() {
     // the seat key reaches it (and is refused on the merits: no vault here)
     let err = call(port, SEAT, "vault_read", json!({ "secret_id": "ab".repeat(32) })).await.expect_err("no vault");
     assert!(!err.contains("read-only"), "{err}");
+}
+
+/// E5 over MCP: a prepared vault refuses every vault tool and
+/// `read_state(vault)` carries no `vault` until a `set_features` vote,
+/// itself driven over MCP, switches it on (E4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn vault_tools_refuse_until_enabled() {
+    let relay = MockRelay::run().await.expect("relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let all = found(tmp.path(), &url, &["memory"]).await;
+    let (a, b) = (serve(&all[0]).await, serve(&all[1]).await);
+    let sid = "ab".repeat(32);
+    for (tool, args) in [
+        ("vault_seal", json!({ "name": "n", "kind": "text", "text": "one" })),
+        ("vault_reseal", json!({ "secret_id": sid })),
+        ("vault_grant", json!({ "secret_id": sid, "reader": "b" })),
+        ("vault_read", json!({ "secret_id": sid })),
+    ] {
+        let err = call(a, SEAT, tool, args).await.expect_err("refused while disabled");
+        assert!(err.contains("vault: not enabled"), "{tool}: {err}");
+    }
+    let state = call(a, SEAT, "read_state", json!({ "surface": "vault" })).await.expect("read_state");
+    assert!(state.get("vault").is_none_or(Value::is_null), "no vault section: {state}");
+    let status = call(a, SEAT, "status", json!({})).await.expect("status");
+    assert_eq!(status["vault_enable"], json!("offer"), "{status}");
+
+    let enable = call(
+        a,
+        SEAT,
+        "propose",
+        json!({ "surface": "organization", "payload": { "op": "set_features", "value": "memory vault" } }),
+    )
+    .await
+    .expect("the enable vote");
+    let id = id_of(&enable);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        if call(b, SEAT, "approve", json!({ "proposal_id": id })).await.is_ok() {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the card never reached b");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    wait_vault(a, "the vault switched on", |v| v["real"] == json!(true)).await;
+    let status = call(a, SEAT, "status", json!({})).await.expect("status");
+    assert_eq!(status["vault_enable"], json!("on"), "{status}");
+    call(a, SEAT, "vault_seal", json!({ "name": "n", "kind": "text", "text": "one" })).await.expect("seal once enabled");
 }

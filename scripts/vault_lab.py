@@ -10,7 +10,8 @@ Headless seats s1..sN run the live-preview `moltd` built with the
         cargo build -j 2 -p molt-app --features live-preview,vault-lab
     cargo run -p molt-net --example dev_relay        # prints ws://127.0.0.1:<port>
     python3 scripts/vault_lab.py up --relay ws://127.0.0.1:<port> [--seats 3] [--complainer s3] [--founder-headless]
-    python3 scripts/vault_lab.py join
+    python3 scripts/vault_lab.py join [--no-vault]
+    python3 scripts/vault_lab.py enable [--by s1]   # the set_features vote, after join --no-vault
     python3 scripts/vault_lab.py seal s1 a one
     python3 scripts/vault_lab.py approve
     python3 scripts/vault_lab.py grant a s2
@@ -320,7 +321,7 @@ def invites(sv):
     ]
 
 
-def cmd_join(_a):
+def cmd_join(a):
     state = load()
     f = founder_node(state)
     joiners = [n for n in headless(state) if n != FOUNDER]
@@ -347,10 +348,11 @@ def cmd_join(_a):
         print(f"{name} joining")
     f.wait_session(lambda s: s["create"]["can_propose"], "every seat joined", 300)
     if state["founder_headless"]:
-        f.tool("create_propose", {"name": REPUBLIC, "agenda": "keep secrets", "features": ["vault"]})
-        print(f"{FOUNDER}: charter proposed with the vault")
+        features = ["memory"] if a.no_vault else ["vault"]
+        f.tool("create_propose", {"name": REPUBLIC, "agenda": "keep secrets", "features": features})
+        print(f"{FOUNDER}: charter proposed features={','.join(features)}")
     else:
-        print("waiting for the charter - tick Vault and propose it in the GUI")
+        print("waiting for the charter - propose it in the GUI (Vault ticked or not)")
     for name in joiners:
         n = nodes[name]
         sv = n.wait_session(lambda s: s["join"]["awaiting_ratify"], "the charter", 900)
@@ -380,6 +382,22 @@ def cmd_join(_a):
         write_config(state, name)
     save(state)
     print("founded")
+
+
+def cmd_enable(a):
+    """Propose the vault by a `set_features` vote: the effective set plus vault."""
+    state = load()
+    by = a.by or headless(state)[0]
+    n = node(state, by)
+    st = n.tool("status")
+    if st.get("vault_enable") != "offer":
+        die(f"{by}: vault_enable={st.get('vault_enable')}")
+    value = " ".join(sorted(set(st.get("features", [])) | {"vault"}))
+    r = n.tool(
+        "propose",
+        {"surface": "organization", "payload": {"op": "set_features", "value": value}},
+    )
+    print(f"{by} proposed set_features {value} proposal={r.get('id', r)} - run: vault_lab.py approve")
 
 
 def secret_of(n, name, reader=None, depositor=None):
@@ -565,7 +583,10 @@ def main():
     up.add_argument("--threshold", type=int, default=2)
     up.add_argument("--complainer", default="")
     up.add_argument("--founder-headless", action="store_true")
-    sub.add_parser("join")
+    j = sub.add_parser("join")
+    j.add_argument("--no-vault", action="store_true", help="a headless founder proposes memory only")
+    en = sub.add_parser("enable")
+    en.add_argument("--by", default="")
     s = sub.add_parser("seal")
     s.add_argument("seat")
     s.add_argument("name")
@@ -595,6 +616,7 @@ def main():
         {
             "up": cmd_up,
             "join": cmd_join,
+            "enable": cmd_enable,
             "seal": cmd_seal,
             "grant": cmd_grant,
             "approve": cmd_approve,

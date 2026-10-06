@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The vault is chosen at founding only (vault spec §3, D11): the
-//! wizard box obeys `2 <= m <= n-2`, the charter echo shows the signed
-//! selection, and the Organization modal can never vote it in.
+//! The vault (vault spec §3, D11): the wizard box is off by default and
+//! obeys `2 <= m <= n-2`, the charter echo shows the signed selection,
+//! and the Organization modal offers it only where a vote can enable it.
 
 use super::*;
 
@@ -85,6 +85,15 @@ fn the_vault_box_is_disabled_outside_2_to_n_minus_2() {
     }
 }
 
+/// E1: every founding prepares the vault; ticking it is opt-in.
+#[test]
+fn the_vault_box_is_off_by_default() {
+    i_slint_backend_testing::init_no_event_loop();
+    let (ui, _shown) = charter_step(2, 4);
+    assert!(!ui.get_cw_feat_vault(), "unticked");
+    assert_eq!(crate::actions::ritual::charter_features(&ui), vec!["memory".to_string()]);
+}
+
 #[test]
 fn a_ticked_vault_reaches_create_propose() {
     i_slint_backend_testing::init_no_event_loop();
@@ -141,14 +150,27 @@ fn the_charter_echo_shows_the_vault() {
 
 type Proposed = Rc<RefCell<Vec<(String, String)>>>;
 
-/// The Organization features modal over a republic whose effective
-/// selection has the vault `vault_on`.
-fn org_modal(vault_on: bool) -> (AppWindow, Shown, Proposed) {
-    i_slint_backend_testing::init_no_event_loop();
+thread_local! {
+    static BACKEND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `StatusView.vault_enable` as the window carries it.
+const ON: i32 = 0;
+const OFFER: i32 = 1;
+const NEWER: i32 = 2;
+const BOUNDS: i32 = 3;
+
+/// The Organization features modal over a republic whose vault switch
+/// reads `enable` (on: the vault is in the effective selection).
+fn org_modal(enable: i32) -> (AppWindow, Shown, Proposed) {
+    if !BACKEND.with(|b| b.replace(true)) {
+        i_slint_backend_testing::init_no_event_loop();
+    }
     let ui = AppWindow::new().expect("headless window");
     apply_strings(&ui, 0);
     ui.window().set_size(slint::PhysicalSize::new(1100, 800));
-    ui.set_org_feat_vault(vault_on);
+    ui.set_org_feat_vault(enable == ON);
+    ui.set_org_vault_enable(enable);
     let got: Proposed = Rc::new(RefCell::new(Vec::new()));
     let sink = got.clone();
     ui.on_org_propose(move |op, value| {
@@ -178,24 +200,45 @@ fn confirm(ui: &AppWindow) {
     settle();
 }
 
+/// E4: where the vault cannot be voted in, the row names why - and
+/// offers no box.
 #[test]
-fn the_org_modal_cannot_vote_the_vault_in() {
-    let (ui, _shown, got) = org_modal(false);
-    let s = ui.global::<Strings>();
-    let dlg = modal(&ui);
-    assert!(
-        checks_in(&dlg, &s.get_feat_vault()).is_empty()
-            && checks_in(&dlg, &format!("{}{}", s.get_feat_vault(), s.get_feat_mock())).is_empty(),
-        "no vault checkbox in the dialog"
-    );
-    assert!(has_text(&dlg, &s.get_vault_founding_only()), "the vault row says founding only");
+fn the_org_modal_names_why_the_vault_is_locked() {
+    for enable in [NEWER, BOUNDS] {
+        let (ui, _shown, got) = org_modal(enable);
+        let s = ui.global::<Strings>();
+        let dlg = modal(&ui);
+        assert!(
+            checks_in(&dlg, &s.get_feat_vault()).is_empty()
+                && checks_in(&dlg, &format!("{}{}", s.get_feat_vault(), s.get_feat_mock())).is_empty(),
+            "no vault checkbox in the dialog"
+        );
+        let why = if enable == NEWER { s.get_vault_newer_republic() } else { s.get_feat_vault_bounds() };
+        assert!(has_text(&dlg, &why), "the vault row says {why}");
+        confirm(&ui);
+        assert!(got.borrow().is_empty(), "nothing to propose");
+    }
+}
+
+/// E4: a prepared republic within the bounds votes the vault in from the
+/// modal.
+#[test]
+fn the_org_modal_offers_the_vault_when_it_can_be_enabled() {
+    let (ui, _shown, got) = org_modal(OFFER);
+    let vault = ui.global::<Strings>().get_feat_vault().to_string();
+    let mut boxes = checks_in(&modal(&ui), &vault);
+    assert_eq!(boxes.len(), 1, "one vault box");
+    click(&ui, &boxes.remove(0));
     confirm(&ui);
-    assert!(got.borrow().is_empty(), "nothing to propose");
+    let got = got.borrow();
+    assert_eq!(got.len(), 1, "one proposal");
+    assert_eq!(got[0].0, "set_features");
+    assert!(got[0].1.split_whitespace().any(|k| k == "vault"), "{}", got[0].1);
 }
 
 #[test]
 fn an_org_proposal_in_a_vault_republic_carries_no_vault() {
-    let (ui, _shown, got) = org_modal(true);
+    let (ui, _shown, got) = org_modal(ON);
     let memory = ui.global::<Strings>().get_feat_memory().to_string();
     let mut boxes = checks_in(&modal(&ui), &memory);
     assert_eq!(boxes.len(), 1, "one memory box");

@@ -2357,9 +2357,12 @@ export component AppWindow inherits Window {
     in property <bool> org-feat-memory;
     in property <bool> org-feat-quests;
     in property <bool> org-feat-vault;
+    // StatusView.vault_enable: 0 on, 1 offer, 2 needs a newer republic, 3 bounds
+    in property <int> org-vault-enable: 2;
     in property <bool> org-feat-wallet;
     in-out property <bool> org-features-modal-open: false;
     property <bool> of-memory-draft;
+    property <bool> of-vault-draft;
     in-out property <bool> org-relays-modal-open: false;
     // R6 pool-edit modal: the draft as ROWS plus the space-joined payload
     // string — the Rust side keeps the two in step (set-relay-draft-rows)
@@ -6339,7 +6342,12 @@ export component AppWindow inherits Window {
                                             }
                                             Row {
                                                 AppCheck { label: Strings.feat-quests; checked: root.org-feat-quests; enabled: false; }
-                                                AppCheck { label: Strings.feat-vault + Strings.feat-mock; checked: root.org-feat-vault; enabled: false; }
+                                                AppCheck {
+                                                    // the mock suffix only where no real vault can exist (a v5 genesis)
+                                                    label: Strings.feat-vault + (!root.vault-real && (root.org-vault-enable == 0 || root.org-vault-enable == 2) ? Strings.feat-mock : "");
+                                                    checked: root.org-feat-vault;
+                                                    enabled: false;
+                                                }
                                             }
                                             Row {
                                                 AppCheck { label: Strings.feat-wallet; checked: root.org-feat-wallet; enabled: false; }
@@ -6354,6 +6362,7 @@ export component AppWindow inherits Window {
                                             tooltip-left: true;
                                             clicked => {
                                                 root.of-memory-draft = root.org-feat-memory;
+                                                root.of-vault-draft = false;
                                                 root.org-features-modal-open = true;
                                             }
                                         }
@@ -9774,7 +9783,8 @@ export component AppWindow inherits Window {
         title: Strings.cw-features;
         body: "";
         confirm-label: Strings.oc-propose;
-        confirm-enabled: root.of-memory-draft && !root.org-feat-memory;
+        confirm-enabled: (root.of-memory-draft && !root.org-feat-memory)
+            || (root.of-vault-draft && root.org-vault-enable == 1);
         dismissed => {
             root.org-features-modal-open = false;
         }
@@ -9786,11 +9796,12 @@ export component AppWindow inherits Window {
             // touched (review 2026-08-12)
             // quests and wallet have no draft (locked below) — but an
             // ALREADY enabled one must ride along: the target set is
-            // enable-only. The vault never rides: founding only, and the
-            // engine keeps it by union.
+            // enable-only. An enabled vault needs no ride: the engine keeps
+            // it by union.
             root.org-propose("set_features",
                 (root.of-memory-draft || root.org-feat-memory ? " memory" : "")
                 + (root.org-feat-quests ? " quests" : "")
+                + (root.of-vault-draft && root.org-vault-enable == 1 ? " vault" : "")
                 + (root.org-feat-wallet ? " wallet" : ""));
         }
         VerticalLayout {
@@ -9808,8 +9819,14 @@ export component AppWindow inherits Window {
                 checked: root.org-feat-quests;
                 enabled: false;
             }
-            // vault: founding only (vault spec D11), never a vote
-            HorizontalLayout {
+            // vault (spec §3, E4): votable only in a prepared republic
+            // within the bounds; otherwise the row names why
+            if root.org-vault-enable == 0: AppCheck { label: Strings.feat-vault; checked: true; enabled: false; }
+            if root.org-vault-enable == 1: AppCheck {
+                label: Strings.feat-vault;
+                checked <=> root.of-vault-draft;
+            }
+            if root.org-vault-enable >= 2: HorizontalLayout {
                 height: 28px * Theme.ui-scale;
                 spacing: 10px;
                 Text {
@@ -9819,7 +9836,7 @@ export component AppWindow inherits Window {
                     vertical-alignment: center;
                 }
                 Text {
-                    text: Strings.vault-founding-only;
+                    text: root.org-vault-enable == 2 ? Strings.vault-newer-republic : Strings.feat-vault-bounds;
                     color: Theme.faint;
                     font-size: Theme.fs-cap;
                     vertical-alignment: center;

@@ -143,7 +143,7 @@ impl crate::State {
         kind: &str,
         text: &SecretText,
     ) -> Result<Reply, MoltError> {
-        let ctx = self.vault_ctx().ok_or(MoltError::Vault(VaultRefusal::NoVault))?;
+        let ctx = self.require_vault()?;
         let seed = self.vault_seed.clone().ok_or(MoltError::Vault(VaultRefusal::NoVaultKey))?;
         let sk = self.identity_sk.clone().ok_or(MoltError::Vault(VaultRefusal::NoVaultKey))?;
         let rid = self.republic_id();
@@ -234,7 +234,9 @@ impl crate::State {
         if self.vault_seams.skip_checks.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(());
         }
-        let Some(ctx) = self.vault_ctx() else {
+        // a prepared vault judges the shape too; the card waits in the
+        // pool, unsigned, until the vault is enabled (charter_features D7)
+        let Some(ctx) = self.vault_founding_ctx() else {
             return Ok(());
         };
         let rid = self.republic_id();

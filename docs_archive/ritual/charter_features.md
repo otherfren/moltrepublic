@@ -187,6 +187,11 @@ surface lands (the established stepwise-UI modus; never fake, always badged).
   D11-D13): Vault is REAL and FOUNDING ONLY - a wizard choice greyed
   outside `2 <= m <= n-2`, never added by `set_features` (the Organization
   modal shows it locked with `founding only`; the engine refuses it).*
+  *Amended 2026-10-06 (`docs_archive/vault/vault_late_enable.md`): every
+  founding prepares the vault; the wizard box is off by default, and a
+  prepared republic within `2 <= m <= n-2` enables it later by a
+  `set_features` vote (the modal offers the box only then and otherwise
+  names why: `needs a newer republic` / `needs 2 <= m <= n-2`).*
 - **Ratification card:** between agenda and the confirm/decline buttons, the
   five rows with their on/off state — the member sees the whole selection it
   signs, not only the enabled part. Read-only.

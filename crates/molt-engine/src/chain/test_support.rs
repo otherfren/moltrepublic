@@ -342,6 +342,30 @@ pub(crate) fn chain_signer(member: &str, b: &Builder, chain: Vec<ChainBlock>) ->
     s
 }
 
+/// A signing seat whose replica mirrors `b`'s genesis (roster, rule,
+/// identities, features) - what a real founding leaves behind.
+pub(crate) fn genesis_seat(member: &str, b: &Builder, chain: Vec<ChainBlock>) -> crate::State {
+    let ChainChange::Genesis { name, rule_m, identities, agenda, features, .. } = b.blocks[0].change.clone()
+    else {
+        panic!("block 0 is not a genesis");
+    };
+    let mut st = crate::tests::plain_state();
+    st.replica = Some(crate::ReplicaState {
+        name,
+        member: member.to_string(),
+        roster: identities.iter().map(|i| i.member.clone()).collect(),
+        rule_m,
+        identities,
+        agenda,
+        features,
+        republic_id: b.republic_id.clone(),
+        founded_ts: 0,
+    });
+    st.adopt_chain(chain);
+    st.identity_sk = Some(b.key(member).clone());
+    st
+}
+
 /// The restored member's consent bytes, signed with its own roster key.
 pub(crate) fn consent_for(b: &Builder, member: &str, nostr_pk: &str) -> String {
     molt_storage::identity_sign(

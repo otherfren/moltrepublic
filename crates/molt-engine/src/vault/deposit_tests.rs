@@ -134,16 +134,112 @@ fn refused(r: Result<Reply, MoltError>, want: &VaultRefusal) {
 
 #[test]
 fn a_deposit_is_refused_outside_a_vault_republic() {
-    for features in [&["vault"][..], &["memory"][..]] {
-        let b = Builder::new_with_features(&SEATS, 2, features, false);
-        let mut st = seat("a", &b, b.blocks.clone());
-        assert!(!st.is_vault_republic());
-        refused(
-            st.cmd_vault_seal("n".into(), "text".into(), SecretText("one".into())),
-            &VaultRefusal::NoVault,
-        );
-        assert!(st.proposals.is_empty());
+    // the v5 mock: the feature is on, the keys are not there
+    let b = Builder::new_with_features(&SEATS, 2, &["vault"], false);
+    let mut st = seat("a", &b, b.blocks.clone());
+    assert!(!st.is_vault_republic());
+    refused(
+        st.cmd_vault_seal("n".into(), "text".into(), SecretText("one".into())),
+        &VaultRefusal::NoVault,
+    );
+    // no vault feature at all: the disabled-feature refusal
+    let b = Builder::new_with_features(&SEATS, 2, &["memory"], false);
+    let mut st = seat("a", &b, b.blocks.clone());
+    not_enabled(st.cmd_vault_seal("n".into(), "text".into(), SecretText("one".into())));
+    assert!(st.proposals.is_empty());
+}
+
+fn not_enabled(r: Result<Reply, MoltError>) {
+    match r {
+        Err(e @ MoltError::FeatureDisabled("vault")) => assert_eq!(e.to_string(), "vault: not enabled"),
+        other => panic!("expected `vault: not enabled`, got {other:?}"),
     }
+}
+
+/// A 2-of-4 republic prepared at founding (every seat keyed) without the
+/// vault in its features (E2).
+fn prepared() -> Builder {
+    Builder::new_with_features(&SEATS, 2, &["memory"], true)
+}
+
+/// E5: prepared is invisible - no view, every command refused, no vault
+/// card signed - until the enabling block commits.
+#[test]
+fn the_vault_is_hidden_until_enabled() {
+    let mut b = prepared();
+    let mut st = seat("a", &b, b.blocks.clone());
+    assert!(st.is_vault_prepared() && !st.is_vault_republic());
+    assert!(st.snapshot(Surface::Vault, None, None).vault.is_none(), "no vault section");
+    not_enabled(st.cmd_vault_seal("n".into(), "text".into(), SecretText("one".into())));
+    not_enabled(st.cmd_vault_reseal("ab".repeat(32)));
+    not_enabled(st.cmd_vault_grant("ab".repeat(32), "b".into()));
+    not_enabled(st.cmd_vault_read("ab".repeat(32)));
+    not_enabled(st.cmd_propose(Surface::Vault, json!({ "op": "seal_secret" })));
+    // a peer's card lands like any disabled-surface card, never signed
+    let (dep, file) = deposit(&b, "b", "b", "n", "one");
+    hold(&mut st, &b, &dep, &file);
+    st.proposals.insert(30, card(op(&dep), "b"));
+    not_enabled(st.cmd_approve(ProposalId(30), None));
+    assert!(signed_by(&st, 30).is_empty());
+
+    b.commit_org(10, "set_features", "memory vault", &["a", "b"]);
+    let mut st = seat("a", &b, b.blocks.clone());
+    assert!(st.is_vault_republic(), "the enabling block switches it on");
+    let view = st.snapshot(Surface::Vault, None, None).vault.expect("the vault section");
+    assert!(view.real);
+    st.cmd_vault_seal("n".into(), "text".into(), SecretText("one".into())).expect("sealed");
+}
+
+/// E5: a vault block is judged by the chain under verification - before
+/// the enabling block it hard-rejects, after it it verifies; block ingest
+/// runs the same walk.
+#[test]
+fn verify_chain_rejects_a_vault_block_before_the_enabling_block() {
+    let b = prepared();
+    let (dep, _) = deposit(&b, "a", "a", "n", "one");
+    let mut early = b.clone();
+    early.commit(applied(10, op(&dep)), &["a", "b"]);
+    let err = crate::chain::verify_chain(&early.blocks).expect_err("a deposit before enabling");
+    assert!(err.contains("vault not enabled"), "{err}");
+
+    let sid = secret_id(&b.republic_id, &dep);
+    let grant = serde_json::to_value(VaultOp::Grant(VaultGrant {
+        grant_id: grant_id(&sid, "d", 12),
+        secret_id: sid,
+        reader: "d".into(),
+    }))
+    .expect("json");
+    let mut early_grant = b.clone();
+    early_grant.commit(applied(12, grant), &["a", "b"]);
+    let err = crate::chain::verify_chain(&early_grant.blocks).expect_err("a grant before enabling");
+    assert!(err.contains("vault not enabled"), "{err}");
+
+    // block ingest: the seat refuses to extend with it
+    let mut st = seat("c", &b, b.blocks.clone());
+    st.receive_block(early.blocks[1].clone());
+    assert_eq!(st.chain.blocks.len(), 1, "the early deposit is not adopted");
+
+    let mut late = b.clone();
+    late.commit_org(9, "set_features", "memory vault", &["a", "b"]);
+    late.commit(applied(10, op(&dep)), &["a", "b"]);
+    crate::chain::verify_chain(&late.blocks).expect("after the enabling block it verifies");
+    let mut st = seat("c", &late, late.blocks[..2].to_vec());
+    st.receive_block(late.blocks[2].clone());
+    assert_eq!(st.chain.blocks.len(), 3, "ingest takes it after the enabling block");
+}
+
+/// E5: the bounds are part of "enabled". An out-of-bounds enable block
+/// that commits anyway (m colluding seats) is history and verifies, but
+/// it enables nothing.
+#[test]
+fn an_out_of_bounds_enable_block_enables_nothing() {
+    let mut b = Builder::new_with_features(&SEATS[..3], 2, &["memory"], true);
+    b.commit_org(9, "set_features", "memory vault", &["a", "b"]);
+    crate::chain::verify_chain(&b.blocks).expect("the forged enable is history");
+    let (dep, _) = deposit(&b, "a", "a", "n", "one");
+    b.commit(applied(10, op(&dep)), &["a", "b"]);
+    let err = crate::chain::verify_chain(&b.blocks).expect_err("2-of-3 never enables");
+    assert!(err.contains("vault not enabled"), "{err}");
 }
 
 #[test]

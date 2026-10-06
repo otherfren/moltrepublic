@@ -335,9 +335,9 @@ impl State {
                     tracing::warn!(from = %from, "dropping a set_member_desc proposal over the length cap");
                     return Ok(Reply::Ack);
                 }
-                // (6) the vault is founding-only (D11)
-                if self.adds_vault_feature(surface, &payload) {
-                    tracing::warn!(from = %from, "dropping a set_features proposal adding the vault");
+                // (6) the vault: only a prepared republic within the bounds (E4)
+                if let Some(r) = self.vault_enable_refusal(surface, &payload) {
+                    tracing::warn!(from = %from, refusal = %r, "dropping a set_features proposal adding the vault");
                     return Ok(Reply::Ack);
                 }
                 // announce only a genuinely NEW proposal: a WP2 re-serve or

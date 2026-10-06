@@ -383,9 +383,7 @@ impl crate::State {
     /// 1.3.3) - proposed like any deposit. The held payload is read off
     /// the actor; the seal answers the caller.
     pub(crate) fn cmd_vault_reseal(&mut self, secret_id: String) -> Result<Reply, MoltError> {
-        if !self.is_vault_republic() {
-            return Err(MoltError::Vault(VaultRefusal::NoVault));
-        }
+        self.require_vault()?;
         let vs = self.vault_state();
         let me = self.member();
         let dep = vs

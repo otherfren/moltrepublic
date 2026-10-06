@@ -55,8 +55,8 @@ fn verify_genesis_rejects_a_v6_genesis_missing_a_key() {
     assert!(err.contains("vault key"), "{err}");
 }
 
-/// The other one-directional rules at the genesis: bounds, the feature,
-/// canonical and unique keys - each over a fully re-signed table.
+/// The other one-directional rules at the genesis: bounds when the vault
+/// is chosen, canonical and unique keys - each over a fully re-signed table.
 #[test]
 fn verify_genesis_applies_the_v6_roster_rules() {
     let base = Builder::vault();
@@ -72,8 +72,11 @@ fn verify_genesis_applies_the_v6_roster_rules() {
         b.reseal_genesis(table);
         assert!(verify_chain(&b.blocks).is_err());
     }
-    let b = Builder::new_with_features(&["a", "b", "c", "d"], 2, &["memory"], true);
-    assert!(verify_chain(&b.blocks).is_err(), "keys without the vault feature");
+    // E2: keys without the feature are the prepared vault, in bounds or not
+    for (m, seats) in [(2, &["a", "b", "c", "d"][..]), (2, &["a", "b", "c"][..])] {
+        let b = Builder::new_with_features(seats, m, &["memory"], true);
+        verify_chain(&b.blocks).expect("a prepared vault verifies");
+    }
     for m in [3, 1] {
         let b = Builder::new_with_features(&["a", "b", "c", "d"], m, &["vault"], true);
         let err = verify_chain(&b.blocks).expect_err("outside the bounds");

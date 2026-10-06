@@ -24,9 +24,7 @@ fn finish(dep: &VaultDeposit, republic_id: &str, secret_id: String, shares: &[mo
 
 impl crate::State {
     pub(crate) fn cmd_vault_read(&mut self, secret_id: String) -> Result<Reply, MoltError> {
-        if self.vault_ctx().is_none() {
-            return Err(MoltError::Vault(VaultRefusal::NoVault));
-        }
+        self.require_vault()?;
         // an empty projection must not read as `not the reader`
         if self.vault_base_pending() {
             return Err(self.vault_base_pending_error());

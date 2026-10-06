@@ -1465,7 +1465,7 @@ impl State {
             .map(|arr| molt_storage::SigningKey::from_bytes(&arr));
         self.vault_seed = transport_state.vault_seed.as_ref().and_then(crate::vault::seed_array);
         self.vault_rx = crate::vault::receipts::ReceiptRuntime::loaded(transport_state.vault_status.clone());
-        if self.is_vault_republic() && self.vault_seed.is_none() {
+        if self.is_vault_prepared() && self.vault_seed.is_none() {
             // a restore or a crash left it out: the phrase this device keeps
             // re-derives it, checked against the founding vault_pk
             let root = self.workspace_root();
@@ -1667,6 +1667,8 @@ impl State {
         }
         self.sync_logo_file();
         self.sync_avatar_files();
+        // an enabling `set_features`: the cards that waited get checked now
+        crate::vault::receipts::on_payload_held(self);
         self.emit_session(SessionScope::Full);
     }
 

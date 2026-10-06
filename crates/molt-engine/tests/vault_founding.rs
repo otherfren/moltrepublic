@@ -3,8 +3,9 @@
 
 //! **Vault founding** (vault build plan S2): a 2-of-4 founding with the
 //! vault seals a roster-v6 genesis whose every seat carries its vault key,
-//! and every seat persists the seed that derives it; without the vault the
-//! founding stays v5 byte for byte.
+//! and every seat persists the seed that derives it. A founding without
+//! the vault is prepared the same way (`vault_late_enable.rs`); the legacy
+//! keyless v5 bytes stay pinned in molt-core and `founding.rs`.
 
 use molt_core::WorkspaceEvent;
 use nostr_relay_builder::MockRelay;
@@ -63,21 +64,5 @@ async fn a_vault_founding_round_trips_roster_v6() {
         let seed = ws.read_transport_state().vault_seed.expect("the vault seed is persisted");
         let seed: [u8; 32] = seed.0.as_slice().try_into().expect("32 bytes");
         assert_eq!(molt_vault::vault_keypair(&seed).1, seat.vault_pk, "{name}: the seed derives the roster key");
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_vaultless_founding_stays_byte_identical() {
-    let relay = MockRelay::run().await.expect("in-process relay");
-    let url = relay.url().await.to_string();
-    let tmp = tempfile::tempdir().expect("tmp");
-    let all = found_n_at(tmp.path(), &url, 4, 2, &["memory"]).await;
-    let opened = close_and_open(tmp.path(), &all).await;
-
-    for (name, ws) in &opened {
-        let (ids, bytes) = genesis_of(ws);
-        assert!(bytes.starts_with(b"molt-roster-v5\0"), "{name}: still v5");
-        assert!(ids.iter().all(|i| i.vault_pk.is_empty()), "{name}: no vault key in any identity");
-        assert!(ws.read_transport_state().vault_seed.is_none(), "{name}: no vault seed");
     }
 }

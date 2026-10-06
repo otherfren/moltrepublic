@@ -202,3 +202,10 @@ python3 scripts/check-doc-refs.py
 ```
 
 Never the full window build, never `cargo test --workspace`, `-j 2`.
+
+## 5. Manual recipe
+
+`docs_archive/vault/vault_build_plan.md` §5, amended: steps 4 and 8
+changed, steps 11-13 and the headless line added (found without the
+vault, enable by the Organization features vote, then seal, grant,
+read). The founding-with-vault path (steps 4-7) stays.

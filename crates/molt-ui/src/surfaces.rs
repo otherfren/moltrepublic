@@ -217,6 +217,9 @@ pub(crate) struct OrgStats {
     /// which optional surfaces get a nav row and read as active under
     /// Organization › charter.
     pub(crate) features: Vec<String>,
+    /// Whether a vote can switch the vault on (engine
+    /// `StatusView.vault_enable`).
+    pub(crate) vault_enable: molt_core::vault::VaultEnable,
     /// Decoded picture bytes a member picture may still carry here (engine
     /// `StatusView.image_budget`) - what the fit before proposing aims at.
     pub(crate) image_budget: u64,
@@ -761,6 +764,7 @@ pub(crate) async fn gather_surfaces(
                 chain_governed: s.chain_governed,
                 relays: s.relays,
                 features: s.features,
+                vault_enable: s.vault_enable,
                 image_budget: s.image_budget,
                 mirror_on: mirror.as_ref().map_or(true, |m| m.on),
                 mirror_quota: mirror.as_ref().map_or(molt_core::MIRROR_QUOTA_DEFAULT, |m| m.quota),

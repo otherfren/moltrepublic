@@ -69,9 +69,9 @@ pub enum VaultRefusal {
     /// The founding bounds (spec §3).
     #[error("needs 2 <= m <= n-2")]
     Bounds,
-    /// `set_features` cannot add the vault.
-    #[error("founding only")]
-    FoundingOnly,
+    /// `set_features` cannot add the vault to a roster-v5 republic.
+    #[error("needs a newer republic")]
+    NeedsNewerRepublic,
     /// A joiner without vault support (D14).
     #[error("needs a newer version: {0}")]
     NeedsNewerVersion(MemberId),
@@ -102,6 +102,22 @@ pub enum VaultRefusal {
     /// A deposit whose `replaces` is not the slot's current version.
     #[error("stale version")]
     Stale,
+}
+
+/// Whether a `set_features` vote can switch this republic's vault on
+/// (spec §3): `StatusView.vault_enable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VaultEnable {
+    /// The vault is in the effective features.
+    On,
+    /// A roster-v6 republic within the bounds: votable.
+    Offer,
+    /// A roster-v5 genesis carries no vault keys.
+    #[default]
+    NeedsNewerRepublic,
+    /// Outside `2 <= m <= n-2`.
+    Bounds,
 }
 
 /// Where a deposit's ciphertext lives on the file plane.
@@ -1037,7 +1053,7 @@ mod tests {
     fn vault_refusal_text_is_pinned() {
         let cases = [
             (VaultRefusal::Bounds, "needs 2 <= m <= n-2"),
-            (VaultRefusal::FoundingOnly, "founding only"),
+            (VaultRefusal::NeedsNewerRepublic, "needs a newer republic"),
             (VaultRefusal::NeedsNewerVersion("b".to_string()), "needs a newer version: b"),
             (VaultRefusal::NotVerified, "not verified"),
             (VaultRefusal::PayloadNotHeld, "payload not held"),
@@ -1056,6 +1072,21 @@ mod tests {
             crate::MoltError::Vault(VaultRefusal::NoVaultKey).to_string(),
             "vault: no vault key"
         );
+    }
+
+    /// The Organization modal's switch rides `status`; an older reader
+    /// without the field offers nothing.
+    #[test]
+    fn vault_enable_wire_shape_is_pinned() {
+        for (e, want) in [
+            (VaultEnable::On, "\"on\""),
+            (VaultEnable::Offer, "\"offer\""),
+            (VaultEnable::NeedsNewerRepublic, "\"needs_newer_republic\""),
+            (VaultEnable::Bounds, "\"bounds\""),
+        ] {
+            assert_eq!(serde_json::to_string(&e).expect("json"), want);
+        }
+        assert_eq!(VaultEnable::default(), VaultEnable::NeedsNewerRepublic);
     }
 
     // --- layouts -------------------------------------------------------

@@ -626,6 +626,10 @@ pub(crate) fn fold_one(
             payload,
         } => {
             if let (Some(ctx), Surface::Vault) = (vault, surface) {
+                // E5: a prepared vault takes no block before it is enabled
+                if !crate::vault::walk_enabled(state, ctx) {
+                    return Err(format!("block {}: vault not enabled", block.height));
+                }
                 crate::vault::deposit::check_vault_op(&state.republic_id, *proposal_id, payload, ctx)
                     .map_err(|e| format!("block {}: vault {e}", block.height))?;
             }

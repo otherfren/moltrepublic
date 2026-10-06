@@ -5,7 +5,7 @@
 //! stage; this file only wires them.
 
 use molt_core::vault::{VaultCtx, VaultRefusal, VaultView};
-use molt_core::{MemberIdentity, MoltError};
+use molt_core::{MemberIdentity, MoltError, Surface};
 use serde_json::Value;
 
 pub(crate) mod deposit;
@@ -62,9 +62,10 @@ fn has_vault(features: Option<&[String]>) -> bool {
 }
 
 /// The roster rule every door applies (plan 1.3.12): any vault key means
-/// every seat keyed, `vault` in the features, the bounds, and canonical,
-/// unique keys. A table without keys passes, `vault` or not (the v5 mock).
-/// Returns whether the table is a real vault.
+/// every seat keyed with canonical, unique keys - a prepared vault (E2);
+/// `vault` in the features of a keyed table also needs the bounds. A table
+/// without keys passes, `vault` or not (the v5 mock). Returns whether the
+/// table is keyed.
 pub(crate) fn check_roster_keys(
     rule_m: u8,
     rule_n: u8,
@@ -74,10 +75,7 @@ pub(crate) fn check_roster_keys(
     if identities.iter().all(|i| i.vault_pk.is_empty()) {
         return Ok(false);
     }
-    if !has_vault(features) {
-        return Err("vault keys without the vault feature".to_string());
-    }
-    if !bounds_ok(rule_m, rule_n) {
+    if has_vault(features) && !bounds_ok(rule_m, rule_n) {
         return Err(VaultRefusal::Bounds.to_string());
     }
     let mut seen = std::collections::BTreeSet::new();
@@ -108,6 +106,39 @@ pub(crate) fn check_new_founding_keys(
         return Err("the vault feature without vault keys".to_string());
     }
     Ok(real)
+}
+
+/// Is the vault on at the walked state (E5)? Judged from the chain under
+/// verification only: its founding features plus every applied
+/// `set_features`, and the bounds of its own context, so an
+/// out-of-bounds enable that committed anyway enables nothing.
+pub(crate) fn walk_enabled(state: &molt_core::CheckpointState, ctx: &VaultCtx) -> bool {
+    let org = state
+        .applied
+        .iter()
+        .filter(|(s, _)| *s == Surface::Organization)
+        .flat_map(|(_, list)| list)
+        .map(|(_, p)| p);
+    enabled_by(ctx, state.founding_features.as_deref(), org)
+}
+
+/// The one "enabled" rule: the bounds of `ctx`, and `vault` among the
+/// founding features or named by an applied `set_features`.
+fn enabled_by<'a>(ctx: &VaultCtx, founding: Option<&[String]>, mut org: impl Iterator<Item = &'a Value>) -> bool {
+    ctx_bounds_ok(ctx) && (has_vault(founding) || org.any(sets_vault))
+}
+
+fn ctx_bounds_ok(ctx: &VaultCtx) -> bool {
+    bounds_ok(ctx.m, u8::try_from(ctx.holders_in_genesis_order.len()).unwrap_or(u8::MAX))
+}
+
+/// An Organization payload whose `set_features` names the vault.
+pub(crate) fn sets_vault(payload: &Value) -> bool {
+    payload.get("op").and_then(Value::as_str) == Some("set_features")
+        && payload
+            .get("value")
+            .and_then(Value::as_str)
+            .is_some_and(|v| v.split_whitespace().any(|k| k == VAULT))
 }
 
 /// This seat's vault key from its phrase entropy and its FOUNDING seat:
@@ -147,10 +178,30 @@ pub(crate) fn seed_array(b: &molt_core::vault::SecretBytes) -> Option<zeroize::Z
 }
 
 impl crate::State {
-    /// The adopted chain's vault context; `None` outside a vault republic.
-    /// For commands and the view only - a walk takes the context of the
-    /// chain it walks.
+    /// The adopted chain's vault context while the vault is ENABLED (E5);
+    /// `None` outside a vault republic and while it is only prepared. For
+    /// commands and the view only - a walk takes the context of the chain
+    /// it walks.
     pub(crate) fn vault_ctx(&self) -> Option<VaultCtx> {
+        let ctx = self.vault_founding_ctx()?;
+        self.vault_on_chain(&ctx).then_some(ctx)
+    }
+
+    /// [`walk_enabled`] over the adopted chain: its founding features (the
+    /// genesis, or the anchor's) and its applied `set_features`.
+    fn vault_on_chain(&self, ctx: &VaultCtx) -> bool {
+        let founding = match (&self.chain.checkpoint_blob, self.chain.blocks.first().map(|b| &b.change)) {
+            (Some(blob), _) => blob.founding_features.as_deref(),
+            (None, Some(molt_core::ChainChange::Genesis { features, .. })) => features.as_deref(),
+            _ => None,
+        };
+        let org = self.chain.applied.get(&Surface::Organization).into_iter().flatten().map(|(_, p)| p);
+        enabled_by(ctx, founding, org)
+    }
+
+    /// The adopted chain's founding vault context: `Some` iff its genesis
+    /// (or anchor) is roster-v6 - the vault is PREPARED (E2), enabled or not.
+    pub(crate) fn vault_founding_ctx(&self) -> Option<VaultCtx> {
         self.chain.head.as_ref()?;
         if let Some(blob) = &self.chain.checkpoint_blob {
             return ctx_from_founding(blob.rule_m, &blob.founding_identities);
@@ -163,9 +214,54 @@ impl crate::State {
         }
     }
 
-    /// The adopted chain's genesis is roster-v6.
+    /// The vault is real and enabled here.
     pub(crate) fn is_vault_republic(&self) -> bool {
         self.vault_ctx().is_some()
+    }
+
+    /// The adopted chain's genesis is roster-v6 (cut variant, op set, seed).
+    pub(crate) fn is_vault_prepared(&self) -> bool {
+        self.vault_founding_ctx().is_some()
+    }
+
+    /// The vault commands' entry gate: `vault: not enabled` like any
+    /// disabled feature, `no vault` for the v5 mock.
+    pub(crate) fn require_vault(&self) -> Result<VaultCtx, MoltError> {
+        if let Some(ctx) = self.vault_ctx() {
+            return Ok(ctx);
+        }
+        let mock = !self.is_vault_prepared() && self.effective_features().iter().any(|f| f == VAULT);
+        Err(if mock {
+            MoltError::Vault(VaultRefusal::NoVault)
+        } else {
+            MoltError::FeatureDisabled(Surface::Vault.as_str())
+        })
+    }
+
+    /// Whether a `set_features` vote can switch the vault on (spec §3).
+    pub(crate) fn vault_enable(&self) -> molt_core::vault::VaultEnable {
+        use molt_core::vault::VaultEnable;
+        match self.vault_founding_ctx() {
+            _ if self.effective_features().iter().any(|f| f == VAULT) => VaultEnable::On,
+            None => VaultEnable::NeedsNewerRepublic,
+            Some(ctx) if self.vault_on_chain(&ctx) => VaultEnable::On,
+            Some(ctx) if ctx_bounds_ok(&ctx) => VaultEnable::Offer,
+            Some(_) => VaultEnable::Bounds,
+        }
+    }
+
+    /// E4: why a NEW proposal may not add the vault (propose, approve,
+    /// the wire); `None` when it adds nothing or may add it. History folds
+    /// regardless.
+    pub(crate) fn vault_enable_refusal(&self, surface: Surface, payload: &Value) -> Option<VaultRefusal> {
+        if surface != Surface::Organization || !sets_vault(payload) {
+            return None;
+        }
+        match self.vault_enable() {
+            molt_core::vault::VaultEnable::NeedsNewerRepublic => Some(VaultRefusal::NeedsNewerRepublic),
+            molt_core::vault::VaultEnable::Bounds => Some(VaultRefusal::Bounds),
+            _ => None,
+        }
     }
 
     /// The republic folded its vault into a base this node does not hold.
@@ -204,7 +300,7 @@ impl crate::State {
         if self.vault_seams.skip_checks.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(());
         }
-        match vault_arm(payload, self.is_vault_republic())? {
+        match vault_arm(payload, self.is_vault_prepared())? {
             VaultArm::Deposit => self.approve_check_deposit(payload),
             VaultArm::Grant => self.approve_check_grant(payload),
             VaultArm::Mock => Ok(()),
@@ -215,7 +311,7 @@ impl crate::State {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chain::test_support::{chain_signer, wire, Builder};
+    use crate::chain::test_support::{chain_signer, genesis_seat, wire, Builder};
     use molt_core::{ProposalId, Surface, WorkspaceEvent};
     use serde_json::json;
 
@@ -223,54 +319,95 @@ mod tests {
         json!({ "op": "set_features", "value": "memory vault" })
     }
 
-    fn founding_only(r: Result<molt_core::Reply, MoltError>) {
+    fn refused_with(r: Result<molt_core::Reply, MoltError>, want: &VaultRefusal) {
         match r {
-            Err(MoltError::Vault(VaultRefusal::FoundingOnly)) => {}
-            other => panic!("expected `founding only`, got {other:?}"),
+            Err(MoltError::Vault(got)) if &got == want => {}
+            other => panic!("expected `{want}`, got {other:?}"),
         }
     }
 
-    /// D11: no NEW proposal adds the vault - not at propose, not at approve,
-    /// not off the wire.
-    #[test]
-    fn set_features_refuses_vault_at_propose_approve_and_wire() {
-        let b = Builder::new(&["petra", "walter"], 2);
-        let mut st = chain_signer("petra", &b, b.blocks.clone());
-        assert!(st.is_chain_governed());
+    fn card(payload: Value, by: &str) -> molt_core::ProposalRecord {
+        molt_core::ProposalRecord {
+            surface: Surface::Organization,
+            payload,
+            approvals: 0,
+            state: molt_core::ProposalState::Proposed,
+            applied_at: 0,
+            declined_at: 0,
+            declined_by: String::new(),
+            decliners: Vec::new(),
+            voted: Vec::new(),
+            by: by.to_string(),
+            superseded: false,
+            superseded_kind: None,
+            withdrawn: false,
+            wiki_rev: None,
+        }
+    }
 
-        founding_only(st.cmd_propose(Surface::Organization, add_vault()));
-
+    /// Propose, the wire and approve all give `want` for adding the vault
+    /// on `st` (whose peer `by` sends the wire twin).
+    fn every_door_refuses(st: &mut crate::State, by: &str, want: &VaultRefusal) {
+        refused_with(st.cmd_propose(Surface::Organization, add_vault()), want);
         wire(
-            &mut st,
-            "walter",
+            st,
+            by,
             1,
             WorkspaceEvent::Proposed { id: ProposalId(2), surface: Surface::Organization, payload: add_vault() },
         );
         assert!(!st.proposals.contains_key(&2), "the wire twin drops it");
-        assert!(!st.receive_proposed(4, Surface::Organization, add_vault(), "walter"));
+        assert!(!st.receive_proposed(4, Surface::Organization, add_vault(), by));
         assert!(!st.proposals.contains_key(&4));
-
         // a card that got in anyway (an older build's pool) is never signed
-        st.proposals.insert(
-            6,
-            molt_core::ProposalRecord {
-                surface: Surface::Organization,
-                payload: add_vault(),
-                approvals: 0,
-                state: molt_core::ProposalState::Proposed,
-                applied_at: 0,
-                declined_at: 0,
-                declined_by: String::new(),
-                decliners: Vec::new(),
-                voted: Vec::new(),
-                by: "walter".to_string(),
-                superseded: false,
-                superseded_kind: None,
-                withdrawn: false,
-                wiki_rev: None,
-            },
+        st.proposals.insert(6, card(add_vault(), by));
+        refused_with(st.cmd_approve(ProposalId(6), None), want);
+    }
+
+    /// E4: a roster-v5 genesis has no keys, so no vote can add the vault.
+    #[test]
+    fn set_features_vault_needs_a_newer_republic_on_v5() {
+        let b = Builder::new(&["petra", "walter"], 2);
+        let mut st = chain_signer("petra", &b, b.blocks.clone());
+        assert!(st.is_chain_governed());
+        every_door_refuses(&mut st, "walter", &VaultRefusal::NeedsNewerRepublic);
+    }
+
+    /// E4: a prepared republic outside `2 <= m <= n-2` cannot enable it.
+    #[test]
+    fn set_features_vault_refuses_outside_the_bounds() {
+        let b = Builder::new_with_features(&["a", "b", "c"], 2, &["memory"], true);
+        let mut st = genesis_seat("a", &b, b.blocks.clone());
+        assert!(st.is_vault_prepared());
+        every_door_refuses(&mut st, "b", &VaultRefusal::Bounds);
+    }
+
+    /// E4: a prepared republic within the bounds votes the vault in at
+    /// every door.
+    #[test]
+    fn set_features_enables_the_vault_in_a_prepared_republic() {
+        let b = Builder::new_with_features(&["a", "b", "c", "d"], 2, &["memory"], true);
+        let mut st = genesis_seat("a", &b, b.blocks.clone());
+        st.cmd_propose(Surface::Organization, add_vault()).expect("propose takes it");
+        wire(
+            &mut st,
+            "b",
+            1,
+            WorkspaceEvent::Proposed { id: ProposalId(20), surface: Surface::Organization, payload: add_vault() },
         );
-        founding_only(st.cmd_approve(ProposalId(6), None));
+        assert!(st.proposals.contains_key(&20), "the wire twin keeps it");
+        st.cmd_approve(ProposalId(20), None).expect("approve signs it");
+    }
+
+    /// E4: history is never refused - a live v5 republic that applied the
+    /// mock's `set_features vault` keeps verifying.
+    #[test]
+    fn a_historic_set_features_vault_block_still_verifies() {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        b.commit_org(10, "set_features", "memory vault", &["petra", "walter"]);
+        crate::chain::verify_chain(&b.blocks).expect("the historic block verifies");
+        let st = chain_signer("petra", &b, b.blocks.clone());
+        assert!(st.effective_features().iter().any(|f| f == VAULT), "the mock is effective");
+        assert!(!st.is_vault_republic(), "and stays the mock");
     }
 
     /// The vault is never a keep-requirement: a republic where it is
@@ -289,8 +426,9 @@ mod tests {
         .expect("vault is kept by the union, not by the proposal");
     }
 
-    /// D11 refuses ADDING the vault: where it is already effective (a live
-    /// v5 mock), an older peer's `set_features` naming it stays votable.
+    /// Refusing applies to ADDING the vault: where it is already effective
+    /// (a live v5 mock), an older peer's `set_features` naming it stays
+    /// votable.
     #[test]
     fn set_features_naming_an_effective_vault_is_not_refused() {
         let named = json!({ "op": "set_features", "value": "memory quests vault" });
@@ -308,11 +446,11 @@ mod tests {
         assert!(st.proposals.contains_key(&2), "the wire twin keeps it");
         assert!(!matches!(
             st.cmd_approve(ProposalId(2), None),
-            Err(MoltError::Vault(VaultRefusal::FoundingOnly))
+            Err(MoltError::Vault(VaultRefusal::NeedsNewerRepublic))
         ));
         assert!(!matches!(
             st.cmd_propose(Surface::Organization, named),
-            Err(MoltError::Vault(VaultRefusal::FoundingOnly))
+            Err(MoltError::Vault(VaultRefusal::NeedsNewerRepublic))
         ));
     }
 

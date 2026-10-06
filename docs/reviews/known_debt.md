@@ -8,7 +8,8 @@ an item leaves in the change that closes it.
 
 From `docs_archive/ui/mock_todo.md` §14. Memory is REAL
 (`docs_archive/memory/shared_memory_real.md`), the Vault is REAL
-(`docs_archive/vault/vault_threshold_disclosure.md`, founding only); the
+(`docs_archive/vault/vault_threshold_disclosure.md`, prepared at every
+founding, enabled at founding or by vote); the
 Wallet is ratified but not started (`docs/chain/wallet_treasury_design.md`,
 first step the dep-lock spike); Kanban has a fresh design-mock round and
 its concept doc (`docs/kanban/kanban_workflows.md` §2–§5+§7), which

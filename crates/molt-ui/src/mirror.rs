@@ -1447,6 +1447,12 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     ui.set_org_feat_memory(feat_on("memory"));
     ui.set_org_feat_quests(feat_on("quests"));
     ui.set_org_feat_vault(feat_on("vault"));
+    ui.set_org_vault_enable(match b.org_stats.vault_enable {
+        molt_core::vault::VaultEnable::On => 0,
+        molt_core::vault::VaultEnable::Offer => 1,
+        molt_core::vault::VaultEnable::NeedsNewerRepublic => 2,
+        molt_core::vault::VaultEnable::Bounds => 3,
+    });
     ui.set_org_feat_wallet(feat_on("wallet"));
     sync_strings(&ui.get_org_relays(), &b.org_stats.relays, |m| ui.set_org_relays(m));
     // the R6 pencil's draft prefill: the same pool, space-joined

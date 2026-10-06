@@ -1,10 +1,11 @@
 # Vault: majority escrow with an elected reader
 
-Status: SHIPPING SPEC, rev 4 (2026-10-05), built 2026-10-06 per
+Status: SHIPPING SPEC, rev 5 (2026-10-06), built 2026-10-06 per
 `vault_build_plan.md` (executed; deviations in plan §1.3, listed in §12;
-D17 is plan Q1, user-confirmed default). The product decisions in §2
-were ratified by the user on 2026-10-05. Open: V6 share refresh (§9.6,
-`docs/reviews/known_debt.md`).
+D17 is plan Q1, user-confirmed default) and `vault_late_enable.md`
+(executed; D11 rewritten, D14 extended). The product decisions in §2
+were ratified by the user on 2026-10-05, D11/D14 as amended on
+2026-10-06. Open: V6 share refresh (§9.6, `docs/reviews/known_debt.md`).
 Rev 1 (2026-08-16) is superseded: its primitives stand, its framing
 ("succession insurance" with an implied depositor protection) and its
 storage story (bundles inline in the chain) do not. §12 lists what
@@ -56,18 +57,25 @@ deposit time, in one line:
   every backup**. This decision surfaced a backup bug in the wiki itself:
   `wiki_base.bin` was skipped by every export (fix of 2026-10-05,
   "storage: back up the folded wiki base").
-- **D11 Founding only, set up in the background.** The vault can be
-  chosen only at founding; a new `set_features` proposal cannot add it
-  (`founding only`); historic `set_features vault` blocks keep verifying. Every
-  seat's vault key is part of the founding (§6), so no seat can lack one
-  and no step needs a user action.
+- **D11 Prepared at every founding, enabled at founding or by vote**
+  (rewritten 2026-10-06). Every new founding prepares the vault in the
+  background: every seat's vault key is part of the founding (§6), the
+  vault ticked or not, so no seat can lack one and no step needs a user
+  action. The wizard box is off by default. A prepared republic enables
+  the vault at founding or later by an ordinary `set_features` vote
+  (enable-only, like every feature), within the bounds of §3. Until it
+  is enabled the vault is invisible: no pane, no `vault` read model, every
+  vault command refused (`vault: not enabled`), no vault frame, and no
+  vault block verifies.
 - **D12 A deposit is a vote.** Deposit and replace are ordinary gated
   proposals at m-of-n, decided by members like any other change — not
   approved automatically. That vote is the only bound on how much every
   seat must hold (no count cap, no delete; replace only).
 - **D13 m ≤ n − 2.** The vault tolerates at least one dead holder (§3).
 - **D14 Older builds never get the vault.** No compatibility path: an
-  older build can neither found nor join nor run a vault republic (§6).
+  older build can neither found nor join nor run a vault republic (§6),
+  and since every founding is prepared, it joins no new founding at all
+  (extended 2026-10-06).
 - **D15 Re-seal after a complaint is offered, never automatic** (§7).
 - **D16 A cut drops the grant audit of replaced versions.** Who read an
   old version disappears below the cut with that version (§9.3) — the
@@ -81,9 +89,9 @@ deposit time, in one line:
 
 ## 3. When the vault can be enabled
 
-The vault is a charter feature (`charter_features.md`), selectable at
-founding only (D11), and the republic's shape decides whether it can
-mean anything:
+The vault is a charter feature (`charter_features.md`), prepared at
+every founding and enabled at founding or by a later `set_features`
+vote (D11); the republic's shape decides whether it can mean anything:
 
 - **m ≥ 2.** At m = 1 Shamir hands every seat the secret itself: every
   member could read every deposit with no grant at all. A 1-of-n
@@ -94,13 +102,26 @@ mean anything:
   2-of-3 republic a grant commits with one seat dead, and the read it
   grants is impossible. So n ≥ 4.
 
-Both are checked at the founding doors (the wizard, `cmd_create_propose`,
-`verify_seal_proposal`); the refusal names the reason
-(`needs 2 <= m <= n-2`). `set_features` refuses `vault` on NEW proposals
-only (`founding only`, D11: `validate_org_payload`, `cmd_propose`,
-`cmd_approve`, `receive_proposed`); `fold_one` and `verify_chain` keep
-accepting historic `set_features vault` blocks, so live v5 republics that
-applied the mock keep verifying.
+Both are checked when the vault is chosen at founding (the wizard,
+`cmd_create_propose`, `verify_seal_proposal`) and when a `set_features`
+vote adds it; the refusal names the reason (`needs 2 <= m <= n-2`). The
+bounds do not gate the preparation: a 2-of-3 founding is keyed too and
+simply can never enable the vault. `set_features` refuses `vault` on NEW
+proposals only (`cmd_propose`, `cmd_approve`, `receive_proposed`, the
+wire drop): a roster-v5 genesis has no keys (`needs a newer republic`),
+a prepared republic outside the bounds `needs 2 <= m <= n-2`. `fold_one`
+and `verify_chain` keep accepting historic `set_features vault` blocks,
+so live v5 republics that applied the mock keep verifying.
+
+**Enabled** means: the genesis (or anchor) is roster-v6, the bounds hold,
+and `vault` is in the effective features - the genesis features plus
+every applied `set_features`. Every walk judges it from the chain under
+verification (`walk_enabled`), never from node state: a Vault block at a
+height where that chain has not enabled the vault hard-rejects, and an
+out-of-bounds enable block that committed anyway (m colluding seats) is
+history that verifies but enables nothing. `status.vault_enable`
+(`on`, `offer`, `needs_newer_republic`, `bounds`) tells a frontend
+whether a vote can switch it on.
 
 ## 4. Trust model — the honest limits
 
@@ -177,21 +198,22 @@ injectivity rule; never separators. Every such layout carries a
 Everything the vault keeps is a handful of small records plus one opaque
 file per deposit.
 
-- **Vault key in the roster** (D11) — when the charter selects the vault,
-  each seat's `vault_pk` is a fourth per-seat field of the sealed roster:
+- **Vault key in the roster** (D11) — at every founding, the vault
+  selected or not, each seat's `vault_pk` is a fourth per-seat field of
+  the sealed roster:
   the joiner derives it during the ritual and sends it with its join, the
   founder's table carries it, and every member checks it the way it
   checks `nostr_pk` (sign-what-you-see: its own value is its own
   derivation; every other one is a valid point and roster-unique). It
   needs a conditional roster tag (`molt-roster-v6` only when a vault key
-  is present; a vault-less founding stays v5/v4 byte-identically) and
-  every recompute site moves together. Pinned by construction: there is
+  is present; an older founder's keyless table stays v5/v4
+  byte-identically) and every recompute site moves together. Pinned by construction: there is
   no announcement record, no vote, no seat without a key. Like `nostr_pk`
   it has no proof of possession — a seat naming a key it cannot open only
   loses its own shares, which it could withhold anyway.
   Every vault-capable joiner ALWAYS sends `vault_pk` (it cannot know the
-  charter yet, which is chosen after every join); the founder drops the
-  field from the table when the charter has no vault. The join MAC is
+  charter yet, which is chosen after every join), and the founder keeps
+  it in the table whatever the charter. The join MAC is
   unchanged: the member's sign-what-you-see check of its own `vault_pk`
   is the binding. Holders, readers and recovery read every `vault_pk`
   from the genesis roster or `founding_identities`, never from a working
@@ -199,16 +221,18 @@ file per deposit.
   membership or recovery change that would move a seat's `vault_pk`.
   **The roster rule is one-directional and split by door**, so live v5
   republics carrying the mock `vault` key keep verifying: everywhere, any
-  `vault_pk` means tag v6, every seat keyed, `vault` in `features`,
-  2 ≤ m ≤ n − 2, keys canonical and unique; only a NEW founding refuses
-  `vault` without keys. **The real vault exists iff the genesis roster is
-  v6**, never by `effective_features()`; the vault switch of a walk comes
-  from the genesis (or anchor) of the chain being walked, never from node
-  state.
+  `vault_pk` means tag v6, every seat keyed, keys canonical and unique,
+  and 2 ≤ m ≤ n − 2 when `vault` is in `features` (keys without `vault`
+  are the prepared vault); only a NEW founding refuses `vault` without
+  keys. **The real vault exists iff the genesis roster is v6** (it is
+  then prepared), and it is ON iff it is also enabled (§3) - never by
+  `effective_features()` alone; the vault switch of a walk comes from
+  the chain being walked, never from node state.
 
-  **Older builds are locked out (D14), fail-closed at every door:** a
-  vault founding needs `vault_pk` in every join, so the founder refuses
-  an older joiner (`needs a newer version`); an older build meeting a v6
+  **Older builds are locked out (D14), fail-closed at every door:** every
+  founding needs `vault_pk` in every join, so the founder refuses an
+  older joiner at the join door (`needs a newer version`), the vault
+  ticked or not; an older build meeting a v6
   roster rejects the unknown tag; and the vault's chain variants stop an
   older reader (additive-only rule). The `vault` feature key already
   exists in older builds as a mock, so a v5 roster may carry it: the real
@@ -436,7 +460,7 @@ So the cut **folds**, with every K6 rule carried over
   deposits and grants (the keys live in the genesis roster). Receipts and complaints are not in
   it (§7).
 - **A new fold variant, not only a tag: one variant, one tag.** Every cut
-  in a republic whose genesis is roster-v6 is
+  in a republic whose genesis is roster-v6 (enabled or only prepared) is
   `ChainChange::CheckpointVault { upto, state_hash, wiki_folded }`, so an
   older build STOPS instead of reading a forgery; its state hashes under
   `molt-chain-checkpoint-v10` (the v9 layout plus `vault_pk` as a fourth
@@ -533,6 +557,16 @@ recorded so the record format leaves room for a refresh epoch.
 
 ## 12. What changed against rev 1
 
+Rev 5 (`vault_late_enable.md`, 2026-10-06):
+- **D11 rewritten:** every founding prepares the vault (keys, seeds,
+  roster-v6, v10 cuts); it is enabled at founding or later by a
+  `set_features` vote within the bounds, and invisible until then.
+- **D14 extended:** an older build joins no new founding.
+- `set_features vault` refuses with `needs a newer republic` (v5
+  genesis) or `needs 2 <= m <= n-2`; `founding only` is gone.
+- A Vault block before the enabling block hard-rejects; "enabled"
+  includes the bounds.
+
 Rev 4 (the build plan's §1.3, 2026-10-05):
 - **The vault key is salted with the founding `nostr_pk`**, not
   `republic_id` (§5), and `vault_ikm` is persisted, failing closed when
@@ -557,8 +591,9 @@ Rev 2/3 against rev 1:
   succession insurance; the honest product is a majority escrow.
 - **Enablement bounds** (§3): 2 ≤ m ≤ n − 2 (rev 2 allowed n − 1, which
   tolerates no dead holder).
-- **Founding only, keys in the roster** (D11). Rev 2's announcement
-  records let one seat that never opened again block every deposit.
+- **Keys in the roster at founding** (D11; rev 5 makes every founding
+  keyed). Rev 2's announcement records let one seat that never opened
+  again block every deposit.
 - **A deposit is a vote** (D12), not an automatic approval.
 - **The depositor holds no share**, and `sealed` counts other holders
   only — the depositor's own share never helps the case the vault exists
@@ -610,7 +645,8 @@ Rev 2/3 against rev 1:
 2. **V2 founding** — `vault_pk` through join, table, sign-what-you-see and
    `verify_sealed_roster`; conditional roster-v6; enablement bounds in the
    wizard, `verify_seal_proposal` and `set_features`. Keystones: a vault
-   founding round-trips v6, a vault-less one stays byte-identical, a
+   founding round-trips v6, a founding without the vault is prepared
+   (rev 5; an older founder's keyless table stays byte-identical), a
    tampered or duplicate `vault_pk` is refused by the member.
 3. **V3 deposit** — payload
    series with mandatory holding, signed deposit with verify-gated approve

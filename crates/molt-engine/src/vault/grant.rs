@@ -164,7 +164,7 @@ impl crate::State {
     }
 
     pub(crate) fn cmd_vault_grant(&mut self, secret_id: String, reader: MemberId) -> Result<Reply, MoltError> {
-        let ctx = self.vault_ctx().ok_or(MoltError::Vault(VaultRefusal::NoVault))?;
+        let ctx = self.require_vault()?;
         if self.vault_base_pending() {
             return Err(self.vault_base_pending_error());
         }

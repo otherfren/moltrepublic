@@ -1241,6 +1241,10 @@ worktree and reruns its verification before merging.
 
 ## 5. Manual test recipe (for the user)
 
+*Amended 2026-10-06 (`vault_late_enable.md`): every founding prepares
+the vault; the Vault box is off by default; step 8 offers the vault in
+a prepared republic; steps 11-13 enable it later by vote.*
+
 Build once (light, live-preview stubs; the same binary serves the GUI
 and the headless seats):
 `CARGO_TARGET_DIR=target/dev-ui SLINT_LIVE_PREVIEW=1 cargo build -j 2 -p molt-app --features live-preview,vault-lab`.
@@ -1253,7 +1257,7 @@ and the headless seats):
    (`SLINT_LIVE_PREVIEW=1 target/dev-ui/debug/moltd --config /tmp/vault-lab/gui/config.toml`).
 4. Found: Create republic, 4 members, threshold 2 -> mint the invites ->
    `python3 scripts/vault_lab.py join` (joins all three, waits for the
-   charter). At the charter step the Vault box is enabled: tick it,
+   charter). At the charter step the Vault box is enabled and unticked: tick it,
    untick Memory, propose the charter; the lab seats ratify and confirm their backups;
    confirm your seed backup and finish in the GUI.
 5. Deposit: Vault pane -> Seal -> name `test`, kind `text`, a few lines.
@@ -1275,13 +1279,28 @@ and the headless seats):
    `vault_lab.py read s2 test` prints the text: s2 needs one answer, from
    the GUI or s3, with s1 dead. `vault_lab.py read s3 test` shows a
    non-reader is refused.
-8. Org features: Organization > features: Vault reads `founding only`;
-   tick Memory, propose, `vault_lab.py approve` -> Memory is enabled.
+8. Org features: Organization > features: Vault is checked and locked
+   (on); tick Memory, propose, `vault_lab.py approve` -> Memory is enabled.
 9. Bounds: `vault_lab.py down`, quit the GUI,
    `vault_lab.py up --relay <url> --seats 2`, start the GUI with the newly
    printed command, found 3 members threshold 2, `vault_lab.py join` ->
    at the charter step the Vault box is greyed with `needs 2 <= m <= n-2`.
-10. `python3 scripts/vault_lab.py down`; stop the relay.
+   Propose without it, finish; Organization > features: the Vault row
+   reads `needs 2 <= m <= n-2`, no box.
+10. `python3 scripts/vault_lab.py down`; quit the GUI.
+11. Late enable: `vault_lab.py up --relay <url> --seats 3`, start the GUI,
+    found 4 members threshold 2, `vault_lab.py join`; at the charter step
+    leave Vault unticked, propose, finish. No Vault in the nav;
+    `vault_lab.py seal s1 a one` prints `vault: not enabled`.
+12. Organization > features: tick Vault, propose, `vault_lab.py approve`
+    -> the Vault nav row appears on every seat.
+13. Continue with steps 5-7 (seal, approve, grant, read). Then
+    `python3 scripts/vault_lab.py down`; stop the relay.
+
+Headless (no GUI): `vault_lab.py up --relay <url> --founder-headless`,
+`vault_lab.py join --no-vault`, `vault_lab.py enable`,
+`vault_lab.py approve`, then `seal f a one`, `approve`, `grant a s1`,
+`approve`, `read s1 a`.
 
 Without `--complainer`, step 5 shows the honest path: `hardened` once
 all three seats verified, no complaint lines, no Re-seal.

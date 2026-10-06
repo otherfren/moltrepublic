@@ -937,7 +937,7 @@ impl State {
     /// always [`ChainChange::CheckpointVault`] (plan 1.3.6), `wiki` the
     /// wiki choice either way.
     pub(crate) fn cut_kind(&self, wiki: bool) -> CutKind {
-        CutKind { wiki, vault: self.is_vault_republic() }
+        CutKind { wiki, vault: self.is_vault_prepared() }
     }
 
     /// The state hash this holder attests for a cut at `upto` - the value
@@ -1021,8 +1021,8 @@ impl State {
             tracing::warn!(%id, "refusing a proposal with an implausible id");
             return false;
         }
-        if self.adds_vault_feature(surface, &payload) {
-            tracing::warn!(%id, %by, "refusing a set_features adding the vault");
+        if let Some(r) = self.vault_enable_refusal(surface, &payload) {
+            tracing::warn!(%id, %by, refusal = %r, "refusing a set_features adding the vault");
             return false;
         }
         if surface == Surface::Vault {
