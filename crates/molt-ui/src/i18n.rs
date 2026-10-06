@@ -84,6 +84,7 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
                 R::UseVaultSeal => "vault_seal benutzen".to_string(),
                 R::TooLarge => "zu groß".to_string(),
                 R::UnknownOp => "unbekannte Operation".to_string(),
+                R::Stale => "veraltete Version".to_string(),
             };
             format!("Vault: {de}")
         }

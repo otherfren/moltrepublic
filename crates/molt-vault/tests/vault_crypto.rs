@@ -80,6 +80,7 @@ fn deposit_by(
             depositor: &d.name,
             name: "one",
             kind: "text",
+            replaces: "",
             text: body,
             ctx,
         },
@@ -160,7 +161,7 @@ fn key_seal_and_deposit_derivations_are_pinned() {
             "e4a7384722693ea986bbb52e8f3fa5cc9c1c3ec2900847ea01d5fa997f46c92d"
         ]
     );
-    assert_eq!(dep.enc_share[0], "64d9e85d6c6af6063808456dcf8dc26e0bb54e34d66478a5b720b3eee91b483a0808e1f3171d8ebcc54ab164108f33905e6e96b462caa76a7e68f35ffc37ed7dc96fab6f5d3c85cc0b28c589c15bc0bb");
+    assert_eq!(dep.enc_share[0], "31bde3f62850357ffc7ed7f276d9a7e373a127d9137a4aa0bffc31243fecb33907a8fd2142148e505e27feb73e8b744df8187d53a20f74324665ffaa0617dc01d4c3011503dbe52e1e09493b28e32679");
     assert_eq!(
         dep.payload.hash,
         "77ed454c1559f1ee86e5faa94d3949910a6061a2d92856884c508b29d845c8d3"
@@ -172,7 +173,7 @@ fn key_seal_and_deposit_derivations_are_pinned() {
     );
     assert_eq!(
         hex::encode(*ikm),
-        "4e6422d3b50b9c0524f5441678d910a168df815dba1b80dbd0a9e41189f13d4e"
+        "6d4f4de41037a7c014935e85914262ebaef3e4b6507db81ef44bcce5826c43fe"
     );
 }
 
@@ -527,6 +528,14 @@ fn a_reordered_holder_list_fails_the_shape_check() {
         verify_deposit_shape(&upper, &c),
         Err(VaultError::Shape("nonce"))
     );
+    let mut replaces = dep.clone();
+    replaces.replaces = "ab".to_string();
+    assert_eq!(
+        verify_deposit_shape(&replaces, &c),
+        Err(VaultError::Shape("replaces"))
+    );
+    replaces.replaces = "ab".repeat(32);
+    assert_eq!(verify_deposit_shape(&replaces, &c), Ok(()));
     let mut not_point = dep.clone();
     not_point.commitments[1] = "ff".repeat(32);
     assert_eq!(
@@ -721,6 +730,7 @@ fn oversize_text_is_refused() {
             depositor: "a",
             name: "one",
             kind: "text",
+            replaces: "",
             text: &body,
             ctx: &c,
         },

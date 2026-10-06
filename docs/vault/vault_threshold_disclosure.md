@@ -222,9 +222,18 @@ file per deposit.
   vault exists only where the genesis roster is v6. A `vault` key in a v5
   feature set stays the mock forever.
 - **Deposit** (gated proposal → chain block) —
-  `{depositor, name, kind, m, holders, commitments[m], enc_share[n-1],
-  payload: {hash, size}, nonce, sig_depositor}`; `nonce` is 16 random
-  bytes, fresh for every deposit (§7).
+  `{depositor, name, kind, replaces, m, holders, commitments[m],
+  enc_share[n-1], payload: {hash, size}, nonce, sig_depositor}`; `nonce`
+  is 16 random bytes, fresh for every deposit (§7).
+  - `replaces` is the `secret_id` of the slot's current version (empty,
+    and omitted from the JSON, for a first deposit). It is in `secret_id`
+    and in the signed bytes. Validity is a projection rule, like a
+    grant's: a deposit whose `replaces` is not the slot's current version
+    at its height commits but is void and changes nothing, so a replayed
+    older (or the current) signed record cannot roll a slot back or void
+    its grants. Approvers refuse it (`stale version`); the wire drops it
+    once it is provably stale; a pending one is superseded when the slot
+    moves past it.
   - `holders` = every seat except the depositor, in genesis founding-table
     order; a seat's Shamir x-coordinate is its 1-based position in that
     table (the depositor's position is simply unused), and `enc_share[]`
@@ -260,7 +269,7 @@ file per deposit.
   bytes, carried by the file plane (§9.2).
 
 `secret_id` = SHA-256 over `molt-vault-secret-v1` ‖ republic id ‖
-depositor ‖ name ‖ kind ‖ m ‖ holders ‖ commitments ‖ payload hash. It
+depositor ‖ name ‖ kind ‖ replaces ‖ m ‖ holders ‖ commitments ‖ payload hash. It
 covers the commitments and the payload but not `enc_share` — no
 circularity with the share AAD below.
 
@@ -499,7 +508,9 @@ recorded so the record format leaves room for a refresh epoch.
 ## 10. What a cheater can and cannot do
 
 - **Forge someone's deposit or replace it** → `sig_depositor` fails;
-  approvers, `verify_chain` and the fold refuse it.
+  approvers, `verify_chain` and the fold refuse it. Replaying the
+  depositor's own earlier record → its signed `replaces` is not the
+  slot's current version: it commits void (§6).
 - **Depositor hands out bad shares** → the holders complain; the reveal
   names the depositor; the card never reaches `sealed` on bad shares.
 - **Member files false complaints** → the reveal names the complainer.

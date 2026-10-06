@@ -65,6 +65,10 @@ fn seat(member: &str, b: &Builder) -> crate::State {
 }
 
 fn deposit(b: &Builder, depositor: &str, signer: &str, name: &str, text: &str) -> (VaultDeposit, Vec<u8>) {
+    deposit_over(b, depositor, signer, name, text, "")
+}
+
+fn deposit_over(b: &Builder, depositor: &str, signer: &str, name: &str, text: &str, replaces: &str) -> (VaultDeposit, Vec<u8>) {
     let ctx = ctx_of(b);
     let text = SecretText(text.to_string());
     let input = molt_vault::DepositInput {
@@ -72,6 +76,7 @@ fn deposit(b: &Builder, depositor: &str, signer: &str, name: &str, text: &str) -
         depositor,
         name,
         kind: "text",
+        replaces,
         text: &text,
         ctx: &ctx,
     };
@@ -187,7 +192,7 @@ fn the_fold_keeps_only_the_current_version_and_its_grants() {
     let _g = rt.enter();
     let mut b = Builder::vault();
     let (v1, _) = deposit(&b, "a", "a", "x", "one");
-    let (v2, _) = deposit(&b, "a", "a", "x", "two");
+    let (v2, _) = deposit_over(&b, "a", "a", "x", "two", &secret_id(&b.republic_id, &v1));
     let s1 = secret_id(&b.republic_id, &v1);
     let s2 = secret_id(&b.republic_id, &v2);
     b.commit(applied(10, op(&v1)), &["a", "b"]);
@@ -435,7 +440,7 @@ fn a_replaced_payload_is_retired_at_the_cut() {
     let _g = rt.enter();
     let mut b = Builder::vault();
     let (v1, f1) = deposit(&b, "a", "a", "x", "one");
-    let (v2, f2) = deposit(&b, "a", "a", "x", "two");
+    let (v2, f2) = deposit_over(&b, "a", "a", "x", "two", &secret_id(&b.republic_id, &v1));
     b.commit(applied(10, op(&v1)), &["a", "b"]);
     b.commit(applied(12, op(&v2)), &["a", "b"]);
     let mut st = seat("c", &b);
@@ -457,7 +462,7 @@ type Version = (VaultDeposit, Vec<u8>);
 fn two_versions_cut() -> (Builder, crate::State, [Version; 2]) {
     let mut b = Builder::vault();
     let v1 = deposit(&b, "a", "a", "x", "one");
-    let v2 = deposit(&b, "a", "a", "x", "two");
+    let v2 = deposit_over(&b, "a", "a", "x", "two", &secret_id(&b.republic_id, &v1.0));
     b.commit(applied(10, op(&v1.0)), &["a", "b"]);
     b.commit(applied(12, op(&v2.0)), &["a", "b"]);
     let mut holder = seat("a", &b);

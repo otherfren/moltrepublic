@@ -99,6 +99,21 @@ pub(crate) struct VaultState {
 }
 
 impl VaultState {
+    /// Whether `dep` names its slot's current version (empty: no version).
+    pub(crate) fn extends(&self, dep: &VaultDeposit) -> bool {
+        self.current.get(&(dep.depositor.clone(), dep.name.clone())).map_or("", String::as_str) == dep.replaces
+    }
+
+    /// Stale even for a node that may lag: the slot has moved past what
+    /// `dep` replaces, or `dep` itself already committed.
+    pub(crate) fn is_stale(&self, republic_id: &str, dep: &VaultDeposit) -> bool {
+        !self.extends(dep)
+            && self.current.contains_key(&(dep.depositor.clone(), dep.name.clone()))
+            && (dep.replaces.is_empty()
+                || self.versions.contains_key(&dep.replaces)
+                || self.versions.contains_key(&secret_id(republic_id, dep)))
+    }
+
     /// Whether `secret_id` is the current version of its slot.
     pub(crate) fn is_current(&self, secret_id: &str) -> bool {
         self.versions.get(secret_id).is_some_and(|v| {
@@ -132,9 +147,18 @@ impl crate::State {
         let seed = self.vault_seed.clone().ok_or(MoltError::Vault(VaultRefusal::NoVaultKey))?;
         let sk = self.identity_sk.clone().ok_or(MoltError::Vault(VaultRefusal::NoVaultKey))?;
         let rid = self.republic_id();
-        let input = molt_vault::DepositInput { republic_id: &rid, depositor, name, kind, text, ctx: &ctx };
+        let replaces = self.vault_slot_current(depositor, name)?;
+        let input = molt_vault::DepositInput { republic_id: &rid, depositor, name, kind, replaces: &replaces, text, ctx: &ctx };
         let (dep, file) = molt_vault::build_deposit(&input, &seed, &sk, &mut os_rng()?).map_err(refusal)?;
         self.vault_propose_deposit(dep, &file)
+    }
+
+    /// The `secret_id` a new deposit in `(depositor, name)` replaces.
+    pub(crate) fn vault_slot_current(&self, depositor: &str, name: &str) -> Result<String, MoltError> {
+        if self.vault_base_pending() {
+            return Err(self.vault_base_pending_error());
+        }
+        Ok(self.vault_state().current.get(&(depositor.to_string(), name.to_string())).cloned().unwrap_or_default())
     }
 
     /// Hold `file` and propose `dep`; the payload is published once the
@@ -182,6 +206,9 @@ impl crate::State {
         if self.vault_base_pending() {
             return Err(self.vault_base_pending_error());
         }
+        if !self.vault_state().extends(&dep) {
+            return Err(MoltError::Vault(VaultRefusal::Stale));
+        }
         let me = self.member();
         let mine = dep.depositor == me;
         let seed = if mine {
@@ -210,7 +237,13 @@ impl crate::State {
         let Some(ctx) = self.vault_ctx() else {
             return Ok(());
         };
-        check_vault_op(&self.republic_id(), id, payload, &ctx).map(|_| ())
+        let rid = self.republic_id();
+        match check_vault_op(&rid, id, payload, &ctx)? {
+            VaultOp::Deposit(dep) if !self.vault_base_pending() && self.vault_state().is_stale(&rid, &dep) => {
+                Err("deposit: stale".to_string())
+            }
+            _ => Ok(()),
+        }
     }
 
     /// The projection over the adopted chain (plus the base, S5).
@@ -233,6 +266,10 @@ impl crate::State {
             }
             match serde_json::from_value::<VaultOp>(value.clone()) {
                 Ok(VaultOp::Deposit(dep)) => {
+                    // a replay, or a replace that lost a race: void
+                    if !st.extends(&dep) {
+                        continue;
+                    }
                     let sid = secret_id(&rid, &dep);
                     let replaces =
                         st.current.insert((dep.depositor.clone(), dep.name.clone()), sid.clone());
@@ -261,10 +298,13 @@ impl crate::State {
         };
         match serde_json::from_value::<VaultOp>(payload) {
             Ok(VaultOp::Deposit(dep)) => {
-                let sid = secret_id(&self.republic_id(), &dep);
-                super::receipts::on_deposit(self, &sid);
+                self.supersede_stale_vault_cards();
+                if self.proposals.get(&id).is_some_and(|p| p.state == ProposalState::Proposed) {
+                    let sid = secret_id(&self.republic_id(), &dep);
+                    super::receipts::on_deposit(self, &sid);
+                }
             }
-            Ok(VaultOp::Grant(_)) => self.supersede_stale_vault_grants(),
+            Ok(VaultOp::Grant(_)) => self.supersede_stale_vault_cards(),
             _ => {}
         }
     }
@@ -274,11 +314,15 @@ impl crate::State {
     pub(crate) fn after_vault_applied(&mut self, payload: &Value) {
         match serde_json::from_value::<VaultOp>(payload.clone()) {
             Ok(VaultOp::Deposit(dep)) => {
-                // a replace: the old version's pending grants die; its
-                // payload stays until the cut (plan 1.3.14)
-                self.supersede_stale_vault_grants();
+                // a replace: the old version's pending grants and racing
+                // replaces die; its payload stays until the cut (plan 1.3.14)
+                self.supersede_stale_vault_cards();
                 let sid = secret_id(&self.republic_id(), &dep);
-                super::receipts::on_deposit(self, &sid);
+                if !self.vault_base_pending() && !self.vault_state().is_current(&sid) {
+                    tracing::info!(secret_id = %sid, "vault: deposit void");
+                } else {
+                    super::receipts::on_deposit(self, &sid);
+                }
             }
             Ok(VaultOp::Grant(g)) => super::grant::on_commit(self, &g.grant_id),
             _ => {}
@@ -286,24 +330,27 @@ impl crate::State {
         self.emit_session(crate::SessionScope::Full);
     }
 
-    /// Spec §8.2: a pending grant on a replaced version drops like a stale
-    /// wiki patch; one whose version is no longer replaced (a reorg) is a
-    /// vote again. A version not committed here is not judged.
-    pub(crate) fn supersede_stale_vault_grants(&mut self) {
+    /// Spec §8.2: a pending grant on a replaced version, or a deposit whose
+    /// `replaces` the slot has moved past, drops like a stale wiki patch;
+    /// one a reorg makes current again is a vote again. A version not
+    /// committed here is not judged.
+    pub(crate) fn supersede_stale_vault_cards(&mut self) {
         if self.vault_base_pending() {
             return;
         }
         let st = self.vault_state();
+        let rid = self.republic_id();
         let mut stale = Vec::new();
         let mut revived = Vec::new();
         for (id, p) in &self.proposals {
             if p.surface != Surface::Vault {
                 continue;
             }
-            let Ok(VaultOp::Grant(g)) = serde_json::from_value::<VaultOp>(p.payload.clone()) else {
-                continue;
+            let replaced = match serde_json::from_value::<VaultOp>(p.payload.clone()) {
+                Ok(VaultOp::Grant(g)) => st.versions.contains_key(&g.secret_id) && !st.is_current(&g.secret_id),
+                Ok(VaultOp::Deposit(d)) => st.is_stale(&rid, &d),
+                _ => continue,
             };
-            let replaced = st.versions.contains_key(&g.secret_id) && !st.is_current(&g.secret_id);
             match p.state {
                 ProposalState::Proposed if replaced => stale.push(*id),
                 ProposalState::Rejected
@@ -323,7 +370,7 @@ impl crate::State {
                 p.superseded_kind = Some(molt_core::SupersededKind::Conflict);
             }
             self.stash_voted(id);
-            tracing::info!(id, "vault: grant superseded by a replace");
+            tracing::info!(id, "vault: card superseded by a replace");
         }
         for id in revived {
             if let Some(p) = self.proposals.get_mut(&id) {
@@ -331,7 +378,7 @@ impl crate::State {
                 p.superseded = false;
                 p.superseded_kind = None;
             }
-            tracing::info!(id, "vault: grant open again after a reorg");
+            tracing::info!(id, "vault: card open again after a reorg");
         }
     }
 

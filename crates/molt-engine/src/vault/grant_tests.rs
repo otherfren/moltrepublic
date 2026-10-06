@@ -53,9 +53,13 @@ fn seat(member: &str, b: &Builder, chain: Vec<ChainBlock>) -> crate::State {
 }
 
 fn deposit(b: &Builder, depositor: &str, name: &str, text: &str) -> (VaultDeposit, Vec<u8>) {
+    deposit_over(b, depositor, name, text, "")
+}
+
+fn deposit_over(b: &Builder, depositor: &str, name: &str, text: &str, replaces: &str) -> (VaultDeposit, Vec<u8>) {
     let ctx = ctx_of(b);
     let text = SecretText(text.to_string());
-    let input = molt_vault::DepositInput { republic_id: &b.republic_id, depositor, name, kind: "text", text: &text, ctx: &ctx };
+    let input = molt_vault::DepositInput { republic_id: &b.republic_id, depositor, name, kind: "text", replaces, text: &text, ctx: &ctx };
     let mut rng = os_rng().expect("rng");
     molt_vault::build_deposit(&input, &seed_of(depositor), b.key(depositor), &mut rng).expect("built")
 }
@@ -174,7 +178,7 @@ fn a_grant_on_a_replaced_version_is_void_and_unanswered() {
     wire(&mut c, "a", 1, WorkspaceEvent::Committed(live));
     assert_eq!(answers_sent(&c).len(), 1, "a valid grant is answered on commit");
 
-    let (y, _) = deposit(&b, "a", "n", "two");
+    let (y, _) = deposit_over(&b, "a", "n", "two", &sid_x);
     let replace = b.commit(applied(14, op(&y)), &["a", "b"]);
     let void = b.commit(applied(16, grant_op(&sid_x, "d", 16)), &["a", "b"]);
     wire(&mut c, "a", 2, WorkspaceEvent::Committed(replace));

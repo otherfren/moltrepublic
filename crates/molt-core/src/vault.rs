@@ -99,6 +99,9 @@ pub enum VaultRefusal {
     /// Outside the closed op set (plan 1.3.9).
     #[error("unknown op")]
     UnknownOp,
+    /// A deposit whose `replaces` is not the slot's current version.
+    #[error("stale version")]
+    Stale,
 }
 
 /// Where a deposit's ciphertext lives on the file plane.
@@ -119,6 +122,10 @@ pub struct VaultDeposit {
     pub name: String,
     /// What it is (`text`, `password`, ...), visible to all (D8).
     pub kind: String,
+    /// The `secret_id` this version replaces, empty for a first deposit;
+    /// signed, so a replayed older record cannot roll the slot back.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub replaces: String,
     /// The threshold it was dealt at.
     pub m: u8,
     /// Every seat but the depositor, in genesis founding-table order.
@@ -508,6 +515,7 @@ pub fn secret_id_bytes(republic_id: &str, dep: &VaultDeposit) -> Vec<u8> {
             Field::One(dep.depositor.as_bytes()),
             Field::One(dep.name.as_bytes()),
             Field::One(dep.kind.as_bytes()),
+            Field::One(dep.replaces.as_bytes()),
             Field::One(&m),
             Field::Run(strs(&dep.holders)),
             Field::Run(strs(&dep.commitments)),
@@ -534,6 +542,7 @@ pub fn deposit_signing_bytes(republic_id: &str, dep: &VaultDeposit) -> Vec<u8> {
             Field::One(dep.depositor.as_bytes()),
             Field::One(dep.name.as_bytes()),
             Field::One(dep.kind.as_bytes()),
+            Field::One(dep.replaces.as_bytes()),
             Field::One(&m),
             Field::Run(strs(&dep.holders)),
             Field::Run(strs(&dep.commitments)),
@@ -958,7 +967,12 @@ mod tests {
             payload: payload.clone(),
             nonce: "n".to_string(),
             sig_depositor: "s".to_string(),
+            ..VaultDeposit::default()
         });
+        let replace = match &dep {
+            VaultOp::Deposit(d) => VaultOp::Deposit(VaultDeposit { replaces: "p".to_string(), ..d.clone() }),
+            _ => unreachable!(),
+        };
         let grant = VaultOp::Grant(VaultGrant {
             grant_id: "g".to_string(),
             secret_id: "x".to_string(),
@@ -970,6 +984,14 @@ mod tests {
                 dep,
                 json!({
                     "op": "deposit", "depositor": "a", "name": "one", "kind": "text", "m": 2,
+                    "holders": ["b"], "commitments": ["c0"], "enc_share": ["e0"],
+                    "payload": { "hash": "h", "size": 3 }, "nonce": "n", "sig_depositor": "s"
+                }),
+            ),
+            (
+                replace,
+                json!({
+                    "op": "deposit", "depositor": "a", "name": "one", "kind": "text", "replaces": "p", "m": 2,
                     "holders": ["b"], "commitments": ["c0"], "enc_share": ["e0"],
                     "payload": { "hash": "h", "size": 3 }, "nonce": "n", "sig_depositor": "s"
                 }),
@@ -1025,6 +1047,7 @@ mod tests {
             (VaultRefusal::UseVaultSeal, "use vault_seal"),
             (VaultRefusal::TooLarge, "too large"),
             (VaultRefusal::UnknownOp, "unknown op"),
+            (VaultRefusal::Stale, "stale version"),
         ];
         for (r, want) in cases {
             assert_eq!(r.to_string(), want);
@@ -1072,6 +1095,7 @@ mod tests {
             depositor: "a".to_string(),
             name: "one".to_string(),
             kind: "text".to_string(),
+            replaces: "p".to_string(),
             m: 2,
             holders: vec!["b".to_string(), "c".to_string(), "d".to_string()],
             commitments: vec!["c0".to_string(), "c1".to_string()],
@@ -1101,14 +1125,14 @@ mod tests {
     #[test]
     fn byte_pins_secret_id() {
         let dep = fixture_deposit();
-        let mut want = by_hand(TAG_SECRET, &[&[b"r"], &[b"a"], &[b"one"], &[b"text"], &[&[2]]]);
-        // the count says 8 fields; the two runs and the hash follow
-        want.splice(TAG_SECRET.len() + 1..TAG_SECRET.len() + 5, 8u32.to_le_bytes());
+        let mut want = by_hand(TAG_SECRET, &[&[b"r"], &[b"a"], &[b"one"], &[b"text"], &[b"p"], &[&[2]]]);
+        // the count says 9 fields; the two runs and the hash follow
+        want.splice(TAG_SECRET.len() + 1..TAG_SECRET.len() + 5, 9u32.to_le_bytes());
         want.extend(run(&["b", "c", "d"]));
         want.extend(run(&["c0", "c1"]));
         want.extend_from_slice(&1u32.to_le_bytes());
         want.extend_from_slice(b"h");
-        pin(&secret_id_bytes("r", &dep), &want, "9caed0f5d1dbb4a72d9012749c8e4b6574e3e4d5f8e0ea3f4299c4f4c613b47d");
+        pin(&secret_id_bytes("r", &dep), &want, "8c52faa1a3b49b36adc4ce9554fdb9f99bab641407aec6aa5ef915fefa3650cf");
         assert_eq!(secret_id("r", &dep), digest(&want));
         // enc_share, nonce, size and the signature stay outside the id
         let mut other = dep.clone();
@@ -1117,13 +1141,15 @@ mod tests {
         other.sig_depositor = "z".to_string();
         other.payload.size = 9;
         assert_eq!(secret_id("r", &other), secret_id("r", &dep));
+        other.replaces = "q".to_string();
+        assert_ne!(secret_id("r", &other), secret_id("r", &dep));
     }
 
     #[test]
     fn byte_pins_deposit_signing_bytes() {
         let dep = fixture_deposit();
-        let mut want = by_hand(TAG_DEPOSIT, &[&[b"r"], &[b"a"], &[b"one"], &[b"text"], &[&[2]]]);
-        want.splice(TAG_DEPOSIT.len() + 1..TAG_DEPOSIT.len() + 5, 11u32.to_le_bytes());
+        let mut want = by_hand(TAG_DEPOSIT, &[&[b"r"], &[b"a"], &[b"one"], &[b"text"], &[b"p"], &[&[2]]]);
+        want.splice(TAG_DEPOSIT.len() + 1..TAG_DEPOSIT.len() + 5, 12u32.to_le_bytes());
         want.extend(run(&["b", "c", "d"]));
         want.extend(run(&["c0", "c1"]));
         want.extend(run(&["e0", "e1", "e2"]));
@@ -1131,7 +1157,7 @@ mod tests {
             want.extend_from_slice(&u32::try_from(f.len()).expect("small").to_le_bytes());
             want.extend_from_slice(f);
         }
-        pin(&deposit_signing_bytes("r", &dep), &want, "8de577d88851fda907ca7ee00d39e27aba252d248071339fd975456004b0b80d");
+        pin(&deposit_signing_bytes("r", &dep), &want, "61a5a9fb282809aad096ad9a14d551790d497aba4363162d0a6595f183d2984a");
         // the signature is the only field left out
         let mut other = dep.clone();
         other.sig_depositor = "z".to_string();
@@ -1140,6 +1166,7 @@ mod tests {
             |d: &mut VaultDeposit| d.enc_share[0] = "x".to_string(),
             |d: &mut VaultDeposit| d.nonce = "x".to_string(),
             |d: &mut VaultDeposit| d.payload.size = 1,
+            |d: &mut VaultDeposit| d.replaces = "q".to_string(),
         ] {
             let mut other = dep.clone();
             change(&mut other);
@@ -1219,7 +1246,7 @@ mod tests {
         want.extend_from_slice(&0u64.to_le_bytes());
         // sorted keys: the record is the checkpoint groups' canonical JSON
         assert!(String::from_utf8_lossy(&want).contains(r#"{"commitments":["c0","c1"],"depositor":"a""#));
-        pin(&vault_base_canonical_bytes(&base), &want, "942231d7e85beae91e2e76a89353af3d11b97ef51ca5e2f5d95e3630ebb6edd9");
+        pin(&vault_base_canonical_bytes(&base), &want, "69664a934554df7a8a73f3511908dafe41e8c31278d7250432f47f97d13b4f33");
         let empty = vault_base_canonical_bytes(&VaultBase::default());
         let mut want_empty = b"molt-vault-base-v1\0".to_vec();
         want_empty.extend_from_slice(&0u64.to_le_bytes());

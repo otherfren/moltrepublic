@@ -200,6 +200,7 @@ fn vault_refusals_render_in_german() {
         R::UseVaultSeal,
         R::TooLarge,
         R::UnknownOp,
+        R::Stale,
     ];
     for r in all {
         let english = r.to_string();

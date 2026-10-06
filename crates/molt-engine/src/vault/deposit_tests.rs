@@ -56,6 +56,11 @@ fn seat(member: &str, b: &Builder, chain: Vec<ChainBlock>) -> crate::State {
 /// A deposit of `depositor`, built and signed by `signer` (a forger when
 /// the two differ).
 fn deposit(b: &Builder, depositor: &str, signer: &str, name: &str, text: &str) -> (VaultDeposit, Vec<u8>) {
+    deposit_over(b, depositor, signer, name, text, "")
+}
+
+/// [`deposit`] replacing the version `replaces`.
+fn deposit_over(b: &Builder, depositor: &str, signer: &str, name: &str, text: &str, replaces: &str) -> (VaultDeposit, Vec<u8>) {
     let ctx = ctx_of(b);
     let text = SecretText(text.to_string());
     let input = molt_vault::DepositInput {
@@ -63,6 +68,7 @@ fn deposit(b: &Builder, depositor: &str, signer: &str, name: &str, text: &str) -
         depositor,
         name,
         kind: "text",
+        replaces,
         text: &text,
         ctx: &ctx,
     };
@@ -322,7 +328,7 @@ fn a_replace_supersedes_pending_grants_and_keeps_the_old_payload() {
     let gop = serde_json::to_value(VaultOp::Grant(grant)).expect("json");
     assert!(st.receive_proposed(12, Surface::Vault, gop.clone(), "d"));
 
-    let (y, _) = deposit(&b, "a", "a", "n", "two");
+    let (y, _) = deposit_over(&b, "a", "a", "n", "two", &secret_id(&b.republic_id, &x));
     let block = b.commit(applied(14, op(&y)), &["a", "b"]);
     wire(&mut st, "a", 1, WorkspaceEvent::Committed(block));
     assert_eq!(st.chain.head.as_ref().map(|h| h.height), Some(2), "the replace applied");
@@ -360,7 +366,7 @@ fn a_replace_supersede_survives_a_reopen() {
     let (x, _) = deposit(&b, "a", "a", "n", "one");
     b.commit(applied(10, op(&x)), &["a", "b"]);
     let sid_x = secret_id(&b.republic_id, &x);
-    let (y, _) = deposit(&b, "a", "a", "n", "two");
+    let (y, _) = deposit_over(&b, "a", "a", "n", "two", &secret_id(&b.republic_id, &x));
     b.commit(applied(14, op(&y)), &["a", "b"]);
 
     let mut st = seat("c", &b, Vec::new());
@@ -378,7 +384,7 @@ fn a_reorged_replace_keeps_the_old_payload() {
     let (x, xf) = deposit(&b, "a", "a", "n", "one");
     b.commit(applied(10, op(&x)), &["a", "b"]);
     let fork_base = b.clone();
-    let (y, yf) = deposit(&b, "a", "a", "n", "two");
+    let (y, yf) = deposit_over(&b, "a", "a", "n", "two", &secret_id(&b.republic_id, &x));
     let y_block = b.commit(applied(14, op(&y)), &["a", "b"]);
     let mut st = seat("c", &b, b.blocks.clone());
     hold(&mut st, &b, &x, &xf);
@@ -425,7 +431,7 @@ fn a_deep_reorg_follows_the_adopted_branch() {
     base.commit(applied(10, op(&x)), &["a", "b"]);
     let rid = base.republic_id.clone();
     let sid_x = secret_id(&rid, &x);
-    let (y, yf) = deposit(&base, "a", "a", "n", "two");
+    let (y, yf) = deposit_over(&base, "a", "a", "n", "two", &sid_x);
     let sid_y = secret_id(&rid, &y);
 
     let mut lose = base.clone();
@@ -611,6 +617,7 @@ fn the_largest_roster_deposit_fits_the_proposal_budget() {
         depositor: &names[0],
         name: &name,
         kind: &kind,
+        replaces: "",
         text: &text,
         ctx: &ctx,
     };
@@ -618,4 +625,102 @@ fn the_largest_roster_deposit_fits_the_proposal_budget() {
         molt_vault::build_deposit(&input, &keys[0].1, &keys[0].0, &mut os_rng().expect("rng")).expect("built");
     assert_eq!(dep.enc_share.len(), 12);
     assert!(crate::proposals::payload_fits(Surface::Vault, &op(&dep), &names));
+}
+
+/// `x` committed, then `y` replacing it, then a grant on `y` (proposal 16).
+fn replaced() -> (Builder, VaultDeposit, VaultDeposit, String, String) {
+    let mut b = Builder::vault();
+    let (x, _) = deposit(&b, "a", "a", "n", "one");
+    b.commit(applied(10, op(&x)), &["a", "b"]);
+    let sid_x = secret_id(&b.republic_id, &x);
+    let (y, _) = deposit_over(&b, "a", "a", "n", "two", &sid_x);
+    b.commit(applied(14, op(&y)), &["a", "b"]);
+    let sid_y = secret_id(&b.republic_id, &y);
+    b.commit(applied(16, grant_op(&sid_y, "d", 16)), &["a", "b"]);
+    (b, x, y, sid_x, sid_y)
+}
+
+fn vault_group(st: &crate::State) -> Vec<(u64, Value)> {
+    st.chain
+        .blocks
+        .iter()
+        .filter_map(|blk| match &blk.change {
+            ChainChange::Applied { proposal_id, surface: Surface::Vault, payload } => Some((*proposal_id, payload.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A replayed signed record (an older version, or the current one again)
+/// commits void: the slot and its grants stay, live and at the cut.
+#[test]
+fn a_replayed_deposit_commits_void_and_changes_nothing() {
+    for replay in [0usize, 1] {
+        let (mut b, x, y, _, sid_y) = replaced();
+        let again = [&x, &y][replay];
+        b.commit(applied(20, op(again)), &["a", "b"]);
+        let st = seat("c", &b, b.blocks.clone());
+        let vs = st.vault_state();
+        assert!(vs.is_current(&sid_y), "replay {replay} rolled the slot");
+        assert_eq!(vs.grants.len(), 1);
+        assert!(!vs.grants[0].void, "replay {replay} voided the grant");
+
+        let (_, base) = crate::chain::vault_base::summarize(&vault_group(&st), None, &b.republic_id).expect("folds");
+        assert_eq!(base.deposits.len(), 1);
+        assert_eq!(base.deposits[0].deposit, y, "replay {replay} at the cut");
+        assert_eq!(base.deposits[0].grants.len(), 1);
+    }
+}
+
+#[test]
+fn approve_and_the_wire_refuse_a_stale_deposit() {
+    let (b, x, y, sid_x, _) = replaced();
+    let mut st = seat("c", &b, b.blocks.clone());
+    for (id, dep) in [(20u64, &x), (22, &y)] {
+        assert!(st.vault_wire_check(id, &op(dep)).is_err(), "the wire took a replay");
+        st.proposals.insert(id, card(op(dep), "d"));
+        refused(st.cmd_approve(ProposalId(id), None), &VaultRefusal::Stale);
+    }
+    // a replace naming a version this node has not seen yet is not judged
+    let (z, _) = deposit_over(&b, "a", "a", "n", "three", &"ab".repeat(32));
+    assert!(st.vault_wire_check(24, &op(&z)).is_ok());
+    // a stale replace of the old version is
+    let (w, _) = deposit_over(&b, "a", "a", "n", "four", &sid_x);
+    assert!(st.vault_wire_check(26, &op(&w)).is_err());
+}
+
+#[test]
+fn a_seal_names_the_current_version() {
+    let (b, _, _, _, sid_y) = replaced();
+    let mut st = seat("a", &b, b.blocks.clone());
+    let _tmp = crate::net::vault_payload::tests::attach_storage(&mut st, &[]);
+    st.cmd_vault_seal("n".into(), "text".into(), SecretText("three".into())).expect("sealed");
+    st.cmd_vault_seal("m".into(), "text".into(), SecretText("one".into())).expect("sealed");
+    let deps: Vec<VaultDeposit> = st
+        .proposals
+        .values()
+        .filter_map(|p| match serde_json::from_value::<VaultOp>(p.payload.clone()) {
+            Ok(VaultOp::Deposit(d)) => Some(d),
+            _ => None,
+        })
+        .collect();
+    let of = |name: &str| deps.iter().find(|d| d.name == name).map(|d| d.replaces.clone()).expect("a card");
+    assert_eq!(of("n"), sid_y);
+    assert_eq!(of("m"), "");
+}
+
+#[test]
+fn a_racing_pending_replace_is_superseded_by_the_commit() {
+    let mut b = Builder::vault();
+    let (x, _) = deposit(&b, "a", "a", "n", "one");
+    b.commit(applied(10, op(&x)), &["a", "b"]);
+    let sid_x = secret_id(&b.republic_id, &x);
+    let mut st = seat("c", &b, b.blocks.clone());
+    let (z, _) = deposit_over(&b, "a", "a", "n", "three", &sid_x);
+    assert!(st.receive_proposed(18, Surface::Vault, op(&z), "a"));
+    let (y, _) = deposit_over(&b, "a", "a", "n", "two", &sid_x);
+    let block = b.commit(applied(14, op(&y)), &["a", "b"]);
+    wire(&mut st, "a", 1, WorkspaceEvent::Committed(block));
+    let p = st.proposals.get(&18).expect("the card");
+    assert!(p.state == ProposalState::Rejected && p.superseded, "the racing replace is superseded");
 }

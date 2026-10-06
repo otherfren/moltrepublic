@@ -82,7 +82,11 @@ pub(crate) fn summarize(
         match serde_json::from_value::<VaultOp>(payload.clone()) {
             Ok(VaultOp::Deposit(dep)) => {
                 let slot = (dep.depositor.clone(), dep.name.clone());
-                slots.insert(slot, VaultBaseDeposit { deposit: dep, grants: Vec::new() });
+                // the projection's void rule (`VaultState::extends`)
+                let current = slots.get(&slot).map(|d| secret_id(republic_id, &d.deposit)).unwrap_or_default();
+                if current == dep.replaces {
+                    slots.insert(slot, VaultBaseDeposit { deposit: dep, grants: Vec::new() });
+                }
             }
             Ok(VaultOp::Grant(grant)) => {
                 let current = slots
@@ -151,7 +155,7 @@ mod tests {
     #[test]
     fn summarize_drops_replaced_versions_and_their_grants() {
         let v1 = dep("a", "x", '1');
-        let v2 = dep("a", "x", '2');
+        let v2 = VaultDeposit { replaces: secret_id("r", &v1), ..dep("a", "x", '2') };
         let other = dep("b", "y", '3');
         let group = vec![
             (1, op(VaultOp::Deposit(v1.clone()))),
@@ -178,7 +182,7 @@ mod tests {
     #[test]
     fn folding_from_the_genesis_and_from_a_held_base_agree() {
         let v1 = dep("a", "x", '1');
-        let v2 = dep("a", "x", '2');
+        let v2 = VaultDeposit { replaces: secret_id("r", &v1), ..dep("a", "x", '2') };
         let all = vec![(1, op(VaultOp::Deposit(v1.clone()))), grant(&v1, "c", 2), (3, op(VaultOp::Deposit(v2.clone())))];
         let (full, full_base) = summarize(&all, None, "r").expect("full");
         let (first, base) = summarize(&all[..2], None, "r").expect("first cut");

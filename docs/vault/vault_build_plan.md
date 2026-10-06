@@ -299,7 +299,7 @@ is new on an existing type).
     transparent, `Debug` `<N bytes>`, zeroized on drop) for the seed.
   - `VaultCtx { m: u8, holders_in_genesis_order: Vec<(MemberId, String, String)> }`
     (1.3.8), shared by molt-vault and molt-engine.
-  - `VaultDeposit { depositor, name, kind, m: u8, holders: Vec<String>, commitments: Vec<String>, enc_share: Vec<String>, payload: VaultPayloadRef { hash, size }, nonce: String, sig_depositor: String }`
+  - `VaultDeposit { depositor, name, kind, replaces: String (`default`, empty skipped), m: u8, holders: Vec<String>, commitments: Vec<String>, enc_share: Vec<String>, payload: VaultPayloadRef { hash, size }, nonce: String, sig_depositor: String }`
     (hex strings; field order = canonical order).
   - `VaultGrant { grant_id, secret_id, reader }`.
   - Applied payload ops on `Surface::Vault`: `{"op":"deposit", ...VaultDeposit}`,
@@ -328,7 +328,7 @@ is new on an existing type).
   variant: `needs 2 <= m <= n-2`, `founding only`,
   `needs a newer version: <seat>`, `not verified`, `payload not held`,
   `not the reader`, `no vault`, `no vault key`, `use vault_seal`,
-  `too large`, `unknown op`).
+  `too large`, `unknown op`, `stale version`).
 - `SurfaceSnapshot.vault: Option<VaultView>` (Vault surface only):
 
 ```text
@@ -502,7 +502,7 @@ worktree and reruns its verification before merging.
   primitive):**
   - `vault_key_info(founding_nostr_pk, identity_pk)` - `molt-vault-x25519-v1`
   - `secret_id(republic_id, &VaultDeposit)` - `molt-vault-secret-v1` over
-    republic id, depositor, name, kind, m, holders, commitments, payload hash
+    republic id, depositor, name, kind, replaces, m, holders, commitments, payload hash
     (not `enc_share`, not `nonce`, not the sig)
   - `deposit_signing_bytes(republic_id, &VaultDeposit)` - `molt-vault-deposit-v1`
     over every field except `sig_depositor`, `enc_share` and `nonce` included

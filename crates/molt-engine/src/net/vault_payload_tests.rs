@@ -45,6 +45,7 @@ fn deposit(b: &Builder, name: &str, seed: u64) -> (VaultDeposit, Vec<u8>) {
         depositor: "a",
         name,
         kind: "text",
+        replaces: "",
         text: &text,
         ctx: &ctx,
     };

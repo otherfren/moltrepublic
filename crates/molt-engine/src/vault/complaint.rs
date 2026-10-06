@@ -210,7 +210,8 @@ pub(crate) fn seal_with_bad_share(
     let rid = st.republic_id();
     let me = st.member();
     let engine = |e: molt_vault::VaultError| MoltError::Engine(format!("vault: {e}"));
-    let input = molt_vault::DepositInput { republic_id: &rid, depositor: &me, name, kind, text, ctx: &ctx };
+    let replaces = st.vault_slot_current(&me, name)?;
+    let input = molt_vault::DepositInput { republic_id: &rid, depositor: &me, name, kind, replaces: &replaces, text, ctx: &ctx };
     let (mut dep, file) =
         molt_vault::build_deposit(&input, &seed, &sk, &mut crate::vault::deposit::os_rng()?).map_err(engine)?;
     let sid = secret_id(&rid, &dep);

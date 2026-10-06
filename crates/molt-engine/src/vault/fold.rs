@@ -122,7 +122,7 @@ impl crate::State {
     /// The base arrived: what waited on it runs now.
     pub(crate) fn after_vault_base_adopted(&mut self) {
         self.vault_flush_queued();
-        self.supersede_stale_vault_grants();
+        self.supersede_stale_vault_cards();
         self.bump_applied_epoch();
         self.emit_session(SessionScope::Full);
     }

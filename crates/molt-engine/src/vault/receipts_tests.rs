@@ -57,6 +57,10 @@ fn seat(member: &str, b: &Builder, chain: Vec<ChainBlock>) -> crate::State {
 }
 
 fn deposit(b: &Builder, depositor: &str, name: &str, text: &str) -> (VaultDeposit, Vec<u8>) {
+    deposit_over(b, depositor, name, text, "")
+}
+
+fn deposit_over(b: &Builder, depositor: &str, name: &str, text: &str, replaces: &str) -> (VaultDeposit, Vec<u8>) {
     let ctx = ctx_of(b);
     let text = SecretText(text.to_string());
     let input = molt_vault::DepositInput {
@@ -64,6 +68,7 @@ fn deposit(b: &Builder, depositor: &str, name: &str, text: &str) -> (VaultDeposi
         depositor,
         name,
         kind: "text",
+        replaces,
         text: &text,
         ctx: &ctx,
     };
@@ -294,7 +299,7 @@ fn an_honest_reveal_after_a_lie_counts_the_share() {
 #[test]
 fn a_replaced_version_gets_no_receipt() {
     let (mut b, old_dep, old_file, old) = committed();
-    let (y, _) = deposit(&b, "a", "n", "two");
+    let (y, _) = deposit_over(&b, "a", "n", "two", &old);
     b.commit(ChainChange::Applied { proposal_id: 12, surface: Surface::Vault, payload: op(&y) }, &["a", "b"]);
     let mut st = seat("c", &b, b.blocks.clone());
     hold(&mut st, &old_dep, &old, &old_file);
@@ -379,7 +384,7 @@ fn a_seat_without_a_vault_seed_sends_no_receipt() {
 #[test]
 fn receipts_of_replaced_versions_are_pruned_at_a_cut() {
     let (mut b, _, _, old) = committed();
-    let (y, _) = deposit(&b, "a", "n", "two");
+    let (y, _) = deposit_over(&b, "a", "n", "two", &old);
     b.commit(ChainChange::Applied { proposal_id: 12, surface: Surface::Vault, payload: op(&y) }, &["a", "b"]);
     let new = secret_id(&b.republic_id, &y);
     let mut st = seat("d", &b, b.blocks.clone());

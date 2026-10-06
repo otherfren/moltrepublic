@@ -26,6 +26,8 @@ pub struct DepositInput<'a> {
     pub name: &'a str,
     /// Its kind (D8: visible).
     pub kind: &'a str,
+    /// The slot's current `secret_id`, empty for a first deposit.
+    pub replaces: &'a str,
     /// The plaintext.
     pub text: &'a SecretText,
     /// The republic's vault context.
@@ -112,6 +114,7 @@ pub fn build_deposit(
         depositor: input.depositor.to_string(),
         name: input.name.to_string(),
         kind: input.kind.to_string(),
+        replaces: input.replaces.to_string(),
         m,
         holders: holders.iter().map(|(n, _, _)| (*n).to_string()).collect(),
         nonce: hex::encode(nonce),
@@ -198,6 +201,9 @@ pub fn verify_deposit_shape(dep: &VaultDeposit, ctx: &VaultCtx) -> Result<(), Va
     let min = u64::try_from(PAYLOAD_OVERHEAD).map_err(|_| VaultError::TooLarge)?;
     if dep.payload.size < min || dep.payload.size > max {
         return Err(VaultError::Shape("payload size"));
+    }
+    if !dep.replaces.is_empty() && !is_hex(&dep.replaces, 32) {
+        return Err(VaultError::Shape("replaces"));
     }
     if !is_hex(&dep.nonce, 16) {
         return Err(VaultError::Shape("nonce"));
