@@ -596,3 +596,25 @@ async fn a_recovered_seat_without_a_matching_seed_refuses_to_persist_it() {
     assert_eq!(st.vault_seed.as_deref(), Some(&*want));
     assert_eq!(stored_seed(&st).await.as_deref(), Some(&want[..]), "and stored");
 }
+
+/// A cut is all-or-nothing on disk: a vault base that fails to land
+/// takes the wiki base written before it back.
+#[test]
+fn a_failed_vault_base_write_rolls_the_wiki_base_back() {
+    let rt = runtime();
+    let _g = rt.enter();
+    let mut b = Builder::vault();
+    b.commit_wiki(1, "a.md", "A", &["a", "b"]);
+    let (x, xf) = deposit(&b, "a", "a", "x", "one");
+    b.commit(applied(10, op(&x)), &["a", "b"]);
+    let mut st = seat("a", &b);
+    let _tmp = crate::net::vault_payload::tests::attach_storage(&mut st, &[]);
+    hold(&mut st, &b, &x, &xf);
+    let dir = st.active.as_ref().expect("storage").dir.clone();
+    std::fs::create_dir_all(dir.join("vault_base.bin").join("x")).expect("a blocking directory");
+
+    seal_cut(&mut st, &b, true);
+    assert_eq!(st.chain.blocks.len(), b.blocks.len() + 1, "full history kept");
+    assert!(st.chain.wiki_base.is_none());
+    assert!(!dir.join("wiki_base.bin").exists(), "the new wiki base stayed on disk");
+}

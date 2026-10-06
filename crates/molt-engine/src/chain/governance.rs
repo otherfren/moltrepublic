@@ -749,9 +749,11 @@ impl State {
                             "the folded wiki base did not reach the disk - keeping full history"
                         );
                     }
-                    // the vault base likewise (spec §9.3)
+                    // the vault base likewise (spec §9.3); the wiki base
+                    // just written goes back, or it answers no commitment
                     Ok((_, folded)) if folded.vault.as_ref().is_some_and(|b| !self.persist_vault_base(Some(b))) => {
-                        tracing::error!("vault_base=not_persisted action=keep_history");
+                        let wiki_back = folded.tree.is_none() || self.persist_wiki_base(self.chain.wiki_base.as_ref());
+                        tracing::error!(wiki_restored = wiki_back, "vault_base=not_persisted action=keep_history");
                     }
                     Ok((blob, folded)) => {
                         if let Some(tree) = folded.tree {
