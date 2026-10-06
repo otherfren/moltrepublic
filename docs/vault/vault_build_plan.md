@@ -1180,7 +1180,8 @@ worktree and reruns its verification before merging.
        retrying `payload not held` / `not verified` at most 10 times per
        seat and proposal, then reporting the refusal.
      - `seal <seat> <name> <text>`, `grant <name> <reader>`,
-       `read <seat> <name>`, `stop <seat>`, `start <seat>`, `status`, `down`.
+       `read <seat> <name>`, `stop <seat>`, `start <seat> [--honest]`
+       (`--honest`: without the complainer seam), `status`, `down`.
 - **Red tests first:** `the_vault_pane_shows_a_real_engine_deposit_as_pending`,
   `a_v5_mock_vault_workspace_shows_one_line`, `ui_snapshot_counts_vault_rows`.
 - **Verify:** molt-ui live-preview tests + clippy; `scripts/dev-ui.sh build`;
@@ -1251,7 +1252,7 @@ and the headless seats):
 4. Found: Create republic, 4 members, threshold 2 -> mint the invites ->
    `python3 scripts/vault_lab.py join` (joins all three, waits for the
    charter). At the charter step the Vault box is enabled: tick it,
-   propose the charter; the lab seats ratify and confirm their backups;
+   untick Memory, propose the charter; the lab seats ratify and confirm their backups;
    confirm your seed backup and finish in the GUI.
 5. Deposit: Vault pane -> Seal -> name `test`, kind `text`, a few lines.
    Read the warning line. `python3 scripts/vault_lab.py approve` -> the
@@ -1259,22 +1260,28 @@ and the headless seats):
    `hardened` stays out of reach while s3 complains; the card shows
    `false complaint by s3` and `readable by 1 instead of 2`, and your card
    offers `Re-seal`.
-6. Re-seal: press it, `vault_lab.py approve` -> the new version commits
-   (the old one stays until the next cut); the threshold line returns to
-   normal (s3 complains again and is named again - expected with the lab
-   seam).
+6. Re-seal: `vault_lab.py stop s3`, `vault_lab.py start s3 --honest`
+   (the seam off), press Re-seal, `vault_lab.py approve` -> the new
+   version commits and the old card disappears (its file stays until the
+   next cut); the new card shows no complaint line and reaches
+   `hardened`. Re-sealing with the seam still on commits a new card that
+   again shows `false complaint by s3`, `readable by 1 instead of 2` and
+   `Re-seal` (the seam complains on every deposit).
 7. Grant and read: Grant `test` to yourself, `vault_lab.py approve`,
-   press Read -> `waiting for answers` then the text. `vault_lab.py stop s1`,
-   grant again (to yourself or `s2`), approve with the remaining seats:
-   the read still works with one seat dead. `vault_lab.py read s3 test`
-   shows a non-reader is refused.
-8. Bounds: `vault_lab.py down`, then a second lab founding at 3 members,
-   threshold 2 (or 4 members, threshold 3): the Vault box stays greyed
-   with `needs 2 <= m <= n-2`. The org features modal of the first
-   republic never offers the vault, and voting another feature there works.
-9. `python3 scripts/vault_lab.py down`; stop the relay.
+   press Read -> `waiting for answers` then the text. Then
+   `vault_lab.py stop s1`, Grant `test` to s2, `vault_lab.py approve`,
+   `vault_lab.py read s2 test` prints the text: s2 needs one answer, from
+   the GUI or s3, with s1 dead. `vault_lab.py read s3 test` shows a
+   non-reader is refused.
+8. Org features: Organization > features: Vault reads `founding only`;
+   tick Memory, propose, `vault_lab.py approve` -> Memory is enabled.
+9. Bounds: `vault_lab.py down`, quit the GUI,
+   `vault_lab.py up --relay <url> --seats 2`, start the GUI with the newly
+   printed command, found 3 members threshold 2, `vault_lab.py join` ->
+   at the charter step the Vault box is greyed with `needs 2 <= m <= n-2`.
+10. `python3 scripts/vault_lab.py down`; stop the relay.
 
-Without `--complainer`, steps 5-6 show the honest path: `hardened` once
+Without `--complainer`, step 5 shows the honest path: `hardened` once
 all three seats verified, no complaint lines, no Re-seal.
 
 ## 6. Risks

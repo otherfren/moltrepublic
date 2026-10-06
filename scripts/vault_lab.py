@@ -16,7 +16,7 @@ Headless seats s1..sN run the live-preview `moltd` built with the
     python3 scripts/vault_lab.py grant a s2
     python3 scripts/vault_lab.py approve
     python3 scripts/vault_lab.py read s2 a
-    python3 scripts/vault_lab.py stop|start <seat> | status | down
+    python3 scripts/vault_lab.py stop <seat> | start <seat> [--honest] | status | down
 
 Stdlib only. State lives in /tmp/vault-lab (lab.json, one dir per seat).
 """
@@ -199,12 +199,12 @@ def write_config(state, seat):
         )
 
 
-def spawn(state, seat):
+def spawn(state, seat, honest=False):
     s = state["seats"][seat]
     env = dict(os.environ)
     env.setdefault("RUST_LOG", "info")
     env.pop(LAB_ENV, None)
-    if seat == state.get("complainer"):
+    if seat == state.get("complainer") and not honest:
         env[LAB_ENV] = "1"
     log = open(os.path.join(s["dir"], "moltd.log"), "a", encoding="utf-8")
     p = subprocess.Popen(
@@ -514,7 +514,7 @@ def cmd_start(a):
     s = state["seats"].get(a.seat) or die(f"unknown seat {a.seat}")
     if alive(s.get("pid")):
         die(f"{a.seat} is running")
-    spawn(state, a.seat)
+    spawn(state, a.seat, honest=getattr(a, "honest", False))
     save(state)
     n = node(state, a.seat)
     if s.get("workspace"):
@@ -584,8 +584,10 @@ def main():
     r.add_argument("name")
     r.add_argument("--timeout", type=int, default=180)
     r.add_argument("--depositor", default="")
-    for verb in ("stop", "start"):
-        sub.add_parser(verb).add_argument("seat")
+    sub.add_parser("stop").add_argument("seat")
+    st = sub.add_parser("start")
+    st.add_argument("seat")
+    st.add_argument("--honest", action="store_true", help="without the complainer seam")
     sub.add_parser("status")
     sub.add_parser("down")
     a = p.parse_args()
