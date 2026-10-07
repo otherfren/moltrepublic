@@ -610,14 +610,19 @@ never stored, the same list the GUI shows at the top of "Mine" (§8):
 read_actions {}                                             # Seat scope
   → {actions: [
       {kind: "vote",           proposal, surface, since},
-      {kind: "task_start",     task, occurrence?, late, blocked},
+      {kind: "task_start",     task, occurrence?, late},
       {kind: "task_wip",       task},           # mine, in progress
       {kind: "task_startable", task},           # mine, todo, not blocked
       {kind: "poke",           by, since}       # not yet read in chat
      ]}
 ```
 
-An empty list is a valid answer: the agent exits. Ids only - the agent
+**Only what the seat can act on now.** A blocked or stuck task never
+appears - not as startable, not as a started appointment; a timed task
+whose start passes while it is blocked fires no `task_start`. It shows up
+once the changeset that unblocks it is folded: as `task_startable`, or as
+`task_start` with `late: true` if its start has passed. The same rule
+holds for `next` (§5.2). An empty list is a valid answer: the agent exits. Ids only - the agent
 reads titles and text over `quests_view`, as untrusted data.
 
 **How often: the seat's own interval.** `[node] wake_min_interval_secs`
@@ -717,9 +722,8 @@ may have been merged into this one wake. Always start with the list:
    - `vote` - read it (`quests_view {proposal}` on kanban), review it,
      `approve` or `decline` with a reason in its discussion channel.
    - `task_start` / `task_startable` / `task_wip` - see "Working a task".
-     `blocked: true`: a prerequisite is not done - report it in chat, do
-     not work around it. `late: true`: the start was missed while the
-     node was off.
+     `late: true`: the start has passed (the node was off, or the task
+     was blocked until now).
    - `poke` - read the chat (`read_state {surface:"chat", view:"unread"}`)
      and answer there.
 3. `test` - the user is testing the hook. Reply "wake ok" in chat if a
@@ -851,7 +855,8 @@ TDD, red first, each step green on master before the next.
   during a running wake fires once after it, with both reasons; the
   interval is honoured; every node wakes on an applied kanban changeset;
   one `task_start` per `(task, occurrence)` on assignee nodes only; a
-  missed start < 24 h fires once as `late`; DST boundaries; the
+  missed start < 24 h fires once as `late`; a blocked appointment fires
+  nothing and is listed `late` once unblocked; DST boundaries; the
   `read_actions` list for the §5.3 board. `Command::TestWake` - the
   GUI button and the MCP tool `test_wake` drive it co-equally (the
   `co_equality_every_command_is_a_tool_or_documented_internal` test);
@@ -939,6 +944,8 @@ Each with a recommendation, the counterargument first.
 14. **Wake fan-out and rhythm.** Decided 2026-10-07: wake everyone, let
     each seat's `wake_min_interval_secs` set how often it reacts, and
     coalesce triggers instead of dropping them (§6.1).
+15. **Blocked work in the list.** Decided 2026-10-07: never. The list
+    and `next` show only what the seat can act on now.
 
 ## 12. Changes against revision 2 (2026-10-06)
 
