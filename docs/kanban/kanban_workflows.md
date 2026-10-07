@@ -72,7 +72,7 @@ field, no points. There is the **task**:
 | `creator` | the seat that proposed the `add` | stamped at propose, immutable (below) |
 | `assignees` | the seats who do the work | at least one roster seat, no duplicates |
 | `effort` | REMAINING work in hours, all assignees together | optional, default 0, >= 0; never on a timed task (§3) |
-| `blocked_by` | tasks that must succeed first (its subtasks) | no self, no duplicates |
+| `blocked_by` | tasks that must succeed first (its prerequisites) | no self, no duplicates |
 | `due` | deadline, `YYYY-MM-DD` | optional |
 | `after` | not before, `YYYY-MM-DD` | optional; `after <= due` |
 | `when` / `repeat` / `skip` / `moved` | calendar placement (§3) | optional |
@@ -99,7 +99,7 @@ Besides `title` and `type`, a task's content is three fields:
   tells an agent where to stop.
 
 **Optional at ingest, expected in practice.** Every rule at the wire door
-is forever, and a recurring "weekly sync" or a parent integration step has
+is forever, and a recurring "weekly sync" or an integration step has
 no use for acceptance criteria. So the shape check only enforces the shape.
 The GUI create form and `quests_propose` ask for `description` and
 `acceptance` on every floating task and flag a missing one as a warning on
@@ -133,21 +133,21 @@ until B has succeeded. Read the other way round, B is a **prerequisite
 for** A. Only `blocked_by` is stored; "prerequisite for" is computed on
 read and shown on B. The links must form a DAG (§4.4).
 
-**Subtasks are prerequisites - there is no epic.** `blocked_by` is the
-ONLY relation between tasks: the tasks a task is blocked by are its
-**subtasks**, and it is their **parent**. A task with many subtasks, to
-any depth ("Beta release" ← "Client" ← "Login screen" …), is what other
-tools call an epic; here it is just a task, with the same fields, the
-same governed lifecycle (§2.2) and the same rules. It can start only when
-all its subtasks have succeeded - so a parent is the integration or
-acceptance step of its subtree, and often carries `effort: 0` and a
-`due`. One relation carries both the hierarchy and the ordering, and the
-forecast reads it directly.
+**One relation - there is no epic.** `blocked_by` is the ONLY relation
+between tasks; there is no parent, no subtask, no hierarchy. A large
+piece of work ("Beta release") is a task that is blocked by its
+prerequisites, which may have prerequisites of their own ("Beta release"
+← "Client" ← "Login screen" …). It has the same fields, the same governed
+lifecycle (§2.2) and the same rules, starts only when all its
+prerequisites have succeeded - so it is the integration or acceptance
+step of the work before it - and often carries `effort: 0` and a `due`.
+The forecast reads the relation directly.
 
-Consequences, stated openly: a parent is never `wip` while its subtasks
-run (its subtree shows the progress, §8 `tree`); a task may be a subtask
-of several parents (the graph is a DAG, not a strict tree); and there is
-no "part of, but not blocking" link. If either hurts in practice, a
+Consequences, stated openly: such a task is never `wip` while its
+prerequisites run (the `dependencies` view shows the progress, §8); a
+task may be a prerequisite for several tasks (the graph is a DAG); and
+there is no "part of, but not blocking" link. If either hurts in
+practice, a
 second relation can be added later without touching this one (§11 Q7).
 
 ### 2.2 Status - a state machine
@@ -237,7 +237,7 @@ is for grouping and seeing.
   §11 Q10 asks whether a governed colour override is worth an act.
 
 Where the colour shows: the card stripe on `board`, the bar on `plan`,
-the block in `calendar`, the node chip in `tree`, and a legend of the
+the block in `calendar`, the node chip in `dependencies`, and a legend of the
 types present in the current view.
 
 ### 2.5 Fold result
@@ -470,7 +470,7 @@ Day granularity for links, hour granularity for capacity.
      finish = the day the effort is covered; every assignee's cursor moves
      to that point. Each seat works on one task at a time and may start
      its next task on the same day if hours remain.
-   - effort 0 (typically a parent): finish = the latest prerequisite finish.
+   - effort 0 (typically an integration step): finish = the latest prerequisite finish.
    - timed once: start/finish are its `when`; it is not moved.
    - terminal tasks are skipped; a `cancelled` prerequisite counts as met;
      a task that is **stuck** (failed prerequisite) is not placed, and
@@ -500,7 +500,7 @@ to a recurring "Sync" Mondays 09:00-11:00; `bot` 24 h, seven days.
 | D Logging | mara | 24 | - | todo (unscheduled) | ∞ | 14 Oct | 16 Oct |
 | M1 Beta, due 23 Oct | mara | 0 | A, B, C | todo (blocked) | 23 Oct | - | **21 Oct** |
 
-M1 is a parent: A, B and C are its subtasks. Walter's B: 4 h on the
+A, B and C are prerequisites for M1. Walter's B: 4 h on the
 14th, away 15-16, 2 h on Monday the 19th (the sync takes 2), 4 h on the
 20th, the last 2 h on the 21st. M1 lands two working days before its
 deadline. `next`: mara → A (`wip`); walter and bot have nothing
@@ -534,7 +534,7 @@ quests_view {seat?, task?, proposal?, from?, to?, filter?}   # Seat scope
   # filter: the §8 filters by name, e.g. ["to_act_on"] - the agent's work queue
   → {rev, tz, tasks (todo + wip + recently closed, with derived status),
      forecast, next (per seat or for `seat`), risks,
-     task: {…, prerequisite_for, subtask tree below it},
+     task: {…, prerequisite_for, its prerequisites to any depth},
      calendar (expanded occurrences in [from, to]),
      proposal: {acts rendered, impact, would_void, changed_since}}
 
@@ -780,9 +780,9 @@ board, drill-in, planning, create, mine, archive; `kb-*` strings in
 | view key | today (mock) | revision 3 |
 |---|---|---|
 | `board` | 5 columns | **To do · In progress · Done** - To do sorted blocked / stuck / scheduled / unscheduled with badges; Done shows success, fail, cancelled |
-| `plan` | sprint planning | **forecast timeline** (Gantt-like): floating tasks as dashed bars, parents as collapsible rows over their subtasks, deadlines as diamonds, `late` and `stuck` in red |
+| `plan` | sprint planning | **forecast timeline** (Gantt-like): floating tasks as dashed bars, a task as a collapsible row over its prerequisites, deadlines as diamonds, `late` and `stuck` in red |
 | `calendar` | - (new, 7th key) | month / week; **only timed tasks**, recurring ones expanded; floating work never appears here |
-| `tree` | - (new, 8th key) | **logical view**: every task with its subtasks as an expandable hierarchy; roots are tasks that are a prerequisite for nothing; a subtask with several parents appears under each (marked "also under …"); status badge and roll-up (succeeded/total in the subtree, forecast finish) per node; filterable (below) |
+| `dependencies` | - (new, 8th key) | **logical view**: every task with its prerequisites, expandable to any depth; the top level is the tasks that are a prerequisite for nothing; a task that is a prerequisite for several appears under each (marked "also for …"); status badge and progress (succeeded/total of all its prerequisites, forecast finish) per task; filterable (below) |
 | `create` | template form | one form; time mode floating / once / recurring; "blocked by" picker |
 | `proposals` | real tables | plus impact and "would void" lines |
 | `my-quests` ("Mine") | sample | the `read_actions` list first (§6.1), then `next`, then everything the seat is assigned to or created |
@@ -795,9 +795,9 @@ criteria as a checklist - ticked where the `succeed` carried evidence,
 with the evidence beside each item - and the delimitation below it.
 
 The drill-in shows both directions: "blocked by" and "prerequisite for",
-and for a parent its subtask tree with succeeded/total counts.
+and its prerequisites to any depth with succeeded/total counts.
 
-**Filters** (on `tree`, `board`, `plan`; a local view setting, never
+**Filters** (on `dependencies`, `board`, `plan`; a local view setting, never
 governance, combinable):
 
 | filter | keeps |
@@ -812,8 +812,9 @@ governance, combinable):
 | assignee, time mode | another seat's view; floating / timed |
 | type | any subset of the types present (picked from the legend) |
 
-In `tree`, a filter keeps the matching tasks **and their ancestors**
-(muted), so a match is never shown without its context.
+In `dependencies`, a filter keeps the matching tasks **and the tasks
+they are a prerequisite for** (muted), so a match is never shown
+without its context.
 
 The plan basket: acts are staged locally, shown with a live impact
 preview, and proposed as one changeset. Persisted as `kanban_draft.json`
@@ -910,9 +911,9 @@ Each with a recommendation, the counterargument first.
    are free because they cost no vote and no ingest rule.
 6. **Time zone.** One per republic (recommended) or UTC everywhere
    (simpler, but recurring wall times drift across DST)?
-7. **A second relation.** Decided for now: subtask = prerequisite, one
+7. **A second relation.** Decided for now: prerequisites only, one
    relation (2026-10-07). Revisit only if teams need "part of" without
-   "blocks", or a parent that is visibly in progress while its subtasks
+   "blocks", or a task that is visibly in progress while its prerequisites
    run.
 8. **Creator's role.** Recommendation: information only (shown,
    filterable); authority stays m-of-n. Alternative: a `succeed` also
@@ -950,8 +951,8 @@ Each with a recommendation, the counterargument first.
 ## 12. Changes against revision 2 (2026-10-06)
 
 - Removed: kinds (epic/story/task) and `parent` (→ one relation,
-  `blocked_by`: subtasks are prerequisites, a large "epic" is just a task
-  with a deep subtask tree), sprints, PI, `priority`, `points`,
+  `blocked_by`: a large "epic" is just a task with prerequisites to any
+  depth), sprints, PI, `priority`, `points`,
   `responsible` (→ `creator` + `assignees`), `ready`/`done`/`scope` fields
   (→ `description`, `acceptance` and `out_of_scope`, now lists, plus `evidence` on `succeed`), the five columns and `close`/`reopen` (→ the
   §2.2 state machine), the acts `edit`, `move`, `assign`, `schedule`,
@@ -967,7 +968,7 @@ Each with a recommendation, the counterargument first.
   stamped at propose; several assignees; the forecast with derived
   priority and the impact view (§5); the calendar with once and recurring
   timed tasks (§3); seat capacity and the republic time zone (§2.3); the
-  typed MCP tools (former Q11, decided); the `calendar` and `tree` view keys with local filters.
+  typed MCP tools (former Q11, decided); the `calendar` and `dependencies` view keys with local filters.
 - Kept: changeset of absolute acts, all-or-nothing, both-doors shape
   check, propose-time precheck, engine-minted ids with `@ref`,
   `base_rev`/`touched_rev`, accumulating checkpoints, the basket, the
