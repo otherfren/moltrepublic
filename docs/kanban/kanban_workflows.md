@@ -584,8 +584,13 @@ trigger is lost**.
 **Who: every seat, the agent decides.** The node does not try to guess
 whether a change matters to its seat. Every trigger wakes the seat, and
 every wake points at the same list of pending actions; the agent reads
-it and decides itself whether and what to do. Triggers, all decided
-locally on each node (nothing extra crosses the wire):
+it and decides itself whether and what to do.
+
+**No wake crosses the wire.** Every node already holds the board, the
+calendar and the pending proposals, so it wakes its OWN seat from what it
+sees: a folded changeset, its local clock, a proposal waiting on it. The
+only wire message among the triggers is the member poke, which exists
+today and is a member's deliberate act, not a wake signal. Triggers:
 
 | reason | fires when |
 |---|---|
