@@ -67,21 +67,21 @@ field, no points. There is the **task**:
 
 | field | meaning | rule |
 |---|---|---|
-| `title` | one line | 1..=200 chars, no newline, required |
-| `type` | free label: "bug", "meeting", "research" … | optional; 1..=32 chars, no newline, trimmed at propose; colours the task (§2.4) |
+| `title` | one line | non-empty, no newline, required |
+| `type` | free label: "bug", "meeting", "research" … | optional; non-empty, no newline, trimmed at propose; colours the task (§2.4) |
 | `creator` | the seat that proposed the `add` | stamped at propose, immutable (below) |
-| `assignees` | the seats who do the work | 1..=8 roster seats, no duplicates |
-| `effort` | REMAINING work in hours, all assignees together | optional, default 0; 0..=480; never on a timed task (§3) |
-| `blocked_by` | tasks that must succeed first (its subtasks) | <= 256 ids, no self, no duplicates |
+| `assignees` | the seats who do the work | at least one roster seat, no duplicates |
+| `effort` | REMAINING work in hours, all assignees together | optional, default 0, >= 0; never on a timed task (§3) |
+| `blocked_by` | tasks that must succeed first (its subtasks) | no self, no duplicates |
 | `due` | deadline, `YYYY-MM-DD` | optional |
 | `after` | not before, `YYYY-MM-DD` | optional; `after <= due` |
 | `when` / `repeat` / `skip` / `moved` | calendar placement (§3) | optional |
 | `state` | the governed lifecycle (§2.2) | `add` lands in `todo` |
-| `note` | why the last transition happened | <= 1 KiB, set with `state` |
+| `note` | why the last transition happened | set with `state` |
 | `evidence` | per acceptance criterion, how it was met | set with `succeed` (§2.1.1) |
-| `description` | what and why, markdown | <= 8 KiB; optional at ingest, asked for by GUI and tool |
-| `acceptance` | acceptance criteria: when is it done | list of 0..=20 items, each 1..=300 chars, plain line; optional at ingest, asked for by GUI and tool |
-| `out_of_scope` | delimitation: what is explicitly NOT part of it | list of 0..=20 items, each 1..=300 chars; optional |
+| `description` | what and why, markdown | optional at ingest, asked for by GUI and tool |
+| `acceptance` | acceptance criteria: when is it done | list of items, each non-empty, plain line; optional at ingest, asked for by GUI and tool |
+| `out_of_scope` | delimitation: what is explicitly NOT part of it | list of items, each non-empty, plain line; optional |
 
 #### 2.1.1 Content: description, acceptance, delimitation
 
@@ -100,14 +100,14 @@ Besides `title` and `type`, a task's content is three fields:
 
 **Optional at ingest, expected in practice.** Every rule at the wire door
 is forever, and a recurring "weekly sync" or a parent integration step has
-no use for acceptance criteria. So the shape check only enforces the caps.
+no use for acceptance criteria. So the shape check only enforces the shape.
 The GUI create form and `quests_propose` ask for `description` and
 `acceptance` on every floating task and flag a missing one as a warning on
 the card ("no acceptance criteria") - a voter may decline for it.
 
 **`succeed` carries evidence.** The `state` act to `success` may carry
-`evidence`: a list parallel to `acceptance` (same length, each item <= 500
-chars, "" for none). The card renders each criterion with its evidence
+`evidence`: a list parallel to `acceptance` (same length, "" for
+none). The card renders each criterion with its evidence
 beside it; a length mismatch or an empty item is a warning on the card,
 never a void - the threshold decides whether the evidence is enough. A
 later `set` of `acceptance` does not touch recorded evidence; the archive
@@ -275,8 +275,7 @@ calendar. A floating task may be blocked by any task, timed ones included.
 ### 3.1 `when`
 
 `{"start": S, "end": E}`, both all-day (`YYYY-MM-DD`, `S <= E`, both days
-inclusive) or both timed (`YYYY-MM-DDTHH:MM`, `S < E`, at most 7 days
-long). Wall time in the republic zone, canonical spelling only (§4.3). A
+inclusive) or both timed (`YYYY-MM-DDTHH:MM`, `S < E`). Wall time in the republic zone, canonical spelling only (§4.3). A
 timed task carries no `effort`: the block IS the work. Moving it is a
 `set` - one vote.
 
@@ -290,12 +289,12 @@ A deliberately small subset of RFC 5545 RRULE:
 "moved":  {"2026-11-02": {"start": "2026-11-03T09:00", "end": "2026-11-03T10:00"}}
 ```
 
-- `freq ∈ daily | weekly | monthly`; `interval` 1..=99 (default 1);
+- `freq ∈ daily | weekly | monthly`; `interval` >= 1 (default 1);
   `byday` only with `weekly` (default: the weekday of `when.start`);
-  `until` (a date) or `count` (1..=1000), not both, or neither (open
+  `until` (a date) or `count` (>= 1), not both, or neither (open
   series). `monthly` repeats on `when.start`'s day of month and skips
   months that lack it (the RFC 5545 rule).
-- `skip` (<= 64 dates) removes occurrences; `moved` (<= 64 entries) gives
+- `skip` (dates) removes occurrences; `moved` (date → window) gives
   one occurrence a new window, keyed by its original date. Keys must be
   real occurrence dates. `count` counts occurrences before `skip`, as in
   RFC 5545.
@@ -304,7 +303,7 @@ A deliberately small subset of RFC 5545 RRULE:
   earlier instant.
 
 **Occurrences are never stored.** They are expanded on read for the
-window a view or a tool asks for (<= 366 days, <= 2000 occurrences), by a
+window a view or a tool asks for (a finite `[from, to]`), by a
 pure function of the task and `tz`. A series costs one vote whether it
 yields one occurrence or five hundred.
 
@@ -327,10 +326,10 @@ decision and applied all-or-nothing:
 
 ```json
 {"op": "kanban_ops", "summary": "Mara: schema done, client started, sync moved",
- "base_rev": 17, "ops": [ …1..=128 acts… ]}
+ "base_rev": 17, "ops": [ …at least one act… ]}
 ```
 
-`summary` 1..=200 chars, the card's headline. `base_rev` is the fold
+`summary` non-empty, one line, the card's headline. `base_rev` is the fold
 revision the proposer saw (display only, §4.5).
 
 ### 4.2 Three task acts, two settings acts
@@ -362,7 +361,7 @@ revision the proposer saw (display only, §4.5).
   `mint_message_id` precedent, `chat.rs:46`), inside its existing
   canonicalize-at-propose block (the `set_relays`/`set_features`
   precedent, proposals.rs:579ff). The same block stamps `creator`. An
-  `add` may carry `"ref"` (1..=32 chars `[a-z0-9_-]`) that later acts of
+  `add` may carry `"ref"` (`[a-z0-9_-]+`) that later acts of
   the SAME changeset cite as `"@ref"` wherever an id goes. Canonicalization
   replaces every `@ref` and drops the `ref` keys; the recorded and signed
   payload carries ids only, so nobody signs a placeholder.
@@ -373,9 +372,7 @@ revision the proposer saw (display only, §4.5).
 One stateless `validate_kanban_payload(&Value)` in molt-core, called from
 `propose_payload` and from wire ingest - the Files precedent
 (`validate_files_payload`, `molt-engine/src/files_state.rs:139`, both
-doors). Refused, never recorded: not an object, unknown `op`, 0 or > 128
-acts, unknown act or field, a field outside its act's vocabulary, a cap
-of §2-§3 exceeded, an empty or duplicated `assignees`, a date or time
+doors). Refused, never recorded: not an object, unknown `op`, no acts, unknown act or field, a field outside its act's vocabulary, an empty or duplicated `assignees`, a date or time
 that does not round-trip (`NaiveDate`/`NaiveDateTime` parse, then format
 must equal the input - `2026-8-1` is refused), `after > due`, a `when`
 in the wrong order or mixing all-day and timed, an `add` carrying both
@@ -383,7 +380,7 @@ in the wrong order or mixing all-day and timed, an `add` carrying both
 naming `state`/`note`/`evidence`/`creator` or nothing, `evidence` on a
 `state` act whose `to` is not `success`, an `acceptance`/`out_of_scope`
 item that is empty or contains a newline, an unknown state, a zone that
-is not IANA-shaped (`Area/Location`, `[A-Za-z0-9_+-/]`, <= 64 chars), an
+is not IANA-shaped (`Area/Location`, `[A-Za-z0-9_+-/]`), an
 unresolved `@ref`. The check is stateless: a rule that needs the board
 (a `set` that leaves a timed task with `effort`) belongs to §4.4.
 
@@ -406,8 +403,7 @@ illegal or unguarded state transition (§2.2), including any transition
 on a series other than `cancel`/`reopen`; an unknown act. And the rules
 that need the task's resulting fields: a timed task with `effort > 0`; a
 `repeat` without `when`; a `skip`/`moved` key that is no occurrence of
-the resulting series; more than 2000 `todo`/`wip` tasks after the
-changeset (the forecast bound, §5.2). Occurrence keys are dates, so this
+the resulting series. Occurrence keys are dates, so this
 needs no tz database. New against
 revision 2: link existence, acyclicity and the lifecycle are enforced,
 because the status machine and the forecast depend on them.
@@ -487,7 +483,7 @@ Day granularity for links, hour granularity for capacity.
    Per seat: `next` - its `wip` tasks, else its first placed task that is
    not blocked.
 
-Bound: open tasks are capped at 2000 per board; the forecast is
+No cap on the board: its size is the members' decision. The forecast is
 O(n log n + links + days × seats) and runs on read, cached per
 `(rev, today)` beside the fold cache.
 
@@ -946,6 +942,10 @@ Each with a recommendation, the counterargument first.
     coalesce triggers instead of dropping them (§6.1).
 15. **Blocked work in the list.** Decided 2026-10-07: never. The list
     and `next` show only what the seat can act on now.
+16. **Limits.** Decided 2026-10-07: no arbitrary caps on governed
+    content - sensible sizes are the members' call. What bounds remain
+    are not choices: the proposal size (`payload_fits`, from the
+    transport), 24 hours in a day, and local node settings.
 
 ## 12. Changes against revision 2 (2026-10-06)
 
