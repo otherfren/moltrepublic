@@ -200,17 +200,17 @@ task of its own that the work is blocked by, not a special state.
 A recurring series (§3.2) uses only `todo` (active) and `cancelled`: any
 other transition on it voids (§4.4).
 
-### 2.3 Seats and the republic clock
+### 2.3 Seats and the clock
 
-Two governed settings live in the same fold:
-
-- **Seat capacity** (`seat` act): `hours` per working day 1..=24, `days` a
-  set of weekdays, `away` up to 16 date ranges. Default for a seat never
-  set: 8 hours, Monday-Friday, never away. An agent seat may be
-  24 hours, seven days.
-- **Republic time zone** (`tz` act): one IANA name (`Europe/Berlin`).
-  Default `UTC`. Every date and wall-clock time on the board is local to
-  it, and "Monday 09:00" stays 09:00 across daylight-saving changes.
+- **Seat capacity** (`seat` act, governed, in the same fold): `hours` per
+  working day 1..=24, `days` a set of weekdays, `away` a list of date
+  ranges. Default for a seat never set: 8 hours, Monday-Friday, never
+  away. An agent seat may be 24 hours, seven days.
+- **The clock is UTC. There are no time zones.** Every date, time and
+  weekday on the board, in the calendar, in the forecast and in the wake
+  timer is UTC, stored and shown alike - no conversion, no daylight
+  saving. Organization › Status shows the current UTC time, so every
+  member reads the same clock.
 
 ### 2.4 Types and colours
 
@@ -245,7 +245,6 @@ types present in the current view.
 ```
 BoardState {
   rev: u64,                               // applied changesets folded (void ones too)
-  tz: String,
   seats: BTreeMap<SeatName, Capacity>,
   tasks: BTreeMap<TaskId, Task>,          // all states
 }
@@ -275,7 +274,7 @@ calendar. A floating task may be blocked by any task, timed ones included.
 ### 3.1 `when`
 
 `{"start": S, "end": E}`, both all-day (`YYYY-MM-DD`, `S <= E`, both days
-inclusive) or both timed (`YYYY-MM-DDTHH:MM`, `S < E`). Wall time in the republic zone, canonical spelling only (§4.3). A
+inclusive) or both timed (`YYYY-MM-DDTHH:MM`, `S < E`). UTC, canonical spelling only (§4.3). A
 timed task carries no `effort`: the block IS the work. Moving it is a
 `set` - one vote.
 
@@ -298,13 +297,10 @@ A deliberately small subset of RFC 5545 RRULE:
   one occurrence a new window, keyed by its original date. Keys must be
   real occurrence dates. `count` counts occurrences before `skip`, as in
   RFC 5545.
-- Daylight saving: a wall time that does not exist (spring-forward gap)
-  is pushed forward by the gap; an ambiguous one (fall-back) takes the
-  earlier instant.
 
 **Occurrences are never stored.** They are expanded on read for the
 window a view or a tool asks for (a finite `[from, to]`), by a
-pure function of the task and `tz`. A series costs one vote whether it
+pure function of the task. A series costs one vote whether it
 yields one occurrence or five hundred.
 
 **An occurrence has no state of its own.** It is a block of time, not a
@@ -332,7 +328,7 @@ decision and applied all-or-nothing:
 `summary` non-empty, one line, the card's headline. `base_rev` is the fold
 revision the proposer saw (display only, §4.5).
 
-### 4.2 Three task acts, two settings acts
+### 4.2 Three task acts, one settings act
 
 ```json
 {"act":"add",   "id":"<hex32>", "ref":"api", "title":"…", "assignees":["mara"],
@@ -344,7 +340,6 @@ revision the proposer saw (display only, §4.5).
 {"act":"state", "id":"<id>|@ref", "to":"success", "evidence":["…","…"]}
 {"act":"seat",  "seat":"walter", "hours":4, "days":["mo","tu","we","th","fr"],
                 "away":[["2026-10-15","2026-10-16"]]}
-{"act":"tz",    "zone":"Europe/Berlin"}
 ```
 
 - `set` may name every task field except `state`, `note`, `evidence` and
@@ -355,7 +350,7 @@ revision the proposer saw (display only, §4.5).
   cannot hide inside a text edit - revision 2 needed separate
   `assign`/`schedule` acts for that; rendering does it here.
 - `state.to` names the target; the fold checks the transition (§2.2).
-- `seat` and `tz` replace their whole value.
+- `seat` replaces its whole value.
 - **Ids, refs and the creator, agents first.** `add.id` is optional:
   omitted, `propose_payload` mints it (engine-side RNG, the
   `mint_message_id` precedent, `chat.rs:46`), inside its existing
@@ -379,16 +374,11 @@ in the wrong order or mixing all-day and timed, an `add` carrying both
 `effort` and `when`, an `add` with `repeat` but no `when`, `set`
 naming `state`/`note`/`evidence`/`creator` or nothing, `evidence` on a
 `state` act whose `to` is not `success`, an `acceptance`/`out_of_scope`
-item that is empty or contains a newline, an unknown state, a zone that
-is not IANA-shaped (`Area/Location`, `[A-Za-z0-9_+-/]`), an
+item that is empty or contains a newline, an unknown state, an
 unresolved `@ref`. The check is stateless: a rule that needs the board
 (a `set` that leaves a timed task with `effort`) belongs to §4.4.
 
-**Zones are checked against the tz database at propose only.** Which
-names exist depends on the `chrono-tz` version a node was built with; a
-wire door or a fold that consulted it would let two builds disagree. At
-propose an unknown zone is refused; a node whose database lacks an
-applied zone renders in UTC and flags "unknown zone" - display only. Wire ingest also refuses any `ref` key or `@` value and
+Wire ingest also refuses any `ref` key or `@` value and
 any `add` without `creator`: canonicalization runs only at propose.
 `payload_fits` (proposals.rs:175) keeps bounding the whole proposal.
 
@@ -403,8 +393,7 @@ illegal or unguarded state transition (§2.2), including any transition
 on a series other than `cancel`/`reopen`; an unknown act. And the rules
 that need the task's resulting fields: a timed task with `effort > 0`; a
 `repeat` without `when`; a `skip`/`moved` key that is no occurrence of
-the resulting series. Occurrence keys are dates, so this
-needs no tz database. New against
+the resulting series. New against
 revision 2: link existence, acyclicity and the lifecycle are enforced,
 because the status machine and the forecast depend on them.
 
@@ -441,7 +430,7 @@ supersede walks remains worth doing, but on its own schedule.
 
 `forecast(&BoardState, today: NaiveDate) → Forecast` in
 `crates/molt-core/src/kanban_forecast.rs`. Pure: no clock, no I/O; the
-caller passes `today` from the local clock. Same `(board, today)`, same
+caller passes today's UTC date. Same `(board, today)`, same
 forecast on every node. **The forecast is never consensus state** - it is
 what the board means today, rendered.
 
@@ -532,7 +521,7 @@ new `Command`; the wake tools of §6.2 are listed in §9 S2/S3):
 ```
 quests_view {seat?, task?, proposal?, from?, to?, filter?}   # Seat scope
   # filter: the §8 filters by name, e.g. ["to_act_on"] - the agent's work queue
-  → {rev, tz, tasks (todo + wip + recently closed, with derived status),
+  → {rev, tasks (todo + wip + recently closed, with derived status),
      forecast, next (per seat or for `seat`), risks,
      task: {…, prerequisite_for, its prerequisites to any depth},
      calendar (expanded occurrences in [from, to]),
@@ -593,7 +582,7 @@ today and is a member's deliberate act, not a wake signal. Triggers:
 | `poked` (exists) | a member pokes this seat |
 | `vote_pending` (exists) | a proposal waits for this seat's vote |
 | `kanban` | an applied kanban changeset was folded - on every node, for every seat |
-| `task_start` | a timed task of this seat (once, or one occurrence) reaches `when.start` in the republic zone, minus the local lead time; all-day at 00:00 |
+| `task_start` | a timed task of this seat (once, or one occurrence) reaches `when.start` (UTC), minus the local lead time; all-day at 00:00 |
 
 `task_start` fires only on assignees' nodes: for any other seat the start
 is no action. Floating work has no start time to fire on; when it becomes
@@ -829,14 +818,13 @@ TDD, red first, each step green on master before the next.
 - **S1 - core.** `kanban_fold.rs` (fold with the state machine,
   `validate_kanban_payload`, precheck), `kanban_forecast.rs`,
   `kanban_calendar.rs` (RRULE subset expansion); chrono is already a
-  workspace dependency (`Cargo.toml:73`), `chrono-tz` to be added (pure,
-  no I/O). Keystones: fold determinism (one-by-one == all-at-once == from
+  workspace dependency (`Cargo.toml:73`); no tz database. Keystones: fold determinism (one-by-one == all-at-once == from
   a cached prefix); void all-or-nothing incl. an in-changeset duplicate
   id; every row of the transition table, legal and illegal; start guard
   with in-changeset ordering; cycle voids; the date round-trip refusal; a
   byte-pinned fixture board; the §5.3 example as a forecast fixture plus
-  the `effort 24` and the two-assignee variant; stuck propagation; DST
-  spring-forward and fall-back; `skip`/`moved`; `monthly` on the 31st.
+  the `effort 24` and the two-assignee variant; stuck propagation;
+  `skip`/`moved`; `monthly` on the 31st.
 - **S2 - engine.** Canonicalization (`minted`, `creator`) in
   `propose_payload`; shape check at both doors; precheck; `kanban_cache`
   with the forecast cache; `board` in `snapshot` (proposals.rs:4014);
@@ -853,7 +841,7 @@ TDD, red first, each step green on master before the next.
   interval is honoured; every node wakes on an applied kanban changeset;
   one `task_start` per `(task, occurrence)` on assignee nodes only; a
   missed start < 24 h fires once as `late`; a blocked appointment fires
-  nothing and is listed `late` once unblocked; DST boundaries; the
+  nothing and is listed `late` once unblocked; the
   `read_actions` list for the §5.3 board. `Command::TestWake` - the
   GUI button and the MCP tool `test_wake` drive it co-equally (the
   `co_equality_every_command_is_a_tool_or_documented_internal` test);
@@ -863,7 +851,8 @@ TDD, red first, each step green on master before the next.
   `Command`, the GUI reads the same constant), the `read_state`
   description fix, conventions in the tool descriptions.
 - **S4 - UI real.** Sample data out, board with derived sub-states,
-  timeline, calendar, basket with impact, `is_implemented()` true, wizard
+  timeline, calendar, basket with impact, the current UTC time in
+  Organization › Status, `is_implemented()` true, wizard
   and Organization panel unlocked; the Wake group of §6.2 (`wake_on`,
   minimum rest, lead time, `SkillModal` with Copy/Save, Test wake), EN/DE strings;
   headless GUI tests under live-preview. `WAKE_SKILL` lands in S3 with a
@@ -909,8 +898,8 @@ Each with a recommendation, the counterargument first.
    `on hold` (covered by `pause` plus an external-blocker task).
    *Recommendation:* no further governed states; new derived sub-states
    are free because they cost no vote and no ingest rule.
-6. **Time zone.** One per republic (recommended) or UTC everywhere
-   (simpler, but recurring wall times drift across DST)?
+6. **Time zone.** Decided 2026-10-07: none. Everything is UTC, shown
+   as UTC; Organization › Status shows the current UTC time.
 7. **A second relation.** Decided for now: prerequisites only, one
    relation (2026-10-07). Revisit only if teams need "part of" without
    "blocks", or a task that is visibly in progress while its prerequisites
@@ -967,7 +956,7 @@ Each with a recommendation, the counterargument first.
   `blocked_by` / "prerequisite for", enforced and acyclic; `creator`
   stamped at propose; several assignees; the forecast with derived
   priority and the impact view (§5); the calendar with once and recurring
-  timed tasks (§3); seat capacity and the republic time zone (§2.3); the
+  timed tasks (§3); seat capacity and the UTC-only clock (§2.3); the
   typed MCP tools (former Q11, decided); the `calendar` and `dependencies` view keys with local filters.
 - Kept: changeset of absolute acts, all-or-nothing, both-doors shape
   check, propose-time precheck, engine-minted ids with `@ref`,
