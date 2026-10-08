@@ -4934,6 +4934,7 @@ dependencies = [
 name = "molt-core"
 version = "0.0.8"
 dependencies = [
+ "chrono",
  "hex",
  "pulldown-cmark",
  "serde",

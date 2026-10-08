@@ -25,3 +25,4 @@ zeroize.workspace = true # wipes the vault seed on drop - pure Rust, no I/O
 # the vault's content ids (`vault::secret_id`, `vault::grant_id`) hash beside
 # their layouts; still RNG-free, no curve arithmetic (that is molt-vault)
 sha2.workspace = true
+chrono.workspace = true # kanban date arithmetic; the caller passes every date, no clock read

@@ -22,6 +22,9 @@ use serde_json::Value;
 /// The republic's persistent-change chain: a single-branch, threshold-signed
 /// sequence of commit blocks (the founding is block 0). See [`chain`].
 pub mod chain;
+pub mod kanban_calendar;
+pub mod kanban_dates;
+pub mod kanban_fold;
 pub mod relay;
 pub mod vault;
 pub mod wiki_fold;
