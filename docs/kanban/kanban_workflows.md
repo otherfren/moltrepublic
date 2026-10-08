@@ -178,11 +178,15 @@ The status shown is **one** value, built from two layers:
 | wip → todo | pause | - |
 | wip → success | succeed | - (the vote is the acceptance, §7) |
 | wip → fail | fail | `note` required |
+| todo → success | succeed (timed once only) | the task has a `when` and no `repeat`; every `blocked_by` task is `success` or `cancelled` |
+| todo → fail | fail (timed once only) | as above, plus `note` required |
 | fail → wip | retry | - |
 | todo, wip, fail → cancelled | cancel | `note` required |
 | success, fail, cancelled → todo | reopen | - |
 
-Any other transition voids the changeset. `success`, `fail` and
+An appointment needs no `start` vote: the calendar already says when
+it runs, so a once-timed task may close straight from `todo` (§11 Q11).
+`start` stays allowed for it. Any other transition voids the changeset. `success`, `fail` and
 `cancelled` are terminal until reopened, and they make up the archive.
 Within one changeset, transitions apply in act order: "B succeed, A start"
 is legal even if A is blocked by B.
@@ -234,7 +238,7 @@ is for grouping and seeing.
   calendar blocks; the palette is checked for contrast in light and dark
   theme.
 - Hash collisions (two types, one colour) are possible with many types;
-  §11 Q10 asks whether a governed colour override is worth an act.
+  §11 Q10: an override act only if collisions bother a real republic.
 
 Where the colour shows: the card stripe on `board`, the bar on `plan`,
 the block in `calendar`, the node chip in `dependencies`, and a legend of the
@@ -605,7 +609,7 @@ state; across a restart the list itself still holds the work.
 - **What the woken agent does.** `read_actions`, then whatever it judges
   right: vote, work a task, answer a poke, or nothing. Its results still
   pass the threshold: it proposes `start`/`succeed`/`fail` like any seat
-  (§2.2, §11 Q11). A wake grants no authority.
+  (§2.2; an appointment closes straight from `todo`). A wake grants no authority.
 - **Security.** The command is local node posture: set in `config.toml`,
   in the GUI (§6.2), or by this node's own Seat-scope operator through
   `patch_settings` (`NODE_POSTURE_KEYS`, `molt-core/src/lib.rs:5982`;
@@ -793,7 +797,8 @@ TDD, red first, each step green on master before the next.
   workspace dependency (`Cargo.toml:73`); no tz database. Keystones: fold determinism (one-by-one == all-at-once == from
   a cached prefix); void all-or-nothing incl. an in-changeset duplicate
   id; every row of the transition table, legal and illegal; start guard
-  with in-changeset ordering; cycle voids; the date round-trip refusal; a
+  with in-changeset ordering; an appointment closing from `todo`, a
+  floating task refused the same; cycle voids; the date round-trip refusal; a
   byte-pinned fixture board; the §5.3 example as a fixture plus both
   §5.4 variants; `needed_by` through a diamond-shaped graph; stuck
   propagation;
@@ -882,17 +887,12 @@ Each with a recommendation, the counterargument first.
 9. **"To act on".** Decided 2026-10-07 (with Q15): my startable `todo`
    and my `wip` tasks only; pending votes are their own filter ("needs
    my vote") and their own `read_actions` entries.
-10. **Type colours.** Against the derived hash colour: two types can
-    collide, and a team may want "bug" to be red. For: no setting, no vote,
-    identical everywhere. *Recommendation:* derived first; if collisions
-    bother a real republic, add a governed `type_color {type, slot}` act
-    (one vote, overrides the hash for that type).
-11. **Timed tasks and the `start` vote.** A poked agent may work at once,
-    but the task stays `todo` until a `start` vote passes - the board lags
-    reality by one vote. Against keeping it: the vote that scheduled the
-    appointment already approved the work. *Recommendation:* allow
-    `todo → success | fail` directly for timed tasks (one vote fewer), keep
-    `start` optional for them.
+10. **Type colours.** Decided 2026-10-08: derived from the label hash,
+    no setting, no vote. A governed `type_color {type, slot}` override
+    is added only if collisions bother a real republic.
+11. **Timed tasks and the `start` vote.** Decided 2026-10-08: a
+    once-timed task may go `todo → success | fail` directly (§2.2), one
+    vote fewer; `start` stays optional for it.
 12. **Poke lead time.** Fire exactly at `when.start`, or a configurable
     local lead (e.g. 10 min, `[node] task_wake_lead_min`) so a slow agent
     is ready on time? *Recommendation:* local setting, default 0.
