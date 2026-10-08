@@ -41,6 +41,7 @@ mod configstore;
 mod events;
 mod files_state;
 mod founding;
+mod kanban;
 mod lifecycles;
 mod loopback_mesh;
 mod net;
@@ -1120,6 +1121,8 @@ pub(crate) struct State {
     /// The folded Memory base, cached across reads (§4.1). Never persisted,
     /// never consensus input — a keystone pins it equal to a fresh fold.
     pub(crate) wiki_cache: Option<WikiCache>,
+    /// The folded kanban board, cached across reads like the wiki.
+    pub(crate) kanban_cache: Option<kanban::KanbanCache>,
     /// Bumped whenever the Memory projection changes in a way an APPEND
     /// cannot describe: a wholesale rebuild, a blob swap, a restore, a
     /// close. The cache extends itself only while this stands still.
@@ -1435,6 +1438,7 @@ impl State {
             ui_state: None,
             applied,
             wiki_cache: None,
+            kanban_cache: None,
             applied_epoch: 0,
             wiki_pending: HashMap::new(),
             wiki_graph: None,
@@ -1858,6 +1862,9 @@ impl State {
                 if surface == Surface::Memory {
                     self.refresh_wiki_cache();
                 }
+                if surface == Surface::Quests {
+                    self.refresh_kanban_cache();
+                }
                 let snap = self.snapshot(surface, channel, view.as_deref());
                 // retrieval IS the reading: the chat messages just handed
                 // out get the same honest receipts the GUI sends when it
@@ -1871,8 +1878,14 @@ impl State {
                 limit,
                 cursor,
                 with_texts,
-            } => Ok(self.cmd_list_proposals(filter, limit, cursor, with_texts)),
-            Command::ReadProposal { id } => self.cmd_read_proposal(id),
+            } => {
+                self.refresh_kanban_cache();
+                Ok(self.cmd_list_proposals(filter, limit, cursor, with_texts))
+            }
+            Command::ReadProposal { id } => {
+                self.refresh_kanban_cache();
+                self.cmd_read_proposal(id)
+            }
             Command::Status => Ok(Reply::Status(self.status())),
             Command::ReadMembers => Ok(Reply::Members { members: self.members_view() }),
             Command::ReadUploads => Ok(Reply::Uploads { uploads: self.uploads_view() }),

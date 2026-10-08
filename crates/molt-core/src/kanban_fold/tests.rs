@@ -826,3 +826,54 @@ fn the_fixture_board_is_byte_pinned() {
     );
     assert_eq!(got, want);
 }
+
+fn minter() -> impl FnMut() -> Result<TaskId, String> {
+    let mut n = 100;
+    move || {
+        n += 1;
+        Ok(id(n))
+    }
+}
+
+#[test]
+fn canonicalization_mints_ids_resolves_refs_and_stamps_the_creator() {
+    let p = cs(vec![
+        json!({"act": "add", "ref": "api", "title": "api", "assignees": ["mara"],
+               "creator": "walter", "type": " bug "}),
+        add(7, "given", &["bot"], json!({"blocked_by": ["@api"]})),
+        json!({"act": "add", "ref": "client", "title": "client", "assignees": ["walter"],
+               "blocked_by": ["@api", id(7)]}),
+        json!({"act": "set", "id": "@client", "fields": {"blocked_by": ["@api"], "type": "x "}}),
+        json!({"act": "state", "id": "@api", "to": "wip"}),
+    ]);
+    let c = kanban_canonicalize(&p, "mara", &mut minter()).expect("canonical");
+    assert_eq!(c.minted, vec![id(101), id(102)], "only engine-minted ids, act order");
+    let ops = c.payload["ops"].as_array().expect("ops");
+    assert_eq!(ops[0]["id"], json!(id(101)));
+    assert_eq!(ops[0]["creator"], json!("mara"), "a supplied creator is overwritten");
+    assert_eq!(ops[0]["type"], json!("bug"), "type trimmed at propose");
+    assert!(ops[0].get("ref").is_none() && ops[2].get("ref").is_none());
+    assert_eq!(ops[1]["id"], json!(id(7)), "a supplied id stays");
+    assert_eq!(ops[1]["creator"], json!("mara"));
+    assert_eq!(ops[1]["blocked_by"], json!([id(101)]));
+    assert_eq!(ops[2]["blocked_by"], json!([id(101), id(7)]));
+    assert_eq!(ops[3]["id"], json!(id(102)));
+    assert_eq!(ops[3]["fields"], json!({"blocked_by": [id(101)], "type": "x"}));
+    assert_eq!(ops[4]["id"], json!(id(101)));
+    assert!(validate_kanban_wire(&c.payload).is_ok(), "the wire accepts the result");
+    assert!(!c.payload.to_string().contains('@'), "nobody signs a placeholder");
+}
+
+#[test]
+fn canonicalization_refuses_what_the_shape_check_refuses() {
+    let bad = cs(vec![json!({"act": "state", "id": "@x", "to": "wip"})]);
+    let e = kanban_canonicalize(&bad, "mara", &mut minter()).expect_err("unresolved");
+    assert!(e.contains("unresolved"), "{e}");
+    let no_rng = kanban_canonicalize(
+        &cs(vec![json!({"act": "add", "title": "a", "assignees": ["mara"]})]),
+        "mara",
+        &mut || Err("rng down".to_string()),
+    )
+    .expect_err("no rng, no id");
+    assert!(no_rng.contains("rng down"));
+}

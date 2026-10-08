@@ -34,6 +34,8 @@ fn a_feature_diff_never_shows_a_removal_and_renders_labels() {
         superseded_kind: None,
         withdrawn: false,
         sealing: false,
+        void: None,
+        advisories: Vec::new(),
     };
     let row = proposal_row(0, &pv);
     assert!(
@@ -186,6 +188,8 @@ fn applied_log_lines_carry_their_patch_id() {
             superseded_kind: None,
             withdrawn: false,
             sealing: false,
+            void: None,
+            advisories: Vec::new(),
         }],
         channels: Vec::new(),
         has_archive: false,
@@ -193,6 +197,7 @@ fn applied_log_lines_carry_their_patch_id() {
         wiki_rev: 0,
         wiki_base_pending: None,
         vault: None,
+        board: None,
     };
     let data = surface_data(0, Surface::Memory, &snap, "petra", None, &HashMap::new());
     assert_eq!(data.log.len(), 2);
@@ -672,6 +677,8 @@ fn outcome_snapshot(pending: usize, applied: usize, declined: usize) -> molt_cor
                 superseded_kind: None,
                 withdrawn: false,
                 sealing: false,
+                void: None,
+                advisories: Vec::new(),
             })
             .collect()
     };
@@ -690,6 +697,7 @@ fn outcome_snapshot(pending: usize, applied: usize, declined: usize) -> molt_cor
         wiki_rev: 0,
         wiki_base_pending: None,
         vault: None,
+        board: None,
     }
 }
 
@@ -853,6 +861,8 @@ fn a_decided_row_carries_its_decision_date() {
         superseded_kind: None,
         withdrawn: false,
         sealing: false,
+        void: None,
+        advisories: Vec::new(),
     };
     let ts = 1_750_000_000;
     let applied = proposal_row(0, &view(ProposalState::Applied, ts, 0));

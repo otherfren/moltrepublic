@@ -665,6 +665,9 @@ impl State {
                     self.refresh_wiki_cache();
                     self.supersede_stale_wiki(moved.as_ref());
                 }
+                if *surface == Surface::Quests {
+                    self.refresh_kanban_fold();
+                }
                 self.stash_voted(*proposal_id);
                 self.chain.pending_sigs.remove(proposal_id);
                 // a peer's block was stamped by the ingest before this runs;

@@ -667,8 +667,14 @@ impl State {
         if surface == Surface::Files {
             self.prepare_files_proposal(&mut payload)?;
         }
+        let (minted, kanban_warnings) = if surface == Surface::Quests {
+            self.prepare_kanban_proposal(&mut payload)?
+        } else {
+            (Vec::new(), Vec::new())
+        };
         validate_payload_fits(surface, &payload, &self.roster())?;
-        let warnings = self.wiki_patch_check(surface, &payload)?;
+        let mut warnings = self.wiki_patch_check(surface, &payload)?;
+        warnings.extend(kanban_warnings);
         // R6: a pool edit that would strand a DECLARED member — sharing no
         // relay with what that seat is on record as reaching (R3b) — is the
         // R4 split as a proposal. Refuse it naming the member and its relay.
@@ -779,6 +785,7 @@ impl State {
             warnings,
             channel: molt_core::ChannelRef::Patch { id },
             repaired: Vec::new(),
+            minted,
         })
     }
 
@@ -1759,6 +1766,14 @@ impl State {
             superseded_kind: p.superseded_kind,
             withdrawn: p.withdrawn,
             sealing: self.chain.seal_held.contains(&id),
+            void: (p.surface == Surface::Quests && p.state == ProposalState::Applied)
+                .then(|| self.kanban_void(id))
+                .flatten(),
+            advisories: if p.surface == Surface::Quests && p.state == ProposalState::Proposed {
+                self.kanban_advisories(&p.payload)
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -2890,7 +2905,7 @@ impl State {
         // this call alone knows ride the reply from here
         match self.cmd_propose(Surface::Memory, payload)? {
             Reply::Proposed { id, channel, .. } => {
-                Ok(Reply::Proposed { id, warnings, channel, repaired })
+                Ok(Reply::Proposed { id, warnings, channel, repaired, minted: Vec::new() })
             }
             other => Ok(other),
         }
@@ -4099,6 +4114,7 @@ impl State {
             // false) rather than removed, so an older reader that still asks
             // is told "no archive" instead of failing to decode.
             has_archive: false,
+            board: (surface == Surface::Quests).then(|| self.kanban_board_view()),
         }
     }
 

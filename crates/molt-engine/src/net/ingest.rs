@@ -259,6 +259,14 @@ impl State {
                         return Ok(Reply::Ack);
                     }
                 }
+                // a kanban changeset arrives canonical (canonicalization runs
+                // only at propose, §4.3), its creators roster seats
+                if surface == molt_core::Surface::Quests {
+                    if let Err(e) = self.kanban_wire_check(&payload) {
+                        tracing::warn!(from = %from, error = %e, "dropping a malformed kanban proposal");
+                        return Ok(Reply::Ack);
+                    }
+                }
                 // (2) a set_image must decode as a picture (WP3); a
                 // set_member_image must also be square (the wire twin of
                 // the propose gate — one contract, both doors)

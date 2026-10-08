@@ -755,6 +755,87 @@ pub fn validate_kanban_wire(v: &Value) -> Result<(), String> {
     parse_changeset(v, Door::Canonical).map(|_| ())
 }
 
+/// A payload after canonicalization at the propose door (§4.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Canonical {
+    /// The payload members sign: ids only, every `add` with its `creator`.
+    pub payload: Value,
+    /// The ids the engine minted, in act order.
+    pub minted: Vec<TaskId>,
+}
+
+/// Canonicalize a `kanban_ops` payload at the propose door (§4.2): mint
+/// every missing `add` id, stamp `creator` (overwriting a supplied one),
+/// trim `type`, replace every `@ref` and drop the `ref` keys.
+///
+/// # Errors
+/// The shape check's first reason, or the minter's.
+pub fn kanban_canonicalize(
+    payload: &Value,
+    creator: &str,
+    mint: &mut dyn FnMut() -> Result<TaskId, String>,
+) -> Result<Canonical, String> {
+    validate_kanban_payload(payload)?;
+    let mut out = payload.clone();
+    let ops = out
+        .get_mut("ops")
+        .and_then(Value::as_array_mut)
+        .ok_or("ops: at least one act")?;
+    let mut refs: BTreeMap<String, String> = BTreeMap::new();
+    let mut minted = Vec::new();
+    for op in ops.iter_mut() {
+        let Some(obj) = op.as_object_mut() else { continue };
+        if obj.get("act").and_then(Value::as_str) != Some("add") {
+            continue;
+        }
+        let id = match obj.get("id").and_then(Value::as_str) {
+            Some(id) => id.to_string(),
+            None => {
+                let id = mint()?;
+                minted.push(id.clone());
+                obj.insert("id".into(), Value::from(id.clone()));
+                id
+            }
+        };
+        if let Some(Value::String(r)) = obj.remove("ref") {
+            refs.insert(format!("@{r}"), id);
+        }
+        obj.insert("creator".into(), Value::from(creator));
+    }
+    let resolve = |v: &mut Value| {
+        if let Some(id) = v.as_str().and_then(|s| refs.get(s)) {
+            *v = Value::from(id.clone());
+        }
+    };
+    let trim = |obj: &mut Map<String, Value>| {
+        if let Some(Value::String(t)) = obj.get_mut("type") {
+            *t = t.trim().to_string();
+        }
+    };
+    let links = |obj: &mut Map<String, Value>| {
+        if let Some(list) = obj.get_mut("blocked_by").and_then(Value::as_array_mut) {
+            list.iter_mut().for_each(resolve);
+        }
+    };
+    for op in ops.iter_mut() {
+        let Some(obj) = op.as_object_mut() else { continue };
+        if let Some(id) = obj.get_mut("id") {
+            resolve(id);
+        }
+        trim(obj);
+        links(obj);
+        if let Some(fields) = obj.get_mut("fields").and_then(Value::as_object_mut) {
+            trim(fields);
+            links(fields);
+        }
+    }
+    validate_kanban_wire(&out)?;
+    Ok(Canonical {
+        payload: out,
+        minted,
+    })
+}
+
 // ----------------------------------------------------------------- fold --
 
 /// What one applied payload did to the board.

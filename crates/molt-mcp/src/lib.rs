@@ -71,7 +71,7 @@ set_features {value: \"memory quests\"}, set_member_image {member,value,bytes_b6
 picture); memory add_note {title}; files persist {id} (the engine fills the \
 share's identity; a live share only), unpersist {id, at: unix now} (a \
 persistent share only), delete {id} (a temporary share - gone for good); \
-quests/wallet add_quest/transfer {title}; the vault has its own tools \
+quests kanban_ops {summary, base_rev, ops}; wallet transfer {title}; the vault has its own tools \
 (vault_seal, vault_reseal, vault_grant, vault_read). Traps: founding/join/recovery need a confirmed relay \
 (relay_add, then confirm); mark_channel_read moves your PRIVATE cursor while \
 mark_read broadcasts read receipts; restore_start = offline knowledge from a \
@@ -1335,7 +1335,7 @@ pub fn tools() -> Vec<ToolDef> {
                 "type": "object",
                 "properties": {
                     "surface": { "type": "string", "enum": gated_enum() },
-                    "payload": { "type": "object", "description": "surface-specific transition {\"op\": ...}: organization set_name/set_charter/set_chat_retention {value}, set_image {value, bytes_b64}, remove_image, set_relays {value: \"wss://a wss://b\"}, set_features {value: \"memory quests\"}, set_member_image {member, value, bytes_b64}/remove_member_image/set_member_desc {member, value} (own seat only, square picture); memory add_note {title}, wiki_patch {value: git-format patch, summary} (raw - wiki_edit is the structured way); quests add_quest {title}; wallet transfer {title}; vault: use vault_seal / vault_grant; files persist {id} / unpersist {id, at} / delete {id} (id = the SHARE's chat message id from read_uploads, `at` = a unix stamp within an hour of this clock and not before the share; delete removes a temporary share for good)" }
+                    "payload": { "type": "object", "description": "surface-specific transition {\"op\": ...}: organization set_name/set_charter/set_chat_retention {value}, set_image {value, bytes_b64}, remove_image, set_relays {value: \"wss://a wss://b\"}, set_features {value: \"memory quests\"}, set_member_image {member, value, bytes_b64}/remove_member_image/set_member_desc {member, value} (own seat only, square picture); memory add_note {title}, wiki_patch {value: git-format patch, summary} (raw - wiki_edit is the structured way); quests kanban_ops {summary, base_rev, ops: acts add/set/state} (an add without id gets a minted one, listed in the reply's `minted`; `@ref` cites an add's `ref` in the same changeset; creator is the proposing seat); wallet transfer {title}; vault: use vault_seal / vault_grant; files persist {id} / unpersist {id, at} / delete {id} (id = the SHARE's chat message id from read_uploads, `at` = a unix stamp within an hour of this clock and not before the share; delete removes a temporary share for good)" }
                 },
                 "required": ["surface", "payload"]
             }),

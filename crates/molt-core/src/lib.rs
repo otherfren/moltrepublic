@@ -25,6 +25,7 @@ pub mod chain;
 pub mod kanban_calendar;
 pub mod kanban_dates;
 pub mod kanban_fold;
+pub mod kanban_review;
 pub mod relay;
 pub mod vault;
 pub mod wiki_fold;
@@ -6140,6 +6141,10 @@ pub enum Reply {
         /// reply says which.
         #[serde(default)]
         repaired: Vec<WikiRepairedLinks>,
+        /// The task ids the engine minted for a kanban changeset's `add`
+        /// acts, in act order (`kanban_workflows.md` §4.2).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        minted: Vec<String>,
     },
     /// This node's vote landed (approve or decline): the record as it
     /// stands afterwards, so a voter sees what its voice did without a
@@ -6574,6 +6579,14 @@ pub struct ProposalView {
     /// holds no such seal. Additive with a default.
     #[serde(default)]
     pub sealing: bool,
+    /// An applied kanban changeset the fold voided: the reason. The block
+    /// stays applied; this is the Accepted row's marker. Display only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub void: Option<String>,
+    /// Advisory lines on a pending kanban changeset (`kanban_workflows.md`
+    /// §4.5), computed on this reader's board and UTC date.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub advisories: Vec<String>,
 }
 
 /// One chat channel as the engine enumerates it for the read contract
@@ -6756,6 +6769,10 @@ pub struct SurfaceSnapshot {
     /// Vault only: the vault's read model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vault: Option<vault::VaultView>,
+    /// Quests only: the folded board with its derived status
+    /// (`kanban_review::board_view`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board: Option<Value>,
 }
 
 /// How much of the committed shared-memory base is here (K6).
@@ -8224,6 +8241,7 @@ mod tests {
                 warnings: Vec::new(),
                 channel: ChannelRef::Patch { id: ProposalId(1) },
                 repaired: Vec::new(),
+                minted: Vec::new(),
             },
             Reply::Proposals { proposals: vec![], total: 0, next_cursor: None },
             Reply::Members { members: vec![] },
