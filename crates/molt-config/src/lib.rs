@@ -50,7 +50,7 @@ pub struct Config {
 }
 
 /// Node-level runtime settings (`[node]`).
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeConfig {
     /// Start without a GUI (MCP-only).
@@ -60,15 +60,65 @@ pub struct NodeConfig {
     /// UI. Off by default — an explicit opt-in.
     #[serde(default)]
     pub poke_enabled: bool,
-    /// Command run via `sh -c` when this seat is poked or new work awaits
-    /// its vote (context in `MOLT_WAKE_*` env vars, `MOLT_WAKE_PENDING`
-    /// carrying the queue size). Empty = off.
+    /// Command run via `sh -c` when a wake trigger fires (context in
+    /// `MOLT_WAKE_*` env vars). Empty = off.
     #[serde(default)]
     pub poke_wake_command: String,
+    /// Minimum seconds between two wakes (0..=86400; out of range = default).
+    #[serde(default = "molt_core::default_wake_min_interval_secs")]
+    pub wake_min_interval_secs: u64,
+    /// The triggers that wake; absent = every reason.
+    #[serde(default = "molt_core::default_wake_on")]
+    pub wake_on: Vec<String>,
+    /// Minutes a `task_start` wake fires before the start (0..=120).
+    #[serde(default = "molt_core::default_task_wake_lead_min")]
+    pub task_wake_lead_min: u16,
     /// Workspace id to open at start (a service seat). File-owned like
     /// `[ui] renderer`: never in [`Settings`], so a save leaves it alone.
     #[serde(default)]
     pub open_on_start: String,
+}
+
+impl Default for NodeConfig {
+    fn default() -> Self {
+        NodeConfig {
+            headless: false,
+            poke_enabled: false,
+            poke_wake_command: String::new(),
+            wake_min_interval_secs: molt_core::default_wake_min_interval_secs(),
+            wake_on: molt_core::default_wake_on(),
+            task_wake_lead_min: molt_core::default_task_wake_lead_min(),
+            open_on_start: String::new(),
+        }
+    }
+}
+
+/// `wake_min_interval_secs` in range, else the default.
+fn wake_interval_or_default(v: u64) -> u64 {
+    if v <= molt_core::WAKE_MIN_INTERVAL_MAX {
+        v
+    } else {
+        molt_core::default_wake_min_interval_secs()
+    }
+}
+
+/// `task_wake_lead_min` in range, else the default.
+fn wake_lead_or_default(v: u16) -> u16 {
+    if v <= molt_core::TASK_WAKE_LEAD_MAX {
+        v
+    } else {
+        molt_core::default_task_wake_lead_min()
+    }
+}
+
+/// The known reasons of `wake_on`, deduplicated, in [`molt_core::kanban_wake::WAKE_REASONS`] order.
+fn known_wake_reasons<'a>(v: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let named: Vec<&str> = v.into_iter().collect();
+    molt_core::kanban_wake::WAKE_REASONS
+        .iter()
+        .filter(|r| named.contains(r))
+        .map(|r| (*r).to_string())
+        .collect()
 }
 
 /// The file plane's pacing (`[files]`, `docs_archive/files/mirroring.md` §3.2).
@@ -552,8 +602,14 @@ pub struct Settings {
     pub sound_poke: String,
     /// React to pokes and offer poking in the UI (explicit opt-in).
     pub poke_enabled: bool,
-    /// Wake command run when this seat is poked or new work awaits its vote.
+    /// Wake command run when a wake trigger fires.
     pub poke_wake_command: String,
+    /// Minimum seconds between two wakes.
+    pub wake_min_interval_secs: u64,
+    /// The triggers that wake.
+    pub wake_on: Vec<String>,
+    /// Minutes a `task_start` wake fires before the start.
+    pub task_wake_lead_min: u16,
     /// Send (and show) per-message chat read receipts (local privacy switch).
     pub read_receipts: bool,
     /// Anonymity network: `"tor" | "none"`.
@@ -612,6 +668,9 @@ impl Default for Settings {
             sound_poke: default_sound(),
             poke_enabled: false,
             poke_wake_command: String::new(),
+            wake_min_interval_secs: molt_core::default_wake_min_interval_secs(),
+            wake_on: molt_core::default_wake_on(),
+            task_wake_lead_min: molt_core::default_task_wake_lead_min(),
             read_receipts: true,
             anonymity: "none".to_string(),
             tor_mode: "local".to_string(),
@@ -677,6 +736,9 @@ impl From<&Config> for Settings {
             sound_poke: c.storage.sound_poke.clone(),
             poke_enabled: c.node.poke_enabled,
             poke_wake_command: c.node.poke_wake_command.clone(),
+            wake_min_interval_secs: wake_interval_or_default(c.node.wake_min_interval_secs),
+            wake_on: known_wake_reasons(c.node.wake_on.iter().map(String::as_str)),
+            task_wake_lead_min: wake_lead_or_default(c.node.task_wake_lead_min),
             read_receipts: c.storage.read_receipts,
             anonymity: c.transport.anonymity.network.as_str().to_string(),
             tor_mode: c.transport.anonymity.tor.mode.as_str().to_string(),
@@ -703,6 +765,22 @@ fn toml_str(s: &str) -> String {
     format!("\"{escaped}\"")
 }
 
+/// A TOML array of basic strings.
+fn toml_str_array(v: &[String]) -> String {
+    let items: Vec<String> = v.iter().map(|s| toml_str(s)).collect();
+    format!("[{}]", items.join(", "))
+}
+
+/// `key = value`, or the commented default: an off-default-only key keeps
+/// a generated config readable by a build that predates it.
+fn off_default_line(key: &str, value: &str, default: &str) -> String {
+    if value == default {
+        format!("# {key} = {default}")
+    } else {
+        format!("{key} = {value}")
+    }
+}
+
 /// Render a fully-commented, valid `config.toml` from `settings`.
 pub fn render(settings: &Settings) -> String {
     format!(
@@ -713,14 +791,21 @@ pub fn render(settings: &Settings) -> String {
 headless = {headless}
 # React to pokes (toast, sound, wake command) and offer poking in the UI.
 poke_enabled = {poke_enabled}
-# Command run via `sh -c` when this seat is poked or new work awaits its
-# vote - wakes a sleeping agent harness. "" = off. Context arrives as the
-# env vars MOLT_WAKE_REASON (poked|vote_pending), MOLT_WAKE_BY,
-# MOLT_WAKE_WORKSPACE and MOLT_WAKE_PENDING (cards awaiting this seat);
-# always QUOTE them ("$MOLT_WAKE_BY"). One wake runs at a time and a burst
-# nudges once: loop list_proposals until nothing waits. Only this file and
-# the GUI set it: it is executed here, so no MCP client may plant one.
+# Command run via `sh -c` when a wake trigger fires - wakes a sleeping agent
+# harness. "" = off. Context arrives as env vars: MOLT_WAKE_REASON (sorted,
+# comma-separated: poked, vote_pending, kanban, task_start, test),
+# MOLT_WAKE_BY, MOLT_WAKE_WORKSPACE, MOLT_WAKE_PENDING (cards awaiting this
+# seat) and MOLT_WAKE_ACTIONS (length of the read_actions list); always QUOTE
+# them ("$MOLT_WAKE_BY"). One wake runs at a time; triggers meanwhile merge
+# into the next one. Local posture: this file, the GUI, or this node's own
+# MCP operator (patch_settings) set it - never another seat.
 poke_wake_command = {poke_wake_command}
+# Minimum seconds between two wakes, 0..86400.
+{wake_interval_line}
+# Triggers that wake: "poked", "vote_pending", "kanban", "task_start".
+{wake_on_line}
+# Minutes before a task's start (UTC) its task_start wake fires, 0..120.
+{wake_lead_line}
 # Workspace id opened at start without a client (a service seat). "" = none.
 # A phrase-sealed workspace is only logged as a warning: decrypt it over MCP.
 # As a service (scripts/moltd.service): headless = true, and start moltd with
@@ -822,6 +907,21 @@ renderer = {renderer}
         headless = settings.headless,
         poke_enabled = settings.poke_enabled,
         poke_wake_command = toml_str(&settings.poke_wake_command),
+        wake_interval_line = off_default_line(
+            "wake_min_interval_secs",
+            &settings.wake_min_interval_secs.to_string(),
+            &molt_core::default_wake_min_interval_secs().to_string(),
+        ),
+        wake_on_line = off_default_line(
+            "wake_on",
+            &toml_str_array(&settings.wake_on),
+            &toml_str_array(&molt_core::default_wake_on()),
+        ),
+        wake_lead_line = off_default_line(
+            "task_wake_lead_min",
+            &settings.task_wake_lead_min.to_string(),
+            &molt_core::default_task_wake_lead_min().to_string(),
+        ),
         workspace_dir = toml_str(&settings.workspace_dir),
         s3_backup = settings.s3_backup,
         s3_endpoint = toml_str(&settings.s3_endpoint),
@@ -900,6 +1000,23 @@ pub fn salvage(text: &str) -> Settings {
         }
         if let Some(v) = node.get("poke_wake_command").and_then(toml::Value::as_str) {
             s.poke_wake_command = v.to_string();
+        }
+        if let Some(v) = node
+            .get("wake_min_interval_secs")
+            .and_then(toml::Value::as_integer)
+            .and_then(|v| u64::try_from(v).ok())
+        {
+            s.wake_min_interval_secs = wake_interval_or_default(v);
+        }
+        if let Some(v) = node.get("wake_on").and_then(toml::Value::as_array) {
+            s.wake_on = known_wake_reasons(v.iter().filter_map(toml::Value::as_str));
+        }
+        if let Some(v) = node
+            .get("task_wake_lead_min")
+            .and_then(toml::Value::as_integer)
+            .and_then(|v| u16::try_from(v).ok())
+        {
+            s.task_wake_lead_min = wake_lead_or_default(v);
         }
     }
     if let Some(files) = value.get("files") {
@@ -1208,6 +1325,34 @@ pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
     set_bool(node, "headless", settings.headless);
     set_bool(node, "poke_enabled", settings.poke_enabled);
     set_str(node, "poke_wake_command", &settings.poke_wake_command);
+    // off-default only, like `[files]`: an untouched file stays readable
+    // by a build that predates the keys
+    if settings.wake_min_interval_secs == molt_core::default_wake_min_interval_secs() {
+        node.remove("wake_min_interval_secs");
+    } else {
+        set_int(
+            node,
+            "wake_min_interval_secs",
+            i64::try_from(settings.wake_min_interval_secs).unwrap_or(i64::MAX),
+        );
+    }
+    if settings.wake_on == molt_core::default_wake_on() {
+        node.remove("wake_on");
+    } else {
+        let current: Option<Vec<&str>> = node
+            .get("wake_on")
+            .and_then(toml_edit::Item::as_array)
+            .map(|a| a.iter().filter_map(toml_edit::Value::as_str).collect());
+        if current.as_deref() != Some(&settings.wake_on.iter().map(String::as_str).collect::<Vec<_>>()[..]) {
+            let arr: toml_edit::Array = settings.wake_on.iter().map(String::as_str).collect();
+            set_item(node, "wake_on", toml_edit::value(arr));
+        }
+    }
+    if settings.task_wake_lead_min == molt_core::default_task_wake_lead_min() {
+        node.remove("task_wake_lead_min");
+    } else {
+        set_int(node, "task_wake_lead_min", i64::from(settings.task_wake_lead_min));
+    }
 
     let storage = table_at(doc.as_table_mut(), &["storage"]);
     set_str(storage, "workspace_dir", &settings.workspace_dir);
@@ -1598,6 +1743,68 @@ mod tests {
         assert_eq!(parse(&saved).expect("parses").node.open_on_start, "ws-1234");
     }
 
+    /// §6.2: the wake keys are off-default only, so a generated config
+    /// still opens on a build that predates them; absent = every reason.
+    #[test]
+    fn the_wake_keys_default_when_absent_and_are_written_off_default_only() {
+        let old = "[node]\npoke_wake_command = \"true\"\n";
+        let s = Settings::from(&parse(old).expect("an old config parses"));
+        assert_eq!(s.wake_min_interval_secs, 300);
+        assert_eq!(s.wake_on, ["poked", "vote_pending", "kanban", "task_start"]);
+        assert_eq!(s.task_wake_lead_min, 10);
+
+        let text = render(&Settings::default());
+        for key in ["wake_min_interval_secs", "wake_on", "task_wake_lead_min"] {
+            assert!(text.contains(&format!("# {key} = ")), "{key} documented: {text}");
+            assert!(!text.lines().any(|l| l.starts_with(key)), "{key} off-default only");
+        }
+        let base = update(old, &s).expect("update");
+        for key in ["wake_min_interval_secs", "wake_on", "task_wake_lead_min"] {
+            assert!(!base.contains(key), "{base}");
+        }
+
+        let off = Settings {
+            wake_min_interval_secs: 60,
+            wake_on: vec!["task_start".to_string()],
+            task_wake_lead_min: 0,
+            ..Settings::default()
+        };
+        let off = Settings { poke_wake_command: "true".to_string(), ..off };
+        let saved = update(&base, &off).expect("update");
+        let back = Settings::from(&parse(&saved).expect("parses"));
+        assert_eq!(
+            (back.wake_min_interval_secs, back.wake_on.clone(), back.task_wake_lead_min),
+            (60, vec!["task_start".to_string()], 0)
+        );
+        assert_eq!(salvage(&render(&off)).wake_on, ["task_start"]);
+        let reset = update(&saved, &s).expect("update");
+        assert_eq!(reset, base, "back at the defaults the keys leave the file");
+    }
+
+    /// An out-of-range value or an unknown reason never reaches the engine.
+    #[test]
+    fn bad_wake_values_fall_back() {
+        let s = salvage(
+            "[node]\nwake_min_interval_secs = 90000\ntask_wake_lead_min = 500\nwake_on = [\"kanban\", \"bogus\"]\n",
+        );
+        assert_eq!(s.wake_min_interval_secs, 300);
+        assert_eq!(s.task_wake_lead_min, 10);
+        assert_eq!(s.wake_on, ["kanban"]);
+        let strict = parse("[node]\nwake_min_interval_secs = 90000\nwake_on = [\"bogus\"]\n")
+            .expect("parses");
+        let s = Settings::from(&strict);
+        assert_eq!(s.wake_min_interval_secs, 300);
+        assert!(s.wake_on.is_empty());
+    }
+
+    /// ADR-0007: the operator's agent may set the command over MCP.
+    #[test]
+    fn the_template_no_longer_claims_mcp_cannot_set_the_wake_command() {
+        let text = render(&Settings::default());
+        assert!(!text.contains("no MCP client may plant one"), "{text}");
+        assert!(text.contains("patch_settings"), "{text}");
+    }
+
     #[test]
     fn unknown_field_is_rejected() {
         let text = format!("{}\nbogus_key = 1\n", render(&Settings::default()));
@@ -1712,6 +1919,9 @@ mod tests {
             sound_poke: "bell".to_string(),
             poke_enabled: true,
             poke_wake_command: "claude -p 'check your seat'".to_string(),
+            wake_min_interval_secs: 0,
+            wake_on: vec!["poked".to_string(), "kanban".to_string()],
+            task_wake_lead_min: 120,
             read_receipts: false,
             anonymity: "tor".to_string(),
             tor_mode: "whonix".to_string(),

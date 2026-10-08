@@ -26,6 +26,7 @@ pub mod kanban_calendar;
 pub mod kanban_dates;
 pub mod kanban_fold;
 pub mod kanban_review;
+pub mod kanban_wake;
 pub mod relay;
 pub mod vault;
 pub mod wiki_fold;
@@ -450,17 +451,22 @@ pub struct SessionSettings {
     /// poking at all.
     #[serde(default)]
     pub poke_enabled: bool,
-    /// Command this node runs (via `sh -c`) when its seat is poked or new
-    /// work awaits its vote — the wake hook for a sleeping agent harness.
-    /// Empty = off, one wake runs at a time. Wire content never reaches the
-    /// command line; context arrives as `MOLT_WAKE_*` env vars only.
-    ///
-    /// Settable ONLY through [`Command::SetWakeCommand`] (the GUI) or
-    /// `config.toml`: the wholesale settings paths refuse it, because a
-    /// surface that could plant a shell command would turn republic access
-    /// into code execution on the operator's machine.
+    /// Command this node runs (via `sh -c`) when a wake trigger fires
+    /// (`docs/kanban/kanban_workflows.md` §6.1) — the hook for a sleeping
+    /// agent harness. Empty = off, one wake runs at a time. Wire content
+    /// never reaches the command line; context arrives as `MOLT_WAKE_*` env
+    /// vars only. Local node posture (ADR-0007): never set by another seat.
     #[serde(default)]
     pub poke_wake_command: String,
+    /// Minimum seconds between two wakes, every reason alike (0..=86400).
+    #[serde(default = "default_wake_min_interval_secs")]
+    pub wake_min_interval_secs: u64,
+    /// The triggers that wake ([`kanban_wake::WAKE_REASONS`]); absent = all.
+    #[serde(default = "default_wake_on")]
+    pub wake_on: Vec<String>,
+    /// Minutes before a task's start its `task_start` wake fires (0..=120).
+    #[serde(default = "default_task_wake_lead_min")]
+    pub task_wake_lead_min: u16,
     /// Send (and show) per-message chat read receipts. A local per-node
     /// privacy switch, on by default; while off this node broadcasts no
     /// receipts and hides others' from its chat view (symmetric).
@@ -512,6 +518,27 @@ fn default_mirror_daily_bytes() -> u64 {
 fn default_sound() -> String {
     "none".to_string()
 }
+
+/// Default minimum rest between two wakes (§6.1).
+pub fn default_wake_min_interval_secs() -> u64 {
+    300
+}
+
+/// Default wake triggers: every reason.
+pub fn default_wake_on() -> Vec<String> {
+    kanban_wake::WAKE_REASONS.iter().map(|r| (*r).to_string()).collect()
+}
+
+/// Default `task_start` lead time in minutes (§11 Q12).
+pub fn default_task_wake_lead_min() -> u16 {
+    10
+}
+
+/// Upper bound of `wake_min_interval_secs`.
+pub const WAKE_MIN_INTERVAL_MAX: u64 = 86_400;
+
+/// Upper bound of `task_wake_lead_min`.
+pub const TASK_WAKE_LEAD_MAX: u16 = 120;
 
 /// Default for an opt-out boolean preference (on unless the operator
 /// disables it, and present-by-absence in an older `config.toml`).
@@ -574,6 +601,9 @@ impl Default for SessionSettings {
             sound_poke: default_sound(),
             poke_enabled: false,
             poke_wake_command: String::new(),
+            wake_min_interval_secs: default_wake_min_interval_secs(),
+            wake_on: default_wake_on(),
+            task_wake_lead_min: default_task_wake_lead_min(),
             read_receipts: true,
             font_app: default_font_app(),
             font_nav: default_font_nav(),
@@ -3719,6 +3749,10 @@ pub struct SessionView {
     /// verdict describes ONE configuration). See [`TorTest`].
     #[serde(default)]
     pub tor_test: TorTest,
+    /// The last [`Command::TestWake`]: `""` (none), `"waiting"` (behind a
+    /// running wake), `"started"`, `"exit <code>"` or `"error: …"`.
+    #[serde(default)]
+    pub wake_test: String,
     /// Config keys (file names, e.g. `"mcp.port"`) whose current value
     /// differs from what the node booted with and which only take effect on
     /// restart. Set by the engine on every save/reload; NOT transient — it
@@ -3792,6 +3826,7 @@ impl Default for SessionView {
             s3_test: String::new(),
             s3_list: String::new(),
             tor_test: TorTest::default(),
+            wake_test: String::new(),
             restart_required: Vec::new(),
             transport: String::new(),
             settings: SessionSettings::default(),
@@ -5894,6 +5929,10 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
+    /// Run the wake command once with `MOLT_WAKE_REASON=test` (§6.2), past
+    /// `wake_on` and the interval; behind a running wake it waits. The
+    /// outcome lands in `session.wake_test`.
+    TestWake,
     /// Set (or clear) this node's **wake command** — the local shell hook a
     /// poke or pending vote runs. The GUI's direct door; over MCP the key
     /// rides the settings surface (`poke_wake_command`, ADR-0007), so this
@@ -5983,7 +6022,7 @@ pub const UI_ACTION_VERBS: [&str; 5] = [
 /// The HOST-POSTURE settings keys: [`Command::SetNodePosture`] sets them
 /// in one call, `PatchSettings` and `SaveSettings` reach them like any
 /// other key (ADR-0007). The three secrets among them are write-only.
-pub const NODE_POSTURE_KEYS: [&str; 11] = [
+pub const NODE_POSTURE_KEYS: [&str; 14] = [
     "headless",
     "workspace_dir",
     "download_dir",
@@ -5995,6 +6034,9 @@ pub const NODE_POSTURE_KEYS: [&str; 11] = [
     "tor_mode",
     "tor_port",
     "poke_wake_command",
+    "wake_min_interval_secs",
+    "wake_on",
+    "task_wake_lead_min",
 ];
 
 impl Command {

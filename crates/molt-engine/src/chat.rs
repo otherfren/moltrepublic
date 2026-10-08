@@ -32,15 +32,6 @@ use crate::{now_secs, State};
 /// sound or spawn its wake command in a loop.
 pub(crate) const POKE_COOLDOWN_SECS: u64 = 60;
 
-/// Global holdoff for the pending-vote auto-wake: a proposal burst nudges
-/// the wake command once, then the woken agent reads the full state anyway.
-pub(crate) const WAKE_HOLDOFF_SECS: u64 = 300;
-
-/// Is a wake command running right now? One at a time, process-wide: the
-/// per-sender cooldown bounds each POKER, not the total, and an agent that
-/// is already awake needs no second nudge.
-static WAKE_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 /// Mint a fresh random message id (chat-bus pin P1: 128-bit CSPRNG, minted
 /// by the engine — never `mockrand`, never in `molt-core`).
 pub(crate) fn mint_message_id() -> Result<MessageId, MoltError> {
@@ -871,8 +862,8 @@ impl State {
 
     /// React to a poke that arrived over the wire (`from` is the
     /// authenticated link identity): if it targets THIS seat and poking is
-    /// enabled, emit [`Event::Poked`] (toast + sound in a GUI) and run the
-    /// wake command — at most once per sender per [`POKE_COOLDOWN_SECS`].
+    /// enabled, emit [`Event::Poked`] (toast + sound in a GUI) and trigger
+    /// the wake - at most once per sender per [`POKE_COOLDOWN_SECS`].
     pub(crate) fn receive_poke(&mut self, from: &str, to: &MemberId) {
         if *to != self.member() || !self.session.settings.poke_enabled {
             tracing::debug!(
@@ -890,97 +881,24 @@ impl State {
             }
         }
         self.presence.poke_at.insert(from.to_string(), now);
+        self.wake.pokes.entry(from.to_string()).or_insert(now);
         tracing::info!(%from, "poked");
         self.emit(Event::Poked {
             by: from.to_string(),
             to: to.clone(),
         });
-        self.spawn_wake("poked", from);
+        self.wake_trigger("poked", from);
     }
 
-    /// Fire the wake command when open work awaits THIS seat's vote —
-    /// debounced by [`WAKE_HOLDOFF_SECS`] so a proposal burst nudges once.
+    /// The `vote_pending` trigger: open work awaits THIS seat's vote.
     pub(crate) fn maybe_wake_pending(&mut self, by: &str) {
-        if self.session.settings.poke_wake_command.trim().is_empty() {
-            return;
-        }
         let me = self.member();
         let waiting = self
             .proposals
             .iter()
             .any(|(id, p)| self.waits_on(*id, p, &me));
-        if !waiting {
-            return;
-        }
-        let now = self.presence_now();
-        if let Some(last) = self.presence.wake_at {
-            if now.saturating_sub(last) < WAKE_HOLDOFF_SECS {
-                return;
-            }
-        }
-        self.presence.wake_at = Some(now);
-        self.spawn_wake("vote_pending", by);
-    }
-
-    /// Spawn the configured wake command, fire-and-forget (a detached thread
-    /// reaps it). The command string comes ONLY from the local config; wire
-    /// content never reaches the command line — context rides `MOLT_WAKE_*`
-    /// env vars, and the woken agent reads the actual state over MCP.
-    fn spawn_wake(&self, reason: &'static str, by: &str) {
-        let cmd = self.session.settings.poke_wake_command.trim().to_string();
-        if cmd.is_empty() {
-            return;
-        }
-        // ONE wake at a time, republic-wide. The per-sender cooldown alone
-        // does not bound this: n members poking once each spawn n processes
-        // per minute, and a realistic wake (an agent turn) runs for minutes.
-        // The flag is released by the reaper thread, so a wake that is still
-        // running simply swallows further nudges - which is also the honest
-        // semantics: the agent is already awake.
-        if WAKE_RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            tracing::debug!(reason, "a wake is already running - nudge swallowed");
-            return;
-        }
-        let by = by.to_string();
-        let workspace = self.session.active_workspace.clone();
-        // How much work waits on this seat right now. The holdoff swallows a
-        // burst on purpose, so the woken agent needs the SIZE to know it must
-        // drain the stream rather than answer one card.
-        let me = self.member();
-        let pending = self
-            .proposals
-            .iter()
-            .filter(|(id, p)| self.waits_on(**id, p, &me))
-            .count();
-        tracing::info!(reason, %by, pending, "wake command spawned");
-        // `Builder::spawn`, never `thread::spawn`: the latter PANICS when the
-        // OS refuses a thread, and this runs on the single-owner actor - one
-        // exhausted thread table would take the whole engine down.
-        let spawned = std::thread::Builder::new()
-            .name("molt-wake".to_string())
-            .spawn(move || {
-                match std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(&cmd)
-                    .env("MOLT_WAKE_REASON", reason)
-                    .env("MOLT_WAKE_BY", &by)
-                    .env("MOLT_WAKE_WORKSPACE", &workspace)
-                    .env("MOLT_WAKE_PENDING", pending.to_string())
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn()
-                {
-                    Ok(mut child) => {
-                        let _ = child.wait();
-                    }
-                    Err(e) => tracing::warn!(error = %e, "wake command failed to spawn"),
-                }
-                WAKE_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
-            });
-        if let Err(e) = spawned {
-            WAKE_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
-            tracing::warn!(error = %e, "no thread for the wake command");
+        if waiting {
+            self.wake_trigger("vote_pending", by);
         }
     }
 }
@@ -1999,22 +1917,17 @@ mod tests {
         let _ = std::fs::remove_file(&marker);
     }
 
-    /// New work awaiting this seat's vote fires the wake command once per
-    /// holdoff window — and not at all while nothing waits.
+    /// New work awaiting this seat's vote wakes it - and not at all while
+    /// nothing waits; a repeat inside the interval waits for it (§6.1).
     #[test]
-    fn pending_work_wakes_once_inside_the_holdoff() {
+    fn pending_work_wakes_and_a_repeat_waits_for_the_interval() {
         let mut st = plain_state();
         st.presence.clock_override = Some(5_000);
-        let marker = std::env::temp_dir().join(format!("molt-vote-wake-{}", std::process::id()));
-        let _ = std::fs::remove_file(&marker);
-        st.session.settings.poke_wake_command = format!("echo woke >> '{}'", marker.display());
+        st.session.settings.poke_wake_command = "true".to_string();
 
-        // nothing pending: no wake
         st.maybe_wake_pending("peer-1");
-        std::thread::sleep(std::time::Duration::from_millis(150));
-        assert!(!marker.exists(), "no pending work, no wake");
+        assert!(st.wake.log.is_empty(), "no pending work, no wake");
 
-        // a foreign proposal this seat has not approved
         st.apply(&EventEnvelope {
             prev_seq: 0,
             seq: 1,
@@ -2026,39 +1939,24 @@ mod tests {
                 payload: serde_json::json!({}),
             },
         });
-        let lines = |p: &std::path::Path| {
-            std::fs::read_to_string(p)
-                .map(|c| c.lines().count())
-                .unwrap_or(0)
-        };
-        let await_lines = |p: &std::path::Path, want: usize| {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while lines(p) < want {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "the wake command never ran"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-        };
         st.maybe_wake_pending("peer-1");
-        await_lines(&marker, 1);
+        assert_eq!(st.wake.log, ["vote_pending"]);
+        crate::wake::await_idle(&st);
 
         st.presence.clock_override = Some(5_010);
         st.maybe_wake_pending("peer-1");
-        std::thread::sleep(std::time::Duration::from_millis(150));
-        assert_eq!(lines(&marker), 1, "inside the holdoff: one nudge only");
+        st.wake_tick();
+        assert_eq!(st.wake.log.len(), 1, "inside the interval: it waits");
 
-        st.presence.clock_override = Some(5_000 + super::WAKE_HOLDOFF_SECS);
-        st.maybe_wake_pending("peer-1");
-        await_lines(&marker, 2);
-        let _ = std::fs::remove_file(&marker);
+        st.presence.clock_override = Some(5_000 + st.session.settings.wake_min_interval_secs);
+        st.wake_tick();
+        assert_eq!(st.wake.log, ["vote_pending", "vote_pending"], "…and is not lost");
     }
 
     /// The knowledge-base stream (`knowledge_base_scale.md` §4.8): a peer's
     /// `wiki_patch` proposal wakes this seat with the vote reason AND the
     /// size of the queue, so the agent drains `list_proposals` instead of
-    /// answering the one card the holdoff let through.
+    /// answering one card.
     #[test]
     fn a_peer_wiki_patch_wakes_the_seat_with_the_pending_count() {
         let mut st = plain_state();
@@ -2095,8 +1993,7 @@ mod tests {
             "both patches apply to the empty base and stay open"
         );
 
-        // `WAKE_RUNNING` is process-wide, so a sibling test's wake can swallow
-        // one nudge: re-nudge past the holdoff until the marker appears.
+        st.maybe_wake_pending("peer-1");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let content = loop {
             match std::fs::read_to_string(&marker) {
@@ -2107,9 +2004,6 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "the wake command never ran"
             );
-            let next = st.presence.clock_override.unwrap_or(9_000) + super::WAKE_HOLDOFF_SECS;
-            st.presence.clock_override = Some(next);
-            st.maybe_wake_pending("peer-1");
             std::thread::sleep(std::time::Duration::from_millis(25));
         };
         assert_eq!(content.trim(), "vote_pending 2");

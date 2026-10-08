@@ -298,6 +298,7 @@ impl State {
                 surface,
                 payload,
             } => {
+                self.wake.proposed_at.entry(id.0).or_insert(env.ts);
                 // OR-insert, like `receive_proposed`: a re-serve of an id
                 // this node already tracks (WP2 answers RECORD the served
                 // Proposed envelopes) must not clobber the live record —
@@ -742,7 +743,7 @@ impl State {
         self.recovery.mesh_window.clear();
         self.recovery.mesh_extension_at.clear();
         self.presence.poke_at.clear();
-        self.presence.wake_at = None;
+        self.wake.reset_workspace();
         // the accept windows belong to the OLD workspace's senders — leaking
         // them would dedup-drop the NEXT workspace's fresh envelopes
         self.delivery.accepted.clear();

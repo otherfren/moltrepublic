@@ -667,6 +667,8 @@ impl State {
                 }
                 if *surface == Surface::Quests {
                     self.refresh_kanban_fold();
+                    // every node wakes its own seat; the list says what is due
+                    self.wake_trigger("kanban", "");
                 }
                 self.stash_voted(*proposal_id);
                 self.chain.pending_sigs.remove(proposal_id);

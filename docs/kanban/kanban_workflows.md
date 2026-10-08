@@ -7,7 +7,9 @@ order, agents first - and the m-of-n rule unchanged. The §8 design mock is BUIL
 (2026-08-16); every §11 question is decided. Backend build (§9): S1
 (core) and the first half of S2 (engine governance: canonicalization,
 both doors, precheck, fold cache, void marker, board read, card
-advisories) are BUILT (2026-10-08); the S2 wakes and S3-S5 are open.
+advisories) and the S2 wakes (triggers, coalescing, task timer,
+`kanban_wakes.json`, the engine-side `read_actions`, `Command::TestWake`
+with its MCP tool `test_wake`) are BUILT (2026-10-09); S3-S5 are open.
 §12 lists what changed against revision 2.**
 
 The ask: the Quests surface (GUI label **"Kanban"**, wire key `quests` -

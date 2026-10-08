@@ -56,6 +56,7 @@ mod session;
 mod transfer;
 mod upload_refs;
 mod vault;
+mod wake;
 mod wiki_export;
 mod wiki_index;
 
@@ -648,7 +649,7 @@ pub(crate) struct DeliveryState {
 
 /// Presence bookkeeping of the open workspace: the test-only clock seam every
 /// presence stamp and aging pass reads through (`State::presence_now`), and
-/// the poke / auto-wake cooldowns. Active-workspace scope for the cooldowns;
+/// the poke cooldown. Active-workspace scope for the cooldowns;
 /// the clock seam outlives a workspace switch.
 pub(crate) struct PresenceState {
     /// Per-sender cooldown for accepted pokes (`member → presence_now of the
@@ -656,10 +657,6 @@ pub(crate) struct PresenceState {
     /// a flooding member cannot ring this node's sound or spawn its wake
     /// command in a loop. Active-workspace scope.
     pub(crate) poke_at: std::collections::HashMap<MemberId, u64>,
-    /// Global holdoff stamp for the pending-vote auto-wake (`presence_now`
-    /// of the last fired wake): new proposals inside the window do not
-    /// re-spawn the wake command — one nudge, then the agent reads state.
-    pub(crate) wake_at: Option<u64>,
     /// Presence clock **test seam** (same posture as [`State::demo_mesh`]):
     /// `None` in every production context — presence stamping/aging then
     /// runs on the shared [`now_secs`] clock; tests pin it to age pills
@@ -1202,6 +1199,8 @@ pub(crate) struct State {
     pub(crate) recovery: RecoveryState,
     pub(crate) chain: ChainProjection,
     pub(crate) presence: PresenceState,
+    /// The wake hook's triggers, coalescing and task timer (§6.1).
+    pub(crate) wake: wake::WakeState,
     /// Are clearnet relays activated for THIS session? Runtime-only **on
     /// purpose** — it is never persisted, so every start re-arms the gate and
     /// no clearnet packet leaves before the user acts again
@@ -1525,9 +1524,9 @@ impl State {
             },
             presence: PresenceState {
                 poke_at: std::collections::HashMap::new(),
-                wake_at: None,
                 clock_override: None,
             },
+            wake: wake::WakeState::default(),
             // the STORED decision is what a fresh process starts from
             // (ADR-0004 amendment): an operator who acknowledged clearnet
             // exposure is not asked again on every restart
@@ -1654,12 +1653,16 @@ impl State {
                 channel,
             } => self.cmd_chat(body, quote, channel),
             Command::ReactChat { id, emoji } => self.cmd_react_chat(id, emoji),
-            Command::MarkRead { ids } => self.cmd_mark_read(ids),
+            Command::MarkRead { ids } => {
+                self.wake.pokes.clear();
+                self.cmd_mark_read(ids)
+            }
             Command::DeleteChat { id } => self.cmd_delete_chat(id),
             Command::ShareFile { path, channel } => self.cmd_share_file(path, channel),
             Command::DownloadFile { id, dest } => self.cmd_download_file(id, dest),
             Command::RemoveFile { id } => self.cmd_remove_file(id),
             Command::MarkChannelRead { channel, up_to } => {
+                self.wake.pokes.clear();
                 self.cmd_mark_channel_read(channel, up_to)
             }
             Command::ClearNotice => {
@@ -1744,6 +1747,7 @@ impl State {
                 self.cmd_net_mirror_done(id, ok, reason, bytes)
             }
             Command::SetWakeCommand { command } => self.cmd_set_wake_command(command),
+            Command::TestWake => self.cmd_test_wake(),
             Command::SetNodePosture { posture } => self.cmd_set_node_posture(posture),
             // file-transfer task feedback (engine-internal, scope-guarded)
             Command::NetFileShared {
@@ -1870,6 +1874,9 @@ impl State {
                 // out get the same honest receipts the GUI sends when it
                 // renders them (State::receipt_returned_chat)
                 self.receipt_returned_chat(&snap);
+                if surface == Surface::Chat {
+                    self.wake.pokes.clear();
+                }
                 Ok(Reply::State(snap))
             }
             Command::ProposeCheckpoint => self.cmd_propose_checkpoint(),

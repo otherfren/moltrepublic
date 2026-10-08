@@ -339,6 +339,7 @@ impl State {
         self.vault_base_tick();
         // A2.2: held seals land once their round has passed
         self.drain_held_seals();
+        self.wake_tick();
         Ok(Reply::Ack)
     }
 

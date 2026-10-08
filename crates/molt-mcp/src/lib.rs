@@ -1006,6 +1006,13 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
             .and_then(Value::as_bool)
             .unwrap_or(d.poke_enabled),
         poke_wake_command: text("poke_wake_command")?,
+        wake_min_interval_secs: bytes("wake_min_interval_secs")?,
+        wake_on: args
+            .get("wake_on")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+            .ok_or_else(|| missing("wake_on"))?,
+        task_wake_lead_min: port("task_wake_lead_min")?,
         read_receipts: flag("read_receipts")?,
         // the trickle pace (mirroring §3.2): optional, absent = the defaults
         mirror_publish_interval_secs: args
@@ -2031,7 +2038,10 @@ pub fn tools() -> Vec<ToolDef> {
                     "anonymity": { "type": "string", "enum": ["tor", "none"] },
                     "tor_mode": { "type": "string", "enum": ["local", "embedded", "whonix"] },
                     "tor_port": { "type": "integer" },
-                    "poke_wake_command": { "type": "string", "description": "local shell hook a poke runs; \"\" clears it" },
+                    "poke_wake_command": { "type": "string", "description": "local shell hook a wake runs; \"\" clears it" },
+                    "wake_min_interval_secs": { "type": "integer", "description": "minimum seconds between two wakes, 0..86400" },
+                    "wake_on": { "type": "array", "items": { "type": "string", "enum": ["poked", "vote_pending", "kanban", "task_start"] }, "description": "triggers that wake" },
+                    "task_wake_lead_min": { "type": "integer", "description": "minutes before a task start its wake fires, 0..120" },
                     "s3_backup": { "type": "boolean" },
                     "s3_endpoint": { "type": "string" },
                     "s3_access_key": { "type": "string" },
@@ -2051,6 +2061,7 @@ pub fn tools() -> Vec<ToolDef> {
                 "required": [
                     "headless", "workspace_dir", "download_dir", "mcp_port", "mcp_allow",
                     "anonymity", "tor_mode", "tor_port", "poke_wake_command",
+                    "wake_min_interval_secs", "wake_on", "task_wake_lead_min",
                     "s3_backup", "s3_endpoint", "s3_access_key", "s3_bucket",
                     "s3_interval_min", "s3_keep_copies", "s3_max_bytes",
                     "sound_message",
@@ -2102,7 +2113,10 @@ pub fn tools() -> Vec<ToolDef> {
                     "anonymity": { "type": "string", "enum": ["tor", "none"] },
                     "tor_mode": { "type": "string", "enum": ["local", "embedded", "whonix"] },
                     "tor_port": { "type": "integer" },
-                    "poke_wake_command": { "type": "string", "description": "local shell hook a poke runs; \"\" clears it" },
+                    "poke_wake_command": { "type": "string", "description": "local shell hook a wake runs; \"\" clears it" },
+                    "wake_min_interval_secs": { "type": "integer", "description": "minimum seconds between two wakes, 0..86400" },
+                    "wake_on": { "type": "array", "items": { "type": "string", "enum": ["poked", "vote_pending", "kanban", "task_start"] }, "description": "triggers that wake" },
+                    "task_wake_lead_min": { "type": "integer", "description": "minutes before a task start its wake fires, 0..120" },
                     "mcp_token": { "type": "string", "description": "write-only: the seat key" },
                     "mcp_read_token": { "type": "string", "description": "write-only: the read-only key; \"\" switches it off" },
                     "s3_secret_key": { "type": "string", "description": "write-only: the S3 secret" },
@@ -2314,6 +2328,14 @@ pub fn tools() -> Vec<ToolDef> {
             build: |args| Ok(Command::OpenWorkspace {
                 id: str_arg(args, "id")?,
             }),
+        },
+        ToolDef {
+            name: "test_wake",
+            command: "test_wake",
+            scope: Scope::Seat,
+            description: "Run this node's wake command once with MOLT_WAKE_REASON=test, ignoring wake_on and the interval (it waits for a running wake). Outcome in read_session.wake_test: started, waiting, exit <code>.",
+            schema: || json!({ "type": "object", "properties": {} }),
+            build: |_| Ok(Command::TestWake),
         },
         ToolDef {
             name: "clear_notice",
@@ -3514,6 +3536,8 @@ pub(crate) mod tests {
                 json!(false)
             } else if is("integer") {
                 json!(1)
+            } else if is("array") {
+                json!([])
             } else {
                 json!(p["enum"]
                     .as_array()

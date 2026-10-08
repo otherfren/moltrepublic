@@ -242,6 +242,7 @@ fn main() -> anyhow::Result<()> {
         .build()?;
     // The initial shared session mirrors config.toml. It lives in the engine, so
     // the GUI and an MCP agent see and change the same screen / language / settings.
+    let flat = molt_config::Settings::from(&config);
     let session = molt_core::SessionView {
         language: config.ui.lang.clone(),
         theme: config.ui.theme.clone(),
@@ -261,6 +262,10 @@ fn main() -> anyhow::Result<()> {
             sound_poke: config.storage.sound_poke.clone(),
             poke_enabled: config.node.poke_enabled,
             poke_wake_command: config.node.poke_wake_command.clone(),
+            // range-checked and filtered by the flat view
+            wake_min_interval_secs: flat.wake_min_interval_secs,
+            wake_on: flat.wake_on.clone(),
+            task_wake_lead_min: flat.task_wake_lead_min,
             read_receipts: config.storage.read_receipts,
             font_app: config.ui.font_app,
             font_nav: config.ui.font_nav,

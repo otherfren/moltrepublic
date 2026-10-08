@@ -1405,6 +1405,10 @@ impl State {
             tracing::warn!(error = %e, "vault_base=unreadable action=refetch");
             None
         });
+        let fired_starts = opened.read_kanban_wakes().unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "kanban_wakes=unreadable");
+            Vec::new()
+        });
         // point of no return: swap the actor state to the new workspace
         self.close_active_storage();
         self.reset_workspace_state();
@@ -1452,6 +1456,8 @@ impl State {
         // it here: bytes that do not answer the commitment are deleted, and
         // the holder goes base-pending rather than reading a wrong wiki.
         self.adopt_wiki_base(stored_wiki_base);
+        // fired task starts survive a restart: a missed one fires once
+        self.wake.adopt_fired(fired_starts);
         // re-verified under the chain's own vault context (plan 1.3.16)
         self.adopt_vault_base(stored_vault_base);
         // the wiki indexes are built OFF the actor and EAGERLY: by the time
@@ -2546,7 +2552,28 @@ fn validate_settings(s: &SessionSettings) -> Result<(), MoltError> {
         ));
     }
     validate_wake_command(&s.poke_wake_command)?;
+    validate_wake_settings(s)?;
     validate_fonts(s.font_app, s.font_nav, s.font_editor)?;
+    Ok(())
+}
+
+/// The §6.2 wake keys: in range, known reasons, each once.
+fn validate_wake_settings(s: &SessionSettings) -> Result<(), MoltError> {
+    if s.wake_min_interval_secs > molt_core::WAKE_MIN_INTERVAL_MAX {
+        return Err(MoltError::Settings("wake_min_interval_secs: 0..86400".to_string()));
+    }
+    if s.task_wake_lead_min > molt_core::TASK_WAKE_LEAD_MAX {
+        return Err(MoltError::Settings("task_wake_lead_min: 0..120".to_string()));
+    }
+    let reasons = molt_core::kanban_wake::WAKE_REASONS;
+    for (i, r) in s.wake_on.iter().enumerate() {
+        if !reasons.contains(&r.as_str()) {
+            return Err(MoltError::Settings(format!("wake_on: unknown reason `{r}`")));
+        }
+        if s.wake_on[..i].contains(r) {
+            return Err(MoltError::Settings(format!("wake_on: `{r}` twice")));
+        }
+    }
     Ok(())
 }
 
@@ -2737,6 +2764,40 @@ mod patch_tests {
             serde_json::json!({ "poke_wake_command": "one
 two" }),
             serde_json::json!({ "anonymity": "nym" }),
+        ] {
+            assert!(
+                w.execute(Command::PatchSettings { patch: patch.clone() }).await.is_err(),
+                "{patch} was accepted"
+            );
+        }
+    }
+
+    /// §6.2: the wake keys are node posture, set over the patch door and
+    /// range-checked there.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_wake_keys_patch_and_refuse_out_of_range() {
+        let w = node();
+        w.execute(Command::PatchSettings {
+            patch: serde_json::json!({
+                "wake_min_interval_secs": 0,
+                "wake_on": ["kanban", "task_start"],
+                "task_wake_lead_min": 120,
+            }),
+        })
+        .await
+        .expect("patch the wake keys");
+        let s = settings(&w).await;
+        assert_eq!(s.wake_min_interval_secs, 0);
+        assert_eq!(s.wake_on, ["kanban", "task_start"]);
+        assert_eq!(s.task_wake_lead_min, 120);
+        for key in ["wake_min_interval_secs", "wake_on", "task_wake_lead_min"] {
+            assert!(molt_core::NODE_POSTURE_KEYS.contains(&key), "{key}");
+        }
+        for patch in [
+            serde_json::json!({ "wake_min_interval_secs": 86_401 }),
+            serde_json::json!({ "task_wake_lead_min": 121 }),
+            serde_json::json!({ "wake_on": ["bogus"] }),
+            serde_json::json!({ "wake_on": ["kanban", "kanban"] }),
         ] {
             assert!(
                 w.execute(Command::PatchSettings { patch: patch.clone() }).await.is_err(),

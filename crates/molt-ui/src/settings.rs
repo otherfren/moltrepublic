@@ -120,6 +120,10 @@ pub(crate) fn read_settings_draft(ui: &AppWindow, stored: &SessionSettings) -> S
         sound_poke: sound_name(ui.get_cfg_sound_poke_index()),
         poke_enabled: ui.get_cfg_poke_enabled(),
         poke_wake_command: ui.get_cfg_poke_wake().to_string(),
+        // not on the config tab yet (S4): echo the stored values
+        wake_min_interval_secs: stored.wake_min_interval_secs,
+        wake_on: stored.wake_on.clone(),
+        task_wake_lead_min: stored.task_wake_lead_min,
         read_receipts: ui.get_cfg_read_receipts(),
         s3_backup: ui.get_cfg_s3_backup(),
         s3_endpoint: ui.get_cfg_s3_endpoint().to_string(),

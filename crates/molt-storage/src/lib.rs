@@ -159,6 +159,8 @@ const VAULT_BASE_SEGMENT: u64 = u64::MAX - 5;
 /// AAD segment number that marks the `vault/<secret_id>.bin` frames (vault
 /// plan S3a: one deposit's payload ciphertext).
 const VAULT_PAYLOAD_SEGMENT: u64 = u64::MAX - 6;
+/// AAD segment marker for `kanban_wakes.json`.
+const KANBAN_WAKES_SEGMENT: u64 = u64::MAX - 7;
 /// The lowest reserved marker — a log file numbered at or above it is
 /// ignored (see [`list_sorted`]).
 const RESERVED_SEGMENT_FLOOR: u64 = VAULT_PAYLOAD_SEGMENT;
@@ -1663,6 +1665,37 @@ impl OpenedWorkspace {
         write_atomic(&self.dir, "chain.state", &frame, true)
     }
 
+    /// The fired `task_start` keys (`docs/kanban/kanban_workflows.md`
+    /// §6.1): local to this node, sealed, never exported. Absent = none.
+    ///
+    /// # Errors
+    /// Unreadable, over the cap, or a frame that does not authenticate.
+    pub fn read_kanban_wakes(&self) -> Result<Vec<String>, StorageError> {
+        let path = self.dir.join("kanban_wakes.json");
+        let data = match read_capped(&path, READ_CAP_STATE, "kanban_wakes.json") {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(StorageError::Corrupt(format!("reading kanban_wakes.json: {e}"))),
+        };
+        let plain = decrypt_state_file(&kanban_wakes_key(&self.key, &self.id), &self.id, KANBAN_WAKES_SEGMENT, &data)?;
+        serde_json::from_slice(&plain)
+            .map_err(|e| StorageError::Corrupt(format!("decoding kanban_wakes.json: {e}")))
+    }
+
+    /// Rewrite `kanban_wakes.json` (atomic, sealed).
+    pub fn write_kanban_wakes(&self, keys: &[String]) -> Result<(), StorageError> {
+        let plain = serde_json::to_vec(keys)
+            .map_err(|e| StorageError::Corrupt(format!("encoding kanban_wakes.json: {e}")))?;
+        let frame = encode_frame(
+            &kanban_wakes_key(&self.key, &self.id),
+            &self.id,
+            KANBAN_WAKES_SEGMENT,
+            0,
+            &plain,
+        )?;
+        write_atomic(&self.dir, "kanban_wakes.json", &frame, true)
+    }
+
     /// **K6: the folded wiki base**, sealed at rest like every other state
     /// file. The bytes are [`molt_core::wiki_fold::wiki_base_canonical_bytes`]
     /// — the exact preimage of the commitment the chain carries, so a
@@ -1919,6 +1952,11 @@ fn chain_state_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
 /// The `wiki_base.bin` sub-key (K6).
 fn wiki_base_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
     Zeroizing::new(hkdf32(ws_key, "molt-wiki-base", id))
+}
+
+/// The `kanban_wakes.json` sub-key.
+fn kanban_wakes_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    Zeroizing::new(hkdf32(ws_key, "molt-kanban-wakes", id))
 }
 
 /// The `vault_base.bin` sub-key (vault S5).
@@ -3038,6 +3076,8 @@ enum WriterMsg {
     /// windows while the SUPERVISOR owns the cursors — each overlays only
     /// its own fields, so neither clobbers the other.
     SaveAccepted(std::collections::BTreeMap<molt_core::MemberId, molt_core::AcceptedWindow>),
+    /// Rewrite `kanban_wakes.json` with these fired keys.
+    SaveKanbanWakes(Vec<String>),
     /// A piece fetch's bookkeeping (mirroring §3.2): upsert by series.
     SaveFetchJob(Box<molt_core::FetchJob>),
     /// The fetch of this series ended.
@@ -3271,6 +3311,18 @@ impl StorageHandle {
             Ok(()) => {}
             Err(mpsc::TrySendError::Full(_)) => {
                 tracing::warn!(dropped = "accept-window save", "writer queue full");
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {}
+        }
+    }
+
+    /// Persist the fired `task_start` keys (fire-and-forget like prefs: a
+    /// lost save can only refire a start once).
+    pub fn save_kanban_wakes(&self, keys: Vec<String>) {
+        match self.tx.try_send(WriterMsg::SaveKanbanWakes(keys)) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_)) => {
+                tracing::warn!(dropped = "kanban wakes save", "writer queue full");
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {}
         }
@@ -3772,6 +3824,11 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                             if let Err(e) = ws.write_transport_state(&ts) {
                                 fail(&failed_flag, "accept-window write", &e);
                             }
+                        }
+                    }
+                    Ok(WriterMsg::SaveKanbanWakes(keys)) => {
+                        if let Err(e) = ws.write_kanban_wakes(&keys) {
+                            fail(&failed_flag, "kanban_wakes.json write", &e);
                         }
                     }
                     Ok(WriterMsg::SaveFetchJob(job)) => {
@@ -4888,6 +4945,24 @@ mod tests {
         // …and the file is still there, untouched, for the build that wrote it
         let after = fs::read(dir.join("transport.state")).expect("still there");
         assert_eq!(after, frame, "the refusal must not have rewritten it");
+    }
+
+    /// §6.1: the fired `task_start` keys live sealed beside the state,
+    /// local to this node; absent reads as none fired.
+    #[test]
+    fn the_kanban_wakes_round_trip_sealed() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let ws = create_workspace(tmp.path(), &seed, &founded(42)).expect("create");
+        assert!(ws.read_kanban_wakes().expect("read").is_empty());
+        let keys = vec!["a@2026-10-12T14:00".to_string(), "b@2026-10-13T00:00".to_string()];
+        ws.write_kanban_wakes(&keys).expect("write");
+        assert_eq!(ws.read_kanban_wakes().expect("read"), keys);
+        let raw = fs::read(ws.dir().join("kanban_wakes.json")).expect("raw");
+        assert!(
+            !raw.windows(b"2026-10-12".len()).any(|w| w == b"2026-10-12"),
+            "sealed at rest"
+        );
     }
 
     /// K6: the folded wiki base round-trips through its own sealed file,
