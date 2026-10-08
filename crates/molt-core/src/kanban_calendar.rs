@@ -8,25 +8,27 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use chrono::{Datelike, Days, Months, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, Weekday};
+use chrono::{Datelike, Days, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, Weekday};
 use serde_json::{Map, Value};
 
 const DATE_FMT: &str = "%Y-%m-%d";
 const DATETIME_FMT: &str = "%Y-%m-%dT%H:%M";
+/// Four-digit years only: chrono's `%Y` round-trips signed years too.
+const YEARS: std::ops::RangeInclusive<i32> = 0..=9999;
 
 /// A `YYYY-MM-DD` date in its canonical spelling, or `None` (`2026-8-1`
 /// does not round-trip and is refused).
 #[must_use]
 pub fn parse_date(s: &str) -> Option<NaiveDate> {
     let d = NaiveDate::parse_from_str(s, DATE_FMT).ok()?;
-    (fmt_date(d) == s).then_some(d)
+    (YEARS.contains(&d.year()) && fmt_date(d) == s).then_some(d)
 }
 
 /// A `YYYY-MM-DDTHH:MM` time in its canonical spelling, or `None`.
 #[must_use]
 pub fn parse_datetime(s: &str) -> Option<NaiveDateTime> {
     let t = NaiveDateTime::parse_from_str(s, DATETIME_FMT).ok()?;
-    (fmt_datetime(t) == s).then_some(t)
+    (YEARS.contains(&t.year()) && fmt_datetime(t) == s).then_some(t)
 }
 
 /// The canonical spelling of a date.
@@ -339,92 +341,110 @@ pub struct Occurrence {
     pub moved: bool,
 }
 
-/// Visit the series' original occurrence dates (before `skip`) in order,
-/// up to and including `limit`. The start always counts as the first
-/// occurrence (RFC 5545 DTSTART).
-fn series_dates(start: NaiveDate, r: &Repeat, limit: NaiveDate, mut emit: impl FnMut(NaiveDate)) {
-    let mut emitted = 0u64;
-    let mut push = |d: NaiveDate| -> bool {
-        if d > limit {
-            return false;
+fn day_mask(start: NaiveDate, r: &Repeat) -> u8 {
+    let bit = |w: Weekday| 1u8 << w.num_days_from_monday();
+    if r.byday.is_empty() {
+        bit(start.weekday())
+    } else {
+        r.byday.iter().fold(0, |m, w| m | bit(*w))
+    }
+}
+
+/// The bits `lo..hi` of a weekday mask.
+fn mask_between(mask: u8, lo: u32, hi: u32) -> u64 {
+    let span = (lo..hi).fold(0u8, |m, o| m | (1u8 << o));
+    u64::from((mask & span).count_ones())
+}
+
+fn month_number(d: NaiveDate) -> i64 {
+    i64::from(d.year()) * 12 + i64::from(d.month0())
+}
+
+/// Months in one Gregorian cycle (400 years): month lengths repeat with it.
+const CYCLE_MONTHS: u64 = 4800;
+
+fn gcd(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
+    }
+}
+
+/// How many of the first `k` periods of a monthly series have its day.
+fn months_with_day(start: NaiveDate, interval: u64, k: u64) -> u64 {
+    let day = start.day();
+    if day <= 28 {
+        return k;
+    }
+    let m0 = u64::try_from(month_number(start)).unwrap_or(0) % CYCLE_MONTHS;
+    let step = interval % CYCLE_MONTHS;
+    let period = CYCLE_MONTHS / gcd(step, CYCLE_MONTHS);
+    let hits = |n: u64| -> u64 {
+        let mut c = 0;
+        for j in 0..n {
+            let a = (m0 + j * step) % CYCLE_MONTHS;
+            // a year congruent mod 400 has the same month lengths
+            let year = i32::try_from(2000 + a / 12).unwrap_or(2000);
+            let month = u32::try_from(a % 12 + 1).unwrap_or(1);
+            if NaiveDate::from_ymd_opt(year, month, day).is_some() {
+                c += 1;
+            }
         }
-        match r.end {
-            RepeatEnd::Until(u) if d > u => return false,
-            RepeatEnd::Count(c) if emitted >= c => return false,
-            _ => {}
-        }
-        emitted += 1;
-        emit(d);
-        true
+        c
     };
+    (k / period) * hits(period) + hits(k % period)
+}
+
+/// The 0-based position of `date` among the series' original dates when
+/// the rule's pattern hits it, ignoring `until`/`count`. Arithmetic, so a
+/// far date costs no walk. The start is always position 0 (RFC 5545 DTSTART).
+fn position(start: NaiveDate, r: &Repeat, date: NaiveDate) -> Option<u64> {
+    if date < start {
+        return None;
+    }
+    if date == start {
+        return Some(0);
+    }
+    let days = u64::try_from((date - start).num_days()).ok()?;
     match r.freq {
-        Freq::Daily => {
-            let mut d = start;
-            while push(d) {
-                let Some(n) = d.checked_add_days(Days::new(r.interval)) else {
-                    return;
-                };
-                d = n;
-            }
-        }
+        Freq::Daily => (days % r.interval == 0).then(|| days / r.interval),
         Freq::Weekly => {
-            if !push(start) {
-                return;
+            let mask = day_mask(start, r);
+            let so = start.weekday().num_days_from_monday();
+            let dof = date.weekday().num_days_from_monday();
+            if mask & (1u8 << dof) == 0 {
+                return None;
             }
-            let days: BTreeSet<u32> = if r.byday.is_empty() {
-                BTreeSet::from([start.weekday().num_days_from_monday()])
+            let weeks = (days + u64::from(so) - u64::from(dof)) / 7;
+            if weeks % r.interval != 0 {
+                return None;
+            }
+            let q = weeks / r.interval;
+            Some(if q == 0 {
+                1 + mask_between(mask, so + 1, dof)
             } else {
-                r.byday.iter().map(|w| w.num_days_from_monday()).collect()
-            };
-            let Some(mut monday) = start
-                .checked_sub_days(Days::new(u64::from(start.weekday().num_days_from_monday())))
-            else {
-                return;
-            };
-            let Some(step) = r.interval.checked_mul(7) else {
-                return;
-            };
-            loop {
-                for off in &days {
-                    let Some(d) = monday.checked_add_days(Days::new(u64::from(*off))) else {
-                        return;
-                    };
-                    if d > start && !push(d) {
-                        return;
-                    }
-                }
-                match monday.checked_add_days(Days::new(step)) {
-                    Some(n) if n <= limit => monday = n,
-                    _ => return,
-                }
-            }
+                1 + mask_between(mask, so + 1, 7)
+                    + (q - 1) * u64::from(mask.count_ones())
+                    + mask_between(mask, 0, dof)
+            })
         }
         Freq::Monthly => {
-            let day = start.day();
-            let Some(first) = start.with_day(1) else {
-                return;
-            };
-            let mut k = 0u64;
-            loop {
-                let Some(month) = k
-                    .checked_mul(r.interval)
-                    .and_then(|m| u32::try_from(m).ok())
-                    .and_then(|m| first.checked_add_months(Months::new(m)))
-                else {
-                    return;
-                };
-                if month > limit {
-                    return;
-                }
-                // a month without that day is skipped (RFC 5545)
-                if let Some(d) = month.with_day(day) {
-                    if !push(d) {
-                        return;
-                    }
-                }
-                k += 1;
+            if date.day() != start.day() {
+                return None;
             }
+            let months = u64::try_from(month_number(date) - month_number(start)).ok()?;
+            (months % r.interval == 0)
+                .then(|| months_with_day(start, r.interval, months / r.interval))
         }
+    }
+}
+
+fn within_end(r: &Repeat, date: NaiveDate, pos: u64) -> bool {
+    match r.end {
+        RepeatEnd::Open => true,
+        RepeatEnd::Until(u) => date <= u,
+        RepeatEnd::Count(c) => pos < c,
     }
 }
 
@@ -432,9 +452,7 @@ fn series_dates(start: NaiveDate, r: &Repeat, limit: NaiveDate, mut emit: impl F
 /// starts at `when` and repeats by `repeat`.
 #[must_use]
 pub fn is_occurrence(when: &When, repeat: &Repeat, date: NaiveDate) -> bool {
-    let mut hit = false;
-    series_dates(when.start_date(), repeat, date, |d| hit |= d == date);
-    hit
+    position(when.start_date(), repeat, date).is_some_and(|p| within_end(repeat, date, p))
 }
 
 /// Expand a timed task into the occurrences overlapping `[from, to]`
@@ -461,6 +479,7 @@ pub fn expand(
         };
     };
     let start = when.start_date();
+    let skip: BTreeSet<NaiveDate> = skip.iter().copied().collect();
     let mut out = Vec::new();
     let mut place = |d: NaiveDate| {
         if skip.contains(&d) {
@@ -481,20 +500,57 @@ pub fn expand(
             });
         }
     };
-    series_dates(start, r, to, &mut place);
-    // a later occurrence may have been moved into the window
-    for d in moved.keys().filter(|d| **d > to) {
-        if is_occurrence(when, r, *d) {
-            place(*d);
+    // an occurrence starting up to its own length before `from` still overlaps
+    let reach = TimeDelta::try_days((when.ends() - when.begins()).num_days() + 1);
+    let lo = reach
+        .and_then(|t| from.checked_sub_signed(t))
+        .unwrap_or(start)
+        .max(start);
+    let mut pos: Option<u64> = None;
+    let mut d = lo;
+    while d <= to {
+        let p = match pos {
+            Some(p) => position_hit(start, r, d).then_some(p + 1),
+            None => position(start, r, d),
+        };
+        if let Some(p) = p {
+            if !within_end(r, d, p) {
+                break;
+            }
+            pos = Some(p);
+            place(d);
+        }
+        match d.succ_opt() {
+            Some(n) => d = n,
+            None => break,
+        }
+    }
+    // an occurrence may have been moved into the window from outside it
+    for k in moved.keys().filter(|k| **k < lo || **k > to) {
+        if is_occurrence(when, r, *k) {
+            place(*k);
         }
     }
     out.sort_by_key(|o| (o.window.begins(), o.date));
     out
 }
 
+/// `position(..).is_some()` without counting.
+fn position_hit(start: NaiveDate, r: &Repeat, date: NaiveDate) -> bool {
+    match r.freq {
+        Freq::Monthly => {
+            date.day() == start.day()
+                && u64::try_from(month_number(date) - month_number(start))
+                    .is_ok_and(|m| m % r.interval == 0)
+        }
+        _ => position(start, r, date).is_some(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Months;
     use serde_json::json;
 
     fn d(s: &str) -> NaiveDate {
@@ -511,6 +567,178 @@ mod tests {
 
     fn dates(occ: &[Occurrence]) -> Vec<String> {
         occ.iter().map(|o| fmt_date(o.date)).collect()
+    }
+
+    /// The plain walk the arithmetic replaced - the oracle it must agree with.
+    fn walk(start: NaiveDate, r: &Repeat, limit: NaiveDate) -> Vec<NaiveDate> {
+        let mut out = Vec::new();
+        let mut push = |d: NaiveDate| -> bool {
+            if d > limit {
+                return false;
+            }
+            match r.end {
+                RepeatEnd::Until(u) if d > u => return false,
+                RepeatEnd::Count(c) if u64::try_from(out.len()).expect("len") >= c => return false,
+                _ => {}
+            }
+            out.push(d);
+            true
+        };
+        match r.freq {
+            Freq::Daily => {
+                let mut d = start;
+                while push(d) {
+                    d = d
+                        .checked_add_days(Days::new(r.interval))
+                        .expect("fixture range");
+                }
+            }
+            Freq::Weekly => {
+                if !push(start) {
+                    return out;
+                }
+                let days: BTreeSet<u32> = if r.byday.is_empty() {
+                    BTreeSet::from([start.weekday().num_days_from_monday()])
+                } else {
+                    r.byday.iter().map(|w| w.num_days_from_monday()).collect()
+                };
+                let mut monday = start
+                    .checked_sub_days(Days::new(u64::from(start.weekday().num_days_from_monday())))
+                    .expect("fixture range");
+                'weeks: loop {
+                    for off in &days {
+                        let d = monday
+                            .checked_add_days(Days::new(u64::from(*off)))
+                            .expect("range");
+                        if d > start && !push(d) {
+                            break 'weeks;
+                        }
+                    }
+                    monday = monday
+                        .checked_add_days(Days::new(r.interval * 7))
+                        .expect("range");
+                    if monday > limit {
+                        break;
+                    }
+                }
+            }
+            Freq::Monthly => {
+                let first = start.with_day(1).expect("first");
+                for k in 0u32.. {
+                    let m = u32::try_from(r.interval).expect("interval") * k;
+                    let month = first.checked_add_months(Months::new(m)).expect("range");
+                    if month > limit {
+                        break;
+                    }
+                    if let Some(d) = month.with_day(start.day()) {
+                        if !push(d) {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn arithmetic_occurrence_agrees_with_the_walk() {
+        let starts = [
+            "2026-10-07",
+            "2024-01-29",
+            "2026-01-31",
+            "2026-03-30",
+            "2028-02-29",
+        ];
+        let rules = [
+            json!({"freq":"daily"}),
+            json!({"freq":"daily","interval":3,"count":40}),
+            json!({"freq":"daily","interval":2,"until":"2027-02-01"}),
+            json!({"freq":"weekly"}),
+            json!({"freq":"weekly","interval":2,"byday":["mo","we","su"]}),
+            json!({"freq":"weekly","interval":3,"byday":["tu"],"count":17}),
+            json!({"freq":"weekly","byday":["fr","mo"],"until":"2027-05-05"}),
+            json!({"freq":"monthly"}),
+            json!({"freq":"monthly","interval":5,"count":9}),
+            json!({"freq":"monthly","interval":13}),
+            json!({"freq":"monthly","interval":12,"count":3}),
+            json!({"freq":"monthly","interval":2,"until":"2029-01-31"}),
+        ];
+        let limit = d("2032-12-31");
+        for s in starts {
+            let w = when(json!({"start": s, "end": s}));
+            for rule in &rules {
+                let r = rep(rule.clone());
+                let hits: BTreeSet<NaiveDate> =
+                    walk(w.start_date(), &r, limit).into_iter().collect();
+                let mut day = d("2023-12-01");
+                while day <= limit {
+                    assert_eq!(
+                        is_occurrence(&w, &r, day),
+                        hits.contains(&day),
+                        "{s} {rule} {day}"
+                    );
+                    day = day.succ_opt().expect("next day");
+                }
+                for (from, to) in [
+                    ("2026-10-01", "2026-10-31"),
+                    ("2028-02-01", "2028-03-31"),
+                    ("2023-01-01", "2032-12-31"),
+                ] {
+                    let skip = [d("2026-10-14"), d("2028-03-30")];
+                    let got: Vec<NaiveDate> =
+                        expand(&w, Some(&r), &skip, &BTreeMap::new(), d(from), d(to))
+                            .iter()
+                            .map(|o| o.date)
+                            .collect();
+                    let want: Vec<NaiveDate> = hits
+                        .iter()
+                        .copied()
+                        .filter(|x| !skip.contains(x) && *x >= d(from) && *x <= d(to))
+                        .collect();
+                    assert_eq!(got, want, "{s} {rule} {from}..{to}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn signed_years_are_refused() {
+        assert!(parse_date("0000-01-01").is_some());
+        assert!(parse_date("9999-12-31").is_some());
+        assert!(parse_date("+10000-01-01").is_none());
+        assert!(parse_date("-0001-12-31").is_none());
+        assert!(parse_date("-262143-01-01").is_none());
+        assert!(parse_datetime("+10000-01-01T00:00").is_none());
+        assert!(parse_datetime("-0001-01-01T00:00").is_none());
+    }
+
+    #[test]
+    fn far_keys_cost_no_walk() {
+        let w = when(json!({"start":"0000-01-01","end":"0000-01-01"}));
+        let r = rep(json!({"freq":"daily"}));
+        let mut moved = BTreeMap::new();
+        let mut day = d("9990-01-01");
+        for _ in 0..3000 {
+            assert!(is_occurrence(&w, &r, day));
+            moved.insert(day, w);
+            day = day.succ_opt().expect("next day");
+        }
+        let r = rep(json!({"freq":"monthly","interval":7}));
+        let w31 = when(json!({"start":"0000-01-31","end":"0000-01-31"}));
+        for y in 9000..9999 {
+            let k = NaiveDate::from_ymd_opt(y, 12, 31).expect("date");
+            let _ = is_occurrence(&w31, &r, k);
+        }
+        let occ = expand(
+            &w,
+            Some(&rep(json!({"freq":"daily"}))),
+            &[],
+            &moved,
+            d("0000-01-01"),
+            d("0000-01-01"),
+        );
+        assert_eq!(occ.len(), 3001);
     }
 
     #[test]

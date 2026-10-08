@@ -164,7 +164,31 @@ fn non_kanban_payloads_are_skipped_without_a_rev() {
         &mut b,
         vec![json!({"act": "add", "ref": "x", "title": "t", "assignees": ["mara"]})],
     );
-    assert!(!r.is_empty());
+    assert!(r.contains("id missing"), "{r}");
+    let r = void(&mut b, vec![add(1, "t", &["mara"], json!({"ref": "x"}))]);
+    assert!(r.contains("ref is resolved at propose"), "{r}");
+}
+
+#[test]
+fn thousands_of_far_skip_keys_fold_without_a_walk() {
+    let mut keys = Vec::new();
+    let mut day = parse_date("9990-01-01").expect("date");
+    for _ in 0..3000 {
+        keys.push(Value::from(fmt_date(day)));
+        day = day.succ_opt().expect("next day");
+    }
+    let mut b = BoardState::default();
+    applied(
+        &mut b,
+        vec![add(
+            1,
+            "s",
+            &["mara"],
+            json!({"when": {"start": "0000-01-01", "end": "0000-01-01"},
+                   "repeat": {"freq": "daily"}, "skip": keys}),
+        )],
+    );
+    applied(&mut b, vec![set(1, json!({"title": "t"}))]);
 }
 
 /// Drive a fresh task to `from`; `timed` makes it an appointment.

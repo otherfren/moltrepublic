@@ -477,7 +477,7 @@ again; the difference is rendered on the card, in the decision chat, and
 returned in `Reply::Proposed.warnings` and by `quests_view` (§6). In the
 example, `set E due 2026-10-21` renders:
 
-> E: date_conflict resolved · needed by 23 Oct, due 21 Oct
+> E: needed by 23 Oct → **21 Oct** · date_conflict resolved
 
 and `set M1 due 2026-10-16`:
 
