@@ -1,9 +1,9 @@
-# Kanban - tasks, calendar and forecast on the gated board
+# Kanban - tasks, calendar and deadlines on the gated board
 
 **Status: CONCEPT for discussion, revision 3 (2026-10-07), anchors
 re-verified against master `1cd491c`. A fundamental rework of revision 2:
-one task kind, a status state machine, a calendar, real scheduling,
-agents first - and the m-of-n rule unchanged. The §8 design mock is BUILT
+one task kind, a status state machine, a calendar, deadline-driven
+order, agents first - and the m-of-n rule unchanged. The §8 design mock is BUILT
 (2026-08-16); everything else is a proposal awaiting ratification, and the
 §11 questions gate the backend build. §12 lists what changed against
 revision 2.**
@@ -19,10 +19,12 @@ applied payloads on the persistent chain, drafts local, one co-equal
 command surface.
 
 **The one idea of revision 3.** The group votes on *intent and outcome* -
-what, who, how much work, blocked by what, by when, fixed appointments,
+what, who, roughly how big, blocked by what, by when, fixed appointments,
 started, succeeded, failed. Everything that follows from those facts is
-*derived* on read and never voted on: whether a task is blocked, the
-schedule of floating work, its priority. That removes most of the votes
+*derived* on read and never voted on: whether a task is blocked, by when
+it is really needed, its priority, overdue work and date conflicts.
+Nothing is estimated in time: agents cannot estimate, so the plan never
+pretends to know how long work takes. That removes most of the votes
 revision 2 needed without loosening the rule that every change of shared
 state clears m-of-n.
 
@@ -71,7 +73,7 @@ field, no points. There is the **task**:
 | `type` | free label: "bug", "meeting", "research" … | optional; non-empty, no newline, trimmed at propose; colours the task (§2.4) |
 | `creator` | the seat that proposed the `add` | stamped at propose, immutable (below) |
 | `assignees` | the seats who do the work | at least one roster seat, no duplicates |
-| `effort` | REMAINING work in hours, all assignees together | optional, default 0, >= 0; never on a timed task (§3) |
+| `size` | rough size: `XS`, `S`, `M`, `L`, `XL`, `XXL` | optional; subjective, orientation only - no rule, view or derivation reads it |
 | `blocked_by` | tasks that must succeed first (its prerequisites) | no self, no duplicates |
 | `due` | deadline, `YYYY-MM-DD` | optional |
 | `after` | not before, `YYYY-MM-DD` | optional; `after <= due` |
@@ -125,8 +127,9 @@ shows both as they were.
 - Ids are random 128-bit lowercase hex minted engine-side (§4.2); display
   form `#` + first 8 hex. An id is never reused - a retry or a reopen
   keeps the id, so citations and links stay valid.
-- `effort` is the remaining work: assignees lower it while working
-  (batched, §7). That is what keeps the forecast honest.
+- `size` is a hint for humans and agents picking work, nothing more. A
+  task has a time span only when it is scheduled (`when`, §3); floating
+  work has none, and no field estimates it.
 
 **`blocked_by` and its inverse.** "A is blocked by B" means A cannot start
 until B has succeeded. Read the other way round, B is a **prerequisite
@@ -140,8 +143,8 @@ prerequisites, which may have prerequisites of their own ("Beta release"
 ← "Client" ← "Login screen" …). It has the same fields, the same governed
 lifecycle (§2.2) and the same rules, starts only when all its
 prerequisites have succeeded - so it is the integration or acceptance
-step of the work before it - and often carries `effort: 0` and a `due`.
-The forecast reads the relation directly.
+step of the work before it - and often carries a `due`, which its
+prerequisites inherit (§5).
 
 Consequences, stated openly: such a task is never `wip` while its
 prerequisites run (the `dependencies` view shows the progress, §8); a
@@ -191,7 +194,8 @@ is legal even if A is blocked by B.
 | **stuck** | some `blocked_by` task is `fail` - nothing moves until someone retries it, cancels it or removes the link |
 | **blocked** | otherwise, some `blocked_by` task is not yet `success`/`cancelled` |
 | **scheduled** | not blocked and has a `when` (a calendar appointment) |
-| **unscheduled** | not blocked and floating; the forecast plans it (§5) |
+| **later** | not blocked, but its `after` date has not come yet |
+| **open** | not blocked and floating; ordered by §5 |
 
 A `cancelled` prerequisite counts as met (the work is no longer needed);
 a `fail` does not. An external blocker ("waiting for the vendor") is a
@@ -200,15 +204,11 @@ task of its own that the work is blocked by, not a special state.
 A recurring series (§3.2) uses only `todo` (active) and `cancelled`: any
 other transition on it voids (§4.4).
 
-### 2.3 Seats and the clock
+### 2.3 The clock
 
-- **Seat capacity** (`seat` act, governed, in the same fold): `hours` per
-  working day 1..=24, `days` a set of weekdays, `away` a list of date
-  ranges. Default for a seat never set: 8 hours, Monday-Friday, never
-  away. An agent seat may be 24 hours, seven days.
-- **The clock is UTC. There are no time zones.** Every date, time and
-  weekday on the board, in the calendar, in the forecast and in the wake
-  timer is UTC, stored and shown alike - no conversion, no daylight
+**The clock is UTC. There are no time zones.** Every date, time and
+  weekday on the board, in the calendar, in the derived dates and in the
+  wake timer is UTC, stored and shown alike - no conversion, no daylight
   saving. Organization › Status shows the current UTC time, so every
   member reads the same clock.
 
@@ -216,7 +216,7 @@ other transition on it voids (§4.4).
 
 `type` is a free label; there is no registry and no list to maintain. The
 first task with a new label creates the type, and the last one to drop it
-retires it. A type changes nothing about rules, lifecycle or forecast - it
+retires it. A type changes nothing about rules, lifecycle or order - it
 is for grouping and seeing.
 
 - **One spelling per type.** Two labels are the same type when they are
@@ -245,7 +245,6 @@ types present in the current view.
 ```
 BoardState {
   rev: u64,                               // applied changesets folded (void ones too)
-  seats: BTreeMap<SeatName, Capacity>,
   tasks: BTreeMap<TaskId, Task>,          // all states
 }
 Task { …§2.1 fields…, touched_rev: u64 }
@@ -255,28 +254,27 @@ Task { …§2.1 fields…, touched_rev: u64 }
 Same chain, byte-identical board on every node: live, after replay, after
 a checkpoint cut. `touched_rev` is the `rev` of the changeset that last
 set any field of the task (§4.5). Derived sub-states, "prerequisite for"
-and the forecast are computed on read, never stored.
+and the derived dates (§5) are computed on read, never stored.
 
 ## 3. Calendar
 
 A task is in exactly one of three time modes.
 
-| mode | fields | in the calendar | in the forecast |
+| mode | fields | in the calendar | time span |
 |---|---|---|---|
-| **floating** (default) | no `when` | **no** | planned by §5 |
-| **timed, once** | `when` | yes, one block | fixed; blocks every assignee's capacity |
-| **timed, recurring** | `when` + `repeat` | yes, every occurrence | fixed; blocks capacity per occurrence |
+| **floating** (default) | no `when` | **no** | none - only `after` / `due` |
+| **timed, once** | `when` | yes, one block | its `when` |
+| **timed, recurring** | `when` + `repeat` | yes, every occurrence | each occurrence's window |
 
 Floating tasks are the bulk of the work. They appear on the board, in the
-list views and on the forecast timeline (`plan`), **never** in the
+list views and on the deadline timeline (`plan`), **never** in the
 calendar. A floating task may be blocked by any task, timed ones included.
 
 ### 3.1 `when`
 
 `{"start": S, "end": E}`, both all-day (`YYYY-MM-DD`, `S <= E`, both days
-inclusive) or both timed (`YYYY-MM-DDTHH:MM`, `S < E`). UTC, canonical spelling only (§4.3). A
-timed task carries no `effort`: the block IS the work. Moving it is a
-`set` - one vote.
+inclusive) or both timed (`YYYY-MM-DDTHH:MM`, `S < E`). UTC, canonical spelling only (§4.3). Moving it
+is a `set` - one vote.
 
 ### 3.2 `repeat`, `skip`, `moved`
 
@@ -307,7 +305,7 @@ yields one occurrence or five hundred.
 task to tick off, so a weekly sync costs no vote per week. To end a
 series, `set` its `until` (history stays visible); `cancel` removes it
 from the calendar entirely. Whether an occurrence should be completable is
-§11 Q4. A series cannot be blocked by anything and cannot block anything
+§11 Q4 (decided: no). A series cannot be blocked by anything and cannot block anything
 (a link to "the meeting" has no single finish); a once-timed task can do
 both.
 
@@ -328,18 +326,16 @@ decision and applied all-or-nothing:
 `summary` non-empty, one line, the card's headline. `base_rev` is the fold
 revision the proposer saw (display only, §4.5).
 
-### 4.2 Three task acts, one settings act
+### 4.2 Three acts
 
 ```json
 {"act":"add",   "id":"<hex32>", "ref":"api", "title":"…", "assignees":["mara"],
-                "effort":16, "blocked_by":["<id>","@ref"], "due":"…", "after":"…",
+                "size":"M", "blocked_by":["<id>","@ref"], "due":"…", "after":"…",
                 "when":{…}, "repeat":{…}, "type":"feature",
                 "description":"…", "acceptance":["…","…"], "out_of_scope":["…"]}
-{"act":"set",   "id":"<id>|@ref", "fields":{"assignees":["walter","bot"],"effort":8,"due":null}}
+{"act":"set",   "id":"<id>|@ref", "fields":{"assignees":["walter","bot"],"size":"L","due":null}}
 {"act":"state", "id":"<id>|@ref", "to":"wip", "note":"…"}
 {"act":"state", "id":"<id>|@ref", "to":"success", "evidence":["…","…"]}
-{"act":"seat",  "seat":"walter", "hours":4, "days":["mo","tu","we","th","fr"],
-                "away":[["2026-10-15","2026-10-16"]]}
 ```
 
 - `set` may name every task field except `state`, `note`, `evidence` and
@@ -350,7 +346,6 @@ revision the proposer saw (display only, §4.5).
   cannot hide inside a text edit - revision 2 needed separate
   `assign`/`schedule` acts for that; rendering does it here.
 - `state.to` names the target; the fold checks the transition (§2.2).
-- `seat` replaces its whole value.
 - **Ids, refs and the creator, agents first.** `add.id` is optional:
   omitted, `propose_payload` mints it (engine-side RNG, the
   `mint_message_id` precedent, `chat.rs:46`), inside its existing
@@ -370,13 +365,13 @@ One stateless `validate_kanban_payload(&Value)` in molt-core, called from
 doors). Refused, never recorded: not an object, unknown `op`, no acts, unknown act or field, a field outside its act's vocabulary, an empty or duplicated `assignees`, a date or time
 that does not round-trip (`NaiveDate`/`NaiveDateTime` parse, then format
 must equal the input - `2026-8-1` is refused), `after > due`, a `when`
-in the wrong order or mixing all-day and timed, an `add` carrying both
-`effort` and `when`, an `add` with `repeat` but no `when`, `set`
+in the wrong order or mixing all-day and timed, a `size` outside the six,
+an `add` with `repeat` but no `when`, `set`
 naming `state`/`note`/`evidence`/`creator` or nothing, `evidence` on a
 `state` act whose `to` is not `success`, an `acceptance`/`out_of_scope`
 item that is empty or contains a newline, an unknown state, an
 unresolved `@ref`. The check is stateless: a rule that needs the board
-(a `set` that leaves a timed task with `effort`) belongs to §4.4.
+(a `set` that leaves a `repeat` without `when`) belongs to §4.4.
 
 Wire ingest also refuses any `ref` key or `@` value and
 any `add` without `creator`: canonicalization runs only at propose.
@@ -388,14 +383,13 @@ any `add` without `creator`: canonicalization runs only at propose.
 stays applied, the Accepted row carries the void marker): `add` with an
 existing id; any act naming an unknown task; a `blocked_by` naming an
 unknown task; **a cycle** in `blocked_by`; a link to or from a recurring
-series; an assignee, `creator` or `seat` that is not a roster seat; an
+series; an assignee or `creator` that is not a roster seat; an
 illegal or unguarded state transition (§2.2), including any transition
 on a series other than `cancel`/`reopen`; an unknown act. And the rules
-that need the task's resulting fields: a timed task with `effort > 0`; a
-`repeat` without `when`; a `skip`/`moved` key that is no occurrence of
+that need the task's resulting fields: a `repeat` without `when`; a `skip`/`moved` key that is no occurrence of
 the resulting series. New against
 revision 2: link existence, acyclicity and the lifecycle are enforced,
-because the status machine and the forecast depend on them.
+because the status machine and the derived dates depend on them.
 
 **Precheck** - the fold's own apply over the current board, run at propose
 only (`wiki_patch_check` stance, proposals.rs:793): a changeset that would
@@ -416,98 +410,75 @@ kanban card the engine runs the precheck again and attaches advisory
 lines:
 
 - "would void now: #aa07 was cancelled by proposal 41" - the voters decline;
-- "changed since proposed: #aa07 effort" for every act whose task has
+- "changed since proposed: #aa07 due" for every act whose task has
   `touched_rev > base_rev` - the silent-overwrite risk made visible;
-- the forecast impact (§5.4).
+- the impact on the derived dates (§5.4).
 
 Correct without new chain machinery; the cost is that a doomed card waits
 for a decline instead of retiring itself. Generalizing the wiki and vault
 supersede walks remains worth doing, but on its own schedule.
 
-## 5. Forecast - the scheduler
+## 5. Deadlines and order - derived, never estimated
 
 ### 5.1 Contract
 
-`forecast(&BoardState, today: NaiveDate) → Forecast` in
-`crates/molt-core/src/kanban_forecast.rs`. Pure: no clock, no I/O; the
-caller passes today's UTC date. Same `(board, today)`, same
-forecast on every node. **The forecast is never consensus state** - it is
-what the board means today, rendered.
+`derive(&BoardState, today: NaiveDate) → Derived` in
+`crates/molt-core/src/kanban_dates.rs`. Pure: no clock, no I/O; the
+caller passes today's UTC date. Same `(board, today)`, same result on
+every node. **Never consensus state** - it is what the board means today,
+rendered. It reads dates and links only; `size` never enters it.
 
-### 5.2 Algorithm
+### 5.2 Rules
 
-Day granularity for links, hour granularity for capacity.
+1. **Needed by.** For every `todo`/`wip` task, `needed_by` = the earliest
+   of its own `due` and the `needed_by` of every open task it is a
+   prerequisite for. A deadline flows backwards through the graph: if the
+   beta is due on the 23rd, everything it waits for is needed by the 23rd
+   too. No `due` anywhere downstream: no `needed_by`.
+2. **Priority.** `wip` first, then earliest `needed_by` (none last), then
+   id. Nobody sets a priority; deadlines and the graph produce it.
+3. **Flags** - all from dates and links, none from an estimate:
+   - `overdue` - `needed_by` is before `today`;
+   - `date_conflict` - the task's own `due` or `after` lies after its
+     `needed_by` (a prerequisite promised later than the work that waits
+     for it), or a timed prerequisite ends after a timed dependent starts;
+   - `stuck` (§2.2) and `started_on_reopened` (§4.4).
+4. **`next`** per seat: its `wip` tasks, then its startable `todo` tasks
+   (not blocked, `after` reached) in priority order. Blocked work is never
+   in it (§11 Q15).
 
-1. **Capacity.** For seat *s* on day *d*: 0 if *d* is not in `days` or
-   inside `away`; otherwise `hours` minus the hours of timed blocks on *d*
-   that *s* is assigned to (once and recurring), at least 0. An all-day
-   block takes the whole day.
-2. **Backward pass.** For every `todo`/`wip` task, latest finish `LF` =
-   the earliest of its own `due` and, for each task it is a prerequisite
-   for, the day before that task's latest start (a zero-effort dependent
-   passes its `LF` through). Latest start `LS` = walk back from `LF`
-   consuming the assignees' summed capacity until `effort` is covered. No
-   deadline downstream: `LS = ∞`.
-3. **Derived priority.** `wip` first, then smallest `LS`, then id. Nobody
-   sets a priority; deadlines and the prerequisite graph produce it.
-4. **Forward pass, serial list scheduling.** Repeatedly take the
-   highest-priority task whose prerequisites are all placed or met.
-   Earliest day = `max(today, after, day after every prerequisite's
-   finish)`.
-   - effort > 0: start no earlier than every assignee's cursor; each day,
-     the task consumes the free hours of **all** its assignees together;
-     finish = the day the effort is covered; every assignee's cursor moves
-     to that point. Each seat works on one task at a time and may start
-     its next task on the same day if hours remain.
-   - effort 0 (typically an integration step): finish = the latest prerequisite finish.
-   - timed once: start/finish are its `when`; it is not moved.
-   - terminal tasks are skipped; a `cancelled` prerequisite counts as met;
-     a task that is **stuck** (failed prerequisite) is not placed, and
-     neither is anything downstream of it.
-   No backfilling of gaps: simple, explainable, deterministic.
-5. **Output.** Per task: `start`, `finish`, `slack` (working days between
-   finish and `LF`), flags `late` (finish after `LF`), `stuck`,
-   `starts_after_fixed` (a timed task whose prerequisite finishes too
-   late), `started_on_reopened`. Per task with `due`: forecast vs deadline.
-   Per seat: `next` - its `wip` tasks, else its first placed task that is
-   not blocked.
+Cost: one pass over tasks and links; cached per `(rev, today)` beside the
+fold cache.
 
-No cap on the board: its size is the members' decision. The forecast is
-O(n log n + links + days × seats) and runs on read, cached per
-`(rev, today)` beside the fold cache.
+### 5.3 Worked example (`today` = Mon 2026-10-12)
 
-### 5.3 Worked example (computed, `today` = Mon 2026-10-12)
-
-Seats: `mara` 8 h Mon-Fri; `walter` 4 h Mon-Fri, away 15-16 Oct, assigned
-to a recurring "Sync" Mondays 09:00-11:00; `bot` 24 h, seven days.
-
-| task | assignees | effort | blocked by | state | `LS` | start | finish |
+| task | assignees | size | blocked by | due | state | `needed_by` | flags |
 |---|---|---|---|---|---|---|---|
-| A API schema | mara | 16 | - | wip | 19 Oct | 12 Oct | 13 Oct |
-| B Client | walter | 12 | A | todo (blocked) | 21 Oct | 14 Oct | 21 Oct |
-| C Docs | bot | 24 | A | todo (blocked) | 23 Oct | 14 Oct | 14 Oct |
-| D Logging | mara | 24 | - | todo (unscheduled) | ∞ | 14 Oct | 16 Oct |
-| M1 Beta, due 23 Oct | mara | 0 | A, B, C | todo (blocked) | 23 Oct | - | **21 Oct** |
+| A API schema | mara | M | - | - | wip | 20 Oct | |
+| B Client | walter | L | A, E | - | todo (blocked) | 23 Oct | |
+| C Docs | bot | S | A | 20 Oct | todo (blocked) | 20 Oct | |
+| D Logging | mara | M | - | - | todo (open) | - | |
+| E Vendor contract | walter | - | - | 28 Oct | todo (open) | 23 Oct | **date_conflict** |
+| M1 Beta | mara | - | A, B, C | 23 Oct | todo (blocked) | 23 Oct | |
 
-A, B and C are prerequisites for M1. Walter's B: 4 h on the
-14th, away 15-16, 2 h on Monday the 19th (the sync takes 2), 4 h on the
-20th, the last 2 h on the 21st. M1 lands two working days before its
-deadline. `next`: mara → A (`wip`); walter and bot have nothing
-startable today - B and C wait for A - so their `next` is empty, and the
-`plan` view shows their forecast starts (14 Oct).
+A is needed by the 20th because C, which waits for it, is due then. E is
+promised for the 28th but B needs it by the 23rd: a date conflict, shown
+before anyone is late. `next`: mara → A (`wip`), then D; walter → E;
+bot → nothing (C waits for A).
 
 ### 5.4 Impact - what a voter sees
 
-A pending changeset is folded onto a copy of the board and forecast
+A pending changeset is folded onto a copy of the board and derived
 again; the difference is rendered on the card, in the decision chat, and
 returned in `Reply::Proposed.warnings` and by `quests_view` (§6). In the
-example, `set B effort 24` renders:
+example, `set E due 2026-10-21` renders:
 
-> M1 Beta: 21 Oct → **26 Oct, LATE** (due 23 Oct) · B: finish 21 Oct → 26 Oct
+> E: date_conflict resolved · needed by 23 Oct, due 21 Oct
 
-Adding `bot` to B's assignees as well (effort 24) brings B back to the
-14th; bot is shared, so C slips to the 15th, and M1 lands on the 15th -
-on time.
+and `set M1 due 2026-10-16`:
+
+> M1, B, E: needed by 23 Oct → **16 Oct** · A, C: 20 Oct → **16 Oct** · C: date_conflict (due 20 Oct)
+
 The impact is display only and is computed on the voter's node with the
 voter's `today`. Members still sign the acts (sign-what-you-see); the
 impact is the reason to sign or decline.
@@ -522,7 +493,7 @@ new `Command`; the wake tools of §6.2 are listed in §9 S2/S3):
 quests_view {seat?, task?, proposal?, from?, to?, filter?}   # Seat scope
   # filter: the §8 filters by name, e.g. ["to_act_on"] - the agent's work queue
   → {rev, tasks (todo + wip + recently closed, with derived status),
-     forecast, next (per seat or for `seat`), risks,
+     derived (needed_by, flags per task), next (per seat or for `seat`),
      task: {…, prerequisite_for, its prerequisites to any depth},
      calendar (expanded occurrences in [from, to]),
      proposal: {acts rendered, impact, would_void, changed_since}}
@@ -546,8 +517,8 @@ quests_propose {summary, base_rev, acts}                     # Seat scope
 
 **Conventions, not mechanisms** - written into the tool descriptions:
 
-- *One changeset per wake.* What one wake produced - transitions,
-  effort updates, new tasks - rides together. How often a seat wakes is
+- *One changeset per wake.* What one wake produced - transitions, date
+  or size changes, new tasks - rides together. How often a seat wakes is
   its own setting (§6.1), so the seat sets its own rhythm.
 - *Reviewing agent checklist:* the acts match the summary; a `succeed`
   carries `evidence` for every acceptance criterion and the card shows no criterion unmet; nothing outside `out_of_scope` was smuggled in; a `fail` note says
@@ -724,7 +695,8 @@ may have been merged into this one wake. Always start with the list:
    criteria? Ask in chat what "done" means before you start.
 4. Propose the outcome with `quests_propose`: `succeed` with one
    `evidence` item per acceptance criterion (same order), or `fail` with
-   a note (why, what next). Lower `effort` if you stopped half way.
+   a note (why, what next). Stopped half way? Leave it `wip` and say
+   so in chat.
 5. Before you exit, `read_actions` once more; work what is new.
 
 ## Rules
@@ -732,7 +704,7 @@ may have been merged into this one wake. Always start with the list:
   promptly - do not idle or poll in a loop for minutes.
 - Never change the wake command or settings unless your operator asked.
 - One kanban changeset per wake: bundle every outcome of this wake (all
-  tasks you worked, all effort updates) into it.
+  tasks you worked, all changes) into it.
 - When unsure, ask in chat instead of proposing.
 ```
 
@@ -744,7 +716,7 @@ The rule stays strict. The load drops because far fewer things are votes:
 |---|---|---|
 | lifecycle of one task | create, ready, doing, review, done, close = up to 6 acts | add, start, succeed = 3 acts |
 | becoming blocked or unblocked | a `move` vote | 0 - derived |
-| a slipped date | a `schedule` vote | 0 - the forecast moves |
+| a slipped estimate | a `schedule` vote | 0 - nothing is estimated |
 | reprioritize | an `edit` vote | 0 - priority is derived |
 | a weekly meeting | not modelled | 1 vote for the series |
 | sprint planning | `sprint` + `schedule` + `move` votes | none - no sprints |
@@ -769,10 +741,10 @@ board, drill-in, planning, create, mine, archive; `kb-*` strings in
 | view key | today (mock) | revision 3 |
 |---|---|---|
 | `board` | 5 columns | **To do · In progress · Done** - To do sorted blocked / stuck / scheduled / unscheduled with badges; Done shows success, fail, cancelled |
-| `plan` | sprint planning | **forecast timeline** (Gantt-like): floating tasks as dashed bars, a task as a collapsible row over its prerequisites, deadlines as diamonds, `late` and `stuck` in red |
+| `plan` | sprint planning | **deadline timeline**: timed tasks as blocks at their `when`; floating tasks as markers at their `needed_by`, a task as a collapsible row over its prerequisites, links as arrows; a lane "no date" for the rest; `overdue`, `date_conflict` and `stuck` in red; size as a label |
 | `calendar` | - (new, 7th key) | month / week; **only timed tasks**, recurring ones expanded; floating work never appears here |
-| `dependencies` | - (new, 8th key) | **logical view**: every task with its prerequisites, expandable to any depth; the top level is the tasks that are a prerequisite for nothing; a task that is a prerequisite for several appears under each (marked "also for …"); status badge and progress (succeeded/total of all its prerequisites, forecast finish) per task; filterable (below) |
-| `create` | template form | one form; time mode floating / once / recurring; "blocked by" picker |
+| `dependencies` | - (new, 8th key) | **logical view**: every task with its prerequisites, expandable to any depth; the top level is the tasks that are a prerequisite for nothing; a task that is a prerequisite for several appears under each (marked "also for …"); status badge and progress (succeeded/total of all its prerequisites, `needed_by`) per task; filterable (below) |
+| `create` | template form | one form; time mode floating / once / recurring; size picker; "blocked by" picker |
 | `proposals` | real tables | plus impact and "would void" lines |
 | `my-quests` ("Mine") | sample | the `read_actions` list first (§6.1), then `next`, then everything the seat is assigned to or created |
 | `archive` | sample | success · fail · cancelled, with the transition note |
@@ -796,9 +768,9 @@ governance, combinable):
 | starting now | my timed tasks whose start has passed and that are not yet `wip` or terminal - the `task_start` actions of §6.1 |
 | created by me | tasks whose `creator` is me |
 | needs my vote | tasks touched by a pending changeset I have not voted on |
-| blocked / stuck / late | by derived status or forecast flag |
+| blocked / stuck / overdue / date conflict | by derived status or flag |
 | state | any subset of the governed states; terminal hidden by default |
-| assignee, time mode | another seat's view; floating / timed |
+| assignee, time mode, size | another seat's view; floating / timed; any subset of sizes |
 | type | any subset of the types present (picked from the legend) |
 
 In `dependencies`, a filter keeps the matching tasks **and the tasks
@@ -816,18 +788,19 @@ rescued into the basket (`Wiki::rescue_patch` idiom).
 TDD, red first, each step green on master before the next.
 
 - **S1 - core.** `kanban_fold.rs` (fold with the state machine,
-  `validate_kanban_payload`, precheck), `kanban_forecast.rs`,
+  `validate_kanban_payload`, precheck), `kanban_dates.rs`,
   `kanban_calendar.rs` (RRULE subset expansion); chrono is already a
   workspace dependency (`Cargo.toml:73`); no tz database. Keystones: fold determinism (one-by-one == all-at-once == from
   a cached prefix); void all-or-nothing incl. an in-changeset duplicate
   id; every row of the transition table, legal and illegal; start guard
   with in-changeset ordering; cycle voids; the date round-trip refusal; a
-  byte-pinned fixture board; the §5.3 example as a forecast fixture plus
-  the `effort 24` and the two-assignee variant; stuck propagation;
+  byte-pinned fixture board; the §5.3 example as a fixture plus both
+  §5.4 variants; `needed_by` through a diamond-shaped graph; stuck
+  propagation;
   `skip`/`moved`; `monthly` on the 31st.
 - **S2 - engine.** Canonicalization (`minted`, `creator`) in
   `propose_payload`; shape check at both doors; precheck; `kanban_cache`
-  with the forecast cache; `board` in `snapshot` (proposals.rs:4014);
+  with the derived-dates cache; `board` in `snapshot` (proposals.rs:4014);
   advisory lines on pending cards (§4.5). Keystones: a `ref`/`@` payload
   or an `add` without `creator` over the wire is dropped; a supplied
   `creator` is overwritten at propose; a pending changeset on a task
@@ -858,8 +831,8 @@ TDD, red first, each step green on master before the next.
   headless GUI tests under live-preview. `WAKE_SKILL` lands in S3 with a
   test that every wake reason and env var is documented in it.
 - **S5 - verification and links.** Two-instance loopback over the real
-  governance path (identical board AND identical forecast for the same
-  `today`), a checkpoint cut keeps the fold, `quest:<id>` link targets in
+  governance path (identical board AND identical derived dates for the
+  same `today`), a checkpoint cut keeps the fold, `quest:<id>` link targets in
   the wiki (`molt_core::wiki_refs`, one parser) with backlinks on read,
   clippy 0 per crate, `scripts/check-doc-refs.py` clean; the doc moves to
   `docs_archive/` and the `known_debt.md` Story-14 entry is updated.
@@ -872,9 +845,10 @@ v7 set). Folding at a cut is decided only when growth is measured.
 Sprints and PIs; manual ranking; priority fields; WIP-limit enforcement;
 burndown and velocity charts; date-driven changes of shared state (nothing
 shared executes on a date - a task does not turn `fail` because its
-deadline passed, it is flagged `late`; the local `task_start` poke of
-§6.1 changes nothing shared); backfilling in the scheduler; per-assignee
-effort splits; resource calendars beyond hours/days/away; time tracking;
+deadline passed, it is flagged `overdue`; the local `task_start` poke of
+§6.1 changes nothing shared); time estimates, effort in hours, seat
+capacity and forecast finish dates (agents cannot estimate; `size` is
+orientation only); time tracking;
 rewards/bounties (Wallet Stage 1 cannot spend); per-member permissions
 (agents are seats).
 
@@ -884,28 +858,27 @@ Each with a recommendation, the counterargument first.
 
 1. **Vote load.** Decided 2026-10-08: strict - every change of shared
    state clears m-of-n; measure the load after S5.
-2. **Effort unit.** Hours (precise, agent-friendly) or half days (coarser,
-   fewer fake decimals)? *Recommendation:* hours.
+2. **Effort.** Decided 2026-10-08: no time estimates. A task has a time
+   span only when it is scheduled (`when`); otherwise an optional
+   T-shirt `size` (XS-XXL), subjective, orientation only. The forecast,
+   seat capacity and the effort-based impact are gone; order and
+   warnings come from deadlines and links (§5).
 3. **Read-only key.** Decided 2026-10-08: no kanban for the read-only
    key.
-4. **Completable occurrences.** Against status-less blocks: a daily chore
-   wants a tick. For: a tick per occurrence is a vote per occurrence.
-   *Recommendation:* blocks only; a chore that needs a tick is a floating
-   task added by the daily changeset.
-5. **More states.** The table of §2.2 is closed (`unknown state` voids).
-   Candidates seen so far: `review` (covered by the `succeed` vote) and
-   `on hold` (covered by `pause` plus an external-blocker task).
-   *Recommendation:* no further governed states; new derived sub-states
-   are free because they cost no vote and no ingest rule.
+4. **Completable occurrences.** Decided 2026-10-08: no - an occurrence
+   is a block of time with no state; a chore that needs a tick is a
+   floating task added by the daily changeset.
+5. **More states.** Decided 2026-10-08: the §2.2 table is closed - no
+   `review` (the `succeed` vote is the review), no `on hold` (`pause`
+   plus an external-blocker task). New derived sub-states stay free.
 6. **Time zone.** Decided 2026-10-07: none. Everything is UTC, shown
    as UTC; Organization › Status shows the current UTC time.
 7. **A second relation.** Decided for now: prerequisites only, one
    relation (2026-10-07). Revisit only if teams need "part of" without
    "blocks", or a task that is visibly in progress while its prerequisites
    run.
-8. **Creator's role.** Recommendation: information only (shown,
-   filterable); authority stays m-of-n. Alternative: a `succeed` also
-   needs the creator's approval - a role, which agents-are-seats rejects.
+8. **Creator's role.** Decided 2026-10-08: information only (shown,
+   filterable); authority stays m-of-n.
 9. **"To act on".** Decided 2026-10-07 (with Q15): my startable `todo`
    and my `wip` tasks only; pending votes are their own filter ("needs
    my vote") and their own `read_actions` entries.
@@ -940,7 +913,7 @@ Each with a recommendation, the counterargument first.
 
 - Removed: kinds (epic/story/task) and `parent` (→ one relation,
   `blocked_by`: a large "epic" is just a task with prerequisites to any
-  depth), sprints, PI, `priority`, `points`,
+  depth), sprints, PI, `priority`, `points` (→ an optional `size`, never computed with),
   `responsible` (→ `creator` + `assignees`), `ready`/`done`/`scope` fields
   (→ `description`, `acceptance` and `out_of_scope`, now lists, plus `evidence` on `succeed`), the five columns and `close`/`reopen` (→ the
   §2.2 state machine), the acts `edit`, `move`, `assign`, `schedule`,
@@ -953,9 +926,10 @@ Each with a recommendation, the counterargument first.
   free task `type` with a derived colour per type (§2.4);
   the status state machine with derived sub-states (§2.2);
   `blocked_by` / "prerequisite for", enforced and acyclic; `creator`
-  stamped at propose; several assignees; the forecast with derived
-  priority and the impact view (§5); the calendar with once and recurring
-  timed tasks (§3); seat capacity and the UTC-only clock (§2.3); the
+  stamped at propose; several assignees; deadline-driven order with
+  `needed_by`, `overdue`, `date_conflict` and the impact view (§5); an
+  optional T-shirt `size`; the calendar with once and recurring
+  timed tasks (§3); the UTC-only clock (§2.3); the
   typed MCP tools (former Q11, decided); the `calendar` and `dependencies` view keys with local filters.
 - Kept: changeset of absolute acts, all-or-nothing, both-doors shape
   check, propose-time precheck, engine-minted ids with `@ref`,
