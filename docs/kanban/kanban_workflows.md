@@ -907,9 +907,9 @@ Each with a recommendation, the counterargument first.
 8. **Creator's role.** Recommendation: information only (shown,
    filterable); authority stays m-of-n. Alternative: a `succeed` also
    needs the creator's approval - a role, which agents-are-seats rejects.
-9. **"To act on".** Recommendation: my startable `todo` and my `wip`
-   tasks; pending votes are their own filter ("needs my vote"), so the
-   two lists can be combined or not.
+9. **"To act on".** Decided 2026-10-07 (with Q15): my startable `todo`
+   and my `wip` tasks only; pending votes are their own filter ("needs
+   my vote") and their own `read_actions` entries.
 10. **Type colours.** Against the derived hash colour: two types can
     collide, and a team may want "bug" to be red. For: no setting, no vote,
     identical everywhere. *Recommendation:* derived first; if collisions
