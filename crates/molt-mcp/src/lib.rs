@@ -1010,8 +1010,10 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
         wake_on: args
             .get("wake_on")
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
-            .ok_or_else(|| missing("wake_on"))?,
+            .ok_or_else(|| missing("wake_on"))?
+            .iter()
+            .map(|r| r.as_str().map(str::to_string).ok_or_else(|| "wake_on: strings only".to_string()))
+            .collect::<Result<_, _>>()?,
         task_wake_lead_min: port("task_wake_lead_min")?,
         read_receipts: flag("read_receipts")?,
         // the trickle pace (mirroring §3.2): optional, absent = the defaults
@@ -3573,6 +3575,17 @@ pub(crate) mod tests {
             Command::SaveSettings { settings } => assert_eq!(settings.file_cap_bytes, Some(0)),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn save_settings_refuses_a_non_string_wake_reason() {
+        let def = tool_named("save_settings");
+        let schema = (def.schema)();
+        let props = schema["properties"].as_object().expect("properties");
+        let required = schema["required"].as_array().expect("required");
+        let mut args = required_args(props, required);
+        args.insert("wake_on".into(), json!([1, "kanban"]));
+        assert!(build("save_settings", &Value::Object(args)).is_err());
     }
 
     #[test]

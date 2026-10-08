@@ -604,10 +604,11 @@ reasons are hints; the list is the truth. Pending reasons are runtime
 state; across a restart the list itself still holds the work.
 
 - **Missed appointments.** The node keeps a local, sealed
-  `kanban_wakes.json` of fired `(task, occurrence)` keys. A node that was
-  off at a start time fires a missed start once on its next open, if it
-  is less than 24 h late (`late: true` in the list); older ones are only
-  shown in the GUI. No key fires twice.
+  `kanban_wakes.json` of fired `(task, start)` keys (built 2026-10-09:
+  a start moved after it fired is a new appointment and fires again). A
+  node that was off at a start time fires a missed start once on its next
+  open, if it is less than 24 h late (`late: true` in the list); older
+  ones are only shown in the GUI. No key fires twice.
 - **Environment.** The existing variables plus `MOLT_WAKE_ACTIONS` (the
   list's length). No task id, title or text: the list is read over MCP.
 - **What the woken agent does.** `read_actions`, then whatever it judges
@@ -847,7 +848,8 @@ TDD, red first, each step green on master before the next.
   `MOLT_WAKE_ACTIONS`, the config comment updated. Keystones: a trigger
   during a running wake fires once after it, with both reasons; the
   interval is honoured; every node wakes on an applied kanban changeset;
-  one `task_start` per `(task, occurrence)` on assignee nodes only; a
+  one `task_start` per `(task, start)` on assignee nodes only, a moved
+  start firing again; a
   missed start < 24 h fires once as `late`; a blocked appointment fires
   nothing and is listed `late` once unblocked; the
   `read_actions` list for the §5.3 board. `Command::TestWake` - the

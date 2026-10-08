@@ -163,7 +163,7 @@ const VAULT_PAYLOAD_SEGMENT: u64 = u64::MAX - 6;
 const KANBAN_WAKES_SEGMENT: u64 = u64::MAX - 7;
 /// The lowest reserved marker — a log file numbered at or above it is
 /// ignored (see [`list_sorted`]).
-const RESERVED_SEGMENT_FLOOR: u64 = VAULT_PAYLOAD_SEGMENT;
+const RESERVED_SEGMENT_FLOOR: u64 = KANBAN_WAKES_SEGMENT;
 /// Plaintext per wiki-base frame: EXACTLY one file-plane piece
 /// (`molt_net::file_plane::PIECE_PAYLOAD_LEN`, cross-checked by a static
 /// assertion in molt-engine - this crate sits below molt-net and cannot
@@ -5068,21 +5068,27 @@ mod tests {
         assert_eq!(ws.read_vault_payload(&b).expect("b").as_deref(), Some(&b"two"[..]));
     }
 
-    /// Plan S3a: the two vault markers sit below the wiki base's, and the
-    /// reserved floor moves down with them - a planted log file at either
+    /// Plan S3a: the vault and kanban-wake markers sit below the wiki base's,
+    /// and the reserved floor moves down with them - a planted log file at any
     /// number is ignored, never the active segment.
     #[test]
-    fn segment_floor_ignores_the_vault_markers() {
-        assert_eq!(RESERVED_SEGMENT_FLOOR, VAULT_PAYLOAD_SEGMENT);
-        const { assert!(VAULT_PAYLOAD_SEGMENT < VAULT_BASE_SEGMENT && VAULT_BASE_SEGMENT < WIKI_BASE_SEGMENT) };
+    fn segment_floor_ignores_the_reserved_markers() {
+        assert_eq!(RESERVED_SEGMENT_FLOOR, KANBAN_WAKES_SEGMENT);
+        const {
+            assert!(
+                KANBAN_WAKES_SEGMENT < VAULT_PAYLOAD_SEGMENT
+                    && VAULT_PAYLOAD_SEGMENT < VAULT_BASE_SEGMENT
+                    && VAULT_BASE_SEGMENT < WIKI_BASE_SEGMENT
+            )
+        };
         let tmp = tempfile::tempdir().expect("tmp");
         let dir = make_ws(tmp.path(), 2);
-        for no in [VAULT_PAYLOAD_SEGMENT, VAULT_BASE_SEGMENT] {
+        for no in [KANBAN_WAKES_SEGMENT, VAULT_PAYLOAD_SEGMENT, VAULT_BASE_SEGMENT] {
             std::fs::write(dir.join("log").join(format!("{no}.mlog")), b"").expect("plant");
         }
         let (ws, loaded) = open_workspace(&dir).expect("opens despite the planted files");
         assert_eq!(loaded.tail.len(), 3);
-        assert!(ws.seg_no < VAULT_PAYLOAD_SEGMENT);
+        assert!(ws.seg_no < KANBAN_WAKES_SEGMENT);
     }
 
     /// WP4b stage 5: the FIRST pruned chain persist raises the manifest

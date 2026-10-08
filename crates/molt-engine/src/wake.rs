@@ -36,9 +36,9 @@ pub(crate) struct WakeState {
     test_running: bool,
     /// Reasons waiting for the next wake.
     pending: BTreeSet<String>,
-    /// Who triggered the newest pending reason (`MOLT_WAKE_BY`).
+    /// The newest member among the pending triggers (`MOLT_WAKE_BY`).
     pending_by: String,
-    /// When the last wake fired (`presence_now`).
+    /// When the last wake fired, then when it ended (`presence_now`).
     last_at: Option<u64>,
     /// When each proposal was proposed (its envelope ts; display only).
     pub(crate) proposed_at: BTreeMap<u64, u64>,
@@ -90,7 +90,9 @@ impl State {
             return;
         }
         self.wake.pending.insert(reason.to_string());
-        self.wake.pending_by = by.to_string();
+        if !by.is_empty() {
+            self.wake.pending_by = by.to_string();
+        }
         self.wake_pump();
     }
 
@@ -125,6 +127,8 @@ impl State {
             .map(|mut e| e.take())
             .unwrap_or_default();
         if let Some(outcome) = ended {
+            // the rest runs from the end of a wake (§6.1)
+            self.wake.last_at = Some(self.presence_now());
             if std::mem::take(&mut self.wake.test_running) {
                 self.session.wake_test = outcome;
                 self.emit_session(SessionScope::Full);
@@ -259,13 +263,9 @@ impl State {
         }
         let reason = reasons.join(",");
         let workspace = self.session.active_workspace.clone();
-        let me = self.member();
-        let pending = self
-            .proposals
-            .iter()
-            .filter(|(id, p)| self.waits_on(**id, p, &me))
-            .count();
-        let actions = self.read_actions().len();
+        let list = self.read_actions();
+        let pending = list.iter().filter(|a| matches!(a, WakeAction::Vote { .. })).count();
+        let actions = list.len();
         tracing::info!(reason = %reason, %by, pending, actions, "wake=spawned");
         #[cfg(test)]
         self.wake.log.push(reason.clone());

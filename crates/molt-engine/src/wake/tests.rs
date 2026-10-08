@@ -1,7 +1,7 @@
 //! S2 wake keystones (`docs/kanban/kanban_workflows.md` §9).
 
 use molt_core::kanban_wake::WakeAction;
-use molt_core::{ChainChange, MoltError, Surface};
+use molt_core::{ChainChange, ChannelRef, Command, MoltError, Surface};
 use serde_json::{json, Value};
 
 use crate::chain::test_support::{genesis_seat, Builder};
@@ -264,8 +264,28 @@ fn read_actions_for_the_worked_example() {
             WakeAction::Poke { by: "mara".to_string(), since: NOON + 1 },
         ]
     );
-    walter.wake.pokes.clear();
-    assert_eq!(walter.read_actions().len(), 2, "a read chat answers the poke");
+}
+
+#[test]
+fn a_chat_read_answers_the_poke_through_every_door() {
+    let b = republic();
+    let doors = [
+        Command::MarkRead { ids: Vec::new() },
+        Command::MarkChannelRead { channel: ChannelRef::default(), up_to: String::new() },
+        Command::ReadState { surface: Surface::Chat, channel: None, view: None },
+    ];
+    for door in doors {
+        let mut walter = seat("walter", &b, NOON);
+        walter.session.settings.poke_enabled = true;
+        let me = walter.member();
+        walter.receive_poke("mara", &me);
+        let bad = Command::MarkChannelRead { channel: ChannelRef::default(), up_to: "zz".to_string() };
+        assert!(walter.handle(bad).is_err());
+        assert_eq!(walter.read_actions().len(), 1, "a refused read answers nothing");
+        let name = format!("{door:?}");
+        walter.handle(door).expect("read");
+        assert!(walter.read_actions().is_empty(), "{name}");
+    }
 }
 
 #[test]
@@ -287,4 +307,78 @@ fn test_wake_runs_the_command_past_wake_on_and_reports_its_exit() {
     s.wake.set_running(false);
     s.wake_tick();
     assert_eq!(s.wake.log, ["test", "test"], "past the interval too");
+}
+
+#[test]
+fn coalescing_keeps_the_poker() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let hold = dir.path().join("hold");
+    let marker = dir.path().join("marker");
+    std::fs::write(&hold, b"").expect("hold");
+    let mut s = crate::tests::plain_state();
+    s.presence.clock_override = Some(NOON);
+    s.session.settings.wake_min_interval_secs = 0;
+    s.session.settings.poke_wake_command = format!(
+        "echo \"$MOLT_WAKE_REASON by=$MOLT_WAKE_BY\" >> '{}'; while [ -e '{}' ]; do sleep 0.02; done",
+        marker.display(),
+        hold.display()
+    );
+    s.wake_trigger("kanban", "");
+    s.wake_trigger("poked", "peer-1");
+    s.wake_trigger("kanban", "");
+    s.wake_trigger("task_start", "");
+    std::fs::remove_file(&hold).expect("release");
+    settle(&mut s);
+    settle(&mut s);
+    let lines = std::fs::read_to_string(&marker).expect("marker");
+    assert_eq!(lines.lines().collect::<Vec<_>>(), ["kanban by=", "kanban,poked,task_start by=peer-1"]);
+}
+
+#[test]
+fn the_rest_counts_from_the_end_of_the_last_wake() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let hold = dir.path().join("hold");
+    std::fs::write(&hold, b"").expect("hold");
+    let mut s = crate::tests::plain_state();
+    s.presence.clock_override = Some(NOON);
+    s.session.settings.wake_min_interval_secs = 300;
+    s.session.settings.poke_wake_command =
+        format!("while [ -e '{}' ]; do sleep 0.02; done", hold.display());
+    s.wake_trigger("kanban", "");
+    s.presence.clock_override = Some(NOON + 400);
+    s.wake_trigger("poked", "peer-1");
+    std::fs::remove_file(&hold).expect("release");
+    settle(&mut s);
+    assert_eq!(s.wake.log, ["kanban"], "a long run is no rest");
+    s.presence.clock_override = Some(NOON + 699);
+    s.wake_tick();
+    assert_eq!(s.wake.log, ["kanban"]);
+    s.presence.clock_override = Some(NOON + 700);
+    s.wake_tick();
+    assert_eq!(s.wake.log, ["kanban", "poked"]);
+}
+
+#[test]
+fn a_start_moved_after_it_fired_fires_again_at_its_new_time() {
+    let mut b = republic();
+    commit(&mut b, 1, cs(vec![meeting(7, json!({}))]));
+    let at = NOON + 110 * MIN; // 13:50, lead 10
+    let mut s = seat("mara", &b, at);
+    s.wake_tick();
+    settle(&mut s);
+    assert_eq!(s.wake.log, ["task_start"]);
+    let moved = json!({"act": "set", "id": tid(7), "fields": {"when": {"start": "2026-10-12T16:00", "end": "2026-10-12T17:00"}}});
+    let block = commit(&mut b, 2, cs(vec![moved]));
+    s.presence.clock_override = Some(at + 5 * MIN);
+    s.receive_block(block);
+    settle(&mut s);
+    assert_eq!(s.wake.log, ["task_start", "kanban"]);
+    s.presence.clock_override = Some(NOON + 230 * MIN); // 15:50
+    s.wake_tick();
+    settle(&mut s);
+    assert_eq!(s.wake.log, ["task_start", "kanban", "task_start"], "a new start is a new appointment");
+    s.presence.clock_override = Some(NOON + 240 * MIN);
+    s.wake_tick();
+    settle(&mut s);
+    assert_eq!(s.wake.log.len(), 3, "and fires once");
 }

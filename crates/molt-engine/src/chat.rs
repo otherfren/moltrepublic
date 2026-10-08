@@ -1948,7 +1948,11 @@ mod tests {
         st.wake_tick();
         assert_eq!(st.wake.log.len(), 1, "inside the interval: it waits");
 
-        st.presence.clock_override = Some(5_000 + st.session.settings.wake_min_interval_secs);
+        // the rest runs from the end, handed back at 5_010
+        st.presence.clock_override = Some(5_009 + st.session.settings.wake_min_interval_secs);
+        st.wake_tick();
+        assert_eq!(st.wake.log.len(), 1);
+        st.presence.clock_override = Some(5_010 + st.session.settings.wake_min_interval_secs);
         st.wake_tick();
         assert_eq!(st.wake.log, ["vote_pending", "vote_pending"], "…and is not lost");
     }

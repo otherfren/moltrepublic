@@ -1654,16 +1654,22 @@ impl State {
             } => self.cmd_chat(body, quote, channel),
             Command::ReactChat { id, emoji } => self.cmd_react_chat(id, emoji),
             Command::MarkRead { ids } => {
-                self.wake.pokes.clear();
-                self.cmd_mark_read(ids)
+                let r = self.cmd_mark_read(ids);
+                if r.is_ok() {
+                    self.wake.pokes.clear();
+                }
+                r
             }
             Command::DeleteChat { id } => self.cmd_delete_chat(id),
             Command::ShareFile { path, channel } => self.cmd_share_file(path, channel),
             Command::DownloadFile { id, dest } => self.cmd_download_file(id, dest),
             Command::RemoveFile { id } => self.cmd_remove_file(id),
             Command::MarkChannelRead { channel, up_to } => {
-                self.wake.pokes.clear();
-                self.cmd_mark_channel_read(channel, up_to)
+                let r = self.cmd_mark_channel_read(channel, up_to);
+                if r.is_ok() {
+                    self.wake.pokes.clear();
+                }
+                r
             }
             Command::ClearNotice => {
                 self.session.notice = String::new();

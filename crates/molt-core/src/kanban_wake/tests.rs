@@ -63,12 +63,7 @@ fn the_list_for_the_worked_example() {
 }
 
 fn meeting() -> BoardState {
-    fold(&[cs(vec![add(
-        7,
-        "sync",
-        &["mara", "walter"],
-        json!({"when": {"start": "2026-10-12T14:00", "end": "2026-10-12T15:00"}}),
-    )])])
+    fold(&[meeting_ops()])
 }
 
 #[test]
