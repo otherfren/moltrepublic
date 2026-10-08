@@ -1,11 +1,11 @@
 # Kanban - tasks, calendar and deadlines on the gated board
 
-**Status: CONCEPT for discussion, revision 3 (2026-10-07), anchors
+**Status: CONCEPT, revision 3 (2026-10-07, decisions 2026-10-08), anchors
 re-verified against master `1cd491c`. A fundamental rework of revision 2:
 one task kind, a status state machine, a calendar, deadline-driven
 order, agents first - and the m-of-n rule unchanged. The §8 design mock is BUILT
-(2026-08-16); everything else is a proposal awaiting ratification, and the
-§11 questions gate the backend build. §12 lists what changed against
+(2026-08-16); every §11 question is decided, and the backend build
+(§9) starts on the user's go. §12 lists what changed against
 revision 2.**
 
 The ask: the Quests surface (GUI label **"Kanban"**, wire key `quests` -
@@ -635,7 +635,7 @@ local node posture, saved to `config.toml`, never governance:
 | wake command (exists) | `poke_wake_command` | `""` = off |
 | wake on: ☑ poke ☑ pending vote ☑ kanban change ☑ task start | `wake_on = ["poked","vote_pending","kanban","task_start"]` | as shown |
 | minimum rest between wakes, seconds | `wake_min_interval_secs` 0..=86400 | 300 |
-| task start lead time, minutes | `task_wake_lead_min` 0..=120 | 0 |
+| task start lead time, minutes | `task_wake_lead_min` 0..=120 | 10 |
 | **Show agent skill…** (button) | - | - |
 | **Test wake** (button) | - | - |
 
@@ -857,9 +857,7 @@ orientation only); time tracking;
 rewards/bounties (Wallet Stage 1 cannot spend); per-member permissions
 (agents are seats).
 
-## 11. Open questions
-
-Each with a recommendation, the counterargument first.
+## 11. Questions - all decided
 
 1. **Vote load.** Decided 2026-10-08: strict - every change of shared
    state clears m-of-n; measure the load after S5.
@@ -893,9 +891,8 @@ Each with a recommendation, the counterargument first.
 11. **Timed tasks and the `start` vote.** Decided 2026-10-08: a
     once-timed task may go `todo → success | fail` directly (§2.2), one
     vote fewer; `start` stays optional for it.
-12. **Poke lead time.** Fire exactly at `when.start`, or a configurable
-    local lead (e.g. 10 min, `[node] task_wake_lead_min`) so a slow agent
-    is ready on time? *Recommendation:* local setting, default 0.
+12. **Poke lead time.** Decided 2026-10-08: a local setting,
+    `[node] task_wake_lead_min`, default 10 minutes.
 13. **Poke on unblock.** Decided 2026-10-07: every applied kanban
     changeset wakes every seat, and the list (`read_actions`) carries
     what became startable; the agent decides. No separate `task_ready`.
