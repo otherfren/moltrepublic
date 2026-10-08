@@ -542,7 +542,7 @@ quests_propose {summary, base_rev, acts}                     # Seat scope
 - `read_state {surface: "quests"}` keeps working and gains `board`; its
   stale "On `memory` the whole folded wiki rides along" line
   (`molt-mcp/src/lib.rs:1467`) is corrected in the same change.
-- The read-only key gets nothing in this plan (§11 Q3).
+- The read-only key gets nothing (§11 Q3, decided).
 
 **Conventions, not mechanisms** - written into the tool descriptions:
 
@@ -882,13 +882,12 @@ rewards/bounties (Wallet Stage 1 cannot spend); per-member permissions
 
 Each with a recommendation, the counterargument first.
 
-1. **Vote load.** Against: even 15 approvals a day is work. For: one
-   ungated write erodes the only authority there is. *Recommendation:*
-   strict; measure after S5.
+1. **Vote load.** Decided 2026-10-08: strict - every change of shared
+   state clears m-of-n; measure the load after S5.
 2. **Effort unit.** Hours (precise, agent-friendly) or half days (coarser,
    fewer fake decimals)? *Recommendation:* hours.
-3. **Read-only key.** Against: the user narrowed that key deliberately
-   (2026-09-04); a plan shows who works on what. *Default: no.*
+3. **Read-only key.** Decided 2026-10-08: no kanban for the read-only
+   key.
 4. **Completable occurrences.** Against status-less blocks: a daily chore
    wants a tick. For: a tick per occurrence is a vote per occurrence.
    *Recommendation:* blocks only; a chore that needs a tick is a floating
