@@ -569,12 +569,17 @@ fn precheck_names_the_first_reason_and_leaves_the_board() {
     let p = cs(vec![st(2, "wip", None), st(1, "wip", None)]);
     let r = kanban_precheck(&b, &p, &seats()).expect_err("blocked");
     assert_eq!(
-        r.0,
+        r.reason.0,
         format!(
             "{} cannot start: blocked by {} (todo)",
             short_id(&id(2)),
             short_id(&id(1))
         )
+    );
+    assert_eq!(
+        r.task,
+        Some(id(1)),
+        "a blocked start concerns the prerequisite"
     );
     assert_eq!(b, before);
     assert!(kanban_precheck(&b, &cs(vec![st(1, "wip", None)]), &seats()).is_ok());

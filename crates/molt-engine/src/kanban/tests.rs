@@ -167,9 +167,16 @@ fn a_pending_changeset_on_a_task_another_vote_cancelled_reads_would_void() {
     walter.refresh_kanban_cache();
     let card = walter.proposals.get(&pid).cloned().expect("card");
     let lines = walter.view(pid, &card).advisories;
-    assert!(lines.iter().any(|l| l.starts_with("would void now: ")), "{lines:?}");
     assert!(
-        lines.iter().any(|l| l.starts_with("changed since proposed: ") && l.ends_with("(proposal 2)")),
+        lines.contains(
+            &"would void now: #00000001: cancelled to wip not allowed (proposal 2)".to_string()
+        ),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("changed since proposed: ") && l.ends_with("(proposal 2)")),
         "{lines:?}"
     );
 }
@@ -213,42 +220,90 @@ fn the_fold_cache_equals_a_fresh_fold_after_every_block() {
         cs(vec![add(1, "a", json!({"due": "2026-10-20"}))]),
         cs(vec![add(2, "b", json!({"blocked_by": [tid(1)]}))]),
         cs(vec![st(2, "wip", None)]),
+        cs(vec![add(3, "c", json!({})), add(1, "again", json!({}))]),
         cs(vec![st(1, "wip", None)]),
     ];
     for (i, p) in changesets.into_iter().enumerate() {
         let block = commit(&mut b, 1 + u64::try_from(i).expect("small"), p);
         walter.receive_block(block);
         let warm = board(&mut walter);
-        walter.kanban_cache = None;
-        assert_eq!(walter.kanban_board_view(), warm, "the cold path drifted");
+        let cold = walter.fold_kanban();
+        let c = walter
+            .kanban_cache
+            .as_ref()
+            .expect("the cache is kept warm");
+        assert_eq!(c.board, cold.board, "block {i}: the extension drifted");
+        assert_eq!(c.void, cold.void, "block {i}");
+        assert_eq!(c.rev_proposal, cold.rev_proposal, "block {i}");
+        assert_eq!((c.legacy, c.chain), (cold.legacy, cold.chain), "block {i}");
+        let saved = walter.kanban_cache.take();
+        assert_eq!(
+            walter.kanban_board_view(),
+            warm,
+            "block {i}: the cold read drifted"
+        );
+        walter.kanban_cache = saved;
     }
-    assert_eq!(board(&mut walter)["rev"], json!(4));
+    let c = walter.kanban_cache.as_ref().expect("warm");
+    assert_eq!(c.board.rev, 5);
+    assert_eq!(
+        c.void.keys().copied().collect::<Vec<_>>(),
+        [3, 4],
+        "the blocked start and the dup add voided"
+    );
 }
 
 #[test]
 fn the_reply_and_the_card_carry_the_impact() {
+    // §5.3: A..E, M1 as 1..6, A in progress
     let mut b = republic();
     commit(
         &mut b,
         1,
         cs(vec![
-            add(5, "Vendor contract", json!({"due": "2026-10-28"})),
-            add(6, "Beta", json!({"blocked_by": [tid(5)], "due": "2026-10-23"})),
+            add(1, "A", json!({})),
+            add(2, "B", json!({"blocked_by": [tid(1), tid(5)]})),
+            add(3, "C", json!({"blocked_by": [tid(1)], "due": "2026-10-20"})),
+            add(4, "D", json!({})),
+            add(5, "E", json!({"due": "2026-10-28"})),
+            add(
+                6,
+                "M1",
+                json!({"blocked_by": [tid(1), tid(2), tid(3)], "due": "2026-10-23"}),
+            ),
         ]),
     );
+    commit(&mut b, 2, cs(vec![st(1, "wip", None)]));
     let mut walter = seat("walter", &b);
     let v = board(&mut walter);
     assert_eq!(v["today"], json!("2026-10-12"));
     assert_eq!(v["tasks"][tid(5)]["flags"], json!(["date_conflict"]));
-    let mut set = cs(vec![json!({"act": "set", "id": tid(5), "fields": {"due": "2026-10-21"}})]);
-    set["base_rev"] = json!(1);
-    let Reply::Proposed { id, warnings, .. } =
-        walter.cmd_propose(Surface::Quests, set).expect("propose")
-    else {
-        panic!("not a Proposed reply");
-    };
-    let want = "#00000005 Vendor contract: needed by 2026-10-23 → 2026-10-21, date_conflict resolved";
-    assert_eq!(warnings, [want]);
-    let card = walter.proposals.get(&id.0).cloned().expect("card");
-    assert_eq!(walter.view(id.0, &card).advisories, [want]);
+    let cases = [
+        (
+            5,
+            "2026-10-21",
+            "#00000005 E: needed by 2026-10-23 → 2026-10-21 · date_conflict resolved",
+        ),
+        (
+            6,
+            "2026-10-16",
+            "#00000001 A, #00000003 C: needed by 2026-10-20 → 2026-10-16 · \
+             #00000002 B, #00000005 E, #00000006 M1: 2026-10-23 → 2026-10-16 · \
+             #00000003 C: date_conflict (due 2026-10-20)",
+        ),
+    ];
+    for (task, due, want) in cases {
+        let mut set = cs(vec![
+            json!({"act": "set", "id": tid(task), "fields": {"due": due}}),
+        ]);
+        set["base_rev"] = json!(2);
+        let Reply::Proposed { id, warnings, .. } =
+            walter.cmd_propose(Surface::Quests, set).expect("propose")
+        else {
+            panic!("not a Proposed reply");
+        };
+        assert_eq!(warnings, [want]);
+        let card = walter.proposals.get(&id.0).cloned().expect("card");
+        assert_eq!(walter.view(id.0, &card).advisories, [want]);
+    }
 }

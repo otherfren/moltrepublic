@@ -34,7 +34,10 @@ fn a_changeset_on_a_task_another_vote_cancelled_would_void() {
     kanban_fold_one(&mut board, &cs(vec![st(1, "cancelled", Some("dropped"))]), &seats());
     let got = lines(&board, &pending, &|rev| (rev == 2).then_some(41));
     assert!(
-        got.iter().any(|l| l.starts_with("would void now: ") && l.contains("cancelled")),
+        got.contains(&format!(
+            "would void now: {}: cancelled to wip not allowed (proposal 41)",
+            short_id(&id(1))
+        )),
         "{got:?}"
     );
     assert!(
@@ -67,19 +70,109 @@ fn every_act_whose_task_moved_past_base_rev_is_named_once() {
 }
 
 #[test]
-fn the_impact_on_needed_by_and_flags_is_rendered_per_task() {
-    // E is promised for the 28th, but M1, which waits for it, is due the 23rd
-    let board = fold(&[cs(vec![
-        add(5, "Vendor contract", &["walter"], json!({"due": "2026-10-28"})),
-        add(6, "Beta", &["mara"], json!({"blocked_by": ids(&[5]), "due": "2026-10-23"})),
-    ])]);
-    let pending = with_base(cs(vec![set(5, json!({"due": "2026-10-21"}))]), 1);
-    let got = lines(&board, &pending, &none);
+fn a_blocked_start_names_the_vote_that_reopened_the_prerequisite() {
+    let mut board = fold(&[
+        cs(vec![
+            add(1, "a", &["mara"], json!({})),
+            add(2, "b", &["mara"], json!({"blocked_by": ids(&[1])})),
+        ]),
+        cs(vec![st(1, "wip", None)]),
+        cs(vec![st(1, "success", None)]),
+    ]);
+    let pending = with_base(cs(vec![st(2, "wip", None)]), 3);
+    let by_rev = |rev: u64| (rev == 4).then_some(7);
+    assert!(
+        lines(&board, &pending, &by_rev).is_empty(),
+        "applies cleanly today"
+    );
+    kanban_fold_one(&mut board, &cs(vec![st(1, "todo", None)]), &seats());
+    let got = lines(&board, &pending, &by_rev);
+    assert_eq!(
+        got.first(),
+        Some(&format!(
+            "would void now: {} cannot start: blocked by {} (todo) (proposal 7)",
+            short_id(&id(2)),
+            short_id(&id(1))
+        )),
+        "{got:?}"
+    );
+}
+
+#[test]
+fn a_void_on_a_task_untouched_since_base_rev_names_no_vote() {
+    let board = fold(&[cs(vec![add(1, "a", &["mara"], json!({}))])]);
+    let pending = with_base(cs(vec![st(1, "success", None)]), 1);
+    let got = lines(&board, &pending, &|_| Some(41));
     assert_eq!(
         got,
         [format!(
-            "{} Vendor contract: needed by 2026-10-23 → 2026-10-21, date_conflict resolved",
+            "would void now: {} cannot success: not started",
+            short_id(&id(1))
+        )]
+    );
+}
+
+/// The §5.3 worked example: A..E, M1 as ids 1..6, A in progress.
+fn worked_example() -> BoardState {
+    fold(&[
+        cs(vec![
+            add(1, "API schema", &["mara"], json!({})),
+            add(
+                2,
+                "Client",
+                &["walter"],
+                json!({"blocked_by": ids(&[1, 5])}),
+            ),
+            add(
+                3,
+                "Docs",
+                &["bot"],
+                json!({"blocked_by": ids(&[1]), "due": "2026-10-20"}),
+            ),
+            add(4, "Logging", &["mara"], json!({})),
+            add(
+                5,
+                "Vendor contract",
+                &["walter"],
+                json!({"due": "2026-10-28"}),
+            ),
+            add(
+                6,
+                "Beta",
+                &["mara"],
+                json!({"blocked_by": ids(&[1, 2, 3]), "due": "2026-10-23"}),
+            ),
+        ]),
+        cs(vec![st(1, "wip", None)]),
+    ])
+}
+
+#[test]
+fn the_impact_renders_as_one_line_grouped_by_change() {
+    let board = worked_example();
+    let pending = with_base(cs(vec![set(5, json!({"due": "2026-10-21"}))]), 2);
+    assert_eq!(
+        lines(&board, &pending, &none),
+        [format!(
+            "{} Vendor contract: needed by 2026-10-23 → 2026-10-21 · date_conflict resolved",
             short_id(&id(5))
+        )]
+    );
+
+    let pending = with_base(cs(vec![set(6, json!({"due": "2026-10-16"}))]), 2);
+    let s = |n: u32| short_id(&id(n));
+    assert_eq!(
+        lines(&board, &pending, &none),
+        [format!(
+            "{} API schema, {} Docs: needed by 2026-10-20 → 2026-10-16 · \
+             {} Client, {} Vendor contract, {} Beta: 2026-10-23 → 2026-10-16 · \
+             {} Docs: date_conflict (due 2026-10-20)",
+            s(1),
+            s(3),
+            s(2),
+            s(5),
+            s(6),
+            s(3)
         )]
     );
 }

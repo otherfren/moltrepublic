@@ -868,11 +868,36 @@ fn set_field(t: &mut Task, f: Field) {
     }
 }
 
-fn unmet_prerequisite(tasks: &BTreeMap<TaskId, Task>, t: &Task) -> Option<String> {
+/// A void reason and the task it concerns, so a reader can name the vote
+/// that last changed that task.
+struct Fault {
+    reason: String,
+    task: Option<TaskId>,
+}
+
+impl Fault {
+    fn at(task: &str, reason: String) -> Self {
+        Fault {
+            reason,
+            task: Some(task.to_string()),
+        }
+    }
+}
+
+impl From<String> for Fault {
+    fn from(reason: String) -> Self {
+        Fault { reason, task: None }
+    }
+}
+
+fn unmet_prerequisite<'a>(
+    tasks: &BTreeMap<TaskId, Task>,
+    t: &'a Task,
+) -> Option<(&'a TaskId, String)> {
     t.blocked_by.iter().find_map(|b| match tasks.get(b) {
         Some(p) if p.state.is_met() => None,
-        Some(p) => Some(format!("{} ({})", short_id(b), p.state.as_str())),
-        None => Some(format!("{} (unknown)", short_id(b))),
+        Some(p) => Some((b, format!("{} ({})", short_id(b), p.state.as_str()))),
+        None => Some((b, format!("{} (unknown)", short_id(b)))),
     })
 }
 
@@ -881,11 +906,11 @@ fn transition(
     id: &str,
     to: TaskState,
     note: Option<&str>,
-) -> Result<(), String> {
+) -> Result<(), Fault> {
     use TaskState::{Cancelled, Fail, Success, Todo, Wip};
     let t = tasks
         .get(id)
-        .ok_or_else(|| format!("{}: unknown task", short_id(id)))?;
+        .ok_or_else(|| Fault::at(id, format!("{}: unknown task", short_id(id))))?;
     let from = t.state;
     let sid = short_id(id);
     let has_note = note.is_some_and(|n| !n.trim().is_empty());
@@ -893,15 +918,21 @@ fn transition(
         if has_note {
             Ok(())
         } else {
-            Err(format!("{sid} {}: note required", to.as_str()))
+            Err(Fault::at(
+                id,
+                format!("{sid} {}: note required", to.as_str()),
+            ))
         }
     };
     let guard = |verb: &str| match unmet_prerequisite(tasks, t) {
         None => Ok(()),
-        Some(p) => Err(format!("{sid} cannot {verb}: blocked by {p}")),
+        Some((b, p)) => Err(Fault::at(b, format!("{sid} cannot {verb}: blocked by {p}"))),
     };
     if t.is_series() && !matches!((from, to), (Todo, Cancelled) | (Cancelled, Todo)) {
-        return Err(format!("{sid}: a series only cancels or reopens"));
+        return Err(Fault::at(
+            id,
+            format!("{sid}: a series only cancels or reopens"),
+        ));
     }
     match (from, to) {
         (Todo, Wip) => guard("start"),
@@ -910,7 +941,10 @@ fn transition(
         (Wip, Fail) | (Todo | Wip | Fail, Cancelled) => needs_note(),
         (Todo, Success | Fail) => {
             if !t.is_timed_once() {
-                return Err(format!("{sid} cannot {}: not started", to.as_str()));
+                return Err(Fault::at(
+                    id,
+                    format!("{sid} cannot {}: not started", to.as_str()),
+                ));
             }
             guard(to.as_str())?;
             if to == Fail {
@@ -918,10 +952,9 @@ fn transition(
             }
             Ok(())
         }
-        _ => Err(format!(
-            "{sid}: {} to {} not allowed",
-            from.as_str(),
-            to.as_str()
+        _ => Err(Fault::at(
+            id,
+            format!("{sid}: {} to {} not allowed", from.as_str(), to.as_str()),
         )),
     }
 }
@@ -932,59 +965,75 @@ fn check_result(
     tasks: &BTreeMap<TaskId, Task>,
     touched: &BTreeSet<TaskId>,
     seats: &BTreeSet<String>,
-) -> Result<(), String> {
+) -> Result<(), Fault> {
     for id in touched {
         let Some(t) = tasks.get(id) else { continue };
-        let sid = short_id(id);
-        if !seats.contains(&t.creator) {
-            return Err(format!("{sid}: creator {} is not a seat", t.creator));
-        }
-        if let Some(a) = t.assignees.iter().find(|a| !seats.contains(*a)) {
-            return Err(format!("{sid}: {a} is not a seat"));
-        }
-        if let (Some(a), Some(d)) = (t.after, t.due) {
-            if a > d {
-                return Err(format!("{sid}: after is later than due"));
-            }
-        }
-        if t.repeat.is_some() && t.when.is_none() {
-            return Err(format!("{sid}: repeat needs when"));
-        }
-        if t.is_series() && !matches!(t.state, TaskState::Todo | TaskState::Cancelled) {
-            return Err(format!("{sid}: a series is todo or cancelled"));
-        }
-        let keys = t.skip.iter().chain(t.moved.keys());
-        match (&t.when, &t.repeat) {
-            (Some(w), Some(r)) => {
-                if let Some(k) = keys.into_iter().find(|k| !is_occurrence(w, r, **k)) {
-                    return Err(format!("{sid}: {} is no occurrence", fmt_date(*k)));
-                }
-            }
-            _ => {
-                if !t.skip.is_empty() || !t.moved.is_empty() {
-                    return Err(format!("{sid}: skip and moved need a series"));
-                }
-            }
-        }
-        for b in &t.blocked_by {
-            if b == id {
-                return Err(format!("{sid}: blocked by itself"));
-            }
-            let Some(p) = tasks.get(b) else {
-                return Err(format!("{sid}: blocked by unknown {}", short_id(b)));
-            };
-            if p.is_series() || t.is_series() {
-                return Err(format!("{sid}: a series cannot be linked"));
-            }
-        }
+        check_task(tasks, id, t, seats).map_err(|r| Fault::at(id, r))?;
         if t.is_series() {
             if let Some((d, _)) = tasks.iter().find(|(_, d)| d.blocked_by.contains(id)) {
-                return Err(format!("{}: a series cannot be linked", short_id(d)));
+                return Err(Fault::at(
+                    d,
+                    format!("{}: a series cannot be linked", short_id(d)),
+                ));
             }
         }
     }
     if let Some(id) = find_cycle(tasks, touched) {
-        return Err(format!("{}: blocked_by forms a cycle", short_id(&id)));
+        return Err(Fault::at(
+            &id,
+            format!("{}: blocked_by forms a cycle", short_id(&id)),
+        ));
+    }
+    Ok(())
+}
+
+fn check_task(
+    tasks: &BTreeMap<TaskId, Task>,
+    id: &TaskId,
+    t: &Task,
+    seats: &BTreeSet<String>,
+) -> Result<(), String> {
+    let sid = short_id(id);
+    if !seats.contains(&t.creator) {
+        return Err(format!("{sid}: creator {} is not a seat", t.creator));
+    }
+    if let Some(a) = t.assignees.iter().find(|a| !seats.contains(*a)) {
+        return Err(format!("{sid}: {a} is not a seat"));
+    }
+    if let (Some(a), Some(d)) = (t.after, t.due) {
+        if a > d {
+            return Err(format!("{sid}: after is later than due"));
+        }
+    }
+    if t.repeat.is_some() && t.when.is_none() {
+        return Err(format!("{sid}: repeat needs when"));
+    }
+    if t.is_series() && !matches!(t.state, TaskState::Todo | TaskState::Cancelled) {
+        return Err(format!("{sid}: a series is todo or cancelled"));
+    }
+    let keys = t.skip.iter().chain(t.moved.keys());
+    match (&t.when, &t.repeat) {
+        (Some(w), Some(r)) => {
+            if let Some(k) = keys.into_iter().find(|k| !is_occurrence(w, r, **k)) {
+                return Err(format!("{sid}: {} is no occurrence", fmt_date(*k)));
+            }
+        }
+        _ => {
+            if !t.skip.is_empty() || !t.moved.is_empty() {
+                return Err(format!("{sid}: skip and moved need a series"));
+            }
+        }
+    }
+    for b in &t.blocked_by {
+        if b == id {
+            return Err(format!("{sid}: blocked by itself"));
+        }
+        let Some(p) = tasks.get(b) else {
+            return Err(format!("{sid}: blocked by unknown {}", short_id(b)));
+        };
+        if p.is_series() || t.is_series() {
+            return Err(format!("{sid}: a series cannot be linked"));
+        }
     }
     Ok(())
 }
@@ -1026,7 +1075,7 @@ fn apply_changeset(
     cs: Changeset,
     rev: u64,
     seats: &BTreeSet<String>,
-) -> Result<BTreeMap<TaskId, Task>, String> {
+) -> Result<BTreeMap<TaskId, Task>, Fault> {
     let mut tasks = board.tasks.clone();
     let mut touched = BTreeSet::new();
     for act in cs.acts {
@@ -1036,9 +1085,9 @@ fn apply_changeset(
                 creator,
                 fields,
             } => {
-                let id = id.ok_or("add: id missing")?;
+                let id = id.ok_or_else(|| Fault::from("add: id missing".to_string()))?;
                 if tasks.contains_key(&id) {
-                    return Err(format!("{}: already exists", short_id(&id)));
+                    return Err(Fault::at(&id, format!("{}: already exists", short_id(&id))));
                 }
                 let mut t = Task {
                     title: String::new(),
@@ -1070,7 +1119,7 @@ fn apply_changeset(
             Act::Set { id, fields } => {
                 let t = tasks
                     .get_mut(&id)
-                    .ok_or_else(|| format!("{}: unknown task", short_id(&id)))?;
+                    .ok_or_else(|| Fault::at(&id, format!("{}: unknown task", short_id(&id))))?;
                 for f in fields {
                     set_field(t, f);
                 }
@@ -1086,7 +1135,7 @@ fn apply_changeset(
                 transition(&tasks, &id, to, note.as_deref())?;
                 let t = tasks
                     .get_mut(&id)
-                    .ok_or_else(|| format!("{}: unknown task", short_id(&id)))?;
+                    .ok_or_else(|| Fault::at(&id, format!("{}: unknown task", short_id(&id))))?;
                 t.state = to;
                 t.note = note;
                 t.evidence = evidence;
@@ -1111,6 +1160,7 @@ pub fn kanban_fold_one(
     }
     let rev = board.rev.saturating_add(1);
     let result = parse_changeset(payload, Door::Canonical)
+        .map_err(Fault::from)
         .and_then(|cs| apply_changeset(board, cs, rev, seats));
     board.rev = rev;
     match result {
@@ -1118,7 +1168,7 @@ pub fn kanban_fold_one(
             board.tasks = tasks;
             FoldStep::Applied
         }
-        Err(e) => FoldStep::Void(VoidReason(e)),
+        Err(e) => FoldStep::Void(VoidReason(e.reason)),
     }
 }
 
@@ -1137,6 +1187,15 @@ pub fn kanban_fold(applied: &[Value], seats: &BTreeSet<String>) -> BoardState {
     board
 }
 
+/// Why a changeset would void now, and the task that reason concerns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrecheckFault {
+    /// The fold's reason.
+    pub reason: VoidReason,
+    /// The task it concerns (for a blocked start: the prerequisite).
+    pub task: Option<TaskId>,
+}
+
 /// The precheck at propose (§4.4): the fold's own apply over the current
 /// board, for a canonical payload. `Err` carries the first reason the
 /// changeset would void now.
@@ -1147,11 +1206,15 @@ pub fn kanban_precheck(
     board: &BoardState,
     payload: &Value,
     seats: &BTreeSet<String>,
-) -> Result<(), VoidReason> {
-    let cs = parse_changeset(payload, Door::Canonical).map_err(VoidReason)?;
-    apply_changeset(board, cs, board.rev.saturating_add(1), seats)
+) -> Result<(), PrecheckFault> {
+    parse_changeset(payload, Door::Canonical)
+        .map_err(Fault::from)
+        .and_then(|cs| apply_changeset(board, cs, board.rev.saturating_add(1), seats))
         .map(|_| ())
-        .map_err(VoidReason)
+        .map_err(|f| PrecheckFault {
+            reason: VoidReason(f.reason),
+            task: f.task,
+        })
 }
 
 #[cfg(test)]

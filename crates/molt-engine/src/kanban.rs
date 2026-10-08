@@ -187,7 +187,7 @@ impl State {
         self.refresh_kanban_cache();
         let board = self.kanban_board();
         kanban_precheck(&board.board, &canon.payload, &board.seats)
-            .map_err(|r| MoltError::BadPayload(r.0))?;
+            .map_err(|f| MoltError::BadPayload(f.reason.0))?;
         let warnings = self.kanban_advisories(&canon.payload);
         *payload = canon.payload;
         Ok((canon.minted, warnings))

@@ -146,9 +146,11 @@ fn a_decision_stamp_is_the_absolute_half_of_the_when_label() {
 }
 
 /// The vault takes deposits only through its own commands (vault plan
-/// U1.4): the generic composer offers no op there.
+/// U1.4), the board only `kanban_ops` changesets: the generic composer
+/// offers no op there.
 #[test]
-fn the_vault_has_no_generic_proposal_op() {
+fn the_vault_and_the_board_have_no_generic_proposal_op() {
     assert_eq!(default_op(Surface::Vault), None);
-    assert_eq!(default_op(Surface::Quests), Some("add_quest"));
+    assert_eq!(default_op(Surface::Quests), None);
+    assert_eq!(default_op(Surface::Memory), Some("add_note"));
 }

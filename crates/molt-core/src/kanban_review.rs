@@ -72,8 +72,15 @@ pub fn advisories(
     let mut out = Vec::new();
 
     let after = match kanban_precheck(board, payload, seats) {
-        Err(reason) => {
-            out.push(format!("would void now: {reason}"));
+        Err(fault) => {
+            let by = fault
+                .task
+                .and_then(|id| board.tasks.get(&id))
+                .filter(|t| t.touched_rev > base_rev)
+                .and_then(|t| proposal_of_rev(t.touched_rev))
+                .map(|p| format!(" (proposal {p})"))
+                .unwrap_or_default();
+            out.push(format!("would void now: {}{by}", fault.reason));
             None
         }
         Ok(()) => {
@@ -122,35 +129,9 @@ pub fn advisories(
     }
 
     if let Some(after) = &after {
-        let derived_after = derive(after, today);
-        let mut per_task: Vec<(String, Vec<String>)> = Vec::new();
-        for change in impact(before, &derived_after) {
-            let (task, part) = match change {
-                ImpactChange::NeededBy { task, from, to } => {
-                    (task, format!("needed by {} → {}", day(from), day(to)))
-                }
-                ImpactChange::Flag { task, flag, on } => {
-                    let part = if on {
-                        flag.as_str().to_string()
-                    } else {
-                        format!("{} resolved", flag.as_str())
-                    };
-                    (task, part)
-                }
-            };
-            match per_task.last_mut() {
-                Some((t, parts)) if *t == task => parts.push(part),
-                _ => per_task.push((task, vec![part])),
-            }
-        }
-        for (task, parts) in per_task {
-            let title = after
-                .tasks
-                .get(&task)
-                .or_else(|| board.tasks.get(&task))
-                .map(|t| format!(" {}", t.title))
-                .unwrap_or_default();
-            out.push(format!("{}{title}: {}", short_id(&task), parts.join(", ")));
+        let line = impact_line(board, after, before, &derive(after, today));
+        if !line.is_empty() {
+            out.push(line);
         }
     }
 
@@ -197,6 +178,77 @@ pub fn advisories(
         }
     }
     out
+}
+
+/// §5.4 on one line: tasks with the same change share a segment,
+/// segments joined by " · ", the task list left out when it repeats.
+fn impact_line(
+    board: &BoardState,
+    after: &BoardState,
+    before: &Derived,
+    derived_after: &Derived,
+) -> String {
+    // (tasks, is a needed_by move, the change)
+    let mut segments: Vec<(Vec<String>, bool, String)> = Vec::new();
+    for change in impact(before, derived_after) {
+        let (task, moved, part) = match change {
+            ImpactChange::NeededBy { task, from, to } => {
+                (task, true, format!("{} → {}", day(from), day(to)))
+            }
+            ImpactChange::Flag {
+                task,
+                flag,
+                on: false,
+            } => (task, false, format!("{} resolved", flag.as_str())),
+            ImpactChange::Flag {
+                task,
+                flag,
+                on: true,
+            } => {
+                let due = (flag == Flag::DateConflict)
+                    .then(|| after.tasks.get(&task).and_then(|t| t.due))
+                    .flatten()
+                    .map(|d| format!(" (due {})", fmt_date(d)))
+                    .unwrap_or_default();
+                (task, false, format!("{}{due}", flag.as_str()))
+            }
+        };
+        match segments
+            .iter_mut()
+            .find(|(_, m, p)| *m == moved && *p == part)
+        {
+            Some((tasks, _, _)) => tasks.push(task),
+            None => segments.push((vec![task], moved, part)),
+        }
+    }
+    let name = |id: &String| {
+        let title = after
+            .tasks
+            .get(id)
+            .or_else(|| board.tasks.get(id))
+            .map(|t| format!(" {}", t.title))
+            .unwrap_or_default();
+        format!("{}{title}", short_id(id))
+    };
+    let mut prev: Option<&Vec<String>> = None;
+    let mut said_needed_by = false;
+    let mut parts = Vec::new();
+    for (tasks, moved, part) in &segments {
+        let lead = if *moved && !said_needed_by {
+            "needed by "
+        } else {
+            ""
+        };
+        said_needed_by |= *moved;
+        if prev == Some(tasks) {
+            parts.push(format!("{lead}{part}"));
+        } else {
+            let names: Vec<String> = tasks.iter().map(name).collect();
+            parts.push(format!("{}: {lead}{part}", names.join(", ")));
+        }
+        prev = Some(tasks);
+    }
+    parts.join(" · ")
 }
 
 /// The board as one read (§6): every task with its derived status, the
