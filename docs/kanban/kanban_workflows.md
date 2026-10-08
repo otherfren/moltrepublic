@@ -748,10 +748,10 @@ board, drill-in, planning, create, mine, archive; `kb-*` strings in
 | `plan` | sprint planning | **deadline timeline**: timed tasks as blocks at their `when`; floating tasks as markers at their `needed_by`, a task as a collapsible row over its prerequisites, links as arrows; a lane "no date" for the rest; `overdue`, `date_conflict` and `stuck` in red; size as a label |
 | `calendar` | - (new, 7th key) | month / week; **only timed tasks**, recurring ones expanded; floating work never appears here |
 | `dependencies` | - (new, 8th key) | **logical view**: every task with its prerequisites, expandable to any depth; the top level is the tasks that are a prerequisite for nothing; a task that is a prerequisite for several appears under each (marked "also for …"); status badge and progress (succeeded/total of all its prerequisites, `needed_by`) per task; filterable (below) |
-| `create` | template form | one form; time mode floating / once / recurring; size picker; "blocked by" picker |
+| `create` | template form | **removed as a view**: a "New task" button in every kanban view opens the form (time mode floating / once / recurring; size picker; "blocked by" picker) |
 | `proposals` | real tables | plus impact and "would void" lines |
 | `my-quests` ("Mine") | sample | the `read_actions` list first (§6.1), then `next`, then everything the seat is assigned to or created |
-| `archive` | sample | success · fail · cancelled, with the transition note |
+| `archive` | sample | **removed as a view**: the board's state filter "closed" shows success · fail · cancelled, with the transition note |
 
 The create form has three content blocks under title and type:
 Description (markdown editor), Acceptance criteria and Out of scope (list
@@ -780,6 +780,32 @@ governance, combinable):
 In `dependencies`, a filter keeps the matching tasks **and the tasks
 they are a prerequisite for** (muted), so a match is never shown
 without its context.
+
+Six view keys remain: `board`, `plan`, `calendar`, `dependencies`,
+`proposals`, `my-quests`. `create` and `archive` leave the `select_view`
+vocabulary (`molt-core/src/lib.rs:204`); nothing outside the mock uses
+them.
+
+**Working in the views** (decided 2026-10-08):
+
+- **Drag on the board stages, it does not move.** Dropping a card in
+  another column puts the `state` act into the basket; the card stays
+  where the board says it is and shows a dashed shadow in the target
+  column, marked "in basket". The same in `calendar`: dragging a block
+  to another slot, or into an empty slot to create one, stages a `set`
+  or an `add`. A block's length is changed in the form, not by dragging.
+- **The basket is always visible.** A bar at the bottom of every kanban
+  view: "3 changes - Propose / Discard", with the live impact (§5.4) on
+  hover. Empty basket, no bar.
+- **Pending votes on the card.** A task touched by a pending changeset
+  carries a badge "vote: → success (2/3)"; a click opens the proposal.
+- **Notifications for everything.** A human seat is told about every
+  trigger of §6.1 - a folded kanban changeset, an appointment starting,
+  a vote waiting, a poke - as a toast, and "Mine" carries the count of
+  `read_actions`. Toasts follow the same `wake_on` switches as the wake
+  command (§6.2) and are coalesced the same way, so a burst is one toast.
+- **Feature off: invisible.** With `quests` not enabled, nothing kanban
+  shows anywhere, as today.
 
 The plan basket: acts are staged locally, shown with a live impact
 preview, and proposed as one changeset. Persisted as `kanban_draft.json`
@@ -829,7 +855,9 @@ TDD, red first, each step green on master before the next.
   `Command`, the GUI reads the same constant), the `read_state`
   description fix, conventions in the tool descriptions.
 - **S4 - UI real.** Sample data out, board with derived sub-states,
-  timeline, calendar, basket with impact, the current UTC time in
+  timeline, calendar, basket bar with impact, staged drag on board and
+  calendar, vote badges, toasts for every trigger, the "New task" button
+  and the six view keys, the current UTC time in
   Organization › Status, `is_implemented()` true, wizard
   and Organization panel unlocked; the Wake group of §6.2 (`wake_on`,
   minimum rest, lead time, `SkillModal` with Copy/Save, Test wake), EN/DE strings;
