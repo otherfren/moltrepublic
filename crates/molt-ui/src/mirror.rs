@@ -722,6 +722,7 @@ pub(crate) fn apply_session(
     // "only a proven circuit is green" rule stays a tested statement, and the
     // technical specifics ride along untranslated.
     ui.set_cfg_tor_test(sv.tor_test.state.as_str().into());
+    ui.set_wake_test_result(sv.wake_test.as_str().into());
     // a confirmed-but-switched-off pool is a DIFFERENT problem from an empty
     // one, and telling the user to "confirm a relay" they already confirmed
     // is advice that cannot help (review finding). The classification is
@@ -1229,7 +1230,7 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                         .iter()
                         .map(|(key, label)| ViewItem {
                             key: (*key).into(),
-                            name: view_label(b.lang, key, label).into(),
+                            name: mine_count(view_label(b.lang, key, label), key, b).into(),
                             icon: view_icon(key).into(),
                         })
                         .collect()
@@ -1500,6 +1501,15 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     // authority, this is what the member-picture fit aims at
     ui.set_mp_img_budget(i32::try_from(b.org_stats.image_budget).unwrap_or(i32::MAX));
     crate::surfaces::apply_vault(ui, b);
+    crate::actions::kanban::apply(ui, b);
+}
+
+/// "Mine" carries the count of `read_actions` (§8).
+fn mine_count(label: String, key: &str, b: &SurfacesBundle) -> String {
+    match b.kanban.as_ref().map(|k| k.actions.len()) {
+        Some(n) if key == "my-quests" && n > 0 => format!("{label} ({n})"),
+        _ => label,
+    }
 }
 
 /// The live-mirror task: the first full session + surfaces push, then a
@@ -1561,7 +1571,24 @@ pub(crate) fn spawn_mirror(ctx: &Ctx) {
                 // only a vote somebody ELSE initiated rings — the
                 // proposer already knows what they just did
                 Ok(Event::Proposed { by, .. }) => {
-                    alert_unless_own(&last_settings, |s| s.sound_vote.clone(), &weak, by);
+                    alert_unless_own(&last_settings, |s| s.sound_vote.clone(), &weak, by.clone());
+                    let weak2 = weak.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        let Some(ui) = weak2.upgrade() else { return };
+                        if ui.get_node_member() != by.as_str() {
+                            crate::actions::kanban::notice(&ui, "vote_pending", "");
+                        }
+                    });
+                    push_surfaces(&w, &weak, &chat_ui).await;
+                }
+                // a folded kanban changeset notifies every seat (§8)
+                Ok(Event::Applied { surface: Surface::Quests, .. }) => {
+                    let weak2 = weak.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak2.upgrade() {
+                            crate::actions::kanban::notice(&ui, "kanban", "");
+                        }
+                    });
                     push_surfaces(&w, &weak, &chat_ui).await;
                 }
                 // a poke addressed to THIS seat toasts who poked and
@@ -1576,7 +1603,7 @@ pub(crate) fn spawn_mirror(ctx: &Ctx) {
                         let st = ui.global::<Strings>();
                         let me = ui.get_node_member();
                         if to.as_str() == me.as_str() {
-                            ui.invoke_show_toast(format!("{by} {}", st.get_toast_poked()).into());
+                            crate::actions::kanban::notice(&ui, "poked", by.as_str());
                         } else if by.as_str() == me.as_str() {
                             ui.invoke_show_toast(
                                 format!("{} {to}", st.get_toast_poke_sent()).into(),

@@ -20,10 +20,10 @@
 // the nav sub-view icons, the reaction pills and the emoji palette.
 import "assets/fonts/Twemoji.Mozilla.ttf";
 
-import { Theme, Strings, HintTip, WikiState, PatchView, Poke, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, RecoverSeatRow, SeedRow, SeedWord, InvitePreview, LinkPreview, BackupRow, ChainRow, RelayItem, RelayPick, VaultDepositRow, VaultGrantRow, VaultUnsealedRow } from "theme.slint";
+import { Theme, Strings, HintTip, WikiState, PatchView, Poke, Kanban, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, RecoverSeatRow, SeedRow, SeedWord, InvitePreview, LinkPreview, BackupRow, ChainRow, RelayItem, RelayPick, VaultDepositRow, VaultGrantRow, VaultUnsealedRow } from "theme.slint";
 import {
     AppButton, AppField, AppArea, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
-    ConfirmModal, DotLabel, InsetWell, WordChip
+    ConfirmModal, SkillModal, DotLabel, InsetWell, WordChip
 } from "components.slint";
 import {
     BusyModal, ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, SeedConfirmStep, RunView, RitualLog, WizardFrame, CharterView, SealedPanel, FoldedStep, ProposalCard, DecisionTable, Spinner, DiffViewer
@@ -32,7 +32,7 @@ import {
 // .slint-side only; the real governance views stay below in this file)
 import { MemoryPane, QuestsPane, VaultPane, WalletPane } from "surfaces.slint";
 
-export { Strings, Theme, WikiState, PatchView, Poke, HintTip }
+export { Strings, Theme, WikiState, PatchView, Poke, HintTip, Kanban }
 
 // A settings form group: caption sitting tight above its control(s), so a
 // label+field pair reads as one unit inside the wider panel rhythm.
@@ -2486,6 +2486,18 @@ export component AppWindow inherits Window {
     in-out property <int> cfg-sound-poke-index: 0;
     in-out property <bool> cfg-poke-enabled: false;
     in-out property <string> cfg-poke-wake;
+    // the Wake group (kanban_workflows.md §6.2)
+    in-out property <bool> cfg-wake-on-poked: true;
+    in-out property <bool> cfg-wake-on-vote: true;
+    in-out property <bool> cfg-wake-on-kanban: true;
+    in-out property <bool> cfg-wake-on-start: true;
+    in-out property <string> cfg-wake-rest: "300";
+    in-out property <string> cfg-wake-lead: "10";
+    in property <string> wake-test-result;
+    in property <string> skill-text;
+    in-out property <bool> skill-open;
+    callback wake-test();
+    callback skill-save();
     // send (and show) per-message chat read receipts — a local privacy
     // switch, seeded from the applied session so the chat's receipt rows
     // track it live (the settings checkbox binds to it, save persists it).
@@ -2676,6 +2688,8 @@ export component AppWindow inherits Window {
             root.wizard-log-open = false;
         } else if (root.recover-link-open) {
             root.close-recover-link();
+        } else if (root.skill-open) {
+            root.skill-open = false;
         } else if (root.confirm-quit-open) {
             root.confirm-quit-open = false;
         } else if (root.confirm-abort-ritual-open) {
@@ -7418,6 +7432,13 @@ export component AppWindow inherits Window {
                         }
                         if s.key == "quests" && root.selected-view != "proposals": QuestsPane {
                             view: root.selected-view;
+                            open-proposal(id) => {
+                                root.select-view("chat", "today");
+                                root.select-channel("patch:\{id}");
+                            }
+                            open-chat => {
+                                root.select-view("chat", "today");
+                            }
                         }
                         if s.key == "vault" && root.selected-view != "proposals": VaultPane {
                             view: root.selected-view;
@@ -7998,6 +8019,71 @@ export component AppWindow inherits Window {
                                     AppField {
                                         text <=> root.cfg-poke-wake;
                                         placeholder: "claude -p '...'";
+                                    }
+                                }
+                                Text {
+                                    text: Strings.field-wake-on;
+                                    color: Theme.dim;
+                                    font-size: Theme.fs-cap;
+                                }
+                                HorizontalLayout {
+                                    spacing: 14px;
+                                    alignment: start;
+                                    AppCheck {
+                                        label: Strings.wake-on-poked;
+                                        checked <=> root.cfg-wake-on-poked;
+                                    }
+                                    AppCheck {
+                                        label: Strings.wake-on-vote;
+                                        checked <=> root.cfg-wake-on-vote;
+                                    }
+                                    AppCheck {
+                                        label: Strings.wake-on-kanban;
+                                        checked <=> root.cfg-wake-on-kanban;
+                                    }
+                                    AppCheck {
+                                        label: Strings.wake-on-start;
+                                        checked <=> root.cfg-wake-on-start;
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    FieldLabel {
+                                        label: Strings.field-wake-rest;
+                                        AppField {
+                                            text <=> root.cfg-wake-rest;
+                                            numeric: true;
+                                        }
+                                    }
+                                    FieldLabel {
+                                        label: Strings.field-wake-lead;
+                                        AppField {
+                                            text <=> root.cfg-wake-lead;
+                                            numeric: true;
+                                        }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    alignment: start;
+                                    AppButton {
+                                        label: Strings.wake-skill-btn;
+                                        clicked => {
+                                            root.skill-open = true;
+                                        }
+                                    }
+                                    AppButton {
+                                        label: Strings.wake-test-btn;
+                                        enabled: root.cfg-poke-wake != "";
+                                        clicked => {
+                                            root.wake-test();
+                                        }
+                                    }
+                                    if root.wake-test-result != "": Text {
+                                        text: "\{Strings.wake-test-last}: \{root.wake-test-result}";
+                                        color: Theme.dim;
+                                        font-size: Theme.fs-cap;
+                                        vertical-alignment: center;
                                     }
                                 }
                             }
@@ -10586,6 +10672,20 @@ export component AppWindow inherits Window {
                 content-h: csm.viewport-height;
                 scroll-y: csm.viewport-y;
             }
+        }
+    }
+
+    if root.skill-open: SkillModal {
+        text: root.skill-text;
+        copy => {
+            root.copy-text(root.skill-text);
+            root.show-toast(Strings.toast-copied);
+        }
+        save => {
+            root.skill-save();
+        }
+        dismissed => {
+            root.skill-open = false;
         }
     }
 

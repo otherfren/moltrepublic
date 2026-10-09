@@ -1003,6 +1003,168 @@ export global Theme {
     out property <length> fs-cap: self.fs-app - 2px;
 }
 
+// ---- Kanban (docs/kanban/kanban_workflows.md §8) ----------------------
+// Rows arrive pre-rendered from molt-ui `kanban.rs`; the pane only lays
+// them out and routes the callbacks.
+
+// One board card, or a staged move's dashed placeholder (`shadow`).
+export struct KbCard {
+    id: string,
+    short: string,
+    title: string,
+    type-label: string,
+    type-slot: int, // -1 = no type
+    size: string,
+    who: string,
+    shown: string, // the wire status: stuck/blocked/scheduled/later/open/wip/success/fail/cancelled
+    badge: string,
+    bad: bool,
+    dates: string,
+    flags: string,
+    note: string,
+    vote: string,
+    vote-id: int,
+    staged: string,
+    shadow: bool,
+}
+
+// A labelled toggle: filter chips, pickers, legal moves.
+export struct KbPick {
+    key: string,
+    label: string,
+    on: bool,
+}
+
+// One type of the legend.
+export struct KbType {
+    key: string,
+    label: string,
+    slot: int,
+    on: bool,
+}
+
+// One list row: a related task, an action of "Mine", a declined changeset.
+export struct KbLine {
+    key: string,
+    kind: string, // task · vote · poke
+    glyph: string,
+    text: string,
+    sub: string,
+    bad: bool,
+}
+
+// One acceptance criterion with the evidence its `succeed` carried.
+export struct KbCheck {
+    text: string,
+    evidence: string,
+    done: bool,
+}
+
+// The drill-in head.
+export struct KbDetail {
+    id: string,
+    short: string,
+    title: string,
+    type-label: string,
+    type-slot: int,
+    size: string,
+    who: string,
+    creator: string,
+    badge: string,
+    bad: bool,
+    dates: string,
+    flags: string,
+    when: string,
+    description: string,
+    note: string,
+    progress: string,
+    vote: string,
+    vote-id: int,
+    staged: string,
+}
+
+export global Kanban {
+    // -- board
+    in-out property <[KbCard]> todo;
+    in-out property <[KbCard]> wip;
+    in-out property <[KbCard]> done;
+    in-out property <[KbPick]> filters;
+    in-out property <[KbType]> legend;
+    callback filter-toggle(string);
+    callback type-toggle(string);
+    // a card dropped on column 0/1/2: stage the move
+    callback move(string, int);
+    // -- drill-in ("" = none)
+    in-out property <string> sel;
+    in-out property <KbDetail> detail;
+    in-out property <[KbLine]> blocked-by;
+    in-out property <[KbLine]> prereq-for;
+    in-out property <[KbLine]> prereqs;
+    in-out property <[KbCheck]> checks;
+    in-out property <[string]> scope;
+    in-out property <[KbPick]> moves;
+    in-out property <string> note;
+    in-out property <[string]> evidence;
+    callback pick(string);
+    callback evidence-set(int, string);
+    callback stage(string);
+    // -- the basket
+    in-out property <int> basket-count;
+    in-out property <string> basket-tip;
+    in-out property <string> basket-summary;
+    in-out property <string> basket-auto;
+    in-out property <[KbLine]> basket-rows;
+    callback basket-propose();
+    callback basket-discard();
+    callback basket-remove(int);
+    // -- the New task form
+    in-out property <bool> form-open;
+    in-out property <string> f-title;
+    in-out property <string> f-type;
+    in-out property <string> f-size;
+    in-out property <string> f-due;
+    in-out property <string> f-after;
+    in-out property <int> f-mode; // 0 floating · 1 once · 2 recurring
+    in-out property <string> f-start;
+    in-out property <string> f-end;
+    in-out property <string> f-freq: "weekly";
+    in-out property <string> f-interval;
+    in-out property <string> f-until;
+    in-out property <string> f-count;
+    in-out property <string> f-desc;
+    in-out property <string> f-error;
+    in-out property <string> f-blocked-filter;
+    in-out property <[KbPick]> f-assignees;
+    in-out property <[KbPick]> f-blocked;
+    in-out property <[string]> f-acceptance;
+    in-out property <[string]> f-scope;
+    callback form-new();
+    callback form-cancel();
+    callback form-submit();
+    callback f-assignee-toggle(string);
+    callback f-blocked-toggle(string);
+    callback f-blocked-filter-edited(string);
+    // list 0 = acceptance, 1 = out of scope
+    callback f-list-add(int);
+    callback f-list-set(int, int, string);
+    callback f-list-remove(int, int);
+    // -- Mine
+    in-out property <int> action-count;
+    in-out property <[KbLine]> actions;
+    in-out property <[KbLine]> mine;
+    in-out property <[KbLine]> declined;
+    callback rescue(int);
+    // §2.4: 12 slots, mid-tone so a chip reads on light and dark alike;
+    // the label always rides beside it
+    public pure function type-color(slot: int) -> color {
+        return slot == 0 ? #d1495b : slot == 1 ? #e07a1f : slot == 2 ? #c9a227
+            : slot == 3 ? #7fa83a : slot == 4 ? #2e9e5b : slot == 5 ? #1f9e94
+            : slot == 6 ? #2a8bc7 : slot == 7 ? #4f6fd6 : slot == 8 ? #7b5cd6
+            : slot == 9 ? #b04fc4 : slot == 10 ? #cf4f93 : slot == 11 ? #8a7a6a
+            : #9a948c;
+    }
+}
+
 export global Strings {
     // brand + choice
     in property <string> choice-title;
@@ -1404,6 +1566,20 @@ export global Strings {
     in property <string> field-poke-wake;
     in property <string> field-wake;
     in property <string> wake-hint;
+    in property <string> field-wake-on;
+    in property <string> wake-on-poked;
+    in property <string> wake-on-vote;
+    in property <string> wake-on-kanban;
+    in property <string> wake-on-start;
+    in property <string> field-wake-rest;
+    in property <string> field-wake-lead;
+    in property <string> wake-skill-btn;
+    in property <string> wake-test-btn;
+    in property <string> wake-test-last;
+    in property <string> skill-title;
+    in property <string> skill-line;
+    in property <string> skill-save;
+    in property <string> skill-saved;
     in property <string> field-sound-poke;
     in property <string> mem-poke;
     in property <string> toast-poked;
@@ -1697,64 +1873,108 @@ export global Strings {
     in property <string> pv-title;
     in property <string> pv-copy;
     in property <string> pv-copied;
-    // Quests (Kanban board — kanban_workflows.md §6)
+    // Quests (Kanban board, kanban_workflows.md §8)
     in property <string> kb-title-board;
     in property <string> kb-hint-board;
-    in property <string> kb-col-backlog;
-    in property <string> kb-col-ready;
-    in property <string> kb-col-doing;
-    in property <string> kb-col-review;
-    in property <string> kb-col-done;
     in property <string> kb-title-plan;
-    in property <string> kb-hint-plan;
-    in property <string> kb-title-create;
-    in property <string> kb-hint-create;
+    in property <string> kb-title-calendar;
+    in property <string> kb-title-deps;
     in property <string> kb-title-mine;
     in property <string> kb-hint-mine;
-    in property <string> kb-title-archive;
-    in property <string> kb-hint-archive;
-    in property <string> kb-kind-epic;
-    in property <string> kb-kind-story;
-    in property <string> kb-kind-task;
-    in property <string> kb-f-parent;
-    in property <string> kb-f-resp;
-    in property <string> kb-f-start;
-    in property <string> kb-f-due;
-    in property <string> kb-f-points;
-    in property <string> kb-f-prio;
-    in property <string> kb-f-sprint;
-    in property <string> kb-f-pi;
-    in property <string> kb-f-deps;
-    in property <string> kb-f-refs;
-    in property <string> kb-sec-details;
-    in property <string> kb-sec-ready;
-    in property <string> kb-sec-done;
-    in property <string> kb-sec-scope;
-    in property <string> kb-prio-low;
-    in property <string> kb-prio-normal;
-    in property <string> kb-prio-high;
-    in property <string> kb-prio-critical;
-    in property <string> kb-ph-title;
-    in property <string> kb-ph-parent;
-    in property <string> kb-ph-resp;
-    in property <string> kb-ph-date;
-    in property <string> kb-ph-points;
-    in property <string> kb-ph-deps;
-    in property <string> kb-ph-details;
-    in property <string> kb-ph-ready;
-    in property <string> kb-ph-done;
-    in property <string> kb-ph-scope;
-    in property <string> kb-propose;
-    in property <string> kb-propose-change;
+    in property <string> kb-col-todo;
+    in property <string> kb-col-wip;
+    in property <string> kb-col-done;
+    in property <string> kb-st-todo;
+    in property <string> kb-st-wip;
+    in property <string> kb-st-success;
+    in property <string> kb-st-fail;
+    in property <string> kb-st-cancelled;
+    in property <string> kb-sub-stuck;
+    in property <string> kb-sub-blocked;
+    in property <string> kb-sub-scheduled;
+    in property <string> kb-sub-later;
+    in property <string> kb-sub-open;
+    in property <string> kb-flag-overdue;
+    in property <string> kb-flag-conflict;
+    in property <string> kb-flag-reopened;
+    in property <string> kb-due;
+    in property <string> kb-after;
+    in property <string> kb-needed;
+    in property <string> kb-daily;
+    in property <string> kb-weekly;
+    in property <string> kb-monthly;
+    in property <string> kb-vote;
+    in property <string> kb-vote-edit;
+    in property <string> kb-in-basket;
+    in property <string> kb-mv-start;
+    in property <string> kb-mv-pause;
+    in property <string> kb-mv-succeed;
+    in property <string> kb-mv-fail;
+    in property <string> kb-mv-cancel;
+    in property <string> kb-mv-retry;
+    in property <string> kb-mv-reopen;
+    in property <string> kb-note-needed;
+    in property <string> kb-move-illegal;
+    in property <string> kb-f-mine;
+    in property <string> kb-f-act;
+    in property <string> kb-f-starting;
+    in property <string> kb-f-created;
+    in property <string> kb-f-vote;
+    in property <string> kb-f-closed;
+    in property <string> kb-n-kanban;
+    in property <string> kb-n-vote;
+    in property <string> kb-n-start;
+    in property <string> kb-a-vote;
+    in property <string> kb-a-start;
+    in property <string> kb-a-late;
+    in property <string> kb-a-wip;
+    in property <string> kb-a-startable;
+    in property <string> kb-a-poke;
+    in property <string> kb-new-ref;
+    in property <string> kb-progress;
+    in property <string> kb-changes;
+    in property <string> kb-rescued;
+    in property <string> kb-new-task;
     in property <string> kb-back;
-    in property <string> kb-mv-review;
-    in property <string> kb-mv-done;
-    in property <string> kb-rollup;
-    in property <string> kb-committed;
-    in property <string> kb-current;
-    in property <string> kb-unscheduled;
-    in property <string> kb-closed-done;
-    in property <string> kb-closed-dropped;
+    in property <string> kb-propose;
+    in property <string> kb-discard;
+    in property <string> kb-add-basket;
+    in property <string> kb-fl-title;
+    in property <string> kb-fl-type;
+    in property <string> kb-fl-size;
+    in property <string> kb-fl-assignees;
+    in property <string> kb-fl-blocked;
+    in property <string> kb-fl-prereq-for;
+    in property <string> kb-fl-prereqs;
+    in property <string> kb-fl-due;
+    in property <string> kb-fl-after;
+    in property <string> kb-fl-time;
+    in property <string> kb-tm-floating;
+    in property <string> kb-tm-once;
+    in property <string> kb-tm-recurring;
+    in property <string> kb-fl-start;
+    in property <string> kb-fl-end;
+    in property <string> kb-fl-interval;
+    in property <string> kb-fl-until;
+    in property <string> kb-fl-count;
+    in property <string> kb-fl-desc;
+    in property <string> kb-fl-acceptance;
+    in property <string> kb-fl-scope;
+    in property <string> kb-fl-note;
+    in property <string> kb-fl-evidence;
+    in property <string> kb-fl-created;
+    in property <string> kb-add-item;
+    in property <string> kb-ph-date;
+    in property <string> kb-ph-when;
+    in property <string> kb-ph-filter;
+    in property <string> kb-ph-summary;
+    in property <string> kb-ph-desc;
+    in property <string> kb-sec-actions;
+    in property <string> kb-sec-mine;
+    in property <string> kb-sec-declined;
+    in property <string> kb-rescue;
+    in property <string> kb-empty;
+    in property <string> kb-off-board;
     // Vault (vault_threshold_disclosure.md)
     in property <string> vt-title-secrets;
     in property <string> vt-hint-secrets;

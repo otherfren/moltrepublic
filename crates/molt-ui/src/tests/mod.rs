@@ -9,6 +9,7 @@ mod chat_log;
 mod gui;
 mod i18n;
 mod images;
+mod kanban;
 mod labels;
 mod mirror;
 mod net_tor;

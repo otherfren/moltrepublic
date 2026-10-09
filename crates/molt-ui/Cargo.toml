@@ -24,6 +24,8 @@ molt-config.workspace = true
 # the workspace-dir draft exactly like the engine does
 molt-storage.workspace = true
 molt-engine.workspace = true
+# the agent skill text the Settings modal shows (one source, §6.2)
+molt-mcp.workspace = true
 tokio.workspace = true
 slint.workspace = true
 serde.workspace = true # the local wiki draft round-trips (WP-D)

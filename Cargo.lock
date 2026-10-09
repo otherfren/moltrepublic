@@ -5080,6 +5080,7 @@ dependencies = [
  "molt-config",
  "molt-core",
  "molt-engine",
+ "molt-mcp",
  "molt-net",
  "molt-storage",
  "molt-ui-window",

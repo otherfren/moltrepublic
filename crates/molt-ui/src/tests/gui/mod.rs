@@ -14,6 +14,7 @@
 mod chat;
 mod files;
 mod founding_fold;
+mod kanban;
 mod layout;
 mod mirror;
 #[cfg(feature = "live-preview")]

@@ -817,6 +817,54 @@ export component ConfirmModal inherits Rectangle {
     }
 }
 
+// The agent skill, read-only (kanban_workflows.md §6.2): one localized
+// line above the English skill, Copy and Save as file.
+export component SkillModal inherits ConfirmModal {
+    in property <string> text;
+    callback copy();
+    callback save();
+    dialog-width: 760px;
+    title: Strings.skill-title;
+    body: Strings.skill-line;
+    cancel-label: Strings.set-close;
+    alt-label: Strings.vt-copy;
+    confirm-label: Strings.skill-save;
+    alted => {
+        root.copy();
+    }
+    confirmed => {
+        root.save();
+    }
+    Rectangle {
+        height: 420px;
+        background: Theme.panel-2;
+        border-radius: Theme.win95 ? 0px : 8px;
+        border-width: Theme.border-w;
+        border-color: Theme.line;
+        clip: true;
+        sk-fl := Flickable {
+            width: 100%;
+            height: 100%;
+            viewport-width: max(self.width, sk-text.preferred-width + 28px);
+            viewport-height: max(self.height, sk-text.preferred-height + 24px);
+            sk-text := Text {
+                x: 14px;
+                y: 12px;
+                text: root.text;
+                color: Theme.text;
+                font-family: "monospace";
+                font-size: Theme.fs-cap;
+            }
+        }
+        ScrollHint {
+            x: parent.width - 7px;
+            view-h: sk-fl.height;
+            content-h: sk-fl.viewport-height;
+            scroll-y: sk-fl.viewport-y;
+        }
+    }
+}
+
 // Multi-line text editor (e.g. the charter draft): AppField's skin around
 // a wrapping TextInput inside a scrollable viewport, so a long text stays
 // fully readable and editable.

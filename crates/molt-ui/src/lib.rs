@@ -64,6 +64,7 @@ mod channels;
 mod chat_log;
 mod i18n;
 mod images;
+mod kanban;
 mod labels;
 mod mirror;
 mod models;

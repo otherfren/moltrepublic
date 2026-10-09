@@ -93,6 +93,27 @@ pub(crate) fn mib_text_to_bytes(text: &str, stored: u64) -> u64 {
     mib.saturating_mul(MIB)
 }
 
+/// A numeric field's value; text that is not a number keeps `stored`.
+pub(crate) fn number_field(text: &str, stored: u64) -> u64 {
+    text.trim().parse().unwrap_or(stored)
+}
+
+/// The four `wake_on` checkboxes, in `WAKE_REASONS` order.
+fn wake_on_draft(ui: &AppWindow) -> Vec<String> {
+    let on = [
+        ui.get_cfg_wake_on_poked(),
+        ui.get_cfg_wake_on_vote(),
+        ui.get_cfg_wake_on_kanban(),
+        ui.get_cfg_wake_on_start(),
+    ];
+    molt_core::kanban_wake::WAKE_REASONS
+        .iter()
+        .zip(on)
+        .filter(|(_, on)| *on)
+        .map(|(r, _)| (*r).to_string())
+        .collect()
+}
+
 /// Gather the config-tab draft properties into a [`SessionSettings`].
 pub(crate) fn read_settings_draft(ui: &AppWindow, stored: &SessionSettings) -> SessionSettings {
     let d = SessionSettings::default();
@@ -120,10 +141,14 @@ pub(crate) fn read_settings_draft(ui: &AppWindow, stored: &SessionSettings) -> S
         sound_poke: sound_name(ui.get_cfg_sound_poke_index()),
         poke_enabled: ui.get_cfg_poke_enabled(),
         poke_wake_command: ui.get_cfg_poke_wake().to_string(),
-        // not on the config tab yet (S4): echo the stored values
-        wake_min_interval_secs: stored.wake_min_interval_secs,
-        wake_on: stored.wake_on.clone(),
-        task_wake_lead_min: stored.task_wake_lead_min,
+        wake_min_interval_secs: number_field(&ui.get_cfg_wake_rest(), stored.wake_min_interval_secs)
+            .min(molt_core::WAKE_MIN_INTERVAL_MAX),
+        wake_on: wake_on_draft(ui),
+        task_wake_lead_min: u16::try_from(
+            number_field(&ui.get_cfg_wake_lead(), u64::from(stored.task_wake_lead_min))
+                .min(u64::from(molt_core::TASK_WAKE_LEAD_MAX)),
+        )
+        .unwrap_or(stored.task_wake_lead_min),
         read_receipts: ui.get_cfg_read_receipts(),
         s3_backup: ui.get_cfg_s3_backup(),
         s3_endpoint: ui.get_cfg_s3_endpoint().to_string(),
@@ -212,6 +237,13 @@ pub(crate) fn apply_settings_fields(ui: &AppWindow, s: &SessionSettings) {
     ui.set_cfg_sound_poke_index(sound_index(&s.sound_poke));
     ui.set_cfg_poke_enabled(s.poke_enabled);
     ui.set_cfg_poke_wake(s.poke_wake_command.clone().into());
+    let on = |r: &str| s.wake_on.iter().any(|w| w == r);
+    ui.set_cfg_wake_on_poked(on("poked"));
+    ui.set_cfg_wake_on_vote(on("vote_pending"));
+    ui.set_cfg_wake_on_kanban(on("kanban"));
+    ui.set_cfg_wake_on_start(on("task_start"));
+    ui.set_cfg_wake_rest(s.wake_min_interval_secs.to_string().into());
+    ui.set_cfg_wake_lead(s.task_wake_lead_min.to_string().into());
     ui.set_cfg_read_receipts(s.read_receipts);
     ui.set_cfg_network_index(net_index(&s.anonymity));
     ui.set_cfg_tor_mode_index(mode_index(&s.tor_mode));
