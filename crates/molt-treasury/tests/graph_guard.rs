@@ -22,6 +22,9 @@ fn no_dev_graph() -> BTreeSet<(String, String)> {
             "all",
             "--prefix",
             "none",
+            // the workspace's own core (chrono's platform crates) is not the purse stack
+            "--prune",
+            "molt-core",
         ])
         .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
         .output()

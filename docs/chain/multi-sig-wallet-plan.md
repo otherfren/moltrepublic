@@ -604,7 +604,12 @@ Fork-Höhen fest. Bis dahin `can_spend = false`, kein `sign.rs`.
 1. [x] Design rev 3 + Plan rev 3 — zur Ratifizierung.
 2. [x] §6 Dependency-Lock + bare `molt-treasury` + pedpop-Review +
    Digest-Auth-Urteil (2026-10-09).
-3. [ ] §10.1–13 molt-treasury; §10.14 Daemon-Klassifizierung.
+3. [x] §10.1–13 molt-treasury; §10.14 Daemon-Klassifizierung (2026-10-09).
+   Runde-1-Nachricht = `c_i ‖ pedpop-Bytes`, `T` deckt beide; `m`/`n` in
+   Attestation und Keys-Record u16 LE, Netz ein Byte (0 main, 1 test,
+   2 stage). `http://` nur zu Onion/Local (wie `ws://`). Der Graph-Guard
+   lässt molt-cores Teilbaum aus (chronos Plattform-Krates). Die
+   Scan-Datei-Bytes kommen mit Schritt 4.
 4. [ ] §9 + §10.15–19 Storage, Backup-Doku.
 5. [ ] §8 Kontrakt, MCP, Config; Co-Equality grün.
 6. [ ] §7.1–7.2 + §7.7; §10.20–25, 36.

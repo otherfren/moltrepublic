@@ -24,7 +24,7 @@ fn run_dkg(context: [u8; 32]) -> Vec<ThresholdKeys<Ed25519>> {
     for p in &params {
         let (m, bytes) = dkg::round1(*p, context, &mut rng);
         r1_machines.push(m);
-        r1_bytes.insert(u16::from(p.i()), bytes);
+        r1_bytes.insert(u16::from(p.i()), bytes.to_vec());
     }
 
     let mut r2_machines = Vec::new();
@@ -90,7 +90,7 @@ fn a_round_one_frame_under_another_context_is_refused() {
     let (_, foreign) = dkg::round1(p[0], [1; 32], &mut rng);
     let (seat2, _) = dkg::round1(p[1], [2; 32], &mut rng);
     let (_, third) = dkg::round1(p[2], [2; 32], &mut rng);
-    let frames = BTreeMap::from([(1, foreign), (3, third)]);
+    let frames = BTreeMap::from([(1, foreign.to_vec()), (3, third.to_vec())]);
     let err = dkg::round2(seat2, p[1], &frames, &mut rng).expect_err("context mismatch");
     assert!(
         matches!(err, TreasuryError::Dkg(ref e) if e.contains("InvalidCommitments")),
@@ -150,13 +150,13 @@ fn a_garbage_frame_names_its_sender_and_seat_zero_is_refused() {
 
     let (seat1, _) = dkg::round1(p[0], [1; 32], &mut rng);
     let (_, r1_2) = dkg::round1(p[1], [1; 32], &mut rng);
-    let frames = BTreeMap::from([(2, r1_2.clone()), (3, vec![0xff; 7])]);
+    let frames = BTreeMap::from([(2, r1_2.to_vec()), (3, vec![0xff; 7])]);
     let err = dkg::round2(seat1, p[0], &frames, &mut rng).expect_err("garbage round 1");
     assert_eq!(err, TreasuryError::Frame(3));
 
     let (seat1, _) = dkg::round1(p[0], [1; 32], &mut rng);
     let (_, r1_3) = dkg::round1(p[2], [1; 32], &mut rng);
-    let frames = BTreeMap::from([(2, r1_2), (3, r1_3)]);
+    let frames = BTreeMap::from([(2, r1_2.to_vec()), (3, r1_3.to_vec())]);
     let (km, _) = dkg::round2(seat1, p[0], &frames, &mut rng).expect("round 2");
     let shares = BTreeMap::from([(2, vec![0xff; 5]), (3, vec![0xff; 5])]);
     let err = dkg::complete(km, p[0], &shares, &mut rng).expect_err("garbage share");

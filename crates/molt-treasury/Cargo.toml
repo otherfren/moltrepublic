@@ -13,6 +13,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+molt-core.workspace = true
 dkg.workspace = true
 dkg-pedpop.workspace = true
 dalek-ff-group.workspace = true
@@ -22,6 +23,9 @@ schnorr-signatures.workspace = true  # not used in code: carries the =0.5.2 pin 
 rand_chacha.workspace = true
 zeroize.workspace = true
 thiserror.workspace = true
+sha2.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
 
 [dev-dependencies]
 monero-daemon-rpc.workspace = true

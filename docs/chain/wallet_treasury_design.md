@@ -11,8 +11,9 @@ answers the review of rev 2: the purse record proves its own all-n consent
 (§3.5), the init vote is the only door (§3.1), every republic gets a purse
 by default (§3.2), and the purse runs on mainnet behind a loud warning
 (§7). Rev 1 (2026-08-16) and rev 2 (2026-10-06) are superseded; §13 lists
-what changed. Built so far: the dependency lock and the bare
-`molt-treasury` crate (plan §14 step 2, 2026-10-09). **Scope is Stage 1 only:** found the
+what changed. Built so far: the dependency lock, `molt-treasury`'s pure
+core (DKG wrapper, view key, address, attestations, keys record, scan
+core) and `daemon_kind` (plan §14 steps 2-3, 2026-10-09). **Scope is Stage 1 only:** found the
 purse, receive, watch. Spending (Stage 2) is gated on upstream (§8).
 
 ---
@@ -425,7 +426,8 @@ Two files, because one secret must never be lost and the rest is cheap:
   some of the cross-check below for a click. It is reached through
   monero-daemon-rpc with a transport over the project's HTTP client and
   dialer. Its host is classified by the **same WHATWG-parsed host rule as a
-  relay** (onion / local / clearnet), with `http`/`https` as the schemes;
+  relay** (onion / local / clearnet), with `http`/`https` as the schemes
+  (`http` only to an onion or local daemon, as `ws` for relays);
   userinfo in the URL is refused (login is its own setting). An onion
   daemon is dialed over Tor; a local or clearnet daemon rides the same gate
   as a local or clearnet relay — dialed only when non-onion dialing is on
@@ -567,9 +569,9 @@ Fixed now, whatever the algorithm:
     known); an identity encryption key or per-message key makes that share's
     cipher key public to every group member. The wrapper must reject the
     identity in **every** point of both frames (commitments, PoK nonce,
-    encryption key; round 2's message key and PoP nonce): step 3, since
-    the frames expose no accessors. The group key is refused already
-    (`keys::standard_address`).
+    encryption key; round 2's message key and PoP nonce), read at their
+    fixed offsets since the frames expose no accessors (`dkg::round2`,
+    `dkg::complete`). The group key is refused too.
   - *Equivocation* is the caller's (the transcript hash, §3.4).
   - *Panics* (release is `panic = "abort"`): the DKG path has none reachable
     after `validate_map`; the blame path indexes by participant
