@@ -53,7 +53,7 @@ selben Tag gegen die Crate-Quellen.
 | Krate | Version | Rolle |
 |---|---|---|
 | `dkg` | 0.6.1 | `ThresholdParams`, `ThresholdKeys`, `Participant` |
-| `dkg-pedpop` | 0.6.0 | DKG, 2 Runden, `BlameMachine`; **auf Serais `next` gelöscht** |
+| `dkg-pedpop` | **=0.6.0** (Pin) | DKG, 2 Runden, `BlameMachine`; **auf Serais `next` gelöscht**; reviewed, not vendored (Design §12) |
 | `dalek-ff-group` | 0.5 | `Ed25519`-Ciphersuite |
 | `ciphersuite` | 0.4 | `Ciphersuite`-Trait |
 | `monero-wallet` | 0.2.0, **ohne** `multisig` | `ViewPair`, `Scanner`, Adressen |
@@ -74,7 +74,8 @@ Verifizierte API-Fakten:
 - `*::read` brauchen die eigenen `ThresholdParams`.
 - Zwischenstände sind nicht serialisierbar.
 - `ciphersuite::read_G` prüft nur Gültigkeit/Kanonizität, **nicht** den
-  Identitätspunkt → eigene Prüfung.
+  Identitätspunkt → eigene Prüfung, für jeden Punkt beider Frames
+  (Design §12).
 - **Kein View-Key aus dem DKG.** Adresse = `ViewPair::new(spend, view)
   .legacy_address(network)`; `ViewPair::new` nimmt monero-oxides eigenen
   `ed25519::Point` → Konvertierung aus dalek-ff-group nötig; lehnt Torsion ab.
@@ -182,9 +183,8 @@ crates/molt-treasury/src/
 - **RPC-Transport** in molt-net (`monero_rpc.rs`): `HttpTransport` über die
   `s3::http`-Funktionen und den `Dialer`. Onion → Tor; Local/Clearnet →
   nur bei `clearnet_enabled` und bestätigtem Daemon (wie ein Relay),
-  sonst fail-closed mit Grund. Login: zuerst eine etablierte
-  Digest-Auth-Crate suchen und das Urteil in §6 festhalten (Regel „nicht
-  selbst basteln“). Antwortgrenze pro Aufruf (`get_blocks.bin` groß).
+  sonst fail-closed mit Grund. Login: `http-auth` (digest-scheme), Urteil
+  in §6. Antwortgrenze pro Aufruf (`get_blocks.bin` groß).
 - **Sitzordnung:** `State::vault_founding_table()` — kein neuer Helfer.
 
 ### 5.2 Kontrakt in molt-core (`molt-core/src/wallet.rs`, neu)
@@ -221,10 +221,10 @@ pub struct WalletRunView {
 ## 6. Dependency-Lock (Schritt 2)
 
 ```toml
-dkg = "0.6"
-dkg-pedpop = "0.6"
-dalek-ff-group = "0.5"
-ciphersuite = "0.4"
+dkg = { version = "0.6", default-features = false, features = ["std"] }
+dkg-pedpop = "=0.6.0"
+dalek-ff-group = { version = "0.5", default-features = false, features = ["std"] }
+ciphersuite = { version = "0.4", default-features = false, features = ["std"] }
 monero-wallet = { version = "0.2", default-features = false, features = ["std", "compile-time-generators"] }
 monero-daemon-rpc = { version = "0.2", default-features = false, features = ["std"] }
 schnorr-signatures = { version = "=0.5.2", default-features = false }
@@ -239,6 +239,29 @@ schnorr-signatures = { version = "=0.5.2", default-features = false }
    `dkg-evrf` unveröffentlicht). Urteil ins Design §12.
 5. Digest-Auth-Crate suchen und bewerten (§5.1).
 6. QR-Crate suchen und bewerten (§11).
+
+**Done 2026-10-09** (verdicts with their arguments in Design §12):
+
+- Locked in the workspace manifest; `molt-treasury` carries the spike
+  functions (`dkg::{params, round1, round2, complete}`,
+  `keys::standard_address`) and `tests/stage1_lock.rs` (3-seat DKG agrees,
+  `ThresholdKeys` round-trip, standard main address; a round-1 frame under
+  another context is refused; the `HttpTransport` shape compiles).
+  `monero-daemon-rpc` is a dev-dependency there until molt-net's transport
+  (§5.1) takes it; `molt-core` joins when first used (step 3).
+- Audit: `cargo tree -p molt-treasury -d` shows only `thiserror` 1 + 2;
+  `-i ring` and `-i cc` match nothing; no `*-sys`.
+  `tests/graph_guard.rs` keeps that true and fails on a second `multiexp`
+  or a moved `schnorr-signatures`. The pin only bites on a fresh resolve:
+  an existing lock keeps `multiexp` 0.4 even at 0.5.3, the guard then
+  goes red on the version.
+- `dkg-pedpop`: crates.io pin `=0.6.0`, not vendored. Step 3 rejects the
+  identity in every point of both frames, not only the commitments, and
+  never calls `blame` with wire indexes.
+- Digest auth: `http-auth` 0.1 with `default-features = false,
+  features = ["digest-scheme"]`. Left: `digest_auth`.
+- QR: `qrcode` 0.14 with `default-features = false` (no deps), module grid
+  via `to_colors()`/`width()`. Left: `qrcodegen`, `fast_qr`.
 
 ## 7. Engine
 
@@ -317,7 +340,8 @@ Presence-Tick bis Commit oder Abbruch; nie im Workspace-Log:
   Nachrichten in Teilnehmer-Reihenfolge)`. Abweichendes `T` → Abbruch.
 - **Equivocation / Blame:** Abbruch mit Grund; Sender und Library-Blame
   nur im lokalen Log (`wallet_abort init=… run=… reason=… from=…`).
-- Identity-Punkte → Abbruch vor dem Library-Aufruf.
+- Identity-Punkte (jeder Punkt in Runde 1 und 2, Gruppenschlüssel) →
+  Abbruch vor dem Library-Aufruf.
 - Ingest idempotent; Frames für einen fremden/alten Lauf ignorieren.
 - `State.wallet_run` im Speicher. Deadline im Presence-Tick. Reopen ohne
   Laufzustand **und** ohne Keys-Record → Abbruch-Frame; mit Keys-Record →
@@ -556,9 +580,8 @@ Organization-Modal: Wallet-Checkbox entsperrt (W1), erzeugt `wallet_init`.
 `the_wizard_ends_with_the_purse_stage`, `no_crypto_words_in_wallet_strings`
 (Wortliste U1 gegen alle `wl_*`/Wallet-Strings), `amounts_render_in_xmr`.
 
-**QR-Code:** keine eigene Kodierung. Im Dep-Lock (§6) eine etablierte
-reine Rust-Crate (Kandidat `qrcode`) prüfen: Lizenz, kein C, Ausgabe als
-Pixelbild für Slint.
+**QR-Code:** keine eigene Kodierung: `qrcode` 0.14 ohne Default-Features
+(Urteil §6).
 
 ## 12. Fork-Vorsorge (FCMP++ + Carrot)
 
@@ -578,8 +601,8 @@ Fork-Höhen fest. Bis dahin `can_spend = false`, kein `sign.rs`.
 ## 14. Ausführungsreihenfolge
 
 1. [x] Design rev 3 + Plan rev 3 — zur Ratifizierung.
-2. [ ] §6 Dependency-Lock + bare `molt-treasury` + pedpop-Review +
-   Digest-Auth-Urteil.
+2. [x] §6 Dependency-Lock + bare `molt-treasury` + pedpop-Review +
+   Digest-Auth-Urteil (2026-10-09).
 3. [ ] §10.1–13 molt-treasury; §10.14 Daemon-Klassifizierung.
 4. [ ] §9 + §10.15–19 Storage, Backup-Doku.
 5. [ ] §8 Kontrakt, MCP, Config; Co-Equality grün.

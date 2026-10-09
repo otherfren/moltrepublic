@@ -14,6 +14,7 @@
 #   molt-storage encrypted append-only workspace storage: event log, snapshots, keys
 #   molt-net     the transport: MLS-protected payloads over Nostr relays (production) or the loopback hub (tests); Tor dialer, S3
 #   molt-vault   the vault's crypto: Shamir/Feldman, HPKE shares, payload AEAD - pure functions, no I/O, depends on core only
+#   molt-treasury the purse's crypto: PedPoP DKG, view key, standard address, attestations - pure functions, no I/O, core + the Monero stack only
 #   molt-engine  the wallet-core actor: single owning task, WalletHandle
 #   molt-mcp     MCP frontend (the headless operator; stdio or tcp)
 #   molt-ui-window  the Slint-compiled window (own crate: the ~400k-line
@@ -34,6 +35,7 @@ members = [
     "crates/molt-storage",
     "crates/molt-net",
     "crates/molt-vault",
+    "crates/molt-treasury",
     "crates/molt-engine",
     "crates/molt-mcp",
     "crates/molt-ui-window",
@@ -51,6 +53,7 @@ molt-config  = { path = "crates/molt-config" }
 molt-storage = { path = "crates/molt-storage" }
 molt-net     = { path = "crates/molt-net" }
 molt-vault   = { path = "crates/molt-vault" }
+molt-treasury = { path = "crates/molt-treasury" }
 molt-engine  = { path = "crates/molt-engine" }
 molt-mcp     = { path = "crates/molt-mcp" }
 molt-ui-window = { path = "crates/molt-ui-window" }
@@ -98,6 +101,16 @@ hpke               = { version = "=0.13.0", default-features = false, features =
 rand_chacha        = "0.3"
 ed25519-dalek      = { version = "2", default-features = false, features = ["std", "rand_core"] }  # member identity keys (derived, never random)
 crc32c             = "0.6"    # molt-storage: torn-write/bitrot detection over the ciphertext
+# the purse, Stage 1 (molt-treasury, docs/chain/multi-sig-wallet-plan.md §6). Minors held;
+# monero-oxide's bug bounty is paused, so upgrade deliberately. No modular-frost and no
+# monero-wallet `multisig` until Stage 2.
+dkg                = { version = "0.6", default-features = false, features = ["std"] }
+dkg-pedpop         = "=0.6.0" # dead upstream; this exact source was reviewed (design §12)
+dalek-ff-group     = { version = "0.5", default-features = false, features = ["std"] }
+ciphersuite        = { version = "0.4", default-features = false, features = ["std"] }
+monero-wallet      = { version = "0.2", default-features = false, features = ["std", "compile-time-generators"] }
+monero-daemon-rpc  = { version = "0.2", default-features = false, features = ["std"] }
+schnorr-signatures = { version = "=0.5.2", default-features = false } # 0.5.3 admits multiexp 0.5 beside 0.4: two BatchVerifier types break dkg-pedpop
 
 # TLS + dialing (molt-net). Pure-Rust: rustls with the RustCrypto provider
 # keeps the no-C-toolchain / reproducible posture (rustls-rustcrypto instead

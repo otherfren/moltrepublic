@@ -11,7 +11,8 @@ answers the review of rev 2: the purse record proves its own all-n consent
 (§3.5), the init vote is the only door (§3.1), every republic gets a purse
 by default (§3.2), and the purse runs on mainnet behind a loud warning
 (§7). Rev 1 (2026-08-16) and rev 2 (2026-10-06) are superseded; §13 lists
-what changed. Nothing is implemented. **Scope is Stage 1 only:** found the
+what changed. Built so far: the dependency lock and the bare
+`molt-treasury` crate (plan §14 step 2, 2026-10-09). **Scope is Stage 1 only:** found the
 purse, receive, watch. Spending (Stage 2) is gated on upstream (§8).
 
 ---
@@ -539,8 +540,9 @@ Fixed now, whatever the algorithm:
 
 ## 12. Dependencies and threat notes
 
-- **Stage 1 stack** (MIT, pure Rust, verified by a compiled spike
-  2026-10-06, no `ring`, no C): `dkg` 0.6.1, `dkg-pedpop` 0.6.0,
+- **Stage 1 stack** (MIT, pure Rust, locked in `molt-treasury` 2026-10-09,
+  no `ring`, no C, no `*-sys`, pinned by `tests/graph_guard.rs`): `dkg`
+  0.6.1, `dkg-pedpop` =0.6.0,
   `dalek-ff-group` 0.5 + `ciphersuite` 0.4 (the Ed25519 suite),
   `monero-wallet` 0.2.0 **without** the `multisig` feature,
   `monero-daemon-rpc` 0.2.0. Stage 1 needs neither `modular-frost` nor
@@ -551,8 +553,41 @@ Fixed now, whatever the algorithm:
 - **`dkg-pedpop` is a dead end upstream.** Still on Serai's default branch,
   removed on the active `next` branch (2025-08-23); its successor
   `dkg-evrf` is not on crates.io. Its last audit (2023) covered older code.
-  The project reviews the pinned version, rejects identity points itself,
-  and decides at the dependency lock whether to vendor it.
+- **Verdict (2026-10-09): crates.io, pinned `=0.6.0`, not vendored.** The
+  review of its source (`lib.rs`, `encryption.rs`) found no defect to
+  patch, only caller duties; the lockfile checksum fixes the bytes and a
+  yank cannot break a locked build. Vendoring would put 1.2k lines of
+  crypto under our maintenance with no change to make. Revisit on a
+  needed fix or the move to `dkg-evrf`. What the review found:
+  - *Context* enters the PoK challenge, the share cipher, the per-message
+    PoP and the DLEq transcript (labeled `flexible-transcript`, distinct
+    DSTs), so a frame from another run fails (pinned by a test).
+  - *Identity points:* `read_G` refuses non-canonical and torsioned points
+    but accepts the identity. An identity `A_0` passes the PoK (its log is
+    known); an identity encryption key or per-message key makes that share's
+    cipher key public to every group member. The wrapper rejects the
+    identity in **every** point of both frames (commitments, PoK nonce,
+    encryption key; round 2's message key and PoP nonce), and the group key.
+  - *Equivocation* is the caller's (the transcript hash, §3.4).
+  - *Panics* (release is `panic = "abort"`): the DKG path has none reachable
+    after `validate_map`; the blame path indexes by participant
+    (`enc_keys[&decryptor]`, `commitments[&sender]`) and panics on an index
+    outside 1..=n. The engine logs the participant from `InvalidShare` and
+    never feeds wire indexes to `blame` or `AdditionalBlameMachine`.
+  - `PedPoPError<Ed25519>` has no `Display` (a derive bound), so errors are
+    debug-formatted into the local log.
+- **Daemon login: `http-auth` 0.1.10** (MIT/Apache-2.0, 18M downloads,
+  RFC 2617/7616 challenge parser and Digest client), with
+  `default-features = false, features = ["digest-scheme"]`: md-5, sha2,
+  hex, rand 0.8, memchr, all pure Rust, no `ring`, no `cc` (scratch build
+  2026-10-09, monerod's MD5 `qop=auth` answered). Left: `digest_auth` 0.3
+  (MIT only, drags `http` 0.2, last release 2023, no challenge-list
+  parser).
+- **QR: `qrcode` 0.14** (MIT/Apache-2.0, 22M downloads) with
+  `default-features = false`: zero dependencies; the default `image` feature
+  is off. `QrCode::new(uri)` → `to_colors()` + `width()` is the module grid
+  the UI scales into a Slint `SharedPixelBuffer`. Left: `qrcodegen` (no
+  release since 2022), `fast_qr` (MIT only, image path through `resvg`).
 - **The `schnorr-signatures = "=0.5.2"` pin is load-bearing.** 0.5.3 is the
   same code but widens its `multiexp` range, which puts `multiexp` 0.4 and
   0.5 side by side and breaks `dkg-pedpop` (two `BatchVerifier` types).

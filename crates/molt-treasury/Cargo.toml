@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "molt-treasury"
+description = "The purse's crypto: PedPoP DKG, view key, standard address, attestations - pure functions, no I/O."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+dkg.workspace = true
+dkg-pedpop.workspace = true
+dalek-ff-group.workspace = true
+ciphersuite.workspace = true
+monero-wallet.workspace = true
+schnorr-signatures.workspace = true  # not used in code: carries the =0.5.2 pin into the graph
+rand_chacha.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+monero-daemon-rpc.workspace = true
