@@ -573,7 +573,7 @@ fn the_skill_file_is_written_only_where_none_exists() {
     assert!(write_skill(tmp.path()).is_err());
     assert_eq!(std::fs::read_to_string(&path).expect("read"), "mine");
     let other = tempfile::tempdir().expect("tmp");
-    let target = other.path().join("target.md");
+    let target = other.path().join("target.txt");
     std::os::unix::fs::symlink(&target, other.path().join("SKILL.md")).expect("link");
     assert!(write_skill(other.path()).is_err());
     assert!(!target.exists(), "the link was not followed");
