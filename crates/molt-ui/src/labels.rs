@@ -474,12 +474,11 @@ pub(crate) fn view_label(lang: i32, key: &str, en: &str) -> String {
 
 /// The default transition op the GUI uses when proposing on a surface;
 /// `None` where only dedicated commands propose (the vault, the kanban
-/// changesets).
+/// changesets, the purse).
 pub(crate) fn default_op(sf: Surface) -> Option<&'static str> {
     Some(match sf {
         Surface::Memory => "add_note",
-        Surface::Quests | Surface::Vault => return None,
-        Surface::Wallet => "transfer",
+        Surface::Quests | Surface::Vault | Surface::Wallet => return None,
         // organization changes come from the dedicated edit modals
         // (org-propose carries the specific op); chat and files are ungated
         Surface::Chat | Surface::Files | Surface::Organization => "note",

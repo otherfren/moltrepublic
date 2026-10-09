@@ -572,6 +572,10 @@ impl State {
             self.require_vault()?;
             return Err(MoltError::Vault(molt_core::vault::VaultRefusal::UseVaultSeal));
         }
+        // the purse's votes come only from its commands (W4)
+        if surface == Surface::Wallet {
+            return Err(MoltError::Wallet(molt_core::wallet::WalletRefusal::UseInit));
+        }
         self.propose_payload(surface, payload)
     }
 
@@ -585,8 +589,18 @@ impl State {
             return Err(MoltError::NotGated(surface));
         }
         // D7: no governance on a surface the charter has not enabled
-        // (Organization itself always passes — set_features rides it)
-        self.require_feature(surface)?;
+        // (Organization itself always passes — set_features rides it);
+        // the purse's init is the door that turns `wallet` on (W4)
+        if surface == Surface::Wallet {
+            if !crate::wallet::is_purse_op(&payload) {
+                return Err(MoltError::Wallet(molt_core::wallet::WalletRefusal::UnknownOp));
+            }
+            if !crate::wallet::is_init(&payload) {
+                self.require_feature(surface)?;
+            }
+        } else {
+            self.require_feature(surface)?;
+        }
         // set_relays: store the CANONICAL spelling (review 2026-08-09). The
         // parser accepts-and-rewrites ":443", a trailing "/" and uppercase;
         // recording the raw token instead would poison every later
@@ -664,6 +678,9 @@ impl State {
         if let Some(r) = self.vault_enable_refusal(surface, &payload) {
             return Err(MoltError::Vault(r));
         }
+        if let Some(e) = self.wallet_feature_refusal(surface, &payload) {
+            return Err(e);
+        }
         if surface == Surface::Files {
             self.prepare_files_proposal(&mut payload)?;
         }
@@ -731,9 +748,11 @@ impl State {
                 .collect();
             let current = self.effective_features();
             for f in &current {
-                // the vault is never proposed (D11); the union keeps it
+                // the vault is never proposed (D11), the wallet only by its
+                // init (W4); the union keeps both
                 let known = Surface::parse(f).is_some_and(Surface::is_charter_feature)
-                    && f != crate::vault::VAULT;
+                    && f != crate::vault::VAULT
+                    && f != Surface::Wallet.as_str();
                 if known && !proposed.contains(f.as_str()) {
                     return Err(MoltError::BadPayload(format!("{f}: cannot be disabled")));
                 }
@@ -864,6 +883,7 @@ impl State {
         note: Option<String>,
     ) -> Result<Reply, MoltError> {
         self.refuse_a_lagging_vote()?;
+        let mut wallet_refused = None;
         let (late, operator_already_voted) = {
             let p = self
                 .proposals
@@ -885,9 +905,14 @@ impl State {
                 // charter has not enabled, so it can never reach m honest seats.
                 // (The nav hides such a surface, so a GUI member could not even
                 // SEE the card it would be co-signing.)
-                self.require_feature(p.surface)?;
+                if !(p.surface == Surface::Wallet && crate::wallet::is_init(&p.payload)) {
+                    self.require_feature(p.surface)?;
+                }
                 if let Some(r) = self.vault_enable_refusal(p.surface, &p.payload) {
                     return Err(MoltError::Vault(r));
+                }
+                if let Some(e) = self.wallet_feature_refusal(p.surface, &p.payload) {
+                    return Err(e);
                 }
                 // a Files vote is checked against THIS seat's own view of the
                 // share - the payload arrived over the wire with no such check
@@ -899,6 +924,11 @@ impl State {
                 if p.surface == Surface::Vault {
                     self.vault_approve_check(&p.payload)?;
                 }
+                if p.surface == Surface::Wallet {
+                    if let Err(r) = self.wallet_approve_check(&p.payload) {
+                        wallet_refused = Some(r);
+                    }
+                }
                 // D2 (last vote counts, decided 2026-08-16): an approve over
                 // the own standing decline RETRACTS the decline below — the
                 // newest stance wins, mirroring the decline's signature
@@ -906,6 +936,10 @@ impl State {
                 (false, Self::operator_approved(p))
             }
         };
+        if let Some(r) = wallet_refused {
+            self.wallet_consent_waits(proposal.0, &r);
+            return Err(MoltError::Wallet(r));
+        }
         // A2: the reason goes in FIRST — a tipping signature must never
         // leave its reasoning behind the decision
         self.post_vote_note(proposal, note)?;
@@ -1251,11 +1285,19 @@ impl State {
         hash: &str,
     ) -> DeclineOutcome {
         let is_own = by == self.member();
-        let veto_room = self
-            .replica
-            .as_ref()
-            .map(|r| r.roster.len().saturating_sub(usize::from(r.rule_m).max(1)))
-            .unwrap_or(0);
+        // W6: one decline kills the purse's init card where it lands
+        let init_card = self
+            .proposals
+            .get(&id)
+            .is_some_and(|p| p.surface == Surface::Wallet && crate::wallet::is_init(&p.payload));
+        let veto_room = if init_card {
+            0
+        } else {
+            self.replica
+                .as_ref()
+                .map(|r| r.roster.len().saturating_sub(usize::from(r.rule_m).max(1)))
+                .unwrap_or(0)
+        };
         let Some(p) = self.proposals.get_mut(&id) else {
             // a real decline references an id SOME proposer minted and
             // gossiped — one absurdly far past the mint counter is garbage,
@@ -4435,11 +4477,19 @@ impl State {
             chain_governed: self.is_chain_governed(),
             chain_diverged: self.chain.diverged.values().cloned().collect(),
             // the nav renders this list: a prepared vault only once enabled
-            features: self
-                .effective_features()
-                .into_iter()
-                .filter(|f| Surface::parse(f).map_or(true, |s| self.feature_on(s)))
-                .collect(),
+            features: {
+                let mut f: Vec<String> = self
+                    .effective_features()
+                    .into_iter()
+                    .filter(|f| Surface::parse(f).map_or(true, |s| self.feature_on(s)))
+                    .collect();
+                let wallet = Surface::Wallet.as_str();
+                if self.feature_on(Surface::Wallet) && !f.iter().any(|k| k == wallet) {
+                    f.push(wallet.to_string());
+                    f.sort();
+                }
+                f
+            },
             vault_enable: self.vault_enable(),
             // the honest downscale target a frontend fits a picture to
             // before proposing — this republic's own derived headroom

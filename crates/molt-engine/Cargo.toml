@@ -47,6 +47,8 @@ pulldown-cmark.workspace = true
 tantivy.workspace = true
 
 [dev-dependencies]
+# the in-process monerod double for the purse tests
+molt-net = { workspace = true, features = ["stub-daemon"] }
 tempfile.workspace = true
 # make WARN/DEBUG from the engine + net visible in the ignored live-server
 # tests (a silent tracing::warn is how the 2026-07-19 mesh stall hid)

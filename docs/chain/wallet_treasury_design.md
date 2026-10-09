@@ -15,7 +15,8 @@ what changed. Built so far: the dependency lock, `molt-treasury`'s pure
 core (DKG wrapper, view key, address, attestations, keys record, scan
 core), `daemon_kind`, the keys and scan files with export and
 import, and the contract, MCP tools and `[wallet]` config (plan §14
-steps 2-5, 2026-10-09). **Scope is Stage 1 only:** found the
+steps 2-5, 2026-10-09); the init vote with its daemon transport (step 6,
+2026-10-10). **Scope is Stage 1 only:** found the
 purse, receive, watch. Spending (Stage 2) is gated on upstream (§8).
 
 ---

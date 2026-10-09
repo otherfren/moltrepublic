@@ -3,6 +3,7 @@
 
 //! Wallet plan §14 step 5: the purse's contract before its runs exist -
 //! the view's phase from the founding rule, and the doors that refuse.
+//! The init vote (step 6) lives in `wallet_init.rs`.
 
 use molt_core::wallet::{ShareStatus, WalletPhase, WalletRefusal};
 use molt_core::{Command, GroupConfig, MoltError, Reply, SessionSettings, SessionView, Surface};
@@ -74,17 +75,24 @@ async fn the_phase_follows_the_founding_rule() {
     assert_eq!(wallet_view(&w).await.phase, WalletPhase::Bounds, "m = n has no purse");
 }
 
-/// The doors steps 6-7 build refuse with one line until then.
+/// The doors step 7 builds refuse with one line until then; the init
+/// needs a chain, and a probe nobody started changes nothing.
 #[tokio::test]
 async fn the_unbuilt_doors_refuse_compactly() {
     let w = molt_engine::spawn(GroupConfig::demo(), SessionView::default());
+    match w.execute(Command::WalletInit).await {
+        Err(e @ MoltError::Wallet(WalletRefusal::NotChain)) => {
+            assert_eq!(e.to_string(), "purse: not a chain republic");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+    let probe = Command::NetWalletProbe { height: Some(1), error: String::new(), generation: None };
+    assert!(matches!(w.execute(probe).await, Ok(Reply::Ack)));
     let peer = || "bjorn".to_string();
     let secret = || molt_core::vault::SecretBytes(vec![7; 32]);
     for cmd in [
-        Command::WalletInit,
         Command::WalletConsent { accept: true },
         Command::WalletRetry,
-        Command::NetWalletProbe { height: Some(1), error: String::new(), generation: None },
         Command::NetWalletFrame { from: peer(), body: secret(), generation: None },
         Command::NetWalletScan {
             scan_height: 1,

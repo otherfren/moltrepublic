@@ -97,14 +97,28 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
             format!("Der Vault wird geholt ({have} von {size} Bytes)")
         }
         E::Vault(r) => format!("Vault: {}", localize_vault_refusal(lang, r)),
-        E::Wallet(r) => format!(
-            "Kasse: {}",
-            match r {
-                molt_core::wallet::WalletRefusal::NotYet => "noch nicht verfügbar",
-                molt_core::wallet::WalletRefusal::NoKeysFile => "keine Schlüsseldatei",
-                molt_core::wallet::WalletRefusal::KeysIntact => "Schlüsseldatei ist intakt",
-            }
-        ),
+        E::Wallet(r) => {
+            use molt_core::wallet::WalletRefusal as W;
+            format!(
+                "Kasse: {}",
+                match r {
+                    W::NotYet => "noch nicht verfügbar",
+                    W::NoKeysFile => "keine Schlüsseldatei",
+                    W::KeysIntact => "Schlüsseldatei ist intakt",
+                    W::NotChain => "keine Chain-Republik",
+                    W::Bounds => "braucht 2 <= m <= n-1",
+                    W::InitExists => "schon eingerichtet",
+                    W::InitPending => "Abstimmung läuft",
+                    W::NoDaemon => "kein Daemon",
+                    W::Checking => "Daemon wird gefragt",
+                    W::Daemon(t) => t.as_str(),
+                    W::Birthday => "Starthöhe außerhalb des Bereichs",
+                    W::Network => "anderes Netzwerk",
+                    W::UnknownOp => "unbekannte Op",
+                    W::UseInit => "wallet_init verwenden",
+                }
+            )
+        }
         E::FeatureDisabled(k) => format!("{k}: nicht aktiviert"),
         E::AlreadyTerminal(id, st) => format!("Vorschlag #{} ist bereits {st:?}", id.0),
         E::NotTheProposer(id) => format!("Vorschlag #{}: nur wer vorschlägt, zieht zurück", id.0),

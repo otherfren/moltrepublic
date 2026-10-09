@@ -163,6 +163,39 @@ pub enum WalletRefusal {
     /// An intact keys file is never set aside.
     #[error("keys file intact")]
     KeysIntact,
+    /// No chain, no founding rule (W1).
+    #[error("not a chain republic")]
+    NotChain,
+    /// The founding rule is outside `2 <= m <= n-1` (W1).
+    #[error("needs 2 <= m <= n-1")]
+    Bounds,
+    /// The purse was set up already.
+    #[error("already set up")]
+    InitExists,
+    /// A set-up vote is open.
+    #[error("set-up vote pending")]
+    InitPending,
+    /// This seat has no daemon: it abstains.
+    #[error("no daemon")]
+    NoDaemon,
+    /// The daemon is being asked.
+    #[error("checking the daemon")]
+    Checking,
+    /// The daemon could not be asked, one line.
+    #[error("{0}")]
+    Daemon(String),
+    /// The birthday lies outside this seat's window.
+    #[error("birthday out of range")]
+    Birthday,
+    /// The vote is for another network than this seat's.
+    #[error("other network")]
+    Network,
+    /// Not a purse op.
+    #[error("unknown op")]
+    UnknownOp,
+    /// Purse votes come only from their commands.
+    #[error("use wallet_init")]
+    UseInit,
 }
 
 #[cfg(test)]

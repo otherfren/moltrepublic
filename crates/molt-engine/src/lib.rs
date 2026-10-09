@@ -1245,6 +1245,8 @@ pub(crate) struct State {
     /// Workspaces whose last backup failed in a way a retry cannot heal (a
     /// damaged purse keys file): the ticker waits out the hold. Runtime-only.
     pub(crate) backup_hold: std::collections::HashMap<WorkspaceId, crate::backup::BackupHold>,
+    /// The purse's daemon height and waiting consents. Runtime-only.
+    pub(crate) purse: wallet::PurseRt,
     /// The last REAL bucket listing's objects (None until one succeeded, and
     /// cleared with it). Kept so the orphan classification can be re-run
     /// against the CURRENT workspace list when it changes (a deleted
@@ -1545,6 +1547,7 @@ impl State {
             backup_inflight: std::collections::HashSet::new(),
             backup_last_done: std::collections::HashMap::new(),
             backup_hold: std::collections::HashMap::new(),
+            purse: wallet::PurseRt::default(),
             backup_listing: None,
             restore_generation: 0,
             restore_task: None,
@@ -2209,8 +2212,10 @@ impl State {
             Command::WalletConsent { accept } => self.cmd_wallet_consent(accept),
             Command::WalletRetry => self.cmd_wallet_retry(),
             Command::WalletAcknowledgeLoss => self.cmd_wallet_acknowledge_loss(),
-            Command::NetWalletProbe { .. }
-            | Command::NetWalletFrame { .. }
+            Command::NetWalletProbe { height, error, generation } => {
+                self.cmd_net_wallet_probe(height, error, generation)
+            }
+            Command::NetWalletFrame { .. }
             | Command::NetWalletScan { .. }
             | Command::NetWalletStatus { .. }
             | Command::NetWalletViewAnswer { .. } => self.cmd_net_wallet_unbuilt(),

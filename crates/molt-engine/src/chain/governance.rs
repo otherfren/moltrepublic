@@ -127,7 +127,7 @@ impl State {
     /// signature for `id` at the current target height? A re-received frame
     /// must not amplify into fresh `Approved` gossip. Headless (no chain
     /// head) there is no target, hence nothing standing.
-    pub(super) fn own_signature_stands(&self, id: u64) -> bool {
+    pub(crate) fn own_signature_stands(&self, id: u64) -> bool {
         let Some(head) = self.chain.head.as_ref() else {
             return false;
         };
@@ -160,6 +160,12 @@ impl State {
         if let ChainChange::Applied { surface: Surface::Vault, payload, .. } = &change {
             if let Err(e) = self.vault_approve_check(payload) {
                 tracing::warn!(id, error = %e, "vault: not signing");
+                return;
+            }
+        }
+        if let ChainChange::Applied { surface: Surface::Wallet, payload, .. } = &change {
+            if let Err(e) = self.wallet_approve_check(payload) {
+                tracing::info!(id, error = %e, "wallet: not signing");
                 return;
             }
         }
@@ -1035,6 +1041,14 @@ impl State {
                 tracing::warn!(%id, %by, error = %e, "vault: refusing a proposal");
                 return false;
             }
+        }
+        if surface == Surface::Wallet && !crate::wallet::is_purse_op(&payload) {
+            tracing::warn!(%id, %by, "wallet: refusing an unknown op");
+            return false;
+        }
+        if let Some(e) = self.wallet_feature_refusal(surface, &payload) {
+            tracing::warn!(%id, %by, error = %e, "refusing a set_features adding the wallet");
+            return false;
         }
         // L3: a flooding proposer may only crowd ITSELF — the newest card
         // is refused (the WP2 re-serve re-earns an honest one later), and

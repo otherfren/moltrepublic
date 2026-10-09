@@ -641,9 +641,28 @@ Fork-Höhen fest. Bis dahin `can_spend = false`, kein `sign.rs`.
    `Off`/`Bounds`/`NoPurse` from the genesis or anchor rule; the other
    doors answer `purse: not available yet` (`TODO(step N)` in
    `molt-engine/src/wallet.rs`).
-6. [ ] §7.1–7.2 + §7.7; §10.20–25, 36.
+6. [x] §7.1–7.2 + §7.7; §10.20–25, 36 (2026-10-10). The daemon
+   transport came forward from step 8 (`molt-net/src/monero_rpc.rs`,
+   `s3::http` with a per-call cap and its own `HttpError`; the
+   `stub-daemon` feature is the in-process monerod of the tests).
+   `WalletInit` probes off the actor and the probe's
+   `NetWalletProbe` answers the caller with the proposal. Birthday =
+   height − 10; an approver takes it up to 30 above and 1440 below its
+   own daemon (a height older than 120 s is asked again). The
+   projection counts the first *well-formed* applied init. A raw
+   `propose` on Wallet answers `use wallet_init` (as the vault's). A seat
+   judges each init card when it lands: another network or a birthday
+   out of its window declines at once (the card dies, W6); an `approve`
+   it cannot check yet (no daemon, a probe pending) is kept in memory and
+   signs once the daemon answers. `wallet_created` is refused at every
+   signing path until step 7. `wallet` is no keep requirement of
+   `set_features` (the union keeps it, like the vault), so the
+   organization dialog no longer rides it along. §10.20–22 and 36 are unit tests on built
+   chains (`molt-engine/src/wallet_tests.rs`); 23–25a also run end to
+   end (`tests/wallet_init.rs`).
 7. [ ] §7.3–7.6 + §7.8; §10.26–35, 37–41.
-8. [ ] §7.9 Scanner; manueller regtest-Lauf.
+8. [ ] §7.9 Scanner; manueller regtest-Lauf (the RPC transport landed
+   with step 6).
 9. [ ] §11 UI.
 10. [ ] clippy pro Crate = 0; Suiten grün; Review über den Gesamt-Diff;
     master.

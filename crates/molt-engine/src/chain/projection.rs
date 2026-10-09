@@ -237,6 +237,10 @@ impl State {
                 set.extend(value.split_whitespace().map(str::to_string));
             }
         }
+        // W4: the applied init is what turns the purse on
+        if self.wallet_init_applied().is_some() {
+            set.insert(Surface::Wallet.as_str().to_string());
+        }
         set.into_iter().collect()
     }
 
@@ -245,6 +249,10 @@ impl State {
     pub(crate) fn feature_on(&self, surface: Surface) -> bool {
         if surface == Surface::Vault && self.is_vault_prepared() {
             return self.is_vault_republic();
+        }
+        // an open init card is reachable while the feature is off (§3.1)
+        if surface == Surface::Wallet && self.wallet_init_pending() {
+            return true;
         }
         self.effective_features().iter().any(|f| f == surface.as_str())
     }

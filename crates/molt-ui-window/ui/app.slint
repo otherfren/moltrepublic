@@ -9909,15 +9909,12 @@ export component AppWindow inherits Window {
             // modal is open, and the stale draft would then propose a set
             // omitting it - refused by the engine for a box the user never
             // touched (review 2026-08-12)
-            // the wallet has no draft (locked below) — but an ALREADY
-            // enabled one must ride along: the target set is
-            // enable-only. An enabled vault needs no ride: the engine keeps
-            // it by union.
+            // the wallet never rides: only its set-up vote adds it, and
+            // the engine keeps an enabled vault or wallet by union
             root.org-propose("set_features",
                 (root.of-memory-draft || root.org-feat-memory ? " memory" : "")
                 + (root.of-quests-draft || root.org-feat-quests ? " quests" : "")
-                + (root.of-vault-draft && root.org-vault-enable == 1 ? " vault" : "")
-                + (root.org-feat-wallet ? " wallet" : ""));
+                + (root.of-vault-draft && root.org-vault-enable == 1 ? " vault" : ""));
         }
         VerticalLayout {
             spacing: 4px;

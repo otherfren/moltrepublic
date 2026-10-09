@@ -453,6 +453,13 @@ impl State {
             merged.wallet_daemon_login = self.session.settings.wallet_daemon_login.clone();
         }
         validate_settings(&merged)?;
+        let daemon_moved = {
+            let s = &self.session.settings;
+            merged.wallet_daemon_url != s.wallet_daemon_url
+                || merged.wallet_daemon_confirmed != s.wallet_daemon_confirmed
+                || merged.wallet_daemon_login != s.wallet_daemon_login
+                || merged.wallet_network != s.wallet_network
+        };
         // the wholesale save below keeps the STORED daemon: this is its door
         let stored = &mut self.session.settings;
         stored.wallet_daemon_url = merged.wallet_daemon_url.clone();
@@ -472,6 +479,9 @@ impl State {
         let reply = self.cmd_save_settings(merged)?;
         if sets_a_secret {
             self.cmd_set_node_posture(secrets)?;
+        }
+        if daemon_moved {
+            self.wallet_daemon_changed();
         }
         Ok(reply)
     }

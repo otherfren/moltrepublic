@@ -426,6 +426,11 @@ impl State {
                             self.post_decision_summary(id.0, &payload, Some(&who));
                         }
                     }
+                    // judged once the card is in the own log: a decline
+                    // must never precede it there
+                    if surface == molt_core::Surface::Wallet {
+                        self.after_wallet_proposed(id.0);
+                    }
                 }
             }
             WorkspaceEvent::Approved { id, by, height, sig } if self.is_chain_governed() => {

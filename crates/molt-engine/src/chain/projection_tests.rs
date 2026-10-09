@@ -1630,7 +1630,7 @@ fn a_fresh_adopter_never_mints_a_chain_consumed_proposal_id() {
         ChainChange::Applied {
             proposal_id: 1,
             surface: Surface::Organization,
-            payload: serde_json::json!({ "op": "set_features", "value": "memory quests" }),
+            payload: serde_json::json!({ "op": "set_features", "value": "memory" }),
         },
         &["petra", "walter"],
     );
@@ -1639,7 +1639,7 @@ fn a_fresh_adopter_never_mints_a_chain_consumed_proposal_id() {
     walter
         .cmd_propose(
             Surface::Organization,
-            serde_json::json!({ "op": "set_features", "value": "memory quests wallet" }),
+            serde_json::json!({ "op": "set_features", "value": "memory quests" }),
         )
         .expect("propose");
     // the OPEN card (adoption materialized the applied block's card too)
