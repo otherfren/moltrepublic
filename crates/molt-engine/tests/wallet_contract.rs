@@ -4,7 +4,7 @@
 //! Wallet plan §14 step 5: the purse's contract before its runs exist -
 //! the view's phase from the founding rule, and the doors that refuse.
 
-use molt_core::wallet::{WalletPhase, WalletRefusal};
+use molt_core::wallet::{ShareStatus, WalletPhase, WalletRefusal};
 use molt_core::{Command, GroupConfig, MoltError, Reply, SessionSettings, SessionView, Surface};
 
 async fn session(w: &molt_engine::WalletHandle) -> SessionView {
@@ -78,7 +78,24 @@ async fn the_phase_follows_the_founding_rule() {
 #[tokio::test]
 async fn the_unbuilt_doors_refuse_compactly() {
     let w = molt_engine::spawn(GroupConfig::demo(), SessionView::default());
-    for cmd in [Command::WalletInit, Command::WalletConsent { accept: true }, Command::WalletRetry] {
+    let peer = || "bjorn".to_string();
+    let secret = || molt_core::vault::SecretBytes(vec![7; 32]);
+    for cmd in [
+        Command::WalletInit,
+        Command::WalletConsent { accept: true },
+        Command::WalletRetry,
+        Command::NetWalletProbe { height: Some(1), error: String::new(), generation: None },
+        Command::NetWalletFrame { from: peer(), body: secret(), generation: None },
+        Command::NetWalletScan {
+            scan_height: 1,
+            daemon_height: 2,
+            paused: None,
+            error: String::new(),
+            generation: None,
+        },
+        Command::NetWalletStatus { from: peer(), status: ShareStatus::Held, generation: None },
+        Command::NetWalletViewAnswer { from: peer(), view: secret(), generation: None },
+    ] {
         match w.execute(cmd).await {
             Err(e @ MoltError::Wallet(WalletRefusal::NotYet)) => {
                 assert_eq!(e.to_string(), "purse: not available yet");
