@@ -4943,6 +4943,7 @@ dependencies = [
  "similar",
  "strum 0.27.2",
  "thiserror 1.0.69",
+ "unicase",
  "url",
  "zeroize",
 ]

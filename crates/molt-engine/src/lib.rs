@@ -1884,7 +1884,9 @@ impl State {
                 // out get the same honest receipts the GUI sends when it
                 // renders them (State::receipt_returned_chat)
                 self.receipt_returned_chat(&snap);
-                if surface == Surface::Chat {
+                // only the agent's unread read answers a poke: the GUI
+                // mirror re-reads the chat on every push
+                if surface == Surface::Chat && view.as_deref() == Some("unread") {
                     self.wake.pokes.clear();
                 }
                 Ok(Reply::State(snap))

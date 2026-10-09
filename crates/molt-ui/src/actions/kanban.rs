@@ -166,7 +166,10 @@ pub(crate) fn apply(ui: &AppWindow, b: &SurfacesBundle) {
     let k = ui.global::<Kanban>();
     with(|st| {
         if st.workspace != b.workspace {
+            // toasted starts outlive the switch: task ids never collide
+            let seen = std::mem::take(&mut st.notices.seen_starts);
             *st = KanbanUi { workspace: b.workspace.clone(), ..KanbanUi::default() };
+            st.notices.seen_starts = seen;
             k.set_sel("".into());
             k.set_form_open(false);
             k.set_basket_summary("".into());
@@ -252,7 +255,7 @@ pub(crate) fn render(ui: &AppWindow) {
             .collect();
         sync_rows(&k.get_basket_rows(), rows, |m| k.set_basket_rows(m));
 
-        let (actions, rest) = mine(&l, feed);
+        let (actions, rest) = mine(&l, st.lang, feed);
         k.set_action_count(i32::try_from(actions.len()).unwrap_or(i32::MAX));
         sync_rows(&k.get_actions(), actions, |m| k.set_actions(m));
         sync_rows(&k.get_mine(), rest, |m| k.set_mine(m));
@@ -766,6 +769,13 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
         });
     }
     {
+        let cx = ctx.clone();
+        k.on_basket_summary_edited(move |text| {
+            with(|st| st.basket.summary = text.to_string());
+            save_basket(&cx);
+        });
+    }
+    {
         let on_ui = on_ui.clone();
         k.on_form_new(move || on_ui(&|ui| form_new(ui)));
     }
@@ -788,8 +798,10 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
         let on_ui = on_ui.clone();
         k.on_f_assignee_toggle(move |seat| {
             on_ui(&|ui| {
-                with(|st| toggle(&mut st.form.assignees, seat.as_str()));
-                render(ui);
+                with(|st| {
+                    toggle(&mut st.form.assignees, seat.as_str());
+                    render_form_pickers(&ui.global::<Kanban>(), st);
+                });
             });
         });
     }
@@ -797,14 +809,18 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
         let on_ui = on_ui.clone();
         k.on_f_blocked_toggle(move |id| {
             on_ui(&|ui| {
-                with(|st| toggle(&mut st.form.blocked, id.as_str()));
-                render(ui);
+                with(|st| {
+                    toggle(&mut st.form.blocked, id.as_str());
+                    render_form_pickers(&ui.global::<Kanban>(), st);
+                });
             });
         });
     }
     {
         let on_ui = on_ui.clone();
-        k.on_f_blocked_filter_edited(move |_| on_ui(&|ui| render(ui)));
+        k.on_f_blocked_filter_edited(move |_| {
+            on_ui(&|ui| with(|st| render_form_pickers(&ui.global::<Kanban>(), st)));
+        });
     }
     {
         let on_ui = on_ui.clone();
@@ -995,17 +1011,29 @@ fn wire_settings(ui: &AppWindow, ctx: &Ctx) {
             let Some(dir) = rfd::FileDialog::new().pick_folder() else {
                 return;
             };
-            let outcome = std::fs::write(dir.join("SKILL.md"), molt_mcp::WAKE_SKILL);
+            let outcome = write_skill(&dir);
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(ui) = weak.upgrade() else { return };
                 match outcome {
-                    Ok(()) => {
+                    Ok(path) => {
                         let saved = ui.global::<Strings>().get_skill_saved();
-                        ui.invoke_show_toast(format!("{saved} {}", dir.join("SKILL.md").display()).into());
+                        ui.invoke_show_toast(format!("{saved} {}", path.display()).into());
                     }
                     Err(e) => ui.invoke_show_toast_error(format!("SKILL.md: {e}").into()),
                 }
             });
         });
     });
+}
+
+/// `dir/SKILL.md`, created new: an existing file or link there is refused.
+pub(crate) fn write_skill(dir: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    use std::io::Write as _;
+    let path = dir.join("SKILL.md");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?
+        .write_all(molt_mcp::WAKE_SKILL.as_bytes())?;
+    Ok(path)
 }

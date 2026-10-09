@@ -58,6 +58,10 @@ pub enum WakeAction {
         /// The occurrence's original date, for a series.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         occurrence: Option<String>,
+        /// When it begins (`YYYY-MM-DDTHH:MM` UTC); with `task` the key a
+        /// moved start fires anew under.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        begins: String,
         /// The start has passed.
         late: bool,
     },
@@ -192,6 +196,7 @@ pub fn task_actions(
         out.push(WakeAction::TaskStart {
             task: due.task,
             occurrence: due.occurrence.map(fmt_date),
+            begins: fmt_datetime(due.begins),
             late,
         });
     }

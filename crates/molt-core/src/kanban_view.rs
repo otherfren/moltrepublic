@@ -105,7 +105,7 @@ timed, size:<XS|S|M|L|XL|XXL>, type:<label>";
 /// A type label folded to the key the legend, colour and filter share.
 #[must_use]
 pub fn type_key(s: &str) -> String {
-    s.trim().to_lowercase()
+    unicase::UniCase::unicode(s.trim()).to_folded_case()
 }
 
 /// A type's colour slot (§2.4): `fnv1a(folded label) mod 12`, the same on

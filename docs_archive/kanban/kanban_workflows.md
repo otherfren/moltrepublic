@@ -568,10 +568,10 @@ never stored, the same list the GUI shows at the top of "Mine" (§8):
 read_actions {}                                             # Seat scope
   → {actions: [
       {kind: "vote",           proposal, surface, since},
-      {kind: "task_start",     task, occurrence?, late},
+      {kind: "task_start",     task, occurrence?, begins, late},
       {kind: "task_wip",       task},           # mine, in progress
       {kind: "task_startable", task},           # mine, todo, not blocked
-      {kind: "poke",           by, since}       # not yet read in chat
+      {kind: "poke",           by, since}       # until read_state chat view "unread" or a mark-read
      ]}
 ```
 
@@ -808,6 +808,9 @@ them.
   command (§6.2) and are coalesced the same way, so a burst is one toast.
 - **Feature off: invisible.** With `quests` not enabled, nothing kanban
   shows anywhere, as today.
+- **Core-rendered lines stay English.** Act lines, advisories and
+  void reasons are rendered by molt-core, identical for MCP and GUI; the
+  GUI localizes only its own labels and the form's field faults.
 
 The plan basket: acts are staged locally, shown with a live impact
 preview, and proposed as one changeset. Persisted as `kanban_draft.json`

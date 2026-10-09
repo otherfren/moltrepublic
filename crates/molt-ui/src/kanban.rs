@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::NaiveDate;
-use molt_core::kanban_calendar::parse_date;
+use molt_core::kanban_calendar::{parse_date, parse_datetime};
 use molt_core::kanban_dates::derive;
 use molt_core::kanban_fold::{
     kanban_canonicalize, kanban_fold, short_id, validate_kanban_payload,
@@ -705,7 +705,19 @@ pub(crate) fn review(l: &Lexicon, feed: &KanbanFeed, basket: &Basket) -> BasketR
         Ok(fake_id(k))
     }) {
         Ok(c) => c,
-        Err(e) => return BasketReview { acts: Vec::new(), advisories: vec![e], rows: Vec::new() },
+        Err(e) => {
+            // a raw line per act keeps each one removable
+            let rows = basket
+                .acts
+                .iter()
+                .map(|op| {
+                    let who = op.get("id").or_else(|| op.get("ref")).and_then(Value::as_str).unwrap_or_default();
+                    let who = if who.len() == 32 { short_id(who) } else { who.to_string() };
+                    format!("{} {who}", s(op, "act")).trim().to_string()
+                })
+                .collect();
+            return BasketReview { acts: Vec::new(), advisories: vec![e], rows };
+        }
     };
     let rename = |line: String| -> String {
         (1..=k).fold(line, |acc, i| acc.replace(&short_id(&fake_id(i)), &format!("{} {i}", l.kb_new_ref)))
@@ -775,6 +787,7 @@ fn non_empty(items: &[String]) -> Vec<String> {
 /// The `add` act the form describes, checked by the propose door's own
 /// shape check; `Err` is its first reason.
 pub(crate) fn form_act(l: &Lexicon, f: &Form) -> Result<Value, String> {
+    form_faults(l, f)?;
     let mut act = Map::new();
     act.insert("act".into(), Value::from("add"));
     act.insert("title".into(), Value::from(f.title.trim()));
@@ -826,6 +839,38 @@ pub(crate) fn form_act(l: &Lexicon, f: &Form) -> Result<Value, String> {
     Ok(act)
 }
 
+/// The form's predictable faults, localized; the rest falls to the
+/// payload check.
+fn form_faults(l: &Lexicon, f: &Form) -> Result<(), String> {
+    let fault = |field: &str, what: &str| Err(format!("{field}: {what}"));
+    if f.title.trim().is_empty() {
+        return fault(l.kb_fl_title, l.kb_missing);
+    }
+    if f.assignees.is_empty() {
+        return fault(l.kb_fl_assignees, l.kb_missing);
+    }
+    let date = |v: &str| parse_date(v.trim()).is_some();
+    let moment = |v: &str| date(v) || parse_datetime(v.trim()).is_some();
+    let mut checks: Vec<(&str, &str, bool)> = vec![
+        (l.kb_fl_due, f.due.as_str(), true),
+        (l.kb_fl_after, f.after.as_str(), true),
+    ];
+    if f.mode > 0 {
+        checks.push((l.kb_fl_start, f.start.as_str(), false));
+        checks.push((l.kb_fl_end, f.end.as_str(), false));
+    }
+    if f.mode == 2 {
+        checks.push((l.kb_fl_until, f.until.as_str(), true));
+    }
+    for (field, v, optional) in checks {
+        let ok = if optional { v.trim().is_empty() || date(v) } else { moment(v) };
+        if !ok {
+            return fault(field, l.kb_bad_date);
+        }
+    }
+    Ok(())
+}
+
 /// The tasks the blocked-by picker offers: not a series, not closed for
 /// good, matching the filter.
 pub(crate) fn blocked_candidates(feed: &KanbanFeed, filter: &str, on: &[String]) -> Vec<KbPick> {
@@ -851,7 +896,7 @@ pub(crate) fn blocked_candidates(feed: &KanbanFeed, filter: &str, on: &[String])
 
 /// "Mine" (§8): the `read_actions` list first, then every other task the
 /// seat is assigned to or created. (`next` is the task part of the list.)
-pub(crate) fn mine(l: &Lexicon, feed: &KanbanFeed) -> (Vec<KbLine>, Vec<KbLine>) {
+pub(crate) fn mine(l: &Lexicon, lang: i32, feed: &KanbanFeed) -> (Vec<KbLine>, Vec<KbLine>) {
     let all = tasks(&feed.snap);
     let title = |id: &str| all.get(id).map(|t| s(t, "title").to_string()).unwrap_or_default();
     let mut listed = BTreeSet::new();
@@ -872,11 +917,11 @@ pub(crate) fn mine(l: &Lexicon, feed: &KanbanFeed) -> (Vec<KbLine>, Vec<KbLine>)
                     kind: "vote".into(),
                     glyph: "🗳️".into(),
                     text: format!("#{proposal} {summary}").trim_end().into(),
-                    sub: format!("{} · {}", l.kb_a_vote, surface.as_str()).into(),
+                    sub: format!("{} · {}", l.kb_a_vote, crate::labels::surface_name(lang, *surface)).into(),
                     bad: false,
                 }
             }
-            WakeAction::TaskStart { task, occurrence, late } => {
+            WakeAction::TaskStart { task, occurrence, late, .. } => {
                 listed.insert(task.clone());
                 let mut sub = l.kb_a_start.to_string();
                 if let Some(o) = occurrence {
@@ -954,7 +999,7 @@ pub(crate) fn notice_reason(ev: &Event, me: &str) -> Option<(&'static str, Strin
 pub(crate) struct Notices {
     reasons: BTreeSet<&'static str>,
     pokers: Vec<String>,
-    seen_starts: BTreeSet<String>,
+    pub(crate) seen_starts: BTreeSet<String>,
 }
 
 impl Notices {
@@ -982,9 +1027,9 @@ impl Notices {
     pub(crate) fn note_starts(&mut self, actions: &[WakeAction], wake_on: &[String]) -> bool {
         let mut fresh = false;
         for a in actions {
-            if let WakeAction::TaskStart { task, occurrence, .. } = a {
-                let key = format!("{task}@{}", occurrence.as_deref().unwrap_or_default());
-                fresh |= self.seen_starts.insert(key);
+            // the engine's fire key (`StartDue::key`): a moved start is new
+            if let WakeAction::TaskStart { task, begins, .. } = a {
+                fresh |= self.seen_starts.insert(format!("{task}@{begins}"));
             }
         }
         fresh && self.note("task_start", wake_on)

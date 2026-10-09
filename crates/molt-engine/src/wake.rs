@@ -221,6 +221,11 @@ impl State {
                 since: self.wake.proposed_at.get(id).copied().unwrap_or(0),
             })
             .collect();
+        // the proposals map is a HashMap: its order is no order
+        out.sort_unstable_by_key(|a| match a {
+            WakeAction::Vote { proposal, since, .. } => (*since, *proposal),
+            _ => (0, 0),
+        });
         if let Some(now) = crate::kanban::utc(self.presence_now()) {
             self.refresh_kanban_cache();
             let cache = self.kanban_board();

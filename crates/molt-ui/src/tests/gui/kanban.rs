@@ -185,6 +185,39 @@ fn the_basket_survives_in_the_draft() {
     assert_eq!(k.get_basket_count(), 0);
 }
 
+/// The typed summary is the basket's: saved with it, kept by a rescue.
+#[test]
+fn a_typed_basket_summary_is_saved_and_kept_by_a_rescue() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    let node = quests_node(tmp.path(), &rt);
+    crate::actions::kanban::wire(&node.ui, &node.ctx(&rt));
+    let k = node.ui.global::<Kanban>();
+    k.invoke_form_new();
+    k.set_f_title("kept".into());
+    k.invoke_form_submit();
+    k.set_basket_summary("sprint close".into());
+    k.invoke_basket_summary_edited("sprint close".into());
+    let saved = (0..200).find_map(|_| {
+        let draft = match rt.block_on(node.w.execute(Command::KanbanDraftLoad)) {
+            Ok(Reply::KanbanDraft { draft }) => draft,
+            _ => String::new(),
+        };
+        if draft.contains("sprint close") {
+            Some(draft)
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            None
+        }
+    });
+    assert!(saved.is_some(), "the summary was saved");
+    with(|st| {
+        st.basket.rescue(&serde_json::json!({"op": "kanban_ops", "summary": "old", "base_rev": 0, "ops": []}));
+    });
+    assert_eq!(with(|st| st.basket.summary.clone()), "sprint close");
+}
+
 /// One Propose at a time; acts staged meanwhile stay in the basket.
 #[test]
 fn a_propose_in_flight_keeps_what_was_staged_meanwhile() {

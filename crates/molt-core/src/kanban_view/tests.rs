@@ -340,6 +340,9 @@ fn a_type_colour_is_the_folded_label_hash_mod_twelve() {
     let want = u8::try_from(crate::fnv1a64("bug") % 12).expect("below 12");
     assert_eq!(type_slot("Bug"), Some(want));
     assert_eq!(type_slot("   "), None);
+    assert_eq!(type_key("Straße"), type_key("STRASSE"));
+    assert_eq!(type_key("ΣΊΣΥΦΟΣ"), type_key("σίσυφος"));
+    assert_eq!(type_slot("ﬁx"), type_slot("FIX"));
     assert!((0..200).all(|i| type_slot(&format!("t{i}")).is_some_and(|s| s < 12)));
 }
 

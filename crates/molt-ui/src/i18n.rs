@@ -1505,6 +1505,8 @@ lexicon! {
     kb_f_timed: "timed", "mit Termin";
     kb_f_as: "as", "als";
     kb_not_number: "not a number", "keine Zahl";
+    kb_missing: "missing", "fehlt";
+    kb_bad_date: "not a date", "kein Datum";
     kb_n_kanban: "Kanban changed", "Kanban geändert";
     kb_n_vote: "Vote waiting", "Abstimmung wartet";
     kb_n_start: "Appointment starting", "Termin beginnt";

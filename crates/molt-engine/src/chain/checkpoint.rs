@@ -380,6 +380,7 @@ impl State {
                 // event, the org refresh and a Restored seat's stale
                 // announce-cooldown; stale signatures re-base once at the end.
                 let mut org_touched = false;
+                let mut quests_touched = false;
                 for block in &candidate {
                     match &block.change {
                         ChainChange::Applied {
@@ -397,6 +398,8 @@ impl State {
                                 self.after_files_applied(payload);
                             } else if *surface == Surface::Vault {
                                 self.after_vault_applied(payload);
+                            } else if *surface == Surface::Quests {
+                                quests_touched = true;
                             }
                         }
                         ChainChange::Membership {
@@ -411,6 +414,10 @@ impl State {
                 }
                 if org_touched {
                     self.after_org_applied();
+                }
+                if quests_touched {
+                    self.refresh_kanban_fold();
+                    self.wake_trigger("kanban", "");
                 }
                 self.rebase_pending_approvals();
                 self.persist_chain_now();

@@ -262,7 +262,7 @@ pub(crate) fn tools() -> Vec<ToolDef> {
             name: "read_actions",
             command: "read_actions",
             scope: Scope::Seat,
-            description: "What your seat can act on now - the entry point on every wake. `actions`: vote {proposal, surface, since}, task_start {task, occurrence?, late}, task_wip {task}, task_startable {task}, poke {by, since}. Blocked or stuck work never appears. Ids only: read the text with quests_view. Empty = nothing to do.",
+            description: "What your seat can act on now - the entry point on every wake. `actions`: vote {proposal, surface, since}, task_start {task, occurrence?, begins, late}, task_wip {task}, task_startable {task}, poke {by, since}. Blocked or stuck work never appears. Ids only: read the text with quests_view. Empty = nothing to do.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ReadActions),
         },

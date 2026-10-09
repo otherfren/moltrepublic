@@ -174,7 +174,12 @@ fn a_missed_start_under_a_day_fires_once_as_late() {
     assert_eq!(s.wake.log, ["task_start"]);
     assert_eq!(
         s.read_actions(),
-        [WakeAction::TaskStart { task: tid(7), occurrence: None, late: true }]
+        [WakeAction::TaskStart {
+            task: tid(7),
+            occurrence: None,
+            begins: "2026-10-12T14:00".to_string(),
+            late: true
+        }]
     );
     let fired: Vec<String> = s.wake.fired.iter().cloned().collect();
 
@@ -215,7 +220,12 @@ fn a_blocked_appointment_fires_nothing_and_is_listed_late_once_unblocked() {
     assert_eq!(s.wake.log, ["kanban", "kanban"], "the unblock wakes as kanban, no task_start");
     assert_eq!(
         s.read_actions(),
-        [WakeAction::TaskStart { task: tid(2), occurrence: None, late: true }]
+        [WakeAction::TaskStart {
+            task: tid(2),
+            occurrence: None,
+            begins: "2026-10-12T14:00".to_string(),
+            late: true
+        }]
     );
 }
 
@@ -285,7 +295,11 @@ fn a_chat_read_answers_the_poke_through_every_door() {
     let doors = [
         Command::MarkRead { ids: Vec::new() },
         Command::MarkChannelRead { channel: ChannelRef::default(), up_to: String::new() },
-        Command::ReadState { surface: Surface::Chat, channel: None, view: None },
+        Command::ReadState {
+            surface: Surface::Chat,
+            channel: None,
+            view: Some("unread".to_string()),
+        },
     ];
     for door in doors {
         let mut walter = seat("walter", &b, NOON);
@@ -394,4 +408,76 @@ fn a_start_moved_after_it_fired_fires_again_at_its_new_time() {
     s.wake_tick();
     settle(&mut s);
     assert_eq!(s.wake.log.len(), 3, "and fires once");
+}
+
+#[test]
+fn a_plain_chat_read_like_the_gui_mirror_keeps_the_poke() {
+    let b = republic();
+    let mut walter = seat("walter", &b, NOON);
+    walter.session.settings.poke_enabled = true;
+    let me = walter.member();
+    walter.receive_poke("mara", &me);
+    walter
+        .handle(Command::ReadState { surface: Surface::Chat, channel: None, view: None })
+        .expect("read");
+    assert_eq!(walter.read_actions().len(), 1);
+}
+
+#[test]
+fn vote_actions_come_in_a_stable_order() {
+    let b = republic();
+    let mut mara = seat("mara", &b, NOON);
+    let mut walter = seat("walter", &b, NOON);
+    let mut ids = Vec::new();
+    for n in 0..12u32 {
+        let pid = crate::chain::test_support::propose(
+            &mut mara,
+            Surface::Quests,
+            cs(vec![add(100 + n, &["mara"], json!({}))]),
+        );
+        let card = mara.proposals.get(&pid).cloned().expect("card");
+        walter.proposals.insert(pid, card);
+        walter.wake.proposed_at.insert(pid, NOON - 100 + u64::from(n % 3));
+        ids.push(pid);
+    }
+    let mut want: Vec<(u64, u64)> = ids
+        .iter()
+        .map(|id| (walter.wake.proposed_at[id], *id))
+        .collect();
+    want.sort_unstable();
+    let got: Vec<(u64, u64)> = walter
+        .read_actions()
+        .into_iter()
+        .filter_map(|a| match a {
+            WakeAction::Vote { proposal, since, .. } => Some((since, proposal)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(got, want);
+}
+
+#[test]
+fn a_re_anchor_on_a_served_cut_wakes_for_its_quests_blocks() {
+    use crate::chain::{checkpoint_state, checkpoint_state_hash};
+    let mut b = republic();
+    commit(&mut b, 1, cs(vec![add(1, &["bot"], json!({}))]));
+    let blob = checkpoint_state(&b.blocks, 1).expect("state@1");
+    let anchor = b.seal(
+        2,
+        ChainChange::Checkpoint { upto: 1, state_hash: checkpoint_state_hash(&blob) },
+        &["mara", "walter"],
+    );
+    b.push(anchor.clone());
+    let block = commit(&mut b, 3, cs(vec![add(2, &["bot"], json!({}))]));
+    let mut bot = genesis_seat("bot", &b, b.blocks[..1].to_vec());
+    bot.session.active_workspace = "ws".to_string();
+    bot.presence.clock_override = Some(NOON);
+    bot.session.settings.poke_wake_command = "true".to_string();
+    bot.session.settings.wake_min_interval_secs = 0;
+    bot.receive_checkpoint_blob(blob);
+    bot.receive_block(block);
+    bot.receive_block(anchor);
+    assert_eq!(bot.chain.head.as_ref().expect("head").height, 3, "re-anchored");
+    settle(&mut bot);
+    assert_eq!(bot.wake.log, ["kanban"]);
 }

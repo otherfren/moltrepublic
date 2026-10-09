@@ -3409,6 +3409,9 @@ export component BasketBar inherits VerticalLayout {
             AppField {
                 text <=> Kanban.basket-summary;
                 placeholder: Kanban.basket-auto;
+                edited => {
+                    Kanban.basket-summary-edited(self.text);
+                }
             }
             AppButton {
                 label: Strings.kb-propose;

@@ -1213,6 +1213,7 @@ export global Kanban {
     in-out property <int> basket-count;
     in-out property <string> basket-tip;
     in-out property <string> basket-summary;
+    callback basket-summary-edited(string);
     in-out property <string> basket-auto;
     in-out property <[KbLine]> basket-rows;
     callback basket-propose();
@@ -2057,6 +2058,8 @@ export global Strings {
     in property <string> kb-f-timed;
     in property <string> kb-f-as;
     in property <string> kb-not-number;
+    in property <string> kb-missing;
+    in property <string> kb-bad-date;
     in property <string> kb-n-kanban;
     in property <string> kb-n-vote;
     in property <string> kb-n-start;

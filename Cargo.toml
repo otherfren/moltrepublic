@@ -163,6 +163,8 @@ image       = { version = "0.25", default-features = false, features = ["png", "
 # the wiki pane's markdown pseudo-render (molt-ui): same crate+version the
 # Slint text stack already compiles in; parser only, no html feature
 pulldown-cmark = { version = "0.13", default-features = false }
+# Unicode case folding for kanban type labels; already in the graph via pulldown-cmark
+unicase = "2.9"
 # the wiki's front matter (knowledge_base_scale.md §4.4) — driven through its
 # EVENT parser, never YamlLoader, so a plain scalar keeps its raw text and the
 # subset decides the types. default-features off drops encoding_rs (we feed &str)

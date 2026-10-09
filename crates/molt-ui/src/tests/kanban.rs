@@ -252,7 +252,7 @@ fn mine_lists_the_actions_first_then_my_other_tasks() {
         WakeAction::TaskWip { task: id(1) },
         WakeAction::Poke { by: "walter".into(), since: 0 },
     ];
-    let (actions, rest) = mine(&l, &f);
+    let (actions, rest) = mine(&l, 0, &f);
     assert_eq!(actions.len(), 2);
     assert_eq!(actions[0].text, "api");
     assert_eq!(actions[1].kind, "poke");
@@ -293,10 +293,17 @@ fn notices_coalesce_and_follow_wake_on() {
     assert_eq!(n.take(&l, "x"), None);
     let only_votes = vec!["vote_pending".to_string()];
     assert!(!n.note("kanban", &only_votes), "switched off");
-    let starts = [WakeAction::TaskStart { task: id(4), occurrence: None, late: false }];
+    let at = |begins: &str| WakeAction::TaskStart {
+        task: id(4),
+        occurrence: None,
+        begins: begins.to_string(),
+        late: false,
+    };
+    let starts = [at("2026-10-12T09:00")];
     assert!(n.note_starts(&starts, &all));
     n.take(&l, "x");
     assert!(!n.note_starts(&starts, &all), "a start toasts once");
+    assert!(n.note_starts(&[at("2026-10-12T15:00")], &all), "a moved start is a new appointment");
 }
 
 /// A rescued add comes back without its minted id: the engine mints a
@@ -464,6 +471,42 @@ fn a_form_number_error_is_localized() {
     assert_eq!(form_act(&Lexicon::en(), &f), Err("Every: not a number".to_string()));
 }
 
+/// The form's predictable faults are named in the reader's language.
+#[test]
+fn the_form_faults_are_localized() {
+    let ok = Form {
+        title: "sync".into(),
+        assignees: vec!["mara".into()],
+        mode: 1,
+        start: "2026-10-12T09:00".into(),
+        end: "2026-10-12T10:00".into(),
+        ..Form::default()
+    };
+    let de = Lexicon::de();
+    let cases = [
+        (Form { title: " ".into(), ..ok.clone() }, "Titel: fehlt"),
+        (Form { assignees: Vec::new(), ..ok.clone() }, "Zuständig: fehlt"),
+        (Form { due: "2026-8-1".into(), ..ok.clone() }, "Fällig: kein Datum"),
+        (Form { after: "x".into(), ..ok.clone() }, "Nicht vor: kein Datum"),
+        (Form { start: "2026-10-12 09:00".into(), ..ok.clone() }, "Beginn: kein Datum"),
+        (Form { end: "".into(), ..ok.clone() }, "Ende: kein Datum"),
+        (Form { mode: 2, freq: "weekly".into(), until: "soon".into(), ..ok.clone() }, "Bis: kein Datum"),
+    ];
+    for (f, want) in cases {
+        assert_eq!(form_act(&de, &f), Err(want.to_string()));
+    }
+    assert!(form_act(&de, &ok).is_ok());
+}
+
+/// A vote line in Mine names the surface in the reader's language.
+#[test]
+fn a_vote_in_mine_names_the_surface_localized() {
+    let mut f = feed();
+    f.actions = vec![WakeAction::Vote { proposal: 9, surface: molt_core::Surface::Organization, since: 0 }];
+    let (actions, _) = mine(&Lexicon::de(), 1, &f);
+    assert!(actions[0].sub.contains("Organisation"), "{}", actions[0].sub);
+}
+
 /// After a Propose only the acts it sent leave, wherever they now sit.
 #[test]
 fn settling_a_propose_removes_exactly_what_was_sent() {
@@ -502,4 +545,36 @@ fn a_kanban_card_shows_its_acts_impact_and_void() {
     assert_eq!(row.notes, "void: #00000001: cancelled to wip not allowed");
     assert!(row.notes_bad);
     assert_eq!(crate::surfaces::proposal_row(1, &done).notes, "nichtig: #00000001: cancelled to wip not allowed");
+}
+
+/// A basket the canonicalizer refuses still lists each act, so one can be
+/// removed instead of discarding them all.
+#[test]
+fn a_refused_basket_keeps_a_row_per_act() {
+    let mut basket = Basket::default();
+    basket.rescue(&cs(vec![add(20, "new", &["mara"], json!({})), st(20, "wip", None)]));
+    basket.acts.remove(0);
+    basket.acts.push(st(1, "success", None));
+    let r = review(&Lexicon::en(), &feed(), &basket);
+    assert!(!r.advisories.is_empty(), "refused: {:?}", r.advisories);
+    assert_eq!(r.rows.len(), 2, "{:?}", r.rows);
+    assert!(r.rows[0].contains("@r1"), "{:?}", r.rows);
+}
+
+/// "Save as file..." never replaces a SKILL.md or follows a link there.
+#[cfg(unix)]
+#[test]
+fn the_skill_file_is_written_only_where_none_exists() {
+    use crate::actions::kanban::write_skill;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let path = write_skill(tmp.path()).expect("a fresh folder");
+    assert_eq!(std::fs::read_to_string(&path).expect("read"), molt_mcp::WAKE_SKILL);
+    std::fs::write(&path, "mine").expect("own skill");
+    assert!(write_skill(tmp.path()).is_err());
+    assert_eq!(std::fs::read_to_string(&path).expect("read"), "mine");
+    let other = tempfile::tempdir().expect("tmp");
+    let target = other.path().join("target.md");
+    std::os::unix::fs::symlink(&target, other.path().join("SKILL.md")).expect("link");
+    assert!(write_skill(other.path()).is_err());
+    assert!(!target.exists(), "the link was not followed");
 }
