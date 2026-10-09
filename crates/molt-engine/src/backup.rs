@@ -852,6 +852,11 @@ mod tests {
 
         st.cmd_net_backup_failed(id.clone(), "s3: timeout".to_string(), false).expect("ack");
         assert!(!st.backup_hold.contains_key(&id), "any other outcome lifts the hold");
+
+        st.cmd_net_backup_failed(id.clone(), damaged, true).expect("ack");
+        st.cmd_net_backup_done(id.clone(), 1, "o".to_string(), 1, String::new(), String::new())
+            .expect("ack");
+        assert!(!st.backup_hold.contains_key(&id), "an upload lifts the hold");
     }
 
     /// C4: the quota never counts or prunes another node's backups.

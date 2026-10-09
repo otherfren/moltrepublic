@@ -424,9 +424,9 @@ fn numeric_stem(file: &str, ext: &str) -> bool {
 }
 
 impl ImportStaging {
-    /// The blob's keys file did not authenticate and stays behind: the
-    /// restored seat is watch-only (wallet design W5), which the engine
-    /// must say loudly.
+    /// The blob's keys file did not authenticate and stays behind: unless
+    /// a replaced dir holds the share, the restored seat is watch-only
+    /// (wallet design W5), which the engine must say loudly.
     pub fn wallet_keys_dropped(&self) -> bool {
         self.dropped.iter().any(|d| d == crate::WALLET_KEYS_FILE)
     }
@@ -556,6 +556,10 @@ impl ImportStaging {
             }
         }
 
+        if let Some(dir) = &existing {
+            self.keep_wallet_keys(dir, &id)?;
+        }
+
         // --- the destructive swap, ordered so the id is never left with zero
         //     visible dirs: trash the pre-existing dir only now that the
         //     replacement is fully staged, and roll that trash BACK if the
@@ -577,6 +581,43 @@ impl ImportStaging {
             let _ = d.sync_all();
         }
         Ok(final_dir)
+    }
+
+    /// Design I12: the replaced dir's keys records join the staged ones,
+    /// since the blob may predate a share. A damaged file the blob cannot
+    /// replace is carried as is, so the loss stays loud.
+    fn keep_wallet_keys(&self, old_dir: &Path, id: &[u8; 32]) -> Result<(), StorageError> {
+        let old = old_dir.join(crate::WALLET_KEYS_FILE);
+        let staged = self.dir.join(crate::WALLET_KEYS_FILE);
+        let old_records = match crate::read_capped(&old, crate::READ_CAP_STATE, crate::WALLET_KEYS_FILE) {
+            Ok(data) => crate::decode_wallet_keys_file(&self.workspace_key, id, &data).ok(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => None,
+            Err(e) => return Err(e.into()),
+        };
+        let Some(old_records) = old_records else {
+            if !staged.exists() {
+                fs::copy(&old, &staged)?;
+                fs::File::open(&staged)?.sync_all()?;
+            }
+            return Ok(());
+        };
+        let mut records = if staged.exists() {
+            let data = crate::read_capped(&staged, crate::READ_CAP_STATE, crate::WALLET_KEYS_FILE)?;
+            crate::decode_wallet_keys_file(&self.workspace_key, id, &data)?
+        } else {
+            Vec::new()
+        };
+        let held = records.len();
+        for r in old_records {
+            if !records.contains(&r) {
+                records.push(r);
+            }
+        }
+        if records.len() == held {
+            return Ok(());
+        }
+        crate::write_wallet_keys_at(&self.dir, &self.workspace_key, id, &records)
     }
 
     /// Discard the staging (explicit spelling of drop).
@@ -860,6 +901,76 @@ mod tests {
         assert_eq!(loaded.tail.first().map(|e| e.seq), Some(1), "the log restored");
         assert!(opened.read_wallet_keys().expect("absent").is_empty(), "no share held");
         assert!(opened.read_wallet_scan().expect("scan").is_some(), "the rest restored");
+    }
+
+    /// A replace keeps every keys record the replaced dir held (design
+    /// I12): a share is never trashed with the old dir, whether the blob
+    /// carries no keys file, a damaged one, or other records.
+    #[test]
+    fn a_replace_keeps_the_replaced_dirs_keys_records() {
+        let records = |dir: &Path| -> Vec<Vec<u8>> {
+            let (opened, _) = crate::open_workspace(dir).expect("open");
+            opened.read_wallet_keys().expect("keys").iter().map(|r| r.to_vec()).collect()
+        };
+
+        // a blob from before the share existed
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (root, dir, seed, id) = make_ws(tmp.path());
+        let blob = blob_of(&root, &dir, &ExportKey::passphrase(PASS));
+        let (ws, _) = crate::open_workspace(&dir).expect("open");
+        ws.append_wallet_keys(b"the share").expect("keys");
+        drop(ws);
+        let (sk, _pk) = crate::derive_identity_key(&seed, &id);
+        let staging = import_stage(&root, &blob, PASS).expect("stage");
+        let restored = staging.commit(&root, true, Some(&sk)).expect("replace");
+        assert_eq!(records(&restored), [b"the share".to_vec()], "no keys file in the blob");
+
+        // a blob whose keys file did not authenticate
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (blob, phrase, seed, id) = wallet_backup(tmp.path(), &[crate::WALLET_KEYS_FILE]);
+        let root = tmp.path().join("src-root");
+        let staging = import_stage(&root, &blob, &phrase).expect("stage");
+        assert!(staging.wallet_keys_dropped());
+        let (sk, _pk) = crate::derive_identity_key(&seed, &id);
+        let restored = staging.commit(&root, true, Some(&sk)).expect("replace");
+        assert_eq!(records(&restored), [b"the share".to_vec()], "a dropped keys file");
+
+        // a blob holding another run's record: both survive
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (root, dir, seed, id) = make_ws(tmp.path());
+        let (ws, _) = crate::open_workspace(&dir).expect("open");
+        ws.append_wallet_keys(b"another run").expect("keys");
+        drop(ws);
+        let blob = blob_of(&root, &dir, &ExportKey::passphrase(PASS));
+        let (ws, _) = crate::open_workspace(&dir).expect("open");
+        ws.append_wallet_keys(b"the share").expect("keys");
+        ws.prune_wallet_keys(b"the share").expect("prune");
+        drop(ws);
+        let (sk, _pk) = crate::derive_identity_key(&seed, &id);
+        let staging = import_stage(&root, &blob, PASS).expect("stage");
+        let restored = staging.commit(&root, true, Some(&sk)).expect("replace");
+        assert_eq!(records(&restored), [b"another run".to_vec(), b"the share".to_vec()]);
+    }
+
+    /// A damaged keys file in the replaced dir stays loud on the restored
+    /// seat when the blob brings none; it never vanishes into the trash.
+    #[test]
+    fn a_replace_carries_a_damaged_keys_file_the_blob_cannot_replace() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (root, dir, seed, id) = make_ws(tmp.path());
+        let blob = blob_of(&root, &dir, &ExportKey::passphrase(PASS));
+        let (ws, _) = crate::open_workspace(&dir).expect("open");
+        ws.append_wallet_keys(b"the share").expect("keys");
+        drop(ws);
+        let keys = dir.join(crate::WALLET_KEYS_FILE);
+        let mut bytes = std::fs::read(&keys).expect("read");
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        std::fs::write(&keys, &bytes).expect("rot");
+        let (sk, _pk) = crate::derive_identity_key(&seed, &id);
+        let staging = import_stage(&root, &blob, PASS).expect("stage");
+        let restored = staging.commit(&root, true, Some(&sk)).expect("replace");
+        assert_eq!(std::fs::read(restored.join(crate::WALLET_KEYS_FILE)).expect("carried"), bytes);
     }
 
     /// A damaged scan file is dropped and named; the seat rescans.

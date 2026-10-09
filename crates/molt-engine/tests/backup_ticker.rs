@@ -793,3 +793,53 @@ async fn an_unreachable_quota_is_reported_instead_of_deleting_the_last_copies() 
         "only the one deletable object went; both newest copies stay: {reqs:?}"
     );
 }
+
+/// Wallet plan §9: a damaged keys file holds the ticker (no retry each
+/// minute, one notice); an explicit "backup now" is answered again.
+#[tokio::test]
+async fn a_damaged_keys_file_holds_the_ticker_but_not_backup_now() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (endpoint, log) = stub_server(Arc::new(|method, _path| match method {
+        "PUT" => (200, String::new(), 0),
+        _ => (200, empty_listing(), 0),
+    }))
+    .await;
+    let (w, id, root) = founded_engine(tmp.path(), &endpoint, 5).await;
+    w.execute(Command::CloseWorkspace).await.expect("close");
+    let dir = molt_storage::find_workspace_dir(&root, &id).expect("dir");
+    let (ws, _) = molt_storage::open_workspace(&dir).expect("open");
+    ws.append_wallet_keys(b"the share").expect("keys");
+    drop(ws);
+    let keys = dir.join(molt_storage::WALLET_KEYS_FILE);
+    let intact = std::fs::read(&keys).expect("read");
+    let mut rotten = intact.clone();
+    let last = rotten.len() - 1;
+    rotten[last] ^= 1;
+    std::fs::write(&keys, &rotten).expect("rot");
+    let damaged = molt_storage::StorageError::WalletKeysDamaged.to_string();
+    let notice = format!("backup-failed:{damaged}");
+    let puts = || log.lock().expect("log").iter().filter(|r| r.method == "PUT").count();
+
+    w.execute(Command::SetWorkspaceBackup { id: id.clone(), enabled: true })
+        .await
+        .expect("enable");
+    w.execute(Command::BackupTick).await.expect("tick");
+    let sv = poll_session(&w, "damaged keys failure", |sv| entry(sv, &id).backup_error == damaged).await;
+    assert_eq!(sv.notice, notice);
+
+    // held: even a healed file waits out the hold
+    std::fs::write(&keys, &intact).expect("heal");
+    w.execute(Command::ClearNotice).await.expect("clear");
+    w.execute(Command::BackupTick).await.expect("tick");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(puts(), 0, "no automatic retry while held");
+
+    // an explicit attempt lifts the hold and gets its own answer
+    std::fs::write(&keys, &rotten).expect("rot again");
+    w.execute(Command::BackupNow { id: id.clone() }).await.expect("backup now");
+    poll_session(&w, "a fresh notice", |sv| sv.notice == notice).await;
+    std::fs::write(&keys, &intact).expect("heal");
+    w.execute(Command::BackupNow { id: id.clone() }).await.expect("backup now");
+    poll_session(&w, "uploaded", |sv| entry(sv, &id).last_backup_min != WorkspaceInfo::NEVER).await;
+    assert_eq!(puts(), 1);
+}

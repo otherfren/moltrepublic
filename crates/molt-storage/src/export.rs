@@ -405,10 +405,14 @@ fn export_dir_impl(
         });
         match checked {
             Ok(data) => kept.push((rel, ExportSource::Bytes(data))),
-            Err(_) if rel == crate::WALLET_KEYS_FILE => {
-                tracing::error!(file = %rel, "export_fail reason=unauthenticated");
-                return Err(StorageError::WalletKeysDamaged);
-            }
+            Err(e) if rel == crate::WALLET_KEYS_FILE => match e {
+                StorageError::Io(io) if io.kind() == std::io::ErrorKind::NotFound => {} // set aside meanwhile
+                StorageError::Io(io) if io.kind() != std::io::ErrorKind::InvalidData => return Err(io.into()),
+                _ => {
+                    tracing::error!(file = %rel, "export_fail reason=unauthenticated");
+                    return Err(StorageError::WalletKeysDamaged);
+                }
+            },
             Err(e) => {
                 tracing::warn!(file = %rel, error = %e, "export_skip reason=unauthenticated");
                 skipped.push(rel);
@@ -1253,6 +1257,24 @@ mod tests {
         assert!(matches!(err, StorageError::WalletKeysDamaged), "{err:?}");
         assert_eq!(err.to_string(), "wallet_keys.state is damaged");
         assert!(blob.is_empty(), "nothing written");
+    }
+
+    /// An unreadable keys file is an I/O failure, not damage: the ticker
+    /// must not hold on it, and set-aside would refuse it as intact.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_keys_file_is_not_called_damaged() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (root, dir) = wallet_ws(tmp.path());
+        let keys = dir.join(crate::WALLET_KEYS_FILE);
+        fs::set_permissions(&keys, fs::Permissions::from_mode(0o000)).expect("chmod");
+        if fs::read(&keys).is_ok() {
+            return; // root reads through the mode
+        }
+        let err = export_dir(&root, &dir, &ExportKey::passphrase(PASS), &mut Vec::new())
+            .expect_err("no backup without the share");
+        assert!(matches!(err, StorageError::Io(_)), "{err:?}");
     }
 
     /// Wallet plan test 18: a damaged scan file costs a rescan, never the

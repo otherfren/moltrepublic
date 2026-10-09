@@ -84,7 +84,7 @@ fn a_damaged_scan_state_is_refused() {
     assert!(refused(&tag), "foreign tag");
 
     // an output outside [birthday, next), a repeated key, an unknown lock,
-    // a lock-free output with a value, a block not below `next`
+    // a lock-free output with a value, `next` not past what it holds
     let mut s = ScanState::new(10);
     s.apply(10, hash(10), hash(9), vec![out(1, 5, 10, Lock::None)]);
     let base = s.encode();
@@ -113,5 +113,36 @@ fn a_damaged_scan_state_is_refused() {
     // `next` sits after the tag and the birthday
     let n = 4 + b"molt-wallet-scan-v1".len() + 8;
     ahead[n..n + 8].copy_from_slice(&10u64.to_le_bytes());
-    assert!(refused(&ahead), "a remembered block at or past next");
+    assert!(refused(&ahead), "next at a held block and output");
+}
+
+/// An output-free image: `birthday`, `next`, and the remembered heights.
+fn window(birthday: u64, next: u64, heights: &[u64]) -> Vec<u8> {
+    let mut b = Vec::new();
+    put_bytes(&mut b, b"molt-wallet-scan-v1");
+    b.extend_from_slice(&birthday.to_le_bytes());
+    b.extend_from_slice(&next.to_le_bytes());
+    b.extend_from_slice(&u32::try_from(heights.len()).expect("count").to_le_bytes());
+    for h in heights {
+        b.extend_from_slice(&h.to_le_bytes());
+        b.extend_from_slice(&hash(*h));
+    }
+    b.extend_from_slice(&0u32.to_le_bytes());
+    b
+}
+
+#[test]
+fn a_block_window_apply_could_not_produce_is_refused() {
+    let decodes = |b: &[u8]| ScanState::decode(b).is_ok();
+    assert!(decodes(&window(10, 13, &[10, 11, 12])), "the honest window");
+    assert!(!decodes(&window(10, 9, &[])), "next below the birthday");
+    assert!(!decodes(&window(10, 13, &[9, 11, 12])), "a block below the birthday");
+    assert!(!decodes(&window(10, 13, &[10, 11, 13])), "a block at next");
+    assert!(!decodes(&window(10, 13, &[10, 12, 11])), "out of order");
+    assert!(!decodes(&window(10, 13, &[10, 11, 11])), "a repeated height");
+    let cap = u64::try_from(molt_treasury::scan::RECENT_BLOCKS).expect("cap");
+    let full: Vec<u64> = (10..10 + cap).collect();
+    assert!(decodes(&window(10, 10 + cap, &full)), "a full window");
+    let over: Vec<u64> = (10..11 + cap).collect();
+    assert!(!decodes(&window(10, 11 + cap, &over)), "beyond the window");
 }

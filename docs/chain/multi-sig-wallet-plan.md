@@ -443,8 +443,11 @@ Presence-Tick bis Commit oder Abbruch; nie im Workspace-Log:
   Adresse); Abweichung → watch-only.
 - **Ausweg (W5):** `WalletAcknowledgeLoss` legt eine defekte
   Schlüsseldatei als Dot-Datei beiseite (Export ignoriert Dot-Dateien);
-  Sitz watch-only; Exporte laufen wieder.
+  Sitz watch-only; Exporte laufen wieder (hebt `backup_hold` auf, Test).
 - **Backup-Ticker:** Backoff bei Schlüssel-Fehler; eine Meldung.
+- Import mit Ersetzen: die Records des ersetzten Ordners kommen zu denen
+  des Blobs (I12); eine defekte Datei dort reist mit, wenn der Blob keine
+  bringt.
 - `docs_archive/storage/backup_restore_design.md` §3.2 + Allowlist
   nachziehen. Release-Notes: ältere Builds exportieren ohne Schlüsseldatei
   und lehnen Blobs mit ihr ab.

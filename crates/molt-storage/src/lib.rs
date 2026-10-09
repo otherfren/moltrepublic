@@ -1764,14 +1764,7 @@ impl OpenedWorkspace {
     }
 
     fn write_wallet_keys(&self, records: &[Zeroizing<Vec<u8>>]) -> Result<(), StorageError> {
-        let frame = encode_frame(
-            &wallet_keys_key(&self.key, &self.id),
-            &self.id,
-            WALLET_KEYS_SEGMENT,
-            0,
-            &encode_wallet_keys(records),
-        )?;
-        write_atomic(&self.dir, WALLET_KEYS_FILE, &frame, true)
+        write_wallet_keys_at(&self.dir, &self.key, &self.id, records)
     }
 
     /// Add one keys record; a record already held is a no-op. A damaged
@@ -2171,6 +2164,17 @@ pub(crate) fn decode_wallet_keys_file(
             .map_err(|_| StorageError::WalletKeysDamaged)?,
     );
     decode_wallet_keys(&plain).ok_or(StorageError::WalletKeysDamaged)
+}
+
+/// Write `wallet_keys.state` into `dir` (atomic, sealed).
+pub(crate) fn write_wallet_keys_at(
+    dir: &Path,
+    ws_key: &[u8; 32],
+    id: &[u8; 32],
+    records: &[Zeroizing<Vec<u8>>],
+) -> Result<(), StorageError> {
+    let frame = encode_frame(&wallet_keys_key(ws_key, id), id, WALLET_KEYS_SEGMENT, 0, &encode_wallet_keys(records))?;
+    write_atomic(dir, WALLET_KEYS_FILE, &frame, true)
 }
 
 /// The scan bytes of a `wallet_scan.state` image.
