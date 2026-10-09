@@ -457,7 +457,8 @@ Presence-Tick bis Commit oder Abbruch; nie im Workspace-Log:
 3. `view_key_depends_on_every_contribution`.
 4. `a_differing_transcript_aborts`.
 5. `two_round_one_frames_from_one_sender_abort`.
-6. `an_identity_commitment_aborts`.
+6. `an_identity_point_in_either_frame_aborts` (jeder Punkt beider
+   Frames; der Gruppenschlüssel: `an_identity_group_key_has_no_address`).
 7. `the_address_is_a_standard_main_address`.
 8. `attestations_verify_only_for_their_seat_and_fields`.
 9. `an_attestation_from_another_run_or_init_fails`.

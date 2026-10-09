@@ -565,9 +565,11 @@ Fixed now, whatever the algorithm:
   - *Identity points:* `read_G` refuses non-canonical and torsioned points
     but accepts the identity. An identity `A_0` passes the PoK (its log is
     known); an identity encryption key or per-message key makes that share's
-    cipher key public to every group member. The wrapper rejects the
+    cipher key public to every group member. The wrapper must reject the
     identity in **every** point of both frames (commitments, PoK nonce,
-    encryption key; round 2's message key and PoP nonce), and the group key.
+    encryption key; round 2's message key and PoP nonce): step 3, since
+    the frames expose no accessors. The group key is refused already
+    (`keys::standard_address`).
   - *Equivocation* is the caller's (the transcript hash, §3.4).
   - *Panics* (release is `panic = "abort"`): the DKG path has none reachable
     after `validate_map`; the blame path indexes by participant

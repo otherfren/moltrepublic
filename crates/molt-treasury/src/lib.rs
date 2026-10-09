@@ -27,7 +27,7 @@ pub enum TreasuryError {
     /// The DKG library refused (its error, debug-formatted).
     #[error("dkg: {0}")]
     Dkg(String),
-    /// The group key is not a valid spend key.
-    #[error("torsioned spend key")]
+    /// The group key is the identity or torsioned.
+    #[error("invalid spend key")]
     SpendKey,
 }

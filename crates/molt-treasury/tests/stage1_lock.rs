@@ -123,3 +123,42 @@ impl monero_daemon_rpc::HttpTransport for Offline {
 fn the_daemon_rpc_transport_trait_is_the_locked_shape() {
     drop(monero_daemon_rpc::MoneroDaemon::new(Offline));
 }
+
+#[test]
+fn an_identity_group_key_has_no_address() {
+    use ciphersuite::group::Group;
+    let view = Zeroizing::new(MoneroScalar::hash(b"stage1 lock view"));
+    let err = keys::standard_address(
+        molt_treasury::EdwardsPoint::identity(),
+        view,
+        Network::Mainnet,
+    )
+    .expect_err("identity spend key");
+    assert_eq!(err, TreasuryError::SpendKey);
+}
+
+#[test]
+fn a_garbage_frame_names_its_sender_and_seat_zero_is_refused() {
+    let mut rng = ChaCha20Rng::from_seed([3; 32]);
+    assert!(matches!(
+        dkg::params(T, N, 0),
+        Err(TreasuryError::Params(_))
+    ));
+    let p: Vec<_> = (1..=N)
+        .map(|i| dkg::params(T, N, i).expect("params"))
+        .collect();
+
+    let (seat1, _) = dkg::round1(p[0], [1; 32], &mut rng);
+    let (_, r1_2) = dkg::round1(p[1], [1; 32], &mut rng);
+    let frames = BTreeMap::from([(2, r1_2.clone()), (3, vec![0xff; 7])]);
+    let err = dkg::round2(seat1, p[0], &frames, &mut rng).expect_err("garbage round 1");
+    assert_eq!(err, TreasuryError::Frame(3));
+
+    let (seat1, _) = dkg::round1(p[0], [1; 32], &mut rng);
+    let (_, r1_3) = dkg::round1(p[2], [1; 32], &mut rng);
+    let frames = BTreeMap::from([(2, r1_2), (3, r1_3)]);
+    let (km, _) = dkg::round2(seat1, p[0], &frames, &mut rng).expect("round 2");
+    let shares = BTreeMap::from([(2, vec![0xff; 5]), (3, vec![0xff; 5])]);
+    let err = dkg::complete(km, p[0], &shares, &mut rng).expect_err("garbage share");
+    assert_eq!(err, TreasuryError::Frame(2));
+}
