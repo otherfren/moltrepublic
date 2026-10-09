@@ -332,3 +332,22 @@ fn a_decided_proposal_renders_its_acts_without_the_before() {
     assert_eq!(v["proposal"]["acts"], json!([format!("{} state: wip", short_id(&id(1)))]));
     assert_eq!(v["proposal"]["state"], json!("applied"));
 }
+
+/// §2.4: one colour per folded label, stable on every node.
+#[test]
+fn a_type_colour_is_the_folded_label_hash_mod_twelve() {
+    assert_eq!(type_slot("  Bug "), type_slot("bug"));
+    let want = u8::try_from(crate::fnv1a64("bug") % 12).expect("below 12");
+    assert_eq!(type_slot("Bug"), Some(want));
+    assert_eq!(type_slot("   "), None);
+    assert!((0..200).all(|i| type_slot(&format!("t{i}")).is_some_and(|s| s < 12)));
+}
+
+/// §2.4: the spelling most tasks use, ties to the lexically smallest.
+#[test]
+fn a_type_shows_its_most_used_spelling() {
+    let names = type_spellings(["Bug", "bug ", "bug", "Feature", "feature"].into_iter());
+    assert_eq!(names.get("bug").map(String::as_str), Some("bug"));
+    assert_eq!(names.get("feature").map(String::as_str), Some("Feature"));
+    assert_eq!(names.len(), 2);
+}

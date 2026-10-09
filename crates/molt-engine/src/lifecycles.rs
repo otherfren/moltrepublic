@@ -1255,6 +1255,34 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// [`Command::KanbanDraftSave`]: the wiki draft's twin.
+    pub(crate) fn cmd_kanban_draft_save(&mut self, draft: &str) -> Result<Reply, MoltError> {
+        let Some(dir) = self.active_workspace_dir() else {
+            return Ok(Reply::Ack);
+        };
+        if let Err(e) = molt_storage::write_kanban_draft(&dir, draft) {
+            tracing::warn!(error = %e, "kanban draft not persisted");
+        }
+        Ok(Reply::Ack)
+    }
+
+    /// [`Command::KanbanDraftLoad`].
+    pub(crate) fn cmd_kanban_draft_load(&mut self) -> Result<Reply, MoltError> {
+        let draft = self
+            .active_workspace_dir()
+            .map(|dir| molt_storage::read_kanban_draft(&dir))
+            .unwrap_or_default();
+        Ok(Reply::KanbanDraft { draft })
+    }
+
+    fn active_workspace_dir(&self) -> Option<std::path::PathBuf> {
+        let id = &self.session.active_workspace;
+        if id.is_empty() {
+            return None;
+        }
+        molt_storage::find_workspace_dir(&self.workspace_root(), id)
+    }
+
     /// Read the open workspace's stored wiki draft ("" = none).
     pub(crate) fn cmd_wiki_draft_load(&mut self) -> Result<Reply, MoltError> {
         let id = self.session.active_workspace.clone();

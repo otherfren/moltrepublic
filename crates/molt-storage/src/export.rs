@@ -587,6 +587,8 @@ fn collect_entries(
             }
             // §3.3 hard exclusion + runtime scratch
             "transport.state" | "LOCK" => {}
+            // local working copies and fired wakes: this node's, not history
+            "wiki_draft.json" | "kanban_draft.json" | "kanban_wakes.json" if !is_dir => {}
             "keys" | "tmp" if is_dir => {}
             "log" if is_dir => {
                 for seg in fs::read_dir(&path)? {
@@ -1069,6 +1071,25 @@ mod tests {
         fs::write(dir.join("snapshots").join("000005.msnap"), b"old snap").expect("snap5");
         fs::write(dir.join("snapshots").join("000009.msnap"), b"new snap").expect("snap9");
         (root, dir, seed)
+    }
+
+    /// The local drafts and fired wakes never travel, and are no surprise.
+    #[test]
+    fn local_drafts_stay_home_silently() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (root, dir, _seed) = make_ws(tmp.path());
+        for f in ["wiki_draft.json", "kanban_draft.json", "kanban_wakes.json"] {
+            fs::write(dir.join(f), b"local").expect("draft");
+        }
+        let mut blob = Vec::new();
+        let outcome = export_dir(&root, &dir, &ExportKey::passphrase(PASS), &mut blob)
+            .expect("export");
+        assert_eq!(outcome.skipped, vec!["notes.txt".to_string()]);
+        let a = read_export(&mut blob.as_slice(), &ExportSecret::passphrase(PASS))
+            .expect("decrypt");
+        for f in ["wiki_draft.json", "kanban_draft.json", "kanban_wakes.json"] {
+            assert!(entry(&a, f).is_none(), "{f} travelled");
+        }
     }
 
     fn entry<'a>(a: &'a ExportArchive, path: &str) -> Option<&'a ExportEntry> {

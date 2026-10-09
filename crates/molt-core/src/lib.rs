@@ -207,16 +207,17 @@ impl Surface {
                 // per-doc history design exists (shared_memory_real.md
                 // WP-E) — the Accepted table is the decision history
             ],
+            // kanban_workflows.md §8: "create" is a button, "archive" the
+            // board's closed filter
             Surface::Quests => &[
                 ("board", "Board"),
-                // sprint scheduling (kanban_workflows.md §6.3)
                 ("plan", "Planning"),
-                ("create", "Create"),
+                ("calendar", "Calendar"),
+                ("dependencies", "Dependencies"),
                 ("proposals", "Proposals"),
                 // the wire key predates the Kanban rework and stays — it is
                 // select_view's vocabulary; only the label moved to "Mine"
                 ("my-quests", "Mine"),
-                ("archive", "Archive"),
             ],
             Surface::Vault => &[
                 ("secrets", "Secrets"),
@@ -4854,6 +4855,16 @@ pub enum Command {
     /// Read the open workspace's stored wiki draft
     /// (`Reply::WikiDraft`; "" = none).
     WikiDraftLoad,
+    /// Persist the operator's LOCAL kanban basket (staged acts not yet
+    /// proposed, `kanban_workflows.md` §8) beside the wiki draft: an
+    /// opaque frontend blob, never part of the backup export.
+    KanbanDraftSave {
+        /// The serialized basket ("" removes it).
+        draft: String,
+    },
+    /// Read the open workspace's stored kanban basket
+    /// (`Reply::KanbanDraft`; "" = none).
+    KanbanDraftLoad,
 
     // --- the vault (docs_archive/vault/vault_threshold_disclosure.md) ---
     /// Deposit a text under `name`; an existing own name is replaced. A
@@ -6249,6 +6260,11 @@ pub enum Reply {
     /// The open workspace's stored local wiki draft ("" = none).
     WikiDraft {
         /// The serialized draft blob, exactly as saved.
+        draft: String,
+    },
+    /// The open workspace's stored kanban basket ("" = none).
+    KanbanDraft {
+        /// The serialized basket, exactly as saved.
         draft: String,
     },
     /// One page of the wiki's document list ([`Command::WikiList`]).

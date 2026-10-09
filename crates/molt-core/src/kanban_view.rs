@@ -106,6 +106,37 @@ fn fold_label(s: &str) -> String {
     s.trim().to_lowercase()
 }
 
+/// A type's colour slot (§2.4): `fnv1a(folded label) mod 12`, the same on
+/// every node; `None` without a type.
+#[must_use]
+pub fn type_slot(label: &str) -> Option<u8> {
+    let folded = fold_label(label);
+    if folded.is_empty() {
+        return None;
+    }
+    u8::try_from(crate::fnv1a64(&folded) % 12).ok()
+}
+
+/// Folded label -> the spelling most tasks use (ties: lexically smallest).
+#[must_use]
+pub fn type_spellings<'a>(labels: impl Iterator<Item = &'a str>) -> BTreeMap<String, String> {
+    let mut counts: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
+    for l in labels {
+        let folded = fold_label(l);
+        if !folded.is_empty() {
+            *counts.entry(folded).or_default().entry(l.trim().to_string()).or_default() += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .filter_map(|(k, spellings)| {
+            // BTreeMap order: the first maximum is the lexically smallest
+            let best = spellings.iter().max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))?;
+            Some((k, best.0.clone()))
+        })
+        .collect()
+}
+
 /// What one `quests_view` asks for.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ViewQuery {

@@ -294,10 +294,13 @@ fn nav_labels_speak_german() {
     assert_eq!(surface_name(1, Surface::Organization), "Organisation");
     assert_eq!(surface_name(0, Surface::Organization), "Organization");
     assert_eq!(view_label(1, "members", "Members"), "Mitglieder");
-    assert_eq!(view_label(1, "archive", "Archive"), "Archiv");
     assert_eq!(view_label(1, "pending", "Pending"), "Ausstehend");
-    // the Kanban views (kanban_workflows.md §6.0): "plan" is new,
-    // "my-quests" keeps its wire key under the "Mine" label
+    // the six Kanban views (kanban_workflows.md §8): "create" and
+    // "archive" left, "my-quests" keeps its wire key under "Mine"
+    let keys: Vec<&str> = Surface::Quests.views().iter().map(|(k, _)| *k).collect();
+    assert_eq!(keys, ["board", "plan", "calendar", "dependencies", "proposals", "my-quests"]);
+    assert_eq!(view_label(1, "calendar", "Calendar"), "Kalender");
+    assert_eq!(view_label(1, "dependencies", "Dependencies"), "Abhängigkeiten");
     assert_eq!(view_label(1, "plan", "Planning"), "Planung");
     assert_eq!(view_label(0, "plan", "Planning"), "Planning");
     assert_eq!(view_label(1, "my-quests", "Mine"), "Meine");

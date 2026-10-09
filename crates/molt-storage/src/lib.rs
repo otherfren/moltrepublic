@@ -1100,6 +1100,28 @@ pub fn write_wiki_draft(ws_dir: &Path, draft: &str) -> Result<(), StorageError> 
     }
 }
 
+/// Read a workspace's local kanban basket ("" = none): staged acts not
+/// yet proposed (`docs/kanban/kanban_workflows.md` §8). Local like the wiki
+/// draft - never history, never exported.
+pub fn read_kanban_draft(ws_dir: &Path) -> String {
+    read_string_capped(&ws_dir.join(KANBAN_DRAFT_FILE), READ_CAP_CONTENT, "kanban draft").unwrap_or_default()
+}
+
+/// Rewrite the local kanban basket (atomic via `tmp/`); empty removes it.
+pub fn write_kanban_draft(ws_dir: &Path, draft: &str) -> Result<(), StorageError> {
+    if draft.is_empty() {
+        match fs::remove_file(ws_dir.join(KANBAN_DRAFT_FILE)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    } else {
+        write_atomic(ws_dir, KANBAN_DRAFT_FILE, draft.as_bytes(), false)
+    }
+}
+
+const KANBAN_DRAFT_FILE: &str = "kanban_draft.json";
+
 // ---------------------------------------------------------------------------
 // The LOCK
 // ---------------------------------------------------------------------------
@@ -4945,6 +4967,18 @@ mod tests {
         // …and the file is still there, untouched, for the build that wrote it
         let after = fs::read(dir.join("transport.state")).expect("still there");
         assert_eq!(after, frame, "the refusal must not have rewritten it");
+    }
+
+    /// §8: the basket round-trips beside the wiki draft; empty removes it.
+    #[test]
+    fn the_kanban_draft_round_trips_and_clears() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        assert_eq!(read_kanban_draft(tmp.path()), "");
+        write_kanban_draft(tmp.path(), "{\"acts\":[]}").expect("write");
+        assert_eq!(read_kanban_draft(tmp.path()), "{\"acts\":[]}");
+        write_kanban_draft(tmp.path(), "").expect("clear");
+        assert!(!tmp.path().join("kanban_draft.json").exists());
+        write_kanban_draft(tmp.path(), "").expect("clearing nothing is fine");
     }
 
     /// §6.1: the fired `task_start` keys live sealed beside the state,

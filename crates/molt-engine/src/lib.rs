@@ -2133,6 +2133,8 @@ impl State {
             Command::ConfirmSeedBackup { phrase } => self.cmd_confirm_seed_backup(&phrase),
             Command::WikiDraftSave { draft } => self.cmd_wiki_draft_save(&draft),
             Command::WikiDraftLoad => self.cmd_wiki_draft_load(),
+            Command::KanbanDraftSave { draft } => self.cmd_kanban_draft_save(&draft),
+            Command::KanbanDraftLoad => self.cmd_kanban_draft_load(),
             // vault/
             Command::VaultSeal { name, kind, text } => self.cmd_vault_seal(name, kind, text),
             Command::VaultReseal { secret_id } => self.cmd_vault_reseal(secret_id),

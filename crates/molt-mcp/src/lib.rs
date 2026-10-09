@@ -2028,7 +2028,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "select_view",
             command: "select_view",
             scope: Scope::Seat,
-            description: "Select a surface and one of its sub-views (organization: status/members/pending/accepted/declined · chat: today · memory: brain/proposals/accepted/denied · quests: board/plan/create/proposals/my-quests/archive · vault: secrets/requests/proposals/unsealed · wallet: balance/history/send/receive/status/settings · files: uploads/persistent/pending/accepted/declined).",
+            description: "Select a surface and one of its sub-views (organization: status/members/pending/accepted/declined · chat: today · memory: brain/proposals/accepted/denied · quests: board/plan/calendar/dependencies/proposals/my-quests · vault: secrets/requests/proposals/unsealed · wallet: balance/history/send/receive/status/settings · files: uploads/persistent/pending/accepted/declined).",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -2749,6 +2749,30 @@ pub fn tools() -> Vec<ToolDef> {
             build: |args| Ok(Command::WikiDraftSave {
                 draft: str_arg(args, "draft")?,
             }),
+        },
+        ToolDef {
+            name: "quests_draft_save",
+            command: "kanban_draft_save",
+            scope: Scope::Seat,
+            description: "Persist the LOCAL kanban basket (acts staged, not yet proposed) for the open workspace: an opaque blob that survives restarts, never in backup exports. Empty removes it. Nothing reaches the board until quests_propose.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "draft": { "type": "string", "description": "the serialized basket (opaque; \"\" removes it)" }
+                },
+                "required": ["draft"]
+            }),
+            build: |args| Ok(Command::KanbanDraftSave {
+                draft: str_arg(args, "draft")?,
+            }),
+        },
+        ToolDef {
+            name: "quests_draft_load",
+            command: "kanban_draft_load",
+            scope: Scope::Seat,
+            description: "Read the open workspace's stored local kanban basket (\"\" = none).",
+            schema: || json!({ "type": "object", "properties": {} }),
+            build: |_| Ok(Command::KanbanDraftLoad),
         },
         ToolDef {
             name: "wiki_draft_load",
