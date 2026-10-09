@@ -1,9 +1,10 @@
 use super::*;
 use crate::kanban_calendar::parse_date;
 use crate::kanban_dates::derive;
-use crate::kanban_fold::tests::{add, cs, fold, id, ids, set, st};
-use crate::kanban_fold::{short_id, BoardState};
-use crate::kanban_review::board_view;
+use crate::kanban_fold::tests::{add, cs, fold, id, ids, seats, set, st};
+use crate::kanban_fold::{kanban_fold_one, short_id, BoardState};
+use crate::kanban_review::{advisories, board_view};
+use crate::kanban_wake::{task_actions, WakeAction};
 use serde_json::json;
 
 fn d(s: &str) -> NaiveDate {
@@ -48,10 +49,13 @@ fn snapshot(board: &BoardState, pending: Value) -> SurfaceSnapshot {
         "gated": true,
         "applied": [],
         "pending": pending,
-        "board": board_view(board, &dv, now(), "mara"),
+        "board": board_view(board, &dv, now(), "mara", LEAD),
     }))
     .expect("a snapshot")
 }
+
+/// The reader's `task_wake_lead_min`.
+const LEAD: u16 = 10;
 
 fn view(snap: &SurfaceSnapshot, q: &ViewQuery) -> Value {
     quests_view(snap, q).expect("a view")
@@ -116,6 +120,33 @@ fn the_seat_relative_filters_follow_the_seat() {
     let v = view(&snap, &walter);
     assert_eq!(task_ids(&v), [id(2), id(4)]);
     assert!(v["next"].is_array(), "one seat, one list");
+}
+
+/// §8: `starting_now` IS the `task_start` list of §6.1, lead included.
+#[test]
+fn starting_now_is_the_task_start_list_with_the_lead() {
+    let mut b = board(0);
+    let soon = cs(vec![add(8, "standup", &["mara", "walter"],
+        json!({"when": {"start": "2026-10-12T12:05", "end": "2026-10-12T12:30"}}))]);
+    kanban_fold_one(&mut b, &soon, &seats());
+    let dv = derive(&b, now().date());
+    let started: BTreeSet<String> = task_actions(&b, &dv, "mara", now(), LEAD)
+        .into_iter()
+        .filter_map(|a| match a {
+            WakeAction::TaskStart { task, .. } => Some(task),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started, BTreeSet::from([id(4), id(8)]), "09:00 passed, 12:05 is inside the lead");
+    let snap = snapshot(&b, json!([]));
+    let got: BTreeSet<String> = filtered(&snap, &["starting_now"]).into_iter().collect();
+    assert_eq!(got, started);
+    let walter = ViewQuery {
+        seat: Some("walter".into()),
+        filter: vec![ViewFilter::StartingNow],
+        ..ViewQuery::default()
+    };
+    assert!(task_ids(&view(&snap, &walter)).is_empty(), "the lead is the reader's own setting");
 }
 
 #[test]
@@ -219,42 +250,74 @@ fn the_calendar_expands_timed_tasks_in_the_window() {
 }
 
 #[test]
-fn the_calendar_window_is_whole_and_bounded() {
+fn the_calendar_window_is_whole_and_ordered() {
     let half = ViewQuery { from: Some(d("2026-10-12")), ..ViewQuery::default() };
     assert!(half.window().is_err());
     let back = ViewQuery { from: Some(d("2026-10-12")), to: Some(d("2026-10-11")), ..ViewQuery::default() };
     assert!(back.window().is_err());
-    let long = ViewQuery { from: Some(d("2026-01-01")), to: Some(d("2027-01-02")), ..ViewQuery::default() };
-    assert!(long.window().is_err());
-    let year = ViewQuery { from: Some(d("2026-01-01")), to: Some(d("2027-01-01")), ..ViewQuery::default() };
-    assert!(year.window().is_ok());
+    let long = ViewQuery { from: Some(d("2026-01-01")), to: Some(d("2036-01-02")), ..ViewQuery::default() };
+    assert!(long.window().is_ok(), "no cap on the window (Q16)");
+}
+
+/// The card's lines, as the engine computes them for `payload` on `b`.
+fn card(b: &BoardState, n: u64, payload: &Value) -> Value {
+    let lines = advisories(b, &derive(b, now().date()), payload, &seats(), now().date(), &|_| None);
+    json!({
+        "id": n, "surface": "quests", "approvals": 1, "threshold": 2, "state": "proposed",
+        "by": "walter", "payload": payload, "advisories": lines,
+    })
 }
 
 #[test]
 fn the_review_read_splits_the_advisories() {
-    let pending = json!([{
-        "id": 9, "surface": "quests", "approvals": 1, "threshold": 2, "state": "proposed",
-        "by": "walter",
-        "payload": {"op": "kanban_ops", "summary": "move docs", "base_rev": 1, "ops": [st(3, "wip", None)]},
-        "rendered": ["#00000003 state: todo → wip"],
-        "advisories": [
-            "would void now: x",
-            "changed since proposed: #00000003 size",
-            "#00000003: needed by none → 2026-10-20",
-        ],
-    }]);
-    let snap = snapshot(&board(0), pending);
-    let v = view(&snap, &ViewQuery { proposal: Some(9), ..ViewQuery::default() });
-    let p = &v["proposal"];
-    assert_eq!(p["summary"], json!("move docs"));
+    let b = board(0);
+    let mut void = cs(vec![st(7, "wip", None), add(9, "x", &["mara"], json!({}))]);
+    void["base_rev"] = json!(1);
+    void["summary"] = json!("revive gone");
+    let mut clean = cs(vec![set(2, json!({"due": "2026-10-20"}))]);
+    clean["base_rev"] = json!(3);
+    let snap = snapshot(&b, json!([card(&b, 9, &void), card(&b, 10, &clean)]));
+
+    let p = &view(&snap, &ViewQuery { proposal: Some(9), ..ViewQuery::default() })["proposal"];
+    assert_eq!(p["summary"], json!("revive gone"));
     assert_eq!(p["state"], json!("proposed"));
-    assert_eq!(p["acts"], json!(["#00000003 state: todo → wip"]));
-    assert_eq!(p["would_void"], json!(["x"]));
-    assert_eq!(p["changed_since"], json!(["#00000003 size"]));
-    assert_eq!(p["impact"], json!(["#00000003: needed by none → 2026-10-20"]));
+    let seven = short_id(&id(7));
+    let nine = short_id(&id(9));
+    assert_eq!(p["would_void"], json!([format!("{seven}: cancelled to wip not allowed")]));
+    assert_eq!(p["changed_since"], json!([format!("{seven} state")]));
+    assert_eq!(
+        p["warnings"],
+        json!([format!("{nine}: no description"), format!("{nine}: no acceptance criteria")])
+    );
+    assert_eq!(p["impact"], json!([]), "content is no date impact");
     assert_eq!(p["ops"][0]["to"], json!("wip"), "the signed acts ride along");
+
+    let p = &view(&snap, &ViewQuery { proposal: Some(10), ..ViewQuery::default() })["proposal"];
+    let lines = snap.pending[1].advisories.clone();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(p["impact"], json!(lines));
+    for k in ["would_void", "changed_since", "warnings"] {
+        assert_eq!(p[k], json!([]), "{k}");
+    }
     let missing = ViewQuery { proposal: Some(8), ..ViewQuery::default() };
     assert!(quests_view(&snap, &missing).is_err());
+}
+
+/// The raw lifecycle rides along; molt-mcp maps it once for every read.
+#[test]
+fn the_review_read_carries_the_lifecycle_flags() {
+    let pending = json!([{
+        "id": 9, "surface": "quests", "approvals": 2, "threshold": 2, "state": "proposed",
+        "payload": cs(vec![st(1, "todo", None)]),
+        "superseded": true, "superseded_kind": "rebase", "sealing": true,
+    }]);
+    let snap = snapshot(&board(0), pending);
+    let p = &view(&snap, &ViewQuery { proposal: Some(9), ..ViewQuery::default() })["proposal"];
+    assert_eq!(p["state"], json!("proposed"));
+    assert_eq!(p["superseded"], json!(true));
+    assert_eq!(p["superseded_kind"], json!("rebase"));
+    assert_eq!(p["sealing"], json!(true));
+    assert_eq!(p["withdrawn"], json!(false));
 }
 
 #[test]

@@ -222,7 +222,9 @@ fn a_voided_changeset_leaves_the_board_unchanged_on_every_node() {
         let ok = snap.accepted.iter().find(|v| v.id.0 == 1).expect("accepted row");
         assert_eq!(ok.void, None);
         let mut shared = after;
-        shared.as_object_mut().expect("board").remove("me");
+        let o = shared.as_object_mut().expect("board");
+        o.remove("me");
+        o.remove("starting");
         boards.push(shared);
     }
     assert!(boards.windows(2).all(|w| w[0] == w[1]), "byte-identical on every node but the reader");

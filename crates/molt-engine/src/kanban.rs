@@ -8,7 +8,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
-use chrono::NaiveDate;
+use chrono::{NaiveDate, NaiveDateTime};
 use molt_core::kanban_dates::{derive, Derived};
 use molt_core::kanban_fold::{
     kanban_canonicalize, kanban_fold_one, kanban_precheck, validate_kanban_wire, BoardState,
@@ -86,11 +86,14 @@ impl State {
         self.roster().into_iter().collect()
     }
 
-    /// Today in UTC (§2.3), on the presence clock so tests can pin it.
+    /// Now in UTC, on the presence clock so tests can pin it.
+    pub(crate) fn kanban_now(&self) -> NaiveDateTime {
+        utc(self.presence_now()).unwrap_or(NaiveDateTime::MIN)
+    }
+
+    /// Today in UTC (§2.3).
     pub(crate) fn kanban_today(&self) -> NaiveDate {
-        let secs = i64::try_from(self.presence_now()).unwrap_or(i64::MAX);
-        chrono::DateTime::from_timestamp(secs, 0)
-            .map_or(NaiveDate::MIN, |t| t.date_naive())
+        self.kanban_now().date()
     }
 
     fn kanban_cache_current(&self, c: &KanbanCache) -> bool {
@@ -240,13 +243,16 @@ impl State {
     /// The board with its derived status, as the Quests read serves it.
     pub(crate) fn kanban_board_view(&self) -> Value {
         let cache = self.kanban_board();
-        let today = self.kanban_today();
-        let derived = self.kanban_derived(&cache, today);
-        let secs = i64::try_from(self.presence_now()).unwrap_or(i64::MAX);
-        let now = chrono::DateTime::from_timestamp(secs, 0)
-            .map_or(chrono::NaiveDateTime::MIN, |t| t.naive_utc());
-        board_view(&cache.board, &derived, now, &self.member())
+        let now = self.kanban_now();
+        let derived = self.kanban_derived(&cache, now.date());
+        let lead = self.session.settings.task_wake_lead_min;
+        board_view(&cache.board, &derived, now, &self.member(), lead)
     }
+}
+
+/// Unix seconds as a UTC time.
+pub(crate) fn utc(secs: u64) -> Option<NaiveDateTime> {
+    chrono::DateTime::from_timestamp(i64::try_from(secs).ok()?, 0).map(|t| t.naive_utc())
 }
 
 #[cfg(test)]

@@ -8,18 +8,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{NaiveDate, NaiveDateTime};
 use serde_json::{Map, Value};
 
-use crate::kanban_calendar::{
-    expand, fmt_date, parse_date, parse_datetime, Repeat, When,
-};
+use crate::kanban_calendar::{expand, fmt_date, parse_date, Repeat, When};
 use crate::kanban_fold::{Size, TaskState};
-use crate::kanban_review::render_acts;
+use crate::kanban_review::{advisory_kind, render_acts, AdvisoryKind};
 use crate::{ProposalState, ProposalView, SurfaceSnapshot, VoteState};
 
 /// A closed task stays in the default list for this many changesets.
 pub const RECENT_CLOSED_REVS: u64 = 10;
-
-/// The longest calendar window one read expands, in days (inclusive).
-pub const MAX_WINDOW_DAYS: i64 = 366;
 
 /// The fields that ride `task`, never the list.
 const TEXT_FIELDS: [&str; 4] = ["description", "acceptance", "out_of_scope", "evidence"];
@@ -31,7 +26,7 @@ pub enum ViewFilter {
     Mine,
     /// The seat's `next` list.
     ToActOn,
-    /// The seat's timed task whose start passed within a day, still `todo`.
+    /// The reader's `task_start` list (§6.1): empty for another seat.
     StartingNow,
     /// The seat created it.
     CreatedByMe,
@@ -132,16 +127,13 @@ impl ViewQuery {
     /// The calendar window, if one was asked for.
     ///
     /// # Errors
-    /// One end without the other, `from > to`, or more than
-    /// [`MAX_WINDOW_DAYS`] days.
+    /// One end without the other, or `from > to`.
     pub fn window(&self) -> Result<Option<(NaiveDate, NaiveDate)>, String> {
         match (self.from, self.to) {
             (None, None) => Ok(None),
             (Some(from), Some(to)) => {
                 if from > to {
                     Err("from is after to".to_string())
-                } else if (to - from).num_days() + 1 > MAX_WINDOW_DAYS {
-                    Err(format!("window over {MAX_WINDOW_DAYS} days"))
                 } else {
                     Ok(Some((from, to)))
                 }
@@ -189,6 +181,14 @@ fn has_str(t: &Value, key: &str, want: &str) -> bool {
         .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(want)))
 }
 
+fn str_set(v: Option<&Value>) -> BTreeSet<&str> {
+    v.and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect()
+}
+
 fn state_of(t: &Value) -> Option<TaskState> {
     TaskState::parse(str_of(t, "state"))
 }
@@ -196,34 +196,17 @@ fn state_of(t: &Value) -> Option<TaskState> {
 /// What the seat-relative filters read.
 struct Ctx<'a> {
     seat: &'a str,
-    now: Option<NaiveDateTime>,
     next: BTreeSet<&'a str>,
+    starting: BTreeSet<&'a str>,
     voting: BTreeSet<String>,
 }
 
 impl Ctx<'_> {
-    fn starting_now(&self, t: &Value) -> bool {
-        let Some(now) = self.now else {
-            return false;
-        };
-        if !has_str(t, "assignees", self.seat) || str_of(t, "shown") != "scheduled" {
-            return false;
-        }
-        let Some(tm) = timing(t) else {
-            return false;
-        };
-        let since = now - chrono::TimeDelta::days(1);
-        let from = since.date();
-        expand(&tm.when, tm.repeat.as_ref(), &tm.skip, &tm.moved, from, now.date())
-            .iter()
-            .any(|o| o.window.begins() > since && o.window.begins() <= now)
-    }
-
     fn keeps(&self, id: &str, t: &Value, f: &ViewFilter) -> bool {
         match f {
             ViewFilter::Mine => has_str(t, "assignees", self.seat),
             ViewFilter::ToActOn => self.next.contains(id),
-            ViewFilter::StartingNow => self.starting_now(t),
+            ViewFilter::StartingNow => self.starting.contains(id),
             ViewFilter::CreatedByMe => str_of(t, "creator") == self.seat,
             ViewFilter::NeedsMyVote => self.voting.contains(id),
             ViewFilter::Blocked => str_of(t, "shown") == "blocked",
@@ -401,7 +384,7 @@ fn calendar(
 }
 
 /// The review read of one kanban proposal: its acts rendered, the
-/// advisories split into would-void, changed-since and impact.
+/// advisories split into would-void, changed-since, impact and warnings.
 fn proposal_view(snap: &SurfaceSnapshot, id: u64) -> Result<Value, String> {
     let p = snap
         .pending
@@ -414,13 +397,14 @@ fn proposal_view(snap: &SurfaceSnapshot, id: u64) -> Result<Value, String> {
     let mut would_void = Vec::new();
     let mut changed = Vec::new();
     let mut impact = Vec::new();
+    let mut warnings = Vec::new();
     for line in &p.advisories {
-        if let Some(r) = line.strip_prefix("would void now: ") {
-            would_void.push(r.to_string());
-        } else if let Some(r) = line.strip_prefix("changed since proposed: ") {
-            changed.push(r.to_string());
-        } else {
-            impact.push(line.clone());
+        let (kind, text) = advisory_kind(line);
+        match kind {
+            AdvisoryKind::WouldVoid => would_void.push(text.to_string()),
+            AdvisoryKind::ChangedSince => changed.push(text.to_string()),
+            AdvisoryKind::Impact => impact.push(text.to_string()),
+            AdvisoryKind::Warning => warnings.push(text.to_string()),
         }
     }
     let acts = if p.rendered.is_empty() {
@@ -428,18 +412,15 @@ fn proposal_view(snap: &SurfaceSnapshot, id: u64) -> Result<Value, String> {
     } else {
         p.rendered.clone()
     };
-    let state = if p.withdrawn {
-        "withdrawn"
-    } else {
-        match p.state {
-            ProposalState::Proposed => "proposed",
-            ProposalState::Applied => "applied",
-            ProposalState::Rejected => "rejected",
-        }
-    };
     let mut m = Map::new();
     m.insert("id".into(), Value::from(id));
-    m.insert("state".into(), Value::from(state));
+    // raw: molt-mcp maps withdrawn/superseded/sealing once for every read
+    let raw = |v: Result<Value, serde_json::Error>| v.unwrap_or(Value::Null);
+    m.insert("state".into(), raw(serde_json::to_value(p.state)));
+    m.insert("withdrawn".into(), Value::Bool(p.withdrawn));
+    m.insert("superseded".into(), Value::Bool(p.superseded));
+    m.insert("superseded_kind".into(), raw(serde_json::to_value(p.superseded_kind)));
+    m.insert("sealing".into(), Value::Bool(p.sealing));
     m.insert("by".into(), Value::from(p.by.clone()));
     m.insert("approvals".into(), Value::from(p.approvals));
     m.insert("threshold".into(), Value::from(p.threshold));
@@ -452,6 +433,7 @@ fn proposal_view(snap: &SurfaceSnapshot, id: u64) -> Result<Value, String> {
     m.insert("would_void".into(), strs(would_void));
     m.insert("changed_since".into(), strs(changed));
     m.insert("impact".into(), strs(impact));
+    m.insert("warnings".into(), strs(warnings));
     if let Some(v) = &p.void {
         m.insert("void".into(), Value::from(v.clone()));
     }
@@ -500,15 +482,8 @@ pub fn quests_view(snap: &SurfaceSnapshot, q: &ViewQuery) -> Result<Value, Strin
     };
     let ctx = Ctx {
         seat,
-        now: parse_datetime(str_of(board, "now")),
-        next: board
-            .get("next")
-            .and_then(|n| n.get(seat))
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .collect(),
+        starting: if seat == me { str_set(board.get("starting")) } else { BTreeSet::new() },
+        next: str_set(board.get("next").and_then(|n| n.get(seat))),
         voting: awaiting(&snap.pending, seat, me),
     };
     let keep = |id: &str, t: &Value| ctx.matches(id, t, &q.filter);

@@ -11,6 +11,7 @@ use serde_json::{Map, Value};
 use crate::kanban_calendar::{fmt_date, fmt_datetime};
 use crate::kanban_dates::{derive, impact, Derived, Flag, ImpactChange, Shown};
 use crate::kanban_fold::{kanban_fold_one, kanban_precheck, short_id, BoardState, TaskState};
+use crate::kanban_wake::start_scan;
 
 impl Shown {
     /// The wire spelling.
@@ -41,6 +42,52 @@ impl Flag {
             Flag::StartedOnReopened => "started_on_reopened",
         }
     }
+}
+
+/// The head of a would-void advisory.
+pub const WOULD_VOID_PREFIX: &str = "would void now: ";
+/// The head of a changed-since advisory.
+pub const CHANGED_SINCE_PREFIX: &str = "changed since proposed: ";
+const NO_DESCRIPTION: &str = "no description";
+const NO_ACCEPTANCE: &str = "no acceptance criteria";
+const EVIDENCE_HEAD: &str = "evidence for ";
+const EVIDENCE_TAIL: &str = " criteria";
+
+/// What one advisory line reports (§4.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvisoryKind {
+    /// The changeset would void on the board now.
+    WouldVoid,
+    /// A task it touches moved since `base_rev`.
+    ChangedSince,
+    /// Its effect on the derived dates (§5.4).
+    Impact,
+    /// Missing content or evidence (§2.1.1).
+    Warning,
+}
+
+/// The kind of an [`advisories`] line, and its text without the kind's head.
+#[must_use]
+pub fn advisory_kind(line: &str) -> (AdvisoryKind, &str) {
+    if let Some(r) = line.strip_prefix(WOULD_VOID_PREFIX) {
+        return (AdvisoryKind::WouldVoid, r);
+    }
+    if let Some(r) = line.strip_prefix(CHANGED_SINCE_PREFIX) {
+        return (AdvisoryKind::ChangedSince, r);
+    }
+    // `<short id>: <what>`; an impact segment names a title after the id
+    let warning = line.split_once(": ").is_some_and(|(sid, what)| {
+        !sid.contains(' ')
+            && (what == NO_DESCRIPTION
+                || what == NO_ACCEPTANCE
+                || what
+                    .strip_prefix(EVIDENCE_HEAD)
+                    .and_then(|r| r.strip_suffix(EVIDENCE_TAIL))
+                    .and_then(|r| r.split_once(" of "))
+                    .is_some_and(|(a, b)| a.parse::<usize>().is_ok() && b.parse::<usize>().is_ok()))
+    });
+    let kind = if warning { AdvisoryKind::Warning } else { AdvisoryKind::Impact };
+    (kind, line)
 }
 
 fn day(d: Option<NaiveDate>) -> String {
@@ -80,7 +127,7 @@ pub fn advisories(
                 .and_then(|t| proposal_of_rev(t.touched_rev))
                 .map(|p| format!(" (proposal {p})"))
                 .unwrap_or_default();
-            out.push(format!("would void now: {}{by}", fault.reason));
+            out.push(format!("{WOULD_VOID_PREFIX}{}{by}", fault.reason));
             None
         }
         Ok(()) => {
@@ -122,7 +169,7 @@ pub fn advisories(
             .map(|p| format!(" (proposal {p})"))
             .unwrap_or_default();
         out.push(format!(
-            "changed since proposed: {} {}{by}",
+            "{CHANGED_SINCE_PREFIX}{} {}{by}",
             short_id(id),
             names.join(", ")
         ));
@@ -143,10 +190,10 @@ pub fn advisories(
         match op.get("act").and_then(Value::as_str) {
             Some("add") if op.get("when").is_none() => {
                 if op.get("description").is_none() {
-                    out.push(format!("{sid}: no description"));
+                    out.push(format!("{sid}: {NO_DESCRIPTION}"));
                 }
                 if op.get("acceptance").is_none() {
-                    out.push(format!("{sid}: no acceptance criteria"));
+                    out.push(format!("{sid}: {NO_ACCEPTANCE}"));
                 }
             }
             Some("state")
@@ -171,7 +218,7 @@ pub fn advisories(
                 if (criteria > 0 || !evidence.is_empty())
                     && (evidence.len() != criteria || met != criteria)
                 {
-                    out.push(format!("{sid}: evidence for {met} of {criteria} criteria"));
+                    out.push(format!("{sid}: {EVIDENCE_HEAD}{met} of {criteria}{EVIDENCE_TAIL}"));
                 }
             }
             _ => {}
@@ -346,9 +393,16 @@ pub fn render_acts(board: Option<&BoardState>, payload: &Value) -> Vec<String> {
 }
 
 /// The board as one read (§6): every task with its derived status, the
-/// priority order and `next` per seat, for `now` (UTC) as `me` reads it.
+/// priority order and `next` per seat, for `now` (UTC) as `me` reads it;
+/// `starting` is `me`'s `task_start` list with its `lead_min` (§6.1, §8).
 #[must_use]
-pub fn board_view(board: &BoardState, derived: &Derived, now: NaiveDateTime, me: &str) -> Value {
+pub fn board_view(
+    board: &BoardState,
+    derived: &Derived,
+    now: NaiveDateTime,
+    me: &str,
+    lead_min: u16,
+) -> Value {
     let today = now.date();
     let strs = |v: &[String]| Value::Array(v.iter().cloned().map(Value::String).collect());
     let mut tasks = Map::new();
@@ -386,6 +440,13 @@ pub fn board_view(board: &BoardState, derived: &Derived, now: NaiveDateTime, me:
     m.insert("today".into(), Value::from(fmt_date(today)));
     m.insert("now".into(), Value::from(fmt_datetime(now)));
     m.insert("me".into(), Value::from(me));
+    let starting: BTreeSet<String> = start_scan(board, derived, me, now, lead_min)
+        .due
+        .into_iter()
+        .filter(|d| !d.blocked)
+        .map(|d| d.task)
+        .collect();
+    m.insert("starting".into(), starting.into_iter().map(Value::String).collect());
     Value::Object(m)
 }
 

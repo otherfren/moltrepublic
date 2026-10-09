@@ -154,7 +154,7 @@ impl State {
                 return;
             }
         }
-        let Some(now_t) = utc(now) else {
+        let Some(now_t) = crate::kanban::utc(now) else {
             return;
         };
         let today = now_t.date();
@@ -221,7 +221,7 @@ impl State {
                 since: self.wake.proposed_at.get(id).copied().unwrap_or(0),
             })
             .collect();
-        if let Some(now) = utc(self.presence_now()) {
+        if let Some(now) = crate::kanban::utc(self.presence_now()) {
             self.refresh_kanban_cache();
             let cache = self.kanban_board();
             let derived = molt_core::kanban_dates::derive(&cache.board, now.date());
@@ -273,7 +273,14 @@ impl State {
         let running = self.wake.running.clone();
         let ended = self.wake.ended.clone();
         running.store(true, Ordering::SeqCst);
-        let by = by.to_string();
+        // one value per name, or this fails to compile
+        let vals: [String; WAKE_ENV.len()] = [
+            reason,
+            by.to_string(),
+            workspace,
+            pending.to_string(),
+            actions.to_string(),
+        ];
         // `Builder::spawn`, never `thread::spawn`: the latter PANICS when the
         // OS refuses a thread, and this runs on the single-owner actor
         let spawned = std::thread::Builder::new()
@@ -282,13 +289,7 @@ impl State {
                 let outcome = match std::process::Command::new("sh")
                     .arg("-c")
                     .arg(&cmd)
-                    .envs(WAKE_ENV.iter().zip([
-                        reason,
-                        by,
-                        workspace,
-                        pending.to_string(),
-                        actions.to_string(),
-                    ]))
+                    .envs(WAKE_ENV.iter().zip(vals))
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
@@ -318,10 +319,6 @@ impl State {
             tracing::warn!(error = %e, "wake=no_thread");
         }
     }
-}
-
-fn utc(secs: u64) -> Option<chrono::NaiveDateTime> {
-    chrono::DateTime::from_timestamp(i64::try_from(secs).ok()?, 0).map(|t| t.naive_utc())
 }
 
 /// The first second of the next UTC day.

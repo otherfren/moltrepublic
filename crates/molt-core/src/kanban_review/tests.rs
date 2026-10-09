@@ -225,7 +225,7 @@ fn the_board_view_carries_tasks_with_their_derived_status() {
     ])]);
     let dv = derive(&board, today());
     let now = today().and_hms_opt(12, 0, 0).expect("noon");
-    let v = board_view(&board, &dv, now, "mara");
+    let v = board_view(&board, &dv, now, "mara", 10);
     assert_eq!(v["rev"], json!(1));
     assert_eq!(v["today"], json!("2026-10-12"));
     assert_eq!(v["now"], json!("2026-10-12T12:00"));
@@ -240,6 +240,7 @@ fn the_board_view_carries_tasks_with_their_derived_status() {
     assert_eq!(v["priority"], json!([id(1), id(2)]));
     assert_eq!(v["next"]["mara"], json!([id(1)]));
     assert_eq!(v["next"]["walter"], json!([]));
+    assert_eq!(v["starting"], json!([]));
 }
 
 #[test]

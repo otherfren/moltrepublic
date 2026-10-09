@@ -488,6 +488,9 @@ async fn call_tool(
         return Err("unauthorized: read-only token".to_string());
     }
     let cmd = (def.build)(args)?;
+    if let Some(v) = quests::served(name) {
+        return serde_json::to_string_pretty(&v).map_err(|e| e.to_string());
+    }
     let reply = handle.execute(cmd).await.map_err(|e| e.to_string())?;
     let value = serde_json::to_value(&reply).map_err(|e| e.to_string())?;
     let mut value = present(name, args, value)?;
@@ -525,10 +528,8 @@ fn strip_seat_secrets(v: &mut Value) {
 /// as a state of its own, `list_proposals` answers headers unless asked
 /// for the patch, and `read_proposal` is that list narrowed to one id.
 fn present(name: &str, args: &Value, mut value: Value) -> Result<Value, String> {
-    match name {
-        "quests_view" => return quests::present_view(args, value),
-        "wake_skill" => return Ok(quests::present_skill()),
-        _ => {}
+    if name == "quests_view" {
+        return quests::present_view(args, value);
     }
     withdrawn_is_a_state(&mut value);
     match name {
@@ -4519,6 +4520,75 @@ pub(crate) mod tests {
         assert!(def.description.contains("One changeset per wake"));
     }
 
+    /// The add schema advertises only what the shape check accepts: an add
+    /// refuses every null, a set clears with one.
+    #[test]
+    fn the_add_act_schema_has_no_null_but_set_fields_do() {
+        let schema = (tool_named("quests_propose").schema)();
+        let acts = &schema["properties"]["acts"]["items"]["oneOf"];
+        let add = acts[0]["properties"].as_object().expect("add fields");
+        for (k, f) in add {
+            let text = f.to_string();
+            assert!(!text.contains("\"null\"") && !text.contains("null]"), "add {k} admits null: {text}");
+        }
+        let set = &acts[1]["properties"]["fields"]["properties"];
+        assert_eq!(set["size"]["type"], json!(["string", "null"]));
+        assert!(set["size"]["enum"].as_array().expect("enum").contains(&Value::Null));
+        assert_eq!(add["size"]["type"], json!("string"));
+    }
+
+    /// One state mapping for every read: the review read says what
+    /// read_proposal says.
+    #[test]
+    fn the_review_read_maps_the_lifecycle_like_read_proposal() {
+        let card = |id: u64, state: &str, extra: Value| {
+            let mut c = json!({ "id": id, "surface": "quests", "approvals": 1, "threshold": 2,
+                "state": state, "payload": { "op": "kanban_ops", "summary": "s", "base_rev": 0, "ops": [] } });
+            if let (Some(c), Some(e)) = (c.as_object_mut(), extra.as_object()) {
+                c.extend(e.clone());
+            }
+            c
+        };
+        let snap = json!({ "surface": "quests", "gated": true, "applied": [],
+            "pending": [
+                card(1, "proposed", json!({ "superseded": true, "superseded_kind": "rebase" })),
+                card(2, "proposed", json!({ "sealing": true })),
+            ],
+            "declined": [card(3, "rejected", json!({ "superseded": true, "superseded_kind": "conflict" }))] });
+        let read = |id: u64| {
+            quests::present_view(&json!({ "proposal": id }), snap.clone()).expect("the review read")["proposal"].clone()
+        };
+        let rebase = read(1);
+        assert_eq!((&rebase["state"], &rebase["superseded"]), (&json!("proposed"), &json!("rebase")));
+        assert_eq!(read(2)["state"], json!("sealing"));
+        let dead = read(3);
+        assert_eq!((&dead["state"], &dead["superseded"]), (&json!("superseded"), &json!("conflict")));
+    }
+
+    /// §9 S3: the skill is the constant itself; the engine is never asked.
+    #[test]
+    fn the_wake_skill_is_served_without_the_engine() {
+        let h = {
+            let rt = tokio::runtime::Runtime::new().expect("a runtime");
+            let _in = rt.enter();
+            molt_engine::spawn(
+                GroupConfig {
+                    member: "me".to_string(),
+                    members: vec!["me".to_string()],
+                    threshold: 1,
+                    self_cosign: false,
+                },
+                SessionView::default(),
+            )
+        };
+        let rt = tokio::runtime::Runtime::new().expect("a runtime");
+        rt.block_on(async {
+            assert!(call(&h, "read_session", json!({})).await.is_err(), "the engine is gone");
+            let skill = call(&h, "wake_skill", json!({})).await.expect("the skill");
+            assert_eq!(skill["skill"], json!(WAKE_SKILL));
+        });
+    }
+
     #[test]
     fn quests_view_reads_the_quests_surface_and_refuses_a_bad_query() {
         let cmd = build("quests_view", &json!({})).expect("builds");
@@ -4538,7 +4608,11 @@ pub(crate) mod tests {
             assert!(build("quests_view", &bad).is_err(), "{bad}");
         }
         let d = tool_named("quests_view").description;
-        for word in ["evidence", "out_of_scope", "would void", "impact"] {
+        let schema = (tool_named("quests_view").schema)().to_string();
+        assert!(!schema.contains("366"), "no cap on the window (Q16)");
+        let long = json!({ "from": "2026-01-01", "to": "2036-01-01" });
+        assert!(build("quests_view", &long).is_ok());
+        for word in ["evidence", "out_of_scope", "would void", "impact", "warnings"] {
             assert!(d.contains(word), "the review checklist misses {word}");
         }
     }
