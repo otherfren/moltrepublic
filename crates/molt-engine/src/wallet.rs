@@ -81,6 +81,12 @@ impl State {
             return Err(MoltError::Storage("no workspace open".to_string()));
         };
         let id = active.id.clone();
+        // an export in flight already read the file; its late failure would re-arm the hold
+        if self.backup_inflight.contains(&id) {
+            return Err(MoltError::WorkspaceBusy(
+                "backup running - retry once it completes".to_string(),
+            ));
+        }
         match active.handle.set_aside_wallet_keys_blocking() {
             Ok(true) => {}
             Ok(false) => return Err(MoltError::Wallet(WalletRefusal::NoKeysFile)),

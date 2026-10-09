@@ -889,3 +889,44 @@ async fn an_acknowledged_loss_lifts_the_hold_and_the_next_backup_runs() {
         other => panic!("nothing left to set aside: {other:?}"),
     }
 }
+
+/// W5: an export in flight already read the keys file; setting it aside
+/// under it would let its late failure re-arm the hold.
+#[tokio::test]
+async fn an_acknowledged_loss_waits_for_a_backup_in_flight() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (endpoint, log) = stub_server(Arc::new(|method, _path| match method {
+        "PUT" => (200, String::new(), 1500),
+        _ => (200, empty_listing(), 0),
+    }))
+    .await;
+    let (w, id, root) = founded_engine(tmp.path(), &endpoint, 5).await;
+    w.execute(Command::CloseWorkspace).await.expect("close");
+    let dir = molt_storage::find_workspace_dir(&root, &id).expect("dir");
+    let (ws, _) = molt_storage::open_workspace(&dir).expect("open");
+    ws.append_wallet_keys(b"the share").expect("keys");
+    drop(ws);
+    w.execute(Command::OpenWorkspace { id: id.clone() }).await.expect("reopen");
+    let keys = dir.join(molt_storage::WALLET_KEYS_FILE);
+
+    w.execute(Command::BackupNow { id: id.clone() }).await.expect("backup now");
+    for _ in 0..200 {
+        if log.lock().expect("log").iter().any(|r| r.method == "PUT") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let mut rotten = std::fs::read(&keys).expect("read");
+    let last = rotten.len() - 1;
+    rotten[last] ^= 1;
+    std::fs::write(&keys, &rotten).expect("rot");
+
+    match w.execute(Command::WalletAcknowledgeLoss).await {
+        Err(molt_core::MoltError::WorkspaceBusy(_)) => {}
+        other => panic!("a backup is in flight: {other:?}"),
+    }
+    assert!(keys.exists(), "nothing set aside");
+    poll_session(&w, "uploaded", |sv| entry(sv, &id).last_backup_min != WorkspaceInfo::NEVER).await;
+    w.execute(Command::WalletAcknowledgeLoss).await.expect("acknowledge once it settled");
+    assert!(!keys.exists());
+}

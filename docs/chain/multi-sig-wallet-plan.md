@@ -634,8 +634,10 @@ Fork-Höhen fest. Bis dahin `can_spend = false`, kein `sign.rs`.
    for the read key with any `wallet` snapshot), `wallet_network`. The
    daemon's one door is `patch_settings`: a wholesale save keeps it, a new
    URL starts unconfirmed. `[wallet]` is written only off its defaults, so
-   older builds keep opening an untouched file. `WalletAcknowledgeLoss`
-   acts on the open workspace and lifts its backup hold. The phase is
+   older builds keep opening an untouched file; a URL or login the loader
+   refuses never reaches the settings, and a save leaves its line alone.
+   `WalletAcknowledgeLoss` acts on the open workspace, refuses while a
+   backup is in flight, and lifts its backup hold. The phase is
    `Off`/`Bounds`/`NoPurse` from the genesis or anchor rule; the other
    doors answer `purse: not available yet` (`TODO(step N)` in
    `molt-engine/src/wallet.rs`).

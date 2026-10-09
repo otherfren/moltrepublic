@@ -318,7 +318,12 @@ fn main() -> anyhow::Result<()> {
                 flat.wallet_daemon_url.clone()
             },
             wallet_daemon_confirmed: flat.wallet_daemon_confirmed,
-            wallet_daemon_login: flat.wallet_daemon_login.clone(),
+            wallet_daemon_login: {
+                if flat.wallet_daemon_login.is_empty() && !config.wallet.daemon_login.is_empty() {
+                    tracing::warn!(key = "[wallet].daemon_login", "daemon login refused - not used");
+                }
+                flat.wallet_daemon_login.clone()
+            },
             wallet_network: flat.wallet_network.clone(),
         },
         // the scanned on-disk workspaces replace the demo list

@@ -16,6 +16,12 @@ pub fn default_wallet_network() -> String {
     "mainnet".to_string()
 }
 
+/// The daemon login rides an HTTP header: one bounded line.
+#[must_use]
+pub fn daemon_login_ok(login: &str) -> bool {
+    login.len() <= 512 && !login.chars().any(char::is_control)
+}
+
 /// Where this republic's purse stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -163,6 +169,21 @@ pub enum WalletRefusal {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The view key lets outsiders watch the purse: wiped on drop.
+    #[test]
+    fn the_view_answer_wipes_its_key() {
+        fn wipes<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+        let answer = crate::Command::NetWalletViewAnswer {
+            from: "a".to_string(),
+            view: crate::vault::SecretBytes(vec![1; 32]),
+            generation: None,
+        };
+        let crate::Command::NetWalletViewAnswer { view, .. } = &answer else {
+            panic!("built above");
+        };
+        wipes(view);
+    }
 
     /// The UI's and MCP's contract: a filled view serializes to exactly this.
     #[test]

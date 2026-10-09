@@ -105,6 +105,12 @@ pub fn usable_daemon_url(url: &str) -> String {
     molt_core::relay::daemon_kind(url).map(|(u, _)| u).unwrap_or_default()
 }
 
+/// The daemon login, or "" when the engine would refuse it.
+#[must_use]
+pub fn usable_daemon_login(login: &str) -> String {
+    if molt_core::wallet::daemon_login_ok(login) { login.to_string() } else { String::new() }
+}
+
 /// Node-level runtime settings (`[node]`).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -835,7 +841,7 @@ impl From<&Config> for Settings {
             renderer: c.ui.renderer.as_str().to_string(),
             wallet_daemon_confirmed: c.wallet.daemon_confirmed && !usable_daemon_url(&c.wallet.daemon_url).is_empty(),
             wallet_daemon_url: usable_daemon_url(&c.wallet.daemon_url),
-            wallet_daemon_login: c.wallet.daemon_login.clone(),
+            wallet_daemon_login: usable_daemon_login(&c.wallet.daemon_login),
             wallet_network: c.wallet.network.as_str().to_string(),
         }
     }
@@ -1281,7 +1287,7 @@ pub fn salvage(text: &str) -> Settings {
         s.wallet_daemon_confirmed = !s.wallet_daemon_url.is_empty()
             && wallet.get("daemon_confirmed").and_then(toml::Value::as_bool).unwrap_or(false);
         if let Some(v) = wallet.get("daemon_login").and_then(toml::Value::as_str) {
-            s.wallet_daemon_login = v.to_string();
+            s.wallet_daemon_login = usable_daemon_login(v);
         }
         if let Some(v) = wallet.get("network").and_then(toml::Value::as_str) {
             if molt_core::wallet::WALLET_NETWORKS.contains(&v) {
@@ -1644,19 +1650,33 @@ fn apply_relays(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
     }
 }
 
-/// `[wallet]` only off its defaults; a login only while one is set.
+/// `[wallet]` only off its defaults; a login only while one is set. A
+/// line the loader refused stays as written until a usable value replaces it.
 fn apply_wallet(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
-    if settings.wallet_is_default() {
+    let refused = |key: &str, usable: fn(&str) -> String| {
+        doc.get("wallet")
+            .and_then(|w| w.get(key))
+            .and_then(toml_edit::Item::as_str)
+            .is_some_and(|v| !v.trim().is_empty() && usable(v).is_empty())
+    };
+    let keep_url = settings.wallet_daemon_url.is_empty() && refused("daemon_url", usable_daemon_url);
+    let keep_login =
+        settings.wallet_daemon_login.is_empty() && refused("daemon_login", usable_daemon_login);
+    if settings.wallet_is_default() && !keep_url && !keep_login {
         doc.as_table_mut().remove("wallet");
         return;
     }
     let wallet = table_at(doc.as_table_mut(), &["wallet"]);
-    set_str(wallet, "daemon_url", &settings.wallet_daemon_url);
-    set_bool(wallet, "daemon_confirmed", settings.wallet_daemon_confirmed);
-    if settings.wallet_daemon_login.is_empty() {
-        wallet.remove("daemon_login");
-    } else {
-        set_str(wallet, "daemon_login", &settings.wallet_daemon_login);
+    if !keep_url {
+        set_str(wallet, "daemon_url", &settings.wallet_daemon_url);
+        set_bool(wallet, "daemon_confirmed", settings.wallet_daemon_confirmed);
+    }
+    if !keep_login {
+        if settings.wallet_daemon_login.is_empty() {
+            wallet.remove("daemon_login");
+        } else {
+            set_str(wallet, "daemon_login", &settings.wallet_daemon_login);
+        }
     }
     set_str(wallet, "network", &settings.wallet_network);
 }
@@ -2499,5 +2519,34 @@ mod nym_tests {
         assert!(parse("[wallet]\nnetwork = \"foonet\"\n").is_err());
         assert!(parse("[wallet]\ndaemon = \"x\"\n").is_err(), "typos are refused");
         assert_eq!(salvage("[wallet]\nnetwork = \"foonet\"\n").wallet_network, "mainnet");
+    }
+
+    /// A login the engine would refuse never reaches the settings, or
+    /// every later save fails on it.
+    #[test]
+    fn a_bad_daemon_login_is_dropped() {
+        let long = format!("\"{}\"", "a".repeat(513));
+        for bad in ["\"u:p\\tx\"", "\"u:p\\r\\nX: y\"", long.as_str()] {
+            let text = format!("[wallet]\ndaemon_login = {bad}\n");
+            let s = Settings::from(&parse(&text).expect("parses"));
+            assert!(s.wallet_daemon_login.is_empty(), "{bad}");
+            assert!(salvage(&text).wallet_daemon_login.is_empty(), "{bad}");
+        }
+    }
+
+    /// A save never deletes a daemon line the loader refused: the settings
+    /// never held it, so the operator's text stays until they fix it.
+    #[test]
+    fn a_refused_daemon_line_survives_a_save() {
+        let text = "[wallet]\n# mine\ndaemon_url = \"http://node.example.org:18081\"\n\
+                    daemon_login = \"u:p\\tx\"\n";
+        let s = Settings::from(&parse(text).expect("parses"));
+        let saved = update(text, &s).expect("updates");
+        assert!(saved.contains("# mine"), "{saved}");
+        assert!(saved.contains("daemon_url = \"http://node.example.org:18081\""), "{saved}");
+        assert!(saved.contains("daemon_login = \"u:p\\tx\""), "{saved}");
+
+        let fixed = update(text, &wallet_settings()).expect("updates");
+        assert_eq!(salvage(&fixed), wallet_settings(), "a usable value replaces it");
     }
 }

@@ -1256,3 +1256,21 @@ fn a_cut_re_bases_an_open_patch_and_a_conflict_kills_one() {
     let alive = walter.proposals.get(&13).cloned().expect("card 13");
     assert_eq!(alive.state, ProposalState::Proposed, "b.md was never touched");
 }
+
+/// Wallet plan §15: after a cut the founding rule comes from the anchor;
+/// the first retained block is no genesis any more.
+#[test]
+fn the_wallet_rule_survives_a_cut() {
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    b.commit_applied(1, &["petra", "walter"]);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    let genesis_rule = walter.wallet_rule().expect("genesis rule");
+    let hash = checkpoint_state_hash(&checkpoint_state(&b.blocks, 1).expect("state"));
+    walter.receive_checkpoint_proposal(40, 1, &hash, false);
+    let change = ChainChange::Checkpoint { upto: 1, state_hash: hash };
+    let bytes = approval_bytes(&b.republic_id, 2, &change);
+    walter.receive_approval(40, "petra", 2, &identity_sign(b.key("petra"), &bytes));
+    assert!(matches!(walter.chain.blocks.first().expect("anchor").change, ChainChange::Checkpoint { .. }));
+    assert_eq!(walter.wallet_rule(), Some(genesis_rule));
+    assert_eq!(walter.wallet_view().phase, molt_core::wallet::WalletPhase::Bounds, "2-of-2 is outside W1");
+}

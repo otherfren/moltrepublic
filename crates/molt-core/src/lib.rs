@@ -5075,8 +5075,8 @@ pub enum Command {
     NetWalletViewAnswer {
         /// The MLS-authenticated seat.
         from: MemberId,
-        /// The view key, hex; checked against the address.
-        view: vault::SecretHex,
+        /// The view key's 32 bytes; checked against the address.
+        view: vault::SecretBytes,
         /// Transport incarnation (stale commands are dropped).
         #[serde(default)]
         generation: Option<u64>,

@@ -2604,9 +2604,8 @@ fn validate_wallet_settings(s: &SessionSettings) -> Result<(), MoltError> {
     validate_daemon_login(&s.wallet_daemon_login)
 }
 
-/// The daemon login rides an HTTP header: one bounded line.
 fn validate_daemon_login(login: &str) -> Result<(), MoltError> {
-    if login.len() > 512 || login.chars().any(char::is_control) {
+    if !molt_core::wallet::daemon_login_ok(login) {
         return Err(MoltError::Settings("wallet_daemon_login: one line, max 512".to_string()));
     }
     Ok(())
@@ -2740,13 +2739,15 @@ mod patch_tests {
         })))
         .await
         .expect("set");
+        let net = settings(&w).await.wallet_network;
         let s = settings(&w).await;
         assert_eq!(s.wallet_daemon_url, "https://node.example.org:18089");
         assert!(s.wallet_daemon_confirmed);
         assert_eq!(s.wallet_daemon_login, "u:p");
-        assert_eq!(s.wallet_network, "mainnet", "mainnet by default");
+        assert_eq!(net, "mainnet", "mainnet by default");
         let wire = serde_json::to_value(&s).expect("serializes").to_string();
         assert!(!wire.contains("u:p"), "never read back: {wire}");
+        w.execute(patch(serde_json::json!({ "wallet_network": "testnet" }))).await.expect("network");
 
         w.execute(Command::SaveSettings { settings: molt_core::SessionSettings::default() })
             .await
@@ -2757,6 +2758,7 @@ mod patch_tests {
             ("https://node.example.org:18089", true, "u:p"),
             "a wholesale save keeps the daemon"
         );
+        assert_eq!(kept.wallet_network, "testnet", "...and the network");
 
         w.execute(patch(serde_json::json!({ "wallet_daemon_url": "https://other.example.org" })))
             .await
