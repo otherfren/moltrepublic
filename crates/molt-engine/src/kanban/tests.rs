@@ -326,19 +326,6 @@ fn the_reply_and_the_card_carry_the_impact() {
     }
 }
 
-/// A new wiki file as a patch.
-fn new_page(path: &str, body: &str) -> String {
-    let lines: Vec<&str> = body.lines().collect();
-    let mut p = format!(
-        "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
-        lines.len()
-    );
-    for l in lines {
-        p.push_str(&format!("+{l}\n"));
-    }
-    p
-}
-
 #[test]
 fn a_wiki_link_to_a_task_is_a_backlink_on_its_read() {
     let mut b = Builder::new_with_features(&["mara", "walter", "bot"], 2, &["memory", "quests"], false);
@@ -356,18 +343,15 @@ fn a_wiki_link_to_a_task_is_a_backlink_on_its_read() {
         ("a.md", "[back](quest:00000001)"),
     ];
     for (i, (path, body)) in pages.iter().enumerate() {
-        let patch = new_page(path, body);
-        b.commit(
-            ChainChange::Applied {
-                proposal_id: 10 + u64::try_from(i).expect("small"),
-                surface: Surface::Memory,
-                payload: json!({"op": "wiki_patch", "value": patch, "summary": "x"}),
-            },
-            &["mara", "walter"],
-        );
+        b.commit_wiki(10 + u64::try_from(i).expect("small"), path, body, &["mara", "walter"]);
     }
     let mut walter = seat("walter", &b);
+    walter.refresh_kanban_cache();
+    let before = walter.kanban_board_view();
+    assert_eq!(before["backlinks"], json!("indexing"), "no graph yet is not 'no backlinks'");
+    assert_eq!(before["tasks"][tid(1)].get("referenced_by"), None);
     let v = board(&mut walter);
+    assert_eq!(v.get("backlinks"), None, "indexed: the absence of referenced_by means none");
     let tasks = &v["tasks"];
     assert_eq!(tasks[tid(1)]["referenced_by"], json!(["a.md", "plan.md"]), "each page once, path order");
     assert_eq!(tasks[tid(2)].get("referenced_by"), None, "a code span names nothing");

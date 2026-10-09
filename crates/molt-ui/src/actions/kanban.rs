@@ -135,6 +135,10 @@ fn pick(ui: &AppWindow, id: &str) {
 /// A wiki `quest:` link: the Kanban pane with that task open; a dead link
 /// stays put.
 pub(crate) fn open_quest(ui: &AppWindow, hex: &str) {
+    // the engine's link grammar, or the link would work one way only
+    if !molt_core::wiki_refs::valid_quest_hex(hex) {
+        return;
+    }
     let Some(id) = with(|st| st.feed.as_ref().and_then(|f| resolve_task(f, hex))) else {
         return;
     };

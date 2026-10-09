@@ -1701,10 +1701,10 @@ fn kanban_notes(lang: i32, p: &molt_core::ProposalView) -> (String, bool) {
         return (String::new(), false);
     }
     if let Some(reason) = &p.void {
-        let void = if lang == 1 { "nichtig" } else { "void" };
-        return (format!("{void}: {reason}"), true);
+        let l = if lang == 1 { Lexicon::de() } else { Lexicon::en() };
+        return (format!("{}: {reason}", l.kb_void), true);
     }
-    let bad = p.advisories.iter().any(|a| a.starts_with("would void"));
+    let bad = p.advisories.iter().any(|a| a.starts_with(molt_core::kanban_review::WOULD_VOID_PREFIX));
     (p.rendered.iter().chain(&p.advisories).cloned().collect::<Vec<_>>().join("\n"), bad)
 }
 

@@ -491,7 +491,7 @@ pub fn quests_view(snap: &SurfaceSnapshot, q: &ViewQuery) -> Result<Value, Strin
 
     let mut out = Map::new();
     out.insert("rev".into(), Value::from(rev));
-    for key in ["today", "now"] {
+    for key in ["today", "now", "backlinks"] {
         if let Some(v) = board.get(key) {
             out.insert(key.into(), v.clone());
         }

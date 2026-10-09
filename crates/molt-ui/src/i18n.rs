@@ -1455,6 +1455,7 @@ lexicon! {
     kb_title_board: "Board", "Board";
     kb_hint_board: "The shared plan - every change on it is a threshold vote.", "Der gemeinsame Plan - jede Änderung daran ist eine Schwellen-Abstimmung.";
     kb_title_plan: "Planning", "Planung";
+    kb_void: "void", "nichtig";
     kb_title_calendar: "Calendar", "Kalender";
     kb_title_deps: "Dependencies", "Abhängigkeiten";
     kb_title_mine: "Mine", "Meine";

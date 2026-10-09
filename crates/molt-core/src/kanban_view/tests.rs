@@ -351,3 +351,14 @@ fn a_type_shows_its_most_used_spelling() {
     assert_eq!(names.get("feature").map(String::as_str), Some("Feature"));
     assert_eq!(names.len(), 2);
 }
+
+#[test]
+fn a_pending_backlink_index_rides_every_read() {
+    let mut snap = snapshot(&board(0), json!([]));
+    assert_eq!(view(&snap, &ViewQuery::default()).get("backlinks"), None);
+    if let Some(b) = snap.board.as_mut().and_then(Value::as_object_mut) {
+        b.insert("backlinks".into(), json!("indexing"));
+    }
+    let task = ViewQuery { task: Some(id(1)), ..ViewQuery::default() };
+    assert_eq!(view(&snap, &task)["backlinks"], json!("indexing"));
+}

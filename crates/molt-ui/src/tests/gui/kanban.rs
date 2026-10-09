@@ -321,6 +321,10 @@ fn a_wiki_quest_link_and_its_backlink_lead_both_ways() {
     k.set_sel("".into());
     node.ui.global::<crate::WikiState>().invoke_open_link("quest:ffffffff".into());
     assert_eq!(k.get_sel().as_str(), "", "a dead link stays put");
+    node.ui
+        .global::<crate::WikiState>()
+        .invoke_open_link(format!("quest:{}", &id[..4]).into());
+    assert_eq!(k.get_sel().as_str(), "", "a prefix under 8 hex is no link");
 }
 
 #[test]

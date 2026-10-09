@@ -257,6 +257,12 @@ impl State {
         let derived = self.kanban_derived(&cache, now.date());
         let lead = self.session.settings.task_wake_lead_min;
         let mut view = board_view(&cache.board, &derived, now, &self.member(), lead);
+        if self.wiki_graph.is_none() {
+            // without the marker a missing referenced_by would read as "no page links it"
+            if let Some(o) = view.as_object_mut() {
+                o.insert("backlinks".into(), Value::from("indexing"));
+            }
+        }
         if let (Some(graph), Some(tasks)) =
             (self.wiki_graph.as_ref(), view.get_mut("tasks").and_then(Value::as_object_mut))
         {

@@ -29,7 +29,9 @@ Read first: `docs_archive/memory/shared_memory_real.md` §4,
 `docs_archive/chain/persistent_chain.md`,
 `docs_archive/ritual/charter_features.md`.
 
-## 1. Where we stand (verified 2026-10-07)
+## 1. Starting point before the build (verified 2026-10-07)
+
+Historical: everything under "Not there" below shipped in S1-S5 (§9).
 
 Real:
 
@@ -813,7 +815,7 @@ beside the wiki draft (`write_wiki_draft`, `molt-storage/src/lib.rs:1089`),
 sealed at rest, outside the backup allowlist. A declined changeset can be
 rescued into the basket (`Wiki::rescue_patch` idiom).
 
-## 9. Build order (once §2-§6 are ratified)
+## 9. Build order
 
 TDD, red first, each step green on master before the next.
 
