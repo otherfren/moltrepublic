@@ -74,7 +74,8 @@ share's identity; a live share only), unpersist {id, at: unix now} (a \
 persistent share only), delete {id} (a temporary share - gone for good); \
 quests kanban_ops {summary, base_rev, ops} (typed: quests_propose; read: \
 quests_view); wallet transfer {title}; the vault has its own tools \
-(vault_seal, vault_reseal, vault_grant, vault_read). Woken by the wake command \
+(vault_seal, vault_reseal, vault_grant, vault_read), the purse too (wallet_init, \
+wallet_consent, wallet_retry, wallet_acknowledge_loss). Woken by the wake command \
 (MOLT_WAKE_REASON set)? wake_skill says how to react; read_actions lists what is due. Traps: founding/join/recovery need a confirmed relay \
 (relay_add, then confirm); mark_channel_read moves your PRIVATE cursor while \
 mark_read broadcasts read receipts; restore_start = offline knowledge from a \
@@ -500,7 +501,7 @@ async fn call_tool(
     serde_json::to_string_pretty(&value).map_err(|e| e.to_string())
 }
 
-/// The READ-ONLY key sees no recovery phrase and no secret, whatever a
+/// The READ-ONLY key sees no recovery phrase, no secret and no purse, whatever a
 /// future reply carries (ADR-0007: the SEAT holds the phrase, the read key
 /// is a knowledge door). A belt over the scope list's braces - a read tool
 /// added tomorrow cannot leak one by accident. `props` is skipped: those
@@ -509,7 +510,7 @@ async fn call_tool(
 fn strip_seat_secrets(v: &mut Value) {
     match v {
         Value::Object(o) => {
-            for key in ["seed", "mcp_token", "mcp_read_token", "s3_secret_key"] {
+            for key in ["seed", "mcp_token", "mcp_read_token", "s3_secret_key", "wallet_daemon_login", "wallet"] {
                 o.remove(key);
             }
             for (key, child) in o.iter_mut() {
@@ -1115,6 +1116,11 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
         tor_port: port("tor_port")?,
         // never taken from the payload — the engine keeps the live pool
         relays: Vec::new(),
+        // the daemon's door is patch_settings; the engine keeps the stored one
+        wallet_daemon_url: d.wallet_daemon_url,
+        wallet_daemon_confirmed: d.wallet_daemon_confirmed,
+        wallet_daemon_login: d.wallet_daemon_login,
+        wallet_network: d.wallet_network,
     })
 }
 
@@ -1494,6 +1500,44 @@ pub fn tools() -> Vec<ToolDef> {
                 "required": ["secret_id"]
             }),
             build: |args| Ok(Command::VaultRead { secret_id: str_arg(args, "secret_id")? }),
+        },
+        ToolDef {
+            name: "wallet_init",
+            command: "wallet_init",
+            scope: Scope::Seat,
+            description: "Propose setting up the republic's Monero purse: a vote like any proposal. Needs 2 <= m <= n-1 and this node's daemon (patch_settings wallet_daemon_url). Once applied, all members must be online at once to create it (read_state wallet: run).",
+            schema: || json!({ "type": "object", "properties": {} }),
+            build: |_| Ok(Command::WalletInit),
+        },
+        ToolDef {
+            name: "wallet_consent",
+            command: "wallet_consent",
+            scope: Scope::Seat,
+            description: "Agree to (accept true) or refuse the current purse setup (read_state wallet: run.needs_consent). Every member sees the balance; a key part lost without a backup is gone; spending does not work yet. One refusal ends the setup.",
+            schema: || json!({
+                "type": "object",
+                "properties": { "accept": { "type": "boolean" } },
+                "required": ["accept"]
+            }),
+            build: |args| Ok(Command::WalletConsent {
+                accept: args.get("accept").and_then(Value::as_bool).ok_or("`accept` is required")?,
+            }),
+        },
+        ToolDef {
+            name: "wallet_retry",
+            command: "wallet_retry",
+            scope: Scope::Seat,
+            description: "Try the purse setup again after it stopped (read_state wallet: run.stage aborted, run.reason).",
+            schema: || json!({ "type": "object", "properties": {} }),
+            build: |_| Ok(Command::WalletRetry),
+        },
+        ToolDef {
+            name: "wallet_acknowledge_loss",
+            command: "wallet_acknowledge_loss",
+            scope: Scope::Seat,
+            description: "Accept that the open workspace's damaged purse key file is lost: it is set aside, this seat keeps watching the purse without a key part, and backups resume. Refused while the file is intact.",
+            schema: || json!({ "type": "object", "properties": {} }),
+            build: |_| Ok(Command::WalletAcknowledgeLoss),
         },
         ToolDef {
             name: "approve",
@@ -1990,7 +2034,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "read_session",
             command: "read_session",
             scope: Scope::Seat,
-            description: "Read the shared app/session state the GUI mirrors: current screen, surface + sub-view, language, workspaces, run lifecycles, and settings. Carries the recovery phrase of a RUNNING ritual (create.seed / join.seed, cleared at the seal); a stored workspace's phrase is a pull (reveal_seed), the list only flags has_seed. A run is done when its run.outcome is 1 (ok) or 2 (failed); `notice` is the GUI's transient toast, cleared by every run start. The three secrets (mcp_token, mcp_read_token, s3_secret_key) are write-only and read back as \"\". `wake_skill` names the skill a woken agent follows (the wake_skill tool serves it).",
+            description: "Read the shared app/session state the GUI mirrors: current screen, surface + sub-view, language, workspaces, run lifecycles, and settings. Carries the recovery phrase of a RUNNING ritual (create.seed / join.seed, cleared at the seal); a stored workspace's phrase is a pull (reveal_seed), the list only flags has_seed. A run is done when its run.outcome is 1 (ok) or 2 (failed); `notice` is the GUI's transient toast, cleared by every run start. The four secrets (mcp_token, mcp_read_token, s3_secret_key, wallet_daemon_login) are write-only and read back as \"\". `wake_skill` names the skill a woken agent follows (the wake_skill tool serves it).",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ReadSession),
         },
@@ -2108,7 +2152,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "save_settings",
             command: "save_settings",
             scope: Scope::Seat,
-            description: "Store the node settings and persist them to the node's config.toml (format-preserving, atomic; the write outcome lands in the session notice, restart-required keys in session.restart_required). Replaces the settings WHOLESALE, host posture included, so every field is required: read_session first, then pass the whole set back with your change. To adjust one thing use patch_settings. The three secrets (mcp_token, mcp_read_token, s3_secret_key) are not part of it - they never read back and keep their stored values here (patch_settings and set_node_posture set them).",
+            description: "Store the node settings and persist them to the node's config.toml (format-preserving, atomic; the write outcome lands in the session notice, restart-required keys in session.restart_required). Replaces the settings WHOLESALE, host posture included, so every field is required: read_session first, then pass the whole set back with your change. To adjust one thing use patch_settings. The three secrets (mcp_token, mcp_read_token, s3_secret_key) are not part of it - they never read back and keep their stored values here (patch_settings and set_node_posture set them). The purse's daemon (wallet_*) keeps its stored values too: patch_settings sets it.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -2182,7 +2226,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "patch_settings",
             command: "patch_settings",
             scope: Scope::Seat,
-            description: "Change SOME settings, keeping every field you do not mention - the tool for adjusting one thing (save_settings replaces everything, and its defaults are not neutral). The host posture is reachable here too. Unknown keys are refused rather than ignored; the relay pool keeps its own door (the relay_* tools). The three secrets are accepted write-only (they never read back).",
+            description: "Change SOME settings, keeping every field you do not mention - the tool for adjusting one thing (save_settings replaces everything, and its defaults are not neutral). The host posture is reachable here too. Unknown keys are refused rather than ignored; the relay pool keeps its own door (the relay_* tools). The secrets are accepted write-only (they never read back). The purse's daemon is set only here: a non-onion one is dialed only once wallet_daemon_confirmed (naming it is the exposure acknowledgement) and clearnet is on; a new URL starts unconfirmed.",
             schema: || json!({
                 "type": "object",
                 "description": "the settings to change, keyed as in read_session.settings",
@@ -2202,6 +2246,10 @@ pub fn tools() -> Vec<ToolDef> {
                     "mcp_token": { "type": "string", "description": "write-only: the seat key" },
                     "mcp_read_token": { "type": "string", "description": "write-only: the read-only key; \"\" switches it off" },
                     "s3_secret_key": { "type": "string", "description": "write-only: the S3 secret" },
+                    "wallet_daemon_url": { "type": "string", "description": "the purse's Monero node: https://, or http:// to an onion or local node; \"\" = none" },
+                    "wallet_daemon_confirmed": { "type": "boolean", "description": "use this node; for a non-onion one this is the exposure acknowledgement" },
+                    "wallet_daemon_login": { "type": "string", "description": "write-only: user:password" },
+                    "wallet_network": { "type": "string", "enum": ["mainnet", "stagenet", "testnet"] },
                     "s3_backup": { "type": "boolean" },
                     "s3_endpoint": { "type": "string" },
                     "s3_access_key": { "type": "string" },
@@ -2939,7 +2987,7 @@ pub(crate) mod tests {
         // hook; the value itself rides the settings surface as
         // `poke_wake_command` (ADR-0007), so this stays internal only
         // because it is a second door, not because it is off limits.
-        const INTERNAL: [&str; 81] = [
+        const INTERNAL: [&str; 86] = [
             // a referenced file's bytes off the local disk / mirror store
             // (wiki_files_and_images.md §3.3): the GUI's picture, an agent
             // gets download_file into its exchange folder
@@ -3019,6 +3067,15 @@ pub(crate) mod tests {
             "net_vault_reveal",
             "net_vault_resp",
             "net_vault_ask",
+            // the purse's off-actor daemon probe and scanner reporting, and
+            // its control frames landing: an agent must not forge a daemon
+            // height, a balance, another seat's run frame, key part status
+            // or view key answer
+            "net_wallet_probe",
+            "net_wallet_frame",
+            "net_wallet_scan",
+            "net_wallet_status",
+            "net_wallet_view_answer",
             "net_delivered",
             "net_peer_seen",
             "net_peer_rekeyed",
@@ -4303,6 +4360,54 @@ pub(crate) mod tests {
         let mut seat = None;
         let _ = handle_rpc(&h, init_req("seat"), Some(&cred), &mut seat).await;
         assert_eq!(seat, Some(Scope::Seat));
+    }
+
+    /// Wallet plan test 42: the read key never sees the purse - no wallet
+    /// tool, no `read_state`, and the strip belt drops a `wallet` snapshot
+    /// and the daemon login whatever a future read reply carries.
+    #[tokio::test]
+    async fn the_read_key_does_not_see_the_wallet() {
+        let h = wallet();
+        let cred = Credentials {
+            seat: "seat".to_string(),
+            read: "readonly".to_string(),
+        };
+        let mut authed = None;
+        let _ = handle_rpc(&h, init_req("readonly"), Some(&cred), &mut authed).await;
+        let call = |name: &str, args: Value| {
+            json!({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": { "name": name, "arguments": args }
+            })
+        };
+        let wallet_tools = ["wallet_init", "wallet_consent", "wallet_retry", "wallet_acknowledge_loss"];
+        for name in wallet_tools {
+            let t = tool_named(name);
+            assert_eq!(t.scope, Scope::Seat, "{name}");
+            assert!(INSTRUCTIONS.contains(name), "instructions miss {name}");
+            let resp = handle_rpc(&h, call(name, json!({ "accept": true })), Some(&cred), &mut authed)
+                .await
+                .expect("tools/call replies");
+            assert_eq!(resp["error"]["code"], -32001, "{name}");
+        }
+        let resp = handle_rpc(&h, call("read_state", json!({ "surface": "wallet" })), Some(&cred), &mut authed)
+            .await
+            .expect("tools/call replies");
+        assert_eq!(resp["error"]["code"], -32001);
+        let listed = handle_rpc(&h, tools_list(), Some(&cred), &mut authed)
+            .await
+            .expect("tools/list replies")
+            .to_string();
+        assert!(!listed.contains("\"wallet_"), "a wallet tool is listed to the read key");
+
+        let mut reply = json!({
+            "surface": "wallet",
+            "wallet": { "address": "4purse", "phase": "ready" },
+            "settings": { "wallet_daemon_login": "u:hunter2" }
+        });
+        strip_seat_secrets(&mut reply);
+        let text = reply.to_string();
+        assert!(!text.contains("4purse") && !text.contains("hunter2"), "{text}");
     }
 
     /// An empty read key is OFF, never "anyone may read".

@@ -440,8 +440,25 @@ impl State {
             }
             base_map.insert(k, v);
         }
-        let merged: SessionSettings = serde_json::from_value(base)
+        let mut merged: SessionSettings = serde_json::from_value(base)
             .map_err(|e| MoltError::Settings(format!("the patch does not fit the settings: {e}")))?;
+        // a confirmation belongs to one daemon: a new URL starts unconfirmed
+        // unless the same patch confirms it
+        if merged.wallet_daemon_url != self.session.settings.wallet_daemon_url
+            && !names.contains("wallet_daemon_confirmed")
+        {
+            merged.wallet_daemon_confirmed = false;
+        }
+        if !names.contains("wallet_daemon_login") {
+            merged.wallet_daemon_login = self.session.settings.wallet_daemon_login.clone();
+        }
+        validate_settings(&merged)?;
+        // the wholesale save below keeps the STORED daemon: this is its door
+        let stored = &mut self.session.settings;
+        stored.wallet_daemon_url = merged.wallet_daemon_url.clone();
+        stored.wallet_daemon_confirmed = merged.wallet_daemon_confirmed;
+        stored.wallet_daemon_login = merged.wallet_daemon_login.clone();
+        stored.wallet_network = merged.wallet_network.clone();
         let named = |key: &str, value: &str| names.contains(key).then(|| value.to_string());
         let secrets = molt_core::NodePosture {
             mcp_token: named("mcp_token", &merged.mcp_token),
@@ -539,6 +556,11 @@ impl State {
         settings.font_app = self.session.settings.font_app;
         settings.font_nav = self.session.settings.font_nav;
         settings.font_editor = self.session.settings.font_editor;
+        // the purse's daemon has one door, `patch_settings`: a wholesale save
+        // must not drop it or move its confirmation to another URL
+        settings.wallet_daemon_url = self.session.settings.wallet_daemon_url.clone();
+        settings.wallet_daemon_confirmed = self.session.settings.wallet_daemon_confirmed;
+        settings.wallet_network = self.session.settings.wallet_network.clone();
         self.session.settings = settings;
         self.mark_restart_required();
         if self.store.is_some() {
@@ -2477,14 +2499,15 @@ fn validate_fonts(app: u16, nav: u16, editor: u16) -> Result<(), MoltError> {
 /// The settings that never ride a payload: they do not serialize, so a
 /// wholesale save would wipe them (ADR-0007 keeps them write-only —
 /// `SetNodePosture` and `PatchSettings` are their doors).
-pub(crate) const WRITE_ONLY_SECRETS: [&str; 3] =
-    ["mcp_token", "mcp_read_token", "s3_secret_key"];
+pub(crate) const WRITE_ONLY_SECRETS: [&str; 4] =
+    ["mcp_token", "mcp_read_token", "s3_secret_key", "wallet_daemon_login"];
 
 /// Keep the stored secrets in a wholesale settings replacement.
 fn keep_stored_secrets(target: &mut SessionSettings, stored: &SessionSettings) {
     target.mcp_token = stored.mcp_token.clone();
     target.mcp_read_token = stored.mcp_read_token.clone();
     target.s3_secret_key = stored.s3_secret_key.clone();
+    target.wallet_daemon_login = stored.wallet_daemon_login.clone();
 }
 
 /// See [`State::host_path`]. A RELATIVE path with separators is refused:
@@ -2559,6 +2582,33 @@ fn validate_settings(s: &SessionSettings) -> Result<(), MoltError> {
     validate_wake_command(&s.poke_wake_command)?;
     validate_wake_settings(s)?;
     validate_fonts(s.font_app, s.font_nav, s.font_editor)?;
+    validate_wallet_settings(s)?;
+    Ok(())
+}
+
+/// `[wallet]`: the daemon URL by the relay host rule, its canonical form
+/// stored; a closed network set; a one-line login.
+fn validate_wallet_settings(s: &SessionSettings) -> Result<(), MoltError> {
+    if !s.wallet_daemon_url.is_empty() {
+        let (url, _) = molt_core::relay::daemon_kind(&s.wallet_daemon_url)
+            .map_err(|e| MoltError::Settings(format!("wallet_daemon_url: {e}")))?;
+        if url != s.wallet_daemon_url {
+            return Err(MoltError::Settings(format!("wallet_daemon_url: write {url}")));
+        }
+    }
+    if !molt_core::wallet::WALLET_NETWORKS.contains(&s.wallet_network.as_str()) {
+        return Err(MoltError::Settings(
+            "wallet_network: mainnet | stagenet | testnet".to_string(),
+        ));
+    }
+    validate_daemon_login(&s.wallet_daemon_login)
+}
+
+/// The daemon login rides an HTTP header: one bounded line.
+fn validate_daemon_login(login: &str) -> Result<(), MoltError> {
+    if login.len() > 512 || login.chars().any(char::is_control) {
+        return Err(MoltError::Settings("wallet_daemon_login: one line, max 512".to_string()));
+    }
     Ok(())
 }
 
@@ -2674,6 +2724,57 @@ mod patch_tests {
         assert_eq!(s.s3_interval_min, 15, "the named field changed");
         assert_eq!(s.anonymity, "tor", "…and Tor stayed on");
         assert_eq!(s.mcp_token, "s3cret", "…and the token stayed in place");
+    }
+
+    /// Plan §8 `[wallet]`: the daemon URL follows the relay host rule, a
+    /// confirmation belongs to one URL, the login is write-only like the
+    /// other secrets, and the network is a closed set.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_wallet_daemon_settings_are_validated_and_the_login_is_write_only() {
+        let w = node();
+        let patch = |v: serde_json::Value| Command::PatchSettings { patch: v };
+        w.execute(patch(serde_json::json!({
+            "wallet_daemon_url": "https://node.example.org:18089",
+            "wallet_daemon_confirmed": true,
+            "wallet_daemon_login": "u:p",
+        })))
+        .await
+        .expect("set");
+        let s = settings(&w).await;
+        assert_eq!(s.wallet_daemon_url, "https://node.example.org:18089");
+        assert!(s.wallet_daemon_confirmed);
+        assert_eq!(s.wallet_daemon_login, "u:p");
+        assert_eq!(s.wallet_network, "mainnet", "mainnet by default");
+        let wire = serde_json::to_value(&s).expect("serializes").to_string();
+        assert!(!wire.contains("u:p"), "never read back: {wire}");
+
+        w.execute(Command::SaveSettings { settings: molt_core::SessionSettings::default() })
+            .await
+            .expect("save");
+        let kept = settings(&w).await;
+        assert_eq!(
+            (kept.wallet_daemon_url.as_str(), kept.wallet_daemon_confirmed, kept.wallet_daemon_login.as_str()),
+            ("https://node.example.org:18089", true, "u:p"),
+            "a wholesale save keeps the daemon"
+        );
+
+        w.execute(patch(serde_json::json!({ "wallet_daemon_url": "https://other.example.org" })))
+            .await
+            .expect("move");
+        assert!(!settings(&w).await.wallet_daemon_confirmed, "a new daemon starts unconfirmed");
+
+        for bad in [
+            serde_json::json!({ "wallet_daemon_url": "ws://node.onion" }),
+            serde_json::json!({ "wallet_daemon_url": "http://node.example.org" }),
+            serde_json::json!({ "wallet_daemon_url": "https://u:p@node.example.org" }),
+            serde_json::json!({ "wallet_network": "foonet" }),
+            serde_json::json!({ "wallet_daemon_login": "u:p\nX: y" }),
+        ] {
+            assert!(w.execute(patch(bad.clone())).await.is_err(), "{bad}");
+        }
+        let s = settings(&w).await;
+        assert_eq!(s.wallet_daemon_url, "https://other.example.org");
+        assert_eq!(s.wallet_daemon_login, "u:p", "a refused patch changes nothing");
     }
 
     /// The three secrets are WRITE-ONLY, not unreachable (ADR-0007): a

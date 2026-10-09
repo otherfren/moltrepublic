@@ -4120,6 +4120,7 @@ impl State {
             // is told "no archive" instead of failing to decode.
             has_archive: false,
             board: (surface == Surface::Quests).then(|| self.kanban_board_view()),
+            wallet: (surface == Surface::Wallet).then(|| Box::new(self.wallet_view())),
         }
     }
 

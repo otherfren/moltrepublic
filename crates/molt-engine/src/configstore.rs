@@ -387,6 +387,10 @@ pub(crate) fn file_settings(s: &SessionSettings, language: &str, theme: &str) ->
             })
             .collect(),
         clearnet_relays_enabled: s.clearnet_relays_enabled,
+        wallet_daemon_url: s.wallet_daemon_url.clone(),
+        wallet_daemon_confirmed: s.wallet_daemon_confirmed,
+        wallet_daemon_login: s.wallet_daemon_login.clone(),
+        wallet_network: s.wallet_network.clone(),
     }
 }
 
@@ -465,6 +469,10 @@ fn session_settings(s: &Settings) -> SessionSettings {
             kept
         },
         clearnet_relays_enabled: s.clearnet_relays_enabled,
+        wallet_daemon_url: s.wallet_daemon_url.clone(),
+        wallet_daemon_confirmed: s.wallet_daemon_confirmed,
+        wallet_daemon_login: s.wallet_daemon_login.clone(),
+        wallet_network: s.wallet_network.clone(),
     }
 }
 

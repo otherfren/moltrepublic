@@ -227,11 +227,19 @@ allowed:
   `patch_settings` / `save_settings`) — a second door, not a boundary.
 * **The read-only key** (`[mcp].read_token`) admits the wiki and file READ
   tools and nothing else, and every reply it gets is stripped of `seed`,
-  `mcp_token`, `mcp_read_token` and `s3_secret_key`.
-* **The three stored secrets** stay write-only in `read_session`: reading
-  one back serves no autonomous action. `patch_settings` and
-  `set_node_posture` set them blind; a wholesale `save_settings` (whose
+  `mcp_token`, `mcp_read_token`, `s3_secret_key`, `wallet_daemon_login` and
+  any `wallet` snapshot: the read key never sees the purse (the `wallet_*`
+  tools and `read_state` are seat scope).
+* **The four stored secrets** (the three above plus the purse daemon's
+  `wallet_daemon_login`) stay write-only in `read_session`: reading one
+  back serves no autonomous action. `patch_settings` sets them blind
+  (`set_node_posture` the first three); a wholesale `save_settings` (whose
   payload cannot carry them) keeps the stored values.
+* **The purse's daemon** (`[wallet]`) has one door, `patch_settings`: a
+  wholesale save keeps it, a new URL starts unconfirmed, and naming
+  `wallet_daemon_confirmed` for a non-onion daemon is its exposure
+  acknowledgement (dialing it also needs `clearnet_enabled`, as for a
+  relay).
 
 Consequences worth knowing before opening the port:
 
@@ -257,7 +265,7 @@ tool**, because both frontends build the same `molt_core::Command` on the same
 engine handle. As of this audit the mapping is complete — chat (send incl.
 quotes, react, delete), proposals (propose / approve / decline), navigation
 (screen, surface, sub-view), language, theme, settings (host posture included
-since ADR-0007; the three stored secrets are settable but never read back),
+since ADR-0007; the stored secrets are settable but never read back),
 workspaces (open / close /
 delete), and the three engine-run lifecycles (restore / create / join with
 their start / cancel / finish verbs). Reading is co-equal too: what the GUI

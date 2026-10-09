@@ -843,3 +843,49 @@ async fn a_damaged_keys_file_holds_the_ticker_but_not_backup_now() {
     poll_session(&w, "uploaded", |sv| entry(sv, &id).last_backup_min != WorkspaceInfo::NEVER).await;
     assert_eq!(puts(), 1);
 }
+
+/// Wallet plan §9 (W5): acknowledging the loss sets the damaged keys file
+/// aside, lifts the hold, and the next export runs.
+#[tokio::test]
+async fn an_acknowledged_loss_lifts_the_hold_and_the_next_backup_runs() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (endpoint, log) = stub_server(Arc::new(|method, _path| match method {
+        "PUT" => (200, String::new(), 0),
+        _ => (200, empty_listing(), 0),
+    }))
+    .await;
+    let (w, id, root) = founded_engine(tmp.path(), &endpoint, 5).await;
+    w.execute(Command::CloseWorkspace).await.expect("close");
+    let dir = molt_storage::find_workspace_dir(&root, &id).expect("dir");
+    let (ws, _) = molt_storage::open_workspace(&dir).expect("open");
+    ws.append_wallet_keys(b"the share").expect("keys");
+    drop(ws);
+    let keys = dir.join(molt_storage::WALLET_KEYS_FILE);
+    let mut rotten = std::fs::read(&keys).expect("read");
+    let last = rotten.len() - 1;
+    rotten[last] ^= 1;
+    std::fs::write(&keys, &rotten).expect("rot");
+    w.execute(Command::OpenWorkspace { id: id.clone() }).await.expect("reopen");
+    let damaged = molt_storage::StorageError::WalletKeysDamaged.to_string();
+    let puts = || log.lock().expect("log").iter().filter(|r| r.method == "PUT").count();
+
+    w.execute(Command::SetWorkspaceBackup { id: id.clone(), enabled: true })
+        .await
+        .expect("enable");
+    w.execute(Command::BackupTick).await.expect("tick");
+    poll_session(&w, "damaged keys failure", |sv| entry(sv, &id).backup_error == damaged).await;
+
+    w.execute(Command::WalletAcknowledgeLoss).await.expect("acknowledge");
+    assert!(!keys.exists(), "the damaged file is set aside");
+    assert!(dir.join(".wallet_keys.state.lost0").exists());
+    assert!(entry(&session(&w).await, &id).backup_error.is_empty(), "the failure is answered");
+
+    w.execute(Command::BackupTick).await.expect("tick");
+    poll_session(&w, "uploaded", |sv| entry(sv, &id).last_backup_min != WorkspaceInfo::NEVER).await;
+    assert_eq!(puts(), 1);
+
+    match w.execute(Command::WalletAcknowledgeLoss).await {
+        Err(molt_core::MoltError::Wallet(molt_core::wallet::WalletRefusal::NoKeysFile)) => {}
+        other => panic!("nothing left to set aside: {other:?}"),
+    }
+}

@@ -424,7 +424,8 @@ Presence-Tick bis Commit oder Abbruch; nie im Workspace-Log:
   Read-Key sieht die Kasse **nicht**.
 - `[wallet]`: `daemon_url`, `daemon_confirmed`, `daemon_login`,
   `network` (Default `mainnet`, W11). In `Config`, `Settings`, `salvage`, `render`. Kein
-  Default-Daemon. Ältere Binaries lehnen die Config ab — Release-Notes.
+  Default-Daemon. Nur abweichend vom Default geschrieben: ältere Binaries
+  lehnen nur eine Config mit gesetztem Daemon ab — Release-Notes.
 
 ## 9. Persistenz
 
@@ -624,7 +625,20 @@ Fork-Höhen fest. Bis dahin `can_spend = false`, kein `sign.rs`.
    rides `NetBackupFailed.hold`: 1 h, doubling to 24 h, one notice. The
    record-vs-purse check stays with step 7 (`read_wallet_keys`,
    `ImportStaging::wallet_keys_dropped`).
-5. [ ] §8 Kontrakt, MCP, Config; Co-Equality grün.
+5. [x] §8 Kontrakt, MCP, Config; Co-Equality grün (2026-10-09).
+   `molt-core/src/wallet.rs` (view, `WalletRefusal`, `bounds_ok`);
+   `SurfaceSnapshot.wallet` is boxed (clippy: `Reply` size). INTERNAL:
+   `NetWalletProbe`, `NetWalletFrame`, `NetWalletScan`, `NetWalletStatus`,
+   `NetWalletViewAnswer`. Session keys `wallet_daemon_url`,
+   `wallet_daemon_confirmed`, `wallet_daemon_login` (write-only, stripped
+   for the read key with any `wallet` snapshot), `wallet_network`. The
+   daemon's one door is `patch_settings`: a wholesale save keeps it, a new
+   URL starts unconfirmed. `[wallet]` is written only off its defaults, so
+   older builds keep opening an untouched file. `WalletAcknowledgeLoss`
+   acts on the open workspace and lifts its backup hold. The phase is
+   `Off`/`Bounds`/`NoPurse` from the genesis or anchor rule; the other
+   doors answer `purse: not available yet` (`TODO(step N)` in
+   `molt-engine/src/wallet.rs`).
 6. [ ] §7.1–7.2 + §7.7; §10.20–25, 36.
 7. [ ] §7.3–7.6 + §7.8; §10.26–35, 37–41.
 8. [ ] §7.9 Scanner; manueller regtest-Lauf.

@@ -47,6 +47,62 @@ pub struct Config {
     /// The file plane (`[files]`).
     #[serde(default)]
     pub files: FilesConfig,
+    /// The purse's daemon (`[wallet]`).
+    #[serde(default)]
+    pub wallet: WalletConfig,
+}
+
+/// The purse's Monero daemon (`[wallet]`). Written only off its defaults,
+/// so a file without a daemon still opens on a build that predates it.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WalletConfig {
+    /// `https://…`, or `http://…` to an onion or local node; "" = none.
+    #[serde(default)]
+    pub daemon_url: String,
+    /// The operator confirmed this daemon (a non-onion one needs it).
+    #[serde(default)]
+    pub daemon_confirmed: bool,
+    /// `user:password` for a daemon that asks for a login.
+    #[serde(default)]
+    pub daemon_login: String,
+    /// The network the purse lives on.
+    #[serde(default)]
+    pub network: WalletNetwork,
+}
+
+/// The purse's network (W11: mainnet by default).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WalletNetwork {
+    /// The real network.
+    #[default]
+    Mainnet,
+    /// The staging network.
+    Stagenet,
+    /// The test network.
+    Testnet,
+}
+
+impl WalletNetwork {
+    /// The lowercase config name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WalletNetwork::Mainnet => "mainnet",
+            WalletNetwork::Stagenet => "stagenet",
+            WalletNetwork::Testnet => "testnet",
+        }
+    }
+}
+
+/// The normalized daemon URL, or "" when the relay host rule refuses it.
+#[must_use]
+pub fn usable_daemon_url(url: &str) -> String {
+    let url = url.trim();
+    if url.is_empty() {
+        return String::new();
+    }
+    molt_core::relay::daemon_kind(url).map(|(u, _)| u).unwrap_or_default()
 }
 
 /// Node-level runtime settings (`[node]`).
@@ -644,6 +700,24 @@ pub struct Settings {
     pub relays: Vec<RelayConfig>,
     /// Whether non-onion (clearnet/LAN/loopback) relays may be dialed.
     pub clearnet_relays_enabled: bool,
+    /// The purse's daemon URL ("" = none).
+    pub wallet_daemon_url: String,
+    /// The daemon was confirmed by the operator.
+    pub wallet_daemon_confirmed: bool,
+    /// The daemon login, `user:password`.
+    pub wallet_daemon_login: String,
+    /// `mainnet` | `stagenet` | `testnet`.
+    pub wallet_network: String,
+}
+
+impl Settings {
+    /// No daemon, mainnet: nothing to write under `[wallet]`.
+    fn wallet_is_default(&self) -> bool {
+        self.wallet_daemon_url.is_empty()
+            && !self.wallet_daemon_confirmed
+            && self.wallet_daemon_login.is_empty()
+            && self.wallet_network == molt_core::wallet::default_wallet_network()
+    }
 }
 
 impl Default for Settings {
@@ -687,6 +761,10 @@ impl Default for Settings {
             renderer: default_renderer(),
             relays: Vec::new(),
             clearnet_relays_enabled: false,
+            wallet_daemon_url: String::new(),
+            wallet_daemon_confirmed: false,
+            wallet_daemon_login: String::new(),
+            wallet_network: molt_core::wallet::default_wallet_network(),
         }
     }
 }
@@ -755,6 +833,10 @@ impl From<&Config> for Settings {
             font_nav: c.ui.font_nav,
             font_editor: c.ui.font_editor,
             renderer: c.ui.renderer.as_str().to_string(),
+            wallet_daemon_confirmed: c.wallet.daemon_confirmed && !usable_daemon_url(&c.wallet.daemon_url).is_empty(),
+            wallet_daemon_url: usable_daemon_url(&c.wallet.daemon_url),
+            wallet_daemon_login: c.wallet.daemon_login.clone(),
+            wallet_network: c.wallet.network.as_str().to_string(),
         }
     }
 }
@@ -890,6 +972,7 @@ port = {tor_port}
 # remembered instead of being asked again after every restart.
 clearnet_enabled = {clearnet_enabled}
 {relays}
+{wallet}
 [ui]
 # GUI language: "en" | "de".
 lang = {lang}
@@ -950,6 +1033,7 @@ renderer = {renderer}
         tor_port = settings.tor_port,
         relay_doc = RELAY_SECTION_DOC,
         relays = render_relays(&settings.relays),
+        wallet = render_wallet(settings),
         clearnet_enabled = settings.clearnet_relays_enabled,
         lang = toml_str(&settings.lang),
         theme = toml_str(&settings.theme),
@@ -976,6 +1060,26 @@ fn render_relays(relays: &[RelayConfig]) -> String {
         out.push_str(&format!("url = {}\n", toml_str(&r.url)));
         out.push_str(&format!("confirmed = {}\n", r.confirmed));
     }
+    out
+}
+
+/// The `[wallet]` section for [`render`]: commented out while it holds only
+/// defaults, so a generated file still opens on a build that predates it.
+fn render_wallet(s: &Settings) -> String {
+    let doc = "# The purse's Monero node: https://, or http:// to an onion or local node.\n\
+               # None ships with the app. A non-onion node also needs daemon_confirmed\n\
+               # and clearnet_enabled above. daemon_login = \"user:password\" if it asks.\n\
+               # network = \"mainnet\" | \"stagenet\" | \"testnet\".\n";
+    if s.wallet_is_default() {
+        return format!("{doc}# [wallet]\n# daemon_url = \"\"\n");
+    }
+    let mut out = format!("{doc}[wallet]\n");
+    out.push_str(&format!("daemon_url = {}\n", toml_str(&s.wallet_daemon_url)));
+    out.push_str(&format!("daemon_confirmed = {}\n", s.wallet_daemon_confirmed));
+    if !s.wallet_daemon_login.is_empty() {
+        out.push_str(&format!("daemon_login = {}\n", toml_str(&s.wallet_daemon_login)));
+    }
+    out.push_str(&format!("network = {}\n", toml_str(&s.wallet_network)));
     out
 }
 
@@ -1168,6 +1272,21 @@ pub fn salvage(text: &str) -> Settings {
         }
         if let Some(token) = mcp.get("read_token").and_then(toml::Value::as_str) {
             s.mcp_read_token = token.to_string();
+        }
+    }
+    if let Some(wallet) = value.get("wallet") {
+        if let Some(v) = wallet.get("daemon_url").and_then(toml::Value::as_str) {
+            s.wallet_daemon_url = usable_daemon_url(v);
+        }
+        s.wallet_daemon_confirmed = !s.wallet_daemon_url.is_empty()
+            && wallet.get("daemon_confirmed").and_then(toml::Value::as_bool).unwrap_or(false);
+        if let Some(v) = wallet.get("daemon_login").and_then(toml::Value::as_str) {
+            s.wallet_daemon_login = v.to_string();
+        }
+        if let Some(v) = wallet.get("network").and_then(toml::Value::as_str) {
+            if molt_core::wallet::WALLET_NETWORKS.contains(&v) {
+                s.wallet_network = v.to_string();
+            }
         }
     }
     if let Some(ui) = value.get("ui") {
@@ -1452,6 +1571,7 @@ pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
     set_int(tor, "port", i64::from(settings.tor_port));
 
     apply_relays(settings, doc);
+    apply_wallet(settings, doc);
 
     let ui = table_at(doc.as_table_mut(), &["ui"]);
     set_str(ui, "lang", &settings.lang);
@@ -1522,6 +1642,23 @@ fn apply_relays(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
             table.decor_mut().set_prefix(format!("\n{RELAY_SECTION_DOC}"));
         }
     }
+}
+
+/// `[wallet]` only off its defaults; a login only while one is set.
+fn apply_wallet(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
+    if settings.wallet_is_default() {
+        doc.as_table_mut().remove("wallet");
+        return;
+    }
+    let wallet = table_at(doc.as_table_mut(), &["wallet"]);
+    set_str(wallet, "daemon_url", &settings.wallet_daemon_url);
+    set_bool(wallet, "daemon_confirmed", settings.wallet_daemon_confirmed);
+    if settings.wallet_daemon_login.is_empty() {
+        wallet.remove("daemon_login");
+    } else {
+        set_str(wallet, "daemon_login", &settings.wallet_daemon_login);
+    }
+    set_str(wallet, "network", &settings.wallet_network);
 }
 
 /// Walk (and create where missing) the table at `path`. Inline tables the
@@ -1954,6 +2091,10 @@ mod tests {
             ],
             // the persisted clearnet decision round-trips like any scalar
             clearnet_relays_enabled: true,
+            wallet_daemon_url: "http://127.0.0.1:18081".to_string(),
+            wallet_daemon_confirmed: true,
+            wallet_daemon_login: "u:p".to_string(),
+            wallet_network: "testnet".to_string(),
         }
     }
 
@@ -2306,5 +2447,57 @@ mod nym_tests {
             "none",
             "salvage falls back to the default rather than keeping a dead value"
         );
+    }
+
+    fn wallet_settings() -> Settings {
+        Settings {
+            wallet_daemon_url: "https://node.example.org:18089".to_string(),
+            wallet_daemon_confirmed: true,
+            wallet_daemon_login: "u:p".to_string(),
+            wallet_network: "stagenet".to_string(),
+            ..Settings::default()
+        }
+    }
+
+    /// Plan §8: `[wallet]` survives render, strict parse, salvage and a
+    /// runtime save.
+    #[test]
+    fn the_wallet_section_round_trips() {
+        let s = wallet_settings();
+        let text = render(&s);
+        let parsed = Settings::from(&parse(&text).expect("parses"));
+        assert_eq!(parsed, s);
+        assert_eq!(salvage(&text), s);
+        let saved = update("", &s).expect("updates");
+        assert!(saved.contains("[wallet]"), "{saved}");
+        assert_eq!(Settings::from(&parse(&saved).expect("parses")).wallet_network, "stagenet");
+        assert_eq!(salvage(&saved), s);
+    }
+
+    /// No daemon, mainnet: no `[wallet]` table at all, so an older build
+    /// (deny_unknown_fields) still opens the file.
+    #[test]
+    fn a_default_wallet_section_stays_out_of_the_file() {
+        let text = render(&Settings::default());
+        assert!(!text.lines().any(|l| l.trim() == "[wallet]"), "{text}");
+        assert_eq!(parse(&text).expect("parses").wallet.network, WalletNetwork::Mainnet);
+        let saved = update(&update("", &wallet_settings()).expect("set"), &Settings::default()).expect("reset");
+        assert!(!saved.contains("[wallet]"), "{saved}");
+    }
+
+    /// The daemon URL follows the relay host rule; a refused one never
+    /// reaches the settings. The network is a closed set.
+    #[test]
+    fn a_bad_daemon_url_is_dropped_and_a_bad_network_refused() {
+        for bad in ["ws://node.onion", "https://u:p@node.example.org", "http://node.example.org"] {
+            let text = format!("[wallet]\ndaemon_url = \"{bad}\"\ndaemon_confirmed = true\n");
+            let s = Settings::from(&parse(&text).expect("parses"));
+            assert!(s.wallet_daemon_url.is_empty(), "{bad}");
+            assert!(!s.wallet_daemon_confirmed, "{bad}");
+            assert_eq!(salvage(&text).wallet_daemon_url, "", "{bad}");
+        }
+        assert!(parse("[wallet]\nnetwork = \"foonet\"\n").is_err());
+        assert!(parse("[wallet]\ndaemon = \"x\"\n").is_err(), "typos are refused");
+        assert_eq!(salvage("[wallet]\nnetwork = \"foonet\"\n").wallet_network, "mainnet");
     }
 }

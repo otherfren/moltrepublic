@@ -253,6 +253,9 @@ pub enum StorageError {
     /// the share silently (wallet design W5).
     #[error("wallet_keys.state is damaged")]
     WalletKeysDamaged,
+    /// An intact keys file is never set aside.
+    #[error("wallet_keys.state is intact")]
+    WalletKeysIntact,
 }
 
 impl StorageError {
@@ -1800,7 +1803,7 @@ impl OpenedWorkspace {
         match self.read_wallet_keys() {
             Err(StorageError::WalletKeysDamaged) => {}
             Ok(_) if !path.exists() => return Ok(false),
-            Ok(_) => return Err(StorageError::BadFile("wallet_keys.state is intact".to_string())),
+            Ok(_) => return Err(StorageError::WalletKeysIntact),
             Err(e) => return Err(e),
         }
         let aside = (0u32..)
@@ -5472,7 +5475,10 @@ mod tests {
         let ws = vault_ws(tmp.path());
         assert!(!ws.set_aside_wallet_keys().expect("absent: nothing to do"));
         ws.append_wallet_keys(b"share").expect("append");
-        assert!(ws.set_aside_wallet_keys().is_err(), "an intact share is never set aside");
+        assert!(
+            matches!(ws.set_aside_wallet_keys(), Err(StorageError::WalletKeysIntact)),
+            "an intact share is never set aside"
+        );
         let path = ws.dir().join(WALLET_KEYS_FILE);
         let mut rotted = fs::read(&path).expect("keys");
         let last = rotted.len() - 1;

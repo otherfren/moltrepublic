@@ -214,6 +214,20 @@ fn vault_refusals_render_in_german() {
     assert!(de.contains(": b"), "{de}");
 }
 
+/// Every purse refusal has a German arm; English stays the MCP text.
+#[test]
+fn wallet_refusals_render_in_german() {
+    use molt_core::wallet::WalletRefusal as R;
+    for r in [R::NotYet, R::NoKeysFile, R::KeysIntact] {
+        let english = r.to_string();
+        let e = molt_core::MoltError::Wallet(r);
+        assert_eq!(super::localize_error(0, &e), e.to_string());
+        let de = super::localize_error(1, &e);
+        assert!(de.starts_with("Kasse: "), "{de}");
+        assert!(!de.contains(&english), "untranslated: {de}");
+    }
+}
+
 /// R1 (relay_topology_plan): the create wizard states rule 1 — ONE
 /// relay every member can reach (the join runs over the INTERSECTION;
 /// "identical pool" was a stricter, false rule that contradicted the

@@ -170,6 +170,11 @@ pub(crate) fn read_settings_draft(ui: &AppWindow, stored: &SessionSettings) -> S
         // acknowledgement live there), and the engine keeps the live pool on
         // save regardless of what a draft carries.
         relays: Vec::new(),
+        // the purse's daemon is not a config-tab field yet: echo the stored one
+        wallet_daemon_url: stored.wallet_daemon_url.clone(),
+        wallet_daemon_confirmed: stored.wallet_daemon_confirmed,
+        wallet_daemon_login: stored.wallet_daemon_login.clone(),
+        wallet_network: stored.wallet_network.clone(),
     }
 }
 

@@ -57,6 +57,7 @@ mod transfer;
 mod upload_refs;
 mod vault;
 mod wake;
+mod wallet;
 mod wiki_export;
 mod wiki_index;
 
@@ -2203,6 +2204,16 @@ impl State {
                 from,
                 generation,
             } => self.cmd_net_backup_confirmed(seat, sig, from, generation),
+            // wallet.rs
+            Command::WalletInit => self.cmd_wallet_init(),
+            Command::WalletConsent { accept } => self.cmd_wallet_consent(accept),
+            Command::WalletRetry => self.cmd_wallet_retry(),
+            Command::WalletAcknowledgeLoss => self.cmd_wallet_acknowledge_loss(),
+            Command::NetWalletProbe { .. }
+            | Command::NetWalletFrame { .. }
+            | Command::NetWalletScan { .. }
+            | Command::NetWalletStatus { .. }
+            | Command::NetWalletViewAnswer { .. } => self.cmd_net_wallet_unbuilt(),
             Command::RecoverInviteStart { member } => self.cmd_recover_invite_start(member),
             Command::RecoverStart { link, phrase } => self.cmd_recover_start(link, phrase),
             Command::NetRecoverSealed {

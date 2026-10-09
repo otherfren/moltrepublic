@@ -30,6 +30,7 @@ pub mod kanban_view;
 pub mod kanban_wake;
 pub mod relay;
 pub mod vault;
+pub mod wallet;
 pub mod wiki_fold;
 pub mod wiki_patch;
 pub mod wiki_refs;
@@ -509,6 +510,22 @@ pub struct SessionSettings {
     /// edit. The consent moment is unchanged — it is simply remembered now.
     #[serde(default)]
     pub clearnet_relays_enabled: bool,
+    /// The purse's Monero daemon (`[wallet] daemon_url`); "" = none. No
+    /// daemon ships with the app.
+    #[serde(default)]
+    pub wallet_daemon_url: String,
+    /// The operator confirmed this daemon; a non-onion one is dialed only
+    /// when confirmed (with its exposure acknowledgement) and
+    /// `clearnet_relays_enabled`. Bound to the URL: changing it clears this.
+    #[serde(default)]
+    pub wallet_daemon_confirmed: bool,
+    /// The daemon login, `user:password`. WRITE-ONLY like
+    /// [`SessionSettings::s3_secret_key`].
+    #[serde(skip_serializing, default)]
+    pub wallet_daemon_login: String,
+    /// `mainnet` | `stagenet` | `testnet` (W11: mainnet by default).
+    #[serde(default = "wallet::default_wallet_network")]
+    pub wallet_network: String,
 }
 
 /// Default alert sound: silent until the operator opts in.
@@ -618,6 +635,10 @@ impl Default for SessionSettings {
             // no relay ships with the app: a fresh install connects nowhere
             relays: Vec::new(),
             clearnet_relays_enabled: false,
+            wallet_daemon_url: String::new(),
+            wallet_daemon_confirmed: false,
+            wallet_daemon_login: String::new(),
+            wallet_network: wallet::default_wallet_network(),
         }
     }
 }
@@ -4989,6 +5010,78 @@ pub enum Command {
         generation: Option<u64>,
     },
 
+    // --- the purse (docs/chain/wallet_treasury_design.md) ---
+    /// Propose the purse's init vote (W4: the only door).
+    WalletInit,
+    /// This seat's consent to the current run (W6: a decline ends it).
+    WalletConsent {
+        /// Consent; `false` declines.
+        accept: bool,
+    },
+    /// Start a new run after an abort.
+    WalletRetry,
+    /// Set a damaged keys file aside: this seat becomes watch-only and
+    /// backups resume (W5).
+    WalletAcknowledgeLoss,
+    /// The off-actor daemon probe reporting (engine-internal).
+    NetWalletProbe {
+        /// The daemon's height; `None` on failure.
+        height: Option<u64>,
+        /// The failure, one line.
+        #[serde(default)]
+        error: String,
+        /// Probe incarnation (stale commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// A purse control frame landed (engine-internal: the transport
+    /// speaks). The seat is the MLS sender, never a frame field.
+    NetWalletFrame {
+        /// The MLS-authenticated sender.
+        from: MemberId,
+        /// The frame body after its tag.
+        body: vault::SecretBytes,
+        /// Transport incarnation (stale commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// The scanner reporting progress (engine-internal).
+    NetWalletScan {
+        /// Scanned up to here.
+        scan_height: u64,
+        /// The daemon's height.
+        daemon_height: u64,
+        /// Why scanning stopped, if it did.
+        #[serde(default)]
+        paused: Option<String>,
+        /// A daemon fault, one line.
+        #[serde(default)]
+        error: String,
+        /// Scanner incarnation (stale commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// A seat's key part status frame landed (engine-internal).
+    NetWalletStatus {
+        /// The MLS-authenticated seat.
+        from: MemberId,
+        /// What it says of itself.
+        status: wallet::ShareStatus,
+        /// Transport incarnation (stale commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// A seat's answer to this seat's view ask landed (engine-internal).
+    NetWalletViewAnswer {
+        /// The MLS-authenticated seat.
+        from: MemberId,
+        /// The view key, hex; checked against the address.
+        view: vault::SecretHex,
+        /// Transport incarnation (stale commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+
     // --- founding-ritual transport events (engine-internal) ---
     /// A member activated their invite link: their JoinRequest arrived on
     /// the invite queue. Sent by the node's own ritual transport tasks
@@ -6848,6 +6941,9 @@ pub struct SurfaceSnapshot {
     /// Vault only: the vault's read model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vault: Option<vault::VaultView>,
+    /// Wallet only: the purse's read model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallet: Option<Box<wallet::WalletView>>,
     /// Quests only: the folded board with its derived status
     /// (`kanban_review::board_view`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -7841,6 +7937,21 @@ pub enum Event {
         /// The version now readable.
         secret_id: String,
     },
+    /// The current purse run moved (wizard, panel and MCP see one stand).
+    WalletRunProgress {
+        /// The run as it stands now.
+        run: wallet::WalletRunView,
+    },
+    /// The purse committed.
+    WalletCreated {
+        /// Its deposit address.
+        address: String,
+    },
+    /// Scanning stopped (a fork this build cannot read).
+    WalletScanPaused {
+        /// Why, one line.
+        reason: String,
+    },
 }
 
 /// The reach of a [`Event::SessionChanged`].
@@ -7983,6 +8094,9 @@ pub enum MoltError {
     /// A vault command was refused; one compact reason.
     #[error("vault: {0}")]
     Vault(vault::VaultRefusal),
+    /// A wallet command was refused; one compact reason.
+    #[error("purse: {0}")]
+    Wallet(wallet::WalletRefusal),
     /// The wiki index is still being built off the actor
     /// (`docs_archive/memory/knowledge_base_scale.md` §4.5/§4.6): "come back in a
     /// moment", not a fault - an empty result would be a lie.
