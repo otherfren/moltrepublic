@@ -3833,7 +3833,8 @@ component KCalChip inherits Rectangle {
     Text {
         x: 4px;
         width: parent.width - 6px;
-        text: root.b.time != "" ? "\{root.b.time} \{root.b.title}" : root.b.title;
+        // §2.4: the type label rides beside the colour
+        text: (root.b.time != "" ? "\{root.b.time} " : "") + (root.b.type-label != "" ? "\{root.b.type-label} · " : "") + root.b.title;
         color: Theme.text;
         font-size: 11px * Theme.ui-scale;
         overflow: elide;
@@ -3867,11 +3868,11 @@ component KCalChip inherits Rectangle {
 }
 
 // `calendar` (§8): month or week, UTC, timed tasks only. A drag stages a
-// move; a click on a free slot opens the form at that slot.
+// move; a drag over free slots (or a click) opens the form with that range.
 component KCalendar inherits VerticalLayout {
     property <length> hh: 36px * Theme.ui-scale;
     property <length> gutter: 44px * Theme.ui-scale;
-    property <length> band-h: 3 * 20px * Theme.ui-scale + 4px;
+    property <length> band-h: 3 * 20px * Theme.ui-scale + 4px + Theme.fs-cap * 1.4;
     spacing: 8px;
     vertical-stretch: 1;
     HorizontalLayout {
@@ -3924,6 +3925,9 @@ component KCalendar inherits VerticalLayout {
             }
         }
     }
+    if Kanban.cal-legend.length > 0: KLegend {
+        types: Kanban.cal-legend;
+    }
     HorizontalLayout {
         padding-left: Kanban.cal-week ? root.gutter : 0px;
         for w in Kanban.cal-weekdays: Text {
@@ -3953,11 +3957,6 @@ component KCalendar inherits VerticalLayout {
             background: d.today ? Theme.accent-soft : (d.in-month ? Theme.panel : Theme.panel-2);
             accessible-role: button;
             accessible-label: d.date;
-            TouchArea {
-                clicked => {
-                    Kanban.cal-new(i, -1);
-                }
-            }
             Text {
                 x: 5px;
                 y: 3px;
@@ -3972,6 +3971,17 @@ component KCalendar inherits VerticalLayout {
                 text: "+\{d.more}";
                 color: Theme.faint;
                 font-size: Theme.fs-cap;
+            }
+        }
+        TouchArea {
+            pointer-event(e) => {
+                if (e.kind == PointerEventKind.up && e.button == PointerEventButton.left) {
+                    Kanban.cal-new(
+                        clamp(Math.floor(self.pressed-y / mg.ch), 0, mg.weeks - 1) * 7 + clamp(Math.floor(self.pressed-x / mg.cw), 0, 6),
+                        -1,
+                        clamp(Math.floor(self.mouse-y / mg.ch), 0, mg.weeks - 1) * 7 + clamp(Math.floor(self.mouse-x / mg.cw), 0, 6),
+                        -1);
+                }
             }
         }
         for b in Kanban.cal-blocks: KCalChip {
@@ -3997,10 +4007,22 @@ component KCalendar inherits VerticalLayout {
             height: 100%;
             background: Theme.panel-2;
             TouchArea {
-                clicked => {
-                    Kanban.cal-new(clamp(Math.floor(self.mouse-x / bd.cw), 0, 6), -1);
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.up && e.button == PointerEventButton.left) {
+                        Kanban.cal-new(
+                            clamp(Math.floor(self.pressed-x / bd.cw), 0, 6), -1,
+                            clamp(Math.floor(self.mouse-x / bd.cw), 0, 6), -1);
+                    }
                 }
             }
+        }
+        for d[i] in Kanban.cal-days: Text {
+            visible: d.more > 0;
+            x: root.gutter + i * bd.cw + bd.cw - self.width - 4px;
+            y: parent.height - self.height - 1px;
+            text: "+\{d.more}";
+            color: Theme.faint;
+            font-size: Theme.fs-cap;
         }
         for b in Kanban.cal-blocks: KCalChip {
             b: b;
@@ -4023,6 +4045,8 @@ component KCalendar inherits VerticalLayout {
         wfl := Flickable {
             width: 100%;
             height: 100%;
+            // a drag moves or creates; the wheel scrolls
+            interactive: false;
             viewport-width: self.width;
             viewport-height: 24 * root.hh;
             Rectangle {
@@ -4030,10 +4054,14 @@ component KCalendar inherits VerticalLayout {
                 width: wk.width - root.gutter;
                 height: 24 * root.hh;
                 TouchArea {
-                    clicked => {
-                        Kanban.cal-new(
-                            clamp(Math.floor(self.mouse-x / wk.cw), 0, 6),
-                            Math.floor(self.mouse-y / root.hh * 2) * 30);
+                    pointer-event(e) => {
+                        if (e.kind == PointerEventKind.up && e.button == PointerEventButton.left) {
+                            Kanban.cal-new(
+                                clamp(Math.floor(self.pressed-x / wk.cw), 0, 6),
+                                clamp(Math.floor(self.pressed-y / root.hh * 2) * 30, 0, 23 * 60 + 30),
+                                clamp(Math.floor(self.mouse-x / wk.cw), 0, 6),
+                                clamp(Math.floor(self.mouse-y / root.hh * 2) * 30, 0, 23 * 60 + 30));
+                        }
                     }
                 }
             }

@@ -979,10 +979,5 @@ rewards/bounties (Wallet Stage 1 cannot spend); per-member permissions
   `base_rev`/`touched_rev`, accumulating checkpoints, the basket, the
   `quest:` link target.
 - Build: 5 steps instead of 9 (K0-K8).
-- Follow-up in code (S4, with the UI rework, so the `.slint` comments do
-  not force a window rebuild of their own): stale section cites of this
-  document - `crates/molt-core/src/lib.rs:206` (§6.3),
-  `crates/molt-ui/src/tests/i18n.rs:299` (§6.0),
-  `crates/molt-ui-window/ui/theme.slint:1700` and
-  `crates/molt-ui-window/ui/surfaces.slint:2427` (§6),
-  `surfaces.slint:2813` (§6.1) - all now §8.
+- Follow-up in code (S4): the stale section cites of this document in
+  `molt-core`, the i18n tests and the `.slint` files now read §8 (done).

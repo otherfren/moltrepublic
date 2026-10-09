@@ -426,8 +426,37 @@ fn the_views_render_the_board() {
     let b = &blocks[0];
     assert_eq!(b.title.as_str(), "meet");
     let day = k.get_cal_days().row_data(usize::try_from(b.day).expect("day")).expect("a day");
-    assert_eq!(day.date.as_str(), today);
-    assert!(day.today);
+    assert_eq!(day.date.as_str(), today, "where the form put it");
+}
+
+/// No feed: nothing of the previous board stays in any view.
+#[test]
+fn a_dropped_feed_clears_every_view() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    let (node, _) = planned_node(tmp.path(), &rt);
+    let k = node.ui.global::<Kanban>();
+    assert!(k.get_plan_legend().row_count() + k.get_plan_ticks().row_count() > 0);
+    with(|st| st.feed = None);
+    render(&node.ui);
+    let counts = [
+        k.get_plan_rows().row_count(),
+        k.get_plan_bars().row_count(),
+        k.get_plan_arrows().row_count(),
+        k.get_plan_ticks().row_count(),
+        k.get_plan_legend().row_count(),
+        k.get_deps().row_count(),
+        k.get_deps_legend().row_count(),
+        k.get_cal_days().row_count(),
+        k.get_cal_blocks().row_count(),
+        k.get_cal_legend().row_count(),
+        k.get_cal_weekdays().row_count(),
+    ];
+    assert_eq!(counts, [0; 11]);
+    assert_eq!(k.get_plan_nodate(), -1);
+    assert!(k.get_plan_today() < 0.0);
+    assert_eq!(k.get_cal_title().as_str(), "");
 }
 
 /// §8: dragging a calendar block stages a `set`; a free slot opens the
@@ -446,10 +475,11 @@ fn the_calendar_stages_a_move_and_opens_a_free_slot() {
     assert_eq!(k.get_basket_count(), 1);
     let shadows: Vec<i32> = k.get_cal_blocks().iter().filter(|b| b.shadow).map(|b| b.day).collect();
     assert_eq!(shadows, [target], "the shadow at the target, the block stays");
-    assert!(k.get_basket_tip().is_empty() || !k.get_basket_tip().contains("void"), "{}", k.get_basket_tip());
+    let row = k.get_basket_rows().row_data(0).expect("the staged move").text.to_string();
+    assert!(row.contains(&short_id(&b.id)) && row.contains("when"), "{row}");
 
     let day = k.get_cal_days().row_data(3).expect("a day").date.to_string();
-    crate::actions::kanban::cal_new(&node.ui, 3, 9 * 60);
+    crate::actions::kanban::cal_new(&node.ui, 3, 9 * 60, 3, 9 * 60);
     assert!(k.get_form_open());
     assert_eq!(k.get_f_mode(), 1);
     assert_eq!(k.get_f_start().as_str(), format!("{day}T09:00"));
@@ -547,4 +577,42 @@ fn plan_and_dependencies_render_and_fold() {
     click(&node.ui, &fold);
     assert_eq!(k.get_deps().row_count(), 2, "opened");
     assert_eq!(k.get_deps().row_data(1).expect("base").title.as_str(), "base");
+}
+
+/// §8: a real drag over free month cells opens the form with those days.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_real_drag_over_free_days_opens_the_form() {
+    type H = i_slint_backend_testing::ElementHandle;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    let (node, _) = planned_node(tmp.path(), &rt);
+    crate::actions::kanban::wire(&node.ui, &node.ctx(&rt));
+    let k = node.ui.global::<Kanban>();
+    let _shown = quests_screen(&node.ui, "calendar");
+    let date = |i: usize| k.get_cal_days().row_data(i).expect("a day").date.to_string();
+    let spot = |i: usize| {
+        let cell = H::find_by_accessible_label(&node.ui, &date(i)).next().expect("a day cell");
+        let p = cell.absolute_position();
+        slint::LogicalPosition::new(p.x + cell.size().width / 2.0, p.y + cell.size().height - 6.0)
+    };
+    let (from, to) = (spot(2), spot(0));
+    let win = node.ui.window();
+    win.dispatch_event(slint::platform::WindowEvent::PointerMoved { position: from });
+    win.dispatch_event(slint::platform::WindowEvent::PointerPressed {
+        position: from,
+        button: slint::platform::PointerEventButton::Left,
+    });
+    for n in 1..=10 {
+        let x = from.x + (to.x - from.x) * n as f32 / 10.0;
+        win.dispatch_event(slint::platform::WindowEvent::PointerMoved { position: slint::LogicalPosition::new(x, from.y) });
+    }
+    win.dispatch_event(slint::platform::WindowEvent::PointerReleased {
+        position: to,
+        button: slint::platform::PointerEventButton::Left,
+    });
+    assert!(k.get_form_open());
+    assert_eq!(k.get_f_mode(), 1);
+    assert_eq!((k.get_f_start().to_string(), k.get_f_end().to_string()), (date(0), date(2)));
 }

@@ -139,7 +139,7 @@ fn a_plan_row_collapses() {
     assert!(d.kids && !d.open);
 }
 
-/// §8: overdue, date conflicts and stuck are red on the timeline.
+/// §8: stuck is red on the timeline.
 #[test]
 fn the_plan_marks_stuck_red() {
     let l = Lexicon::en();
@@ -234,9 +234,9 @@ fn a_dragged_block_stages_a_move() {
 /// §8: a free slot opens the form with that slot (length in the form).
 #[test]
 fn a_free_slot_prefills_the_form() {
-    assert_eq!(slot_times(day(2026, 10, 14), None), ("2026-10-14".to_string(), "2026-10-14".to_string()));
+    assert_eq!(slot_range(day(2026, 10, 14), None, day(2026, 10, 14), None), ("2026-10-14".to_string(), "2026-10-14".to_string()));
     assert_eq!(
-        slot_times(day(2026, 10, 14), Some(9 * 60)),
+        slot_range(day(2026, 10, 14), Some(9 * 60), day(2026, 10, 14), Some(9 * 60)),
         ("2026-10-14T09:00".to_string(), "2026-10-14T10:00".to_string())
     );
 }
@@ -246,4 +246,178 @@ fn a_free_slot_prefills_the_form() {
 fn the_status_clock_is_utc() {
     let t = day(2026, 10, 9).and_hms_opt(14, 32, 59).expect("a time");
     assert_eq!(utc_clock(t), "2026-10-09 14:32 UTC");
+}
+
+/// 1 pre timed 14 Oct 09-12; 2 dep timed 14 Oct 10-11, blocked by pre;
+/// 3 late due 1 Oct (overdue on the fixture's 12 Oct).
+fn conflicted() -> KanbanFeed {
+    feed_with(
+        vec![cs(vec![
+            add(1, "pre", &["mara"], json!({"when": {"start": "2026-10-14T09:00", "end": "2026-10-14T12:00"}})),
+            add(2, "dep", &["mara"], json!({
+                "when": {"start": "2026-10-14T10:00", "end": "2026-10-14T11:00"},
+                "blocked_by": [id(1)]
+            })),
+            add(3, "late", &["walter"], json!({"due": "2026-10-01"})),
+        ])],
+        json!([]),
+        "mara",
+    )
+}
+
+/// §8: overdue and a date conflict are red, the conflicting link too.
+#[test]
+fn the_plan_marks_overdue_and_date_conflicts_red() {
+    let l = Lexicon::en();
+    let p = plan(&l, &conflicted(), &none(), &none());
+    let row = |n: u32| p.rows.iter().position(|r| r.id == id(n).as_str()).expect("row");
+    assert!(p.rows[row(3)].bad, "overdue");
+    assert!(p.rows[row(1)].bad, "date conflict");
+    assert_eq!(p.arrows.len(), 1);
+    assert!(p.arrows[0].bad, "the prerequisite ends after its dependent starts");
+}
+
+/// §8: a series is a block per occurrence in the axis window.
+#[test]
+fn a_series_is_a_bar_per_occurrence() {
+    let l = Lexicon::en();
+    let p = plan(&l, &timed(), &none(), &none());
+    let row = i32::try_from(p.rows.iter().position(|r| r.id == id(1).as_str()).expect("sync")).expect("i32");
+    let bars = p.bars.iter().filter(|b| b.row == row).count();
+    assert_eq!(bars, 2, "12 and 19 Oct on the two-week axis");
+    assert!(p.nodate.is_none());
+}
+
+/// §8: a series is timed even when none of its occurrences falls in the
+/// default axis; it never lands in the "no date" lane.
+#[test]
+fn a_later_series_is_dated() {
+    let l = Lexicon::en();
+    let f = feed_with(
+        vec![cs(vec![add(1, "standup", &["mara"], json!({
+            "when": {"start": "2026-12-01T09:00", "end": "2026-12-01T09:15"},
+            "repeat": {"freq": "weekly"}
+        }))])],
+        json!([]),
+        "mara",
+    );
+    let p = plan(&l, &f, &none(), &none());
+    assert_eq!(p.nodate, None);
+    assert!(!p.bars.is_empty(), "the axis reaches its first occurrence");
+}
+
+/// A date far out bounds the axis; a series cannot flood the timeline.
+#[test]
+fn the_plan_axis_is_bounded() {
+    let l = Lexicon::en();
+    let f = feed_with(
+        vec![cs(vec![
+            add(1, "daily", &["mara"], json!({
+                "when": {"start": "2026-10-12T09:00", "end": "2026-10-12T09:15"},
+                "repeat": {"freq": "daily"}
+            })),
+            add(2, "typo", &["mara"], json!({"due": "2206-01-01"})),
+            add(3, "ancient", &["mara"], json!({"when": {"start": "1999-01-01", "end": "1999-01-02"}})),
+        ])],
+        json!([]),
+        "mara",
+    );
+    let p = plan(&l, &f, &none(), &none());
+    assert!(p.bars.len() < 1500, "{} bars", p.bars.len());
+    assert!(p.bars.iter().all(|b| (0.0..=1.0).contains(&b.x0) && (0.0..=1.0).contains(&b.x1)));
+    assert_eq!(p.nodate, None, "out-of-range dates sit at the edge");
+}
+
+/// §8: the plan is filterable; a filter keeps only the matches.
+#[test]
+fn the_plan_follows_the_filter() {
+    let l = Lexicon::en();
+    let mut f = diamond();
+    f.me = "walter".into();
+    if let Some(b) = f.snap.board.as_mut() {
+        b["me"] = json!("walter");
+    }
+    let on: BTreeSet<String> = ["mine".to_string()].into();
+    let p = plan(&l, &f, &on, &none());
+    let ids: Vec<String> = p.rows.iter().map(|r| r.id.to_string()).collect();
+    assert_eq!(ids, [id(2)]);
+}
+
+/// A lattice of shared prerequisites stays linear while filtering: a task
+/// opens under its first path only.
+#[test]
+fn a_shared_lattice_does_not_explode() {
+    let l = Lexicon::en();
+    let layers = 14u32;
+    let mut ops = Vec::new();
+    for layer in 0..layers {
+        for k in 0..2u32 {
+            let n = layer * 2 + k + 1;
+            let below: Vec<String> =
+                if layer + 1 < layers { vec![id((layer + 1) * 2 + 1), id((layer + 1) * 2 + 2)] } else { Vec::new() };
+            ops.push(add(n, &format!("t{n}"), &["mara"], json!({"blocked_by": below})));
+        }
+    }
+    let f = feed_with(vec![cs(ops)], json!([]), "mara");
+    let on: BTreeSet<String> = ["mine".to_string()].into();
+    let d = dependencies(&l, &f, &on, &none());
+    assert!(d.rows.len() < 200, "{} rows", d.rows.len());
+    let deepest = id(layers * 2);
+    assert!(d.rows.iter().any(|r| r.id == deepest.as_str()), "every task still reachable");
+}
+
+/// §2.4: a calendar block names its type, and the page has a legend.
+#[test]
+fn a_calendar_block_carries_its_type() {
+    let l = Lexicon::en();
+    let f = feed_with(
+        vec![cs(vec![add(1, "sync", &["mara"], json!({
+            "type": "Meeting",
+            "when": {"start": "2026-10-12T09:00", "end": "2026-10-12T10:00"}
+        }))])],
+        json!([]),
+        "mara",
+    );
+    let c = calendar(&l, &f, &Basket::default(), day(2026, 10, 12), false);
+    assert_eq!(c.blocks[0].type_label.as_str(), "Meeting");
+    let keys: Vec<String> = c.legend.iter().map(|t| t.label.to_string()).collect();
+    assert_eq!(keys, ["Meeting"]);
+}
+
+/// The week's all-day band shows three blocks and counts the rest.
+#[test]
+fn the_week_counts_hidden_all_day_blocks() {
+    let l = Lexicon::en();
+    let ops: Vec<_> = (1..=5)
+        .map(|n| add(n, &format!("a{n}"), &["mara"], json!({"when": {"start": "2026-10-14", "end": "2026-10-14"}})))
+        .collect();
+    let f = feed_with(vec![cs(ops)], json!([]), "mara");
+    let c = calendar(&l, &f, &Basket::default(), day(2026, 10, 14), true);
+    assert_eq!(c.days[2].more, 2);
+}
+
+/// German dates read "20. Okt".
+#[test]
+fn german_dates_carry_the_dot() {
+    assert_eq!(short_date(&Lexicon::de(), "2026-10-20"), "20. Okt");
+    assert_eq!(short_date(&Lexicon::en(), "2026-10-20"), "20 Oct");
+}
+
+/// §8: a drag over free slots opens the form with that range.
+#[test]
+fn a_dragged_range_prefills_the_form() {
+    assert_eq!(
+        slot_range(day(2026, 10, 16), None, day(2026, 10, 14), None),
+        ("2026-10-14".to_string(), "2026-10-16".to_string())
+    );
+    assert_eq!(
+        slot_range(day(2026, 10, 14), Some(9 * 60), day(2026, 10, 14), Some(11 * 60)),
+        ("2026-10-14T09:00".to_string(), "2026-10-14T11:30".to_string()),
+        "the last slot is included"
+    );
+    assert_eq!(
+        slot_range(day(2026, 10, 14), Some(9 * 60), day(2026, 10, 14), Some(9 * 60)),
+        ("2026-10-14T09:00".to_string(), "2026-10-14T10:00".to_string()),
+        "a click: one hour"
+    );
 }

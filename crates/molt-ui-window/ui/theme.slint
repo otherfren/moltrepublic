@@ -1157,6 +1157,7 @@ export struct KbCalBlock {
     src: int,
     id: string,
     title: string,
+    type-label: string,
     time: string,
     slot: int,
     bad: bool,
@@ -1268,12 +1269,14 @@ export global Kanban {
     in-out property <[string]> cal-weekdays;
     in-out property <[KbCalDay]> cal-days;
     in-out property <[KbCalBlock]> cal-blocks;
+    in-out property <[KbType]> cal-legend;
     callback cal-step(int);
     callback cal-today();
     callback cal-set-week(bool);
     // a block dropped on a day; minute -1 = no time (month, all-day band)
     callback cal-drop(int, int, int);
-    callback cal-new(int, int);
+    // a free range: day, minute, end day, end minute (minute -1: all day)
+    callback cal-new(int, int, int, int);
     // §2.4: 12 slots, mid-tone so a chip reads on light and dark alike;
     // the label always rides beside it
     public pure function type-color(slot: int) -> color {
@@ -2110,6 +2113,7 @@ export global Strings {
     in property <string> kb-months;
     in property <string> kb-months-long;
     in property <string> kb-weekdays;
+    in property <string> kb-day-fmt;
     // Vault (vault_threshold_disclosure.md)
     in property <string> vt-title-secrets;
     in property <string> vt-hint-secrets;

@@ -129,14 +129,20 @@ pub(crate) fn dependencies(l: &Lexicon, feed: &KanbanFeed, filters: &BTreeSet<St
         .collect();
 
     let mut rows = Vec::new();
+    let mut progress_of: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    // filtering opens a task under its first path only, so a shared lattice stays linear
+    let mut opened: BTreeSet<String> = BTreeSet::new();
     // (path, id, depth, parent)
     let mut stack: Vec<(String, String, usize, Option<String>)> =
         tops.iter().rev().map(|id| (id.clone(), id.clone(), 0, None)).collect();
     while let Some((path, id, depth, parent)) = stack.pop() {
         let Some(t) = all.get(&id) else { continue };
         let kids = children(&id);
-        let open = narrowed != toggled.contains(&path);
-        let (done, total) = progress(&all, &id);
+        let open = (narrowed && !opened.contains(&id)) != toggled.contains(&path);
+        if open {
+            opened.insert(id.clone());
+        }
+        let (done, total) = *progress_of.entry(id.clone()).or_insert_with(|| progress(&all, &id));
         let (type_label, type_slot) = type_of(&spell, t);
         let also: Vec<String> = deps
             .get(&id)
@@ -197,11 +203,7 @@ pub(crate) fn short_date(l: &Lexicon, date: &str) -> String {
 
 fn day_label(l: &Lexicon, d: NaiveDate) -> String {
     let m = month_names(l).get(d.month0() as usize).copied().unwrap_or_default();
-    if l.kb_months.starts_with("Jan Feb Mär") {
-        format!("{}. {m}", d.day())
-    } else {
-        format!("{} {m}", d.day())
-    }
+    l.kb_day_fmt.replace("{d}", &d.day().to_string()).replace("{m}", m)
 }
 
 fn midnight(d: NaiveDate) -> NaiveDateTime {
@@ -253,17 +255,25 @@ fn spans(t: &Value, window: Option<(NaiveDate, NaiveDate)>) -> Vec<Span> {
 /// A series' occurrences in `[from, to]`, through the same read the agents
 /// get (`quests_view` calendar).
 fn occurrences(t: &Value, from: NaiveDate, to: NaiveDate) -> Vec<When> {
-    let mut board = Map::new();
-    board.insert("tasks".into(), json!({ "x": t }));
-    let Some(snap) = board_snap(Value::Object(board)) else { return Vec::new() };
-    let q = ViewQuery { from: Some(from), to: Some(to), ..ViewQuery::default() };
-    quests_view(&snap, &q)
-        .ok()
-        .and_then(|v| v.get("calendar").and_then(Value::as_array).cloned())
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|o| When::parse(&json!({ "start": s(o, "start"), "end": s(o, "end") })).ok())
-        .collect()
+    page_occurrences(json!({ "tasks": { "x": t } }), from, to).into_iter().map(|(_, _, w)| w).collect()
+}
+
+/// How far the plan's axis reaches around today, in days.
+const YEAR: u64 = 365;
+const AXIS_BACK: u64 = YEAR;
+const AXIS_AHEAD: u64 = 2 * YEAR;
+
+/// Where a task widens the axis: a series at its next occurrence (else
+/// its first), anything else at its spans.
+fn axis_spans(t: &Value, today: NaiveDate) -> Vec<Span> {
+    match t.get("when").and_then(|w| When::parse(w).ok()) {
+        Some(w) if t.get("repeat").is_some() => {
+            let ahead = today.checked_add_days(Days::new(YEAR)).unwrap_or(today);
+            let next = occurrences(t, today, ahead).into_iter().next().unwrap_or(w);
+            vec![(next.begins(), next.ends(), false)]
+        }
+        _ => spans(t, None),
+    }
 }
 
 /// A bare Quests snapshot around a board read.
@@ -320,16 +330,18 @@ pub(crate) fn plan(l: &Lexicon, feed: &KanbanFeed, filters: &BTreeSet<String>, c
         trees.push(tree);
     }
 
-    // the axis: every fixed date and today, at least two weeks
+    // the axis: every date and today, at least two weeks, bounded around today
     let mut lo = today;
     let mut hi = today;
     for id in &kept {
         let Some(t) = all.get(id) else { continue };
-        for (b, e, _) in spans(t, None) {
+        for (b, e, _) in axis_spans(t, today) {
             lo = lo.min(b.date());
             hi = hi.max(if e.time() == NaiveTime::MIN && e > b { e.date().pred_opt().unwrap_or(e.date()) } else { e.date() });
         }
     }
+    lo = lo.max(today.checked_sub_days(Days::new(AXIS_BACK)).unwrap_or(lo));
+    hi = hi.min(today.checked_add_days(Days::new(AXIS_AHEAD)).unwrap_or(hi));
     let from = lo.pred_opt().unwrap_or(lo);
     let mut to = next_day(hi);
     if (to - from).num_days() < 13 {
@@ -337,10 +349,11 @@ pub(crate) fn plan(l: &Lexicon, feed: &KanbanFeed, filters: &BTreeSet<String>, c
     }
     let start = midnight(from);
     let span_secs = (midnight(next_day(to)) - start).num_seconds().max(1) as f64;
-    let x = |t: NaiveDateTime| -> f32 { ((t - start).num_seconds() as f64 / span_secs) as f32 };
+    // a date beyond the bounded axis sits at its edge
+    let x = |t: NaiveDateTime| -> f32 { ((t - start).num_seconds() as f64 / span_secs).clamp(0.0, 1.0) as f32 };
 
     let dated = |tree: &Vec<(String, usize)>| {
-        tree.iter().any(|(id, _)| all.get(id).is_some_and(|t| !spans(t, Some((from, to))).is_empty()))
+        tree.iter().any(|(id, _)| all.get(id).is_some_and(|t| !axis_spans(t, today).is_empty()))
     };
     let (with, without): (Vec<_>, Vec<_>) = trees.into_iter().partition(dated);
     let mut out = Plan { today: x(midnight(today) + TimeDelta::hours(12)), ..Plan::default() };
@@ -468,6 +481,7 @@ pub(crate) struct Cal {
     pub(crate) days: Vec<KbCalDay>,
     pub(crate) blocks: Vec<KbCalBlock>,
     pub(crate) src: Vec<CalSrc>,
+    pub(crate) legend: Vec<KbType>,
 }
 
 /// How many blocks a month cell shows before "+n".
@@ -566,7 +580,7 @@ pub(crate) fn calendar(l: &Lexicon, feed: &KanbanFeed, basket: &Basket, anchor: 
     for (shadow, (id, occ, w)) in real.into_iter().map(|o| (false, o)).chain(shadows.into_iter().map(|o| (true, o))) {
         let source = if shadow { &staged_tasks } else { &all };
         let Some(t) = source.get(&id) else { continue };
-        let (_, slot) = type_of(&spell, t);
+        let (type_label, slot) = type_of(&spell, t);
         let all_day = matches!(w, When::AllDay { .. });
         let (b, e) = (w.begins(), w.ends());
         let mut d = b.date().max(first);
@@ -583,8 +597,9 @@ pub(crate) fn calendar(l: &Lexicon, feed: &KanbanFeed, basket: &Basket, anchor: 
             if let Some(i) = index(d) {
                 per_day[i].push(KbCalBlock {
                     src,
-                    id: if shadow && id.ends_with(&"f".repeat(24)) { String::new() } else { id.clone() }.into(),
+                    id: id.as_str().into(),
                     title: s(t, "title").into(),
+                    type_label: type_label.as_str().into(),
                     time: if all_day || seg_b != b { String::new() } else { b.format("%H:%M").to_string() }.into(),
                     slot,
                     bad: !shadow && is_bad(t),
@@ -637,7 +652,7 @@ pub(crate) fn calendar(l: &Lexicon, feed: &KanbanFeed, basket: &Basket, anchor: 
         let lanes = i32::try_from(lanes_end.len().max(1)).unwrap_or(1);
         group.drain(..).for_each(|g| blocks[g].lanes = lanes);
         let d = days[i];
-        let more = if week { 0 } else { blocks.len().saturating_sub(MONTH_ROWS) };
+        let more = if week { blocks.iter().filter(|b| b.all_day).count() } else { blocks.len() }.saturating_sub(MONTH_ROWS);
         out.days.push(KbCalDay {
             date: fmt_date(d).into(),
             label: d.day().to_string().into(),
@@ -647,9 +662,13 @@ pub(crate) fn calendar(l: &Lexicon, feed: &KanbanFeed, basket: &Basket, anchor: 
         });
     }
     for blocks in per_day {
-        let keep = if week { blocks.len() } else { MONTH_ROWS };
-        out.blocks.extend(blocks.into_iter().take(keep));
+        // week: the all-day band shows MONTH_ROWS, the hours everything timed
+        let shown = |b: &KbCalBlock| usize::try_from(b.order).is_ok_and(|o| o < MONTH_ROWS);
+        let kept = blocks.into_iter().filter(|b| (week && !b.all_day) || shown(b));
+        out.blocks.extend(kept);
     }
+    let ids: Vec<String> = out.blocks.iter().filter(|b| !b.shadow).map(|b| b.id.to_string()).collect();
+    out.legend = legend(&all, &ids, &BTreeSet::new());
     let months = month_names_long(l);
     out.title = if week {
         format!("{} - {} {}", day_label(l, first), day_label(l, last), last.year())
@@ -707,15 +726,19 @@ pub(crate) fn drop_fields(feed: &KanbanFeed, basket: &Basket, src: &CalSrc, targ
     Some((src.id.clone(), fields))
 }
 
-/// The New task form's start and end for an empty slot: a whole day, or an
-/// hour from `minute`.
-pub(crate) fn slot_times(day: NaiveDate, minute: Option<u32>) -> (String, String) {
-    match minute {
-        None => (fmt_date(day), fmt_date(day)),
-        Some(m) => {
-            let b = midnight(day) + TimeDelta::minutes(i64::from(m.min(23 * 60)));
-            (fmt_datetime(b), fmt_datetime(b + TimeDelta::hours(1)))
+/// The form's window for free slots dragged from `a` to `b` (either way):
+/// whole days, or the half-hour slots including both ends; one slot is an
+/// hour.
+pub(crate) fn slot_range(a: NaiveDate, am: Option<u32>, b: NaiveDate, bm: Option<u32>) -> (String, String) {
+    match (am, bm) {
+        (Some(am), Some(bm)) => {
+            let at = |d: NaiveDate, m: u32| midnight(d) + TimeDelta::minutes(i64::from(m.min(23 * 60 + 30)));
+            let (x, y) = (at(a, am), at(b, bm));
+            let (lo, hi) = (x.min(y), x.max(y));
+            let end = if lo == hi { lo + TimeDelta::hours(1) } else { hi + TimeDelta::minutes(30) };
+            (fmt_datetime(lo), fmt_datetime(end))
         }
+        _ => (fmt_date(a.min(b)), fmt_date(a.max(b))),
     }
 }
 

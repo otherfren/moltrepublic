@@ -1557,7 +1557,7 @@ lexicon! {
     kb_rescue: "Rescue into basket", "In den Korb retten";
     kb_empty: "Nothing here", "Nichts hier";
     kb_hint_plan: "Deadlines and appointments - arrows run from a prerequisite to what waits for it.", "Fristen und Termine - Pfeile laufen von der Voraussetzung zu dem, was auf sie wartet.";
-    kb_hint_calendar: "Appointments only, UTC. Drag to move, click a free slot to add.", "Nur Termine, UTC. Ziehen verschiebt, Klick auf eine freie Stelle legt an.";
+    kb_hint_calendar: "Appointments only, UTC. Drag a block to move it, drag or click free slots to add.", "Nur Termine, UTC. Block ziehen verschiebt, freie Stellen ziehen oder klicken legt an.";
     kb_hint_deps: "On top: what nothing waits for. Open a task for its prerequisites.", "Oben: worauf nichts wartet. Aufklappen zeigt die Voraussetzungen.";
     kb_also_for: "also for", "auch für";
     kb_no_date: "No date", "Ohne Datum";
@@ -1567,6 +1567,7 @@ lexicon! {
     kb_months: "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec", "Jan Feb Mär Apr Mai Jun Jul Aug Sep Okt Nov Dez";
     kb_months_long: "January February March April May June July August September October November December", "Januar Februar März April Mai Juni Juli August September Oktober November Dezember";
     kb_weekdays: "Mon Tue Wed Thu Fri Sat Sun", "Mo Di Mi Do Fr Sa So";
+    kb_day_fmt: "{d} {m}", "{d}. {m}";
     vt_title_secrets: "Sealed secrets", "Versiegelte Geheimnisse";
     vt_hint_secrets: "Encrypted deposits - every other seat holds one key share.", "Verschlüsselte Einlagen - jeder andere Sitz hält einen Schlüssel-Anteil.";
     vt_seal_new: "Seal a secret", "Geheimnis versiegeln";

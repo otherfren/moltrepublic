@@ -22,7 +22,7 @@ use crate::kanban::{
     form_act, mine, needs_note, notice_reason, review, toggle_filter, Basket, Form, KanbanFeed,
     Notices,
 };
-use crate::kanban_views::{calendar, dependencies, drop_fields, plan, slot_times, utc_clock, CalSrc};
+use crate::kanban_views::{calendar, dependencies, drop_fields, plan, slot_range, utc_clock, CalSrc};
 use crate::models::{sync_rows, sync_strings};
 use crate::surfaces::SurfacesBundle;
 use crate::{AppWindow, Kanban, KbLine, KbPick, Strings};
@@ -257,6 +257,7 @@ fn render_views(k: &Kanban<'_>, feed: &KanbanFeed, st: &KanbanUi, l: &Lexicon) -
     sync_strings(&k.get_cal_weekdays(), &weekdays, |m| k.set_cal_weekdays(m));
     sync_rows(&k.get_cal_days(), c.days, |m| k.set_cal_days(m));
     sync_rows(&k.get_cal_blocks(), c.blocks, |m| k.set_cal_blocks(m));
+    sync_rows(&k.get_cal_legend(), c.legend, |m| k.set_cal_legend(m));
     c.src
 }
 
@@ -265,9 +266,17 @@ fn clear(k: &Kanban<'_>) {
     sync_rows(&k.get_plan_rows(), Vec::new(), |m| k.set_plan_rows(m));
     sync_rows(&k.get_plan_bars(), Vec::new(), |m| k.set_plan_bars(m));
     sync_rows(&k.get_plan_arrows(), Vec::new(), |m| k.set_plan_arrows(m));
+    sync_rows(&k.get_plan_ticks(), Vec::new(), |m| k.set_plan_ticks(m));
+    sync_rows(&k.get_plan_legend(), Vec::new(), |m| k.set_plan_legend(m));
+    k.set_plan_today(-1.0);
+    k.set_plan_nodate(-1);
     sync_rows(&k.get_deps(), Vec::new(), |m| k.set_deps(m));
+    sync_rows(&k.get_deps_legend(), Vec::new(), |m| k.set_deps_legend(m));
     sync_rows(&k.get_cal_blocks(), Vec::new(), |m| k.set_cal_blocks(m));
     sync_rows(&k.get_cal_days(), Vec::new(), |m| k.set_cal_days(m));
+    sync_rows(&k.get_cal_legend(), Vec::new(), |m| k.set_cal_legend(m));
+    sync_strings(&k.get_cal_weekdays(), &[], |m| k.set_cal_weekdays(m));
+    k.set_cal_title("".into());
     sync_rows(&k.get_todo(), Vec::new(), |m| k.set_todo(m));
     sync_rows(&k.get_wip(), Vec::new(), |m| k.set_wip(m));
     sync_rows(&k.get_done(), Vec::new(), |m| k.set_done(m));
@@ -448,16 +457,18 @@ pub(crate) fn cal_drop(ui: &AppWindow, src: usize, day: usize, minute: i32) -> b
     staged.is_some()
 }
 
-/// A free calendar slot: the New task form, timed once at that slot.
-pub(crate) fn cal_new(ui: &AppWindow, day: usize, minute: i32) {
+/// Free calendar slots from `day`/`minute` to `end_day`/`end_minute`
+/// (minute < 0: whole days): the New task form, timed once there.
+pub(crate) fn cal_new(ui: &AppWindow, day: usize, minute: i32, end_day: usize, end_minute: i32) {
     let target = with(|st| {
         let feed = st.feed.as_ref()?;
         let anchor = st.cal_anchor.unwrap_or_else(|| crate::kanban::today_of(feed));
-        crate::kanban_views::page_days(anchor, st.cal_week).get(day).copied()
+        let days = crate::kanban_views::page_days(anchor, st.cal_week);
+        Some((*days.get(day)?, *days.get(end_day)?))
     });
-    let Some(target) = target else { return };
+    let Some((a, b)) = target else { return };
     form_new(ui);
-    let (start, end) = slot_times(target, u32::try_from(minute).ok());
+    let (start, end) = slot_range(a, u32::try_from(minute).ok(), b, u32::try_from(end_minute).ok());
     let k = ui.global::<Kanban>();
     k.set_f_mode(1);
     k.set_f_start(start.into());
@@ -855,10 +866,10 @@ fn wire_views(k: &Kanban<'_>, on_ui: &(impl Fn(&dyn Fn(&AppWindow)) + Clone + 's
     }
     {
         let on_ui = on_ui.clone();
-        k.on_cal_new(move |day, minute| {
+        k.on_cal_new(move |day, minute, end_day, end_minute| {
             on_ui(&|ui| {
-                if let Ok(day) = usize::try_from(day) {
-                    cal_new(ui, day, minute);
+                if let (Ok(day), Ok(end_day)) = (usize::try_from(day), usize::try_from(end_day)) {
+                    cal_new(ui, day, minute, end_day, end_minute);
                 }
             });
         });
