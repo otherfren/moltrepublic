@@ -1083,6 +1083,93 @@ export struct KbDetail {
     staged: string,
 }
 
+// `dependencies` (§8): one task under one parent; `key` is its path.
+export struct KbDepRow {
+    key: string,
+    id: string,
+    depth: int,
+    title: string,
+    short: string,
+    type-label: string,
+    type-slot: int,
+    badge: string,
+    bad: bool,
+    progress: string,
+    needed: string,
+    also: string,
+    muted: bool,
+    kids: bool,
+    open: bool,
+}
+
+// `plan` (§8): one timeline row; a task sits once, under its first parent.
+export struct KbPlanRow {
+    id: string,
+    depth: int,
+    title: string,
+    short: string,
+    type-label: string,
+    type-slot: int,
+    size: string,
+    badge: string,
+    bad: bool,
+    kids: bool,
+    open: bool,
+    date: string,
+}
+
+// A block (timed) or a marker (`needed_by`) on row `row`; x in 0..1.
+export struct KbPlanBar {
+    row: int,
+    x0: float,
+    x1: float,
+    marker: bool,
+    slot: int,
+    bad: bool,
+}
+
+// A prerequisite link: from the end on row r1 to the start on row r2.
+export struct KbPlanArrow {
+    r1: int,
+    x1: float,
+    r2: int,
+    x2: float,
+    bad: bool,
+}
+
+export struct KbTick {
+    x: float,
+    label: string,
+}
+
+// One calendar day cell.
+export struct KbCalDay {
+    date: string,
+    label: string,
+    in-month: bool,
+    today: bool,
+    more: int,
+}
+
+// One block segment on day `day`; `src` indexes the draggable source
+// (-1 = a basket shadow). Week: start/end are fractions of the day.
+export struct KbCalBlock {
+    src: int,
+    id: string,
+    title: string,
+    time: string,
+    slot: int,
+    bad: bool,
+    shadow: bool,
+    day: int,
+    order: int,
+    all-day: bool,
+    start: float,
+    end: float,
+    lane: int,
+    lanes: int,
+}
+
 export global Kanban {
     // -- board
     in-out property <[KbCard]> todo;
@@ -1161,6 +1248,32 @@ export global Kanban {
     in-out property <[KbLine]> mine;
     in-out property <[KbLine]> declined;
     callback rescue(int);
+    // -- plan: the deadline timeline
+    in-out property <[KbPlanRow]> plan-rows;
+    in-out property <[KbPlanBar]> plan-bars;
+    in-out property <[KbPlanArrow]> plan-arrows;
+    in-out property <[KbTick]> plan-ticks;
+    in-out property <float> plan-today: -1;
+    // the first row of the "no date" lane (-1 = none)
+    in-out property <int> plan-nodate: -1;
+    in-out property <[KbType]> plan-legend;
+    callback plan-toggle(string);
+    // -- dependencies
+    in-out property <[KbDepRow]> deps;
+    in-out property <[KbType]> deps-legend;
+    callback deps-toggle(string);
+    // -- calendar
+    in-out property <string> cal-title;
+    in-out property <bool> cal-week;
+    in-out property <[string]> cal-weekdays;
+    in-out property <[KbCalDay]> cal-days;
+    in-out property <[KbCalBlock]> cal-blocks;
+    callback cal-step(int);
+    callback cal-today();
+    callback cal-set-week(bool);
+    // a block dropped on a day; minute -1 = no time (month, all-day band)
+    callback cal-drop(int, int, int);
+    callback cal-new(int, int);
     // §2.4: 12 slots, mid-tone so a chip reads on light and dark alike;
     // the label always rides beside it
     public pure function type-color(slot: int) -> color {
@@ -1401,6 +1514,7 @@ export global Strings {
     // count reuses ow-members), the charter reader, and the settings
     // panel (chat retention)
     in property <string> os-founded;
+    in property <string> os-utc;
     in property <string> os-consensus;
     in property <string> cv-shrink;
     in property <string> ocs-title;
@@ -1985,7 +2099,17 @@ export global Strings {
     in property <string> kb-sec-declined;
     in property <string> kb-rescue;
     in property <string> kb-empty;
-    in property <string> kb-off-board;
+    in property <string> kb-hint-plan;
+    in property <string> kb-hint-calendar;
+    in property <string> kb-hint-deps;
+    in property <string> kb-also-for;
+    in property <string> kb-no-date;
+    in property <string> kb-month;
+    in property <string> kb-week;
+    in property <string> kb-today;
+    in property <string> kb-months;
+    in property <string> kb-months-long;
+    in property <string> kb-weekdays;
     // Vault (vault_threshold_disclosure.md)
     in property <string> vt-title-secrets;
     in property <string> vt-hint-secrets;

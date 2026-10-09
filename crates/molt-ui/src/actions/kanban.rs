@@ -5,6 +5,8 @@
 //! the `Kanban` global from it and the engine's board.
 
 use std::cell::RefCell;
+
+use chrono::Datelike;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
@@ -20,6 +22,7 @@ use crate::kanban::{
     form_act, mine, needs_note, notice_reason, review, toggle_filter, Basket, Form, KanbanFeed,
     Notices,
 };
+use crate::kanban_views::{calendar, dependencies, drop_fields, plan, slot_times, utc_clock, CalSrc};
 use crate::models::{sync_rows, sync_strings};
 use crate::surfaces::SurfacesBundle;
 use crate::{AppWindow, Kanban, KbLine, KbPick, Strings};
@@ -39,6 +42,15 @@ pub(crate) struct KanbanUi {
     pub(crate) in_flight: bool,
     /// This workspace's stored basket was taken (once per workspace).
     pub(crate) draft_adopted: bool,
+    /// `plan` rows folded over their prerequisites.
+    pub(crate) plan_closed: BTreeSet<String>,
+    /// `dependencies` paths flipped from their default.
+    pub(crate) deps_toggled: BTreeSet<String>,
+    /// The calendar page: its anchor day (`None` = today) and week mode.
+    pub(crate) cal_anchor: Option<chrono::NaiveDate>,
+    pub(crate) cal_week: bool,
+    /// The rendered page's draggable blocks.
+    pub(crate) cal_src: Vec<CalSrc>,
 }
 
 impl KanbanUi {
@@ -171,6 +183,7 @@ pub(crate) fn render(ui: &AppWindow) {
         sync_rows(&k.get_filters_status(), status, |m| k.set_filters_status(m));
         sync_rows(&k.get_filters_state(), state, |m| k.set_filters_state(m));
         sync_rows(&k.get_filters_seat(), seat, |m| k.set_filters_seat(m));
+        st.cal_src = render_views(&k, feed, st, &l);
 
         let sel = k.get_sel().to_string();
         match (!sel.is_empty()).then(|| detail(&l, feed, &st.basket, &sel)).flatten() {
@@ -223,8 +236,38 @@ pub(crate) fn render(ui: &AppWindow) {
     });
 }
 
+/// The views beside the board (§8): plan, dependencies, calendar.
+fn render_views(k: &Kanban<'_>, feed: &KanbanFeed, st: &KanbanUi, l: &Lexicon) -> Vec<CalSrc> {
+    let p = plan(l, feed, &st.filters, &st.plan_closed);
+    sync_rows(&k.get_plan_rows(), p.rows, |m| k.set_plan_rows(m));
+    sync_rows(&k.get_plan_bars(), p.bars, |m| k.set_plan_bars(m));
+    sync_rows(&k.get_plan_arrows(), p.arrows, |m| k.set_plan_arrows(m));
+    sync_rows(&k.get_plan_ticks(), p.ticks, |m| k.set_plan_ticks(m));
+    sync_rows(&k.get_plan_legend(), p.legend, |m| k.set_plan_legend(m));
+    k.set_plan_today(p.today);
+    k.set_plan_nodate(p.nodate.and_then(|n| i32::try_from(n).ok()).unwrap_or(-1));
+    let d = dependencies(l, feed, &st.filters, &st.deps_toggled);
+    sync_rows(&k.get_deps(), d.rows, |m| k.set_deps(m));
+    sync_rows(&k.get_deps_legend(), d.legend, |m| k.set_deps_legend(m));
+    let anchor = st.cal_anchor.unwrap_or_else(|| crate::kanban::today_of(feed));
+    let c = calendar(l, feed, &st.basket, anchor, st.cal_week);
+    k.set_cal_title(c.title.into());
+    k.set_cal_week(st.cal_week);
+    let weekdays: Vec<String> = l.kb_weekdays.split(' ').map(str::to_string).collect();
+    sync_strings(&k.get_cal_weekdays(), &weekdays, |m| k.set_cal_weekdays(m));
+    sync_rows(&k.get_cal_days(), c.days, |m| k.set_cal_days(m));
+    sync_rows(&k.get_cal_blocks(), c.blocks, |m| k.set_cal_blocks(m));
+    c.src
+}
+
 /// No board: nothing of the previous workspace may stay on screen.
 fn clear(k: &Kanban<'_>) {
+    sync_rows(&k.get_plan_rows(), Vec::new(), |m| k.set_plan_rows(m));
+    sync_rows(&k.get_plan_bars(), Vec::new(), |m| k.set_plan_bars(m));
+    sync_rows(&k.get_plan_arrows(), Vec::new(), |m| k.set_plan_arrows(m));
+    sync_rows(&k.get_deps(), Vec::new(), |m| k.set_deps(m));
+    sync_rows(&k.get_cal_blocks(), Vec::new(), |m| k.set_cal_blocks(m));
+    sync_rows(&k.get_cal_days(), Vec::new(), |m| k.set_cal_days(m));
     sync_rows(&k.get_todo(), Vec::new(), |m| k.set_todo(m));
     sync_rows(&k.get_wip(), Vec::new(), |m| k.set_wip(m));
     sync_rows(&k.get_done(), Vec::new(), |m| k.set_done(m));
@@ -385,6 +428,59 @@ pub(crate) fn drop_card(ui: &AppWindow, id: &str, col: usize) -> bool {
             false
         }
     }
+}
+
+/// A calendar block dropped on page day `day` (`minute` < 0: no time):
+/// stage the move (§8). `false` when nothing moved.
+pub(crate) fn cal_drop(ui: &AppWindow, src: usize, day: usize, minute: i32) -> bool {
+    let staged = with(|st| {
+        let feed = st.feed.as_ref()?;
+        let from = st.cal_src.get(src)?.clone();
+        let anchor = st.cal_anchor.unwrap_or_else(|| crate::kanban::today_of(feed));
+        let target = *crate::kanban_views::page_days(anchor, st.cal_week).get(day)?;
+        let (id, fields) = drop_fields(feed, &st.basket, &from, target, u32::try_from(minute).ok())?;
+        st.basket.stage_set(&id, fields);
+        Some(())
+    });
+    if staged.is_some() {
+        render(ui);
+    }
+    staged.is_some()
+}
+
+/// A free calendar slot: the New task form, timed once at that slot.
+pub(crate) fn cal_new(ui: &AppWindow, day: usize, minute: i32) {
+    let target = with(|st| {
+        let feed = st.feed.as_ref()?;
+        let anchor = st.cal_anchor.unwrap_or_else(|| crate::kanban::today_of(feed));
+        crate::kanban_views::page_days(anchor, st.cal_week).get(day).copied()
+    });
+    let Some(target) = target else { return };
+    form_new(ui);
+    let (start, end) = slot_times(target, u32::try_from(minute).ok());
+    let k = ui.global::<Kanban>();
+    k.set_f_mode(1);
+    k.set_f_start(start.into());
+    k.set_f_end(end.into());
+}
+
+/// Page the calendar: `step` pages forward (negative: back), 0 = today.
+pub(crate) fn cal_step(ui: &AppWindow, step: i32) {
+    with(|st| {
+        let Some(feed) = st.feed.as_ref() else { return };
+        let today = crate::kanban::today_of(feed);
+        let anchor = st.cal_anchor.unwrap_or(today);
+        st.cal_anchor = Some(match (step, st.cal_week) {
+            (0, _) => today,
+            (n, true) => anchor + chrono::TimeDelta::weeks(i64::from(n)),
+            (n, false) => {
+                let months = chrono::Months::new(n.unsigned_abs());
+                let first = anchor.with_day(1).unwrap_or(anchor);
+                if n > 0 { first.checked_add_months(months) } else { first.checked_sub_months(months) }.unwrap_or(anchor)
+            }
+        });
+    });
+    render(ui);
 }
 
 /// The form's fields into a [`Form`].
@@ -701,8 +797,96 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             });
         });
     }
+    wire_views(&k, &on_ui, ctx);
     wire_settings(ui, ctx);
     start_actions_timer(ctx);
+    start_clock(ui);
+}
+
+/// The callbacks of plan, dependencies and calendar.
+fn wire_views(k: &Kanban<'_>, on_ui: &(impl Fn(&dyn Fn(&AppWindow)) + Clone + 'static), ctx: &Ctx) {
+    {
+        let on_ui = on_ui.clone();
+        k.on_plan_toggle(move |id| {
+            on_ui(&|ui| {
+                with(|st| flip(&mut st.plan_closed, id.as_str()));
+                render(ui);
+            });
+        });
+    }
+    {
+        let on_ui = on_ui.clone();
+        k.on_deps_toggle(move |key| {
+            on_ui(&|ui| {
+                with(|st| flip(&mut st.deps_toggled, key.as_str()));
+                render(ui);
+            });
+        });
+    }
+    {
+        let on_ui = on_ui.clone();
+        k.on_cal_step(move |n| on_ui(&|ui| cal_step(ui, n)));
+    }
+    {
+        let on_ui = on_ui.clone();
+        k.on_cal_today(move || on_ui(&|ui| cal_step(ui, 0)));
+    }
+    {
+        let on_ui = on_ui.clone();
+        k.on_cal_set_week(move |week| {
+            on_ui(&|ui| {
+                with(|st| st.cal_week = week);
+                render(ui);
+            });
+        });
+    }
+    {
+        let on_ui = on_ui.clone();
+        let cx = ctx.clone();
+        k.on_cal_drop(move |src, day, minute| {
+            on_ui(&|ui| {
+                if let (Ok(src), Ok(day)) = (usize::try_from(src), usize::try_from(day)) {
+                    if cal_drop(ui, src, day, minute) {
+                        save_basket(&cx);
+                    }
+                }
+            });
+        });
+    }
+    {
+        let on_ui = on_ui.clone();
+        k.on_cal_new(move |day, minute| {
+            on_ui(&|ui| {
+                if let Ok(day) = usize::try_from(day) {
+                    cal_new(ui, day, minute);
+                }
+            });
+        });
+    }
+}
+
+fn flip(set: &mut BTreeSet<String>, key: &str) {
+    if !set.remove(key) {
+        set.insert(key.to_string());
+    }
+}
+
+thread_local! {
+    static CLOCK: slint::Timer = slint::Timer::default();
+}
+
+/// Organization › Status shows the UTC time (§2.3).
+pub(crate) fn start_clock(ui: &AppWindow) {
+    let tick = |ui: &AppWindow| ui.set_org_utc_now(utc_clock(chrono::Utc::now().naive_utc()).into());
+    tick(ui);
+    let weak = ui.as_weak();
+    CLOCK.with(|t| {
+        t.start(slint::TimerMode::Repeated, std::time::Duration::from_secs(10), move || {
+            if let Some(ui) = weak.upgrade() {
+                tick(&ui);
+            }
+        });
+    });
 }
 
 thread_local! {

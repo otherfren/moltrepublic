@@ -15,11 +15,11 @@ use serde_json::{json, Value};
 use crate::i18n::Lexicon;
 use crate::kanban::*;
 
-fn id(n: u32) -> String {
+pub(super) fn id(n: u32) -> String {
     format!("{n:032x}")
 }
 
-fn add(n: u32, title: &str, who: &[&str], extra: Value) -> Value {
+pub(super) fn add(n: u32, title: &str, who: &[&str], extra: Value) -> Value {
     let mut v = json!({"act": "add", "id": id(n), "creator": "mara", "title": title, "assignees": who});
     if let (Some(m), Some(e)) = (v.as_object_mut(), extra.as_object()) {
         m.extend(e.clone());
@@ -27,7 +27,7 @@ fn add(n: u32, title: &str, who: &[&str], extra: Value) -> Value {
     v
 }
 
-fn st(n: u32, to: &str, note: Option<&str>) -> Value {
+pub(super) fn st(n: u32, to: &str, note: Option<&str>) -> Value {
     let mut v = json!({"act": "state", "id": id(n), "to": to});
     if let Some(note) = note {
         v["note"] = Value::from(note);
@@ -35,11 +35,11 @@ fn st(n: u32, to: &str, note: Option<&str>) -> Value {
     v
 }
 
-fn cs(ops: Vec<Value>) -> Value {
+pub(super) fn cs(ops: Vec<Value>) -> Value {
     json!({"op": "kanban_ops", "summary": "s", "base_rev": 0, "ops": ops})
 }
 
-fn feed_with(applied: Vec<Value>, pending: Value, me: &str) -> KanbanFeed {
+pub(super) fn feed_with(applied: Vec<Value>, pending: Value, me: &str) -> KanbanFeed {
     let seats = ["mara", "walter", "bot"];
     let set: BTreeSet<String> = seats.iter().map(|s| (*s).to_string()).collect();
     let board = molt_core::kanban_fold::kanban_fold(&applied, &set);
@@ -58,7 +58,7 @@ fn feed_with(applied: Vec<Value>, pending: Value, me: &str) -> KanbanFeed {
 
 /// 1 api (mara, wip); 2 client blocked by 1; 3 docs open (Bug); 4 meet
 /// timed once; 5 broken (fail); 6 waits on 5 (stuck); 7 done long ago.
-fn feed() -> KanbanFeed {
+pub(super) fn feed() -> KanbanFeed {
     let mut applied = vec![cs(vec![
         add(1, "api", &["mara"], json!({"type": "Bug", "size": "M"})),
         add(2, "client", &["walter"], json!({"blocked_by": [id(1)], "type": "bug"})),

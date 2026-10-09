@@ -265,3 +265,35 @@ fn an_org_proposal_in_a_vault_republic_carries_no_vault() {
     let keys: Vec<&str> = got[0].1.split_whitespace().collect();
     assert_eq!(keys, vec!["memory"], "the vault never rides a set_features value");
 }
+
+/// S4: the Kanban is real - the wizard box is opt-in and reaches
+/// `CreatePropose`.
+#[test]
+fn a_ticked_kanban_reaches_create_propose() {
+    i_slint_backend_testing::init_no_event_loop();
+    let (ui, _shown) = charter_step(2, 4);
+    let label = ui.global::<Strings>().get_feat_quests().to_string();
+    let mut found = checks_in(&window_root(&ui), &label);
+    assert_eq!(found.len(), 1, "one kanban box on the charter step");
+    assert!(!ui.get_cw_feat_quests(), "off by default");
+    click(&ui, &found.remove(0));
+    assert_eq!(
+        crate::actions::ritual::charter_features(&ui),
+        vec!["memory".to_string(), "quests".to_string()]
+    );
+}
+
+/// S4: the Organization modal votes the Kanban in.
+#[test]
+fn the_org_modal_votes_the_kanban_in() {
+    let (ui, _shown, got) = org_modal(NEWER);
+    let quests = ui.global::<Strings>().get_feat_quests().to_string();
+    let mut boxes = checks_in(&modal(&ui), &quests);
+    assert_eq!(boxes.len(), 1, "one kanban box");
+    click(&ui, &boxes.remove(0));
+    confirm(&ui);
+    let got = got.borrow();
+    assert_eq!(got.len(), 1, "one proposal");
+    let keys: Vec<&str> = got[0].1.split_whitespace().collect();
+    assert_eq!(keys, vec!["quests"]);
+}

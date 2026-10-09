@@ -15,10 +15,10 @@ tools `quests_view`, `quests_propose`, `read_actions`, `wake_skill`, the
 (2026-10-09: engine board, basket sealed in `kanban_draft.json` and the
 `quests_draft_save`/`quests_draft_load` tools, staged drag, drill-in, New
 task form, the board filters incl. another seat's view, vote badges,
-"Mine", notifications, the Wake group, the six view keys); `plan`,
-`calendar`, `dependencies`, the impact and would-void lines in the
-Proposals view, the UTC clock, `is_implemented()` and the unlocked
-feature switches are open, as is S5.
+"Mine", notifications, the Wake group, the six view keys), and so are
+`plan`, `calendar`, `dependencies`, their filters, the UTC clock,
+`is_implemented()` and the unlocked feature switches (2026-10-09); the
+impact and would-void lines in the Proposals view are open, as is S5.
 §12 lists what changed against revision 2.**
 
 The ask: the Quests surface (GUI label **"Kanban"**, wire key `quests` -

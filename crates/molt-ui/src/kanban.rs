@@ -61,7 +61,7 @@ const FILTER_ROWS: [&[&str]; 3] = [
 ];
 
 /// The chip key that shows another seat's view.
-const SEAT_PREFIX: &str = "seat:";
+pub(crate) const SEAT_PREFIX: &str = "seat:";
 
 fn filter_label(l: &Lexicon, key: &str) -> String {
     if let Some(size) = key.strip_prefix("size:") {
@@ -144,11 +144,11 @@ fn flag_label(l: &Lexicon, f: &str) -> &'static str {
     }
 }
 
-fn s<'a>(t: &'a Value, key: &str) -> &'a str {
+pub(crate) fn s<'a>(t: &'a Value, key: &str) -> &'a str {
     t.get(key).and_then(Value::as_str).unwrap_or_default()
 }
 
-fn strs(t: &Value, key: &str) -> Vec<String> {
+pub(crate) fn strs(t: &Value, key: &str) -> Vec<String> {
     t.get(key)
         .and_then(Value::as_array)
         .into_iter()
@@ -159,7 +159,7 @@ fn strs(t: &Value, key: &str) -> Vec<String> {
 }
 
 /// The board read's tasks (`{id: task}`), empty without one.
-fn tasks(snap: &SurfaceSnapshot) -> Map<String, Value> {
+pub(crate) fn tasks(snap: &SurfaceSnapshot) -> Map<String, Value> {
     snap.board
         .as_ref()
         .and_then(|b| b.get("tasks"))
@@ -197,7 +197,7 @@ fn freq_label(l: &Lexicon, f: &str) -> &'static str {
 }
 
 /// `when` / `repeat` in one line ("" for floating work).
-fn when_line(l: &Lexicon, t: &Value) -> String {
+pub(crate) fn when_line(l: &Lexicon, t: &Value) -> String {
     let Some(w) = t.get("when") else {
         return String::new();
     };
@@ -310,7 +310,7 @@ pub(crate) struct Board {
 }
 
 /// The view's task rows for these filters, as `seat` sees them.
-fn listed(snap: &SurfaceSnapshot, filters: &BTreeSet<String>, keep_types: bool) -> Vec<Value> {
+pub(crate) fn listed(snap: &SurfaceSnapshot, filters: &BTreeSet<String>, keep_types: bool) -> Vec<Value> {
     let filter: Vec<ViewFilter> = filters
         .iter()
         .filter_map(|f| ViewFilter::parse(f).ok())
@@ -570,6 +570,17 @@ impl Basket {
         self.acts.push(act);
     }
 
+    /// Stage field changes: they merge into a `set` already staged for
+    /// the task.
+    pub(crate) fn stage_set(&mut self, id: &str, fields: Map<String, Value>) {
+        let staged = self.acts.iter_mut().find(|a| s(a, "act") == "set" && s(a, "id") == id);
+        if let Some(f) = staged.and_then(|a| a.get_mut("fields")).and_then(Value::as_object_mut) {
+            f.extend(fields);
+            return;
+        }
+        self.acts.push(json!({ "act": "set", "id": id, "fields": fields }));
+    }
+
     /// Stage a new task, with a `ref` later acts may cite.
     pub(crate) fn add(&mut self, mut act: Value) {
         self.next_ref += 1;
@@ -657,7 +668,7 @@ pub(crate) struct BasketReview {
 }
 
 /// Fake ids stand in for the ones the engine mints; they render as "new".
-fn fake_id(k: u32) -> String {
+pub(crate) fn fake_id(k: u32) -> String {
     format!("{k:08x}{}", "f".repeat(24))
 }
 
@@ -697,7 +708,7 @@ pub(crate) fn review(l: &Lexicon, feed: &KanbanFeed, basket: &Basket) -> BasketR
 }
 
 /// The engine's UTC day, else this machine's.
-fn today_of(feed: &KanbanFeed) -> NaiveDate {
+pub(crate) fn today_of(feed: &KanbanFeed) -> NaiveDate {
     feed.snap
         .board
         .as_ref()

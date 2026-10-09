@@ -10,6 +10,7 @@ mod gui;
 mod i18n;
 mod images;
 mod kanban;
+mod kanban_views;
 mod labels;
 mod mirror;
 mod net_tor;

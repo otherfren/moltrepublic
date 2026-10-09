@@ -418,9 +418,9 @@ pub(crate) fn seed_word_rows(text: &str) -> Vec<Vec<(i32, String, i32)>> {
 }
 
 /// The wizard's checkbox selection for `CreatePropose`; the engine
-/// canonicalizes. Quests and wallet have no wizard checkbox yet.
+/// canonicalizes. The wallet has no wizard checkbox yet.
 pub(crate) fn charter_features(ui: &AppWindow) -> Vec<String> {
-    [(ui.get_cw_feat_memory(), "memory"), (ui.get_cw_feat_vault(), "vault")]
+    [(ui.get_cw_feat_memory(), "memory"), (ui.get_cw_feat_quests(), "quests"), (ui.get_cw_feat_vault(), "vault")]
         .into_iter()
         .filter(|(on, _)| *on)
         .map(|(_, key)| key.to_string())

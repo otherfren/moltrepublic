@@ -386,3 +386,165 @@ fn the_proposals_view_keeps_new_task_and_the_basket() {
         "the basket bar"
     );
 }
+
+/// Two tasks through the vote: one floating with a deadline, one timed
+/// today (UTC, the engine's clock).
+fn planned_node(root: &std::path::Path, rt: &tokio::runtime::Runtime) -> (Node, String) {
+    let node = quests_node(root, rt);
+    let k = node.ui.global::<Kanban>();
+    let today = chrono::Utc::now().date_naive().format("%Y-%m-%d").to_string();
+    form_new(&node.ui);
+    k.set_f_title("ship".into());
+    k.set_f_due("2099-01-01".into());
+    assert!(form_submit(&node.ui));
+    form_new(&node.ui);
+    k.set_f_title("meet".into());
+    k.set_f_mode(1);
+    k.set_f_start(today.as_str().into());
+    k.set_f_end(today.as_str().into());
+    assert!(form_submit(&node.ui));
+    propose_basket(&node, rt);
+    (node, today)
+}
+
+/// §8: plan, dependencies and calendar render the engine's board.
+#[test]
+fn the_views_render_the_board() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    let (node, today) = planned_node(tmp.path(), &rt);
+    let k = node.ui.global::<Kanban>();
+    let titles = |rows: Vec<String>| rows.into_iter().collect::<std::collections::BTreeSet<_>>();
+    let plan: Vec<String> = k.get_plan_rows().iter().map(|r| r.title.to_string()).collect();
+    assert_eq!(titles(plan), ["meet".to_string(), "ship".to_string()].into());
+    assert_eq!(k.get_plan_bars().row_count(), 2, "a marker and a block");
+    let deps: Vec<String> = k.get_deps().iter().map(|r| r.title.to_string()).collect();
+    assert_eq!(titles(deps), ["meet".to_string(), "ship".to_string()].into());
+    let blocks: Vec<_> = k.get_cal_blocks().iter().collect();
+    assert_eq!(blocks.len(), 1, "only the timed task");
+    let b = &blocks[0];
+    assert_eq!(b.title.as_str(), "meet");
+    let day = k.get_cal_days().row_data(usize::try_from(b.day).expect("day")).expect("a day");
+    assert_eq!(day.date.as_str(), today);
+    assert!(day.today);
+}
+
+/// §8: dragging a calendar block stages a `set`; a free slot opens the
+/// form at that slot.
+#[test]
+fn the_calendar_stages_a_move_and_opens_a_free_slot() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    let (node, _) = planned_node(tmp.path(), &rt);
+    let k = node.ui.global::<Kanban>();
+    let b = k.get_cal_blocks().row_data(0).expect("meet");
+    let target = if b.day > 0 { b.day - 1 } else { b.day + 1 };
+    let src = usize::try_from(b.src).expect("draggable");
+    assert!(crate::actions::kanban::cal_drop(&node.ui, src, usize::try_from(target).expect("day"), -1));
+    assert_eq!(k.get_basket_count(), 1);
+    let shadows: Vec<i32> = k.get_cal_blocks().iter().filter(|b| b.shadow).map(|b| b.day).collect();
+    assert_eq!(shadows, [target], "the shadow at the target, the block stays");
+    assert!(k.get_basket_tip().is_empty() || !k.get_basket_tip().contains("void"), "{}", k.get_basket_tip());
+
+    let day = k.get_cal_days().row_data(3).expect("a day").date.to_string();
+    crate::actions::kanban::cal_new(&node.ui, 3, 9 * 60);
+    assert!(k.get_form_open());
+    assert_eq!(k.get_f_mode(), 1);
+    assert_eq!(k.get_f_start().as_str(), format!("{day}T09:00"));
+    assert_eq!(k.get_f_end().as_str(), format!("{day}T10:00"));
+}
+
+/// §2.3: Organization › Status carries the UTC clock.
+#[test]
+fn the_status_shows_the_utc_clock() {
+    if !BACKEND.with(|b| b.replace(true)) {
+        i_slint_backend_testing::init_no_event_loop();
+    }
+    let ui = AppWindow::new().expect("headless window");
+    crate::actions::kanban::start_clock(&ui);
+    let now = ui.get_org_utc_now().to_string();
+    assert!(now.ends_with(" UTC") && now.len() == "2026-10-09 14:32 UTC".len(), "{now}");
+}
+
+/// A real pointer drag of a month block onto the neighbouring day.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_real_drag_in_the_month_stages_a_move() {
+    type H = i_slint_backend_testing::ElementHandle;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    let (node, _) = planned_node(tmp.path(), &rt);
+    crate::actions::kanban::wire(&node.ui, &node.ctx(&rt));
+    let k = node.ui.global::<Kanban>();
+    let b = k.get_cal_blocks().row_data(0).expect("meet");
+    let _shown = quests_screen(&node.ui, "calendar");
+    let chip = H::find_by_accessible_label(&node.ui, "meet")
+        .find(|h| h.size().height < 40.0)
+        .expect("the block renders");
+    let cell = H::find_by_accessible_label(&node.ui, &k.get_cal_days().row_data(0).expect("day").date)
+        .next()
+        .expect("a day cell");
+    let step = if b.day % 7 == 6 { -cell.size().width } else { cell.size().width };
+    let pos = chip.absolute_position();
+    let from = slint::LogicalPosition::new(pos.x + 10.0, pos.y + chip.size().height / 2.0);
+    let to = slint::LogicalPosition::new(from.x + step, from.y);
+    let win = node.ui.window();
+    win.dispatch_event(slint::platform::WindowEvent::PointerMoved { position: from });
+    win.dispatch_event(slint::platform::WindowEvent::PointerPressed {
+        position: from,
+        button: slint::platform::PointerEventButton::Left,
+    });
+    for n in 1..=10 {
+        let x = from.x + (to.x - from.x) * n as f32 / 10.0;
+        win.dispatch_event(slint::platform::WindowEvent::PointerMoved { position: slint::LogicalPosition::new(x, from.y) });
+    }
+    win.dispatch_event(slint::platform::WindowEvent::PointerReleased {
+        position: to,
+        button: slint::platform::PointerEventButton::Left,
+    });
+    assert_eq!(k.get_basket_count(), 1, "the drop staged one move");
+    let want = if b.day % 7 == 6 { b.day - 1 } else { b.day + 1 };
+    let shadows: Vec<i32> = k.get_cal_blocks().iter().filter(|b| b.shadow).map(|b| b.day).collect();
+    assert_eq!(shadows, [want]);
+    assert_eq!(k.get_sel().as_str(), "", "a drag is not a click");
+}
+
+/// The plan and dependency views render their rows; a fold opens a task.
+#[cfg(feature = "live-preview")]
+#[test]
+fn plan_and_dependencies_render_and_fold() {
+    type H = i_slint_backend_testing::ElementHandle;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    let node = quests_node(tmp.path(), &rt);
+    crate::actions::kanban::wire(&node.ui, &node.ctx(&rt));
+    let k = node.ui.global::<Kanban>();
+    form_new(&node.ui);
+    k.set_f_title("base".into());
+    assert!(form_submit(&node.ui));
+    propose_basket(&node, &rt);
+    let base = k.get_deps().row_data(0).expect("base").id.to_string();
+    form_new(&node.ui);
+    k.set_f_title("top".into());
+    k.set_f_due("2099-01-01".into());
+    with(|st| st.form.blocked = vec![base]);
+    assert!(form_submit(&node.ui));
+    propose_basket(&node, &rt);
+
+    let _shown = quests_screen(&node.ui, "plan");
+    assert!(H::find_by_accessible_label(&node.ui, "top").next().is_some(), "the plan row");
+    assert!(H::find_by_accessible_label(&node.ui, "base").next().is_some(), "open by default");
+    assert_eq!(k.get_plan_arrows().row_count(), 1);
+    drop(_shown);
+
+    let _shown = quests_screen(&node.ui, "dependencies");
+    assert_eq!(k.get_deps().row_count(), 1, "only the top, collapsed");
+    let fold = H::find_by_element_type_name(&node.ui, "KFold").next().expect("the fold");
+    click(&node.ui, &fold);
+    assert_eq!(k.get_deps().row_count(), 2, "opened");
+    assert_eq!(k.get_deps().row_data(1).expect("base").title.as_str(), "base");
+}

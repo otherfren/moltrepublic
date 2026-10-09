@@ -1987,10 +1987,11 @@ export component AppWindow inherits Window {
     // the one charter length limit, engine and UI alike (AGENDA_MAX)
     property <int> cw-agenda-max: 4096;
     // the charter step's feature selection (charter_features.md): chat is
-    // core and not a property; shared memory defaults on; kanban/wallet
-    // are locked off (not built). Read by the Rust create-propose
-    // handler, reset with the form.
+    // core and not a property; shared memory defaults on; the wallet is
+    // locked off (not built). Read by the Rust create-propose handler,
+    // reset with the form.
     in-out property <bool> cw-feat-memory: true;
+    in-out property <bool> cw-feat-quests: false;
     in-out property <bool> cw-feat-vault: false;
     // vault spec §3: m >= 2 and m <= n-2; m and n are fixed at setup
     out property <bool> cw-vault-allowed: root.cw-threshold >= 2
@@ -2355,6 +2356,8 @@ export component AppWindow inherits Window {
     // the enable-modal's draft; an already-enabled feature is locked in the
     // modal - enable-only, the engine refuses removals either way
     in property <bool> org-feat-memory;
+    // the current UTC time (kanban_workflows.md §2.3)
+    in property <string> org-utc-now;
     in property <bool> org-feat-quests;
     in property <bool> org-feat-vault;
     // StatusView.vault_enable: 0 on, 1 offer, 2 needs a newer republic, 3 bounds
@@ -2362,6 +2365,7 @@ export component AppWindow inherits Window {
     in property <bool> org-feat-wallet;
     in-out property <bool> org-features-modal-open: false;
     property <bool> of-memory-draft;
+    property <bool> of-quests-draft;
     property <bool> of-vault-draft;
     in-out property <bool> org-relays-modal-open: false;
     // R6 pool-edit modal: the draft as ROWS plus the space-joined payload
@@ -2811,6 +2815,7 @@ export component AppWindow inherits Window {
         root.cw-threshold = 2;
         root.cw-members = 3;
         root.cw-feat-memory = true;
+        root.cw-feat-quests = false;
         root.cw-feat-vault = false;
         root.cw-fold = -1;
     }
@@ -3937,8 +3942,8 @@ export component AppWindow inherits Window {
                                 horizontal-alignment: right;
                             }
                             // the feature selection, ratified with the
-                            // charter: chat is core (locked on); kanban
-                            // and wallet are not built yet (locked off);
+                            // charter: chat is core (locked on); the
+                            // wallet is not built yet (locked off);
                             // the vault is founding-only and bounded by
                             // m and n
                             // content-sized, anchored left - the panel must
@@ -3968,7 +3973,7 @@ export component AppWindow inherits Window {
                                                 AppCheck { width: 180px; label: Strings.feat-memory; checked <=> root.cw-feat-memory; }
                                             }
                                             Row {
-                                                AppCheck { width: 180px; label: Strings.feat-quests; checked: false; enabled: false; }
+                                                AppCheck { width: 180px; label: Strings.feat-quests; checked <=> root.cw-feat-quests; }
                                                 HorizontalLayout {
                                                     spacing: 10px;
                                                     AppCheck {
@@ -6249,6 +6254,21 @@ export component AppWindow inherits Window {
                                                     font-weight: 700;
                                                 }
                                             }
+                                            // §2.3: the one clock every member reads
+                                            VerticalLayout {
+                                                spacing: 4px;
+                                                Text {
+                                                    text: Strings.os-utc;
+                                                    color: Theme.faint;
+                                                    font-size: Theme.fs-cap;
+                                                }
+                                                Text {
+                                                    text: root.org-utc-now;
+                                                    color: Theme.text;
+                                                    font-size: Theme.fs-body;
+                                                    font-weight: 700;
+                                                }
+                                            }
                                             VerticalLayout {
                                                 spacing: 4px;
                                                 Text {
@@ -6380,6 +6400,7 @@ export component AppWindow inherits Window {
                                             tooltip-left: true;
                                             clicked => {
                                                 root.of-memory-draft = root.org-feat-memory;
+                                                root.of-quests-draft = root.org-feat-quests;
                                                 root.of-vault-draft = false;
                                                 root.org-features-modal-open = true;
                                             }
@@ -9877,6 +9898,7 @@ export component AppWindow inherits Window {
         body: "";
         confirm-label: Strings.oc-propose;
         confirm-enabled: (root.of-memory-draft && !root.org-feat-memory)
+            || (root.of-quests-draft && !root.org-feat-quests)
             || (root.of-vault-draft && root.org-vault-enable == 1);
         dismissed => {
             root.org-features-modal-open = false;
@@ -9887,13 +9909,13 @@ export component AppWindow inherits Window {
             // modal is open, and the stale draft would then propose a set
             // omitting it - refused by the engine for a box the user never
             // touched (review 2026-08-12)
-            // quests and wallet have no draft (locked below) — but an
-            // ALREADY enabled one must ride along: the target set is
+            // the wallet has no draft (locked below) — but an ALREADY
+            // enabled one must ride along: the target set is
             // enable-only. An enabled vault needs no ride: the engine keeps
             // it by union.
             root.org-propose("set_features",
                 (root.of-memory-draft || root.org-feat-memory ? " memory" : "")
-                + (root.org-feat-quests ? " quests" : "")
+                + (root.of-quests-draft || root.org-feat-quests ? " quests" : "")
                 + (root.of-vault-draft && root.org-vault-enable == 1 ? " vault" : "")
                 + (root.org-feat-wallet ? " wallet" : ""));
         }
@@ -9905,12 +9927,10 @@ export component AppWindow inherits Window {
                 checked <=> root.of-memory-draft;
                 enabled: !root.org-feat-memory;
             }
-            // kanban and wallet are not built yet: locked here exactly like
-            // in the founding wizard (an already enabled one stays shown)
             AppCheck {
                 label: Strings.feat-quests;
-                checked: root.org-feat-quests;
-                enabled: false;
+                checked <=> root.of-quests-draft;
+                enabled: !root.org-feat-quests;
             }
             // vault (spec §3, E4): votable only in a prepared republic
             // within the bounds; otherwise the row names why
@@ -9935,6 +9955,7 @@ export component AppWindow inherits Window {
                     vertical-alignment: center;
                 }
             }
+            // the wallet is not built yet: locked like in the wizard
             AppCheck {
                 label: Strings.feat-wallet;
                 checked: root.org-feat-wallet;

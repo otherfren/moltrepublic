@@ -21,7 +21,7 @@
 // Each pane is one component taking only the selected sub-view key, so the
 // panes stay independently editable under scripts/dev-ui.sh hot-reload.
 
-import { Theme, Strings, HintTip, Kanban, KbCard, KbLine, KbPick, KbType, KbCheck, WikiState, WikiNavRow, WikiTabRow, WikiBlock, WikiSpan, WikiProp, VaultDepositRow, VaultGrantRow, VaultUnsealedRow } from "theme.slint";
+import { Theme, Strings, HintTip, Kanban, KbCard, KbLine, KbPick, KbType, KbCheck, KbCalBlock, WikiState, WikiNavRow, WikiTabRow, WikiBlock, WikiSpan, WikiProp, VaultDepositRow, VaultGrantRow, VaultUnsealedRow } from "theme.slint";
 import { AppButton, AppField, AppArea, AppDropdown, ScrollHint, DotLabel, InsetWell } from "components.slint";
 
 // ---------------------------------------------------------------------------
@@ -3418,6 +3418,663 @@ export component BasketBar inherits VerticalLayout {
     }
 }
 
+// The type legend (§2.4): a click narrows to that type.
+component KLegend inherits HorizontalLayout {
+    in property <[KbType]> types;
+    spacing: 6px;
+    alignment: start;
+    for t in root.types: Rectangle {
+        width: tchip.preferred-width + 14px;
+        height: 26px * Theme.ui-scale;
+        border-radius: Theme.win95 ? 0px : 4px;
+        border-width: 1px;
+        border-color: t.on ? Theme.accent : Theme.line;
+        background: t.on ? Theme.accent-soft : transparent;
+        accessible-role: button;
+        accessible-label: t.label;
+        tchip := TypeChip {
+            x: 7px;
+            height: 100%;
+            label: t.label;
+            slot: t.slot;
+        }
+        TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => {
+                Kanban.type-toggle(t.key);
+            }
+        }
+    }
+}
+
+// The §8 filters, shared by board, plan and dependencies (a local view
+// setting, never governance).
+component KFilters inherits VerticalLayout {
+    in property <[KbType]> legend;
+    spacing: 8px;
+    KChipRow {
+        chips: Kanban.filters;
+    }
+    KChipRow {
+        chips: Kanban.filters-status;
+    }
+    KChipRow {
+        chips: Kanban.filters-state;
+        for f in Kanban.filters-seat: KChipToggle {
+            label: f.label;
+            active: f.on;
+            clicked => {
+                Kanban.filter-toggle(f.key);
+            }
+        }
+    }
+    if root.legend.length > 0: KLegend {
+        types: root.legend;
+    }
+}
+
+// A fold toggle: ▸ closed, ▾ open.
+component KFold inherits Rectangle {
+    in property <bool> open;
+    callback clicked();
+    width: 18px * Theme.ui-scale;
+    height: self.width;
+    accessible-role: button;
+    accessible-label: root.open ? "▾" : "▸";
+    Text {
+        text: root.open ? "▾" : "▸";
+        color: Theme.dim;
+        font-size: Theme.fs-body;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// `plan` (§8): the deadline timeline. Rows left, the time axis right;
+// blocks at `when`, markers at `needed_by`, prerequisite links as arrows.
+component KPlan inherits Rectangle {
+    property <length> rh: 30px * Theme.ui-scale;
+    property <length> lw: min(320px, self.width * 0.4);
+    property <length> axis-h: 22px * Theme.ui-scale;
+    property <length> tl-w: max(40px, self.width - self.lw - 18px);
+    property <length> content-h: self.axis-h + (Kanban.plan-rows.length + (Kanban.plan-nodate >= 0 ? 1 : 0)) * self.rh + 8px;
+    vertical-stretch: 1;
+    background: Theme.panel;
+    border-radius: Theme.win95 ? 0px : 8px;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    clip: true;
+
+    pure function row-y(i: int) -> length {
+        return root.axis-h + i * root.rh + (Kanban.plan-nodate >= 0 && i >= Kanban.plan-nodate ? root.rh : 0px);
+    }
+    pure function at(x: float) -> length {
+        return root.lw + x * root.tl-w;
+    }
+
+    if Kanban.plan-rows.length == 0: Text {
+        text: Strings.kb-empty;
+        color: Theme.faint;
+        font-size: Theme.fs-cap;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    pfl := Flickable {
+        width: 100%;
+        height: 100%;
+        viewport-width: self.width;
+        viewport-height: root.content-h;
+        for r[i] in Kanban.plan-rows: Rectangle {
+            x: 0;
+            y: root.row-y(i);
+            width: pfl.width;
+            height: root.rh;
+            background: Math.mod(i, 2) == 0 ? transparent : Theme.panel-2;
+        }
+        for t in Kanban.plan-ticks: Rectangle {
+            x: root.at(t.x);
+            y: 0;
+            width: 1px;
+            height: root.content-h;
+            background: Theme.line;
+            Text {
+                x: 3px;
+                y: 3px;
+                text: t.label;
+                color: Theme.faint;
+                font-size: Theme.fs-cap;
+            }
+        }
+        if Kanban.plan-today >= 0: Rectangle {
+            x: root.at(Kanban.plan-today);
+            y: 0;
+            width: 2px;
+            height: root.content-h;
+            background: Theme.accent.transparentize(0.4);
+        }
+        if Kanban.plan-nodate >= 0: Text {
+            x: 8px;
+            y: root.row-y(Kanban.plan-nodate) - root.rh + 6px;
+            text: Strings.kb-no-date;
+            color: Theme.dim;
+            font-size: Theme.fs-cap;
+            font-weight: 700;
+        }
+        for a in Kanban.plan-arrows: Rectangle {
+            property <length> x1: root.at(a.x1);
+            property <length> x2: root.at(a.x2);
+            property <length> xm: self.x1 + 6px;
+            property <length> y1: root.row-y(a.r1) + root.rh / 2;
+            property <length> y2: root.row-y(a.r2) + root.rh / 2;
+            property <color> ink: a.bad ? Theme.bad : Theme.dim;
+            x: 0;
+            y: 0;
+            width: 0;
+            height: 0;
+            Rectangle {
+                x: parent.x1;
+                y: parent.y1;
+                width: 6px;
+                height: 1.5px;
+                background: parent.ink;
+            }
+            Rectangle {
+                x: parent.xm;
+                y: min(parent.y1, parent.y2);
+                width: 1.5px;
+                height: abs(parent.y2 - parent.y1);
+                background: parent.ink;
+            }
+            Rectangle {
+                x: min(parent.xm, parent.x2);
+                y: parent.y2;
+                width: abs(parent.x2 - parent.xm);
+                height: 1.5px;
+                background: parent.ink;
+            }
+            Text {
+                x: parent.x2 - 7px;
+                y: parent.y2 - 8px;
+                text: "▸";
+                color: parent.ink;
+                font-size: 11px;
+            }
+        }
+        for b in Kanban.plan-bars: Rectangle {
+            property <color> ink: b.bad ? Theme.bad : (b.slot >= 0 ? Kanban.type-color(b.slot) : Theme.dim);
+            x: b.marker ? root.at(b.x0) - 7px : root.at(b.x0);
+            y: root.row-y(b.row) + 6px;
+            width: b.marker ? 14px : max(4px, (b.x1 - b.x0) * root.tl-w);
+            height: root.rh - 12px;
+            border-radius: Theme.win95 ? 0px : 3px;
+            background: b.marker ? transparent : self.ink;
+            if b.marker: Text {
+                width: 100%;
+                height: 100%;
+                text: "◆";
+                color: parent.ink;
+                font-size: 13px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        for r[i] in Kanban.plan-rows: Rectangle {
+            x: 0;
+            y: root.row-y(i);
+            width: root.lw;
+            height: root.rh;
+            accessible-role: button;
+            accessible-label: r.title;
+            TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    Kanban.pick(r.id);
+                }
+            }
+            HorizontalLayout {
+                padding-left: 6px + r.depth * 14px;
+                padding-right: 8px;
+                spacing: 6px;
+                if r.kids: VerticalLayout {
+                    alignment: center;
+                    KFold {
+                        open: r.open;
+                        clicked => {
+                            Kanban.plan-toggle(r.id);
+                        }
+                    }
+                }
+                if !r.kids: Rectangle {
+                    width: 18px * Theme.ui-scale;
+                }
+                if r.type-slot >= 0: VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 8px * Theme.ui-scale;
+                        height: self.width;
+                        border-radius: Theme.win95 ? 0px : 2px;
+                        background: Kanban.type-color(r.type-slot);
+                    }
+                }
+                Text {
+                    text: r.title;
+                    color: r.bad ? Theme.bad : Theme.text;
+                    font-size: Theme.fs-body;
+                    font-weight: r.depth == 0 ? 700 : 400;
+                    overflow: elide;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                if r.size != "": VerticalLayout {
+                    alignment: center;
+                    TagChip {
+                        label: r.size;
+                        muted: true;
+                    }
+                }
+                Text {
+                    text: r.date;
+                    color: r.bad ? Theme.bad : Theme.faint;
+                    font-size: Theme.fs-cap;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+    ScrollHint {
+        x: parent.width - 5px;
+        view-h: pfl.height;
+        content-h: pfl.viewport-height;
+        scroll-y: pfl.viewport-y;
+    }
+}
+
+// `dependencies` (§8): the tasks nothing waits for on top, each open to
+// its prerequisites at any depth.
+component KDeps inherits Rectangle {
+    vertical-stretch: 1;
+    background: Theme.panel;
+    border-radius: Theme.win95 ? 0px : 8px;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    clip: true;
+    if Kanban.deps.length == 0: Text {
+        text: Strings.kb-empty;
+        color: Theme.faint;
+        font-size: Theme.fs-cap;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    dfl := Flickable {
+        width: 100%;
+        height: 100%;
+        viewport-width: self.width;
+        viewport-height: dlist.preferred-height;
+        dlist := VerticalLayout {
+            padding: 8px;
+            spacing: 4px;
+            alignment: start;
+            for r in Kanban.deps: Rectangle {
+                height: max(32px * Theme.ui-scale, drow.preferred-height);
+                border-radius: Theme.win95 ? 0px : 6px;
+                background: dta.has-hover ? Theme.raised : (r.depth == 0 ? Theme.panel-2 : transparent);
+                opacity: r.muted ? 0.55 : 1.0;
+                accessible-role: button;
+                accessible-label: r.title;
+                dta := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        Kanban.pick(r.id);
+                    }
+                }
+                drow := HorizontalLayout {
+                    padding-left: 8px + r.depth * 18px;
+                    padding-right: 8px;
+                    padding-top: 3px;
+                    padding-bottom: 3px;
+                    spacing: 8px;
+                    if r.kids: VerticalLayout {
+                        alignment: center;
+                        KFold {
+                            open: r.open;
+                            clicked => {
+                                Kanban.deps-toggle(r.key);
+                            }
+                        }
+                    }
+                    if !r.kids: Rectangle {
+                        width: 18px * Theme.ui-scale;
+                    }
+                    Text {
+                        text: r.title;
+                        color: Theme.text;
+                        font-size: Theme.fs-body;
+                        font-weight: r.depth == 0 ? 700 : 400;
+                        overflow: elide;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    if r.also != "": Text {
+                        text: r.also;
+                        color: Theme.faint;
+                        font-size: Theme.fs-cap;
+                        font-italic: true;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+                    if r.type-slot >= 0: TypeChip {
+                        label: r.type-label;
+                        slot: r.type-slot;
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        TagChip {
+                            label: r.badge;
+                            tone: r.bad ? Theme.bad : Theme.accent;
+                        }
+                    }
+                    if r.progress != "": Text {
+                        text: r.progress;
+                        color: Theme.dim;
+                        font-size: Theme.fs-cap;
+                        vertical-alignment: center;
+                    }
+                    if r.needed != "": Text {
+                        text: r.needed;
+                        color: r.bad ? Theme.bad : Theme.faint;
+                        font-size: Theme.fs-cap;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: r.short;
+                        color: Theme.faint;
+                        font-size: Theme.fs-cap;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+    ScrollHint {
+        x: parent.width - 5px;
+        view-h: dfl.height;
+        content-h: dfl.viewport-height;
+        scroll-y: dfl.viewport-y;
+    }
+}
+
+// One calendar block: a click opens the task, a drag reports where it was
+// let go in its parent's coordinates; a shadow is the basket's, never
+// dragged.
+component KCalChip inherits Rectangle {
+    in property <KbCalBlock> b;
+    callback dropped(length, length);
+    property <bool> dragged: false;
+    property <bool> suppress: false;
+    property <color> ink: root.b.bad ? Theme.bad : (root.b.slot >= 0 ? Kanban.type-color(root.b.slot) : Theme.dim);
+    accessible-role: button;
+    accessible-label: root.b.title;
+    border-radius: Theme.win95 ? 0px : 3px;
+    background: root.b.shadow ? transparent : self.ink.transparentize(0.7);
+    border-width: root.b.shadow ? 0px : 1px;
+    border-color: self.ink;
+    opacity: root.dragged ? 0.5 : 1.0;
+    clip: true;
+    if root.b.shadow: Dashes {
+        width: 100%;
+        height: 100%;
+    }
+    Text {
+        x: 4px;
+        width: parent.width - 6px;
+        text: root.b.time != "" ? "\{root.b.time} \{root.b.title}" : root.b.title;
+        color: Theme.text;
+        font-size: 11px * Theme.ui-scale;
+        overflow: elide;
+        vertical-alignment: root.b.all-day || parent.height < 30px ? center : top;
+    }
+    TouchArea {
+        mouse-cursor: root.b.src >= 0 ? MouseCursor.pointer : MouseCursor.default;
+        moved => {
+            if (self.pressed && root.b.src >= 0
+                && (abs(self.mouse-x - self.pressed-x) > 6px || abs(self.mouse-y - self.pressed-y) > 6px)) {
+                root.dragged = true;
+            }
+        }
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down) {
+                root.suppress = false;
+            }
+            if (e.kind == PointerEventKind.up && root.dragged) {
+                root.dragged = false;
+                root.suppress = true;
+                root.dropped(root.x + self.mouse-x, root.y + self.mouse-y);
+            }
+        }
+        clicked => {
+            if (!root.suppress && root.b.id != "" && !root.b.shadow) {
+                Kanban.pick(root.b.id);
+            }
+            root.suppress = false;
+        }
+    }
+}
+
+// `calendar` (§8): month or week, UTC, timed tasks only. A drag stages a
+// move; a click on a free slot opens the form at that slot.
+component KCalendar inherits VerticalLayout {
+    property <length> hh: 36px * Theme.ui-scale;
+    property <length> gutter: 44px * Theme.ui-scale;
+    property <length> band-h: 3 * 20px * Theme.ui-scale + 4px;
+    spacing: 8px;
+    vertical-stretch: 1;
+    HorizontalLayout {
+        spacing: 6px;
+        AppButton {
+            label: "◀";
+            pad: 10px;
+            clicked => {
+                Kanban.cal-step(-1);
+            }
+        }
+        AppButton {
+            label: Strings.kb-today;
+            clicked => {
+                Kanban.cal-today();
+            }
+        }
+        AppButton {
+            label: "▶";
+            pad: 10px;
+            clicked => {
+                Kanban.cal-step(1);
+            }
+        }
+        Text {
+            text: Kanban.cal-title;
+            color: Theme.text;
+            font-size: Theme.fs-h2;
+            font-weight: 700;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        VerticalLayout {
+            alignment: center;
+            ChipRow {
+                KChipToggle {
+                    label: Strings.kb-month;
+                    active: !Kanban.cal-week;
+                    clicked => {
+                        Kanban.cal-set-week(false);
+                    }
+                }
+                KChipToggle {
+                    label: Strings.kb-week;
+                    active: Kanban.cal-week;
+                    clicked => {
+                        Kanban.cal-set-week(true);
+                    }
+                }
+            }
+        }
+    }
+    HorizontalLayout {
+        padding-left: Kanban.cal-week ? root.gutter : 0px;
+        for w in Kanban.cal-weekdays: Text {
+            text: w;
+            color: Theme.dim;
+            font-size: Theme.fs-cap;
+            font-weight: 700;
+            horizontal-alignment: center;
+            horizontal-stretch: 1;
+        }
+    }
+    // -- month
+    if !Kanban.cal-week: mg := Rectangle {
+        property <length> cw: self.width / 7;
+        property <int> weeks: max(1, Math.ceil(Kanban.cal-days.length / 7));
+        property <length> ch: self.height / self.weeks;
+        vertical-stretch: 1;
+        min-height: 300px;
+        clip: true;
+        for d[i] in Kanban.cal-days: Rectangle {
+            x: Math.mod(i, 7) * mg.cw;
+            y: Math.floor(i / 7) * mg.ch;
+            width: mg.cw;
+            height: mg.ch;
+            border-width: 0.5px;
+            border-color: Theme.line;
+            background: d.today ? Theme.accent-soft : (d.in-month ? Theme.panel : Theme.panel-2);
+            accessible-role: button;
+            accessible-label: d.date;
+            TouchArea {
+                clicked => {
+                    Kanban.cal-new(i, -1);
+                }
+            }
+            Text {
+                x: 5px;
+                y: 3px;
+                text: d.label;
+                color: d.in-month ? Theme.dim : Theme.faint;
+                font-size: Theme.fs-cap;
+                font-weight: d.today ? 700 : 400;
+            }
+            if d.more > 0: Text {
+                x: 5px;
+                y: parent.height - self.height - 3px;
+                text: "+\{d.more}";
+                color: Theme.faint;
+                font-size: Theme.fs-cap;
+            }
+        }
+        for b in Kanban.cal-blocks: KCalChip {
+            b: b;
+            x: Math.mod(b.day, 7) * mg.cw + 3px;
+            y: Math.floor(b.day / 7) * mg.ch + 20px * Theme.ui-scale + b.order * 20px * Theme.ui-scale;
+            width: mg.cw - 6px;
+            height: 18px * Theme.ui-scale;
+            dropped(px, py) => {
+                Kanban.cal-drop(b.src,
+                    clamp(Math.floor(py / mg.ch), 0, mg.weeks - 1) * 7 + clamp(Math.floor(px / mg.cw), 0, 6),
+                    -1);
+            }
+        }
+    }
+    // -- week: an all-day band over the hours
+    if Kanban.cal-week: bd := Rectangle {
+        property <length> cw: (self.width - root.gutter) / 7;
+        height: root.band-h;
+        Rectangle {
+            x: root.gutter;
+            width: parent.width - root.gutter;
+            height: 100%;
+            background: Theme.panel-2;
+            TouchArea {
+                clicked => {
+                    Kanban.cal-new(clamp(Math.floor(self.mouse-x / bd.cw), 0, 6), -1);
+                }
+            }
+        }
+        for b in Kanban.cal-blocks: KCalChip {
+            b: b;
+            visible: b.all-day && b.order < 3;
+            x: root.gutter + b.day * bd.cw + 2px;
+            y: 2px + b.order * 20px * Theme.ui-scale;
+            width: bd.cw - 4px;
+            height: 18px * Theme.ui-scale;
+            dropped(px, py) => {
+                Kanban.cal-drop(b.src, clamp(Math.floor((px - root.gutter) / bd.cw), 0, 6), -1);
+            }
+        }
+    }
+    if Kanban.cal-week: wk := Rectangle {
+        property <length> cw: (self.width - root.gutter) / 7;
+        vertical-stretch: 1;
+        min-height: 300px;
+        clip: true;
+        background: Theme.panel;
+        wfl := Flickable {
+            width: 100%;
+            height: 100%;
+            viewport-width: self.width;
+            viewport-height: 24 * root.hh;
+            Rectangle {
+                x: root.gutter;
+                width: wk.width - root.gutter;
+                height: 24 * root.hh;
+                TouchArea {
+                    clicked => {
+                        Kanban.cal-new(
+                            clamp(Math.floor(self.mouse-x / wk.cw), 0, 6),
+                            Math.floor(self.mouse-y / root.hh * 2) * 30);
+                    }
+                }
+            }
+            for h in 24: Rectangle {
+                x: 0;
+                y: h * root.hh;
+                width: wk.width;
+                height: 1px;
+                background: Theme.line;
+                Text {
+                    x: 4px;
+                    y: 2px;
+                    text: "\{h < 10 ? "0" : ""}\{h}:00";
+                    color: Theme.faint;
+                    font-size: Theme.fs-cap;
+                }
+            }
+            for c in 7: Rectangle {
+                x: root.gutter + c * wk.cw;
+                y: 0;
+                width: 1px;
+                height: 24 * root.hh;
+                background: Theme.line;
+            }
+            for b in Kanban.cal-blocks: KCalChip {
+                b: b;
+                visible: !b.all-day;
+                x: root.gutter + b.day * wk.cw + b.lane * (wk.cw - 4px) / max(1, b.lanes) + 2px;
+                y: b.start * 24 * root.hh;
+                width: (wk.cw - 4px) / max(1, b.lanes) - 2px;
+                height: max(16px, (b.end - b.start) * 24 * root.hh - 1px);
+                dropped(px, py) => {
+                    Kanban.cal-drop(b.src,
+                        clamp(Math.floor((px - root.gutter) / wk.cw), 0, 6),
+                        clamp(Math.floor(py / root.hh * 2) * 30, 0, 23 * 60 + 30));
+                }
+            }
+        }
+    }
+}
+
 export component QuestsPane inherits VerticalLayout {
     in property <string> view;
     // a vote badge or a vote action: open that proposal's discussion
@@ -3448,47 +4105,8 @@ export component QuestsPane inherits VerticalLayout {
         title: Strings.kb-title-board;
         hint: Strings.kb-hint-board;
     }
-    if !Kanban.form-open && Kanban.sel == "" && root.view == "board": KChipRow {
-        chips: Kanban.filters;
-    }
-    if !Kanban.form-open && Kanban.sel == "" && root.view == "board": KChipRow {
-        chips: Kanban.filters-status;
-    }
-    if !Kanban.form-open && Kanban.sel == "" && root.view == "board": KChipRow {
-        chips: Kanban.filters-state;
-        for f in Kanban.filters-seat: KChipToggle {
-            label: f.label;
-            active: f.on;
-            clicked => {
-                Kanban.filter-toggle(f.key);
-            }
-        }
-    }
-    if !Kanban.form-open && Kanban.sel == "" && root.view == "board" && Kanban.legend.length > 0: HorizontalLayout {
-        spacing: 6px;
-        alignment: start;
-        for t in Kanban.legend: Rectangle {
-            width: tchip.preferred-width + 14px;
-            height: 26px * Theme.ui-scale;
-            border-radius: Theme.win95 ? 0px : 4px;
-            border-width: 1px;
-            border-color: t.on ? Theme.accent : Theme.line;
-            background: t.on ? Theme.accent-soft : transparent;
-            accessible-role: button;
-            accessible-label: t.label;
-            tchip := TypeChip {
-                x: 7px;
-                height: 100%;
-                label: t.label;
-                slot: t.slot;
-            }
-            TouchArea {
-                mouse-cursor: MouseCursor.pointer;
-                clicked => {
-                    Kanban.type-toggle(t.key);
-                }
-            }
-        }
+    if !Kanban.form-open && Kanban.sel == "" && root.view == "board": KFilters {
+        legend: Kanban.legend;
     }
     // the columns stay laid out (hidden) under the form and the drill-in:
     // the drop target is read off their positions
@@ -3606,26 +4224,35 @@ export component QuestsPane inherits VerticalLayout {
         }
     }
 
-    // -- the views of the next stage ---------------------------------------
+    // -- Plan: the deadline timeline -------------------------------------
     if !Kanban.form-open && Kanban.sel == "" && root.view == "plan": KHead {
         glyph: "🗓️";
         title: Strings.kb-title-plan;
-        hint: Strings.kb-off-board;
+        hint: Strings.kb-hint-plan;
     }
+    if !Kanban.form-open && Kanban.sel == "" && root.view == "plan": KFilters {
+        legend: Kanban.plan-legend;
+    }
+    if !Kanban.form-open && Kanban.sel == "" && root.view == "plan": KPlan { }
+
+    // -- Calendar: timed tasks only ----------------------------------------
     if !Kanban.form-open && Kanban.sel == "" && root.view == "calendar": KHead {
         glyph: "📅";
         title: Strings.kb-title-calendar;
-        hint: Strings.kb-off-board;
+        hint: Strings.kb-hint-calendar;
     }
+    if !Kanban.form-open && Kanban.sel == "" && root.view == "calendar": KCalendar { }
+
+    // -- Dependencies ------------------------------------------------------
     if !Kanban.form-open && Kanban.sel == "" && root.view == "dependencies": KHead {
         glyph: "🔗";
         title: Strings.kb-title-deps;
-        hint: Strings.kb-off-board;
+        hint: Strings.kb-hint-deps;
     }
-    if !Kanban.form-open && Kanban.sel == ""
-        && (root.view == "plan" || root.view == "calendar" || root.view == "dependencies"): Rectangle {
-        vertical-stretch: 1;
+    if !Kanban.form-open && Kanban.sel == "" && root.view == "dependencies": KFilters {
+        legend: Kanban.deps-legend;
     }
+    if !Kanban.form-open && Kanban.sel == "" && root.view == "dependencies": KDeps { }
 
     // proposals: the generic list sits below this pane, and the bar after it
     if root.view == "proposals" && !Kanban.form-open && Kanban.sel == "": KHead {
