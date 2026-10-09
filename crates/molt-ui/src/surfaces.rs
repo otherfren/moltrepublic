@@ -1142,8 +1142,14 @@ pub(crate) async fn gather_surfaces(
                 Ok(Reply::Actions { actions }) => actions,
                 _ => Vec::new(),
             };
+            let draft = match wallet.execute(Command::KanbanDraftLoad).await {
+                Ok(Reply::KanbanDraft { draft }) => Some(draft),
+                _ => None,
+            };
             let seats = members.iter().map(|m| m.name.clone()).collect();
-            Some(crate::kanban::KanbanFeed::new(snap, actions, seats, member.clone()))
+            let mut feed = crate::kanban::KanbanFeed::new(snap, actions, seats, member.clone());
+            feed.draft = draft;
+            Some(feed)
         }
         None => None,
     };

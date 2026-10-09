@@ -1498,6 +1498,11 @@ lexicon! {
     kb_f_created: "Created by me", "Von mir erstellt";
     kb_f_vote: "Needs my vote", "Braucht meine Stimme";
     kb_f_closed: "Closed", "Geschlossen";
+    kb_title_proposals: "Proposals", "Vorschläge";
+    kb_hint_proposals: "Kanban changesets waiting for votes.", "Kanban-Änderungen, die auf Stimmen warten.";
+    kb_f_timed: "timed", "mit Termin";
+    kb_f_as: "as", "als";
+    kb_not_number: "not a number", "keine Zahl";
     kb_n_kanban: "Kanban changed", "Kanban geändert";
     kb_n_vote: "Vote waiting", "Abstimmung wartet";
     kb_n_start: "Appointment starting", "Termin beginnt";
@@ -1544,7 +1549,6 @@ lexicon! {
     kb_ph_date: "YYYY-MM-DD", "JJJJ-MM-TT";
     kb_ph_when: "YYYY-MM-DD or YYYY-MM-DDTHH:MM (UTC)", "JJJJ-MM-TT oder JJJJ-MM-TTTHH:MM (UTC)";
     kb_ph_filter: "Filter tasks", "Aufgaben filtern";
-    kb_ph_summary: "Summary", "Zusammenfassung";
     kb_ph_desc: "What and why - markdown", "Was und warum - Markdown";
     kb_sec_actions: "To act on", "Für mich dran";
     kb_sec_mine: "Assigned or created", "Zugewiesen oder erstellt";

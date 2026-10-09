@@ -1089,6 +1089,13 @@ export global Kanban {
     in-out property <[KbCard]> wip;
     in-out property <[KbCard]> done;
     in-out property <[KbPick]> filters;
+    in-out property <[KbPick]> filters-status;
+    in-out property <[KbPick]> filters-state;
+    in-out property <[KbPick]> filters-seat;
+    // cards per column, the basket's shadows not counted
+    in-out property <int> todo-count;
+    in-out property <int> wip-count;
+    in-out property <int> done-count;
     in-out property <[KbType]> legend;
     callback filter-toggle(string);
     callback type-toggle(string);
@@ -1921,6 +1928,11 @@ export global Strings {
     in property <string> kb-f-created;
     in property <string> kb-f-vote;
     in property <string> kb-f-closed;
+    in property <string> kb-title-proposals;
+    in property <string> kb-hint-proposals;
+    in property <string> kb-f-timed;
+    in property <string> kb-f-as;
+    in property <string> kb-not-number;
     in property <string> kb-n-kanban;
     in property <string> kb-n-vote;
     in property <string> kb-n-start;
@@ -1967,7 +1979,6 @@ export global Strings {
     in property <string> kb-ph-date;
     in property <string> kb-ph-when;
     in property <string> kb-ph-filter;
-    in property <string> kb-ph-summary;
     in property <string> kb-ph-desc;
     in property <string> kb-sec-actions;
     in property <string> kb-sec-mine;

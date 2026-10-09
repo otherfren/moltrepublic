@@ -151,6 +151,7 @@ fn a_staged_move_leaves_the_card_and_adds_a_shadow() {
     assert_eq!(docs.staged, "in basket → in progress");
     assert!(b.cols[1][0].shadow);
     assert_eq!(b.cols[1][0].id.as_str(), id(3));
+    assert_eq!(b.counts, [4, 1, 0], "a shadow is not on the board");
 }
 
 #[test]
@@ -176,11 +177,16 @@ fn the_basket_review_is_the_voters_view() {
     let mut basket = Basket::default();
     basket.stage_state(&id(2), "wip", "", &[]);
     let form = Form { title: "write".into(), assignees: vec!["mara".into()], ..Form::default() };
-    basket.add(form_act(&form).expect("a valid add"));
+    basket.add(form_act(&l, &form).expect("a valid add"));
     let r = review(&l, &f, &basket);
     assert!(r.acts.iter().any(|a| a == "new 1 add: write"), "{:?}", r.acts);
     assert!(r.acts.iter().any(|a| a.starts_with(&short_id(&id(2)))), "{:?}", r.acts);
-    assert!(r.advisories.iter().any(|a| a.starts_with("would void now: ")), "{:?}", r.advisories);
+    assert_eq!(
+        r.advisories.iter().filter(|a| a.starts_with("would void now: ")).count(),
+        1,
+        "{:?}",
+        r.advisories
+    );
     assert!(r.advisories.iter().any(|a| a.ends_with("no acceptance criteria")), "{:?}", r.advisories);
     assert_eq!(auto_summary(&r.acts).matches("(+").count(), 1);
 }
@@ -228,14 +234,14 @@ fn the_form_builds_a_checked_add() {
         interval: "2".into(),
         ..Form::default()
     };
-    let act = form_act(&f).expect("valid");
+    let act = form_act(&Lexicon::en(), &f).expect("valid");
     assert_eq!(act["repeat"], json!({"freq": "weekly", "interval": 2}));
     assert_eq!(act["acceptance"], json!(["one"]), "blank items drop");
     f.due = "2026-8-1".into();
-    assert!(form_act(&f).is_err(), "a date must round-trip");
+    assert!(form_act(&Lexicon::en(), &f).is_err(), "a date must round-trip");
     f.due = String::new();
     f.assignees.clear();
-    assert!(form_act(&f).is_err(), "at least one assignee");
+    assert!(form_act(&Lexicon::en(), &f).is_err(), "at least one assignee");
 }
 
 #[test]
@@ -315,7 +321,7 @@ fn a_rescued_add_gets_a_fresh_id_and_its_references_follow() {
     assert!(!r.advisories.iter().any(|a| a.starts_with("would void")), "{:?}", r.advisories);
 }
 
-/// The legend names every type on the board, filtered or not.
+/// §2.4: the legend names the types the view lists, the type filter aside.
 #[test]
 fn the_legend_survives_a_type_filter() {
     let l = Lexicon::en();
@@ -372,4 +378,103 @@ fn each_basket_row_renders_its_own_act() {
     assert_eq!(r.rows.len(), 2);
     assert!(r.rows[0].contains("size"), "{:?}", r.rows);
     assert!(r.rows[1].contains("state"), "{:?}", r.rows);
+}
+
+/// §2.4: a type only a hidden task carries is not in the legend.
+#[test]
+fn the_legend_skips_types_the_view_hides() {
+    let l = Lexicon::en();
+    let mut applied = feed().snap.applied;
+    applied.insert(1, cs(vec![add(31, "gone", &["mara"], json!({"type": "chore"})), st(31, "cancelled", Some("n"))]));
+    let f = feed_with(applied, json!([]), "mara");
+    let b = board(&l, &f, &BTreeSet::new(), &Basket::default());
+    let labels: Vec<String> = b.legend.iter().map(|t| t.label.to_string()).collect();
+    assert_eq!(labels, ["bug"]);
+    let on: BTreeSet<String> = ["closed".to_string()].into();
+    let b = board(&l, &f, &on, &Basket::default());
+    assert!(b.legend.iter().any(|t| t.label == "chore"), "closed lists it");
+}
+
+/// Two pending changesets on one card: the lower id badges it, every push.
+#[test]
+fn the_vote_badge_is_the_lowest_pending_id() {
+    let l = Lexicon::en();
+    let p = |n: u64| json!({
+        "id": n, "surface": "quests", "approvals": 0, "threshold": 2, "state": "proposed",
+        "payload": cs(vec![st(1, "success", None)]),
+    });
+    let f = feed_with(feed().snap.applied, json!([p(12), p(10)]), "mara");
+    assert_eq!(vote_badges(&l, &f.snap).get(&id(1)).map(|v| v.1), Some(10));
+}
+
+/// §8: every filter of the table is offered, grouped in rows.
+#[test]
+fn the_filter_rows_offer_the_whole_table() {
+    let l = Lexicon::en();
+    let f = feed();
+    let rows = filter_rows(&l, &f, &BTreeSet::new());
+    let keys: Vec<Vec<String>> =
+        rows.iter().map(|r| r.iter().map(|p| p.key.to_string()).collect()).collect();
+    assert_eq!(keys[0], ["mine", "to_act_on", "starting_now", "created_by_me", "needs_my_vote"]);
+    assert_eq!(
+        keys[1],
+        ["blocked", "stuck", "overdue", "date_conflict", "floating", "timed", "size:XS", "size:S", "size:M", "size:L", "size:XL", "size:XXL"]
+    );
+    assert_eq!(keys[2], ["todo", "wip", "success", "fail", "cancelled", "closed"]);
+    assert_eq!(keys[3], ["seat:walter", "seat:bot"], "another seat's view");
+    let on: BTreeSet<String> = ["size:M".to_string()].into();
+    assert_eq!(ids(&board(&l, &f, &on, &Basket::default()).cols[1]), [id(1)]);
+    assert!(board(&l, &f, &on, &Basket::default()).cols[0].is_empty());
+    let on: BTreeSet<String> = ["mine".to_string(), "seat:walter".to_string()].into();
+    let b = board(&l, &f, &on, &Basket::default());
+    assert_eq!(ids(&b.cols[0]), [id(2), id(6), id(4)], "walter's tasks");
+    let rows = filter_rows(&l, &f, &on);
+    assert!(rows[3][0].on);
+}
+
+/// An engine event raises the notification its `wake_on` reason names.
+#[test]
+fn engine_events_map_to_notice_reasons() {
+    use molt_core::{Event, ProposalId, Surface};
+    let proposed = |by: &str| Event::Proposed { id: ProposalId(1), surface: Surface::Memory, by: by.into() };
+    assert_eq!(notice_reason(&proposed("walter"), "mara"), Some(("vote_pending", String::new())));
+    assert_eq!(notice_reason(&proposed("mara"), "mara"), None, "an own proposal");
+    let applied = |surface| Event::Applied { id: ProposalId(1), surface };
+    assert_eq!(notice_reason(&applied(Surface::Quests), "mara"), Some(("kanban", String::new())));
+    assert_eq!(notice_reason(&applied(Surface::Memory), "mara"), None);
+    let poke = |by: &str, to: &str| Event::Poked { by: by.into(), to: to.into() };
+    assert_eq!(notice_reason(&poke("walter", "mara"), "mara"), Some(("poked", "walter".to_string())));
+    assert_eq!(notice_reason(&poke("mara", "walter"), "mara"), None, "the sender's echo");
+}
+
+/// The form's errors speak the reader's language.
+#[test]
+fn a_form_number_error_is_localized() {
+    let f = Form {
+        title: "sync".into(),
+        assignees: vec!["mara".into()],
+        mode: 2,
+        start: "2026-10-12T09:00".into(),
+        end: "2026-10-12T10:00".into(),
+        freq: "weekly".into(),
+        interval: "x".into(),
+        ..Form::default()
+    };
+    assert_eq!(form_act(&Lexicon::de(), &f), Err("Alle: keine Zahl".to_string()));
+    assert_eq!(form_act(&Lexicon::en(), &f), Err("Every: not a number".to_string()));
+}
+
+/// After a Propose only the acts it sent leave, wherever they now sit.
+#[test]
+fn settling_a_propose_removes_exactly_what_was_sent() {
+    let mut basket = Basket::default();
+    basket.stage_state(&id(1), "success", "", &[]);
+    basket.stage_state(&id(3), "wip", "", &[]);
+    basket.summary = "s".into();
+    let sent = basket.acts.clone();
+    basket.acts.remove(0);
+    basket.stage_state(&id(2), "wip", "", &[]);
+    basket.settle(&sent);
+    assert_eq!(basket.acts, [st(2, "wip", None)]);
+    assert_eq!(basket.summary, "");
 }

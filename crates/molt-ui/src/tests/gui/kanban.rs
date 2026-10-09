@@ -70,21 +70,13 @@ fn cards(m: &ModelRc<KbCard>) -> Vec<KbCard> {
 /// What `propose` sends, run to completion.
 fn propose_basket(node: &Node, rt: &tokio::runtime::Runtime) {
     let k = node.ui.global::<Kanban>();
-    let payload = with(|st| {
-        let rev = st
-            .feed
-            .as_ref()
-            .and_then(|f| f.snap.board.as_ref())
-            .and_then(|b| b.get("rev"))
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        st.basket.payload(rev, &k.get_basket_auto())
-    });
+    let (payload, sent) = with(|st| st.begin_propose(String::new(), &k.get_basket_auto()))
+        .expect("a basket to propose");
     let reply = rt
         .block_on(node.w.execute(Command::Propose { surface: Surface::Quests, payload }))
         .expect("the engine takes the changeset");
     assert!(matches!(reply, Reply::Proposed { .. }), "{reply:?}");
-    with(|st| st.basket = crate::kanban::Basket::default());
+    with(|st| st.settle_propose(Some(&sent)));
     node.mirror(rt);
 }
 
@@ -176,17 +168,83 @@ fn the_basket_survives_in_the_draft() {
     });
     let saved = saved.expect("the basket was saved");
     assert!(saved.contains("kept"), "{saved}");
-    // a fresh window state adopts it on the next open of this workspace
+    // a fresh window state adopts it from the next push
     with(|st| *st = crate::actions::kanban::KanbanUi::default());
     node.mirror(&rt);
-    assert_eq!(k.get_basket_count(), 0, "the load is asynchronous");
-    let ws = with(|st| st.workspace.clone());
-    crate::actions::kanban::adopt_draft(&node.ui, &ws, &saved);
-    assert_eq!(k.get_basket_count(), 1);
-    crate::actions::kanban::adopt_draft(&node.ui, &ws, "{}");
-    assert_eq!(k.get_basket_count(), 1, "never over staged work");
+    assert_eq!(k.get_basket_count(), 1, "the push carried the stored basket");
+    k.invoke_form_new();
+    k.set_f_title("more".into());
+    k.invoke_form_submit();
+    node.mirror(&rt);
+    assert_eq!(k.get_basket_count(), 2, "adopted once, never over staged work");
     k.invoke_basket_discard();
     assert_eq!(k.get_basket_count(), 0);
+}
+
+/// One Propose at a time; acts staged meanwhile stay in the basket.
+#[test]
+fn a_propose_in_flight_keeps_what_was_staged_meanwhile() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    let node = quests_node(tmp.path(), &rt);
+    let k = node.ui.global::<Kanban>();
+    form_new(&node.ui);
+    k.set_f_title("first".into());
+    assert!(form_submit(&node.ui));
+    let (payload, sent) = with(|st| st.begin_propose("mine".into(), "auto")).expect("begins");
+    assert_eq!(payload["summary"], serde_json::json!("mine"));
+    let rev = with(|st| st.feed.as_ref().map(|f| f.folded.rev));
+    assert_eq!(payload["base_rev"].as_u64(), rev, "the fold the review checked");
+    assert!(with(|st| st.begin_propose(String::new(), "auto")).is_none(), "in flight");
+    form_new(&node.ui);
+    k.set_f_title("second".into());
+    assert!(form_submit(&node.ui));
+    with(|st| st.settle_propose(Some(&sent)));
+    let left = with(|st| st.basket.to_draft());
+    assert!(left.contains("second") && !left.contains("first"), "{left}");
+    assert!(!left.contains("mine"), "the summary went with the vote");
+    assert!(with(|st| st.begin_propose(String::new(), "auto")).is_some(), "settled");
+}
+
+/// Toasts follow the APPLIED `wake_on` from the session push.
+#[test]
+fn notices_follow_the_applied_wake_on() {
+    if !BACKEND.with(|b| b.replace(true)) {
+        i_slint_backend_testing::init_no_event_loop();
+    }
+    with(|st| *st = crate::actions::kanban::KanbanUi::default());
+    let ui = AppWindow::new().expect("headless window");
+    let chat_ui = Arc::new(Mutex::new(ChatUiState::default()));
+    let mut sv = SessionView::default();
+    sv.settings.wake_on = vec!["vote_pending".to_string()];
+    apply_session(&ui, &sv, true, &chat_ui);
+    ui.set_node_member("a".into());
+    let applied = molt_core::Event::Applied { id: molt_core::ProposalId(1), surface: Surface::Quests };
+    crate::actions::kanban::notice_event(&ui, &applied);
+    let take = || with(|st| st.notices.take(&crate::i18n::Lexicon::en(), "poked"));
+    assert_eq!(take(), None, "kanban is switched off");
+    let proposed = molt_core::Event::Proposed { id: molt_core::ProposalId(2), surface: Surface::Quests, by: "b".into() };
+    crate::actions::kanban::notice_event(&ui, &proposed);
+    assert_eq!(take().as_deref(), Some("Vote waiting"));
+    let all = molt_core::kanban_wake::WAKE_REASONS.iter().map(|r| (*r).to_string()).collect();
+    sv.settings.wake_on = all;
+    apply_session(&ui, &sv, true, &chat_ui);
+}
+
+/// The draft saves reach the engine in the order they were made.
+#[test]
+fn draft_saves_land_in_order() {
+    let rt = rt();
+    let saver = std::sync::Arc::new(crate::actions::kanban::DraftSaver::default());
+    let written = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let first = saver.next();
+    let second = saver.next();
+    let w = written.clone();
+    rt.block_on(saver.save(second, || async move { w.lock().expect("lock").push(2) }));
+    let w = written.clone();
+    rt.block_on(saver.save(first, || async move { w.lock().expect("lock").push(1) }));
+    assert_eq!(*written.lock().expect("lock"), [2], "an older save never lands after a newer one");
 }
 
 /// The drill-in names both link directions and offers only legal moves.
@@ -250,10 +308,15 @@ fn the_skill_modal_shows_the_mcp_skill() {
 
 #[cfg(feature = "live-preview")]
 fn board_screen(ui: &AppWindow) -> Shown {
+    quests_screen(ui, "board")
+}
+
+#[cfg(feature = "live-preview")]
+fn quests_screen(ui: &AppWindow, view: &str) -> Shown {
     ui.window().set_size(slint::PhysicalSize::new(1400, 900));
     ui.set_screen(AppScreen::Main);
     ui.set_selected_surface("quests".into());
-    ui.set_selected_view("board".into());
+    ui.set_selected_view(view.into());
     let shown = show_headless(ui);
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
     shown
@@ -299,4 +362,27 @@ fn a_real_drag_onto_in_progress_stages_a_start() {
     assert_eq!(k.get_basket_count(), 1, "the drop staged one act");
     assert!(cards(&k.get_wip()).iter().any(|c| c.shadow));
     assert_eq!(k.get_sel().as_str(), "", "a drag is not a click");
+}
+
+/// §8: the New task button and the basket bar on every kanban view, the
+/// proposals list included.
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_proposals_view_keeps_new_task_and_the_basket() {
+    type H = i_slint_backend_testing::ElementHandle;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    let node = quests_node(tmp.path(), &rt);
+    crate::actions::kanban::wire(&node.ui, &node.ctx(&rt));
+    let k = node.ui.global::<Kanban>();
+    form_new(&node.ui);
+    k.set_f_title("staged".into());
+    assert!(form_submit(&node.ui));
+    let _shown = quests_screen(&node.ui, "proposals");
+    assert!(H::find_by_accessible_label(&node.ui, "New task").next().is_some(), "New task");
+    assert!(
+        H::find_by_accessible_label(&node.ui, "🧺 1 changes").next().is_some(),
+        "the basket bar"
+    );
 }

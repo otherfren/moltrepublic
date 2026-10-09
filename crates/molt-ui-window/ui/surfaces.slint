@@ -2665,6 +2665,8 @@ component KanbanColumn inherits Rectangle {
     in property <string> title;
     in property <color> tone;
     in property <[KbCard]> cards;
+    // the real cards, the basket's shadows not counted
+    in property <int> count;
     // a dragged card hovers this column
     in property <bool> hot: false;
     callback vote(int);
@@ -2689,7 +2691,7 @@ component KanbanColumn inherits Rectangle {
                 horizontal-stretch: 1;
             }
             Text {
-                text: "\{root.cards.length}";
+                text: "\{root.count}";
                 color: Theme.faint;
                 font-size: Theme.fs-cap;
                 vertical-alignment: center;
@@ -2764,6 +2766,21 @@ component KChipToggle inherits Rectangle {
             root.clicked();
         }
     }
+}
+
+// One row of filter chips; children ride after them.
+component KChipRow inherits HorizontalLayout {
+    in property <[KbPick]> chips;
+    spacing: 6px;
+    alignment: start;
+    for f in root.chips: KChipToggle {
+        label: f.label;
+        active: f.on;
+        clicked => {
+            Kanban.filter-toggle(f.key);
+        }
+    }
+    @children
 }
 
 // A captioned form slot (fs-cap caption over the field).
@@ -3319,7 +3336,7 @@ component KDrill inherits VerticalLayout {
 
 // The basket bar (§8): "N changes - Propose / Discard", the voter's view
 // of it on hover.
-component BasketBar inherits VerticalLayout {
+export component BasketBar inherits VerticalLayout {
     property <bool> open: false;
     spacing: 6px;
     if root.open || bar-ta.has-hover: Rectangle {
@@ -3431,16 +3448,25 @@ export component QuestsPane inherits VerticalLayout {
         title: Strings.kb-title-board;
         hint: Strings.kb-hint-board;
     }
-    if !Kanban.form-open && Kanban.sel == "" && root.view == "board": HorizontalLayout {
-        spacing: 6px;
-        alignment: start;
-        for f in Kanban.filters: KChipToggle {
+    if !Kanban.form-open && Kanban.sel == "" && root.view == "board": KChipRow {
+        chips: Kanban.filters;
+    }
+    if !Kanban.form-open && Kanban.sel == "" && root.view == "board": KChipRow {
+        chips: Kanban.filters-status;
+    }
+    if !Kanban.form-open && Kanban.sel == "" && root.view == "board": KChipRow {
+        chips: Kanban.filters-state;
+        for f in Kanban.filters-seat: KChipToggle {
             label: f.label;
             active: f.on;
             clicked => {
                 Kanban.filter-toggle(f.key);
             }
         }
+    }
+    if !Kanban.form-open && Kanban.sel == "" && root.view == "board" && Kanban.legend.length > 0: HorizontalLayout {
+        spacing: 6px;
+        alignment: start;
         for t in Kanban.legend: Rectangle {
             width: tchip.preferred-width + 14px;
             height: 26px * Theme.ui-scale;
@@ -3475,6 +3501,7 @@ export component QuestsPane inherits VerticalLayout {
             title: Strings.kb-col-todo;
             tone: Theme.faint;
             cards: Kanban.todo;
+            count: Kanban.todo-count;
             hot: root.drag-col == 0;
             vote(id) => {
                 root.open-proposal(id);
@@ -3491,6 +3518,7 @@ export component QuestsPane inherits VerticalLayout {
             title: Strings.kb-col-wip;
             tone: Theme.warn;
             cards: Kanban.wip;
+            count: Kanban.wip-count;
             hot: root.drag-col == 1;
             vote(id) => {
                 root.open-proposal(id);
@@ -3507,6 +3535,7 @@ export component QuestsPane inherits VerticalLayout {
             title: Strings.kb-col-done;
             tone: Theme.good;
             cards: Kanban.done;
+            count: Kanban.done-count;
             hot: root.drag-col == 2;
             vote(id) => {
                 root.open-proposal(id);
@@ -3598,7 +3627,13 @@ export component QuestsPane inherits VerticalLayout {
         vertical-stretch: 1;
     }
 
-    if Kanban.basket-count > 0: BasketBar { }
+    // proposals: the generic list sits below this pane, and the bar after it
+    if root.view == "proposals" && !Kanban.form-open && Kanban.sel == "": KHead {
+        glyph: "🗳️";
+        title: Strings.kb-title-proposals;
+        hint: Strings.kb-hint-proposals;
+    }
+    if Kanban.basket-count > 0 && root.view != "proposals": BasketBar { }
 }
 
 // ---------------------------------------------------------------------------

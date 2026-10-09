@@ -30,7 +30,7 @@ import {
 } from "parts.slint";
 // the four staged surfaces' badged DESIGN-MOCK panes (sample data lives
 // .slint-side only; the real governance views stay below in this file)
-import { MemoryPane, QuestsPane, VaultPane, WalletPane } from "surfaces.slint";
+import { MemoryPane, QuestsPane, BasketBar, VaultPane, WalletPane } from "surfaces.slint";
 
 export { Strings, Theme, WikiState, PatchView, Poke, HintTip, Kanban }
 
@@ -7430,7 +7430,7 @@ export component AppWindow inherits Window {
                                 root.mem-export-open = true;
                             }
                         }
-                        if s.key == "quests" && root.selected-view != "proposals": QuestsPane {
+                        if s.key == "quests": QuestsPane {
                             view: root.selected-view;
                             open-proposal(id) => {
                                 root.select-view("chat", "today");
@@ -7489,7 +7489,9 @@ export component AppWindow inherits Window {
                                     && (root.selected-view == "proposals"
                                         || root.selected-view == "accepted"
                                         || root.selected-view == "denied"))
-                                || (s.key == "wallet" && root.selected-view == "status")): VerticalLayout {
+                                || (s.key == "wallet" && root.selected-view == "status"))
+                            // the kanban form and drill-in take the pane
+                            && !(s.key == "quests" && (Kanban.form-open || Kanban.sel != "")): VerticalLayout {
                             spacing: 8px;
                             if root.selected-view != "accepted" && root.selected-view != "denied": Text {
                                 text: Strings.mv-pending;
@@ -7705,6 +7707,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
+                        if s.key == "quests" && root.selected-view == "proposals" && Kanban.basket-count > 0: BasketBar { }
                     }
                 }
                 }

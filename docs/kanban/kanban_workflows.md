@@ -12,11 +12,13 @@ advisories) and the S2 wakes (triggers, coalescing, task timer,
 with its MCP tool `test_wake`) are BUILT (2026-10-09), and S3 (the MCP
 tools `quests_view`, `quests_propose`, `read_actions`, `wake_skill`, the
 `WAKE_SKILL` constant) is BUILT (2026-10-09). S4 board side is BUILT
-(2026-10-09: engine board, basket with `kanban_draft.json` and the
+(2026-10-09: engine board, basket sealed in `kanban_draft.json` and the
 `quests_draft_save`/`quests_draft_load` tools, staged drag, drill-in, New
-task form, vote badges, "Mine", notifications, the Wake group, the six
-view keys); `plan`, `calendar`, `dependencies`, the UTC clock,
-`is_implemented()` and the unlocked feature switches are open, as is S5.
+task form, the board filters incl. another seat's view, vote badges,
+"Mine", notifications, the Wake group, the six view keys); `plan`,
+`calendar`, `dependencies`, the impact and would-void lines in the
+Proposals view, the UTC clock, `is_implemented()` and the unlocked
+feature switches are open, as is S5.
 §12 lists what changed against revision 2.**
 
 The ask: the Quests surface (GUI label **"Kanban"**, wire key `quests` -

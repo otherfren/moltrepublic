@@ -1531,7 +1531,17 @@ pub(crate) fn spawn_mirror(ctx: &Ctx) {
         push_session(&w, &weak, &last_settings, SessionScope::Full, &chat_ui).await;
         push_surfaces(&w, &weak, &chat_ui).await;
         loop {
-            match rx.recv().await {
+            let next = rx.recv().await;
+            if let Ok(ev @ (Event::Proposed { .. } | Event::Applied { .. } | Event::Poked { .. })) = &next {
+                let ev = ev.clone();
+                let weak2 = weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak2.upgrade() {
+                        crate::actions::kanban::notice_event(&ui, &ev);
+                    }
+                });
+            }
+            match next {
                 Ok(Event::SessionChanged { scope }) => {
                     push_session(&w, &weak, &last_settings, scope, &chat_ui).await;
                     // A Full session change can mean a workspace was
@@ -1572,30 +1582,13 @@ pub(crate) fn spawn_mirror(ctx: &Ctx) {
                 // only a vote somebody ELSE initiated rings — the
                 // proposer already knows what they just did
                 Ok(Event::Proposed { by, .. }) => {
-                    alert_unless_own(&last_settings, |s| s.sound_vote.clone(), &weak, by.clone());
-                    let weak2 = weak.clone();
-                    let _ = slint::invoke_from_event_loop(move || {
-                        let Some(ui) = weak2.upgrade() else { return };
-                        if ui.get_node_member() != by.as_str() {
-                            crate::actions::kanban::notice(&ui, "vote_pending", "");
-                        }
-                    });
+                    alert_unless_own(&last_settings, |s| s.sound_vote.clone(), &weak, by);
                     push_surfaces(&w, &weak, &chat_ui).await;
                 }
-                // a folded kanban changeset notifies every seat (§8)
-                Ok(Event::Applied { surface: Surface::Quests, .. }) => {
-                    let weak2 = weak.clone();
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak2.upgrade() {
-                            crate::actions::kanban::notice(&ui, "kanban", "");
-                        }
-                    });
-                    push_surfaces(&w, &weak, &chat_ui).await;
-                }
-                // a poke addressed to THIS seat toasts who poked and
-                // rings its own sound (the engine already gated opt-in +
-                // cooldown); the sender side confirms quietly. No
-                // push_surfaces — a poke changes no surface state.
+                // a poke addressed to THIS seat rings its own sound (the
+                // engine already gated opt-in + cooldown); the sender side
+                // confirms quietly. No push_surfaces — a poke changes no
+                // surface state.
                 Ok(Event::Poked { by, to }) => {
                     alert_unless_own(&last_settings, |s| s.sound_poke.clone(), &weak, by.clone());
                     let weak2 = weak.clone();
@@ -1603,9 +1596,7 @@ pub(crate) fn spawn_mirror(ctx: &Ctx) {
                         let Some(ui) = weak2.upgrade() else { return };
                         let st = ui.global::<Strings>();
                         let me = ui.get_node_member();
-                        if to.as_str() == me.as_str() {
-                            crate::actions::kanban::notice(&ui, "poked", by.as_str());
-                        } else if by.as_str() == me.as_str() {
+                        if by.as_str() == me.as_str() {
                             ui.invoke_show_toast(
                                 format!("{} {to}", st.get_toast_poke_sent()).into(),
                             );

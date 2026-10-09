@@ -6,15 +6,19 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::LazyLock;
 
-use molt_core::{Command, Reply, Surface};
+use molt_core::{Command, Event, Reply, Surface};
+use serde_json::Value;
 use slint::{ComponentHandle, ModelRc, VecModel};
 
 use crate::app::Ctx;
 use crate::i18n::{error_toast, Lexicon};
 use crate::kanban::{
-    auto_summary, blocked_candidates, board, declined, detail, drop_target, filter_chips,
-    form_act, mine, needs_note, review, Basket, Form, KanbanFeed, Notices,
+    auto_summary, blocked_candidates, board, declined, detail, drop_target, filter_rows,
+    form_act, mine, needs_note, notice_reason, review, toggle_filter, Basket, Form, KanbanFeed,
+    Notices,
 };
 use crate::models::{sync_rows, sync_strings};
 use crate::surfaces::SurfacesBundle;
@@ -31,14 +35,67 @@ pub(crate) struct KanbanUi {
     pub(crate) form: Form,
     pub(crate) evidence: Vec<String>,
     pub(crate) notices: Notices,
-    /// The basket acts a Propose is sending (`None` = nothing in flight).
-    pub(crate) in_flight: Option<usize>,
+    /// A Propose is on its way to the engine.
+    pub(crate) in_flight: bool,
+    /// This workspace's stored basket was taken (once per workspace).
+    pub(crate) draft_adopted: bool,
 }
+
+impl KanbanUi {
+    /// Start a Propose: the payload against the fold the review checked,
+    /// and the acts it sends. `None` while one is in flight or nothing is
+    /// staged.
+    pub(crate) fn begin_propose(&mut self, summary: String, auto: &str) -> Option<(Value, Vec<Value>)> {
+        if self.in_flight || self.basket.acts.is_empty() {
+            return None;
+        }
+        let rev = self.feed.as_ref()?.folded.rev;
+        self.in_flight = true;
+        self.basket.summary = summary;
+        Some((self.basket.payload(rev, auto), self.basket.acts.clone()))
+    }
+
+    /// The Propose came back: on success (`Some`) the sent acts leave.
+    pub(crate) fn settle_propose(&mut self, sent: Option<&[Value]>) {
+        self.in_flight = false;
+        if let Some(sent) = sent {
+            self.basket.settle(sent);
+        }
+    }
+}
+
+/// Basket saves in the order they were made: each one waits for the
+/// previous and an older one never lands after a newer one.
+#[derive(Default)]
+pub(crate) struct DraftSaver {
+    issued: AtomicU64,
+    written: tokio::sync::Mutex<u64>,
+}
+
+impl DraftSaver {
+    /// The next save's generation.
+    pub(crate) fn next(&self) -> u64 {
+        self.issued.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Run `write` unless a newer generation already landed.
+    pub(crate) async fn save<F, Fut>(&self, generation: u64, write: F)
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let mut written = self.written.lock().await;
+        if generation > *written {
+            write().await;
+            *written = generation;
+        }
+    }
+}
+
+static SAVER: LazyLock<DraftSaver> = LazyLock::new(DraftSaver::default);
 
 thread_local! {
     static KB: RefCell<KanbanUi> = RefCell::new(KanbanUi::default());
-    // the engine handles, for the draft load a workspace switch needs
-    static CTX: RefCell<Option<Ctx>> = const { RefCell::new(None) };
     // the APPLIED `wake_on`, never the settings draft
     static WAKE_ON: RefCell<Vec<String>> = RefCell::new(
         molt_core::kanban_wake::WAKE_REASONS.iter().map(|r| (*r).to_string()).collect(),
@@ -64,54 +121,30 @@ fn lex(lang: i32) -> Lexicon {
 }
 
 /// The mirror's entry: adopt the push (a workspace switch resets the local
-/// state and takes the stored basket), then render.
+/// state; the first push with a board brings the stored basket), then
+/// render.
 pub(crate) fn apply(ui: &AppWindow, b: &SurfacesBundle) {
+    let k = ui.global::<Kanban>();
     with(|st| {
         if st.workspace != b.workspace {
             *st = KanbanUi { workspace: b.workspace.clone(), ..KanbanUi::default() };
-            ui.global::<Kanban>().set_sel("".into());
-            ui.global::<Kanban>().set_form_open(false);
-            ui.global::<Kanban>().set_basket_summary("".into());
-            if !b.workspace.is_empty() {
-                load_draft(b.workspace.clone());
-            }
+            k.set_sel("".into());
+            k.set_form_open(false);
+            k.set_basket_summary("".into());
         }
         st.lang = b.lang;
         st.feed = b.kanban.clone();
+        let draft = st.feed.as_ref().and_then(|f| f.draft.as_deref());
+        if let (false, Some(draft)) = (st.draft_adopted, draft) {
+            st.draft_adopted = true;
+            if st.basket.acts.is_empty() {
+                st.basket = Basket::from_draft(draft);
+                k.set_basket_summary(st.basket.summary.as_str().into());
+            }
+        }
     });
     note_starts(ui);
     render(ui);
-}
-
-/// Adopt the stored basket of `workspace` (still open, nothing staged yet).
-fn load_draft(workspace: String) {
-    let Some(cx) = CTX.with_borrow(Clone::clone) else { return };
-    let w = cx.wallet.clone();
-    let weak = cx.weak.clone();
-    cx.rt.spawn(async move {
-        let Ok(Reply::KanbanDraft { draft }) = w.execute(Command::KanbanDraftLoad).await else {
-            return;
-        };
-        let _ = slint::invoke_from_event_loop(move || {
-            if let Some(ui) = weak.upgrade() {
-                adopt_draft(&ui, &workspace, &draft);
-            }
-        });
-    });
-}
-
-/// Take a stored basket for `workspace` unless something is staged already.
-pub(crate) fn adopt_draft(ui: &AppWindow, workspace: &str, draft: &str) {
-    let summary = with(|st| {
-        (st.workspace == workspace && st.basket.acts.is_empty()).then(|| {
-            st.basket = Basket::from_draft(draft);
-            st.basket.summary.clone()
-        })
-    });
-    if let Some(summary) = summary {
-        ui.global::<Kanban>().set_basket_summary(summary.into());
-        render(ui);
-    }
 }
 
 /// Re-render the `Kanban` global from the state.
@@ -128,8 +161,16 @@ pub(crate) fn render(ui: &AppWindow) {
         sync_rows(&k.get_todo(), todo, |m| k.set_todo(m));
         sync_rows(&k.get_wip(), wip, |m| k.set_wip(m));
         sync_rows(&k.get_done(), done, |m| k.set_done(m));
+        k.set_todo_count(b.counts[0]);
+        k.set_wip_count(b.counts[1]);
+        k.set_done_count(b.counts[2]);
         sync_rows(&k.get_legend(), b.legend, |m| k.set_legend(m));
-        sync_rows(&k.get_filters(), filter_chips(&l, &st.filters), |m| k.set_filters(m));
+        let [who, status, state, seat]: [Vec<KbPick>; 4] =
+            filter_rows(&l, feed, &st.filters).try_into().unwrap_or_default();
+        sync_rows(&k.get_filters(), who, |m| k.set_filters(m));
+        sync_rows(&k.get_filters_status(), status, |m| k.set_filters_status(m));
+        sync_rows(&k.get_filters_state(), state, |m| k.set_filters_state(m));
+        sync_rows(&k.get_filters_seat(), seat, |m| k.set_filters_seat(m));
 
         let sel = k.get_sel().to_string();
         match (!sel.is_empty()).then(|| detail(&l, feed, &st.basket, &sel)).flatten() {
@@ -194,6 +235,9 @@ fn clear(k: &Kanban<'_>) {
     sync_rows(&k.get_declined(), Vec::new(), |m| k.set_declined(m));
     k.set_basket_count(0);
     k.set_action_count(0);
+    k.set_todo_count(0);
+    k.set_wip_count(0);
+    k.set_done_count(0);
     k.set_basket_tip("".into());
     k.set_sel("".into());
     k.set_form_open(false);
@@ -228,8 +272,15 @@ fn wake_on() -> Vec<String> {
     WAKE_ON.with_borrow(Clone::clone)
 }
 
+/// An engine event on the UI thread: the notification it raises here.
+pub(crate) fn notice_event(ui: &AppWindow, ev: &Event) {
+    if let Some((reason, by)) = notice_reason(ev, ui.get_node_member().as_str()) {
+        notice(ui, reason, &by);
+    }
+}
+
 /// A trigger from the event stream (UI thread): `poked` carries the poker.
-pub(crate) fn notice(ui: &AppWindow, reason: &'static str, by: &str) {
+fn notice(ui: &AppWindow, reason: &'static str, by: &str) {
     let wake_on = wake_on();
     let armed = with(|st| {
         if reason == "poked" {
@@ -272,9 +323,14 @@ pub(crate) fn flush_notices(ui: &AppWindow) {
 
 fn save_basket(ctx: &Ctx) {
     let draft = with(|st| st.basket.to_draft());
+    let generation = SAVER.next();
     let w = ctx.wallet.clone();
     ctx.rt.spawn(async move {
-        let _ = w.execute(Command::KanbanDraftSave { draft }).await;
+        SAVER
+            .save(generation, || async move {
+                let _ = w.execute(Command::KanbanDraftSave { draft }).await;
+            })
+            .await;
     });
 }
 
@@ -394,8 +450,8 @@ fn sync_lists(k: &Kanban<'_>) {
 /// The form into the basket; `false` with the reason shown on the form.
 pub(crate) fn form_submit(ui: &AppWindow) -> bool {
     let k = ui.global::<Kanban>();
-    let form = with(|st| read_form(&k, st));
-    match form_act(&form) {
+    let (form, l) = with(|st| (read_form(&k, st), lex(st.lang)));
+    match form_act(&l, &form) {
         Ok(act) => {
             with(|st| st.basket.add(act));
             k.set_f_error("".into());
@@ -414,21 +470,7 @@ pub(crate) fn form_submit(ui: &AppWindow) -> bool {
 fn propose(ui: &AppWindow, ctx: &Ctx) {
     let summary = ui.global::<Kanban>().get_basket_summary().to_string();
     let auto = ui.global::<Kanban>().get_basket_auto().to_string();
-    let Some((payload, sent)) = with(|st| {
-        if st.in_flight.is_some() || st.basket.acts.is_empty() {
-            return None;
-        }
-        st.in_flight = Some(st.basket.acts.len());
-        st.basket.summary = summary;
-        let rev = st
-            .feed
-            .as_ref()
-            .and_then(|f| f.snap.board.as_ref())
-            .and_then(|b| b.get("rev"))
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        Some((st.basket.payload(rev, &auto), st.basket.acts.clone()))
-    }) else {
+    let Some((payload, sent)) = with(|st| st.begin_propose(summary, &auto)) else {
         return;
     };
     let w = ctx.wallet.clone();
@@ -437,17 +479,11 @@ fn propose(ui: &AppWindow, ctx: &Ctx) {
     ctx.rt.spawn(async move {
         let outcome = w.execute(Command::Propose { surface: Surface::Quests, payload }).await;
         let _ = slint::invoke_from_event_loop(move || {
+            let ok = outcome.is_ok();
+            with(|st| st.settle_propose(ok.then_some(sent.as_slice())));
             let Some(ui) = weak.upgrade() else { return };
-            with(|st| st.in_flight = None);
             match outcome {
                 Ok(_) => {
-                    // only what was sent leaves: a move staged meanwhile stays
-                    with(|st| {
-                        if st.basket.acts.starts_with(&sent) {
-                            st.basket.acts.drain(..sent.len());
-                        }
-                        st.basket.summary.clear();
-                    });
                     ui.global::<Kanban>().set_basket_summary("".into());
                     save_basket(&cx);
                     render(&ui);
@@ -461,7 +497,6 @@ fn propose(ui: &AppWindow, ctx: &Ctx) {
 
 /// Wire the `Kanban` global's callbacks.
 pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
-    CTX.with_borrow_mut(|c| *c = Some(ctx.clone()));
     let k = ui.global::<Kanban>();
     let weak = ui.as_weak();
     let on_ui = move |f: &dyn Fn(&AppWindow)| {
@@ -473,11 +508,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
         let on_ui = on_ui.clone();
         k.on_filter_toggle(move |key| {
             on_ui(&|ui| {
-                with(|st| {
-                    if !st.filters.remove(key.as_str()) {
-                        st.filters.insert(key.to_string());
-                    }
-                });
+                with(|st| toggle_filter(&mut st.filters, key.as_str()));
                 render(ui);
             });
         });

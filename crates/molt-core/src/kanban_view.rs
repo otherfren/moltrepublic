@@ -70,7 +70,7 @@ timed, size:<XS|S|M|L|XL|XXL>, type:<label>";
             return Size::parse(size).map(ViewFilter::Size).ok_or_else(unknown);
         }
         if let Some(label) = s.strip_prefix("type:") {
-            let folded = fold_label(label);
+            let folded = type_key(label);
             return if folded.is_empty() {
                 Err(unknown())
             } else {
@@ -102,7 +102,9 @@ timed, size:<XS|S|M|L|XL|XXL>, type:<label>";
     }
 }
 
-fn fold_label(s: &str) -> String {
+/// A type label folded to the key the legend, colour and filter share.
+#[must_use]
+pub fn type_key(s: &str) -> String {
     s.trim().to_lowercase()
 }
 
@@ -110,7 +112,7 @@ fn fold_label(s: &str) -> String {
 /// every node; `None` without a type.
 #[must_use]
 pub fn type_slot(label: &str) -> Option<u8> {
-    let folded = fold_label(label);
+    let folded = type_key(label);
     if folded.is_empty() {
         return None;
     }
@@ -122,7 +124,7 @@ pub fn type_slot(label: &str) -> Option<u8> {
 pub fn type_spellings<'a>(labels: impl Iterator<Item = &'a str>) -> BTreeMap<String, String> {
     let mut counts: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
     for l in labels {
-        let folded = fold_label(l);
+        let folded = type_key(l);
         if !folded.is_empty() {
             *counts.entry(folded).or_default().entry(l.trim().to_string()).or_default() += 1;
         }
@@ -249,7 +251,7 @@ impl Ctx<'_> {
             ViewFilter::Floating => t.get("when").is_none(),
             ViewFilter::Timed => t.get("when").is_some(),
             ViewFilter::Size(s) => str_of(t, "size") == s.as_str(),
-            ViewFilter::Type(label) => fold_label(str_of(t, "type")) == *label,
+            ViewFilter::Type(label) => type_key(str_of(t, "type")) == *label,
         }
     }
 

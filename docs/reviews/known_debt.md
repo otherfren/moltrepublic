@@ -157,3 +157,11 @@ misses that window. Fix direction: the test should wait on the sheet
 (poll `read_transport_state` until `ack_seen`, with a deadline) instead of
 on the close - the guarantee is eventual, so a one-shot read of it is the
 test's bug, not the engine's.
+
+## `wiki_draft.json` is plaintext (2026-10-09)
+
+Its doc comments and `shared_memory_real.md` §9.2 say "sealed at rest",
+but `write_wiki_draft` writes the raw draft, mode 0644. The kanban basket
+next to it is sealed since 2026-10-09 (`Workspace::write_kanban_draft`,
+its own sub-key and segment marker, held by the engine actor). Fix: the
+same move for the wiki draft; a legacy plaintext file reads as no draft.

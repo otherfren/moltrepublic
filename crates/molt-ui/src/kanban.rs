@@ -10,13 +10,13 @@ use chrono::NaiveDate;
 use molt_core::kanban_calendar::parse_date;
 use molt_core::kanban_dates::derive;
 use molt_core::kanban_fold::{
-    kanban_canonicalize, kanban_fold, kanban_precheck, short_id, validate_kanban_payload,
+    kanban_canonicalize, kanban_fold, short_id, validate_kanban_payload,
     BoardState,
 };
-use molt_core::kanban_review::{advisories, render_acts, WOULD_VOID_PREFIX};
-use molt_core::kanban_view::{quests_view, type_slot, type_spellings, ViewFilter, ViewQuery};
+use molt_core::kanban_review::{advisories, render_acts};
+use molt_core::kanban_view::{quests_view, type_key, type_slot, type_spellings, ViewFilter, ViewQuery};
 use molt_core::kanban_wake::WakeAction;
-use molt_core::{ProposalState, SurfaceSnapshot};
+use molt_core::{Event, ProposalState, Surface, SurfaceSnapshot};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
@@ -36,6 +36,8 @@ pub(crate) struct KanbanFeed {
     pub(crate) me: String,
     /// The fold over `snap.applied`: what the basket is checked against.
     pub(crate) folded: BoardState,
+    /// The engine's stored basket (`None` = not read).
+    pub(crate) draft: Option<String>,
 }
 
 impl KanbanFeed {
@@ -43,31 +45,77 @@ impl KanbanFeed {
     pub(crate) fn new(snap: SurfaceSnapshot, actions: Vec<WakeAction>, seats: Vec<String>, me: String) -> KanbanFeed {
         let set: BTreeSet<String> = seats.iter().cloned().collect();
         let folded = kanban_fold(&snap.applied, &set);
-        KanbanFeed { snap, actions, seats, me, folded }
+        KanbanFeed { snap, actions, seats, me, folded, draft: None }
     }
 }
 
-/// The board filters the chips offer (§8), by wire name.
-pub(crate) const FILTERS: [&str; 6] =
-    ["mine", "to_act_on", "starting_now", "created_by_me", "needs_my_vote", "closed"];
+/// The board filters of §8 by wire name, one chip row each: whose work,
+/// status / time mode / size, the governed states.
+const FILTER_ROWS: [&[&str]; 3] = [
+    &["mine", "to_act_on", "starting_now", "created_by_me", "needs_my_vote"],
+    &[
+        "blocked", "stuck", "overdue", "date_conflict", "floating", "timed",
+        "size:XS", "size:S", "size:M", "size:L", "size:XL", "size:XXL",
+    ],
+    &["todo", "wip", "success", "fail", "cancelled", "closed"],
+];
 
-fn filter_label(l: &Lexicon, key: &str) -> &'static str {
+/// The chip key that shows another seat's view.
+const SEAT_PREFIX: &str = "seat:";
+
+fn filter_label(l: &Lexicon, key: &str) -> String {
+    if let Some(size) = key.strip_prefix("size:") {
+        return size.to_string();
+    }
     match key {
         "mine" => l.kb_f_mine,
         "to_act_on" => l.kb_f_act,
         "starting_now" => l.kb_f_starting,
         "created_by_me" => l.kb_f_created,
         "needs_my_vote" => l.kb_f_vote,
-        _ => l.kb_f_closed,
+        "overdue" => l.kb_flag_overdue,
+        "date_conflict" => l.kb_flag_conflict,
+        "floating" => l.kb_tm_floating,
+        "timed" => l.kb_f_timed,
+        "closed" => l.kb_f_closed,
+        state => shown_label(l, state),
     }
+    .to_string()
 }
 
-/// The filter chips with their state.
-pub(crate) fn filter_chips(l: &Lexicon, on: &BTreeSet<String>) -> Vec<KbPick> {
-    FILTERS
+/// The filter chip rows with their state; the last row picks another
+/// seat's view.
+pub(crate) fn filter_rows(l: &Lexicon, feed: &KanbanFeed, on: &BTreeSet<String>) -> Vec<Vec<KbPick>> {
+    let mut rows: Vec<Vec<KbPick>> = FILTER_ROWS
         .iter()
-        .map(|k| KbPick { key: (*k).into(), label: filter_label(l, k).into(), on: on.contains(*k) })
-        .collect()
+        .map(|row| {
+            row.iter()
+                .map(|k| KbPick { key: (*k).into(), label: filter_label(l, k).into(), on: on.contains(*k) })
+                .collect()
+        })
+        .collect();
+    rows.push(
+        feed.seats
+            .iter()
+            .filter(|s| **s != feed.me)
+            .map(|s| {
+                let key = format!("{SEAT_PREFIX}{s}");
+                KbPick { on: on.contains(&key), key: key.into(), label: format!("{} {s}", l.kb_f_as).into() }
+            })
+            .collect(),
+    );
+    rows
+}
+
+/// Toggle a chip: a seat replaces any other seat.
+pub(crate) fn toggle_filter(on: &mut BTreeSet<String>, key: &str) {
+    if on.remove(key) {
+        return;
+    }
+    if key.starts_with(SEAT_PREFIX) {
+        on.retain(|k| !k.starts_with(SEAT_PREFIX));
+    }
+    on.insert(key.to_string());
 }
 
 /// A governed state or derived status, localized.
@@ -189,10 +237,13 @@ fn flags_line(l: &Lexicon, t: &Value) -> String {
 }
 
 /// Task id -> (badge, proposal) for every task a pending changeset touches
-/// ("vote: → success (2/3)", §8); the first changeset wins.
+/// ("vote: → success (2/3)", §8); the lowest pending id wins.
 pub(crate) fn vote_badges(l: &Lexicon, snap: &SurfaceSnapshot) -> BTreeMap<String, (String, i32)> {
     let mut out = BTreeMap::new();
-    for p in snap.pending.iter().filter(|p| p.state == ProposalState::Proposed) {
+    let mut pending: Vec<_> = snap.pending.iter().filter(|p| p.state == ProposalState::Proposed).collect();
+    // the snapshot's order is a map's; the lowest id badges, every push
+    pending.sort_by_key(|p| p.id.0);
+    for p in pending {
         let ops = p.payload.get("ops").and_then(Value::as_array).into_iter().flatten();
         for op in ops {
             let id = s(op, "id");
@@ -221,7 +272,7 @@ fn card(
     staged: Option<&str>,
 ) -> KbCard {
     let kind = s(t, "type");
-    let folded = kind.trim().to_lowercase();
+    let folded = type_key(kind);
     let flags = strs(t, "flags");
     let shown = s(t, "shown");
     let (vote, vote_id) = votes.get(id).cloned().unwrap_or((String::new(), -1));
@@ -253,7 +304,25 @@ fn card(
 #[derive(Default)]
 pub(crate) struct Board {
     pub(crate) cols: [Vec<KbCard>; 3],
+    /// Cards per column, the basket's shadows not counted.
+    pub(crate) counts: [i32; 3],
     pub(crate) legend: Vec<KbType>,
+}
+
+/// The view's task rows for these filters, as `seat` sees them.
+fn listed(snap: &SurfaceSnapshot, filters: &BTreeSet<String>, keep_types: bool) -> Vec<Value> {
+    let filter: Vec<ViewFilter> = filters
+        .iter()
+        .filter_map(|f| ViewFilter::parse(f).ok())
+        .filter(|f| keep_types || !matches!(f, ViewFilter::Type(_)))
+        .collect();
+    let seat = filters.iter().find_map(|f| f.strip_prefix(SEAT_PREFIX)).map(str::to_string);
+    let q = ViewQuery { filter, seat, ..ViewQuery::default() };
+    quests_view(snap, &q)
+        .ok()
+        .and_then(|v| v.get("tasks").cloned())
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
 }
 
 /// The board as the filters and the basket see it (§8): To do sorted
@@ -267,18 +336,12 @@ pub(crate) fn board(
 ) -> Board {
     let all = tasks(&feed.snap);
     let spell = type_spellings(all.values().map(|t| s(t, "type")));
-    let filter: Vec<ViewFilter> = filters.iter().filter_map(|f| ViewFilter::parse(f).ok()).collect();
-    let q = ViewQuery { filter, ..ViewQuery::default() };
-    let listed = quests_view(&feed.snap, &q)
-        .ok()
-        .and_then(|v| v.get("tasks").cloned())
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default();
+    let shown = listed(&feed.snap, filters, true);
     let votes = vote_badges(l, &feed.snap);
     let staged = basket.staged_moves();
     let mut out = Board::default();
     let mut todo: Vec<(u8, KbCard)> = Vec::new();
-    for t in &listed {
+    for t in &shown {
         let id = s(t, "id");
         let c = card(l, id, t, &spell, &votes, staged.get(id).map(String::as_str));
         match column_of(s(t, "state")) {
@@ -298,8 +361,16 @@ pub(crate) fn board(
     todo.sort_by_key(|(rank, _)| *rank);
     let shadows: Vec<KbCard> = out.cols[0].drain(..).collect();
     out.cols[0] = shadows.into_iter().chain(todo.into_iter().map(|(_, c)| c)).collect();
+    for (n, col) in out.counts.iter_mut().zip(&out.cols) {
+        *n = i32::try_from(col.iter().filter(|c| !c.shadow).count()).unwrap_or(i32::MAX);
+    }
+    // §2.4: the types present in the view, the type filter itself aside
+    // so a picked type never hides the others
+    let typed = if filters.iter().any(|f| f.starts_with("type:")) { listed(&feed.snap, filters, false) } else { shown };
+    let present: BTreeSet<String> = typed.iter().map(|t| type_key(s(t, "type"))).collect();
     out.legend = spell
         .into_iter()
+        .filter(|(key, _)| present.contains(key) || filters.contains(&format!("type:{key}")))
         .map(|(key, label)| KbType {
             on: filters.contains(&format!("type:{key}")),
             slot: type_slot(&key).map_or(-1, i32::from),
@@ -557,6 +628,17 @@ impl Basket {
         n
     }
 
+    /// A Propose went through: each act it sent leaves once, wherever it
+    /// now sits; what was staged meanwhile stays.
+    pub(crate) fn settle(&mut self, sent: &[Value]) {
+        for act in sent {
+            if let Some(i) = self.acts.iter().position(|a| a == act) {
+                self.acts.remove(i);
+            }
+        }
+        self.summary.clear();
+    }
+
     /// The changeset to propose.
     pub(crate) fn payload(&self, base_rev: u64, auto: &str) -> Value {
         let summary = if self.summary.trim().is_empty() { auto } else { self.summary.trim() };
@@ -609,12 +691,8 @@ pub(crate) fn review(l: &Lexicon, feed: &KanbanFeed, basket: &Basket) -> BasketR
         })
         .collect();
     let today = today_of(feed);
-    let mut lines = Vec::new();
-    if let Err(f) = kanban_precheck(board, &canon.payload, &seats) {
-        lines.push(format!("{WOULD_VOID_PREFIX}{}", f.reason.0));
-    }
     let before = derive(board, today);
-    lines.extend(advisories(board, &before, &canon.payload, &seats, today, &|_| None));
+    let lines = advisories(board, &before, &canon.payload, &seats, today, &|_| None);
     BasketReview { acts, advisories: lines.into_iter().map(rename).collect(), rows }
 }
 
@@ -667,7 +745,7 @@ fn non_empty(items: &[String]) -> Vec<String> {
 
 /// The `add` act the form describes, checked by the propose door's own
 /// shape check; `Err` is its first reason.
-pub(crate) fn form_act(f: &Form) -> Result<Value, String> {
+pub(crate) fn form_act(l: &Lexicon, f: &Form) -> Result<Value, String> {
     let mut act = Map::new();
     act.insert("act".into(), Value::from("add"));
     act.insert("title".into(), Value::from(f.title.trim()));
@@ -701,12 +779,12 @@ pub(crate) fn form_act(f: &Form) -> Result<Value, String> {
             if v.trim().is_empty() {
                 return Ok(None);
             }
-            v.trim().parse::<u64>().map(Some).map_err(|_| format!("{what}: not a number"))
+            v.trim().parse::<u64>().map(Some).map_err(|_| format!("{what}: {}", l.kb_not_number))
         };
-        if let Some(n) = num(&f.interval, "interval")? {
+        if let Some(n) = num(&f.interval, l.kb_fl_interval)? {
             r.insert("interval".into(), Value::from(n));
         }
-        if let Some(n) = num(&f.count, "count")? {
+        if let Some(n) = num(&f.count, l.kb_fl_count)? {
             r.insert("count".into(), Value::from(n));
         }
         if !f.until.trim().is_empty() {
@@ -828,6 +906,17 @@ pub(crate) fn declined(feed: &KanbanFeed) -> Vec<KbLine> {
             bad: false,
         })
         .collect()
+}
+
+/// The notification an engine event raises for seat `me` (§8): the
+/// `wake_on` reason and, for a poke, who poked.
+pub(crate) fn notice_reason(ev: &Event, me: &str) -> Option<(&'static str, String)> {
+    match ev {
+        Event::Proposed { by, .. } if by != me => Some(("vote_pending", String::new())),
+        Event::Applied { surface: Surface::Quests, .. } => Some(("kanban", String::new())),
+        Event::Poked { by, to } if to == me => Some(("poked", by.clone())),
+        _ => None,
+    }
 }
 
 /// The coalesced notifications (§8): every trigger the wake knows, under
