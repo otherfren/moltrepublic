@@ -31,10 +31,23 @@ pub(crate) struct KanbanUi {
     pub(crate) form: Form,
     pub(crate) evidence: Vec<String>,
     pub(crate) notices: Notices,
+    /// The basket acts a Propose is sending (`None` = nothing in flight).
+    pub(crate) in_flight: Option<usize>,
 }
 
 thread_local! {
     static KB: RefCell<KanbanUi> = RefCell::new(KanbanUi::default());
+    // the engine handles, for the draft load a workspace switch needs
+    static CTX: RefCell<Option<Ctx>> = const { RefCell::new(None) };
+    // the APPLIED `wake_on`, never the settings draft
+    static WAKE_ON: RefCell<Vec<String>> = RefCell::new(
+        molt_core::kanban_wake::WAKE_REASONS.iter().map(|r| (*r).to_string()).collect(),
+    );
+}
+
+/// The applied `wake_on` (the mirror, on every settings push).
+pub(crate) fn set_wake_on(on: Vec<String>) {
+    WAKE_ON.with_borrow_mut(|w| *w = on);
 }
 
 /// Run `f` on the pane's state.
@@ -56,10 +69,12 @@ pub(crate) fn apply(ui: &AppWindow, b: &SurfacesBundle) {
     with(|st| {
         if st.workspace != b.workspace {
             *st = KanbanUi { workspace: b.workspace.clone(), ..KanbanUi::default() };
-            st.basket = Basket::from_draft(&b.kanban_draft);
             ui.global::<Kanban>().set_sel("".into());
             ui.global::<Kanban>().set_form_open(false);
-            ui.global::<Kanban>().set_basket_summary(st.basket.summary.as_str().into());
+            ui.global::<Kanban>().set_basket_summary("".into());
+            if !b.workspace.is_empty() {
+                load_draft(b.workspace.clone());
+            }
         }
         st.lang = b.lang;
         st.feed = b.kanban.clone();
@@ -68,16 +83,44 @@ pub(crate) fn apply(ui: &AppWindow, b: &SurfacesBundle) {
     render(ui);
 }
 
+/// Adopt the stored basket of `workspace` (still open, nothing staged yet).
+fn load_draft(workspace: String) {
+    let Some(cx) = CTX.with_borrow(Clone::clone) else { return };
+    let w = cx.wallet.clone();
+    let weak = cx.weak.clone();
+    cx.rt.spawn(async move {
+        let Ok(Reply::KanbanDraft { draft }) = w.execute(Command::KanbanDraftLoad).await else {
+            return;
+        };
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                adopt_draft(&ui, &workspace, &draft);
+            }
+        });
+    });
+}
+
+/// Take a stored basket for `workspace` unless something is staged already.
+pub(crate) fn adopt_draft(ui: &AppWindow, workspace: &str, draft: &str) {
+    let summary = with(|st| {
+        (st.workspace == workspace && st.basket.acts.is_empty()).then(|| {
+            st.basket = Basket::from_draft(draft);
+            st.basket.summary.clone()
+        })
+    });
+    if let Some(summary) = summary {
+        ui.global::<Kanban>().set_basket_summary(summary.into());
+        render(ui);
+    }
+}
+
 /// Re-render the `Kanban` global from the state.
 pub(crate) fn render(ui: &AppWindow) {
     let k = ui.global::<Kanban>();
     with(|st| {
         let l = lex(st.lang);
         let Some(feed) = st.feed.as_ref() else {
-            sync_rows(&k.get_todo(), Vec::new(), |m| k.set_todo(m));
-            sync_rows(&k.get_wip(), Vec::new(), |m| k.set_wip(m));
-            sync_rows(&k.get_done(), Vec::new(), |m| k.set_done(m));
-            k.set_basket_count(0);
+            clear(&k);
             return;
         };
         let b = board(&l, feed, &st.filters, &st.basket);
@@ -112,16 +155,15 @@ pub(crate) fn render(ui: &AppWindow) {
         k.set_basket_count(i32::try_from(st.basket.acts.len()).unwrap_or(i32::MAX));
         k.set_basket_auto(auto.into());
         k.set_basket_tip(r.advisories.join("\n").into());
-        let rows: Vec<KbLine> = st
-            .basket
-            .acts
+        let rows: Vec<KbLine> = r
+            .rows
             .iter()
             .enumerate()
-            .map(|(i, _)| KbLine {
+            .map(|(i, text)| KbLine {
                 key: i.to_string().into(),
                 kind: "act".into(),
                 glyph: "🧺".into(),
-                text: basket_line(&st.basket, &r.acts, i).into(),
+                text: text.as_str().into(),
                 sub: "".into(),
                 bad: false,
             })
@@ -140,21 +182,21 @@ pub(crate) fn render(ui: &AppWindow) {
     });
 }
 
-/// One basket row: the act's first rendered line, else its raw kind.
-fn basket_line(basket: &Basket, rendered: &[String], i: usize) -> String {
-    let act = &basket.acts[i];
-    let id = act.get("id").and_then(serde_json::Value::as_str).unwrap_or_default();
-    let short = molt_core::kanban_fold::short_id(id);
-    rendered
-        .iter()
-        .find(|line| !id.is_empty() && line.starts_with(&short))
-        .cloned()
-        .or_else(|| {
-            act.get("title")
-                .and_then(serde_json::Value::as_str)
-                .map(|t| format!("+ {t}"))
-        })
-        .unwrap_or(short)
+/// No board: nothing of the previous workspace may stay on screen.
+fn clear(k: &Kanban<'_>) {
+    sync_rows(&k.get_todo(), Vec::new(), |m| k.set_todo(m));
+    sync_rows(&k.get_wip(), Vec::new(), |m| k.set_wip(m));
+    sync_rows(&k.get_done(), Vec::new(), |m| k.set_done(m));
+    sync_rows(&k.get_legend(), Vec::new(), |m| k.set_legend(m));
+    sync_rows(&k.get_basket_rows(), Vec::new(), |m| k.set_basket_rows(m));
+    sync_rows(&k.get_actions(), Vec::new(), |m| k.set_actions(m));
+    sync_rows(&k.get_mine(), Vec::new(), |m| k.set_mine(m));
+    sync_rows(&k.get_declined(), Vec::new(), |m| k.set_declined(m));
+    k.set_basket_count(0);
+    k.set_action_count(0);
+    k.set_basket_tip("".into());
+    k.set_sel("".into());
+    k.set_form_open(false);
 }
 
 fn render_form_pickers(k: &Kanban<'_>, st: &KanbanUi) {
@@ -171,7 +213,7 @@ fn render_form_pickers(k: &Kanban<'_>, st: &KanbanUi) {
 
 /// New `task_start` actions: one notification each (§8).
 fn note_starts(ui: &AppWindow) {
-    let wake_on = wake_on(ui);
+    let wake_on = wake_on();
     let armed = with(|st| {
         let actions = st.feed.as_ref().map(|f| f.actions.clone()).unwrap_or_default();
         st.notices.note_starts(&actions, &wake_on)
@@ -182,24 +224,13 @@ fn note_starts(ui: &AppWindow) {
 }
 
 /// The applied `wake_on` (toasts follow the wake's switches, §8).
-fn wake_on(ui: &AppWindow) -> Vec<String> {
-    let checks = [
-        ui.get_cfg_wake_on_poked(),
-        ui.get_cfg_wake_on_vote(),
-        ui.get_cfg_wake_on_kanban(),
-        ui.get_cfg_wake_on_start(),
-    ];
-    molt_core::kanban_wake::WAKE_REASONS
-        .iter()
-        .zip(checks)
-        .filter(|(_, on)| *on)
-        .map(|(r, _)| (*r).to_string())
-        .collect()
+fn wake_on() -> Vec<String> {
+    WAKE_ON.with_borrow(Clone::clone)
 }
 
 /// A trigger from the event stream (UI thread): `poked` carries the poker.
 pub(crate) fn notice(ui: &AppWindow, reason: &'static str, by: &str) {
-    let wake_on = wake_on(ui);
+    let wake_on = wake_on();
     let armed = with(|st| {
         if reason == "poked" {
             st.notices.note_poke(by, &wake_on)
@@ -383,7 +414,11 @@ pub(crate) fn form_submit(ui: &AppWindow) -> bool {
 fn propose(ui: &AppWindow, ctx: &Ctx) {
     let summary = ui.global::<Kanban>().get_basket_summary().to_string();
     let auto = ui.global::<Kanban>().get_basket_auto().to_string();
-    let payload = with(|st| {
+    let Some((payload, sent)) = with(|st| {
+        if st.in_flight.is_some() || st.basket.acts.is_empty() {
+            return None;
+        }
+        st.in_flight = Some(st.basket.acts.len());
         st.basket.summary = summary;
         let rev = st
             .feed
@@ -392,8 +427,10 @@ fn propose(ui: &AppWindow, ctx: &Ctx) {
             .and_then(|b| b.get("rev"))
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
-        st.basket.payload(rev, &auto)
-    });
+        Some((st.basket.payload(rev, &auto), st.basket.acts.clone()))
+    }) else {
+        return;
+    };
     let w = ctx.wallet.clone();
     let weak = ctx.weak.clone();
     let cx = ctx.clone();
@@ -401,9 +438,16 @@ fn propose(ui: &AppWindow, ctx: &Ctx) {
         let outcome = w.execute(Command::Propose { surface: Surface::Quests, payload }).await;
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
+            with(|st| st.in_flight = None);
             match outcome {
                 Ok(_) => {
-                    with(|st| st.basket = Basket::default());
+                    // only what was sent leaves: a move staged meanwhile stays
+                    with(|st| {
+                        if st.basket.acts.starts_with(&sent) {
+                            st.basket.acts.drain(..sent.len());
+                        }
+                        st.basket.summary.clear();
+                    });
                     ui.global::<Kanban>().set_basket_summary("".into());
                     save_basket(&cx);
                     render(&ui);
@@ -417,6 +461,7 @@ fn propose(ui: &AppWindow, ctx: &Ctx) {
 
 /// Wire the `Kanban` global's callbacks.
 pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
+    CTX.with_borrow_mut(|c| *c = Some(ctx.clone()));
     let k = ui.global::<Kanban>();
     let weak = ui.as_weak();
     let on_ui = move |f: &dyn Fn(&AppWindow)| {

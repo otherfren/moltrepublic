@@ -11,6 +11,7 @@ use molt_core::kanban_calendar::parse_date;
 use molt_core::kanban_dates::derive;
 use molt_core::kanban_fold::{
     kanban_canonicalize, kanban_fold, kanban_precheck, short_id, validate_kanban_payload,
+    BoardState,
 };
 use molt_core::kanban_review::{advisories, render_acts, WOULD_VOID_PREFIX};
 use molt_core::kanban_view::{quests_view, type_slot, type_spellings, ViewFilter, ViewQuery};
@@ -33,6 +34,17 @@ pub(crate) struct KanbanFeed {
     pub(crate) seats: Vec<String>,
     /// The local seat.
     pub(crate) me: String,
+    /// The fold over `snap.applied`: what the basket is checked against.
+    pub(crate) folded: BoardState,
+}
+
+impl KanbanFeed {
+    /// A push's feed, folded once (off the UI thread).
+    pub(crate) fn new(snap: SurfaceSnapshot, actions: Vec<WakeAction>, seats: Vec<String>, me: String) -> KanbanFeed {
+        let set: BTreeSet<String> = seats.iter().cloned().collect();
+        let folded = kanban_fold(&snap.applied, &set);
+        KanbanFeed { snap, actions, seats, me, folded }
+    }
 }
 
 /// The board filters the chips offer (§8), by wire name.
@@ -266,13 +278,9 @@ pub(crate) fn board(
     let staged = basket.staged_moves();
     let mut out = Board::default();
     let mut todo: Vec<(u8, KbCard)> = Vec::new();
-    let mut present: BTreeMap<String, (String, i32)> = BTreeMap::new();
     for t in &listed {
         let id = s(t, "id");
         let c = card(l, id, t, &spell, &votes, staged.get(id).map(String::as_str));
-        if c.type_slot >= 0 {
-            present.insert(s(t, "type").trim().to_lowercase(), (c.type_label.to_string(), c.type_slot));
-        }
         match column_of(s(t, "state")) {
             0 => todo.push((todo_rank(s(t, "shown")), c)),
             col => out.cols[col].push(c),
@@ -290,13 +298,13 @@ pub(crate) fn board(
     todo.sort_by_key(|(rank, _)| *rank);
     let shadows: Vec<KbCard> = out.cols[0].drain(..).collect();
     out.cols[0] = shadows.into_iter().chain(todo.into_iter().map(|(_, c)| c)).collect();
-    out.legend = present
+    out.legend = spell
         .into_iter()
-        .map(|(key, (label, slot))| KbType {
+        .map(|(key, label)| KbType {
             on: filters.contains(&format!("type:{key}")),
+            slot: type_slot(&key).map_or(-1, i32::from),
             key: key.into(),
             label: label.into(),
-            slot,
         })
         .collect();
     out
@@ -510,7 +518,37 @@ impl Basket {
     /// Append a declined changeset's acts (the `rescue_patch` idiom);
     /// returns how many came back.
     pub(crate) fn rescue(&mut self, payload: &Value) -> usize {
-        let ops: Vec<Value> = payload.get("ops").and_then(Value::as_array).cloned().unwrap_or_default();
+        let mut ops: Vec<Value> = payload.get("ops").and_then(Value::as_array).cloned().unwrap_or_default();
+        // a minted id is the declined vote's: the engine mints anew, the
+        // changeset's own references follow through a ref
+        let mut renamed: BTreeMap<String, String> = BTreeMap::new();
+        for op in ops.iter_mut().filter(|op| s(op, "act") == "add") {
+            self.next_ref += 1;
+            let r = format!("r{}", self.next_ref);
+            if let Some(m) = op.as_object_mut() {
+                if let Some(Value::String(id)) = m.remove("id") {
+                    renamed.insert(id, format!("@{r}"));
+                }
+                m.remove("creator");
+                m.insert("ref".into(), Value::from(r));
+            }
+        }
+        let swap = |v: &mut Value| {
+            if let Some(to) = v.as_str().and_then(|id| renamed.get(id)) {
+                *v = Value::from(to.as_str());
+            }
+        };
+        for op in &mut ops {
+            if let Some(v) = op.get_mut("id") {
+                swap(v);
+            }
+            if let Some(Value::Array(items)) = op.get_mut("blocked_by") {
+                items.iter_mut().for_each(swap);
+            }
+            if let Some(Value::Array(items)) = op.get_mut("fields").and_then(|f| f.get_mut("blocked_by")) {
+                items.iter_mut().for_each(swap);
+            }
+        }
         let n = ops.len();
         self.acts.extend(ops);
         if self.summary.trim().is_empty() {
@@ -532,6 +570,8 @@ impl Basket {
 pub(crate) struct BasketReview {
     pub(crate) acts: Vec<String>,
     pub(crate) advisories: Vec<String>,
+    /// One line per basket act, in basket order.
+    pub(crate) rows: Vec<String>,
 }
 
 /// Fake ids stand in for the ones the engine mints; they render as "new".
@@ -546,7 +586,7 @@ pub(crate) fn review(l: &Lexicon, feed: &KanbanFeed, basket: &Basket) -> BasketR
         return BasketReview::default();
     }
     let seats: BTreeSet<String> = feed.seats.iter().cloned().collect();
-    let board = kanban_fold(&feed.snap.applied, &seats);
+    let board = &feed.folded;
     let payload = basket.payload(board.rev, "-");
     let mut k = 0u32;
     let canon = match kanban_canonicalize(&payload, &feed.me, &mut || {
@@ -554,20 +594,28 @@ pub(crate) fn review(l: &Lexicon, feed: &KanbanFeed, basket: &Basket) -> BasketR
         Ok(fake_id(k))
     }) {
         Ok(c) => c,
-        Err(e) => return BasketReview { acts: Vec::new(), advisories: vec![e] },
+        Err(e) => return BasketReview { acts: Vec::new(), advisories: vec![e], rows: Vec::new() },
     };
     let rename = |line: String| -> String {
         (1..=k).fold(line, |acc, i| acc.replace(&short_id(&fake_id(i)), &format!("{} {i}", l.kb_new_ref)))
     };
-    let acts: Vec<String> = render_acts(Some(&board), &canon.payload).into_iter().map(rename).collect();
+    let acts: Vec<String> = render_acts(Some(board), &canon.payload).into_iter().map(&rename).collect();
+    let ops: &[Value] = canon.payload.get("ops").and_then(Value::as_array).map_or(&[], Vec::as_slice);
+    let rows = ops
+        .iter()
+        .map(|op| {
+            let one = json!({ "op": "kanban_ops", "summary": "-", "base_rev": 0, "ops": [op] });
+            render_acts(Some(board), &one).into_iter().next().map(&rename).unwrap_or_default()
+        })
+        .collect();
     let today = today_of(feed);
     let mut lines = Vec::new();
-    if let Err(f) = kanban_precheck(&board, &canon.payload, &seats) {
+    if let Err(f) = kanban_precheck(board, &canon.payload, &seats) {
         lines.push(format!("{WOULD_VOID_PREFIX}{}", f.reason.0));
     }
-    let before = derive(&board, today);
-    lines.extend(advisories(&board, &before, &canon.payload, &seats, today, &|_| None));
-    BasketReview { acts, advisories: lines.into_iter().map(rename).collect() }
+    let before = derive(board, today);
+    lines.extend(advisories(board, &before, &canon.payload, &seats, today, &|_| None));
+    BasketReview { acts, advisories: lines.into_iter().map(rename).collect(), rows }
 }
 
 /// The engine's UTC day, else this machine's.

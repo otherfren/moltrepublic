@@ -176,10 +176,15 @@ fn the_basket_survives_in_the_draft() {
     });
     let saved = saved.expect("the basket was saved");
     assert!(saved.contains("kept"), "{saved}");
-    // a fresh window state adopts it on the next push of this workspace
+    // a fresh window state adopts it on the next open of this workspace
     with(|st| *st = crate::actions::kanban::KanbanUi::default());
     node.mirror(&rt);
+    assert_eq!(k.get_basket_count(), 0, "the load is asynchronous");
+    let ws = with(|st| st.workspace.clone());
+    crate::actions::kanban::adopt_draft(&node.ui, &ws, &saved);
     assert_eq!(k.get_basket_count(), 1);
+    crate::actions::kanban::adopt_draft(&node.ui, &ws, "{}");
+    assert_eq!(k.get_basket_count(), 1, "never over staged work");
     k.invoke_basket_discard();
     assert_eq!(k.get_basket_count(), 0);
 }

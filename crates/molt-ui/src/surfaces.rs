@@ -194,8 +194,6 @@ pub(crate) struct SurfacesBundle {
     pub(crate) workspace: String,
     /// The Kanban board (`None` = no quests surface in this charter).
     pub(crate) kanban: Option<crate::kanban::KanbanFeed>,
-    /// The stored basket, adopted on a workspace switch.
-    pub(crate) kanban_draft: String,
 }
 
 /// The Organization → Status info strip, from the engine's Status reply.
@@ -1138,25 +1136,16 @@ pub(crate) async fn gather_surfaces(
         .find(|(sf, _)| *sf == Surface::Vault)
         .and_then(|(_, snap)| snap.vault.clone());
     let quests = snaps.iter().find(|(sf, _)| *sf == Surface::Quests).map(|(_, snap)| snap.clone());
-    let (kanban, kanban_draft) = match quests {
+    let kanban = match quests {
         Some(snap) => {
             let actions = match wallet.execute(Command::ReadActions).await {
                 Ok(Reply::Actions { actions }) => actions,
                 _ => Vec::new(),
             };
-            let draft = match wallet.execute(Command::KanbanDraftLoad).await {
-                Ok(Reply::KanbanDraft { draft }) => draft,
-                _ => String::new(),
-            };
-            let feed = crate::kanban::KanbanFeed {
-                snap,
-                actions,
-                seats: members.iter().map(|m| m.name.clone()).collect(),
-                me: member.clone(),
-            };
-            (Some(feed), draft)
+            let seats = members.iter().map(|m| m.name.clone()).collect();
+            Some(crate::kanban::KanbanFeed::new(snap, actions, seats, member.clone()))
         }
-        None => (None, String::new()),
+        None => None,
     };
     let surfaces: Vec<SurfaceData> = snaps
         .iter()
@@ -1198,7 +1187,6 @@ pub(crate) async fn gather_surfaces(
         vault,
         workspace: active_ws.clone(),
         kanban,
-        kanban_draft,
     };
     tracing::debug!(
         ws = %active_ws,

@@ -5,7 +5,7 @@
 use std::collections::BTreeSet;
 
 use molt_core::kanban_dates::derive;
-use molt_core::kanban_fold::{kanban_fold, short_id};
+use molt_core::kanban_fold::{kanban_precheck, short_id};
 use molt_core::kanban_review::board_view;
 use molt_core::kanban_view::type_slot;
 use molt_core::kanban_wake::WakeAction;
@@ -42,7 +42,7 @@ fn cs(ops: Vec<Value>) -> Value {
 fn feed_with(applied: Vec<Value>, pending: Value, me: &str) -> KanbanFeed {
     let seats = ["mara", "walter", "bot"];
     let set: BTreeSet<String> = seats.iter().map(|s| (*s).to_string()).collect();
-    let board = kanban_fold(&applied, &set);
+    let board = molt_core::kanban_fold::kanban_fold(&applied, &set);
     let now = chrono::NaiveDate::from_ymd_opt(2026, 10, 12)
         .and_then(|d| d.and_hms_opt(12, 0, 0))
         .expect("noon");
@@ -53,7 +53,7 @@ fn feed_with(applied: Vec<Value>, pending: Value, me: &str) -> KanbanFeed {
     }))
     .expect("a snapshot");
     snap.board = Some(view);
-    KanbanFeed { snap, actions: Vec::new(), seats: seats.iter().map(|s| (*s).to_string()).collect(), me: me.to_string() }
+    KanbanFeed::new(snap, Vec::new(), seats.iter().map(|s| (*s).to_string()).collect(), me.to_string())
 }
 
 /// 1 api (mara, wip); 2 client blocked by 1; 3 docs open (Bug); 4 meet
@@ -291,4 +291,85 @@ fn notices_coalesce_and_follow_wake_on() {
     assert!(n.note_starts(&starts, &all));
     n.take(&l, "x");
     assert!(!n.note_starts(&starts, &all), "a start toasts once");
+}
+
+/// A rescued add comes back without its minted id: the engine mints a
+/// fresh one, and the changeset's own references follow through a ref.
+#[test]
+fn a_rescued_add_gets_a_fresh_id_and_its_references_follow() {
+    let declined = cs(vec![
+        add(20, "new", &["mara"], json!({})),
+        add(21, "after", &["mara"], json!({"blocked_by": [id(20), id(1)]})),
+        st(20, "wip", None),
+    ]);
+    let mut basket = Basket::default();
+    basket.rescue(&declined);
+    basket.rescue(&declined);
+    let text = serde_json::to_string(&basket.acts).expect("json");
+    assert!(!text.contains(&id(20)) && !text.contains(&id(21)), "{text}");
+    assert!(!text.contains("creator"), "{text}");
+    assert_eq!(basket.acts[1]["blocked_by"], json!(["@r1", id(1)]));
+    assert_eq!(basket.acts[2]["id"], json!("@r1"));
+    assert_eq!(basket.acts[3]["ref"], json!("r3"), "a second rescue takes new refs");
+    let r = review(&Lexicon::en(), &feed(), &basket);
+    assert!(!r.advisories.iter().any(|a| a.starts_with("would void")), "{:?}", r.advisories);
+}
+
+/// The legend names every type on the board, filtered or not.
+#[test]
+fn the_legend_survives_a_type_filter() {
+    let l = Lexicon::en();
+    let mut applied = feed().snap.applied;
+    applied.push(cs(vec![add(30, "feat", &["mara"], json!({"type": "feature"}))]));
+    let f = feed_with(applied, json!([]), "mara");
+    let on: BTreeSet<String> = ["type:bug".to_string()].into();
+    let b = board(&l, &f, &on, &Basket::default());
+    let labels: Vec<String> = b.legend.iter().map(|t| t.label.to_string()).collect();
+    assert_eq!(labels, ["bug", "feature"]);
+    assert!(b.legend[0].on && !b.legend[1].on);
+}
+
+/// The drop and move table is the fold's own (§2.2): every pair agrees
+/// with the precheck.
+#[test]
+fn the_move_table_matches_the_fold() {
+    let states = ["todo", "wip", "success", "fail", "cancelled"];
+    for timed in [false, true] {
+        for from in states {
+            for to in states {
+                let extra = if timed {
+                    json!({"when": {"start": "2026-10-20", "end": "2026-10-20"}})
+                } else {
+                    json!({})
+                };
+                let mut ops = vec![add(1, "t", &["mara"], extra)];
+                let path: &[&str] = match from {
+                    "todo" => &[],
+                    "wip" => &["wip"],
+                    "success" => &["wip", "success"],
+                    "fail" => &["wip", "fail"],
+                    _ => &["cancelled"],
+                };
+                let seats: BTreeSet<String> = ["mara".to_string()].into();
+                for p in path {
+                    ops.push(st(1, p, Some("n")));
+                }
+                let board = molt_core::kanban_fold::kanban_fold(&[cs(ops)], &seats);
+                let fold_ok = kanban_precheck(&board, &cs(vec![st(1, to, Some("n"))]), &seats).is_ok();
+                assert_eq!(legal_move(from, timed, false, to), fold_ok, "{from} -> {to} timed={timed}");
+            }
+        }
+    }
+}
+
+/// Each basket row shows its own act, even two acts on one task.
+#[test]
+fn each_basket_row_renders_its_own_act() {
+    let mut basket = Basket::default();
+    basket.acts.push(json!({"act": "set", "id": id(3), "fields": {"size": "L"}}));
+    basket.stage_state(&id(3), "wip", "", &[]);
+    let r = review(&Lexicon::en(), &feed(), &basket);
+    assert_eq!(r.rows.len(), 2);
+    assert!(r.rows[0].contains("size"), "{:?}", r.rows);
+    assert!(r.rows[1].contains("state"), "{:?}", r.rows);
 }

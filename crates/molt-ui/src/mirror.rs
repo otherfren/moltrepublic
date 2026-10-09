@@ -723,6 +723,7 @@ pub(crate) fn apply_session(
     // technical specifics ride along untranslated.
     ui.set_cfg_tor_test(sv.tor_test.state.as_str().into());
     ui.set_wake_test_result(sv.wake_test.as_str().into());
+    crate::actions::kanban::set_wake_on(sv.settings.wake_on.clone());
     // a confirmed-but-switched-off pool is a DIFFERENT problem from an empty
     // one, and telling the user to "confirm a relay" they already confirmed
     // is advice that cannot help (review finding). The classification is

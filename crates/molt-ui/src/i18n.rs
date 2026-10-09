@@ -1493,7 +1493,7 @@ lexicon! {
     kb_note_needed: "note required", "Notiz nötig";
     kb_move_illegal: "not a legal move", "kein erlaubter Schritt";
     kb_f_mine: "Mine", "Meine";
-    kb_f_act: "To act on", "Zu tun";
+    kb_f_act: "To act on", "Für mich dran";
     kb_f_starting: "Starting now", "Startet jetzt";
     kb_f_created: "Created by me", "Von mir erstellt";
     kb_f_vote: "Needs my vote", "Braucht meine Stimme";
@@ -1546,7 +1546,7 @@ lexicon! {
     kb_ph_filter: "Filter tasks", "Aufgaben filtern";
     kb_ph_summary: "Summary", "Zusammenfassung";
     kb_ph_desc: "What and why - markdown", "Was und warum - Markdown";
-    kb_sec_actions: "To act on", "Zu tun";
+    kb_sec_actions: "To act on", "Für mich dran";
     kb_sec_mine: "Assigned or created", "Zugewiesen oder erstellt";
     kb_sec_declined: "Declined", "Abgelehnt";
     kb_rescue: "Rescue into basket", "In den Korb retten";
