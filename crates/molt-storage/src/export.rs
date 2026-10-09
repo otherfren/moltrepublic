@@ -372,8 +372,11 @@ fn export_dir_impl(
     // holder lives), never the whole backup - an import that met it would
     // refuse everything else too. Read eagerly, so the checked bytes are
     // the shipped bytes.
+    // The purse's keys file is the exception (wallet design W5): its loss
+    // would drop a share silently, so it fails the whole export.
     let checked_kind = |rel: &str| -> Option<u64> {
         match rel {
+            crate::WALLET_KEYS_FILE | crate::WALLET_SCAN_FILE => Some(crate::READ_CAP_STATE),
             "wiki_base.bin" => Some(crate::READ_CAP_WIKI_BASE),
             "vault_base.bin" => Some(crate::READ_CAP_VAULT_BASE),
             r if crate::vault_payload_stem(r).is_some() => Some(crate::READ_CAP_VAULT_PAYLOAD),
@@ -392,6 +395,8 @@ fn export_dir_impl(
         }
         .and_then(|data| {
             match rel.as_str() {
+                crate::WALLET_KEYS_FILE => crate::decode_wallet_keys_file(&ws_key, &id, &data).map(drop),
+                crate::WALLET_SCAN_FILE => crate::decode_wallet_scan_file(&ws_key, &id, &data).map(drop),
                 "wiki_base.bin" => crate::verify_wiki_base(&ws_key, &id, &data),
                 "vault_base.bin" => crate::verify_vault_base(&ws_key, &id, &data),
                 r => crate::verify_vault_payload(&ws_key, &id, crate::vault_payload_stem(r).unwrap_or_default(), &data),
@@ -400,6 +405,10 @@ fn export_dir_impl(
         });
         match checked {
             Ok(data) => kept.push((rel, ExportSource::Bytes(data))),
+            Err(_) if rel == crate::WALLET_KEYS_FILE => {
+                tracing::error!(file = %rel, "export_fail reason=unauthenticated");
+                return Err(StorageError::WalletKeysDamaged);
+            }
             Err(e) => {
                 tracing::warn!(file = %rel, error = %e, "export_skip reason=unauthenticated");
                 skipped.push(rel);
@@ -568,6 +577,7 @@ fn collect_entries(
             // `wiki_base.bin`: after a K6 cut the only local copy of the
             // shared memory (the chain keeps just its hash)
             "manifest.toml" | "prefs.toml" | "chain.state" | "wiki_base.bin" | "vault_base.bin"
+            | crate::WALLET_KEYS_FILE | crate::WALLET_SCAN_FILE
                 if !is_dir =>
             {
                 files.push((name, ExportSource::File(path)));
@@ -1194,6 +1204,94 @@ mod tests {
 
     fn sid(c: char) -> String {
         std::iter::repeat_n(c, 64).collect()
+    }
+
+    /// A workspace holding a keys record and a scan file, closed.
+    fn wallet_ws(tmp: &std::path::Path) -> (PathBuf, PathBuf) {
+        let root = tmp.join("root");
+        let seed =
+            crate::seed_entropy(&crate::generate_seed_phrase().expect("gen")).expect("entropy");
+        let ws = crate::create_workspace(&root, &seed, &founded()).expect("create");
+        ws.write_chain(None, &[]).expect("chain.state");
+        ws.append_wallet_keys(b"the share").expect("keys");
+        ws.write_wallet_scan(b"the cursor").expect("scan");
+        let dir = ws.dir().to_path_buf();
+        drop(ws);
+        (root, dir)
+    }
+
+    fn rot(path: &std::path::Path) {
+        let mut bytes = fs::read(path).expect("read");
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x01;
+        fs::write(path, &bytes).expect("rot");
+    }
+
+    /// Wallet plan test 16 (W5): both wallet files travel while they
+    /// authenticate; a damaged keys file fails the whole export, naming it,
+    /// before a byte is written - a backup that lost the share silently is
+    /// worse than none.
+    #[test]
+    fn a_damaged_keys_file_fails_the_export() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (root, dir) = wallet_ws(tmp.path());
+        let mut blob = Vec::new();
+        let outcome =
+            export_dir(&root, &dir, &ExportKey::passphrase(PASS), &mut blob).expect("export");
+        assert!(outcome.skipped.is_empty(), "{:?}", outcome.skipped);
+        let a = read_export(&mut blob.as_slice(), &ExportSecret::passphrase(PASS))
+            .expect("decrypt");
+        for f in [crate::WALLET_KEYS_FILE, crate::WALLET_SCAN_FILE] {
+            let shipped = entry(&a, f).expect("travels");
+            assert_eq!(shipped.data, fs::read(dir.join(f)).expect("disk"), "{f} verbatim");
+        }
+
+        rot(&dir.join(crate::WALLET_KEYS_FILE));
+        let mut blob = Vec::new();
+        let err = export_dir(&root, &dir, &ExportKey::passphrase(PASS), &mut blob)
+            .expect_err("no backup without the share");
+        assert!(matches!(err, StorageError::WalletKeysDamaged), "{err:?}");
+        assert_eq!(err.to_string(), "wallet_keys.state is damaged");
+        assert!(blob.is_empty(), "nothing written");
+    }
+
+    /// Wallet plan test 18: a damaged scan file costs a rescan, never the
+    /// backup - left out and named.
+    #[test]
+    fn a_damaged_scan_file_is_skipped_and_named() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (root, dir) = wallet_ws(tmp.path());
+        rot(&dir.join(crate::WALLET_SCAN_FILE));
+        let mut blob = Vec::new();
+        let outcome =
+            export_dir(&root, &dir, &ExportKey::passphrase(PASS), &mut blob).expect("export");
+        assert_eq!(outcome.skipped, [crate::WALLET_SCAN_FILE]);
+        let a = read_export(&mut blob.as_slice(), &ExportSecret::passphrase(PASS))
+            .expect("decrypt");
+        assert!(entry(&a, crate::WALLET_SCAN_FILE).is_none());
+        assert!(entry(&a, crate::WALLET_KEYS_FILE).is_some(), "the share still travels");
+    }
+
+    /// Wallet plan test 19 (W5's way out): once the loss is acknowledged
+    /// the damaged file sits aside as a dot-file and exports resume
+    /// without it, silently.
+    #[test]
+    fn an_acknowledged_loss_lets_the_export_resume() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (root, dir) = wallet_ws(tmp.path());
+        rot(&dir.join(crate::WALLET_KEYS_FILE));
+        assert!(export_dir(&root, &dir, &ExportKey::passphrase(PASS), &mut Vec::new()).is_err());
+        let (ws, _) = crate::open_workspace(&dir).expect("open");
+        assert!(ws.set_aside_wallet_keys().expect("set aside"));
+        drop(ws);
+        let mut blob = Vec::new();
+        let outcome =
+            export_dir(&root, &dir, &ExportKey::passphrase(PASS), &mut blob).expect("resumes");
+        assert!(outcome.skipped.is_empty(), "the dot-file is no surprise: {:?}", outcome.skipped);
+        let a = read_export(&mut blob.as_slice(), &ExportSecret::passphrase(PASS))
+            .expect("decrypt");
+        assert!(a.entries.iter().all(|e| !e.path.contains("wallet_keys")), "nothing of it travels");
+        assert!(entry(&a, crate::WALLET_SCAN_FILE).is_some());
     }
 
     /// Spec §9.5: after a cut the vault base and the current payloads are

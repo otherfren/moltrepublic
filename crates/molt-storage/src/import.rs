@@ -330,6 +330,8 @@ pub fn import_stage(
         .iter()
         .filter_map(|e| {
             let checked = match e.path.as_str() {
+                crate::WALLET_KEYS_FILE => crate::decode_wallet_keys_file(&ws_key, &id, &e.data).map(drop),
+                crate::WALLET_SCAN_FILE => crate::decode_wallet_scan_file(&ws_key, &id, &e.data).map(drop),
                 "wiki_base.bin" => crate::verify_wiki_base(&ws_key, &id, &e.data),
                 "vault_base.bin" => crate::verify_vault_base(&ws_key, &id, &e.data),
                 p => match crate::vault_payload_stem(p) {
@@ -389,7 +391,8 @@ pub fn import_stage(
 /// might try to smuggle in.
 fn allowed_entry(path: &str) -> bool {
     match path {
-        "manifest.toml" | "prefs.toml" | "chain.state" | "wiki_base.bin" | "vault_base.bin" => true,
+        "manifest.toml" | "prefs.toml" | "chain.state" | "wiki_base.bin" | "vault_base.bin"
+        | crate::WALLET_KEYS_FILE | crate::WALLET_SCAN_FILE => true,
         p => {
             if p.starts_with("vault/") {
                 return crate::vault_payload_stem(p).is_some();
@@ -421,6 +424,13 @@ fn numeric_stem(file: &str, ext: &str) -> bool {
 }
 
 impl ImportStaging {
+    /// The blob's keys file did not authenticate and stays behind: the
+    /// restored seat is watch-only (wallet design W5), which the engine
+    /// must say loudly.
+    pub fn wallet_keys_dropped(&self) -> bool {
+        self.dropped.iter().any(|d| d == crate::WALLET_KEYS_FILE)
+    }
+
     /// The staging directory (dot-invisible until commit).
     pub fn staging_dir(&self) -> &Path {
         &self.dir
@@ -771,6 +781,101 @@ mod tests {
         assert_eq!(opened.read_wiki_base().expect("readable"), None, "no base held");
     }
 
+    /// A real workspace-mode backup of a workspace holding a keys record and
+    /// a scan file, re-forged with `rot` applied to the named entries (the
+    /// honest exporter refuses or skips them). Returns `(blob, phrase, seed, id)`.
+    fn wallet_backup(tmp: &Path, rot: &[&str]) -> (Vec<u8>, String, Vec<u8>, String) {
+        let phrase = crate::generate_seed_phrase().expect("gen");
+        let seed = crate::seed_entropy(&phrase).expect("entropy");
+        let root = tmp.join("src-root");
+        let ws = crate::create_workspace(&root, &seed, &founded_genesis()).expect("create");
+        ws.write_chain(None, &[]).expect("chain.state");
+        ws.append_wallet_keys(b"the share").expect("keys");
+        ws.write_wallet_scan(b"the cursor").expect("scan");
+        let id = ws.manifest.workspace.id.clone();
+        let dir = ws.dir().to_path_buf();
+        drop(ws);
+        let honest = blob_of(&root, &dir, &ExportKey::Workspace);
+        let ws_key = crate::derive_workspace_key(&seed, &id);
+        let archive = crate::export::read_export(
+            &mut honest.as_slice(),
+            &ExportSecret::WorkspaceKey(ws_key),
+        )
+        .expect("decrypt the honest backup");
+        let entries: Vec<(String, Vec<u8>)> = archive
+            .entries
+            .iter()
+            .map(|e| {
+                let mut data = e.data.clone();
+                if rot.contains(&e.path.as_str()) {
+                    let last = data.len() - 1;
+                    data[last] ^= 1;
+                }
+                (e.path.clone(), data)
+            })
+            .collect();
+        for f in rot {
+            assert!(entries.iter().any(|(p, _)| p == f), "{f} was exported");
+        }
+        let refs: Vec<(&str, &[u8])> =
+            entries.iter().map(|(p, d)| (p.as_str(), d.as_slice())).collect();
+        let meta = serde_json::to_value(&archive.meta).expect("meta json");
+        (forge_blob(&id, &ws_key, &meta, &refs), phrase, seed, id)
+    }
+
+    /// Both wallet files restore while they authenticate.
+    #[test]
+    fn the_wallet_files_restore() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (blob, phrase, seed, id) = wallet_backup(tmp.path(), &[]);
+        let dest_root = tmp.path().join("dest-root");
+        std::fs::create_dir_all(&dest_root).expect("dest root");
+        let staging = import_stage(&dest_root, &blob, &phrase).expect("stage");
+        assert!(staging.dropped.is_empty(), "{:?}", staging.dropped);
+        assert!(!staging.wallet_keys_dropped());
+        let (sk, _pk) = crate::derive_identity_key(&seed, &id);
+        let restored = staging.commit(&dest_root, false, Some(&sk)).expect("commit");
+        let (opened, _) = crate::open_workspace(&restored).expect("open");
+        let keys = opened.read_wallet_keys().expect("keys");
+        assert_eq!(keys.iter().map(|r| r.to_vec()).collect::<Vec<_>>(), [b"the share".to_vec()]);
+        assert!(opened.read_wallet_scan().expect("scan").is_some());
+    }
+
+    /// Wallet plan test 17 (W5): a keys file that does not authenticate is
+    /// dropped and the restore goes on - the seat is watch-only, and the
+    /// staging says so for the engine to show loudly.
+    #[test]
+    fn a_damaged_keys_file_restores_watch_only() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (blob, phrase, seed, id) = wallet_backup(tmp.path(), &[crate::WALLET_KEYS_FILE]);
+        let dest_root = tmp.path().join("dest-root");
+        std::fs::create_dir_all(&dest_root).expect("dest root");
+        let staging = import_stage(&dest_root, &blob, &phrase).expect("the restore goes through");
+        assert_eq!(staging.dropped, [crate::WALLET_KEYS_FILE]);
+        assert!(staging.wallet_keys_dropped(), "watch-only, loudly");
+        assert!(!staging.dir.join(crate::WALLET_KEYS_FILE).exists(), "never planted");
+        let (sk, _pk) = crate::derive_identity_key(&seed, &id);
+        let restored = staging.commit(&dest_root, false, Some(&sk)).expect("commit");
+        let (opened, loaded) = crate::open_workspace(&restored).expect("open");
+        assert_eq!(loaded.tail.first().map(|e| e.seq), Some(1), "the log restored");
+        assert!(opened.read_wallet_keys().expect("absent").is_empty(), "no share held");
+        assert!(opened.read_wallet_scan().expect("scan").is_some(), "the rest restored");
+    }
+
+    /// A damaged scan file is dropped and named; the seat rescans.
+    #[test]
+    fn a_damaged_scan_file_is_dropped_at_import() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (blob, phrase, _seed, _id) = wallet_backup(tmp.path(), &[crate::WALLET_SCAN_FILE]);
+        let dest_root = tmp.path().join("dest-root");
+        std::fs::create_dir_all(&dest_root).expect("dest root");
+        let staging = import_stage(&dest_root, &blob, &phrase).expect("stage");
+        assert_eq!(staging.dropped, [crate::WALLET_SCAN_FILE]);
+        assert!(!staging.wallet_keys_dropped());
+        assert!(!staging.dir.join(crate::WALLET_SCAN_FILE).exists());
+        assert!(staging.dir.join(crate::WALLET_KEYS_FILE).exists());
+    }
+
     /// Spec §9.5: a vault file that does not authenticate under the blob's
     /// key (another workspace's, or a payload under another stem) costs
     /// that file; the rest restores, and the dropped ones are named.
@@ -1030,6 +1135,10 @@ mod tests {
         assert!(allowed_entry("logo.png"));
         assert!(allowed_entry("wiki_base.bin"));
         assert!(!allowed_entry("log/wiki_base.bin"), "only at the root");
+        assert!(allowed_entry("wallet_keys.state"));
+        assert!(allowed_entry("wallet_scan.state"));
+        assert!(!allowed_entry(".wallet_keys.state.lost0"), "a set-aside file never travels");
+        assert!(!allowed_entry("log/wallet_keys.state"), "only at the root");
         for evil in [
             "transport.state",
             "keys/workspace.key",

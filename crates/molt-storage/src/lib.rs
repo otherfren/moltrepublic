@@ -163,9 +163,18 @@ const VAULT_PAYLOAD_SEGMENT: u64 = u64::MAX - 6;
 const KANBAN_WAKES_SEGMENT: u64 = u64::MAX - 7;
 /// AAD segment marker for `kanban_draft.json` (the basket).
 const KANBAN_DRAFT_SEGMENT: u64 = u64::MAX - 8;
+/// AAD segment marker for `wallet_keys.state` (the purse's keys records).
+const WALLET_KEYS_SEGMENT: u64 = u64::MAX - 9;
+/// AAD segment marker for `wallet_scan.state` (the scanner's progress).
+const WALLET_SCAN_SEGMENT: u64 = u64::MAX - 10;
 /// The lowest reserved marker — a log file numbered at or above it is
 /// ignored (see [`list_sorted`]).
-const RESERVED_SEGMENT_FLOOR: u64 = KANBAN_DRAFT_SEGMENT;
+const RESERVED_SEGMENT_FLOOR: u64 = WALLET_SCAN_SEGMENT;
+/// The purse's keys records (`docs/chain/wallet_treasury_design.md` §6).
+pub const WALLET_KEYS_FILE: &str = "wallet_keys.state";
+/// The purse scanner's progress; damage costs a rescan.
+pub const WALLET_SCAN_FILE: &str = "wallet_scan.state";
+const WALLET_KEYS_TAG: &[u8] = b"molt-wallet-keys-file-v1";
 /// Plaintext per wiki-base frame: EXACTLY one file-plane piece
 /// (`molt_net::file_plane::PIECE_PAYLOAD_LEN`, cross-checked by a static
 /// assertion in molt-engine - this crate sits below molt-net and cannot
@@ -240,6 +249,10 @@ pub enum StorageError {
     /// A malformed file that is not the log (manifest, prefs, key file).
     #[error("{0}")]
     BadFile(String),
+    /// The purse's keys file does not authenticate: no export may drop
+    /// the share silently (wallet design W5).
+    #[error("wallet_keys.state is damaged")]
+    WalletKeysDamaged,
 }
 
 impl StorageError {
@@ -1735,6 +1748,96 @@ impl OpenedWorkspace {
         write_atomic(&self.dir, "kanban_wakes.json", &frame, true)
     }
 
+    /// The purse's keys records (wallet plan §9); absent = none.
+    ///
+    /// # Errors
+    /// [`StorageError::WalletKeysDamaged`] when the file does not
+    /// authenticate or parse; I/O otherwise.
+    pub fn read_wallet_keys(&self) -> Result<WalletRecords, StorageError> {
+        let data = match read_capped(&self.dir.join(WALLET_KEYS_FILE), READ_CAP_STATE, WALLET_KEYS_FILE) {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        decode_wallet_keys_file(&self.key, &self.id, &data)
+    }
+
+    fn write_wallet_keys(&self, records: &[Zeroizing<Vec<u8>>]) -> Result<(), StorageError> {
+        let frame = encode_frame(
+            &wallet_keys_key(&self.key, &self.id),
+            &self.id,
+            WALLET_KEYS_SEGMENT,
+            0,
+            &encode_wallet_keys(records),
+        )?;
+        write_atomic(&self.dir, WALLET_KEYS_FILE, &frame, true)
+    }
+
+    /// Add one keys record; a record already held is a no-op. A damaged
+    /// file is never replaced (design I16) - set it aside first.
+    pub fn append_wallet_keys(&self, record: &[u8]) -> Result<(), StorageError> {
+        let mut records = self.read_wallet_keys()?;
+        if records.iter().any(|r| r.as_slice() == record) {
+            return Ok(());
+        }
+        records.push(Zeroizing::new(record.to_vec()));
+        self.write_wallet_keys(&records)
+    }
+
+    /// Keep only `keep`, the purse's record, once the purse committed.
+    /// Refuses when `keep` is not held: the share it names must survive.
+    pub fn prune_wallet_keys(&self, keep: &[u8]) -> Result<(), StorageError> {
+        let mut records = self.read_wallet_keys()?;
+        if !records.iter().any(|r| r.as_slice() == keep) {
+            return Err(StorageError::BadFile("wallet_keys.state: the kept record is not held".to_string()));
+        }
+        records.retain(|r| r.as_slice() == keep);
+        self.write_wallet_keys(&records)
+    }
+
+    /// The acknowledged loss (wallet design W5): a damaged keys file moves
+    /// aside as `.wallet_keys.state.lost<n>`, which nothing exports or
+    /// reads. `false` when there is no file.
+    ///
+    /// # Errors
+    /// An intact file is never set aside; I/O.
+    pub fn set_aside_wallet_keys(&self) -> Result<bool, StorageError> {
+        let path = self.dir.join(WALLET_KEYS_FILE);
+        match self.read_wallet_keys() {
+            Err(StorageError::WalletKeysDamaged) => {}
+            Ok(_) if !path.exists() => return Ok(false),
+            Ok(_) => return Err(StorageError::BadFile("wallet_keys.state is intact".to_string())),
+            Err(e) => return Err(e),
+        }
+        let aside = (0u32..)
+            .map(|n| self.dir.join(format!(".{WALLET_KEYS_FILE}.lost{n}")))
+            .find(|p| !p.exists())
+            .ok_or_else(|| StorageError::BadFile("no name to set wallet_keys.state aside".to_string()))?;
+        fs::rename(&path, &aside)?;
+        File::open(&self.dir)?.sync_all()?;
+        Ok(true)
+    }
+
+    /// The scanner's progress bytes; absent = `None`.
+    ///
+    /// # Errors
+    /// Unreadable, over the cap, or a frame that does not authenticate:
+    /// the caller rescans from the birthday.
+    pub fn read_wallet_scan(&self) -> Result<Option<Zeroizing<Vec<u8>>>, StorageError> {
+        let data = match read_capped(&self.dir.join(WALLET_SCAN_FILE), READ_CAP_STATE, WALLET_SCAN_FILE) {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        decode_wallet_scan_file(&self.key, &self.id, &data).map(Some)
+    }
+
+    /// Rewrite `wallet_scan.state` (atomic, sealed).
+    pub fn write_wallet_scan(&self, bytes: &[u8]) -> Result<(), StorageError> {
+        let frame = encode_frame(&wallet_scan_key(&self.key, &self.id), &self.id, WALLET_SCAN_SEGMENT, 0, bytes)?;
+        write_atomic(&self.dir, WALLET_SCAN_FILE, &frame, true)
+    }
+
     /// **K6: the folded wiki base**, sealed at rest like every other state
     /// file. The bytes are [`molt_core::wiki_fold::wiki_base_canonical_bytes`]
     /// — the exact preimage of the commitment the chain carries, so a
@@ -2001,6 +2104,81 @@ fn kanban_wakes_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
 /// The `kanban_draft.json` sub-key.
 fn kanban_draft_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
     Zeroizing::new(hkdf32(ws_key, "molt-kanban-draft", id))
+}
+
+/// The `wallet_keys.state` sub-key.
+fn wallet_keys_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    Zeroizing::new(hkdf32(ws_key, "molt-wallet-keys", id))
+}
+
+/// The `wallet_scan.state` sub-key.
+fn wallet_scan_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    Zeroizing::new(hkdf32(ws_key, "molt-wallet-scan", id))
+}
+
+/// The keys records of `wallet_keys.state`, each an opaque
+/// `molt_treasury::keys::KeysRecord` encoding.
+pub type WalletRecords = Vec<Zeroizing<Vec<u8>>>;
+
+/// `tag ‖ count ‖ record*`, each record length-prefixed.
+fn encode_wallet_keys(records: &[Zeroizing<Vec<u8>>]) -> Zeroizing<Vec<u8>> {
+    let len = records.iter().map(|r| 4 + r.len()).sum::<usize>();
+    let mut out = Zeroizing::new(Vec::with_capacity(4 + WALLET_KEYS_TAG.len() + 4 + len));
+    molt_core::put_bytes(&mut out, WALLET_KEYS_TAG);
+    molt_core::put_count(&mut out, records.len());
+    for r in records {
+        molt_core::put_bytes(&mut out, r);
+    }
+    out
+}
+
+fn decode_wallet_keys(plain: &[u8]) -> Option<WalletRecords> {
+    fn take<'a>(rest: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
+        if rest.len() < n {
+            return None;
+        }
+        let (head, tail) = rest.split_at(n);
+        *rest = tail;
+        Some(head)
+    }
+    fn len(rest: &mut &[u8]) -> Option<usize> {
+        usize::try_from(u32::from_le_bytes(take(rest, 4)?.try_into().ok()?)).ok()
+    }
+    let mut rest = plain;
+    let tag_len = len(&mut rest)?;
+    if take(&mut rest, tag_len)? != WALLET_KEYS_TAG {
+        return None;
+    }
+    let count = len(&mut rest)?;
+    let mut out = Vec::new();
+    for _ in 0..count {
+        let n = len(&mut rest)?;
+        out.push(Zeroizing::new(take(&mut rest, n)?.to_vec()));
+    }
+    rest.is_empty().then_some(out)
+}
+
+/// The keys records of a `wallet_keys.state` image; any damage is
+/// [`StorageError::WalletKeysDamaged`].
+pub(crate) fn decode_wallet_keys_file(
+    ws_key: &[u8; 32],
+    id: &[u8; 32],
+    data: &[u8],
+) -> Result<WalletRecords, StorageError> {
+    let plain = Zeroizing::new(
+        decrypt_state_file(&wallet_keys_key(ws_key, id), id, WALLET_KEYS_SEGMENT, data)
+            .map_err(|_| StorageError::WalletKeysDamaged)?,
+    );
+    decode_wallet_keys(&plain).ok_or(StorageError::WalletKeysDamaged)
+}
+
+/// The scan bytes of a `wallet_scan.state` image.
+pub(crate) fn decode_wallet_scan_file(
+    ws_key: &[u8; 32],
+    id: &[u8; 32],
+    data: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, StorageError> {
+    decrypt_state_file(&wallet_scan_key(ws_key, id), id, WALLET_SCAN_SEGMENT, data).map(Zeroizing::new)
 }
 
 /// The `vault_base.bin` sub-key (vault S5).
@@ -3176,6 +3354,20 @@ enum WriterMsg {
         blocks: Vec<molt_core::ChainBlock>,
         ack: mpsc::SyncSender<bool>,
     },
+    /// Append one keys record, acking when durable (wallet design I4).
+    PersistWalletKeys {
+        record: Zeroizing<Vec<u8>>,
+        ack: mpsc::SyncSender<bool>,
+    },
+    /// Keep only this keys record (the purse's), acking when durable.
+    PruneWalletKeys {
+        keep: Zeroizing<Vec<u8>>,
+        ack: mpsc::SyncSender<bool>,
+    },
+    /// Set a damaged keys file aside (the acknowledged loss).
+    SetAsideWalletKeys(mpsc::SyncSender<Result<bool, StorageError>>),
+    /// Rewrite `wallet_scan.state`.
+    SaveWalletScan(Zeroizing<Vec<u8>>),
     /// K6: persist (or drop, on `None`) the folded wiki base. Same blocking
     /// ack as the chain: a cut that dropped the patches has to know the tree
     /// reached the disk before it forgets them.
@@ -3555,6 +3747,44 @@ impl StorageHandle {
             return false; // the writer is gone: nothing reached the disk
         }
         ack_rx.recv().unwrap_or(false)
+    }
+
+    /// Append a keys record and BLOCK until it is durable: the attestation
+    /// may leave only after this returns `true` (wallet design I4).
+    #[must_use]
+    pub fn persist_wallet_keys_blocking(&self, record: Zeroizing<Vec<u8>>) -> bool {
+        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
+        if self.tx.send(WriterMsg::PersistWalletKeys { record, ack: ack_tx }).is_err() {
+            return false;
+        }
+        ack_rx.recv().unwrap_or(false)
+    }
+
+    /// Prune the keys file to the purse's record, blocking until durable.
+    #[must_use]
+    pub fn prune_wallet_keys_blocking(&self, keep: Zeroizing<Vec<u8>>) -> bool {
+        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
+        if self.tx.send(WriterMsg::PruneWalletKeys { keep, ack: ack_tx }).is_err() {
+            return false;
+        }
+        ack_rx.recv().unwrap_or(false)
+    }
+
+    /// [`OpenedWorkspace::set_aside_wallet_keys`] on the writer thread.
+    pub fn set_aside_wallet_keys_blocking(&self) -> Result<bool, StorageError> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.tx
+            .send(WriterMsg::SetAsideWalletKeys(tx))
+            .map_err(|_| StorageError::BadFile("storage writer stopped".to_string()))?;
+        rx.recv()
+            .map_err(|_| StorageError::BadFile("storage writer stopped".to_string()))?
+    }
+
+    /// Persist the scanner's progress (fire-and-forget: a lost save costs a rescan).
+    pub fn save_wallet_scan(&self, bytes: Zeroizing<Vec<u8>>) {
+        if let Err(mpsc::TrySendError::Full(_)) = self.tx.try_send(WriterMsg::SaveWalletScan(bytes)) {
+            tracing::warn!(dropped = "wallet scan save", "writer queue full");
+        }
     }
 
     /// K6: persist the folded wiki base (`None` drops it), acking when
@@ -4014,6 +4244,28 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                             ok = false;
                         }
                         let _ = ack.send(ok);
+                    }
+                    Ok(WriterMsg::PersistWalletKeys { record, ack }) => {
+                        let wrote = ws.append_wallet_keys(&record).and_then(|()| ws.sync());
+                        if let Err(e) = &wrote {
+                            tracing::error!(error = %e, "wallet_keys=unwritten");
+                        }
+                        let _ = ack.send(wrote.is_ok());
+                    }
+                    Ok(WriterMsg::PruneWalletKeys { keep, ack }) => {
+                        let wrote = ws.prune_wallet_keys(&keep).and_then(|()| ws.sync());
+                        if let Err(e) = &wrote {
+                            tracing::error!(error = %e, "wallet_keys=unpruned");
+                        }
+                        let _ = ack.send(wrote.is_ok());
+                    }
+                    Ok(WriterMsg::SetAsideWalletKeys(reply)) => {
+                        let _ = reply.send(ws.set_aside_wallet_keys());
+                    }
+                    Ok(WriterMsg::SaveWalletScan(bytes)) => {
+                        if let Err(e) = ws.write_wallet_scan(&bytes) {
+                            tracing::warn!(error = %e, "wallet_scan=unwritten");
+                        }
                     }
                     Ok(WriterMsg::PersistWikiBase { bytes, ack }) => {
                         let wrote = match &bytes {
@@ -5147,15 +5399,100 @@ mod tests {
         assert_eq!(ws.read_vault_payload(&b).expect("b").as_deref(), Some(&b"two"[..]));
     }
 
+    /// Wallet plan §9 (test 15): the keys records append, dedupe and prune
+    /// to the purse's; both files sit under their own segment marker and
+    /// sub-key, so neither opens under the other's name.
+    #[test]
+    fn wallet_keys_and_scan_round_trip_under_their_segments() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let ws = vault_ws(tmp.path());
+        assert!(ws.read_wallet_keys().expect("absent").is_empty());
+        assert_eq!(ws.read_wallet_scan().expect("absent"), None);
+        ws.append_wallet_keys(b"run one").expect("first");
+        ws.append_wallet_keys(b"run two").expect("second");
+        ws.append_wallet_keys(b"run one").expect("a repeat is a no-op");
+        let held: Vec<Vec<u8>> =
+            ws.read_wallet_keys().expect("read").iter().map(|r| r.to_vec()).collect();
+        assert_eq!(held, [b"run one".to_vec(), b"run two".to_vec()]);
+        ws.write_wallet_scan(b"cursor").expect("scan");
+        assert_eq!(ws.read_wallet_scan().expect("read").as_deref().map(|b| b.as_slice()), Some(&b"cursor"[..]));
+
+        let dir = ws.dir().to_path_buf();
+        let keys = fs::read(dir.join(WALLET_KEYS_FILE)).expect("keys file");
+        assert!(!keys.windows(7).any(|w| w == b"run one"), "sealed at rest");
+        let scan = fs::read(dir.join(WALLET_SCAN_FILE)).expect("scan file");
+        fs::write(dir.join(WALLET_SCAN_FILE), &keys).expect("swap");
+        assert!(ws.read_wallet_scan().is_err(), "the keys frame does not open as the scan file");
+        fs::write(dir.join(WALLET_KEYS_FILE), &scan).expect("swap");
+        assert!(ws.read_wallet_keys().is_err(), "the scan frame does not open as the keys file");
+        assert!(ws.append_wallet_keys(b"run three").is_err(), "a damaged file is never replaced");
+        assert_eq!(fs::read(dir.join(WALLET_KEYS_FILE)).expect("kept"), scan);
+        fs::write(dir.join(WALLET_KEYS_FILE), &keys).expect("restore");
+
+        assert!(ws.prune_wallet_keys(b"run three").is_err(), "pruning never drops the kept share");
+        drop(ws);
+        let (ws, _) = open_workspace(&dir).expect("reopen");
+        let handle = start_writer(ws);
+        assert!(handle.persist_wallet_keys_blocking(Zeroizing::new(b"run three".to_vec())));
+        assert!(handle.prune_wallet_keys_blocking(Zeroizing::new(b"run two".to_vec())));
+        handle.save_wallet_scan(Zeroizing::new(b"cursor 2".to_vec()));
+        handle.close(None);
+        let (ws, _) = open_workspace(&dir).expect("reopen");
+        let held: Vec<Vec<u8>> =
+            ws.read_wallet_keys().expect("read").iter().map(|r| r.to_vec()).collect();
+        assert_eq!(held, [b"run two".to_vec()], "only the purse's record is left");
+        assert_eq!(ws.read_wallet_scan().expect("read").as_deref().map(|b| b.as_slice()), Some(&b"cursor 2"[..]));
+    }
+
+    /// The keys file's plaintext layout: tag, record count, length-prefixed records.
+    #[test]
+    fn the_wallet_keys_file_layout_is_pinned() {
+        let records = [Zeroizing::new(b"a".to_vec()), Zeroizing::new(b"bc".to_vec())];
+        let mut want = Vec::new();
+        molt_core::put_bytes(&mut want, b"molt-wallet-keys-file-v1");
+        want.extend_from_slice(&2u32.to_le_bytes());
+        molt_core::put_bytes(&mut want, b"a");
+        molt_core::put_bytes(&mut want, b"bc");
+        assert_eq!(*encode_wallet_keys(&records), want);
+        assert_eq!(decode_wallet_keys(&want).map(|r| r.len()), Some(2));
+        assert!(decode_wallet_keys(&want[..want.len() - 1]).is_none());
+        assert!(decode_wallet_keys(&[want.as_slice(), &[0]].concat()).is_none());
+    }
+
+    /// Wallet plan §9 (W5's way out): only a damaged keys file is set
+    /// aside, as a dot-file nothing exports or reads.
+    #[test]
+    fn only_a_damaged_keys_file_is_set_aside() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let ws = vault_ws(tmp.path());
+        assert!(!ws.set_aside_wallet_keys().expect("absent: nothing to do"));
+        ws.append_wallet_keys(b"share").expect("append");
+        assert!(ws.set_aside_wallet_keys().is_err(), "an intact share is never set aside");
+        let path = ws.dir().join(WALLET_KEYS_FILE);
+        let mut rotted = fs::read(&path).expect("keys");
+        let last = rotted.len() - 1;
+        rotted[last] ^= 1;
+        fs::write(&path, &rotted).expect("rot");
+        assert!(ws.set_aside_wallet_keys().expect("damaged"));
+        assert!(!path.exists());
+        assert!(ws.read_wallet_keys().expect("gone").is_empty());
+        assert_eq!(fs::read(ws.dir().join(".wallet_keys.state.lost0")).expect("kept aside"), rotted);
+        fs::write(&path, &rotted).expect("rot again");
+        assert!(ws.set_aside_wallet_keys().expect("damaged again"));
+        assert!(ws.dir().join(".wallet_keys.state.lost1").exists(), "an earlier one is not clobbered");
+    }
+
     /// Plan S3a: the vault and kanban-wake markers sit below the wiki base's,
     /// and the reserved floor moves down with them - a planted log file at any
     /// number is ignored, never the active segment.
     #[test]
     fn segment_floor_ignores_the_reserved_markers() {
-        assert_eq!(RESERVED_SEGMENT_FLOOR, KANBAN_DRAFT_SEGMENT);
+        assert_eq!(RESERVED_SEGMENT_FLOOR, WALLET_SCAN_SEGMENT);
         const {
             assert!(
-                KANBAN_DRAFT_SEGMENT < KANBAN_WAKES_SEGMENT
+                WALLET_SCAN_SEGMENT < WALLET_KEYS_SEGMENT
+                    && WALLET_KEYS_SEGMENT < KANBAN_DRAFT_SEGMENT
+                    && KANBAN_DRAFT_SEGMENT < KANBAN_WAKES_SEGMENT
                     && KANBAN_WAKES_SEGMENT < VAULT_PAYLOAD_SEGMENT
                     && VAULT_PAYLOAD_SEGMENT < VAULT_BASE_SEGMENT
                     && VAULT_BASE_SEGMENT < WIKI_BASE_SEGMENT
@@ -5163,12 +5500,19 @@ mod tests {
         };
         let tmp = tempfile::tempdir().expect("tmp");
         let dir = make_ws(tmp.path(), 2);
-        for no in [KANBAN_DRAFT_SEGMENT, KANBAN_WAKES_SEGMENT, VAULT_PAYLOAD_SEGMENT, VAULT_BASE_SEGMENT] {
+        for no in [
+            WALLET_SCAN_SEGMENT,
+            WALLET_KEYS_SEGMENT,
+            KANBAN_DRAFT_SEGMENT,
+            KANBAN_WAKES_SEGMENT,
+            VAULT_PAYLOAD_SEGMENT,
+            VAULT_BASE_SEGMENT,
+        ] {
             std::fs::write(dir.join("log").join(format!("{no}.mlog")), b"").expect("plant");
         }
         let (ws, loaded) = open_workspace(&dir).expect("opens despite the planted files");
         assert_eq!(loaded.tail.len(), 3);
-        assert!(ws.seg_no < KANBAN_DRAFT_SEGMENT);
+        assert!(ws.seg_no < WALLET_SCAN_SEGMENT);
     }
 
     /// WP4b stage 5: the FIRST pruned chain persist raises the manifest
