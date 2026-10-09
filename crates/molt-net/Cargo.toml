@@ -45,6 +45,8 @@ workspace = true
 # ring-provider tokio-rustls, which the runtime must never silently re-adopt
 # before the explicit N2 WS/TLS decision).
 embedded-tor = ["dep:arti-client", "dep:tor-rtcompat"]
+# The in-process monerod double (`monero_rpc::stub`) for other crates' tests.
+stub-daemon = ["dep:md-5"]
 
 [dependencies]
 molt-core.workspace = true
@@ -99,8 +101,14 @@ nostr.workspace = true
 # tor-dirmgr) is the accepted C dep.
 arti-client = { version = "0.42", default-features = false, features = ["tokio", "rustls", "onion-service-client"], optional = true }
 tor-rtcompat = { version = "0.42", optional = true }
+# The purse's daemon RPC (wallet_treasury_design.md §7) over our own HTTP
+# client and dialer; digest login for monerod's --rpc-login.
+monero-daemon-rpc.workspace = true
+http-auth.workspace = true
+md-5 = { version = "0.10", optional = true }
 
 [dev-dependencies]
+md-5 = "0.10" # the stub daemon checks the digest answer
 # `test-util` (paused-clock auto-advance) drives the bounded-dial-timeout test
 # without a 30 s real wait. Dev-only: the default build graph is unchanged.
 tokio = { workspace = true, features = ["test-util"] }

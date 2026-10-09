@@ -53,6 +53,7 @@ pub mod loopback;
 pub mod mesh;
 pub mod mirror_gossip;
 pub mod mls;
+pub mod monero_rpc;
 pub mod nostr;
 pub mod relay_runtime;
 pub mod relay_ws;

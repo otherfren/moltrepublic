@@ -12,7 +12,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use molt_net::s3::http::{roundtrip_download, roundtrip_upload, DownloadBounds};
+use molt_net::s3::http::{roundtrip_download, roundtrip_upload, DownloadBounds, HttpError};
 use molt_net::s3::{sigv4, S3Client, S3Config, S3Error};
 use molt_net::dial::Dialer;
 use sha2::{Digest, Sha256};
@@ -397,9 +397,7 @@ async fn upload_stall_fails_with_a_per_write_idle_timeout() {
         started.elapsed() < Duration::from_secs(1),
         "failed at the idle window, not a whole-body cap"
     );
-    let S3Error::Protocol(msg) = err else {
-        panic!("expected a protocol error, got {err:?}");
-    };
+    let HttpError(msg) = err;
     assert!(
         msg.contains("write") && msg.contains("timed out"),
         "the failure is the per-write idle timeout, not a whole-exchange cap: {msg}"
@@ -525,7 +523,7 @@ async fn download_below_the_throughput_floor_is_bounded() {
         "bounded by the throughput floor, not idle-only"
     );
     assert!(
-        matches!(&err, S3Error::Protocol(m) if m.contains("floor") || m.contains("too slow")),
+        matches!(&err, HttpError(m) if m.contains("floor") || m.contains("too slow")),
         "honest throughput-floor error, got {err:?}"
     );
 }
@@ -574,7 +572,7 @@ async fn download_head_dribble_is_bounded_by_the_floor() {
         "bounded by the floor, not held by the idle-only head read"
     );
     assert!(
-        matches!(&err, S3Error::Protocol(m) if m.contains("head") && m.contains("floor")),
+        matches!(&err, HttpError(m) if m.contains("head") && m.contains("floor")),
         "honest head-floor error, got {err:?}"
     );
 }

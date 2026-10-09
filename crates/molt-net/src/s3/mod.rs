@@ -463,11 +463,11 @@ impl S3Client {
         match self.config.endpoint.scheme {
             S3Scheme::Https => {
                 let mut tls = self.tls_handshake(stream).await?;
-                http::roundtrip(&mut tls, method, &path_and_query, &wire_headers, body).await
+                Ok(http::roundtrip(&mut tls, method, &path_and_query, &wire_headers, body, http::MAX_RESPONSE).await?)
             }
             S3Scheme::Http => {
                 let mut tcp = stream;
-                http::roundtrip(&mut tcp, method, &path_and_query, &wire_headers, body).await
+                Ok(http::roundtrip(&mut tcp, method, &path_and_query, &wire_headers, body, http::MAX_RESPONSE).await?)
             }
         }
     }

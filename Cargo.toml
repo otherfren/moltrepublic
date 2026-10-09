@@ -111,6 +111,7 @@ ciphersuite        = { version = "0.4", default-features = false, features = ["s
 monero-wallet      = { version = "0.2", default-features = false, features = ["std", "compile-time-generators"] }
 monero-daemon-rpc  = { version = "0.2", default-features = false, features = ["std"] }
 schnorr-signatures = { version = "=0.5.2", default-features = false } # 0.5.3 admits multiexp 0.5 beside 0.4: two BatchVerifier types break dkg-pedpop
+http-auth          = { version = "0.1", default-features = false, features = ["digest-scheme"] } # the daemon login (design §12)
 
 # TLS + dialing (molt-net). Pure-Rust: rustls with the RustCrypto provider
 # keeps the no-C-toolchain / reproducible posture (rustls-rustcrypto instead

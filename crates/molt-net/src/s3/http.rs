@@ -15,7 +15,17 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
 
-use super::S3Error;
+/// One HTTP exchange failed: framing, timeout or size. Each client maps it
+/// into its own error type.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
+pub struct HttpError(pub String);
+
+impl From<HttpError> for super::S3Error {
+    fn from(e: HttpError) -> Self {
+        super::S3Error::Protocol(e.0)
+    }
+}
 
 /// Deadline for one whole HTTP exchange once the connection is up (the dial
 /// and TLS handshakes carry their own deadlines). Covers head + a *small*
@@ -23,9 +33,9 @@ use super::S3Error;
 /// would deterministically time out (see [`roundtrip_upload`]).
 const HTTP_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Hard cap on response head + body — a probe/list answer is tiny; anything
+/// S3's cap on response head + body — a probe/list answer is tiny; anything
 /// larger is a misbehaving server, not data we want to buffer.
-const MAX_RESPONSE: usize = 4 * 1024 * 1024;
+pub const MAX_RESPONSE: usize = 4 * 1024 * 1024;
 
 /// Idle deadline for one body-write slice on the streaming upload path: each
 /// bounded `write_all` must make progress within this window. A large backup
@@ -61,20 +71,21 @@ impl HttpResponse {
 /// Send one request over `stream` and read the full response.
 /// `path_and_query` goes on the request line verbatim; `headers` are written
 /// as given (the caller supplies `Host` and every signed header). A `HEAD`
-/// request reads no body.
+/// request reads no body. Head + body beyond `max_response` bytes fail.
 pub async fn roundtrip<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
     method: &str,
     path_and_query: &str,
     headers: &[(String, String)],
     body: &[u8],
-) -> Result<HttpResponse, S3Error> {
+    max_response: usize,
+) -> Result<HttpResponse, HttpError> {
     timeout(
         HTTP_EXCHANGE_TIMEOUT,
-        exchange(stream, method, path_and_query, headers, body),
+        exchange(stream, method, path_and_query, headers, body, max_response),
     )
     .await
-    .map_err(|_| S3Error::Protocol("http exchange timed out".to_string()))?
+    .map_err(|_| HttpError("http exchange timed out".to_string()))?
 }
 
 async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
@@ -83,7 +94,8 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
     path_and_query: &str,
     headers: &[(String, String)],
     body: &[u8],
-) -> Result<HttpResponse, S3Error> {
+    max_response: usize,
+) -> Result<HttpResponse, HttpError> {
     // --- request ---
     let mut req = format!("{method} {path_and_query} HTTP/1.1\r\n");
     for (k, v) in headers {
@@ -96,21 +108,21 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
     stream
         .write_all(req.as_bytes())
         .await
-        .map_err(|e| S3Error::Protocol(format!("http write: {e}")))?;
+        .map_err(|e| HttpError(format!("http write: {e}")))?;
     if !body.is_empty() {
         stream
             .write_all(body)
             .await
-            .map_err(|e| S3Error::Protocol(format!("http write body: {e}")))?;
+            .map_err(|e| HttpError(format!("http write body: {e}")))?;
     }
     stream
         .flush()
         .await
-        .map_err(|e| S3Error::Protocol(format!("http flush: {e}")))?;
+        .map_err(|e| HttpError(format!("http flush: {e}")))?;
 
     // --- response: read until provably complete or EOF, then parse ---
     let head_only = method == "HEAD";
-    read_full_response(stream, head_only).await
+    read_full_response(stream, head_only, max_response).await
 }
 
 /// Read one whole HTTP response (head + framed/close-delimited body) into
@@ -119,7 +131,8 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
 async fn read_full_response<S: AsyncRead + Unpin>(
     stream: &mut S,
     head_only: bool,
-) -> Result<HttpResponse, S3Error> {
+    max_response: usize,
+) -> Result<HttpResponse, HttpError> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
@@ -132,24 +145,28 @@ async fn read_full_response<S: AsyncRead + Unpin>(
                 // complete — or close-delimited, where truncation is
                 // undetectable by design. Anything else is a real error:
                 // a partial framed body must never parse as authoritative.
-                if response_complete(&buf, head_only) || close_delimited(&buf, head_only) {
+                if response_complete(&buf, head_only, max_response) || close_delimited(&buf, head_only) {
                     break;
                 }
-                return Err(S3Error::Protocol(format!("http read: {e}")));
+                return Err(HttpError(format!("http read: {e}")));
             }
         };
         buf.extend_from_slice(&chunk[..n]);
-        if buf.len() > MAX_RESPONSE {
-            return Err(S3Error::Protocol("http response exceeds 4 MiB".to_string()));
+        if buf.len() > max_response {
+            return Err(too_large(max_response));
         }
         // stop as soon as the response is provably complete — a keep-alive
         // server ignoring our `Connection: close` must not stall us until
         // the timeout (close-delimited bodies still need the EOF above)
-        if response_complete(&buf, head_only) {
+        if response_complete(&buf, head_only, max_response) {
             break;
         }
     }
-    parse_response(&buf, head_only)
+    parse_response(&buf, head_only, max_response)
+}
+
+fn too_large(max_response: usize) -> HttpError {
+    HttpError(format!("http response exceeds {max_response} bytes"))
 }
 
 /// `write_all` a slice under an idle deadline: it must make progress within
@@ -161,11 +178,11 @@ async fn write_all_idle<S: AsyncWrite + Unpin>(
     data: &[u8],
     idle: Duration,
     what: &str,
-) -> Result<(), S3Error> {
+) -> Result<(), HttpError> {
     timeout(idle, stream.write_all(data))
         .await
-        .map_err(|_| S3Error::Protocol(format!("{what} timed out")))?
-        .map_err(|e| S3Error::Protocol(format!("{what}: {e}")))
+        .map_err(|_| HttpError(format!("{what} timed out")))?
+        .map_err(|e| HttpError(format!("{what}: {e}")))
 }
 
 /// Send one request with a (possibly large) `body` and read the response —
@@ -182,7 +199,7 @@ pub async fn roundtrip_upload<S: AsyncRead + AsyncWrite + Unpin>(
     headers: &[(String, String)],
     body: &[u8],
     write_idle: Duration,
-) -> Result<HttpResponse, S3Error> {
+) -> Result<HttpResponse, HttpError> {
     // --- request head ---
     let mut req = format!("{method} {path_and_query} HTTP/1.1\r\n");
     for (k, v) in headers {
@@ -200,13 +217,13 @@ pub async fn roundtrip_upload<S: AsyncRead + AsyncWrite + Unpin>(
     }
     timeout(write_idle, stream.flush())
         .await
-        .map_err(|_| S3Error::Protocol("http flush timed out".to_string()))?
-        .map_err(|e| S3Error::Protocol(format!("http flush: {e}")))?;
+        .map_err(|_| HttpError("http flush timed out".to_string()))?
+        .map_err(|e| HttpError(format!("http flush: {e}")))?;
 
     // --- response: small head + body, one whole-exchange cap ---
-    timeout(HTTP_EXCHANGE_TIMEOUT, read_full_response(stream, false))
+    timeout(HTTP_EXCHANGE_TIMEOUT, read_full_response(stream, false, MAX_RESPONSE))
         .await
-        .map_err(|_| S3Error::Protocol("http exchange timed out".to_string()))?
+        .map_err(|_| HttpError("http exchange timed out".to_string()))?
 }
 
 /// Cap on a streamed download's response HEAD (status + headers).
@@ -267,7 +284,7 @@ pub async fn roundtrip_download<S, W>(
     max_bytes: u64,
     bounds: DownloadBounds,
     progress: &mut (dyn FnMut(u64, Option<u64>) + Send),
-) -> Result<(u16, u64), S3Error>
+) -> Result<(u16, u64), HttpError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     W: tokio::io::AsyncWrite + Unpin + ?Sized,
@@ -283,15 +300,15 @@ where
         stream
             .write_all(req.as_bytes())
             .await
-            .map_err(|e| S3Error::Protocol(format!("http write: {e}")))?;
+            .map_err(|e| HttpError(format!("http write: {e}")))?;
         stream
             .flush()
             .await
-            .map_err(|e| S3Error::Protocol(format!("http flush: {e}")))
+            .map_err(|e| HttpError(format!("http flush: {e}")))
     };
     timeout(idle, write)
         .await
-        .map_err(|_| S3Error::Protocol("http write timed out".to_string()))??;
+        .map_err(|_| HttpError("http write timed out".to_string()))??;
 
     // the whole receive — head, then body or error drain — is bounded both by
     // the per-read idle window AND by an overall minimum-throughput floor, so a
@@ -308,20 +325,20 @@ where
             break parsed;
         }
         if buf.len() > MAX_DOWNLOAD_HEAD {
-            return Err(S3Error::Protocol("http response head exceeds 64 KiB".to_string()));
+            return Err(HttpError("http response head exceeds 64 KiB".to_string()));
         }
         if started.elapsed() > overall {
-            return Err(S3Error::Protocol(format!(
+            return Err(HttpError(format!(
                 "http response head too slow - below the {} B/s floor",
                 bounds.min_throughput_bps
             )));
         }
         let n = timeout(idle, stream.read(&mut chunk))
             .await
-            .map_err(|_| S3Error::Protocol("http read timed out".to_string()))?
-            .map_err(|e| S3Error::Protocol(format!("http read: {e}")))?;
+            .map_err(|_| HttpError("http read timed out".to_string()))?
+            .map_err(|e| HttpError(format!("http read: {e}")))?;
         if n == 0 {
-            return Err(S3Error::Protocol(
+            return Err(HttpError(
                 "http response head is incomplete or malformed".to_string(),
             ));
         }
@@ -335,18 +352,18 @@ where
 
     // --- 2xx body: Content-Length-framed streaming ---
     if is_chunked(&resp_headers) {
-        return Err(S3Error::Protocol(
+        return Err(HttpError(
             "chunked download body is not supported (no Content-Length)".to_string(),
         ));
     }
     let Some(total) = content_length(&resp_headers) else {
-        return Err(S3Error::Protocol(
+        return Err(HttpError(
             "download without a Content-Length".to_string(),
         ));
     };
     let total = u64::try_from(total).unwrap_or(u64::MAX);
     if total > max_bytes {
-        return Err(S3Error::Protocol(format!(
+        return Err(HttpError(format!(
             "object is {total} bytes - beyond the {max_bytes}-byte cap"
         )));
     }
@@ -358,23 +375,23 @@ where
     if take > 0 {
         out.write_all(&leftover[..take])
             .await
-            .map_err(|e| S3Error::Protocol(format!("writing the download: {e}")))?;
+            .map_err(|e| HttpError(format!("writing the download: {e}")))?;
         written += u64::try_from(take).unwrap_or(0);
         progress(written, Some(total));
     }
     while written < total {
         if started.elapsed() > overall {
-            return Err(S3Error::Protocol(format!(
+            return Err(HttpError(format!(
                 "download too slow - below the {} B/s floor ({written} of {total} bytes)",
                 bounds.min_throughput_bps
             )));
         }
         let n = timeout(idle, stream.read(&mut chunk))
             .await
-            .map_err(|_| S3Error::Protocol("http read timed out".to_string()))?
-            .map_err(|e| S3Error::Protocol(format!("http read: {e}")))?;
+            .map_err(|_| HttpError("http read timed out".to_string()))?
+            .map_err(|e| HttpError(format!("http read: {e}")))?;
         if n == 0 {
-            return Err(S3Error::Protocol(format!(
+            return Err(HttpError(format!(
                 "http body was truncated ({written} of {total} bytes)"
             )));
         }
@@ -382,13 +399,13 @@ where
         let use_n = n.min(remaining);
         out.write_all(&chunk[..use_n])
             .await
-            .map_err(|e| S3Error::Protocol(format!("writing the download: {e}")))?;
+            .map_err(|e| HttpError(format!("writing the download: {e}")))?;
         written += u64::try_from(use_n).unwrap_or(0);
         progress(written, Some(total));
     }
     out.flush()
         .await
-        .map_err(|e| S3Error::Protocol(format!("writing the download: {e}")))?;
+        .map_err(|e| HttpError(format!("writing the download: {e}")))?;
     Ok((status, written))
 }
 
@@ -398,7 +415,7 @@ where
 /// ignores `Connection: close` is stopped as soon as `Content-Length` / the
 /// chunked terminator says the body is complete, and an idle timeout, read
 /// error, or the overall floor all resolve to `(status, 0)` rather than a
-/// [`S3Error::Protocol`] that would hide the real status.
+/// [`HttpError`] that would hide the real status.
 #[allow(clippy::too_many_arguments)]
 async fn drain_error_body<S: AsyncRead + Unpin>(
     stream: &mut S,
@@ -409,7 +426,7 @@ async fn drain_error_body<S: AsyncRead + Unpin>(
     idle: Duration,
     started: Instant,
     overall: Duration,
-) -> Result<(u16, u64), S3Error> {
+) -> Result<(u16, u64), HttpError> {
     let mut chunk = [0u8; 8192];
     let mut have = buf.len() - body_start; // body bytes already read with the head
     // Content-Length-framed: read exactly the declared body, no more — a
@@ -426,7 +443,7 @@ async fn drain_error_body<S: AsyncRead + Unpin>(
     // chunked: read until the terminator parses (dechunk succeeds)
     if is_chunked(resp_headers) {
         let mut acc = buf[body_start..].to_vec();
-        while dechunk(&acc).is_err() && acc.len() <= MAX_RESPONSE && started.elapsed() <= overall {
+        while dechunk(&acc, MAX_RESPONSE).is_err() && acc.len() <= MAX_RESPONSE && started.elapsed() <= overall {
             match timeout(idle, stream.read(&mut chunk)).await {
                 Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
                 Ok(Ok(n)) => acc.extend_from_slice(&chunk[..n]),
@@ -485,7 +502,7 @@ fn content_length(headers: &[(String, String)]) -> Option<usize> {
 /// plus (for non-HEAD) a fully-arrived framed body. A close-delimited body
 /// (neither `Content-Length` nor chunked) is never provably complete — only
 /// the peer's EOF ends it.
-fn response_complete(raw: &[u8], head_only: bool) -> bool {
+fn response_complete(raw: &[u8], head_only: bool, max_response: usize) -> bool {
     let Some((_, headers, body_start)) = parse_head(raw) else {
         return false;
     };
@@ -494,7 +511,7 @@ fn response_complete(raw: &[u8], head_only: bool) -> bool {
     }
     let rest = &raw[body_start..];
     if is_chunked(&headers) {
-        dechunk(rest).is_ok()
+        dechunk(rest, max_response).is_ok()
     } else if let Some(len) = content_length(&headers) {
         rest.len() >= len
     } else {
@@ -510,18 +527,18 @@ fn close_delimited(raw: &[u8], head_only: bool) -> bool {
 }
 
 /// Parse a full HTTP/1.1 response held in `raw`.
-fn parse_response(raw: &[u8], head_only: bool) -> Result<HttpResponse, S3Error> {
+fn parse_response(raw: &[u8], head_only: bool, max_response: usize) -> Result<HttpResponse, HttpError> {
     let (status, headers, body_start) = parse_head(raw).ok_or_else(|| {
-        S3Error::Protocol("http response head is incomplete or malformed".to_string())
+        HttpError("http response head is incomplete or malformed".to_string())
     })?;
     let rest = &raw[body_start..];
     let body = if head_only {
         Vec::new()
     } else if is_chunked(&headers) {
-        dechunk(rest)?
+        dechunk(rest, max_response)?
     } else if let Some(len) = content_length(&headers) {
         if rest.len() < len {
-            return Err(S3Error::Protocol("http body was truncated".to_string()));
+            return Err(HttpError("http body was truncated".to_string()));
         }
         rest[..len].to_vec()
     } else {
@@ -535,35 +552,35 @@ fn parse_response(raw: &[u8], head_only: bool) -> Result<HttpResponse, S3Error> 
 }
 
 /// Decode a `Transfer-Encoding: chunked` body.
-fn dechunk(mut rest: &[u8]) -> Result<Vec<u8>, S3Error> {
+fn dechunk(mut rest: &[u8], max_response: usize) -> Result<Vec<u8>, HttpError> {
     let mut body = Vec::new();
     loop {
         let line_end = rest
             .windows(2)
             .position(|w| w == b"\r\n")
-            .ok_or_else(|| S3Error::Protocol("chunked body was truncated".to_string()))?;
+            .ok_or_else(|| HttpError("chunked body was truncated".to_string()))?;
         let size_str = std::str::from_utf8(&rest[..line_end])
-            .map_err(|_| S3Error::Protocol("bad chunk size".to_string()))?;
+            .map_err(|_| HttpError("bad chunk size".to_string()))?;
         // chunk extensions (";…") are allowed, ignore them
         let size_hex = size_str.split(';').next().unwrap_or("").trim();
         let size = usize::from_str_radix(size_hex, 16)
-            .map_err(|_| S3Error::Protocol(format!("bad chunk size: {size_str}")))?;
+            .map_err(|_| HttpError(format!("bad chunk size: {size_str}")))?;
         // reject absurd sizes BEFORE any arithmetic — a hostile
         // `ffffffffffffffff` must not overflow `size + 2` or slice-panic
-        if size > MAX_RESPONSE {
-            return Err(S3Error::Protocol("http response exceeds 4 MiB".to_string()));
+        if size > max_response {
+            return Err(too_large(max_response));
         }
         rest = &rest[line_end + 2..];
         if size == 0 {
             return Ok(body); // trailers, if any, are ignored
         }
         if rest.len() < size + 2 {
-            return Err(S3Error::Protocol("chunked body was truncated".to_string()));
+            return Err(HttpError("chunked body was truncated".to_string()));
         }
         body.extend_from_slice(&rest[..size]);
         rest = &rest[size + 2..]; // skip the chunk's trailing CRLF
-        if body.len() > MAX_RESPONSE {
-            return Err(S3Error::Protocol("http response exceeds 4 MiB".to_string()));
+        if body.len() > max_response {
+            return Err(too_large(max_response));
         }
     }
 }
@@ -575,7 +592,7 @@ mod tests {
     #[test]
     fn parses_a_content_length_response() {
         let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-Amz-Request-Id: abc\r\n\r\nhello";
-        let r = parse_response(raw, false).expect("parses");
+        let r = parse_response(raw, false, MAX_RESPONSE).expect("parses");
         assert_eq!(r.status, 200);
         assert_eq!(r.header("x-amz-request-id"), Some("abc"));
         assert_eq!(r.body, b"hello");
@@ -585,7 +602,7 @@ mod tests {
     fn parses_a_chunked_response() {
         let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
                     4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n";
-        let r = parse_response(raw, false).expect("parses");
+        let r = parse_response(raw, false, MAX_RESPONSE).expect("parses");
         assert_eq!(r.body, b"Wikipedia");
     }
 
@@ -593,7 +610,7 @@ mod tests {
     fn head_response_has_no_body_even_with_content_length() {
         // HEAD advertises the body it would have sent — but sends none
         let raw = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 243\r\n\r\n";
-        let r = parse_response(raw, true).expect("parses");
+        let r = parse_response(raw, true, MAX_RESPONSE).expect("parses");
         assert_eq!(r.status, 403);
         assert!(r.body.is_empty());
     }
@@ -602,8 +619,8 @@ mod tests {
     fn truncated_head_is_a_protocol_error() {
         let raw = b"HTTP/1.1 200 OK\r\nContent-Le";
         assert!(matches!(
-            parse_response(raw, false),
-            Err(S3Error::Protocol(_))
+            parse_response(raw, false, MAX_RESPONSE),
+            Err(HttpError(_))
         ));
     }
 
@@ -611,8 +628,8 @@ mod tests {
     fn truncated_body_is_a_protocol_error() {
         let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc";
         assert!(matches!(
-            parse_response(raw, false),
-            Err(S3Error::Protocol(_))
+            parse_response(raw, false, MAX_RESPONSE),
+            Err(HttpError(_))
         ));
     }
 
@@ -622,30 +639,39 @@ mod tests {
         let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
                     ffffffffffffffff\r\nx\r\n0\r\n\r\n";
         assert!(matches!(
-            parse_response(raw, false),
-            Err(S3Error::Protocol(_))
+            parse_response(raw, false, MAX_RESPONSE),
+            Err(HttpError(_))
         ));
+    }
+
+    /// The cap is the caller's: the daemon passes its per-call limit.
+    #[test]
+    fn the_response_cap_is_a_parameter() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+        assert_eq!(parse_response(raw, false, 5).expect("fits").body, b"hello");
+        assert!(parse_response(raw, false, 4).is_err());
+        assert!(!response_complete(raw, false, 4));
     }
 
     #[test]
     fn completeness_is_provable_only_for_framed_bodies() {
         // content-length: complete exactly when the body arrived in full
         let full = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
-        assert!(response_complete(full, false));
-        assert!(!response_complete(&full[..full.len() - 1], false));
+        assert!(response_complete(full, false, MAX_RESPONSE));
+        assert!(!response_complete(&full[..full.len() - 1], false, MAX_RESPONSE));
         // chunked: complete only with the terminating 0-chunk
         let chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
                         4\r\nWiki\r\n0\r\n\r\n";
-        assert!(response_complete(chunked, false));
-        assert!(!response_complete(&chunked[..chunked.len() - 7], false));
+        assert!(response_complete(chunked, false, MAX_RESPONSE));
+        assert!(!response_complete(&chunked[..chunked.len() - 7], false, MAX_RESPONSE));
         // close-delimited: never provably complete, but recognized as such
         let close = b"HTTP/1.1 200 OK\r\n\r\npartial";
-        assert!(!response_complete(close, false));
+        assert!(!response_complete(close, false, MAX_RESPONSE));
         assert!(close_delimited(close, false));
         assert!(!close_delimited(full, false));
         // HEAD: complete at the end of the head, whatever it announces
         let head = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 243\r\n\r\n";
-        assert!(response_complete(head, true));
-        assert!(!response_complete(&head[..head.len() - 2], true));
+        assert!(response_complete(head, true, MAX_RESPONSE));
+        assert!(!response_complete(&head[..head.len() - 2], true, MAX_RESPONSE));
     }
 }

@@ -3542,6 +3542,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "http-auth"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "150fa4a9462ef926824cf4519c84ed652ca8f4fbae34cb8af045b5cbcaf98822"
+dependencies = [
+ "digest",
+ "hex",
+ "md-5",
+ "memchr",
+ "rand 0.8.6",
+ "sha2",
+]
+
+[[package]]
 name = "http-body"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4966,6 +4980,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "md-5"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
+dependencies = [
+ "cfg-if",
+ "digest",
+]
+
+[[package]]
 name = "measure_time"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5172,8 +5196,11 @@ dependencies = [
  "hex",
  "hkdf",
  "hmac",
+ "http-auth",
  "httparse",
+ "md-5",
  "molt-core",
+ "monero-daemon-rpc",
  "nostr",
  "nostr-relay-builder",
  "nostr-relay-pool",
