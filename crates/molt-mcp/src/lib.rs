@@ -1108,7 +1108,7 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
             .unwrap_or(d.mirror_daily_bytes),
         mcp_port: port("mcp_port")?,
         mcp_allow: text("mcp_allow")?,
-        // the three secrets are write-only: the engine keeps the stored ones
+        // the write-only secrets: the engine keeps the stored ones
         mcp_token: d.mcp_token,
         mcp_read_token: d.mcp_read_token,
         anonymity: text("anonymity")?,
@@ -2152,7 +2152,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "save_settings",
             command: "save_settings",
             scope: Scope::Seat,
-            description: "Store the node settings and persist them to the node's config.toml (format-preserving, atomic; the write outcome lands in the session notice, restart-required keys in session.restart_required). Replaces the settings WHOLESALE, host posture included, so every field is required: read_session first, then pass the whole set back with your change. To adjust one thing use patch_settings. The three secrets (mcp_token, mcp_read_token, s3_secret_key) are not part of it - they never read back and keep their stored values here (patch_settings and set_node_posture set them). The purse's daemon (wallet_*) keeps its stored values too: patch_settings sets it.",
+            description: "Store the node settings and persist them to the node's config.toml (format-preserving, atomic; the write outcome lands in the session notice, restart-required keys in session.restart_required). Replaces the settings WHOLESALE, host posture included, so every field is required: read_session first, then pass the whole set back with your change. To adjust one thing use patch_settings. The four secrets (mcp_token, mcp_read_token, s3_secret_key, wallet_daemon_login) are not part of it - they never read back and keep their stored values here (patch_settings sets them, set_node_posture the first three). The other wallet_* keys keep theirs too: patch_settings sets them.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -3425,7 +3425,7 @@ pub(crate) mod tests {
     /// (ADR-0007). The audit of 2026-08-26 had made the three seed fields
     /// unserializable, which left every headless node unable to found or
     /// join; they are served again — and the read scope strips them, along
-    /// with the three write-only secrets, from whatever a reply carries.
+    /// with the write-only secrets, from whatever a reply carries.
     #[test]
     fn no_recovery_phrase_reaches_the_read_scope() {
         let phrase = "abandon ability able about above absent absorb abstract";

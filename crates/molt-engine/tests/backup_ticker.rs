@@ -910,12 +910,15 @@ async fn an_acknowledged_loss_waits_for_a_backup_in_flight() {
     let keys = dir.join(molt_storage::WALLET_KEYS_FILE);
 
     w.execute(Command::BackupNow { id: id.clone() }).await.expect("backup now");
-    for _ in 0..200 {
-        if log.lock().expect("log").iter().any(|r| r.method == "PUT") {
+    let mut put = false;
+    for _ in 0..1000 {
+        put = log.lock().expect("log").iter().any(|r| r.method == "PUT");
+        if put {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
+    assert!(put, "the export read the intact file and started its PUT");
     let mut rotten = std::fs::read(&keys).expect("read");
     let last = rotten.len() - 1;
     rotten[last] ^= 1;
@@ -929,4 +932,59 @@ async fn an_acknowledged_loss_waits_for_a_backup_in_flight() {
     poll_session(&w, "uploaded", |sv| entry(sv, &id).last_backup_min != WorkspaceInfo::NEVER).await;
     w.execute(Command::WalletAcknowledgeLoss).await.expect("acknowledge once it settled");
     assert!(!keys.exists());
+}
+
+/// W5: a hold whose damaged file is already gone (removed, or replaced by
+/// a good copy) is lifted by the acknowledgement that refuses it.
+#[tokio::test]
+async fn an_acknowledgement_refused_because_the_damage_is_gone_still_lifts_the_hold() {
+    for remove in [false, true] {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (endpoint, log) = stub_server(Arc::new(|method, _path| match method {
+            "PUT" => (200, String::new(), 0),
+            _ => (200, empty_listing(), 0),
+        }))
+        .await;
+        let (w, id, root) = founded_engine(tmp.path(), &endpoint, 5).await;
+        w.execute(Command::CloseWorkspace).await.expect("close");
+        let dir = molt_storage::find_workspace_dir(&root, &id).expect("dir");
+        let (ws, _) = molt_storage::open_workspace(&dir).expect("open");
+        ws.append_wallet_keys(b"the share").expect("keys");
+        drop(ws);
+        let keys = dir.join(molt_storage::WALLET_KEYS_FILE);
+        let intact = std::fs::read(&keys).expect("read");
+        let mut rotten = intact.clone();
+        let last = rotten.len() - 1;
+        rotten[last] ^= 1;
+        std::fs::write(&keys, &rotten).expect("rot");
+        w.execute(Command::OpenWorkspace { id: id.clone() }).await.expect("reopen");
+        let damaged = molt_storage::StorageError::WalletKeysDamaged.to_string();
+        let puts = || log.lock().expect("log").iter().filter(|r| r.method == "PUT").count();
+
+        w.execute(Command::SetWorkspaceBackup { id: id.clone(), enabled: true })
+            .await
+            .expect("enable");
+        w.execute(Command::BackupTick).await.expect("tick");
+        poll_session(&w, "damaged keys failure", |sv| entry(sv, &id).backup_error == damaged).await;
+
+        if remove {
+            std::fs::remove_file(&keys).expect("remove");
+        } else {
+            std::fs::write(&keys, &intact).expect("heal");
+        }
+        match w.execute(Command::WalletAcknowledgeLoss).await {
+            Err(molt_core::MoltError::Wallet(
+                molt_core::wallet::WalletRefusal::NoKeysFile | molt_core::wallet::WalletRefusal::KeysIntact,
+            )) => {}
+            other => panic!("nothing damaged to set aside (remove={remove}): {other:?}"),
+        }
+        assert!(
+            entry(&session(&w).await, &id).backup_error.is_empty(),
+            "the damage is gone (remove={remove})"
+        );
+
+        w.execute(Command::BackupTick).await.expect("tick");
+        poll_session(&w, "uploaded", |sv| entry(sv, &id).last_backup_min != WorkspaceInfo::NEVER).await;
+        assert_eq!(puts(), 1, "remove={remove}");
+    }
 }

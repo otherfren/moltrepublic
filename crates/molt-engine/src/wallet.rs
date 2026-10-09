@@ -87,20 +87,33 @@ impl State {
                 "backup running - retry once it completes".to_string(),
             ));
         }
-        match active.handle.set_aside_wallet_keys_blocking() {
-            Ok(true) => {}
-            Ok(false) => return Err(MoltError::Wallet(WalletRefusal::NoKeysFile)),
-            Err(molt_storage::StorageError::WalletKeysIntact) => {
-                return Err(MoltError::Wallet(WalletRefusal::KeysIntact));
-            }
+        let refusal = match active.handle.set_aside_wallet_keys_blocking() {
+            Ok(true) => None,
+            Ok(false) => Some(WalletRefusal::NoKeysFile),
+            Err(molt_storage::StorageError::WalletKeysIntact) => Some(WalletRefusal::KeysIntact),
             Err(e) => return Err(MoltError::Storage(e.to_string())),
+        };
+        match refusal {
+            None => {
+                tracing::warn!(id, "wallet_keys=set_aside seat=watch_only");
+                self.lift_keys_hold(&id);
+            }
+            // the damage is gone already: only a keys failure holds the ticker
+            Some(r) => {
+                if self.backup_hold.contains_key(&id) {
+                    self.lift_keys_hold(&id);
+                }
+                return Err(MoltError::Wallet(r));
+            }
         }
-        tracing::warn!(id, "wallet_keys=set_aside seat=watch_only");
-        self.backup_hold.remove(&id);
+        Ok(Reply::Ack)
+    }
+
+    fn lift_keys_hold(&mut self, id: &str) {
+        self.backup_hold.remove(id);
         if let Some(ws) = self.session.workspaces.iter_mut().find(|w| w.id == id) {
             ws.backup_error.clear();
         }
         self.emit_session(SessionScope::Full);
-        Ok(Reply::Ack)
     }
 }

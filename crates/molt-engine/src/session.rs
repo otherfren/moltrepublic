@@ -422,7 +422,7 @@ impl State {
         let serde_json::Value::Object(base_map) = &mut base else {
             return Err(MoltError::Settings("settings are not an object".to_string()));
         };
-        // the three secrets never serialize, so the base carries none of
+        // the write-only secrets never serialize, so the base carries none of
         // them: a patch may SET one (write-only), an absent key keeps it
         let names: std::collections::BTreeSet<String> = fields.keys().cloned().collect();
         for (k, v) in fields {
@@ -526,7 +526,7 @@ impl State {
         &mut self,
         settings: SessionSettings,
     ) -> Result<Reply, MoltError> {
-        // the three secrets never ride a payload (they do not serialize),
+        // the write-only secrets never ride a payload (they do not serialize),
         // so a wholesale save keeps the stored ones — `SetNodePosture` and
         // `PatchSettings` are their doors
         let mut settings = settings;
@@ -2779,7 +2779,7 @@ mod patch_tests {
         assert_eq!(s.wallet_daemon_login, "u:p", "a refused patch changes nothing");
     }
 
-    /// The three secrets are WRITE-ONLY, not unreachable (ADR-0007): a
+    /// The write-only secrets are not unreachable (ADR-0007): a
     /// patch that names one sets it, a wholesale save - whose payload can
     /// never carry one - keeps every stored value.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
