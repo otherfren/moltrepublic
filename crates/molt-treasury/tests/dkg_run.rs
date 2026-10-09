@@ -137,6 +137,28 @@ fn two_round_one_frames_from_one_sender_abort() {
     assert!(shares.is_complete());
 }
 
+#[test]
+fn an_inbox_shows_its_senders_not_their_bytes() {
+    let mut inbox = Inbox::new(3);
+    inbox.record(1, vec![0xab; 64]).expect("1");
+    let shown = format!("{inbox:?}");
+    assert!(!shown.contains("171"), "{shown}");
+    assert!(shown.contains("Inbox"), "{shown}");
+}
+
+/// A grown buffer leaves an unwiped copy of its secret behind.
+#[test]
+fn secret_buffers_are_sized_once() {
+    let id = run_id(6);
+    let r = run(&id, 2, 3, 15);
+    let pre = keys::view_preimage(&id, &r.round1, 3).expect("preimage");
+    assert_eq!(pre.capacity(), pre.len());
+    let mut rng = ChaCha20Rng::seed_from_u64(1);
+    let p = dkg::params(2, 3, 1).expect("params");
+    let (_, msg) = dkg::round1(p, dkg::context(&id, 2, 3), &mut rng);
+    assert_eq!(msg.capacity(), msg.len());
+}
+
 /// Every 32-byte point position of a `t`-of-`n` round-1 message
 /// (`c ‖ t commitments ‖ PoK R ‖ PoK s ‖ encryption key`).
 fn round1_points(t: usize) -> Vec<usize> {

@@ -3,12 +3,15 @@
 //! (design §7, §9; plan §10.11-12).
 
 use molt_treasury::scan::{
-    BlockScanner, Received, ScanFault, ScanState, StandardScanner, Step, CONFIRMATIONS,
+    BlockScanner, Lock, Received, ScanFault, ScanState, StandardScanner, Step, CONFIRMATIONS,
+    RECENT_BLOCKS,
 };
 use molt_treasury::{EdwardsPoint, MoneroScalar};
 use monero_wallet::block::{Block, BlockHeader};
+use monero_wallet::ed25519::Point;
+use monero_wallet::extra::ExtraField;
 use monero_wallet::interface::ScannableBlock;
-use monero_wallet::transaction::{Input, Timelock, Transaction, TransactionPrefix};
+use monero_wallet::transaction::{Input, Output, Timelock, Transaction, TransactionPrefix};
 use zeroize::Zeroizing;
 
 fn out(key: u8, amount: u64, height: u64) -> Received {
@@ -18,6 +21,7 @@ fn out(key: u8, amount: u64, height: u64) -> Received {
         height,
         tx: [key; 32],
         index_in_tx: 0,
+        lock: Lock::None,
     }
 }
 
@@ -57,6 +61,46 @@ fn twenty_confirmations_split_balance_and_pending() {
     assert_eq!(s.balance(30), (5, 3));
     assert_eq!(s.balance(31), (8, 0));
     assert_eq!(s.balance(12), (0, 8));
+}
+
+#[test]
+fn a_locked_output_stays_pending_until_it_unlocks() {
+    let mut s = ScanState::new(10);
+    let mined = Received {
+        lock: Lock::Block(70),
+        ..out(1, 5, 10)
+    };
+    let timed = Received {
+        lock: Lock::Time(1_700_000_000),
+        ..out(2, 3, 10)
+    };
+    s.apply(10, hash(10, 0), hash(9, 0), vec![mined, timed]);
+    assert_eq!(s.balance(30), (0, 8));
+    assert_eq!(s.balance(69), (0, 8));
+    assert_eq!(s.balance(70), (5, 3));
+}
+
+#[test]
+fn the_window_bounds_how_far_a_reorg_steps_back() {
+    let top = u64::try_from(RECENT_BLOCKS).expect("window") + 50;
+    let mut s = ScanState::new(0);
+    for h in 0..top {
+        s.apply(h, hash(h, 0), hash(h.wrapping_sub(1), 0), vec![]);
+    }
+    // each foreign parent drops one remembered block; the window's last one restarts
+    for k in 1..=RECENT_BLOCKS {
+        let at = s.next_height();
+        assert_eq!(
+            s.apply(at, hash(at, 1), hash(at - 1, 1), vec![]),
+            Step::Reorg
+        );
+        let want = if k == RECENT_BLOCKS {
+            0
+        } else {
+            top - u64::try_from(k).expect("k")
+        };
+        assert_eq!(s.next_height(), want, "reorg {k}");
+    }
 }
 
 #[test]
@@ -129,6 +173,61 @@ fn scanner() -> StandardScanner {
     let spend = EdwardsPoint::generator();
     let view = Zeroizing::new(MoneroScalar::hash(b"scan test view"));
     StandardScanner::new(spend, view).expect("scanner")
+}
+
+/// A miner transaction paying `scanner()`'s address, locked like a coinbase.
+fn mined_block(number: usize, amount: u64) -> ScannableBlock {
+    use ciphersuite::group::Group;
+    let g = EdwardsPoint::generator().0;
+    let r = dalek_ff_group::Scalar::from(7u64);
+    let tx_key = r * g;
+    let view = MoneroScalar::hash(b"scan test view").into();
+    let mut derivation = (view * tx_key)
+        .mul_by_cofactor()
+        .compress()
+        .to_bytes()
+        .to_vec();
+    derivation.push(0); // varint output index 0
+    let shared = MoneroScalar::hash(&derivation).into();
+    let key = Point::from(shared * g + g).compress();
+    let miner = Transaction::V2 {
+        prefix: TransactionPrefix {
+            additional_timelock: Timelock::Block(number + 60),
+            inputs: vec![Input::Gen(number)],
+            outputs: vec![Output {
+                amount: Some(amount),
+                key,
+                view_tag: None,
+            }],
+            extra: ExtraField::PublicKey(Point::from(tx_key).compress()).serialize(),
+        },
+        proofs: None,
+    };
+    let header = BlockHeader {
+        hardfork_version: 16,
+        hardfork_signal: 16,
+        timestamp: 0,
+        previous: [0; 32],
+        nonce: 0,
+    };
+    ScannableBlock {
+        block: Block::new(header, miner, vec![]).expect("block"),
+        transactions: vec![],
+        output_index_for_first_ringct_output: Some(0),
+    }
+}
+
+#[test]
+fn a_mined_output_carries_its_lock() {
+    let found = scanner().scan_block(mined_block(500, 9)).expect("scan");
+    assert_eq!(found.len(), 1);
+    assert_eq!((found[0].amount, found[0].height), (9, 500));
+    assert_eq!(found[0].lock, Lock::Block(560));
+
+    let mut s = ScanState::new(500);
+    s.apply(500, hash(500, 0), hash(499, 0), found);
+    assert_eq!(s.balance(520), (0, 9));
+    assert_eq!(s.balance(560), (9, 0));
 }
 
 #[test]

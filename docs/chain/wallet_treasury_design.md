@@ -416,7 +416,9 @@ Two files, because one secret must never be lost and the rest is cheap:
   view key.
 - **Main address only.** Subaddresses with multisig are unverified upstream.
 - **Confirmations: 20.** Shown as pending below (the network saw an
-  18-block reorg in September 2025). A reorg is detected against the stored
+  18-block reorg in September 2025); an output under an additional
+  timelock (a mined output's 60 blocks, a sender's unlock time) stays
+  pending until it unlocks. A reorg is detected against the stored
   recent block hashes; then the scan rewinds or rescans from the birthday.
 - **The daemon** is the member's choice; **no daemon ships with the app**
   (as with relays: a default would be a default surveillance point). The

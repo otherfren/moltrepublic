@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use dalek_ff_group::EdwardsPoint;
 use monero_wallet::ed25519::Scalar;
 use monero_wallet::interface::ScannableBlock;
+use monero_wallet::transaction::Timelock;
 use monero_wallet::{ScanError, Scanner};
 use zeroize::Zeroizing;
 
@@ -32,6 +33,40 @@ pub struct Received {
     pub tx: [u8; 32],
     /// Its position in that transaction.
     pub index_in_tx: u64,
+    /// Its additional timelock (a mined output's 60 blocks, or a sender's).
+    pub lock: Lock,
+}
+
+/// An output's additional timelock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lock {
+    /// None beyond the network's default.
+    None,
+    /// Until the chain reaches this height.
+    Block(u64),
+    /// Until this Unix time on the chain's clock.
+    Time(u64),
+}
+
+impl Lock {
+    /// Spendable at chain height `daemon_height`; a time lock counts as locked.
+    pub fn open_at(self, daemon_height: u64) -> bool {
+        match self {
+            Self::None => true,
+            Self::Block(h) => h <= daemon_height,
+            Self::Time(_) => false,
+        }
+    }
+}
+
+impl From<Timelock> for Lock {
+    fn from(t: Timelock) -> Self {
+        match t {
+            Timelock::None => Self::None,
+            Timelock::Block(h) => Self::Block(u64::try_from(h).unwrap_or(u64::MAX)),
+            Timelock::Time(s) => Self::Time(s),
+        }
+    }
 }
 
 /// Why a block yielded nothing.
@@ -100,6 +135,7 @@ impl BlockScanner for StandardScanner {
                 height,
                 tx: o.transaction(),
                 index_in_tx: o.index_in_transaction(),
+                lock: o.additional_timelock().into(),
             })
             .collect())
     }
@@ -181,10 +217,13 @@ impl ScanState {
         Step::Applied(new)
     }
 
-    /// `(balance, pending)` in piconero at the daemon's chain height.
+    /// `(balance, pending)` in piconero at the daemon's chain height;
+    /// pending until confirmed and unlocked.
     pub fn balance(&self, daemon_height: u64) -> (u64, u64) {
         self.outputs.iter().fold((0, 0), |(ok, wait), r| {
-            if daemon_height.saturating_sub(r.height) >= CONFIRMATIONS {
+            if daemon_height.saturating_sub(r.height) >= CONFIRMATIONS
+                && r.lock.open_at(daemon_height)
+            {
                 (ok.saturating_add(r.amount), wait)
             } else {
                 (ok, wait.saturating_add(r.amount))

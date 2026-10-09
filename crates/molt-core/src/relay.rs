@@ -170,7 +170,11 @@ impl core::fmt::Display for DaemonUrlError {
             RelayUrlError::Junk => f.write_str("the node URL contains whitespace or control characters"),
             RelayUrlError::Fragment => f.write_str("a node URL cannot carry a #fragment"),
             RelayUrlError::TooLong => write!(f, "the node URL is longer than {MAX_URL_LEN} bytes"),
-            RelayUrlError::OnionAddress | RelayUrlError::NonCanonical => self.0.fmt(f),
+            RelayUrlError::NonCanonical => f.write_str(
+                "not the canonical spelling - write host, IP and port plainly \
+                 (e.g. https://node.example.org:18089)",
+            ),
+            RelayUrlError::OnionAddress => self.0.fmt(f),
         }
     }
 }
@@ -1118,7 +1122,20 @@ mod tests {
         ] {
             assert_eq!(daemon_kind(bad), Err(DaemonUrlError(want)), "must reject {bad:?}");
         }
-        assert!(!DaemonUrlError(RelayUrlError::Scheme).to_string().contains("relay"));
+        for e in [
+            RelayUrlError::Scheme,
+            RelayUrlError::Host,
+            RelayUrlError::PlaintextClearnet,
+            RelayUrlError::Junk,
+            RelayUrlError::OnionAddress,
+            RelayUrlError::Userinfo,
+            RelayUrlError::Fragment,
+            RelayUrlError::TooLong,
+            RelayUrlError::NonCanonical,
+        ] {
+            let text = DaemonUrlError(e).to_string();
+            assert!(!text.contains("relay") && !text.contains("ws://"), "{e:?}: {text}");
+        }
         // the relay side is untouched: http is still no relay
         assert_eq!(normalize_relay_url("https://node.example.org"), Err(RelayUrlError::Scheme));
         assert_eq!(relay_kind("http://127.0.0.1:18081"), RelayKind::Clearnet);

@@ -18,7 +18,7 @@ use dkg_pedpop::{
 use molt_core::{put_bytes, put_count};
 use rand_chacha::rand_core::{CryptoRng, RngCore};
 use sha2::{Digest, Sha256};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{RunId, TreasuryError};
 
@@ -61,11 +61,13 @@ pub fn round1(
     context: [u8; 32],
     rng: &mut (impl RngCore + CryptoRng),
 ) -> (SecretShareMachine<Ed25519>, Zeroizing<Vec<u8>>) {
-    let mut msg = Zeroizing::new(vec![0u8; CONTRIBUTION_LEN]);
-    rng.fill_bytes(&mut msg);
     let (machine, commitments) =
         KeyGenMachine::<Ed25519>::new(params, context).generate_coefficients(rng);
-    msg.extend_from_slice(&commitments.serialize());
+    let commitments = commitments.serialize();
+    let mut msg = Zeroizing::new(Vec::with_capacity(CONTRIBUTION_LEN + commitments.len()));
+    msg.resize(CONTRIBUTION_LEN, 0);
+    rng.fill_bytes(&mut msg);
+    msg.extend_from_slice(&commitments);
     (machine, msg)
 }
 
@@ -170,8 +172,9 @@ pub fn check_transcript(
     }
 }
 
-/// The frames of one round received so far, one per sender.
-#[derive(Debug, Clone)]
+/// The frames of one round received so far, one per sender; wiped on drop
+/// (round 1 carries every view contribution).
+#[derive(Clone)]
 pub struct Inbox {
     from: BTreeSet<u16>,
     frames: Frames,
@@ -197,15 +200,16 @@ impl Inbox {
     /// `Ok(true)` for a first frame, `Ok(false)` for an identical resend;
     /// a different second frame from one sender is equivocation.
     pub fn record(&mut self, from: u16, msg: Vec<u8>) -> Result<bool, TreasuryError> {
+        let mut msg = Zeroizing::new(msg);
         if !self.from.contains(&from) {
             return Err(TreasuryError::Frame(from));
         }
         match self.frames.get(&from) {
             None => {
-                self.frames.insert(from, msg);
+                self.frames.insert(from, core::mem::take(&mut *msg));
                 Ok(true)
             }
-            Some(seen) if *seen == msg => Ok(false),
+            Some(seen) if *seen == *msg => Ok(false),
             Some(_) => Err(TreasuryError::Equivocation(from)),
         }
     }
@@ -218,6 +222,21 @@ impl Inbox {
     /// The frames by sender.
     pub fn frames(&self) -> &Frames {
         &self.frames
+    }
+}
+
+impl core::fmt::Debug for Inbox {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Inbox")
+            .field("from", &self.from)
+            .field("received", &self.frames.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+impl Drop for Inbox {
+    fn drop(&mut self) {
+        self.frames.values_mut().for_each(Zeroize::zeroize);
     }
 }
 

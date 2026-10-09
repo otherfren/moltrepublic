@@ -22,10 +22,14 @@ pub fn view_preimage(
     n: u16,
 ) -> Result<Zeroizing<Vec<u8>>, TreasuryError> {
     expect_all(round1, n)?;
-    let mut out = Zeroizing::new(Vec::new());
-    put_bytes(&mut out, VIEW_TAG);
-    run.put(&mut out);
-    put_count(&mut out, round1.len());
+    let mut head = Vec::new();
+    put_bytes(&mut head, VIEW_TAG);
+    run.put(&mut head);
+    put_count(&mut head, round1.len());
+    let mut out = Zeroizing::new(Vec::with_capacity(
+        head.len() + round1.len() * (2 + CONTRIBUTION_LEN),
+    ));
+    out.extend_from_slice(&head);
     for (i, msg) in round1 {
         let c = msg
             .get(..CONTRIBUTION_LEN)
@@ -100,16 +104,20 @@ pub struct KeysRecord {
 impl KeysRecord {
     /// The tagged layout; fixed fields, then the share and the view key.
     pub fn encode(&self) -> Zeroizing<Vec<u8>> {
-        let mut out = Zeroizing::new(Vec::new());
-        put_bytes(&mut out, KEYS_TAG);
-        self.run.put(&mut out);
-        out.extend_from_slice(&self.transcript);
-        put_bytes(&mut out, self.address.as_bytes());
-        out.push(network_byte(self.network));
-        out.extend_from_slice(&self.m.to_le_bytes());
-        out.extend_from_slice(&self.n.to_le_bytes());
-        out.extend_from_slice(&self.birthday.to_le_bytes());
-        out.extend_from_slice(&self.attestation);
+        let mut head = Vec::new();
+        put_bytes(&mut head, KEYS_TAG);
+        self.run.put(&mut head);
+        head.extend_from_slice(&self.transcript);
+        put_bytes(&mut head, self.address.as_bytes());
+        head.push(network_byte(self.network));
+        head.extend_from_slice(&self.m.to_le_bytes());
+        head.extend_from_slice(&self.n.to_le_bytes());
+        head.extend_from_slice(&self.birthday.to_le_bytes());
+        head.extend_from_slice(&self.attestation);
+        let mut out = Zeroizing::new(Vec::with_capacity(
+            head.len() + 4 + self.share.len() + self.view.len(),
+        ));
+        out.extend_from_slice(&head);
         put_bytes(&mut out, &self.share);
         out.extend_from_slice(&*self.view);
         out

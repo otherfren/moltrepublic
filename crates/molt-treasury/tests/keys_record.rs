@@ -34,6 +34,11 @@ fn record() -> KeysRecord {
 fn wallet_keys_round_trip_and_zeroize() {
     let rec = record();
     let bytes = rec.encode();
+    assert_eq!(
+        bytes.capacity(),
+        bytes.len(),
+        "grown, an unwiped copy stays behind"
+    );
     let back = KeysRecord::decode(&bytes).expect("decode");
     assert_eq!(back.encode(), bytes);
     assert_eq!(back.address, rec.address);
