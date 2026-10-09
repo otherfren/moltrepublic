@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #![allow(missing_docs)]
 
-//! The kanban basket (`docs/kanban/kanban_workflows.md` §8) survives a
+//! The kanban basket (`docs_archive/kanban/kanban_workflows.md` §8) survives a
 //! close and reopen, and is sealed at rest like the other state files.
 
 use std::time::Duration;

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The kanban board in the engine (`docs/kanban/kanban_workflows.md` §4,
+//! The kanban board in the engine (`docs_archive/kanban/kanban_workflows.md` §4,
 //! §5.4, §9 S2): canonicalization and the precheck at propose, the fold
 //! cache over the applied Quests log (the wiki fold-cache precedent), the
 //! derived dates cached per `(rev, today)`, and what a card shows.

@@ -38,11 +38,15 @@ impl Node {
 
 /// A 1-of-2 quests republic as seat `a`: one approval applies.
 fn quests_node(root: &std::path::Path, rt: &tokio::runtime::Runtime) -> Node {
+    quests_node_with(root, rt, &["quests"])
+}
+
+fn quests_node_with(root: &std::path::Path, rt: &tokio::runtime::Runtime, features: &[&str]) -> Node {
     if !BACKEND.with(|b| b.replace(true)) {
         i_slint_backend_testing::init_no_event_loop();
     }
     with(|st| *st = crate::actions::kanban::KanbanUi::default());
-    drop(chain_workspace_with(root, 1, &["a", "b"], false, &["quests"], false).0);
+    drop(chain_workspace_with(root, 1, &["a", "b"], false, features, false).0);
     let (w, _) = node_with_chat(root);
     let ui = AppWindow::new().expect("headless window");
     apply_strings(&ui, 0);
@@ -272,6 +276,51 @@ fn the_drill_in_offers_the_legal_moves() {
     let moves: Vec<String> = k.get_moves().iter().map(|m| m.key.to_string()).collect();
     assert_eq!(moves, ["wip", "cancelled"]);
     assert_eq!(k.get_detail().creator.as_str(), "a");
+}
+
+/// §9 S5: a wiki page's `quest:` link opens the task, and the task's
+/// drill-in names the pages that link it.
+#[test]
+fn a_wiki_quest_link_and_its_backlink_lead_both_ways() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    let node = quests_node_with(tmp.path(), &rt, &["memory", "quests"]);
+    let k = node.ui.global::<Kanban>();
+    form_new(&node.ui);
+    k.set_f_title("drill".into());
+    assert!(form_submit(&node.ui));
+    propose_basket(&node, &rt);
+    let id = cards(&k.get_todo())[0].id.to_string();
+    let page = format!(
+        "diff --git a/plan.md b/plan.md\nnew file mode 100644\n--- /dev/null\n+++ b/plan.md\n@@ -0,0 +1,1 @@\n+Do [the drill](quest:{}) first.\n",
+        &id[..8]
+    );
+    let payload = serde_json::json!({"op": "wiki_patch", "value": page, "summary": "plan"});
+    rt.block_on(node.w.execute(Command::Propose { surface: Surface::Memory, payload }))
+        .expect("the page is proposed");
+
+    k.set_sel(id.as_str().into());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let cited = loop {
+        node.mirror(&rt);
+        let cited: Vec<String> = k.get_cited_by().iter().map(|l| l.key.to_string()).collect();
+        if !cited.is_empty() || std::time::Instant::now() > deadline {
+            break cited;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert_eq!(cited, ["plan.md"]);
+
+    let _wiki = crate::wiki_bridge::wire_wiki(&node.ui);
+    k.set_sel("".into());
+    node.ui
+        .global::<crate::WikiState>()
+        .invoke_open_link(format!("quest:{}", &id[..8]).into());
+    assert_eq!(k.get_sel().as_str(), id, "the prefix opens the task");
+    k.set_sel("".into());
+    node.ui.global::<crate::WikiState>().invoke_open_link("quest:ffffffff".into());
+    assert_eq!(k.get_sel().as_str(), "", "a dead link stays put");
 }
 
 #[test]

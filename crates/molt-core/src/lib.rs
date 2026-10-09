@@ -459,7 +459,7 @@ pub struct SessionSettings {
     #[serde(default)]
     pub poke_enabled: bool,
     /// Command this node runs (via `sh -c`) when a wake trigger fires
-    /// (`docs/kanban/kanban_workflows.md` §6.1) — the hook for a sleeping
+    /// (`docs_archive/kanban/kanban_workflows.md` §6.1) — the hook for a sleeping
     /// agent harness. Empty = off, one wake runs at a time. Wire content
     /// never reaches the command line; context arrives as `MOLT_WAKE_*` env
     /// vars only. Local node posture (ADR-0007): never set by another seat.

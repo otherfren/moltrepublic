@@ -1,4 +1,4 @@
-//! The kanban read an agent works from (`docs/kanban/kanban_workflows.md`
+//! The kanban read an agent works from (`docs_archive/kanban/kanban_workflows.md`
 //! §6 `quests_view`, §8 filters): the Quests snapshot narrowed to a seat,
 //! a task, a proposal or a calendar window. Display only; `today` and the
 //! board's derived status come from the snapshot.

@@ -103,7 +103,9 @@ and the user-owned relay pool), `transport/delivery_guarantee.md`,
 `security/mcp-security.md` (the MCP endpoint and the agent's host boundary),
 `ui/gui_over_mcp.md` (driving and reading the GUI headless),
 `vault/vault_threshold_disclosure.md` (the vault: threshold escrow with an
-elected reader), `build/reproducible-builds.md`, and the ADRs under `adr/`.
+elected reader), `kanban/kanban_workflows.md` (the gated board: tasks,
+calendar, derived deadlines, agent wakes), `build/reproducible-builds.md`,
+and the ADRs under `adr/`.
 
 After moving or renaming any document run **`python3
 scripts/check-doc-refs.py`** (exit 0 = clean). Code comments cite doc paths

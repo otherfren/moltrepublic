@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Waking this node's own seat (`docs/kanban/kanban_workflows.md` §6.1):
+//! Waking this node's own seat (`docs_archive/kanban/kanban_workflows.md` §6.1):
 //! the triggers (`poked`, `vote_pending`, `kanban`, `task_start`, `test`)
 //! mark a reason pending; ONE wake runs at a time and fires once the
 //! running one ended and `wake_min_interval_secs` passed, with every

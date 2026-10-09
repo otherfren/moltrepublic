@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The kanban tools (`docs/kanban/kanban_workflows.md` §6, §9 S3): typed
+//! The kanban tools (`docs_archive/kanban/kanban_workflows.md` §6, §9 S3): typed
 //! wrappers over `ReadState` and `Propose` on Quests, the `read_actions`
 //! list and the wake skill.
 

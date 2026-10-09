@@ -1669,7 +1669,7 @@ impl OpenedWorkspace {
         write_atomic(&self.dir, "chain.state", &frame, true)
     }
 
-    /// The fired `task_start` keys (`docs/kanban/kanban_workflows.md`
+    /// The fired `task_start` keys (`docs_archive/kanban/kanban_workflows.md`
     /// §6.1): local to this node, sealed, never exported. Absent = none.
     ///
     /// # Errors
@@ -1686,7 +1686,7 @@ impl OpenedWorkspace {
             .map_err(|e| StorageError::Corrupt(format!("decoding kanban_wakes.json: {e}")))
     }
 
-    /// The local kanban basket (`docs/kanban/kanban_workflows.md` §8):
+    /// The local kanban basket (`docs_archive/kanban/kanban_workflows.md` §8):
     /// staged acts not yet proposed, sealed, never exported. Absent = "".
     ///
     /// # Errors

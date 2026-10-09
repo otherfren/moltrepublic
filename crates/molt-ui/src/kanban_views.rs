@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The Kanban views beside the board (`docs/kanban/kanban_workflows.md`
+//! The Kanban views beside the board (`docs_archive/kanban/kanban_workflows.md`
 //! §8): the deadline timeline (`plan`), the calendar and the dependency
 //! tree. Pure projections over the Quests snapshot and the basket.
 

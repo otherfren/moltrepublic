@@ -1305,10 +1305,11 @@ export component DecisionTable inherits Rectangle {
                     // content lives behind the discussion jump. A
                     // superseded patch says so here (the base moved).
                     text: r.withdrawn ? "↩ \{Strings.pc-withdrawn}"
+                        : r.notes-bad ? r.notes
                         : (r.superseded ? Strings.pc-superseded
                         : (r.patch-op || r.charter-op ? "" : (r.proposed != "" ? r.proposed : r.current)));
                     horizontal-stretch: 1;
-                    color: r.superseded || r.withdrawn ? Theme.moved : Theme.dim;
+                    color: r.notes-bad ? Theme.bad : r.superseded || r.withdrawn ? Theme.moved : Theme.dim;
                     font-size: Theme.fs-body;
                     vertical-alignment: center;
                     overflow: elide;
@@ -1585,6 +1586,12 @@ export component ProposalCard inherits Rectangle {
                 wrap: word-wrap;
                 horizontal-stretch: 1;
             }
+        }
+        if root.p.notes != "": Text {
+            text: root.p.notes;
+            color: root.p.notes-bad ? Theme.bad : Theme.dim;
+            font-size: Theme.fs-cap;
+            wrap: word-wrap;
         }
         // set_relays / set_features: the set diff — one row per element of
         // the union, + added (good) / - removed (bad) / kept unmarked

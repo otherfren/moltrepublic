@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The Kanban pane's wiring (`docs/kanban/kanban_workflows.md` §8): the
+//! The Kanban pane's wiring (`docs_archive/kanban/kanban_workflows.md` §8): the
 //! UI-local state (filters, the basket, the form, the drill-in, the
 //! notification batch) lives here on the UI thread; every push re-renders
 //! the `Kanban` global from it and the engine's board.
@@ -19,8 +19,8 @@ use crate::app::Ctx;
 use crate::i18n::{error_toast, Lexicon};
 use crate::kanban::{
     auto_summary, blocked_candidates, board, declined, detail, drop_target, filter_rows,
-    form_act, mine, needs_note, notice_reason, review, toggle_filter, Basket, Form, KanbanFeed,
-    Notices,
+    form_act, mine, needs_note, notice_reason, resolve_task, review, toggle_filter, Basket, Form,
+    KanbanFeed, Notices,
 };
 use crate::kanban_views::{calendar, dependencies, drop_fields, plan, slot_range, utc_clock, CalSrc};
 use crate::models::{sync_rows, sync_strings};
@@ -119,6 +119,29 @@ pub(crate) fn set_wake_on(on: Vec<String>) {
     WAKE_ON.with_borrow_mut(|w| *w = on);
 }
 
+/// Open the drill-in of `id` (a unique prefix will do); "" closes it.
+fn pick(ui: &AppWindow, id: &str) {
+    let full = with(|st| {
+        st.evidence.clear();
+        st.feed.as_ref().and_then(|f| resolve_task(f, id))
+    });
+    let k = ui.global::<Kanban>();
+    k.set_note("".into());
+    sync_strings(&k.get_evidence(), &[], |m| k.set_evidence(m));
+    k.set_sel(full.unwrap_or_else(|| id.to_string()).into());
+    render(ui);
+}
+
+/// A wiki `quest:` link: the Kanban pane with that task open; a dead link
+/// stays put.
+pub(crate) fn open_quest(ui: &AppWindow, hex: &str) {
+    let Some(id) = with(|st| st.feed.as_ref().and_then(|f| resolve_task(f, hex))) else {
+        return;
+    };
+    ui.invoke_select_surface("quests".into());
+    pick(ui, &id);
+}
+
 /// Run `f` on the pane's state.
 pub(crate) fn with<R>(f: impl FnOnce(&mut KanbanUi) -> R) -> R {
     KB.with_borrow_mut(f)
@@ -196,6 +219,7 @@ pub(crate) fn render(ui: &AppWindow) {
                 sync_rows(&k.get_blocked_by(), d.blocked_by, |m| k.set_blocked_by(m));
                 sync_rows(&k.get_prereq_for(), d.prereq_for, |m| k.set_prereq_for(m));
                 sync_rows(&k.get_prereqs(), d.prereqs, |m| k.set_prereqs(m));
+                sync_rows(&k.get_cited_by(), d.cited_by, |m| k.set_cited_by(m));
                 sync_rows(&k.get_checks(), d.checks, |m| k.set_checks(m));
                 sync_strings(&k.get_scope(), &d.scope, |m| k.set_scope(m));
                 sync_rows(&k.get_moves(), d.moves, |m| k.set_moves(m));
@@ -637,13 +661,15 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     {
         let on_ui = on_ui.clone();
         k.on_pick(move |id| {
+            on_ui(&|ui| pick(ui, id.as_str()));
+        });
+    }
+    {
+        let on_ui = on_ui.clone();
+        k.on_open_page(move |path| {
             on_ui(&|ui| {
-                with(|st| st.evidence.clear());
-                let k = ui.global::<Kanban>();
-                k.set_note("".into());
-                sync_strings(&k.get_evidence(), &[], |m| k.set_evidence(m));
-                k.set_sel(id.clone());
-                render(ui);
+                ui.invoke_select_surface("memory".into());
+                ui.global::<crate::WikiState>().invoke_open_link(path.clone());
             });
         });
     }

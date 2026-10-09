@@ -1,4 +1,4 @@
-//! S2a keystones (`docs/kanban/kanban_workflows.md` §9): both doors, the
+//! S2a keystones (`docs_archive/kanban/kanban_workflows.md` §9): both doors, the
 //! precheck, the fold cache, the void marker and the card's advisories.
 
 use molt_core::{ChainChange, EventEnvelope, MoltError, ProposalId, Reply, Surface, WorkspaceEvent};

@@ -1,4 +1,4 @@
-//! Deadlines and order, derived on read (`docs/kanban/kanban_workflows.md`
+//! Deadlines and order, derived on read (`docs_archive/kanban/kanban_workflows.md`
 //! §5): `needed_by`, priority, the flags and `next`. Never consensus state -
 //! what the board means on `today`, which the caller passes (UTC).
 //! Reads dates and links only; `size` never enters it.

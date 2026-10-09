@@ -1,4 +1,4 @@
-//! S2 wake keystones (`docs/kanban/kanban_workflows.md` §9).
+//! S2 wake keystones (`docs_archive/kanban/kanban_workflows.md` §9).
 
 use molt_core::kanban_wake::WakeAction;
 use molt_core::{ChainChange, ChannelRef, Command, MoltError, Reply, Surface};

@@ -1357,6 +1357,10 @@ pub(crate) fn wire_wiki(ui: &AppWindow) -> (Rc<RefCell<wiki::Wiki>>, Rc<RefCell<
         let weak = ui.as_weak();
         g.on_open_link(move |target| {
             let Some(ui) = weak.upgrade() else { return };
+            if let Some(hex) = molt_core::wiki_refs::quest_id_of(&target) {
+                crate::actions::kanban::open_quest(&ui, &hex);
+                return;
+            }
             let hit = m.borrow_mut().open_link(&target);
             sync_after(&ui, &m, &la);
             if !hit {

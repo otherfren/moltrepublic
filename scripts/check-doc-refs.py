@@ -87,6 +87,9 @@ NO_BARE_SCAN_FILES = {
     "crates/molt-engine/src/wiki_index/search.rs": "search fixtures are wiki paths",
     "crates/molt-engine/src/chain/wiki_base.rs": "the fold keystone's fixtures are wiki paths",
     "crates/molt-mcp/src/lib.rs": "the proposal-presentation test's sample patch names wiki paths",
+    "crates/molt-engine/src/kanban/tests.rs": "the quest-backlink keystone's pages are wiki paths",
+    "crates/molt-engine/tests/kanban_two_nodes.rs": "the two-seat keystone's linking page is a wiki path",
+    "crates/molt-ui/src/tests/gui/kanban.rs": "the quest-link GUI test's page is a wiki path",
     # the agent round's observation log and briefing quote WIKI paths and
     # the agents' own scratch file by name
     "docs_archive/reviews/mcp_agent_friction_2026-09-05.md": "quoted wiki paths from the live run",

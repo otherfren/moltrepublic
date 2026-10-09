@@ -4,16 +4,16 @@ Status: **OPEN WORK.** The surviving deferred items whose home documents
 were executed and archived. One entry per item, with its fix direction;
 an item leaves in the change that closes it.
 
-## Story 14 remainder — a real backend for Kanban
+## Story 14 remainder — a real backend for the Wallet
 
 From `docs_archive/ui/mock_todo.md` §14. Memory is REAL
 (`docs_archive/memory/shared_memory_real.md`), the Vault is REAL
 (`docs_archive/vault/vault_threshold_disclosure.md`, prepared at every
-founding, enabled at founding or by vote); the
+founding, enabled at founding or by vote), Kanban is REAL
+(`docs_archive/kanban/kanban_workflows.md`, built 2026-10-09; its vote
+load is to be measured on a real republic, §11 Q1); the
 Wallet's rev 3 awaits ratification (`docs/chain/wallet_treasury_design.md`,
-Stage 1 only; first step the dependency lock, spending gated on SA+L); Kanban has a fresh design-mock round and
-its concept doc (`docs/kanban/kanban_workflows.md` §2–§5+§7), which
-carries open questions that gate any real build.
+Stage 1 only; first step the dependency lock, spending gated on SA+L).
 
 ## Vault share refresh (V6)
 

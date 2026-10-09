@@ -149,6 +149,9 @@ export struct ProposalRow {
     // why approve is grayed ("" = approvable): a vault deposit this seat
     // has not verified yet
     blocked: string,
+    // kanban: the acts, impact and would-void lines; an applied void's reason
+    notes: string,
+    notes-bad: bool,
 }
 
 // One member of a republic with its last-sync info (mock data).
@@ -1003,7 +1006,7 @@ export global Theme {
     out property <length> fs-cap: self.fs-app - 2px;
 }
 
-// ---- Kanban (docs/kanban/kanban_workflows.md §8) ----------------------
+// ---- Kanban (docs_archive/kanban/kanban_workflows.md §8) ----------------------
 // Rows arrive pre-rendered from molt-ui `kanban.rs`; the pane only lays
 // them out and routes the callbacks.
 
@@ -1195,6 +1198,9 @@ export global Kanban {
     in-out property <[KbLine]> blocked-by;
     in-out property <[KbLine]> prereq-for;
     in-out property <[KbLine]> prereqs;
+    // wiki pages whose `quest:` link names the task
+    in-out property <[KbLine]> cited-by;
+    callback open-page(string);
     in-out property <[KbCheck]> checks;
     in-out property <[string]> scope;
     in-out property <[KbPick]> moves;
@@ -2074,6 +2080,7 @@ export global Strings {
     in property <string> kb-fl-assignees;
     in property <string> kb-fl-blocked;
     in property <string> kb-fl-prereq-for;
+    in property <string> kb-fl-cited;
     in property <string> kb-fl-prereqs;
     in property <string> kb-fl-due;
     in property <string> kb-fl-after;

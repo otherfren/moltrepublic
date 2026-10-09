@@ -1,4 +1,4 @@
-//! What a voter and a reader see of the board (`docs/kanban/kanban_workflows.md`
+//! What a voter and a reader see of the board (`docs_archive/kanban/kanban_workflows.md`
 //! §4.5, §5.4, §6): the advisory lines on a pending changeset and the
 //! board as one read. Display only, never consensus input; `today` is the
 //! reader's UTC date.

@@ -1,5 +1,5 @@
 //! What wakes a seat and what it finds when it wakes
-//! (`docs/kanban/kanban_workflows.md` §6.1): the `task_start` timer's due
+//! (`docs_archive/kanban/kanban_workflows.md` §6.1): the `task_start` timer's due
 //! starts and the `read_actions` list. Pure - the caller passes the board,
 //! its derivation and the UTC clock.
 

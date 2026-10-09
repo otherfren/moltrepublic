@@ -1,4 +1,4 @@
-//! The kanban board as a deterministic FOLD (`docs/kanban/kanban_workflows.md`
+//! The kanban board as a deterministic FOLD (`docs_archive/kanban/kanban_workflows.md`
 //! §2, §4): applied `kanban_ops` changesets in chain order over the empty
 //! board. A changeset applies all-or-nothing; one that breaks a rule is
 //! VOID - it still counts in `rev`, it changes nothing else. Same chain,

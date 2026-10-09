@@ -728,6 +728,10 @@ pub(crate) struct ProposalRowData {
     /// Why approve is grayed ("" = approvable): a vault deposit this seat
     /// has not verified yet (spec §7).
     pub(crate) blocked: String,
+    /// Kanban: a pending card's acts and advisories, an applied void's reason.
+    pub(crate) notes: String,
+    /// The notes say it would void, or did.
+    pub(crate) notes_bad: bool,
 }
 
 /// Read status + every surface snapshot into a bundle the window can apply.
@@ -1457,6 +1461,7 @@ pub(crate) fn to_decided_row(p: &ProposalRowData) -> ProposalRow {
     ProposalRow {
         current: one_line(&p.current).into(),
         proposed: one_line(&p.proposed).into(),
+        notes: one_line(&p.notes).into(),
         ..to_proposal_row(p)
     }
 }
@@ -1507,6 +1512,8 @@ pub(crate) fn to_proposal_row(p: &ProposalRowData) -> ProposalRow {
         withdrawn: p.withdrawn,
         unread: p.unread,
         blocked: p.blocked.as_str().into(),
+        notes: p.notes.as_str().into(),
+        notes_bad: p.notes_bad,
     }
 }
 
@@ -1602,6 +1609,7 @@ pub(crate) fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRo
         .get("op")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
+    let (notes, notes_bad) = kanban_notes(lang, p);
     ProposalRowData {
         id: p.id.0 as i32,
         text: display_title(lang, &p.payload),
@@ -1682,7 +1690,22 @@ pub(crate) fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRo
         withdrawn: p.withdrawn,
         unread: 0, // filled by the caller where the unread map is at hand
         blocked: String::new(),
+        notes,
+        notes_bad,
     }
+}
+
+/// A kanban card's lines (§8 `proposals`) and whether they warn of a void.
+fn kanban_notes(lang: i32, p: &molt_core::ProposalView) -> (String, bool) {
+    if p.surface != Surface::Quests {
+        return (String::new(), false);
+    }
+    if let Some(reason) = &p.void {
+        let void = if lang == 1 { "nichtig" } else { "void" };
+        return (format!("{void}: {reason}"), true);
+    }
+    let bad = p.advisories.iter().any(|a| a.starts_with("would void"));
+    (p.rendered.iter().chain(&p.advisories).cloned().collect::<Vec<_>>().join("\n"), bad)
 }
 
 /// A short human label for a surface transition payload: the human title

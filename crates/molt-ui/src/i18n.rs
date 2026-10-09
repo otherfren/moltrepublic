@@ -1528,6 +1528,7 @@ lexicon! {
     kb_fl_assignees: "Assignees", "Zuständig";
     kb_fl_blocked: "Blocked by", "Blockiert durch";
     kb_fl_prereq_for: "Prerequisite for", "Voraussetzung für";
+    kb_fl_cited: "Linked in the wiki", "Im Wiki verlinkt";
     kb_fl_prereqs: "All prerequisites", "Alle Voraussetzungen";
     kb_fl_due: "Due", "Fällig";
     kb_fl_after: "Not before", "Nicht vor";

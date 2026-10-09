@@ -1,4 +1,4 @@
-//! The kanban calendar (`docs/kanban/kanban_workflows.md` §3): a task's
+//! The kanban calendar (`docs_archive/kanban/kanban_workflows.md` §3): a task's
 //! time window, the small RRULE subset of a recurring series, and the
 //! expansion of a series into occurrences for a finite window.
 //!

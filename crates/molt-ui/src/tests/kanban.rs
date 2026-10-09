@@ -478,3 +478,28 @@ fn settling_a_propose_removes_exactly_what_was_sent() {
     assert_eq!(basket.acts, [st(2, "wip", None)]);
     assert_eq!(basket.summary, "");
 }
+
+/// §8 `proposals`: a pending card carries its acts, impact and would-void
+/// lines; an applied void carries its reason, in the bad tone.
+#[test]
+fn a_kanban_card_shows_its_acts_impact_and_void() {
+    use molt_core::{ProposalState, Surface};
+    let mut v = crate::tests::channels::view_of(7, "", ProposalState::Proposed);
+    v.surface = Surface::Quests;
+    v.payload = json!({"op": "kanban_ops", "summary": "s", "base_rev": 0, "ops": []});
+    v.rendered = vec!["#00000001 due: - → 2026-10-20".into()];
+    v.advisories = vec!["#00000001 A: needed by - → 2026-10-20".into()];
+    let row = crate::surfaces::proposal_row(0, &v);
+    assert_eq!(row.notes, "#00000001 due: - → 2026-10-20\n#00000001 A: needed by - → 2026-10-20");
+    assert!(!row.notes_bad);
+    v.advisories.push("would void now: #00000001: cancelled to wip not allowed".into());
+    assert!(crate::surfaces::proposal_row(0, &v).notes_bad);
+
+    let mut done = crate::tests::channels::view_of(8, "", ProposalState::Applied);
+    done.surface = Surface::Quests;
+    done.void = Some("#00000001: cancelled to wip not allowed".into());
+    let row = crate::surfaces::proposal_row(0, &done);
+    assert_eq!(row.notes, "void: #00000001: cancelled to wip not allowed");
+    assert!(row.notes_bad);
+    assert_eq!(crate::surfaces::proposal_row(1, &done).notes, "nichtig: #00000001: cancelled to wip not allowed");
+}

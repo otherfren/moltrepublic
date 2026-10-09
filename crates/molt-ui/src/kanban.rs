@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The Kanban surface (`docs/kanban/kanban_workflows.md` §8): the engine's
+//! The Kanban surface (`docs_archive/kanban/kanban_workflows.md` §8): the engine's
 //! board as card rows, the drill-in, the local basket of staged acts,
 //! "Mine" and the coalesced notifications. Pure projections over the
 //! Quests snapshot; the window wiring is `actions/kanban.rs`.
@@ -439,6 +439,7 @@ pub(crate) struct Detail {
     pub(crate) blocked_by: Vec<KbLine>,
     pub(crate) prereq_for: Vec<KbLine>,
     pub(crate) prereqs: Vec<KbLine>,
+    pub(crate) cited_by: Vec<KbLine>,
     pub(crate) checks: Vec<KbCheck>,
     pub(crate) scope: Vec<String>,
     pub(crate) moves: Vec<KbPick>,
@@ -454,6 +455,13 @@ fn task_line(l: &Lexicon, all: &Map<String, Value>, id: &str) -> KbLine {
         sub: shown_label(l, s(&t, "shown")).into(),
         bad: s(&t, "shown") == "stuck" || s(&t, "state") == "fail",
     }
+}
+
+/// The task `named` - an id or a unique prefix - as its full id.
+pub(crate) fn resolve_task(feed: &KanbanFeed, named: &str) -> Option<String> {
+    let q = ViewQuery { task: Some(named.to_string()), ..ViewQuery::default() };
+    let v = quests_view(&feed.snap, &q).ok()?;
+    v.get("task").and_then(|t| t.get("id")).and_then(Value::as_str).map(str::to_string)
 }
 
 /// The drill-in of `id` (§8): both link directions, its prerequisites to
@@ -515,6 +523,16 @@ pub(crate) fn detail(l: &Lexicon, feed: &KanbanFeed, basket: &Basket, id: &str) 
                 let depth = p.get("depth").and_then(Value::as_u64).unwrap_or(1);
                 line.text = format!("{}{}", "  ".repeat(usize::try_from(depth.saturating_sub(1)).unwrap_or(0)), line.text).into();
                 line
+            })
+            .collect(),
+        cited_by: strs(&full, "referenced_by")
+            .into_iter()
+            .map(|page| KbLine {
+                key: page.as_str().into(),
+                kind: "page".into(),
+                glyph: "📄".into(),
+                text: page.into(),
+                ..KbLine::default()
             })
             .collect(),
         checks: strs(&full, "acceptance")

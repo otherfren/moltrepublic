@@ -3068,7 +3068,10 @@ pub fn parse_blocks(raw: &str) -> Vec<Block> {
             }
             Event::Start(Tag::Link { dest_url, .. }) => {
                 let dest = dest_url.to_string();
-                if dest.ends_with(".md") || molt_core::wiki_refs::checksum_of(&dest).is_some() {
+                if dest.ends_with(".md")
+                    || molt_core::wiki_refs::checksum_of(&dest).is_some()
+                    || molt_core::wiki_refs::quest_id_of(&dest).is_some()
+                {
                     link = dest;
                 }
             }
@@ -4105,6 +4108,18 @@ mod tests {
         assert_eq!(file.len(), 1);
         assert_eq!(file[0].text, "Bericht Q3");
         assert_eq!(file[0].link, "upload:3f9a2c1b7e04");
+    }
+
+    #[test]
+    fn a_quest_link_stays_a_span_with_its_destination() {
+        let blocks = parse_blocks("Do [the drill](quest:0b6d42f7) first.");
+        let quest: Vec<(&str, &str)> = blocks[0]
+            .spans
+            .iter()
+            .filter(|s| !s.link.is_empty())
+            .map(|s| (s.text.as_str(), s.link.as_str()))
+            .collect();
+        assert_eq!(quest, [("the drill", "quest:0b6d42f7")]);
     }
 
     #[test]

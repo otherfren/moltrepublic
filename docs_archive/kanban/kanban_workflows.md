@@ -1,25 +1,8 @@
 # Kanban - tasks, calendar and deadlines on the gated board
 
-**Status: CONCEPT, revision 3 (2026-10-07, decisions 2026-10-08), anchors
-re-verified against master `1cd491c`. A fundamental rework of revision 2:
-one task kind, a status state machine, a calendar, deadline-driven
-order, agents first - and the m-of-n rule unchanged. The §8 design mock is BUILT
-(2026-08-16); every §11 question is decided. Backend build (§9): S1
-(core) and the first half of S2 (engine governance: canonicalization,
-both doors, precheck, fold cache, void marker, board read, card
-advisories) and the S2 wakes (triggers, coalescing, task timer,
-`kanban_wakes.json`, the engine-side `read_actions`, `Command::TestWake`
-with its MCP tool `test_wake`) are BUILT (2026-10-09), and S3 (the MCP
-tools `quests_view`, `quests_propose`, `read_actions`, `wake_skill`, the
-`WAKE_SKILL` constant) is BUILT (2026-10-09). S4 board side is BUILT
-(2026-10-09: engine board, basket sealed in `kanban_draft.json` and the
-`quests_draft_save`/`quests_draft_load` tools, staged drag, drill-in, New
-task form, the board filters incl. another seat's view, vote badges,
-"Mine", notifications, the Wake group, the six view keys), and so are
-`plan`, `calendar`, `dependencies`, their filters, the UTC clock,
-`is_implemented()` and the unlocked feature switches (2026-10-09); the
-impact and would-void lines in the Proposals view are open, as is S5.
-§12 lists what changed against revision 2.**
+**Status: specification of shipping behaviour, built 2026-10-09.**
+Revision 3 (2026-10-07, decisions 2026-10-08), every §11 question decided;
+§9 S1-S5 built. §12 lists what changed against revision 2.
 
 The ask: the Quests surface (GUI label **"Kanban"**, wire key `quests` -
 `docs_archive/ritual/charter_features.md` §5.1; there is no `kanban` feature
@@ -887,6 +870,13 @@ TDD, red first, each step green on master before the next.
   the wiki (`molt_core::wiki_refs`, one parser) with backlinks on read,
   clippy 0 per crate, `scripts/check-doc-refs.py` clean; the doc moves to
   `docs_archive/` and the `known_debt.md` Story-14 entry is updated.
+  As built: a `quest:<hex>` link names a task by id or a unique prefix of
+  8+ hex (`wiki_refs::quest_refs`); it is no wiki page edge. Every task
+  read carries `referenced_by` (the pages linking it, from the wiki
+  graph); the drill-in lists them, and a click on the link in the wiki
+  opens the task. Keystone `crates/molt-engine/tests/kanban_two_nodes.rs`
+  (two engines over an in-process relay, the `wiki_base_plane.rs`
+  precedent).
 
 Checkpoints accumulate (legal with no tag change: quests is in the frozen
 v7 set). Folding at a cut is decided only when growth is measured.

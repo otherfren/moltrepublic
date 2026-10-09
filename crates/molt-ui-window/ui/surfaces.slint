@@ -3300,6 +3300,15 @@ component KDrill inherits VerticalLayout {
                 }
             }
         }
+        if Kanban.cited-by.length > 0: KCap {
+            text: Strings.kb-fl-cited;
+        }
+        for c in Kanban.cited-by: KLineRow {
+            line: c;
+            clicked => {
+                Kanban.open-page(c.key);
+            }
+        }
         if Kanban.detail.staged != "": Text {
             text: Kanban.detail.staged;
             color: Theme.accent;
