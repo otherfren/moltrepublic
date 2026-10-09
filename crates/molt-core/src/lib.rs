@@ -5323,6 +5323,9 @@ pub enum Command {
         id: WorkspaceId,
         /// The failure, honestly.
         error: String,
+        /// A retry cannot heal it (a damaged purse keys file): back off.
+        #[serde(default)]
+        hold: bool,
     },
     /// A founding seat's real, joinable invite link became available once its
     /// queue was provisioned on the SMP server (engine-internal, from the

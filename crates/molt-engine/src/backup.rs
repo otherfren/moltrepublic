@@ -27,6 +27,19 @@ pub(crate) const BACKUP_TICK_MS: u64 = 60_000;
 
 /// The honest per-workspace status of a sealed-at-rest skip (design P6).
 const SEALED_SKIP: &str = "sealed at rest - backup skipped until decrypted";
+/// The first wait after a failure a retry cannot heal; it doubles per repeat.
+const BACKUP_HOLD_FIRST_SECS: u64 = 3_600;
+/// The longest wait between two such attempts.
+const BACKUP_HOLD_MAX_SECS: u64 = 86_400;
+
+/// The ticker's wait after a failure a retry cannot heal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BackupHold {
+    /// No automatic attempt before this Unix second.
+    pub(crate) until: u64,
+    /// The current wait, seconds.
+    pub(crate) delay: u64,
+}
 
 impl State {
     /// One decide pass of the backup ticker (engine-internal). Synchronous:
@@ -57,6 +70,7 @@ impl State {
             .workspaces
             .iter()
             .filter(|w| w.s3 && !self.backup_inflight.contains(&w.id))
+            .filter(|w| !matches!(self.backup_hold.get(&w.id), Some(h) if now_secs() < h.until))
             .map(|w| w.id.clone())
             .collect();
         // clamp to the tick period: interval 0 must not mean "a full blob
@@ -223,6 +237,8 @@ impl State {
         let dialer = self
             .dialer_for()
             .map_err(|e| MoltError::Settings(e.to_string()))?;
+        // an explicit attempt gets its own answer, not a held silence
+        self.backup_hold.remove(&id);
         self.spawn_backup_task(id, dir, config, dialer);
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
@@ -424,6 +440,7 @@ impl State {
                                  {}-byte restore cap, not uploaded",
                                 crate::lifecycles::RESTORE_MAX_BYTES
                             ),
+                            hold: false,
                         }
                     } else {
                         let object = molt_core::backup_key(&id, ts);
@@ -452,17 +469,20 @@ impl State {
                             Err(e) => Command::NetBackupFailed {
                                 id,
                                 error: e.to_string(),
+                                hold: false,
                             },
                         }
                     }
                 }
                 Ok(Err(e)) => Command::NetBackupFailed {
                     id,
+                    hold: matches!(e, molt_storage::StorageError::WalletKeysDamaged),
                     error: e.to_string(),
                 },
                 Err(e) => Command::NetBackupFailed {
                     id,
                     error: format!("backup task failed: {e}"),
+                    hold: false,
                 },
             };
             let (reply, _rx) = tokio::sync::oneshot::channel();
@@ -481,6 +501,7 @@ impl State {
         quota_error: String,
     ) -> Result<Reply, MoltError> {
         self.backup_inflight.remove(&id);
+        self.backup_hold.remove(&id);
         // the in-memory last-done is the authoritative fallback: it is set
         // even if the durable prefs stamp below cannot be written, so the
         // due-check never re-uploads on a loop
@@ -509,15 +530,30 @@ impl State {
     }
 
     /// A failed backup (engine-internal): stamp untouched, reason verbatim.
+    /// A `hold` failure backs the ticker off and is announced once.
     pub(crate) fn cmd_net_backup_failed(
         &mut self,
         id: WorkspaceId,
         error: String,
+        hold: bool,
     ) -> Result<Reply, MoltError> {
         self.backup_inflight.remove(&id);
-        tracing::warn!(id, error = %error, "backup failed");
+        tracing::warn!(id, error = %error, hold, "backup failed");
         self.set_backup_error(&id, &error);
-        self.note_backup(format!("backup-failed:{error}"));
+        let repeat = if hold {
+            let delay = self
+                .backup_hold
+                .get(&id)
+                .map_or(BACKUP_HOLD_FIRST_SECS, |h| (h.delay * 2).min(BACKUP_HOLD_MAX_SECS));
+            let until = now_secs().saturating_add(delay);
+            self.backup_hold.insert(id, BackupHold { until, delay }).is_some()
+        } else {
+            self.backup_hold.remove(&id);
+            false
+        };
+        if !repeat {
+            self.note_backup(format!("backup-failed:{error}"));
+        }
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }
@@ -776,6 +812,48 @@ fn backup_refusal_reason(dir: &std::path::Path) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    /// Wallet plan §9: a damaged keys file fails every export until the loss
+    /// is acknowledged, so the ticker backs off instead of retrying each
+    /// minute, says so once, and tries again when the hold runs out.
+    #[test]
+    fn a_damaged_keys_file_backs_the_ticker_off_with_one_message() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut st = crate::tests::support::plain_state();
+        st.persist = true;
+        let s = &mut st.session.settings;
+        s.workspace_dir = tmp.path().display().to_string();
+        s.s3_backup = true;
+        s.s3_endpoint = "https://s3.example.com".to_string();
+        s.s3_access_key = "a".to_string();
+        s.s3_secret_key = "b".to_string();
+        s.s3_bucket = "c".to_string();
+        let mut ws = molt_core::WorkspaceInfo::demo_set().remove(0);
+        ws.s3 = true;
+        ws.encrypted = false;
+        let id = ws.id.clone();
+        st.session.workspaces = vec![ws];
+        let error = |st: &crate::State| st.session.workspaces[0].backup_error.clone();
+        let damaged = molt_storage::StorageError::WalletKeysDamaged.to_string();
+
+        st.cmd_net_backup_failed(id.clone(), damaged.clone(), true).expect("ack");
+        assert_eq!(st.session.notice, format!("backup-failed:{damaged}"));
+        st.cmd_backup_tick().expect("tick");
+        assert_eq!(error(&st), damaged, "held: no new attempt");
+
+        st.session.notice.clear();
+        let first = st.backup_hold[&id];
+        st.cmd_net_backup_failed(id.clone(), damaged.clone(), true).expect("ack");
+        assert!(st.session.notice.is_empty(), "one message");
+        assert_eq!(st.backup_hold[&id].delay, 2 * first.delay, "the hold grows");
+
+        st.backup_hold.get_mut(&id).expect("held").until = 0;
+        st.cmd_backup_tick().expect("tick");
+        assert_eq!(error(&st), "workspace directory missing", "tried again once the hold ran out");
+
+        st.cmd_net_backup_failed(id.clone(), "s3: timeout".to_string(), false).expect("ack");
+        assert!(!st.backup_hold.contains_key(&id), "any other outcome lifts the hold");
+    }
+
     /// C4: the quota never counts or prunes another node's backups.
     #[test]
     fn the_quota_sees_only_this_nodes_workspaces() {

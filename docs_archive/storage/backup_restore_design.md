@@ -108,6 +108,8 @@ download + the same import path.
 | `logo.<ext>` | **yes** | applied org state materialized as a file |
 | `wiki_base.bin` | **yes** (added 2026-10-05) | the folded wiki tree a K6 cut leaves (`knowledge_base_scale.md` §4.9): below the cut the chain keeps only its hash, so this is the one local copy of the shared memory. Left out, a republic whose every seat restores from backup holds the commitment and nobody holds the content. Import checks every frame authenticates under the blob's workspace key; the open checks the commitment |
 | `vault_base.bin`, `vault/<secret_id>.bin` | **yes** (vault S5, `docs_archive/vault/vault_threshold_disclosure.md` §9.5) | the folded vault base and the payloads of the current deposits. Same rule as `wiki_base.bin`: the export ships a file only if it authenticates (a payload under the key its 64-hex stem derives) and names one it leaves out; the import plants only authenticating files and lists the rest in `dropped`; the open re-verifies the base under its own vault context |
+| `wallet_keys.state` | **yes, must authenticate** (added 2026-10-09, `docs/chain/wallet_treasury_design.md` §6) | the purse's keys records: this seat's key part exists nowhere else. A copy that does not authenticate **fails the whole export** with one line naming the file (a backup that dropped the share silently is worse than none); the import drops such a copy, restores the rest, and reports the seat watch-only (`ImportStaging::wallet_keys_dropped`). The acknowledged loss sets a damaged file aside as a dot-file, and exports resume |
+| `wallet_scan.state` | **yes** (added 2026-10-09) | the purse scanner's progress. Same rule as `wiki_base.bin`: shipped if it authenticates, else skipped and named; the import drops a damaged one (a rescan from the birthday) |
 | `keys/workspace.key` | **no** | sealed to the *exporting* device's key — dead weight anywhere else. The key itself travels inside the encrypted payload (§3.5) |
 | `keys/seed.sealed` | **no** (the *entropy* may travel in the payload, §3.5) | same reason |
 | `transport.state` | **NO — hard exclusion** | §3.3 |
@@ -333,7 +335,7 @@ import is **stage → verify → commit**:
    enforced, §3.4); stream-decrypt chunks; validate entry paths against an
    **allowlist** (`manifest.toml`, `prefs.toml`, `chain.state`,
    `wiki_base.bin`, `vault_base.bin`, `vault/<64 hex>.bin`,
-   `log/NNNNNN.mlog`, `snapshots/NNNNNNNNNNNN.msnap`,
+   `wallet_keys.state`, `wallet_scan.state`, `log/NNNNNN.mlog`, `snapshots/NNNNNNNNNNNN.msnap`,
    `logo.<ext>` — reject
    anything else, which subsumes traversal attacks); write everything into
    a dot-staging dir `root/.import-<id>/` (invisible to the scan);
@@ -544,8 +546,13 @@ Pruning runs in the same off-actor task as the upload (never on the actor).
   `NetBackupDone { id, ts, object, bytes }` → engine sets
   `prefs.last_backup = ts` (persisted via the prefs path that already
   exists), updates the list entry, clears inflight.
-  `NetBackupFailed { id, error }` → session notice + list state, stamp
-  **untouched**, inflight cleared.
+  `NetBackupFailed { id, error, hold }` → session notice + list state, stamp
+  **untouched**, inflight cleared. `hold` marks a failure a retry cannot
+  heal (a damaged `wallet_keys.state`): the ticker waits 1 h, doubling to
+  at most 24 h, and the notice is raised once, not per attempt; any other
+  outcome lifts the hold, and the manual "backup now" ignores it.
+  Retention prunes only after a confirmed upload, so a failing export
+  keeps the bucket's good copies.
 * **`cmd_set_workspace_backup` loses its fake stamp** (`last_backup_min =
   0` on enable — mock_todo Finding 12): enabling now only persists the pref
   and lets the next `BackupTick` run a real first backup; the stamp moves

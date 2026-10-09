@@ -1241,6 +1241,9 @@ pub(crate) struct State {
     /// could not be persisted (read-only dir) does not trigger a full-blob
     /// re-upload every minute forever (review finding).
     pub(crate) backup_last_done: std::collections::HashMap<WorkspaceId, u64>,
+    /// Workspaces whose last backup failed in a way a retry cannot heal (a
+    /// damaged purse keys file): the ticker waits out the hold. Runtime-only.
+    pub(crate) backup_hold: std::collections::HashMap<WorkspaceId, crate::backup::BackupHold>,
     /// The last REAL bucket listing's objects (None until one succeeded, and
     /// cleared with it). Kept so the orphan classification can be re-run
     /// against the CURRENT workspace list when it changes (a deleted
@@ -1540,6 +1543,7 @@ impl State {
             tor_test_gen: 0,
             backup_inflight: std::collections::HashSet::new(),
             backup_last_done: std::collections::HashMap::new(),
+            backup_hold: std::collections::HashMap::new(),
             backup_listing: None,
             restore_generation: 0,
             restore_task: None,
@@ -2070,7 +2074,7 @@ impl State {
                 prune_error,
                 quota_error,
             } => self.cmd_net_backup_done(id, ts, object, bytes, prune_error, quota_error),
-            Command::NetBackupFailed { id, error } => self.cmd_net_backup_failed(id, error),
+            Command::NetBackupFailed { id, error, hold } => self.cmd_net_backup_failed(id, error, hold),
 
             // lifecycles.rs
             Command::RestoreStart {

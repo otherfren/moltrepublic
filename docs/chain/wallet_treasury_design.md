@@ -13,7 +13,8 @@ by default (§3.2), and the purse runs on mainnet behind a loud warning
 (§7). Rev 1 (2026-08-16) and rev 2 (2026-10-06) are superseded; §13 lists
 what changed. Built so far: the dependency lock, `molt-treasury`'s pure
 core (DKG wrapper, view key, address, attestations, keys record, scan
-core) and `daemon_kind` (plan §14 steps 2-3, 2026-10-09). **Scope is Stage 1 only:** found the
+core), `daemon_kind`, and the keys and scan files with export and
+import (plan §14 steps 2-4, 2026-10-09). **Scope is Stage 1 only:** found the
 purse, receive, watch. Spending (Stage 2) is gated on upstream (§8).
 
 ---

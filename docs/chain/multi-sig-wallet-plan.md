@@ -610,7 +610,17 @@ Fork-Höhen fest. Bis dahin `can_spend = false`, kein `sign.rs`.
    2 stage). `http://` nur zu Onion/Local (wie `ws://`). Der Graph-Guard
    lässt molt-cores Teilbaum aus (chronos Plattform-Krates). Die
    Scan-Datei-Bytes kommen mit Schritt 4.
-4. [ ] §9 + §10.15–19 Storage, Backup-Doku.
+4. [x] §9 + §10.15–19 Storage, Backup-Doku (2026-10-09). Storage keeps
+   the records opaque (no molt-treasury dependency, as with the vault):
+   plaintext `molt-wallet-keys-file-v1` ‖ count ‖ length-prefixed records,
+   byte-pinned. Append skips a byte-equal record and refuses a damaged
+   file; `prune_wallet_keys(keep)` keeps the byte-equal record and refuses
+   when it is not held. Scan bytes: `ScanState::encode/decode`
+   (`molt-wallet-scan-v1`, seen keys = output keys). Set aside as
+   `.wallet_keys.state.lost<n>`, never an intact file. The ticker's hold
+   rides `NetBackupFailed.hold`: 1 h, doubling to 24 h, one notice. The
+   record-vs-purse check stays with step 7 (`read_wallet_keys`,
+   `ImportStaging::wallet_keys_dropped`).
 5. [ ] §8 Kontrakt, MCP, Config; Co-Equality grün.
 6. [ ] §7.1–7.2 + §7.7; §10.20–25, 36.
 7. [ ] §7.3–7.6 + §7.8; §10.26–35, 37–41.

@@ -1757,6 +1757,7 @@ impl OpenedWorkspace {
         let data = match read_capped(&self.dir.join(WALLET_KEYS_FILE), READ_CAP_STATE, WALLET_KEYS_FILE) {
             Ok(d) => d,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => return Err(StorageError::WalletKeysDamaged),
             Err(e) => return Err(e.into()),
         };
         decode_wallet_keys_file(&self.key, &self.id, &data)
@@ -5480,6 +5481,10 @@ mod tests {
         fs::write(&path, &rotted).expect("rot again");
         assert!(ws.set_aside_wallet_keys().expect("damaged again"));
         assert!(ws.dir().join(".wallet_keys.state.lost1").exists(), "an earlier one is not clobbered");
+        // over the cap is damage too: the export refuses it, so the way out must take it
+        File::create(&path).expect("plant").set_len(READ_CAP_STATE + 1).expect("sparse");
+        assert!(matches!(ws.read_wallet_keys(), Err(StorageError::WalletKeysDamaged)));
+        assert!(ws.set_aside_wallet_keys().expect("over the cap"));
     }
 
     /// Plan S3a: the vault and kanban-wake markers sit below the wiki base's,
