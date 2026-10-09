@@ -1201,6 +1201,8 @@ pub(crate) struct State {
     pub(crate) presence: PresenceState,
     /// The wake hook's triggers, coalescing and task timer (§6.1).
     pub(crate) wake: wake::WakeState,
+    /// The open workspace's kanban basket; the store keeps it sealed.
+    pub(crate) kanban_draft: String,
     /// Are clearnet relays activated for THIS session? Runtime-only **on
     /// purpose** — it is never persisted, so every start re-arms the gate and
     /// no clearnet packet leaves before the user acts again
@@ -1527,6 +1529,7 @@ impl State {
                 clock_override: None,
             },
             wake: wake::WakeState::default(),
+            kanban_draft: String::new(),
             // the STORED decision is what a fresh process starts from
             // (ADR-0004 amendment): an operator who acknowledged clearnet
             // exposure is not asked again on every restart
@@ -2133,7 +2136,7 @@ impl State {
             Command::ConfirmSeedBackup { phrase } => self.cmd_confirm_seed_backup(&phrase),
             Command::WikiDraftSave { draft } => self.cmd_wiki_draft_save(&draft),
             Command::WikiDraftLoad => self.cmd_wiki_draft_load(),
-            Command::KanbanDraftSave { draft } => self.cmd_kanban_draft_save(&draft),
+            Command::KanbanDraftSave { draft } => self.cmd_kanban_draft_save(draft),
             Command::KanbanDraftLoad => self.cmd_kanban_draft_load(),
             // vault/
             Command::VaultSeal { name, kind, text } => self.cmd_vault_seal(name, kind, text),

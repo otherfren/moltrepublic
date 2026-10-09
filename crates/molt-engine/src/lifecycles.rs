@@ -1242,12 +1242,9 @@ impl State {
     /// (the debounced auto-save races closes; nothing to persist is not
     /// an error).
     pub(crate) fn cmd_wiki_draft_save(&mut self, draft: &str) -> Result<Reply, MoltError> {
-        let id = self.session.active_workspace.clone();
-        if id.is_empty() {
+        // session-only workspace or none open: nothing to hold it
+        let Some(dir) = self.active_workspace_dir() else {
             return Ok(Reply::Ack);
-        }
-        let Some(dir) = molt_storage::find_workspace_dir(&self.workspace_root(), &id) else {
-            return Ok(Reply::Ack); // session-only workspace: nothing to hold it
         };
         if let Err(e) = molt_storage::write_wiki_draft(&dir, draft) {
             tracing::warn!(error = %e, "wiki draft not persisted");
@@ -1255,24 +1252,21 @@ impl State {
         Ok(Reply::Ack)
     }
 
-    /// [`Command::KanbanDraftSave`]: the wiki draft's twin.
-    pub(crate) fn cmd_kanban_draft_save(&mut self, draft: &str) -> Result<Reply, MoltError> {
-        let Some(dir) = self.active_workspace_dir() else {
+    /// [`Command::KanbanDraftSave`]: held by the actor, sealed by the store.
+    pub(crate) fn cmd_kanban_draft_save(&mut self, draft: String) -> Result<Reply, MoltError> {
+        if self.session.active_workspace.is_empty() {
             return Ok(Reply::Ack);
-        };
-        if let Err(e) = molt_storage::write_kanban_draft(&dir, draft) {
-            tracing::warn!(error = %e, "kanban draft not persisted");
         }
+        if let Some(active) = self.active.as_ref() {
+            active.handle.save_kanban_draft(draft.clone());
+        }
+        self.kanban_draft = draft;
         Ok(Reply::Ack)
     }
 
     /// [`Command::KanbanDraftLoad`].
     pub(crate) fn cmd_kanban_draft_load(&mut self) -> Result<Reply, MoltError> {
-        let draft = self
-            .active_workspace_dir()
-            .map(|dir| molt_storage::read_kanban_draft(&dir))
-            .unwrap_or_default();
-        Ok(Reply::KanbanDraft { draft })
+        Ok(Reply::KanbanDraft { draft: self.kanban_draft.clone() })
     }
 
     fn active_workspace_dir(&self) -> Option<std::path::PathBuf> {
@@ -1285,14 +1279,10 @@ impl State {
 
     /// Read the open workspace's stored wiki draft ("" = none).
     pub(crate) fn cmd_wiki_draft_load(&mut self) -> Result<Reply, MoltError> {
-        let id = self.session.active_workspace.clone();
-        let draft = if id.is_empty() {
-            String::new()
-        } else {
-            molt_storage::find_workspace_dir(&self.workspace_root(), &id)
-                .map(|dir| molt_storage::read_wiki_draft(&dir))
-                .unwrap_or_default()
-        };
+        let draft = self
+            .active_workspace_dir()
+            .map(|dir| molt_storage::read_wiki_draft(&dir))
+            .unwrap_or_default();
         Ok(Reply::WikiDraft { draft })
     }
 

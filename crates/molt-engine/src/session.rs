@@ -1409,6 +1409,10 @@ impl State {
             tracing::warn!(error = %e, "kanban_wakes=unreadable");
             Vec::new()
         });
+        let kanban_draft = opened.read_kanban_draft().unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "kanban_draft=unreadable");
+            String::new()
+        });
         // point of no return: swap the actor state to the new workspace
         self.close_active_storage();
         self.reset_workspace_state();
@@ -1458,6 +1462,7 @@ impl State {
         self.adopt_wiki_base(stored_wiki_base);
         // fired task starts survive a restart: a missed one fires once
         self.wake.adopt_fired(fired_starts);
+        self.kanban_draft = kanban_draft;
         // re-verified under the chain's own vault context (plan 1.3.16)
         self.adopt_vault_base(stored_vault_base);
         // the wiki indexes are built OFF the actor and EAGERLY: by the time

@@ -161,9 +161,11 @@ const VAULT_BASE_SEGMENT: u64 = u64::MAX - 5;
 const VAULT_PAYLOAD_SEGMENT: u64 = u64::MAX - 6;
 /// AAD segment marker for `kanban_wakes.json`.
 const KANBAN_WAKES_SEGMENT: u64 = u64::MAX - 7;
+/// AAD segment marker for `kanban_draft.json` (the basket).
+const KANBAN_DRAFT_SEGMENT: u64 = u64::MAX - 8;
 /// The lowest reserved marker — a log file numbered at or above it is
 /// ignored (see [`list_sorted`]).
-const RESERVED_SEGMENT_FLOOR: u64 = KANBAN_WAKES_SEGMENT;
+const RESERVED_SEGMENT_FLOOR: u64 = KANBAN_DRAFT_SEGMENT;
 /// Plaintext per wiki-base frame: EXACTLY one file-plane piece
 /// (`molt_net::file_plane::PIECE_PAYLOAD_LEN`, cross-checked by a static
 /// assertion in molt-engine - this crate sits below molt-net and cannot
@@ -1100,26 +1102,6 @@ pub fn write_wiki_draft(ws_dir: &Path, draft: &str) -> Result<(), StorageError> 
     }
 }
 
-/// Read a workspace's local kanban basket ("" = none): staged acts not
-/// yet proposed (`docs/kanban/kanban_workflows.md` §8). Local like the wiki
-/// draft - never history, never exported.
-pub fn read_kanban_draft(ws_dir: &Path) -> String {
-    read_string_capped(&ws_dir.join(KANBAN_DRAFT_FILE), READ_CAP_CONTENT, "kanban draft").unwrap_or_default()
-}
-
-/// Rewrite the local kanban basket (atomic via `tmp/`); empty removes it.
-pub fn write_kanban_draft(ws_dir: &Path, draft: &str) -> Result<(), StorageError> {
-    if draft.is_empty() {
-        match fs::remove_file(ws_dir.join(KANBAN_DRAFT_FILE)) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.into()),
-        }
-    } else {
-        write_atomic(ws_dir, KANBAN_DRAFT_FILE, draft.as_bytes(), false)
-    }
-}
-
 const KANBAN_DRAFT_FILE: &str = "kanban_draft.json";
 
 // ---------------------------------------------------------------------------
@@ -1704,6 +1686,41 @@ impl OpenedWorkspace {
             .map_err(|e| StorageError::Corrupt(format!("decoding kanban_wakes.json: {e}")))
     }
 
+    /// The local kanban basket (`docs/kanban/kanban_workflows.md` §8):
+    /// staged acts not yet proposed, sealed, never exported. Absent = "".
+    ///
+    /// # Errors
+    /// Unreadable, over the cap, or a frame that does not authenticate.
+    pub fn read_kanban_draft(&self) -> Result<String, StorageError> {
+        let data = match read_capped(&self.dir.join(KANBAN_DRAFT_FILE), READ_CAP_CONTENT, KANBAN_DRAFT_FILE) {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+            Err(e) => return Err(StorageError::Corrupt(format!("reading {KANBAN_DRAFT_FILE}: {e}"))),
+        };
+        let plain = decrypt_state_file(&kanban_draft_key(&self.key, &self.id), &self.id, KANBAN_DRAFT_SEGMENT, &data)?;
+        String::from_utf8(plain)
+            .map_err(|e| StorageError::Corrupt(format!("decoding {KANBAN_DRAFT_FILE}: {e}")))
+    }
+
+    /// Rewrite the basket (atomic, sealed); empty removes the file.
+    pub fn write_kanban_draft(&self, draft: &str) -> Result<(), StorageError> {
+        if draft.is_empty() {
+            return match fs::remove_file(self.dir.join(KANBAN_DRAFT_FILE)) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e.into()),
+            };
+        }
+        let frame = encode_frame(
+            &kanban_draft_key(&self.key, &self.id),
+            &self.id,
+            KANBAN_DRAFT_SEGMENT,
+            0,
+            draft.as_bytes(),
+        )?;
+        write_atomic(&self.dir, KANBAN_DRAFT_FILE, &frame, true)
+    }
+
     /// Rewrite `kanban_wakes.json` (atomic, sealed).
     pub fn write_kanban_wakes(&self, keys: &[String]) -> Result<(), StorageError> {
         let plain = serde_json::to_vec(keys)
@@ -1979,6 +1996,11 @@ fn wiki_base_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
 /// The `kanban_wakes.json` sub-key.
 fn kanban_wakes_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
     Zeroizing::new(hkdf32(ws_key, "molt-kanban-wakes", id))
+}
+
+/// The `kanban_draft.json` sub-key.
+fn kanban_draft_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    Zeroizing::new(hkdf32(ws_key, "molt-kanban-draft", id))
 }
 
 /// The `vault_base.bin` sub-key (vault S5).
@@ -3100,6 +3122,8 @@ enum WriterMsg {
     SaveAccepted(std::collections::BTreeMap<molt_core::MemberId, molt_core::AcceptedWindow>),
     /// Rewrite `kanban_wakes.json` with these fired keys.
     SaveKanbanWakes(Vec<String>),
+    /// Rewrite the sealed `kanban_draft.json` ("" removes it).
+    SaveKanbanDraft(String),
     /// A piece fetch's bookkeeping (mirroring §3.2): upsert by series.
     SaveFetchJob(Box<molt_core::FetchJob>),
     /// The fetch of this series ended.
@@ -3345,6 +3369,17 @@ impl StorageHandle {
             Ok(()) => {}
             Err(mpsc::TrySendError::Full(_)) => {
                 tracing::warn!(dropped = "kanban wakes save", "writer queue full");
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {}
+        }
+    }
+
+    /// Persist the kanban basket (fire-and-forget like the wakes).
+    pub fn save_kanban_draft(&self, draft: String) {
+        match self.tx.try_send(WriterMsg::SaveKanbanDraft(draft)) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_)) => {
+                tracing::warn!(dropped = "kanban draft save", "writer queue full");
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {}
         }
@@ -3851,6 +3886,11 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                     Ok(WriterMsg::SaveKanbanWakes(keys)) => {
                         if let Err(e) = ws.write_kanban_wakes(&keys) {
                             fail(&failed_flag, "kanban_wakes.json write", &e);
+                        }
+                    }
+                    Ok(WriterMsg::SaveKanbanDraft(draft)) => {
+                        if let Err(e) = ws.write_kanban_draft(&draft) {
+                            tracing::warn!(error = %e, "kanban_draft=unwritten");
                         }
                     }
                     Ok(WriterMsg::SaveFetchJob(job)) => {
@@ -4969,16 +5009,21 @@ mod tests {
         assert_eq!(after, frame, "the refusal must not have rewritten it");
     }
 
-    /// §8: the basket round-trips beside the wiki draft; empty removes it.
+    /// §8: the basket round-trips sealed at rest; empty removes it.
     #[test]
-    fn the_kanban_draft_round_trips_and_clears() {
+    fn the_kanban_draft_round_trips_sealed_and_clears() {
         let tmp = tempfile::tempdir().expect("tmp");
-        assert_eq!(read_kanban_draft(tmp.path()), "");
-        write_kanban_draft(tmp.path(), "{\"acts\":[]}").expect("write");
-        assert_eq!(read_kanban_draft(tmp.path()), "{\"acts\":[]}");
-        write_kanban_draft(tmp.path(), "").expect("clear");
-        assert!(!tmp.path().join("kanban_draft.json").exists());
-        write_kanban_draft(tmp.path(), "").expect("clearing nothing is fine");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let ws = create_workspace(tmp.path(), &seed, &founded(42)).expect("create");
+        assert_eq!(ws.read_kanban_draft().expect("read"), "");
+        let draft = "{\"acts\":[{\"title\":\"marker-title\"}]}";
+        ws.write_kanban_draft(draft).expect("write");
+        assert_eq!(ws.read_kanban_draft().expect("read"), draft);
+        let raw = fs::read(ws.dir().join("kanban_draft.json")).expect("raw");
+        assert!(!raw.windows(12).any(|w| w == b"marker-title"), "sealed at rest");
+        ws.write_kanban_draft("").expect("clear");
+        assert!(!ws.dir().join("kanban_draft.json").exists());
+        ws.write_kanban_draft("").expect("clearing nothing is fine");
     }
 
     /// §6.1: the fired `task_start` keys live sealed beside the state,
@@ -5107,22 +5152,23 @@ mod tests {
     /// number is ignored, never the active segment.
     #[test]
     fn segment_floor_ignores_the_reserved_markers() {
-        assert_eq!(RESERVED_SEGMENT_FLOOR, KANBAN_WAKES_SEGMENT);
+        assert_eq!(RESERVED_SEGMENT_FLOOR, KANBAN_DRAFT_SEGMENT);
         const {
             assert!(
-                KANBAN_WAKES_SEGMENT < VAULT_PAYLOAD_SEGMENT
+                KANBAN_DRAFT_SEGMENT < KANBAN_WAKES_SEGMENT
+                    && KANBAN_WAKES_SEGMENT < VAULT_PAYLOAD_SEGMENT
                     && VAULT_PAYLOAD_SEGMENT < VAULT_BASE_SEGMENT
                     && VAULT_BASE_SEGMENT < WIKI_BASE_SEGMENT
             )
         };
         let tmp = tempfile::tempdir().expect("tmp");
         let dir = make_ws(tmp.path(), 2);
-        for no in [KANBAN_WAKES_SEGMENT, VAULT_PAYLOAD_SEGMENT, VAULT_BASE_SEGMENT] {
+        for no in [KANBAN_DRAFT_SEGMENT, KANBAN_WAKES_SEGMENT, VAULT_PAYLOAD_SEGMENT, VAULT_BASE_SEGMENT] {
             std::fs::write(dir.join("log").join(format!("{no}.mlog")), b"").expect("plant");
         }
         let (ws, loaded) = open_workspace(&dir).expect("opens despite the planted files");
         assert_eq!(loaded.tail.len(), 3);
-        assert!(ws.seg_no < KANBAN_WAKES_SEGMENT);
+        assert!(ws.seg_no < KANBAN_DRAFT_SEGMENT);
     }
 
     /// WP4b stage 5: the FIRST pruned chain persist raises the manifest
