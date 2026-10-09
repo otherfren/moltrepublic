@@ -48,6 +48,9 @@ pub enum TreasuryError {
     /// A keys record is damaged or inconsistent.
     #[error("keys record invalid")]
     Record,
+    /// A scan file image is damaged or inconsistent.
+    #[error("scan state invalid")]
+    ScanState,
     /// The DKG library refused (its error, debug-formatted).
     #[error("dkg: {0}")]
     Dkg(String),
@@ -102,10 +105,10 @@ fn network_from_byte(b: u8) -> Option<Network> {
 }
 
 /// A strict cursor over a tagged layout.
-struct Reader<'a>(&'a [u8]);
+pub(crate) struct Reader<'a>(pub(crate) &'a [u8]);
 
 impl<'a> Reader<'a> {
-    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+    pub(crate) fn take(&mut self, n: usize) -> Option<&'a [u8]> {
         if self.0.len() < n {
             return None;
         }
@@ -114,28 +117,28 @@ impl<'a> Reader<'a> {
         Some(head)
     }
 
-    fn array<const N: usize>(&mut self) -> Option<[u8; N]> {
+    pub(crate) fn array<const N: usize>(&mut self) -> Option<[u8; N]> {
         self.take(N)?.try_into().ok()
     }
 
-    fn u8(&mut self) -> Option<u8> {
+    pub(crate) fn u8(&mut self) -> Option<u8> {
         Some(self.take(1)?[0])
     }
 
-    fn u16(&mut self) -> Option<u16> {
+    pub(crate) fn u16(&mut self) -> Option<u16> {
         Some(u16::from_le_bytes(self.array()?))
     }
 
-    fn u64(&mut self) -> Option<u64> {
+    pub(crate) fn u64(&mut self) -> Option<u64> {
         Some(u64::from_le_bytes(self.array()?))
     }
 
-    fn bytes(&mut self) -> Option<&'a [u8]> {
+    pub(crate) fn bytes(&mut self) -> Option<&'a [u8]> {
         let len = usize::try_from(u32::from_le_bytes(self.array()?)).ok()?;
         self.take(len)
     }
 
-    fn done(&self) -> bool {
+    pub(crate) fn done(&self) -> bool {
         self.0.is_empty()
     }
 }

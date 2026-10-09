@@ -12,8 +12,12 @@ use monero_wallet::transaction::Timelock;
 use monero_wallet::{ScanError, Scanner};
 use zeroize::Zeroizing;
 
+use molt_core::{put_bytes, put_count};
+
 use crate::keys::view_pair;
-use crate::TreasuryError;
+use crate::{Reader, TreasuryError};
+
+const SCAN_TAG: &[u8] = b"molt-wallet-scan-v1";
 
 /// Confirmations before an output counts as balance.
 pub const CONFIRMATIONS: u64 = 20;
@@ -229,6 +233,96 @@ impl ScanState {
                 (ok, wait.saturating_add(r.amount))
             }
         })
+    }
+
+    /// The scan file's bytes: `tag ‖ birthday ‖ next ‖ count ‖ (height ‖
+    /// hash)* ‖ count ‖ (key ‖ amount ‖ height ‖ tx ‖ index ‖ lock kind ‖
+    /// lock value)*`; the seen keys are the outputs' keys.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        put_bytes(&mut out, SCAN_TAG);
+        out.extend_from_slice(&self.birthday.to_le_bytes());
+        out.extend_from_slice(&self.next.to_le_bytes());
+        put_count(&mut out, self.recent.len());
+        for (h, hash) in &self.recent {
+            out.extend_from_slice(&h.to_le_bytes());
+            out.extend_from_slice(hash);
+        }
+        put_count(&mut out, self.outputs.len());
+        for r in &self.outputs {
+            out.extend_from_slice(&r.key);
+            out.extend_from_slice(&r.amount.to_le_bytes());
+            out.extend_from_slice(&r.height.to_le_bytes());
+            out.extend_from_slice(&r.tx);
+            out.extend_from_slice(&r.index_in_tx.to_le_bytes());
+            let (kind, value) = match r.lock {
+                Lock::None => (0u8, 0),
+                Lock::Block(h) => (1, h),
+                Lock::Time(t) => (2, t),
+            };
+            out.push(kind);
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        out
+    }
+
+    /// The state back, only if whole and consistent with [`Self::apply`]'s
+    /// invariants; anything else costs a rescan from the birthday.
+    pub fn decode(bytes: &[u8]) -> Result<Self, TreasuryError> {
+        Self::parse(bytes).ok_or(TreasuryError::ScanState)
+    }
+
+    fn parse(bytes: &[u8]) -> Option<Self> {
+        let mut r = Reader(bytes);
+        if r.bytes()? != SCAN_TAG {
+            return None;
+        }
+        let birthday = r.u64()?;
+        let next = r.u64()?;
+        if next < birthday {
+            return None;
+        }
+        let mut s = Self::new(birthday);
+        s.next = next;
+        let blocks = usize::try_from(u32::from_le_bytes(r.array()?)).ok()?;
+        if blocks > RECENT_BLOCKS {
+            return None;
+        }
+        for _ in 0..blocks {
+            let h = r.u64()?;
+            let hash = r.array()?;
+            let ascending = !matches!(s.recent.last_key_value(), Some((top, _)) if *top >= h);
+            if !ascending || h < birthday || h >= next {
+                return None;
+            }
+            s.recent.insert(h, hash);
+        }
+        let outputs = u32::from_le_bytes(r.array()?);
+        for _ in 0..outputs {
+            let key = r.array()?;
+            let amount = r.u64()?;
+            let height = r.u64()?;
+            let tx = r.array()?;
+            let index_in_tx = r.u64()?;
+            let lock = match (r.u8()?, r.u64()?) {
+                (0, 0) => Lock::None,
+                (1, h) => Lock::Block(h),
+                (2, t) => Lock::Time(t),
+                _ => return None,
+            };
+            if height < birthday || height >= next || !s.seen.insert(key) {
+                return None;
+            }
+            s.outputs.push(Received {
+                key,
+                amount,
+                height,
+                tx,
+                index_in_tx,
+                lock,
+            });
+        }
+        r.done().then_some(s)
     }
 
     /// Drop the newest block; past the remembered window, start over.
