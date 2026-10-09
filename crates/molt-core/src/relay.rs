@@ -138,7 +138,7 @@ pub const MAX_URL_LEN: usize = 512;
 /// redundant default port, canonical path — so two spellings of one relay
 /// cannot enter the pool as two entries.
 pub fn normalize_relay_url(raw: &str) -> Result<String, RelayUrlError> {
-    classified(raw).map(|(url, _)| url)
+    classified(raw, Schemes::RELAY).map(|(url, _)| url)
 }
 
 /// The kind of a relay URL — derived, never stored.
@@ -151,10 +151,57 @@ pub fn normalize_relay_url(raw: &str) -> Result<String, RelayUrlError> {
 /// parse refuses counts as [`RelayKind::Clearnet`]: the side of the gate
 /// that asks the user first.
 pub fn relay_kind(url: &str) -> RelayKind {
-    classified(url).map_or(RelayKind::Clearnet, |(_, kind)| kind)
+    classified(url, Schemes::RELAY).map_or(RelayKind::Clearnet, |(_, kind)| kind)
 }
 
-/// The one shared pass behind [`normalize_relay_url`] and [`relay_kind`].
+/// A refused Monero daemon URL: the relay rule's reason, worded for a daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DaemonUrlError(pub RelayUrlError);
+
+impl core::fmt::Display for DaemonUrlError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            RelayUrlError::Scheme => f.write_str("a node URL must start with https:// or http://"),
+            RelayUrlError::PlaintextClearnet => {
+                f.write_str("http:// only for .onion or local nodes - use https://")
+            }
+            RelayUrlError::Userinfo => f.write_str("the login is a setting of its own"),
+            RelayUrlError::Host => f.write_str("the node URL has no usable host"),
+            RelayUrlError::Junk => f.write_str("the node URL contains whitespace or control characters"),
+            RelayUrlError::Fragment => f.write_str("a node URL cannot carry a #fragment"),
+            RelayUrlError::TooLong => write!(f, "the node URL is longer than {MAX_URL_LEN} bytes"),
+            RelayUrlError::OnionAddress | RelayUrlError::NonCanonical => self.0.fmt(f),
+        }
+    }
+}
+
+/// A Monero daemon URL (`http`/`https`), normalized, and where it lives -
+/// the relay host rule with the web schemes. Unlike
+/// [`relay_kind`] it fails closed: a refused URL is never dialed.
+pub fn daemon_kind(url: &str) -> Result<(String, RelayKind), DaemonUrlError> {
+    classified(url, Schemes::DAEMON).map_err(DaemonUrlError)
+}
+
+/// The secure and the plaintext scheme a URL family accepts.
+#[derive(Clone, Copy)]
+struct Schemes {
+    secure: &'static str,
+    plain: &'static str,
+}
+
+impl Schemes {
+    const RELAY: Self = Self {
+        secure: "wss://",
+        plain: "ws://",
+    };
+    const DAEMON: Self = Self {
+        secure: "https://",
+        plain: "http://",
+    };
+}
+
+/// The one shared pass behind [`normalize_relay_url`], [`relay_kind`] and
+/// [`daemon_kind`].
 ///
 /// The host is taken from the **WHATWG parser** (`url` — the parser every
 /// real WebSocket/Nostr client dials with), never from hand-rolled string
@@ -164,10 +211,10 @@ pub fn relay_kind(url: &str) -> RelayKind {
 /// (`mdk_evaluation.md` §6). Strictness on TOP of the parse (ASCII only, no
 /// backslash, canonical spelling, conservative domain labels) narrows what
 /// we accept — but what we accept is always exactly what the parser read.
-fn classified(raw: &str) -> Result<(String, RelayKind), RelayUrlError> {
+fn classified(raw: &str, schemes: Schemes) -> Result<(String, RelayKind), RelayUrlError> {
     let trimmed = raw.trim();
-    // A backslash has no place in a relay URL; WHATWG rewrites it to `/` for
-    // ws/wss, so a stored one would not be the URL that gets dialed. Refuse
+    // A backslash has no place in a URL; WHATWG rewrites it to `/` for
+    // ws/wss/http/https, so a stored one would not be the URL that gets dialed. Refuse
     // it outright rather than store an ambiguity.
     if trimmed
         .chars()
@@ -184,13 +231,14 @@ fn classified(raw: &str) -> Result<(String, RelayKind), RelayUrlError> {
         return Err(RelayUrlError::TooLong);
     }
     let lower = trimmed.to_ascii_lowercase();
-    let (scheme, after_scheme) = if let Some(rest) = lower.strip_prefix("wss://") {
-        ("wss://", rest)
-    } else if let Some(rest) = lower.strip_prefix("ws://") {
-        ("ws://", rest)
+    let (secure, after_scheme) = if let Some(rest) = lower.strip_prefix(schemes.secure) {
+        (true, rest)
+    } else if let Some(rest) = lower.strip_prefix(schemes.plain) {
+        (false, rest)
     } else {
         return Err(RelayUrlError::Scheme);
     };
+    let scheme = if secure { schemes.secure } else { schemes.plain };
     // THE parse — the same algorithm every dialing client runs.
     let parsed = url::Url::parse(&lower).map_err(|_| RelayUrlError::Host)?;
     if parsed.fragment().is_some() {
@@ -220,7 +268,7 @@ fn classified(raw: &str) -> Result<(String, RelayKind), RelayUrlError> {
         Some(p) => format!("{host_str}:{p}"),
         None => host_str.to_string(),
     };
-    let default_port: u16 = if scheme == "wss://" { 443 } else { 80 };
+    let default_port: u16 = if secure { 443 } else { 80 };
     let spelled_default = format!("{host_str}:{default_port}");
     if input_authority != canonical_authority
         && !(parsed.port().is_none() && input_authority == spelled_default)
@@ -232,7 +280,7 @@ fn classified(raw: &str) -> Result<(String, RelayKind), RelayUrlError> {
         url::Host::Ipv4(a) => ipv4_kind(a)?,
         url::Host::Ipv6(a) => ipv6_kind(a)?,
     };
-    if scheme == "ws://" && kind == RelayKind::Clearnet {
+    if !secure && kind == RelayKind::Clearnet {
         return Err(RelayUrlError::PlaintextClearnet);
     }
     // canonical path + query from the parse (dot-segments collapsed — the
@@ -1041,5 +1089,38 @@ mod tests {
         ] {
             assert_eq!(normalize_relay_url(bad), Err(want), "must reject {bad:?}");
         }
+    }
+
+    #[test]
+    fn daemon_kind_classifies_onion_local_clearnet() {
+        let onion = format!("http://{}.onion:18081", "a".repeat(56));
+        for (raw, url, kind) in [
+            (onion.as_str(), onion.as_str(), RelayKind::Onion),
+            ("http://127.0.0.1:18081", "http://127.0.0.1:18081", RelayKind::Local),
+            ("http://localhost:18081/", "http://localhost:18081", RelayKind::Local),
+            ("https://192.168.1.5:18089", "https://192.168.1.5:18089", RelayKind::Local),
+            ("HTTPS://Node.Example.ORG:443/", "https://node.example.org", RelayKind::Clearnet),
+            ("https://node.example.org:18089", "https://node.example.org:18089", RelayKind::Clearnet),
+        ] {
+            assert_eq!(daemon_kind(raw), Ok((url.to_string(), kind)), "{raw:?}");
+        }
+        for (bad, want) in [
+            ("ws://127.0.0.1:18081", RelayUrlError::Scheme),
+            ("wss://node.example.org", RelayUrlError::Scheme),
+            ("node.example.org:18081", RelayUrlError::Scheme),
+            ("http://node.example.org:18081", RelayUrlError::PlaintextClearnet),
+            ("https://user:pass@node.example.org", RelayUrlError::Userinfo),
+            ("http://a.onion:1@evil.example.org", RelayUrlError::Userinfo),
+            ("https://evil.example.org\\x.onion", RelayUrlError::Junk),
+            ("http://0x7f.1:18081", RelayUrlError::NonCanonical),
+            ("https://node.example.org#x", RelayUrlError::Fragment),
+            ("http://x.onion", RelayUrlError::OnionAddress),
+        ] {
+            assert_eq!(daemon_kind(bad), Err(DaemonUrlError(want)), "must reject {bad:?}");
+        }
+        assert!(!DaemonUrlError(RelayUrlError::Scheme).to_string().contains("relay"));
+        // the relay side is untouched: http is still no relay
+        assert_eq!(normalize_relay_url("https://node.example.org"), Err(RelayUrlError::Scheme));
+        assert_eq!(relay_kind("http://127.0.0.1:18081"), RelayKind::Clearnet);
     }
 }
