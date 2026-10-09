@@ -135,7 +135,12 @@ impl Surface {
     pub fn is_implemented(self) -> bool {
         matches!(
             self,
-            Surface::Organization | Surface::Chat | Surface::Memory | Surface::Vault | Surface::Files
+            Surface::Organization
+                | Surface::Chat
+                | Surface::Memory
+                | Surface::Quests
+                | Surface::Vault
+                | Surface::Files
         )
     }
 
@@ -8472,7 +8477,7 @@ mod tests {
         let real: Vec<Surface> = Surface::ALL.into_iter().filter(|s| s.is_implemented()).collect();
         assert_eq!(
             real,
-            vec![Surface::Organization, Surface::Chat, Surface::Memory, Surface::Vault, Surface::Files]
+            vec![Surface::Organization, Surface::Chat, Surface::Memory, Surface::Quests, Surface::Vault, Surface::Files]
         );
     }
 

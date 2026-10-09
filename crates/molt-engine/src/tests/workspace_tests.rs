@@ -180,7 +180,7 @@ fn workspace_state_survives_close_and_reopen() {
                 };
                 assert!(implemented(Surface::Memory));
                 assert!(implemented(Surface::Files));
-                assert!(!implemented(Surface::Quests));
+                assert!(implemented(Surface::Quests));
                 assert!(implemented(Surface::Vault));
                 assert!(!implemented(Surface::Wallet));
             }
