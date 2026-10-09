@@ -26,6 +26,7 @@ pub mod kanban_calendar;
 pub mod kanban_dates;
 pub mod kanban_fold;
 pub mod kanban_review;
+pub mod kanban_view;
 pub mod kanban_wake;
 pub mod relay;
 pub mod vault;
@@ -5929,6 +5930,9 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
+    /// What this seat can act on now (`kanban_workflows.md` §6.1
+    /// `read_actions`): derived on demand, never stored.
+    ReadActions,
     /// Run the wake command once with `MOLT_WAKE_REASON=test` (§6.2), past
     /// `wake_on` and the interval; behind a running wake it waits. The
     /// outcome lands in `session.wake_test`.
@@ -6424,6 +6428,11 @@ pub enum Reply {
         #[serde(default)]
         base: Option<String>,
     },
+    /// The `read_actions` list ([`Command::ReadActions`]).
+    Actions {
+        /// Votes, due starts, wip and startable tasks, unread pokes.
+        actions: Vec<kanban_wake::WakeAction>,
+    },
     /// The member table (Organization → Members). A struct variant on
     /// purpose: the internally-tagged `reply` repr cannot serialize a bare
     /// sequence (the MCP surface renders replies as JSON).
@@ -6629,6 +6638,10 @@ pub struct ProposalView {
     /// §4.5), computed on this reader's board and UTC date.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub advisories: Vec<String>,
+    /// A pending kanban changeset's acts, one named field per line with
+    /// its value now (`kanban_review::render_acts`). Display only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rendered: Vec<String>,
 }
 
 /// One chat channel as the engine enumerates it for the read contract

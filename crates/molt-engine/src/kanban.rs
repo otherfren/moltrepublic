@@ -14,7 +14,7 @@ use molt_core::kanban_fold::{
     kanban_canonicalize, kanban_fold_one, kanban_precheck, validate_kanban_wire, BoardState,
     FoldStep,
 };
-use molt_core::kanban_review::{advisories, board_view};
+use molt_core::kanban_review::{advisories, board_view, render_acts};
 use molt_core::{MoltError, Surface};
 use serde_json::Value;
 
@@ -227,6 +227,11 @@ impl State {
         )
     }
 
+    /// A pending changeset's acts against the current board.
+    pub(crate) fn kanban_rendered(&self, payload: &Value) -> Vec<String> {
+        render_acts(Some(&self.kanban_board().board), payload)
+    }
+
     /// Why the fold voided this applied changeset, if it did.
     pub(crate) fn kanban_void(&self, id: u64) -> Option<String> {
         self.kanban_board().void.get(&id).cloned()
@@ -237,7 +242,10 @@ impl State {
         let cache = self.kanban_board();
         let today = self.kanban_today();
         let derived = self.kanban_derived(&cache, today);
-        board_view(&cache.board, &derived, today)
+        let secs = i64::try_from(self.presence_now()).unwrap_or(i64::MAX);
+        let now = chrono::DateTime::from_timestamp(secs, 0)
+            .map_or(chrono::NaiveDateTime::MIN, |t| t.naive_utc());
+        board_view(&cache.board, &derived, now, &self.member())
     }
 }
 

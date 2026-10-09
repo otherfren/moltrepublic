@@ -19,6 +19,16 @@ pub const WAKE_REASONS: [&str; 4] = ["poked", "vote_pending", "kanban", "task_st
 /// The reason a test wake carries; never switched off by `wake_on`.
 pub const TEST_REASON: &str = "test";
 
+/// The environment a wake command runs with: why, who poked, the
+/// workspace, pending votes and the `read_actions` length.
+pub const WAKE_ENV: [&str; 5] = [
+    "MOLT_WAKE_REASON",
+    "MOLT_WAKE_BY",
+    "MOLT_WAKE_WORKSPACE",
+    "MOLT_WAKE_PENDING",
+    "MOLT_WAKE_ACTIONS",
+];
+
 /// A missed start older than this never fires (§6.1).
 pub const MISSED_HORIZON_SECS: i64 = 24 * 3600;
 

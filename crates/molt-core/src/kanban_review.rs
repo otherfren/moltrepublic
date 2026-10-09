@@ -3,12 +3,12 @@
 //! board as one read. Display only, never consensus input; `today` is the
 //! reader's UTC date.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use chrono::NaiveDate;
+use chrono::{NaiveDate, NaiveDateTime};
 use serde_json::{Map, Value};
 
-use crate::kanban_calendar::fmt_date;
+use crate::kanban_calendar::{fmt_date, fmt_datetime};
 use crate::kanban_dates::{derive, impact, Derived, Flag, ImpactChange, Shown};
 use crate::kanban_fold::{kanban_fold_one, kanban_precheck, short_id, BoardState, TaskState};
 
@@ -251,10 +251,105 @@ fn impact_line(
     parts.join(" · ")
 }
 
-/// The board as one read (§6): every task with its derived status, the
-/// priority order and `next` per seat, for `today`.
+/// One act field's value as a card shows it: lists joined, ids short.
+fn shown_value(key: &str, v: Option<&Value>) -> String {
+    let item = |x: &Value| match x.as_str() {
+        Some(s) if key == "blocked_by" => short_id(s),
+        Some(s) => s.to_string(),
+        None => x.to_string(),
+    };
+    match v {
+        None | Some(Value::Null) => "none".to_string(),
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(a)) if a.is_empty() => "none".to_string(),
+        Some(Value::Array(a)) => a.iter().map(item).collect::<Vec<_>>().join(", "),
+        Some(other) => other.to_string(),
+    }
+}
+
+/// One field's line, `before → after` when there is a before; then the
+/// working copy takes the new value.
+fn change_line(
+    sid: &str,
+    key: &str,
+    to: Option<&Value>,
+    now: &mut Map<String, Value>,
+    with_before: bool,
+) -> String {
+    let after = shown_value(key, to);
+    let line = if with_before {
+        format!("{sid} {key}: {} → {after}", shown_value(key, now.get(key)))
+    } else {
+        format!("{sid} {key}: {after}")
+    };
+    match to {
+        Some(v) if !v.is_null() => {
+            now.insert(key.to_string(), v.clone());
+        }
+        _ => {
+            now.remove(key);
+        }
+    }
+    line
+}
+
+/// A changeset's acts as the card and the decision chat render them
+/// (§4.2): every named field on its own line, `before → after` against
+/// `board` (and the acts before it), only the value without one.
 #[must_use]
-pub fn board_view(board: &BoardState, derived: &Derived, today: NaiveDate) -> Value {
+pub fn render_acts(board: Option<&BoardState>, payload: &Value) -> Vec<String> {
+    if payload.get("op").and_then(Value::as_str) != Some("kanban_ops") {
+        return Vec::new();
+    }
+    let mut work: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
+    let mut out = Vec::new();
+    let ops = payload.get("ops").and_then(Value::as_array).into_iter().flatten();
+    for op in ops {
+        let Some(id) = op.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let sid = short_id(id);
+        let now = work.entry(id.to_string()).or_insert_with(|| {
+            board
+                .and_then(|b| b.tasks.get(id))
+                .and_then(|t| t.to_json().as_object().cloned())
+                .unwrap_or_default()
+        });
+        match op.get("act").and_then(Value::as_str) {
+            Some("add") => {
+                out.push(format!("{sid} add: {}", shown_value("title", op.get("title"))));
+                let fields = op.as_object().into_iter().flatten();
+                for (k, v) in fields.filter(|(k, _)| !matches!(k.as_str(), "act" | "id" | "ref" | "title")) {
+                    out.push(format!("{sid} {k}: {}", shown_value(k, Some(v))));
+                }
+                *now = op.as_object().cloned().unwrap_or_default();
+                now.insert("state".into(), Value::from(TaskState::Todo.as_str()));
+            }
+            Some("set") => {
+                let fields = op.get("fields").and_then(Value::as_object).into_iter().flatten();
+                for (k, v) in fields {
+                    out.push(change_line(&sid, k, Some(v), now, board.is_some()));
+                }
+            }
+            Some("state") => {
+                out.push(change_line(&sid, "state", op.get("to"), now, board.is_some()));
+                for k in ["note", "evidence"] {
+                    if let Some(v) = op.get(k) {
+                        out.push(format!("{sid} {k}: {}", shown_value(k, Some(v))));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The board as one read (§6): every task with its derived status, the
+/// priority order and `next` per seat, for `now` (UTC) as `me` reads it.
+#[must_use]
+pub fn board_view(board: &BoardState, derived: &Derived, now: NaiveDateTime, me: &str) -> Value {
+    let today = now.date();
     let strs = |v: &[String]| Value::Array(v.iter().cloned().map(Value::String).collect());
     let mut tasks = Map::new();
     for (id, t) in &board.tasks {
@@ -289,6 +384,8 @@ pub fn board_view(board: &BoardState, derived: &Derived, today: NaiveDate) -> Va
     m.insert("rev".into(), Value::from(board.rev));
     m.insert("tasks".into(), Value::Object(tasks));
     m.insert("today".into(), Value::from(fmt_date(today)));
+    m.insert("now".into(), Value::from(fmt_datetime(now)));
+    m.insert("me".into(), Value::from(me));
     Value::Object(m)
 }
 

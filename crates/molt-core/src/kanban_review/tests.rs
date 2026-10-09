@@ -224,9 +224,12 @@ fn the_board_view_carries_tasks_with_their_derived_status() {
         add(2, "b", &["walter"], json!({"blocked_by": ids(&[1])})),
     ])]);
     let dv = derive(&board, today());
-    let v = board_view(&board, &dv, today());
+    let now = today().and_hms_opt(12, 0, 0).expect("noon");
+    let v = board_view(&board, &dv, now, "mara");
     assert_eq!(v["rev"], json!(1));
     assert_eq!(v["today"], json!("2026-10-12"));
+    assert_eq!(v["now"], json!("2026-10-12T12:00"));
+    assert_eq!(v["me"], json!("mara"));
     let a = &v["tasks"][id(1)];
     assert_eq!(a["title"], json!("a"));
     assert_eq!(a["shown"], json!("open"));
@@ -237,4 +240,41 @@ fn the_board_view_carries_tasks_with_their_derived_status() {
     assert_eq!(v["priority"], json!([id(1), id(2)]));
     assert_eq!(v["next"]["mara"], json!([id(1)]));
     assert_eq!(v["next"]["walter"], json!([]));
+}
+
+#[test]
+fn every_act_renders_each_named_field_on_its_own_line() {
+    let board = fold(&[cs(vec![add(1, "a", &["mara"], json!({"size": "S"}))])]);
+    let p = cs(vec![
+        set(1, json!({"assignees": ["walter", "bot"], "due": "2026-12-01", "size": null})),
+        st(1, "wip", None),
+        add(2, "b", &["bot"], json!({"blocked_by": ids(&[1])})),
+        st(2, "cancelled", Some("not needed")),
+    ]);
+    let (s1, s2) = (short_id(&id(1)), short_id(&id(2)));
+    assert_eq!(
+        render_acts(Some(&board), &p),
+        [
+            format!("{s1} assignees: mara → walter, bot"),
+            format!("{s1} due: none → 2026-12-01"),
+            format!("{s1} size: S → none"),
+            format!("{s1} state: todo → wip"),
+            format!("{s2} add: b"),
+            format!("{s2} assignees: bot"),
+            format!("{s2} blocked_by: {s1}"),
+            format!("{s2} creator: mara"),
+            format!("{s2} state: todo → cancelled"),
+            format!("{s2} note: not needed"),
+        ]
+    );
+    assert_eq!(
+        render_acts(None, &p)[..4],
+        [
+            format!("{s1} assignees: walter, bot"),
+            format!("{s1} due: 2026-12-01"),
+            format!("{s1} size: none"),
+            format!("{s1} state: wip"),
+        ]
+    );
+    assert!(render_acts(Some(&board), &json!({"op": "add_quest"})).is_empty());
 }

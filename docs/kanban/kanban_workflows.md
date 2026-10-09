@@ -9,7 +9,9 @@ order, agents first - and the m-of-n rule unchanged. The §8 design mock is BUIL
 both doors, precheck, fold cache, void marker, board read, card
 advisories) and the S2 wakes (triggers, coalescing, task timer,
 `kanban_wakes.json`, the engine-side `read_actions`, `Command::TestWake`
-with its MCP tool `test_wake`) are BUILT (2026-10-09); S3-S5 are open.
+with its MCP tool `test_wake`) are BUILT (2026-10-09), and S3 (the MCP
+tools `quests_view`, `quests_propose`, `read_actions`, `wake_skill`, the
+`WAKE_SKILL` constant) is BUILT (2026-10-09); S4-S5 are open.
 §12 lists what changed against revision 2.**
 
 The ask: the Quests surface (GUI label **"Kanban"**, wire key `quests` -
@@ -664,7 +666,10 @@ local node posture, saved to `config.toml`, never governance:
   tool see the identical contract. A test pins that every reason in
   `spawn_wake` and every env var appears in it.
 
-**Draft of the skill** (what the modal shows):
+**Draft of the skill** (as built, `WAKE_SKILL` in `molt-mcp` is the
+authority: it also names every `MOLT_WAKE_*` variable, carries the
+reviewing checklist and moves the one `quests_propose` to the end of the
+wake):
 
 ```markdown
 ---

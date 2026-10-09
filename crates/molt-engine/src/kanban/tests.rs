@@ -182,6 +182,20 @@ fn a_pending_changeset_on_a_task_another_vote_cancelled_reads_would_void() {
 }
 
 #[test]
+fn a_pending_card_renders_its_acts_against_the_board_and_the_read_names_the_reader() {
+    let mut b = republic();
+    commit(&mut b, 1, cs(vec![add(1, "a", json!({}))]));
+    let mut walter = seat("walter", &b);
+    let set = json!({"act": "set", "id": tid(1), "fields": {"assignees": ["walter"]}});
+    let pid = crate::chain::test_support::propose(&mut walter, Surface::Quests, cs(vec![set]));
+    let card = walter.proposals.get(&pid).cloned().expect("card");
+    assert_eq!(walter.view(pid, &card).rendered, ["#00000001 assignees: mara → walter"]);
+    let v = board(&mut walter);
+    assert_eq!(v["me"], json!("walter"));
+    assert_eq!(v["now"], json!("2026-10-12T12:00"));
+}
+
+#[test]
 fn a_voided_changeset_leaves_the_board_unchanged_on_every_node() {
     let mut b = republic();
     let first = commit(&mut b, 1, cs(vec![add(1, "a", json!({}))]));
@@ -207,9 +221,11 @@ fn a_voided_changeset_leaves_the_board_unchanged_on_every_node() {
         );
         let ok = snap.accepted.iter().find(|v| v.id.0 == 1).expect("accepted row");
         assert_eq!(ok.void, None);
-        boards.push(after);
+        let mut shared = after;
+        shared.as_object_mut().expect("board").remove("me");
+        boards.push(shared);
     }
-    assert!(boards.windows(2).all(|w| w[0] == w[1]), "byte-identical on every node");
+    assert!(boards.windows(2).all(|w| w[0] == w[1]), "byte-identical on every node but the reader");
 }
 
 #[test]

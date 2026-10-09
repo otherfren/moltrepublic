@@ -1,7 +1,7 @@
 //! S2 wake keystones (`docs/kanban/kanban_workflows.md` §9).
 
 use molt_core::kanban_wake::WakeAction;
-use molt_core::{ChainChange, ChannelRef, Command, MoltError, Surface};
+use molt_core::{ChainChange, ChannelRef, Command, MoltError, Reply, Surface};
 use serde_json::{json, Value};
 
 use crate::chain::test_support::{genesis_seat, Builder};
@@ -264,6 +264,19 @@ fn read_actions_for_the_worked_example() {
             WakeAction::Poke { by: "mara".to_string(), since: NOON + 1 },
         ]
     );
+}
+
+#[test]
+fn the_read_actions_command_answers_the_list() {
+    let mut b = republic();
+    commit(&mut b, 1, cs(vec![add(4, &["mara"], json!({}))]));
+    let mut mara = seat("mara", &b, NOON);
+    match mara.handle(Command::ReadActions).expect("read") {
+        Reply::Actions { actions } => {
+            assert_eq!(actions, [WakeAction::TaskStartable { task: tid(4) }]);
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 #[test]

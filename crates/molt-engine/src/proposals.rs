@@ -1774,6 +1774,11 @@ impl State {
             } else {
                 Vec::new()
             },
+            rendered: if p.surface == Surface::Quests && p.state == ProposalState::Proposed {
+                self.kanban_rendered(&p.payload)
+            } else {
+                Vec::new()
+            },
         }
     }
 

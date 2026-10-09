@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use molt_core::kanban_wake::{
-    key_begins, start_scan, task_actions, WakeAction, MISSED_HORIZON_SECS, TEST_REASON,
+    key_begins, start_scan, task_actions, WakeAction, MISSED_HORIZON_SECS, TEST_REASON, WAKE_ENV,
 };
 use molt_core::{MoltError, Reply, SessionScope};
 
@@ -282,11 +282,13 @@ impl State {
                 let outcome = match std::process::Command::new("sh")
                     .arg("-c")
                     .arg(&cmd)
-                    .env("MOLT_WAKE_REASON", &reason)
-                    .env("MOLT_WAKE_BY", &by)
-                    .env("MOLT_WAKE_WORKSPACE", &workspace)
-                    .env("MOLT_WAKE_PENDING", pending.to_string())
-                    .env("MOLT_WAKE_ACTIONS", actions.to_string())
+                    .envs(WAKE_ENV.iter().zip([
+                        reason,
+                        by,
+                        workspace,
+                        pending.to_string(),
+                        actions.to_string(),
+                    ]))
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())

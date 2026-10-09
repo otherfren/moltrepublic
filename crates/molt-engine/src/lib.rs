@@ -1754,6 +1754,7 @@ impl State {
             }
             Command::SetWakeCommand { command } => self.cmd_set_wake_command(command),
             Command::TestWake => self.cmd_test_wake(),
+            Command::ReadActions => Ok(Reply::Actions { actions: self.read_actions() }),
             Command::SetNodePosture { posture } => self.cmd_set_node_posture(posture),
             // file-transfer task feedback (engine-internal, scope-guarded)
             Command::NetFileShared {

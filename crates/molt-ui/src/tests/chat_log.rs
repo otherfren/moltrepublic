@@ -160,6 +160,7 @@ fn system_lines_interleave_by_time_and_tolerate_unknown_proposals() {
         sealing: false,
         void: None,
         advisories: Vec::new(),
+        rendered: Vec::new(),
     };
     let first_seen = HashMap::from([(4u64, 150u64)]);
     let sys = patch_system_lines(0, 4, &[pv], &HashMap::new(), &first_seen);
