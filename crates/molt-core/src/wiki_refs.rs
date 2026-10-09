@@ -4,7 +4,10 @@
 //! renders inline, `[text](upload:<hex>)` as a link. A file is named by
 //! its content - the sha256 in hex, full or a prefix of at least
 //! [`PREFIX_MIN`] digits - never by a path or a message id. The link
-//! graph ignores the scheme by construction (no `.md`).
+//! graph ignores the scheme by construction (no `.md`). The same walk
+//! reads `[text](quest:<hex>)`, a link to a kanban task by its id or a
+//! prefix of at least [`QUEST_PREFIX_MIN`] digits
+//! (`docs_archive/kanban/kanban_workflows.md` §9 S5).
 
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
@@ -56,23 +59,80 @@ pub fn checksum_of(dest: &str) -> Option<String> {
     Some(rest.trim().to_ascii_lowercase())
 }
 
+/// The task link scheme.
+pub const QUEST_SCHEME: &str = "quest:";
+/// The shortest prefix that names a task: its display form `#` + 8 hex.
+pub const QUEST_PREFIX_MIN: usize = 8;
+/// A full task id in hex.
+pub const QUEST_HEX_FULL: usize = 32;
+
+/// Whether `hex` is a lowercase hex task id or prefix of
+/// [`QUEST_PREFIX_MIN`]..=[`QUEST_HEX_FULL`] digits.
+#[must_use]
+pub fn valid_quest_hex(hex: &str) -> bool {
+    (QUEST_PREFIX_MIN..=QUEST_HEX_FULL).contains(&hex.len())
+        && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The hex a `quest:` destination names, normalized; `None` for any other
+/// destination.
+#[must_use]
+pub fn quest_id_of(dest: &str) -> Option<String> {
+    let rest = dest.trim().strip_prefix(QUEST_SCHEME)?;
+    Some(rest.trim().to_ascii_lowercase())
+}
+
+/// One `quest:` link in a page, in document order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestRef {
+    /// The hex after the scheme, trimmed and lowercased.
+    pub hex: String,
+    /// The link's text.
+    pub text: String,
+    /// The byte range of the whole markup in the source.
+    pub span: std::ops::Range<usize>,
+}
+
+impl QuestRef {
+    /// The hex has the form a task id or its prefix takes.
+    #[must_use]
+    pub fn valid(&self) -> bool {
+        valid_quest_hex(&self.hex)
+    }
+}
+
+/// Every `quest:` link of `markdown`, in order. A picture names no task.
+#[must_use]
+pub fn quest_refs(markdown: &str) -> Vec<QuestRef> {
+    refs(markdown, quest_id_of, false)
+        .into_iter()
+        .map(|r| QuestRef { hex: r.hex, text: r.alt, span: r.span })
+        .collect()
+}
+
 /// Every `upload:` reference of `markdown`, in order. Code spans and
 /// fences never yield one - pulldown-cmark emits no link or image inside
 /// them, so an example stays an example.
 #[must_use]
 pub fn file_refs(markdown: &str) -> Vec<FileRef> {
+    refs(markdown, checksum_of, true)
+}
+
+/// THE walk: the links (and with `images` the pictures) whose destination
+/// `pick` accepts.
+fn refs(markdown: &str, pick: fn(&str) -> Option<String>, images: bool) -> Vec<FileRef> {
     let mut out = Vec::new();
     // the reference being collected: (hex, image, span) + its text so far
     let mut open: Option<(String, bool, std::ops::Range<usize>, String)> = None;
     for (event, range) in Parser::new(markdown).into_offset_iter() {
         match event {
             Event::Start(Tag::Image { dest_url, .. }) if open.is_none() => {
-                if let Some(hex) = checksum_of(&dest_url) {
+                if let Some(hex) = pick(&dest_url).filter(|_| images) {
                     open = Some((hex, true, range, String::new()));
                 }
             }
             Event::Start(Tag::Link { dest_url, .. }) if open.is_none() => {
-                if let Some(hex) = checksum_of(&dest_url) {
+                if let Some(hex) = pick(&dest_url) {
                     open = Some((hex, false, range, String::new()));
                 }
             }
@@ -170,6 +230,33 @@ mod tests {
         assert_eq!(refs[0].hex, "bbbbbbbbbbbb");
         assert!(!refs[0].image);
         assert_eq!(refs[0].alt, "alt");
+    }
+
+    #[test]
+    fn a_quest_link_names_a_task_by_id_or_prefix() {
+        let md = "See [the drill](quest:0B6D42F7) and [all](quest:0b6d42f70000000000000000000000aa).\n\n[f](upload:3f9a2c1b7e04) [p](a.md)";
+        let refs = quest_refs(md);
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].hex, "0b6d42f7");
+        assert_eq!(refs[0].text, "the drill");
+        assert!(refs[0].valid());
+        assert_eq!(&md[refs[0].span.clone()], "[the drill](quest:0B6D42F7)");
+        assert_eq!(refs[1].hex, "0b6d42f70000000000000000000000aa");
+        assert!(refs[1].valid());
+        assert_eq!(file_refs(md).len(), 1, "a quest link is no file reference");
+    }
+
+    #[test]
+    fn a_quest_reference_is_a_link_outside_code_with_a_hex_of_8_to_32() {
+        let md = "`[a](quest:0b6d42f7)`\n\n```\n[b](quest:0b6d42f7)\n```\n\n![c](quest:0b6d42f7) [d](quest:0b6d42f) [e](quest:0b6d42f7x)";
+        let refs = quest_refs(md);
+        let hexes: Vec<(&str, bool)> = refs.iter().map(|r| (r.hex.as_str(), r.valid())).collect();
+        assert_eq!(hexes, [("0b6d42f", false), ("0b6d42f7x", false)], "code and pictures name no task; a bad hex is reported");
+        assert!(valid_quest_hex(&"a".repeat(32)));
+        assert!(!valid_quest_hex(&"a".repeat(33)));
+        assert_eq!(quest_id_of(" quest:ABCDEF01 "), Some("abcdef01".to_string()));
+        assert_eq!(quest_id_of("quests:abcdef01"), None);
+        assert_eq!(quest_id_of("upload:abcdef012345"), None);
     }
 
     #[test]

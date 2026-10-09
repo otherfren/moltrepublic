@@ -211,6 +211,8 @@ pub(crate) struct WikiGraph {
     pub(crate) inn: BTreeMap<String, Vec<Edge>>,
     /// Edges naming a document that does not exist, keyed by that name.
     pub(crate) dangling: BTreeMap<String, Vec<(String, Edge)>>,
+    /// Per document: the well-formed `quest:` hexes its body links to.
+    quests: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl WikiGraph {
@@ -239,6 +241,7 @@ impl WikiGraph {
             self.docs.remove(path);
             self.raw.remove(path);
             self.props.remove(path);
+            self.quests.remove(path);
             return;
         };
         let (props, _) = front_matter::properties(content);
@@ -251,6 +254,16 @@ impl WikiGraph {
         }
         // …and the body's links, each with the predicate it declared
         let (_, body) = front_matter::split(content);
+        let quests: BTreeSet<String> = molt_core::wiki_refs::quest_refs(body)
+            .into_iter()
+            .filter(molt_core::wiki_refs::QuestRef::valid)
+            .map(|r| r.hex)
+            .collect();
+        if quests.is_empty() {
+            self.quests.remove(path);
+        } else {
+            self.quests.insert(path.to_string(), quests);
+        }
         let inline = body_links(body);
         for link in &inline {
             edges.push(RawEdge {
@@ -279,6 +292,25 @@ impl WikiGraph {
             }
         }
         self.props.insert(path.to_string(), pairs);
+    }
+
+    /// Per task of `ids`, the pages whose `quest:` link names it - by its
+    /// id or a prefix no other task shares - in path order.
+    pub(crate) fn quest_citers(&self, ids: &BTreeSet<&str>) -> BTreeMap<String, Vec<String>> {
+        let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (path, hexes) in &self.quests {
+            let mut named: BTreeSet<&str> = BTreeSet::new();
+            for hex in hexes {
+                let mut hits = ids.range(hex.as_str()..).take_while(|id| id.starts_with(hex.as_str()));
+                if let (Some(id), None) = (hits.next(), hits.next()) {
+                    named.insert(id);
+                }
+            }
+            for id in named {
+                out.entry(id.to_string()).or_default().push(path.clone());
+            }
+        }
+        out
     }
 
     /// Which documents each name denotes - by path, basename, stem,
@@ -990,6 +1022,20 @@ mod tests {
         let (exact, candidates) = g.resolve_name("Unitree Robotics");
         assert_eq!(exact.as_deref(), Some("hersteller/unitree.md"));
         assert_eq!(candidates[0].1, "title");
+    }
+
+    /// A `quest:` link names a task, never a page: no edge, nothing
+    /// dangling, but the page counts as its citer.
+    #[test]
+    fn a_quest_link_is_a_citation_not_a_page_edge() {
+        let mut g = WikiGraph::build(&tree(&[("n.md", "do [it](quest:0b6d42f7) next\n")]));
+        assert!(g.out.get("n.md").is_none_or(Vec::is_empty));
+        assert!(g.dangling.is_empty(), "{:?}", g.dangling);
+        let id = format!("0b6d42f7{}", "0".repeat(24));
+        let ids = BTreeSet::from([id.as_str()]);
+        assert_eq!(g.quest_citers(&ids).get(&id), Some(&vec!["n.md".to_string()]));
+        g.update(&BTreeMap::new(), &BTreeSet::from(["n.md".to_string()]));
+        assert!(g.quest_citers(&ids).is_empty(), "a deleted page cites nothing");
     }
 
     /// G15: a markdown link to a URL that ends in `.md` cites a source; only

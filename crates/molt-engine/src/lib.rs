@@ -1877,7 +1877,7 @@ impl State {
                     self.refresh_wiki_cache();
                 }
                 if surface == Surface::Quests {
-                    self.refresh_kanban_cache();
+                    self.refresh_kanban_read();
                 }
                 let snap = self.snapshot(surface, channel, view.as_deref());
                 // retrieval IS the reading: the chat messages just handed

@@ -123,6 +123,16 @@ impl State {
         }
     }
 
+    /// The Quests read's refresh: the board, and the wiki graph its
+    /// backlinks come from (built off the actor when missing).
+    pub(crate) fn refresh_kanban_read(&mut self) {
+        self.refresh_kanban_cache();
+        self.refresh_wiki_graph();
+        if self.wiki_graph.is_none() {
+            self.spawn_wiki_index_build();
+        }
+    }
+
     /// Bring the fold up to the current logs: extend it by the appended
     /// entries while the other half stood still, else refold.
     pub(crate) fn refresh_kanban_fold(&mut self) {
@@ -246,7 +256,18 @@ impl State {
         let now = self.kanban_now();
         let derived = self.kanban_derived(&cache, now.date());
         let lead = self.session.settings.task_wake_lead_min;
-        board_view(&cache.board, &derived, now, &self.member(), lead)
+        let mut view = board_view(&cache.board, &derived, now, &self.member(), lead);
+        if let (Some(graph), Some(tasks)) =
+            (self.wiki_graph.as_ref(), view.get_mut("tasks").and_then(Value::as_object_mut))
+        {
+            let ids: BTreeSet<&str> = cache.board.tasks.keys().map(String::as_str).collect();
+            for (id, pages) in graph.quest_citers(&ids) {
+                if let Some(t) = tasks.get_mut(&id).and_then(Value::as_object_mut) {
+                    t.insert("referenced_by".into(), pages.into());
+                }
+            }
+        }
+        view
     }
 }
 
