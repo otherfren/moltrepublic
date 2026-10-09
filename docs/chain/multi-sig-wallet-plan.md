@@ -135,7 +135,7 @@ Verifizierte API-Fakten:
 | `vault_frames.rs`, `mirror_gossip.rs` | `molt-net/src/` | Vorbild Frames |
 | `GroupHandle::publish_control` | `molt-net/src/group_runtime.rs` | best-effort (Queue 64), daher Resend |
 | `TransportState` (`mirror`, `vault_status`) | `molt-core/src/lib.rs` | Shareholder-Status, Laufzustand |
-| Segmente `−1 … −6`, `RESERVED_SEGMENT_FLOOR` (per Test gepinnt) | `molt-storage/src/lib.rs` | neu `−7` Schlüssel, `−8` Scan; Floor + Test mitziehen |
+| Segmente `−1 … −8` (`−7`/`−8` Kanban), `RESERVED_SEGMENT_FLOOR` (per Test gepinnt) | `molt-storage/src/lib.rs` | neu `−9` Schlüssel, `−10` Scan; Floor + Test mitziehen |
 | `chain_state_key`/`hkdf32`, `encode_frame`, `write_atomic` | `molt-storage/src/lib.rs` | Muster für beide Dateien |
 | `persist_chain_blocking`, `WriterMsg` | `molt-storage/src/lib.rs` | blockierender Writer |
 | Export-Funktion mit Closure `checked_kind` | `molt-storage/src/export.rs` | Export-Arme |
@@ -406,12 +406,12 @@ Presence-Tick bis Commit oder Abbruch; nie im Workspace-Log:
 
 | Datei | Segment | Inhalt | Export | Import |
 |---|---|---|---|---|
-| `wallet_keys.state` | `u64::MAX − 7` | Keys-Records (je attestiertem Lauf, nach Commit nur der der Kasse) | prüfen; defekt → **Abbruch** | prüfen; defekt → verwerfen, watch-only; Record ≠ Kasse → watch-only |
-| `wallet_scan.state` | `u64::MAX − 8` | Cursor, Block-Hashes, gesehene Keys, Outputs | prüfen; defekt → skip + benennen | prüfen; defekt → verwerfen, Rescan |
+| `wallet_keys.state` | `u64::MAX − 9` | Keys-Records (je attestiertem Lauf, nach Commit nur der der Kasse) | prüfen; defekt → **Abbruch** | prüfen; defekt → verwerfen, watch-only; Record ≠ Kasse → watch-only |
+| `wallet_scan.state` | `u64::MAX − 10` | Cursor, Block-Hashes, gesehene Keys, Outputs | prüfen; defekt → skip + benennen | prüfen; defekt → verwerfen, Rescan |
 
 - Sub-Keys `hkdf32(ws_key, "molt-wallet-keys", id)` /
   `"molt-wallet-scan"`; `encode_frame` + `write_atomic`; Cap
-  `READ_CAP_STATE`. `RESERVED_SEGMENT_FLOOR` auf `−8`, Pin-Test mit.
+  `READ_CAP_STATE`. `RESERVED_SEGMENT_FLOOR` auf `−10`, Pin-Test mit.
 - Schlüsseldatei: `WriterMsg::PersistWalletKeys` +
   `persist_wallet_keys_blocking`. Records werden angehängt, nie ersetzt;
   erst der Commit der Kasse räumt die anderen ab (I16).
