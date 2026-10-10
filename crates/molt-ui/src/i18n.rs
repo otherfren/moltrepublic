@@ -548,6 +548,10 @@ pub(crate) static LOG_SHAPES_DE: &[(&[&str], &[&str])] = &[
         &["→ knowledge restored - the workspace opens detached and reattaches automatically"],
         &["→ Wissen wiederhergestellt - der Workspace öffnet abgekoppelt und verbindet sich automatisch wieder"],
     ),
+    (
+        &["→ purse keys file damaged - view only"],
+        &["→ Schlüsseldatei der Kasse beschädigt - nur Ansicht"],
+    ),
     (&["✗ restore failed: ", ""], &["✗ Restore fehlgeschlagen: ", ""]),
     (&["→ fs: read ", ""], &["→ fs: lese ", ""]),
     (&["→ s3: list ", ""], &["→ s3: liste ", ""]),

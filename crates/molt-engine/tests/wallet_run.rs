@@ -304,16 +304,23 @@ async fn a_reused_nonce_is_refused() {
     all[0].execute(Command::OpenWorkspace { id }).await.expect("reopen");
     all[0].__wallet_start_with([9; 32]);
     wait_run(&all[0], [9; 32]).await;
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // two resend beats of the start, inside its readiness deadline
+    tokio::time::sleep(Duration::from_secs(21)).await;
     for w in &all[1..] {
         assert_eq!(w.__wallet_run(), Some([8; 32]), "the reused nonce is not joined");
         assert_eq!(stage(&wallet(w).await), Some(RunStage::Aborted));
+    }
+    // the reopened seat's starts do arrive
+    all[0].__wallet_start_with([4; 32]);
+    for w in &all {
+        wait_run(w, [4; 32]).await;
     }
 }
 
 /// Plan §10.38 (I16): a withheld attestation keeps the purse from
 /// sealing; the next run runs beside the kept record, and when the
-/// withheld attestations arrive, whichever run wins, every seat holds its share.
+/// withheld attestations arrive, whichever run wins, every seat holds its
+/// share. Both records stay until the purse is below a cut.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_withheld_attestation_cannot_seal_a_run_without_shares() {
     let relay = MockRelay::run().await.expect("relay");
@@ -343,9 +350,12 @@ async fn a_withheld_attestation_cannot_seal_a_run_without_shares() {
     let block = purse_block(&all[0]).await;
     for ws in &reopen_all(tmp.path(), &all, &names).await {
         let records = ws.read_wallet_keys().expect("keys");
-        assert_eq!(records.len(), 1, "the losing run's record is gone");
-        let rec = molt_treasury::keys::KeysRecord::decode(&records[0]).expect("record");
-        assert_eq!(block["run"], hex::encode(rec.run.run), "each seat keeps the winner's share");
+        assert_eq!(records.len(), 2, "both runs' records, none replaced");
+        let runs: Vec<String> = records
+            .iter()
+            .map(|r| hex::encode(molt_treasury::keys::KeysRecord::decode(r).expect("record").run.run))
+            .collect();
+        assert!(runs.iter().any(|r| block["run"] == *r), "each seat keeps the winner's share");
     }
 }
 

@@ -379,8 +379,9 @@ Presence-Tick bis Commit oder Abbruch; nie im Workspace-Log:
    unter dem `identity_pk` der Gründungsposition `i`
    (`vault_founding_table`) prüfen. Nur Payload + `CheckpointState`.
 7. Beim Commit Geschwister-Karten schließen (Vorbild
-   `supersede_stale_vault_cards`) und die Keys-Records aller anderen Läufe
-   löschen.
+   `supersede_stale_vault_cards`); die Keys-Records aller anderen Läufe
+   erst löschen, wenn der Kassen-Block final ist (unter einem
+   Checkpoint-Schnitt, wo kein Reorg hinreicht).
 8. **Restart:** Keys-Records vorhanden, keine Kasse → jede Attestation
    erneut senden, passenden offenen `wallet_created` co-signieren.
 
@@ -431,7 +432,7 @@ Presence-Tick bis Commit oder Abbruch; nie im Workspace-Log:
 
 | Datei | Segment | Inhalt | Export | Import |
 |---|---|---|---|---|
-| `wallet_keys.state` | `u64::MAX − 9` | Keys-Records (je attestiertem Lauf, nach Commit nur der der Kasse) | prüfen; defekt → **Abbruch** | prüfen; defekt → verwerfen, watch-only; Record ≠ Kasse → watch-only |
+| `wallet_keys.state` | `u64::MAX − 9` | Keys-Records (je attestiertem Lauf, ab finaler Kasse nur der der Kasse) | prüfen; defekt → **Abbruch** | prüfen; defekt → verwerfen, watch-only; Record ≠ Kasse → watch-only |
 | `wallet_scan.state` | `u64::MAX − 10` | Cursor, Block-Hashes, gesehene Keys, Outputs | prüfen; defekt → skip + benennen | prüfen; defekt → verwerfen, Rescan |
 
 - Sub-Keys `hkdf32(ws_key, "molt-wallet-keys", id)` /
@@ -439,7 +440,7 @@ Presence-Tick bis Commit oder Abbruch; nie im Workspace-Log:
   `READ_CAP_STATE`. `RESERVED_SEGMENT_FLOOR` auf `−10`, Pin-Test mit.
 - Schlüsseldatei: `WriterMsg::PersistWalletKeys` +
   `persist_wallet_keys_blocking`. Records werden angehängt, nie ersetzt;
-  erst der Commit der Kasse räumt die anderen ab (I16).
+  erst die finale Kasse räumt die anderen ab (I16).
 - Beim Öffnen und Import: Record gegen die projizierte Kasse (Init, Lauf,
   Adresse); Abweichung → watch-only.
 - **Ausweg (W5):** `WalletAcknowledgeLoss` legt eine defekte
@@ -681,10 +682,15 @@ Fork-Höhen fest. Bis dahin `can_spend = false`, kein `sign.rs`.
      while this seat is in readiness or the rounds, a start only in
      the rounds. A decline is answered to every later frame of its
      run, so a lost one still arrives as a decline. The purse RNG
-     fails closed: no nonce, and the run aborts.
+     fails closed: no nonce, and the run aborts. A decline withdraws
+     this seat's consent for the init, its approval included, until it
+     accepts again (in memory: after a reopen the approval counts again).
+     Only `not ready` and `timeout` name missing seats. The other runs'
+     records go once the purse block is below a cut, not at its commit:
+     a reorg may still make another run the purse.
      The starter sends `wdhint` with its start; `WalletRunView` gains
      `daemon_hint`. New refusals: `no set-up running`, `set-up running`,
-     `not this seat's result`. `shareholders` names only this seat's
+     `not this seat's result`, `no randomness`. `shareholders` names only this seat's
      own status until the status frame (7b). §10.32–35 and 38c/d are
      unit tests on built chains (`wallet_run_tests.rs`; 34 cuts the
      chain between init and purse, and after it); the rest run end to
@@ -715,7 +721,7 @@ Fork-Höhen fest. Bis dahin `can_spend = false`, kein `sign.rs`.
 - Auto-Start nur im Hook `after_block_applied`, einmal pro Init, nie beim
   Restore; Auto-Init nur bei Create/Join, nie Recovery; danach nur
   `WalletRetry`.
-- Keys-Records nie ersetzen vor dem Commit (I16); Reopen mit Record bricht
+- Keys-Records nie ersetzen, bevor die Kasse final ist (I16); Reopen mit Record bricht
   nie ab.
 - `require_feature` sitzt auch in `cmd_approve` — `wallet_init` ausnehmen.
 - Gründungsritual nicht anfassen; die Stufe beginnt nach dem Siegel.

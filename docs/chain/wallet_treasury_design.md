@@ -324,11 +324,13 @@ all n valid attestations proposes the terminal change — founding position
 - **Restart between attest and seal:** on reopen the engine finds its keys
   records, re-broadcasts each attestation, and co-signs a matching pending
   `wallet_created`.
-- **A keys record is never replaced before the purse commits.** A seat
+- **A keys record is never replaced before the purse is final.** A seat
   keeps one record per run it attested; any run that gathers n
   attestations is therefore one whose share every seat still holds, even
-  if an attestation was withheld and released later. When the purse
-  commits, the records of every other run are deleted.
+  if an attestation was withheld and released later. The records of
+  every other run are deleted once the purse block is final (below a
+  checkpoint cut, where no reorg reaches): until then a re-base may make
+  another run the purse.
 
 ### 3.6 What chain verification does NOT do
 
@@ -375,7 +377,7 @@ or in any log: the view key, any share or `ThresholdKeys` material.
 Two files, because one secret must never be lost and the rest is cheap:
 
 - **Keys file** — the keys records (§3.5): one per attested run until the
-  purse commits, then exactly the purse's. Written through the blocking
+  purse is final, then exactly the purse's. Written through the blocking
   writer; a record is never replaced. Encrypted on the
   `chain.state` pattern (own HKDF sub-key, own AAD segment, atomic replace,
   zeroized in memory).
@@ -520,7 +522,7 @@ Fixed now, whatever the algorithm:
 - **I15 The founding never waits for the purse.** The stage begins after
   the seal, "Enter republic" is always open, and a failure leaves a
   founded republic. The founding ritual's code and bytes are untouched.
-- **I16 A keys record is never replaced** before the purse commits.
+- **I16 A keys record is never replaced** before the purse is final.
 
 ## 11. Failure and abort
 

@@ -725,3 +725,51 @@ async fn an_aborted_download_fails_honestly_with_no_residue() {
     w.execute(Command::RestoreCancel).await.expect("cancel");
     assert_no_staging_residue(&dest_root);
 }
+
+/// Wallet design W5: a backup whose purse keys file does not authenticate
+/// restores without it, and the run log says so.
+#[tokio::test]
+async fn a_damaged_keys_file_restores_view_only_and_says_so() {
+    use molt_storage::export::{ExportKey, ExportSecret};
+    let tmp = tempfile::tempdir().expect("tmp");
+    let src_root = tmp.path().join("src");
+    let (src, id, phrase) = founded_source(&src_root, SessionSettings::default()).await;
+    src.execute(Command::CloseWorkspace).await.expect("close src");
+    let src_dir = molt_storage::find_workspace_dir(&src_root, &id).expect("src dir");
+    {
+        let (ws, _) = molt_storage::open_workspace(&src_dir).expect("open");
+        ws.append_wallet_keys(b"a share").expect("keys");
+    }
+    let mut honest = Vec::new();
+    molt_storage::export::export_dir(&src_root, &src_dir, &ExportKey::Workspace, &mut honest).expect("export");
+    let ws_key = molt_storage::derive_workspace_key(&molt_storage::seed_entropy(&phrase).expect("entropy"), &id);
+    let archive = molt_storage::export::read_export(&mut honest.as_slice(), &ExportSecret::WorkspaceKey(ws_key))
+        .expect("decrypt");
+    let entries: Vec<(String, Vec<u8>)> = archive
+        .entries
+        .iter()
+        .map(|e| {
+            let mut data = e.data.clone();
+            if e.path == molt_storage::WALLET_KEYS_FILE {
+                let last = data.len() - 1;
+                data[last] ^= 1;
+            }
+            (e.path.clone(), data)
+        })
+        .collect();
+    assert!(entries.iter().any(|(p, _)| p == molt_storage::WALLET_KEYS_FILE), "the keys file travels");
+    let refs: Vec<(&str, &[u8])> = entries.iter().map(|(p, d)| (p.as_str(), d.as_slice())).collect();
+    let meta = serde_json::to_value(&archive.meta).expect("meta");
+    let blob = molt_storage::import::forge_workspace_blob(&id, &ws_key, &meta, &refs);
+    let path = tmp.path().join("damaged.molt.enc");
+    std::fs::write(&path, blob).expect("write");
+
+    let w2 = restore_engine(&tmp.path().join("dst"), SessionSettings::default());
+    let sv = run_restore(&w2, "file", &path.display().to_string(), &phrase, false).await;
+    assert_eq!(sv.restore.run.outcome, 1, "the restore goes on: {:?}", sv.restore.run.log);
+    assert!(
+        sv.restore.run.log.iter().any(|l| l == "→ purse keys file damaged - view only"),
+        "loudly: {:?}",
+        sv.restore.run.log
+    );
+}

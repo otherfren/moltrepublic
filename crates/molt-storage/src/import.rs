@@ -647,6 +647,72 @@ impl Drop for ImportStaging {
     }
 }
 
+/// Encrypt `meta` + `entries` as a workspace-mode `molt-export-v1` blob
+/// for `id_hex` under `ws_key`, as ONE final chunk (tests only: a fixed nonce).
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-forge"))]
+pub fn forge_workspace_blob(
+    id_hex: &str,
+    ws_key: &[u8; 32],
+    meta: &serde_json::Value,
+    entries: &[(&str, &[u8])],
+) -> Vec<u8> {
+    use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+    use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+
+    let id = crate::id_bytes(id_hex).expect("id");
+    let header = crate::export::ExportHeader {
+        format: "molt-export-v1".to_string(),
+        version: 1,
+        workspace_id: id_hex.to_string(),
+        key_mode: "workspace".to_string(),
+        kdf: None,
+        cipher: "xchacha20poly1305".to_string(),
+        chunk_bytes: crate::export::EXPORT_CHUNK_BYTES,
+        export_salt: "cd".repeat(32),
+    };
+    let header_bytes = serde_json::to_vec(&header).expect("header json");
+
+    let meta_bytes = serde_json::to_vec(meta).expect("meta json");
+
+    let mut payload = u32::try_from(meta_bytes.len())
+        .expect("meta len")
+        .to_le_bytes()
+        .to_vec();
+    payload.extend_from_slice(&meta_bytes);
+    for (path, data) in entries {
+        payload.extend_from_slice(&u16::try_from(path.len()).expect("path len").to_le_bytes());
+        payload.extend_from_slice(path.as_bytes());
+        payload.extend_from_slice(&u64::try_from(data.len()).expect("data len").to_le_bytes());
+        payload.extend_from_slice(data);
+    }
+
+    // workspace-mode key schedule (mirrors export.rs's frozen HKDF tags)
+    let k_root = crate::hkdf32(ws_key, "molt-export-backup-v1", &id);
+    let k_stream = crate::hkdf32(&k_root, "molt-export-stream-v1", &header_bytes);
+    let cipher = XChaCha20Poly1305::new((&k_stream).into());
+
+    // a single final chunk: aad = magic ‖ id ‖ index(0) ‖ final(1)
+    let mut aad = [0u8; 56];
+    aad[..15].copy_from_slice(b"molt-export-v1\0");
+    aad[15..47].copy_from_slice(&id);
+    aad[55] = 1;
+    let nonce = [0u8; 24];
+    let ct = cipher
+        .encrypt(XNonce::from_slice(&nonce), Payload { msg: &payload, aad: &aad })
+        .expect("encrypt");
+
+    let mut blob = b"molt-export-v1\0".to_vec();
+    blob.extend_from_slice(
+        &u32::try_from(header_bytes.len()).expect("header len").to_le_bytes(),
+    );
+    blob.extend_from_slice(&header_bytes);
+    blob.extend_from_slice(&nonce);
+    blob.extend_from_slice(&u32::try_from(ct.len()).expect("ct len").to_le_bytes());
+    blob.extend_from_slice(&ct);
+    blob
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1406,67 +1472,5 @@ mod tests {
         (forge_blob(&id_hex, &ws_key, &meta, entries), phrase)
     }
 
-    /// Encrypt `meta` + `entries` as a workspace-mode `molt-export-v1` blob
-    /// for `id_hex` under `ws_key`, as ONE final chunk.
-    fn forge_blob(
-        id_hex: &str,
-        ws_key: &[u8; 32],
-        meta: &serde_json::Value,
-        entries: &[(&str, &[u8])],
-    ) -> Vec<u8> {
-        use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-        use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-
-        let id = crate::id_bytes(id_hex).expect("id");
-        let header = crate::export::ExportHeader {
-            format: "molt-export-v1".to_string(),
-            version: 1,
-            workspace_id: id_hex.to_string(),
-            key_mode: "workspace".to_string(),
-            kdf: None,
-            cipher: "xchacha20poly1305".to_string(),
-            chunk_bytes: crate::export::EXPORT_CHUNK_BYTES,
-            export_salt: "cd".repeat(32),
-        };
-        let header_bytes = serde_json::to_vec(&header).expect("header json");
-
-        let meta_bytes = serde_json::to_vec(meta).expect("meta json");
-
-        let mut payload = u32::try_from(meta_bytes.len())
-            .expect("meta len")
-            .to_le_bytes()
-            .to_vec();
-        payload.extend_from_slice(&meta_bytes);
-        for (path, data) in entries {
-            payload.extend_from_slice(&u16::try_from(path.len()).expect("path len").to_le_bytes());
-            payload.extend_from_slice(path.as_bytes());
-            payload.extend_from_slice(&u64::try_from(data.len()).expect("data len").to_le_bytes());
-            payload.extend_from_slice(data);
-        }
-
-        // workspace-mode key schedule (mirrors export.rs's frozen HKDF tags)
-        let k_root = crate::hkdf32(ws_key, "molt-export-backup-v1", &id);
-        let k_stream = crate::hkdf32(&k_root, "molt-export-stream-v1", &header_bytes);
-        let cipher = XChaCha20Poly1305::new((&k_stream).into());
-
-        // a single final chunk: aad = magic ‖ id ‖ index(0) ‖ final(1)
-        let mut aad = [0u8; 56];
-        aad[..15].copy_from_slice(b"molt-export-v1\0");
-        aad[15..47].copy_from_slice(&id);
-        aad[55] = 1;
-        let nonce = [0u8; 24];
-        let ct = cipher
-            .encrypt(XNonce::from_slice(&nonce), Payload { msg: &payload, aad: &aad })
-            .expect("encrypt");
-
-        let mut blob = b"molt-export-v1\0".to_vec();
-        blob.extend_from_slice(
-            &u32::try_from(header_bytes.len()).expect("header len").to_le_bytes(),
-        );
-        blob.extend_from_slice(&header_bytes);
-        blob.extend_from_slice(&nonce);
-        blob.extend_from_slice(&u32::try_from(ct.len()).expect("ct len").to_le_bytes());
-        blob.extend_from_slice(&ct);
-        blob
-    }
+    use super::forge_workspace_blob as forge_blob;
 }

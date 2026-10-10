@@ -447,9 +447,10 @@ fn an_unavailable_rng_ends_the_run() {
     assert!(!sent(&s[0]).iter().any(|f| matches!(f, WalletFrame::Round1(_))), "no round 1 from a zero seed");
 }
 
-/// Design §6: at the commit a view-only seat drops the other runs' records.
+/// Design §6: a view-only seat drops the other runs' records once the
+/// purse is final.
 #[test]
-fn a_view_only_seat_drops_the_other_runs_records_at_the_commit() {
+fn a_view_only_seat_drops_the_other_runs_records_once_final() {
     let mut b = with_init();
     let (purse, _) = purse_run(&b, 12, 3000, Network::Mainnet);
     let (_, other) = purse_run(&b, 13, 3000, Network::Mainnet);
@@ -461,10 +462,12 @@ fn a_view_only_seat_drops_the_other_runs_records_at_the_commit() {
     assert!(active.handle.persist_wallet_keys_blocking(other[1].encode()));
     st.wallet_on_open(Ok(vec![other[1].encode()]));
     assert!(st.purse.run.watch_only);
+    assert_eq!(st.purse.run.records.len(), 1, "kept while a reorg may displace the purse");
+    let blob = cut_at(&mut b, 2);
+    adopt_cut(&mut st, &b, blob, 2);
+    st.wallet_run_tick(T0);
     assert!(st.purse.run.records.is_empty());
-    st.active.take().expect("active").handle.close(None);
-    let (ws, _) = molt_storage::open_workspace(&dir).expect("reopen");
-    assert!(ws.read_wallet_keys().expect("keys").is_empty(), "the dead run's share is gone");
+    assert!(records_on_disk(&mut st, &dir).is_empty(), "the dead run's share is gone");
 }
 
 /// Plan §10.38a on the receiving side: a nonce once seen is never joined again.
@@ -563,4 +566,222 @@ fn a_differing_transcript_aborts_the_run() {
     f.transcript = hex::encode([0xee; 32]);
     deliver(&mut s[0], "b", &[WalletFrame::Round2(f)]);
     assert_eq!(reason_of(&s[0]).as_deref(), Some("transcript"));
+}
+
+/// Push a checkpoint over `b`'s blocks up to `upto`; its state blob.
+fn cut_at(b: &mut Builder, upto: u64) -> molt_core::CheckpointState {
+    let blob = crate::chain::checkpoint_state(&b.blocks, upto).expect("state");
+    let hash = crate::chain::checkpoint_state_hash(&blob);
+    let anchor = b.seal(upto + 1, ChainChange::Checkpoint { upto, state_hash: hash }, &ABC);
+    b.push(anchor);
+    blob
+}
+
+/// Adopt `b`'s chain from the cut at `upto` (its anchor at `upto + 1`).
+fn adopt_cut(st: &mut crate::State, b: &Builder, blob: molt_core::CheckpointState, upto: u64) {
+    st.set_checkpoint_blob(Some(blob));
+    st.adopt_chain(b.blocks[usize::try_from(upto + 1).expect("index")..].to_vec());
+}
+
+/// The keys records on `dir`'s disk, after closing `st`'s writer.
+fn records_on_disk(st: &mut crate::State, dir: &std::path::Path) -> Vec<Vec<u8>> {
+    st.active.take().expect("active").handle.close(None);
+    let (ws, _) = molt_storage::open_workspace(dir).expect("reopen");
+    ws.read_wallet_keys().expect("keys").iter().map(|r| r.to_vec()).collect()
+}
+
+/// I16 against a reorg: the other runs' records stay until the purse
+/// block is final (below a cut), so a re-base onto another run's purse
+/// still finds this seat's part.
+#[test]
+fn a_displaced_purse_keeps_every_record_until_it_is_final() {
+    let base = with_init();
+    let (one, r1) = purse_run(&base, 15, 3000, Network::Mainnet);
+    let (two, r2) = purse_run(&base, 16, 3000, Network::Mainnet);
+    let mut first = base.clone();
+    commit(&mut first, 6, created_value(&one));
+    let mut second = base.clone();
+    commit(&mut second, 7, created_value(&two));
+    let (mut stored, _tmp, dir) = crate::tests::support::stored_chain_signer(&first, "b", &ABC);
+    let mut st = genesis_seat("b", &first, first.blocks.clone());
+    st.active = stored.active.take();
+    let active = st.active.as_ref().expect("active");
+    assert!(active.handle.persist_wallet_keys_blocking(r1[1].encode()));
+    assert!(active.handle.persist_wallet_keys_blocking(r2[1].encode()));
+    st.wallet_on_open(Ok(vec![r1[1].encode(), r2[1].encode()]));
+    assert_eq!(st.wallet_purse().map(|p| p.created.run), Some(one.run));
+    assert_eq!(st.purse.run.records.len(), 2, "not final: the other record stays");
+
+    st.adopt_chain(base.blocks.clone());
+    st.wallet_run_tick(T0);
+    assert_eq!(st.wallet_purse(), None, "displaced");
+    st.adopt_chain(second.blocks.clone());
+    st.wallet_on_commit();
+    assert_eq!(st.wallet_purse().map(|p| p.created.run), Some(two.run), "re-based onto the other purse");
+    assert!(!st.purse.run.watch_only, "this seat still holds its part");
+
+    let blob = cut_at(&mut second, 2);
+    adopt_cut(&mut st, &second, blob, 2);
+    st.wallet_run_tick(T0 + RESEND_SECS);
+    assert_eq!(records_on_disk(&mut st, &dir), [r2[1].encode().to_vec()], "final: only the purse's record");
+}
+
+/// W6: a decline withdraws this seat's consent, an approval of the init
+/// included; a later run asks again.
+#[test]
+fn a_decline_withdraws_consent_for_later_runs() {
+    let (_, mut s) = three(true);
+    s[2].chain.own_approvals.insert(INIT);
+    s[0].wallet_start(Some([7; 32])).expect("start");
+    let a = sent(&s[0]);
+    deliver(&mut s[2], "a", &a);
+    s[2].cmd_wallet_consent(false).expect("decline");
+    let _ = sent(&s[2]);
+    s[1].wallet_start(Some([8; 32])).expect("start");
+    let b = sent(&s[1]);
+    deliver(&mut s[2], "b", &b);
+    assert_eq!(s[2].purse.run.run.as_ref().map(|r| r.nonce), Some([8; 32]));
+    assert!(!sent(&s[2]).iter().any(|f| matches!(f, WalletFrame::Ready(r) if r.ok)), "not readied unasked");
+    assert_eq!(s[2].wallet_run_view().map(|v| v.needs_consent), Some(true));
+}
+
+/// Design §3.4: an abort names its reason; only absence names seats.
+#[test]
+fn a_remote_abort_names_no_seat() {
+    let (_, mut s) = three(true);
+    let r1 = all_in_round1(&mut s, [7; 32]);
+    deliver(&mut s[0], "b", &r1[1..2]);
+    let abort = WalletFrame::Abort(WalletAbortFrame {
+        v: WALLET_V,
+        init: INIT,
+        run: hex::encode([7u8; 32]),
+        reason: "equivocation".to_string(),
+    });
+    deliver(&mut s[0], "b", &[abort]);
+    assert_eq!(reason_of(&s[0]).as_deref(), Some("equivocation"));
+    assert_eq!(s[0].wallet_run_view().map(|v| v.missing), Some(Vec::new()));
+}
+
+/// Design §3.5: a reopen with a record re-attests and co-signs a matching
+/// open card at once, not only on the resend beat.
+#[test]
+fn a_reopen_with_a_record_re_attests_and_cosigns_at_once() {
+    let b = with_init();
+    let (c, records) = purse_run(&b, 17, 3000, Network::Mainnet);
+    let mut st = genesis_seat("c", &b, b.blocks.clone());
+    crate::chain::test_support::wire(
+        &mut st,
+        "a",
+        1,
+        molt_core::WorkspaceEvent::Proposed { id: molt_core::ProposalId(9), surface: Surface::Wallet, payload: created_value(&c) },
+    );
+    let _ = sent(&st);
+    st.wallet_on_open(Ok(vec![records[2].encode()]));
+    let sig = hex::encode(records[2].attestation);
+    assert!(sent(&st).iter().any(|f| matches!(f, WalletFrame::Attest(a) if a.sig == sig)), "re-attested");
+    assert!(st.chain.own_approvals.contains(&9), "co-signed");
+}
+
+/// Design §3.3: position k starts after (k-1) steps of silence; a start
+/// that arrives first is joined instead.
+#[test]
+fn a_silent_starter_is_replaced_by_the_next_position() {
+    let (_, mut s) = three(true);
+    let init = init_payload(3000, "mainnet");
+    s[1].after_wallet_applied(INIT, &init);
+    s[2].after_wallet_applied(INIT, &init);
+    assert!(stage_of(&s[1]).is_none(), "position 2 waits");
+    s[1].wallet_fallback_start(T0 + STEP_SECS - 1);
+    assert!(stage_of(&s[1]).is_none());
+    s[1].wallet_fallback_start(T0 + STEP_SECS);
+    assert_eq!(s[1].purse.run.run.as_ref().map(|r| r.starter), Some(2), "position 2 starts");
+    s[2].wallet_fallback_start(T0 + STEP_SECS);
+    assert!(stage_of(&s[2]).is_none(), "position 3 waits two steps");
+    let start = sent(&s[1]);
+    deliver(&mut s[2], "b", &start);
+    s[2].wallet_fallback_start(T0 + 2 * STEP_SECS);
+    assert_eq!(s[2].purse.run.run.as_ref().map(|r| r.starter), Some(2), "joined, not a second start");
+}
+
+/// Design §3.5: position k proposes the purse only after (k-1) steps.
+#[test]
+fn a_later_position_proposes_only_after_its_wait() {
+    let b = with_init();
+    let (c, records) = purse_run(&b, 18, 3000, Network::Mainnet);
+    let mut st = genesis_seat("b", &b, b.blocks.clone());
+    st.presence.clock_override = Some(T0);
+    st.purse.run.records.push(records[1].clone());
+    for (pos, sig) in (1u16..).zip(&c.sigs) {
+        st.wallet_on_attest(pos, c.run, *sig);
+    }
+    let valid = created_value(&c);
+    let proposed = |st: &crate::State| st.proposals.values().any(|p| p.state == ProposalState::Proposed && p.payload == valid);
+    assert!(!proposed(&st), "position 2 waits");
+    st.presence.clock_override = Some(T0 + STEP_SECS - 1);
+    st.wallet_maybe_propose(c.run);
+    assert!(!proposed(&st));
+    st.presence.clock_override = Some(T0 + STEP_SECS);
+    st.wallet_maybe_propose(c.run);
+    assert!(proposed(&st), "after one step");
+}
+
+/// A retry or a start never supersedes a live run; after the purse a
+/// retry names it.
+#[test]
+fn a_retry_or_start_never_supersedes_a_live_run() {
+    let refused = |r: Result<Reply, MoltError>, want: WalletRefusal| matches!(r, Err(MoltError::Wallet(w)) if w == want);
+    let (_, mut s) = three(true);
+    s[0].wallet_start(Some([7; 32])).expect("start");
+    assert!(refused(s[0].cmd_wallet_retry(), WalletRefusal::RunActive), "readiness");
+    let (_, mut s) = three(true);
+    all_in_round1(&mut s, [7; 32]);
+    assert!(refused(s[0].cmd_wallet_retry(), WalletRefusal::RunActive), "the rounds");
+    assert_eq!(s[1].wallet_start(Some([8; 32])), Err(WalletRefusal::RunActive), "a start in the rounds");
+
+    let mut b = with_init();
+    let (c, _) = purse_run(&b, 19, 3000, Network::Mainnet);
+    commit(&mut b, 6, created_value(&c));
+    let mut st = genesis_seat("a", &b, b.blocks.clone());
+    assert!(refused(st.cmd_wallet_retry(), WalletRefusal::InitExists), "the purse exists");
+}
+
+/// Plan §7.4: a seat that left a run in readiness for a racing start
+/// rejoins it on that run's round frame, and answers no abort.
+#[test]
+fn a_run_left_in_readiness_is_rejoined_on_its_round_frame() {
+    let (b, mut s) = three(true);
+    s[1].wallet_start(Some([3; 32])).expect("start");
+    let start = sent(&s[1]);
+    deliver(&mut s[0], "b", &start);
+    deliver(&mut s[2], "b", &start);
+    let (ra, rc) = (sent(&s[0]), sent(&s[2]));
+    deliver(&mut s[1], "a", &ra);
+    deliver(&mut s[1], "c", &rc);
+    assert_eq!(stage_of(&s[1]), Some(RunStage::Round1));
+    let r1 = sent(&s[1]).into_iter().find(|f| matches!(f, WalletFrame::Round1(_))).expect("b's round 1");
+    let mut racer = run_seat(&b, "a", true);
+    racer.wallet_start(Some([5; 32])).expect("start");
+    deliver(&mut s[2], "a", &sent(&racer));
+    assert_eq!(s[2].purse.run.run.as_ref().map(|r| r.nonce), Some([5; 32]), "the lower position");
+    let _ = sent(&s[2]);
+    deliver(&mut s[2], "b", &[r1]);
+    assert_eq!(s[2].purse.run.run.as_ref().map(|r| r.nonce), Some([3; 32]), "rejoined");
+    assert!(!sent(&s[2]).iter().any(|f| matches!(f, WalletFrame::Abort(_))), "no abort");
+}
+
+/// Plan §7.4: a reopened seat rejoins a run still in readiness; the
+/// frames that came before the start are replayed.
+#[test]
+fn a_reopened_seat_rejoins_a_run_in_readiness() {
+    let (b, mut s) = three(true);
+    s[0].wallet_start(Some([7; 32])).expect("start");
+    let start = sent(&s[0]);
+    deliver(&mut s[1], "a", &start);
+    let rb = sent(&s[1]);
+    let mut c = run_seat(&b, "c", false);
+    deliver(&mut c, "b", &rb);
+    assert!(stage_of(&c).is_none(), "kept for the start");
+    deliver(&mut c, "a", &start);
+    let ready = c.purse.run.run.as_ref().map(|r| r.ready.clone());
+    assert_eq!(ready, Some([1, 2].into_iter().collect()), "both early readies replayed");
 }

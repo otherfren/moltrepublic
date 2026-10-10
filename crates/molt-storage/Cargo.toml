@@ -12,6 +12,10 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+# A blob forger for other crates' tests.
+test-forge = []
+
 [dependencies]
 molt-core.workspace = true
 # only for `sync` oneshots: the writer thread answers async callers

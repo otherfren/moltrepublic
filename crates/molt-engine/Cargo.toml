@@ -50,6 +50,8 @@ tantivy.workspace = true
 [dev-dependencies]
 # the in-process monerod double for the purse tests
 molt-net = { workspace = true, features = ["stub-daemon"] }
+# a backup whose purse keys file does not authenticate
+molt-storage = { workspace = true, features = ["test-forge"] }
 tempfile.workspace = true
 # make WARN/DEBUG from the engine + net visible in the ignored live-server
 # tests (a silent tracing::warn is how the 2026-07-19 mesh stall hid)

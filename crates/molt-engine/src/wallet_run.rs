@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use molt_core::wallet::{RunStage, WalletRefusal, WalletRunView};
-use molt_core::{Event, MemberId, MoltError, ProposalState, Reply, Surface};
+use molt_core::{ChainChange, Event, MemberId, MoltError, ProposalState, Reply, Surface};
 use molt_net::wallet_frames::{
     WalletAbortFrame, WalletAttestFrame, WalletFrame, WalletHintFrame, WalletReadyFrame,
     WalletRound1Frame, WalletRound2Frame, WalletStartFrame, WALLET_V,
@@ -76,7 +76,7 @@ pub(crate) struct Run {
 }
 
 impl Run {
-    /// A finished run keeps no round material (the inboxes wipe on drop).
+    /// A finished run keeps no round material (the inboxes and frames wipe on drop).
     fn wipe(&mut self) {
         self.machine = None;
         self.key_machine = None;
@@ -119,6 +119,8 @@ pub(crate) struct RunRt {
     auto_from: Option<(u64, u64)>,
     /// Inits this seat consented to in a run.
     consented: BTreeSet<u64>,
+    /// Inits whose consent this seat withdrew by a decline (its approval too).
+    withdrawn: BTreeSet<u64>,
     hint: String,
     resent_at: u64,
     /// The purse proposal id already settled here.
@@ -673,8 +675,9 @@ impl State {
                 return self.wallet_abort("declined", vec![pos], Some(pos), "", false);
             }
             WalletFrame::Abort(a) => {
-                let missing = self.wallet_missing();
                 let reason = REASONS.iter().find(|r| **r == a.reason).copied().unwrap_or("aborted");
+                // only absence names seats, and only as this seat saw it
+                let missing = if matches!(reason, "not ready" | "timeout") { self.wallet_missing() } else { Vec::new() };
                 return self.wallet_abort(reason, missing, Some(pos), "remote", false);
             }
             WalletFrame::Round1(f) => match hex::decode(&f.msg.0) {
@@ -708,10 +711,17 @@ impl State {
         self.wallet_advance();
     }
 
+    /// Consent: given in a run, or the init approval while the log carries it
+    /// and no decline withdrew it (W6).
+    fn wallet_consents(&self, init: u64) -> bool {
+        self.purse.run.consented.contains(&init)
+            || (self.chain.own_approvals.contains(&init) && !self.purse.run.withdrawn.contains(&init))
+    }
+
     /// Does this seat stand ready (build, daemon, consent)? Asks the
     /// daemon when it has no height yet.
     fn wallet_ready_here(&mut self, init: u64, network: Network) -> bool {
-        let consent = self.chain.own_approvals.contains(&init) || self.purse.run.consented.contains(&init);
+        let consent = self.wallet_consents(init);
         let s = &self.session.settings;
         if s.wallet_daemon_url.is_empty() || network_of(&s.wallet_network) != Some(network) {
             return false;
@@ -802,16 +812,17 @@ impl State {
         let (Ok(params), Some(machine)) = (dkg::params(m, n, me), run.machine.take()) else {
             return;
         };
-        let others: Frames = run.round1.frames().iter().filter(|(l, _)| **l != me).map(|(l, b)| (*l, b.clone())).collect();
+        let mut others: Frames = run.round1.frames().iter().filter(|(l, _)| **l != me).map(|(l, b)| (*l, b.clone())).collect();
         let t = match dkg::transcript(&run.nonce, run.round1.frames(), n) {
             Ok(t) => t,
             Err(e) => return self.wallet_abort("invalid", Vec::new(), None, &e.to_string(), true),
         };
         let out = dkg::round2(machine, params, &others, &mut rng);
+        others.values_mut().for_each(zeroize::Zeroize::zeroize);
         let Some(run) = self.purse.run.run.as_mut() else {
             return;
         };
-        let (km, shares) = match out {
+        let (km, mut shares) = match out {
             Ok(x) => x,
             Err(e) => {
                 let from = match e {
@@ -832,6 +843,7 @@ impl State {
             shares: shares.iter().map(|(to, s)| (*to, molt_core::vault::SecretHex(hex::encode(s)))).collect(),
             transcript: hex::encode(t),
         });
+        shares.values_mut().for_each(zeroize::Zeroize::zeroize);
         run.out.push(f.clone());
         self.wallet_send(&f);
     }
@@ -1073,8 +1085,8 @@ impl State {
         self.wallet_progress();
     }
 
-    /// The purse committed: siblings die, the other runs' records go, the
-    /// run is done. Idempotent; `true` the first time for this purse.
+    /// The purse committed: siblings die, the run is done, this seat's part
+    /// is found. Idempotent; `true` the first time for this purse.
     pub(crate) fn wallet_settle(&mut self) -> bool {
         let Some(purse) = self.wallet_purse() else {
             return false;
@@ -1105,45 +1117,70 @@ impl State {
             self.chain.pending_sigs.remove(&id);
             tracing::info!(id, "wallet_created=superseded");
         }
-        let keep = self
-            .purse
-            .run
-            .records
-            .iter()
-            .position(|r| r.run.init_id == c.init && r.run.run == c.run && r.address == c.address);
-        match keep {
-            Some(k) => {
-                let rec = self.purse.run.records.swap_remove(k);
-                if !self.purse.run.records.is_empty() {
-                    let pruned = self.active.as_ref().is_some_and(|a| a.handle.prune_wallet_keys_blocking(rec.encode()));
-                    if pruned {
-                        self.purse.run.records.clear();
-                    } else {
-                        tracing::error!("wallet_keys=prune_failed");
-                    }
-                }
-                self.purse.run.records.insert(0, rec);
-                self.purse.run.watch_only = false;
-            }
-            None => {
-                self.wallet_view_only();
-                if !self.purse.run.records.is_empty() {
-                    let drop = self.purse.run.records.iter().map(KeysRecord::encode).collect();
-                    let dropped = self.active.as_ref().is_some_and(|a| a.handle.drop_wallet_keys_blocking(drop));
-                    if dropped {
-                        self.purse.run.records.clear();
-                    } else {
-                        tracing::error!("wallet_keys=prune_failed");
-                    }
-                }
-            }
+        if self.wallet_purse_record(c).is_some() {
+            self.purse.run.watch_only = false;
+        } else {
+            self.wallet_view_only();
         }
         if let Some(run) = self.purse.run.run.as_mut() {
             run.stage = RunStage::Done;
             run.wipe();
         }
+        self.purse.run.early.clear();
         tracing::info!(address = %c.address, "wallet_purse=committed");
+        self.wallet_prune_final();
         true
+    }
+
+    fn wallet_purse_record(&self, c: &Created) -> Option<usize> {
+        self.purse.run.records.iter().position(|r| r.run.init_id == c.init && r.run.run == c.run && r.address == c.address)
+    }
+
+    /// The other runs' records go once the purse is final: below a cut,
+    /// where no reorg reaches (I16). Before that a re-base may make one of
+    /// them the purse.
+    fn wallet_prune_final(&mut self) {
+        let records = &self.purse.run.records;
+        let stale = records.len() > 1 || (self.purse.run.watch_only && !records.is_empty());
+        if !stale {
+            return;
+        }
+        let Some(purse) = self.wallet_purse() else {
+            return;
+        };
+        if self.purse.run.settled != Some(purse.id) {
+            return;
+        }
+        let open = self.chain.blocks.iter().any(|b| {
+            matches!(&b.change, ChainChange::Applied { proposal_id, surface: Surface::Wallet, .. } if Some(*proposal_id) == purse.id)
+        });
+        if open {
+            return;
+        }
+        let done = match self.wallet_purse_record(&purse.created) {
+            Some(k) => {
+                let rec = self.purse.run.records.swap_remove(k);
+                let pruned = self.active.as_ref().is_some_and(|a| a.handle.prune_wallet_keys_blocking(rec.encode()));
+                if pruned {
+                    self.purse.run.records.clear();
+                }
+                self.purse.run.records.insert(0, rec);
+                pruned
+            }
+            None => {
+                let drop = self.purse.run.records.iter().map(KeysRecord::encode).collect();
+                let dropped = self.active.as_ref().is_some_and(|a| a.handle.drop_wallet_keys_blocking(drop));
+                if dropped {
+                    self.purse.run.records.clear();
+                }
+                dropped
+            }
+        };
+        if done {
+            tracing::info!("wallet_keys=pruned");
+        } else {
+            tracing::error!("wallet_keys=prune_failed");
+        }
     }
 
     /// This seat holds no key part of the purse: loud, once.
@@ -1203,7 +1240,17 @@ impl State {
             if self.purse.run.run.as_ref().is_some_and(|r| r.stage != RunStage::Done) {
                 self.wallet_on_commit();
             }
+            if now.saturating_sub(self.purse.run.resent_at) >= RESEND_SECS {
+                self.purse.run.resent_at = now;
+                self.wallet_prune_final();
+            }
             return;
+        }
+        // a reorg displaced the purse: its re-commit settles again
+        if self.purse.run.settled.take().is_some() {
+            if let Some(run) = self.purse.run.run.as_mut().filter(|r| r.persisted && r.stage == RunStage::Done) {
+                run.stage = RunStage::Sealing;
+            }
         }
         self.wallet_deadlines(now);
         self.wallet_fallback_start(now);
@@ -1291,7 +1338,7 @@ impl State {
             RunStage::Sealing | RunStage::Done => (all, Vec::new()),
             RunStage::Aborted => (0, self.wallet_names(run.missing.iter().copied())),
         };
-        let consent = self.chain.own_approvals.contains(&run.init) || self.purse.run.consented.contains(&run.init);
+        let consent = self.wallet_consents(run.init);
         Some(WalletRunView {
             stage: run.stage,
             done,
@@ -1337,8 +1384,11 @@ impl State {
         };
         if accept {
             self.purse.run.consented.insert(init);
+            self.purse.run.withdrawn.remove(&init);
             self.wallet_advance();
         } else {
+            self.purse.run.consented.remove(&init);
+            self.purse.run.withdrawn.insert(init);
             let me = self.wallet_pos(&self.member()).unwrap_or(0);
             self.wallet_abort("declined", vec![me], Some(me), "", false);
             self.wallet_send_decline(nonce);

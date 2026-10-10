@@ -237,6 +237,7 @@ pub fn known_log_shapes() -> &'static [LogShape] {
         &["✓ backup from unix ", " (", " day(s) old) · workspace “", "” materialized"],
         &["→ the seed does not anchor this seat in the verified roster - knowledge-only restore"],
         &["→ knowledge restored - the workspace opens detached and reattaches automatically"],
+        &["→ purse keys file damaged - view only"],
         &["✗ restore failed: ", ""],
         &["→ fs: read ", ""],
         &["→ s3: list ", ""],

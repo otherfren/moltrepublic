@@ -28,8 +28,8 @@ impl std::fmt::Debug for SecretText {
 }
 
 /// Hex of secret material on the wire (a share, an ephemeral ikm, an
-/// answer ciphertext). `Debug` prints only its length.
-#[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// answer ciphertext). `Debug` prints only its length; wiped on drop.
+#[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 #[serde(transparent)]
 pub struct SecretHex(pub String);
 
@@ -952,6 +952,8 @@ mod tests {
         assert_eq!(serde_json::to_value(&text).expect("serializes"), json!("hunter2-password"));
         let hex = SecretHex("abcdef".to_string());
         assert_eq!(format!("{hex:?}"), "<6 hex>");
+        fn wiped_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+        wiped_on_drop::<SecretHex>();
     }
 
     #[test]
