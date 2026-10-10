@@ -294,6 +294,7 @@ impl State {
                 |p| crate::wallet_run::network_word(p.created.network).to_string(),
             ),
             run: self.wallet_run_view(),
+            can_start: phase == WalletPhase::Init && self.purse.run.run.is_none() && self.purse.run.auto_from.is_none(),
             shareholders,
             daemon_height: scan.daemon_height.or(self.purse.height.map(|(h, _)| h)).unwrap_or(0),
             connected: scan.connected.unwrap_or(self.purse.height.is_some()),

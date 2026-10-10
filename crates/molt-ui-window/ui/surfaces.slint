@@ -4823,7 +4823,7 @@ export component PurseStage inherits VerticalLayout {
             color: Theme.dim;
             font-size: Theme.fs-cap;
         }
-        if Purse.run-aborted: HorizontalLayout {
+        if Purse.run-aborted || Purse.can-start: HorizontalLayout {
             alignment: start;
             AppButton {
                 label: Strings.wl-try-again;

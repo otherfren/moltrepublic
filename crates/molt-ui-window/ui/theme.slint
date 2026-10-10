@@ -2222,6 +2222,7 @@ export global Strings {
     in property <string> wl-sealing;
     in property <string> wl-ready;
     in property <string> wl-try-again;
+    in property <string> wl-not-running;
     in property <string> wl-online;
     in property <string> wl-agree;
     in property <string> wl-decline;
@@ -2292,6 +2293,8 @@ export global Purse {
     in property <string> run-missing;
     in property <float> run-progress;
     in property <bool> run-aborted;
+    // set-up voted, no run here and none due: the seat starts one
+    in property <bool> can-start;
     in property <bool> needs-consent;
     // the node, like the Monero GUI's remote node: one field, one button
     in property <string> node;

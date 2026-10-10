@@ -2366,6 +2366,8 @@ export component AppWindow inherits Window {
     // StatusView.vault_enable: 0 on, 1 offer, 2 needs a newer republic, 3 bounds
     in property <int> org-vault-enable: 2;
     in property <bool> org-feat-wallet;
+    // a ratified `wallet` with no set-up voted is no purse yet (W10)
+    property <bool> org-wallet-on: root.org-feat-wallet && Purse.phase != 2;
     in-out property <bool> org-features-modal-open: false;
     property <bool> of-memory-draft;
     property <bool> of-quests-draft;
@@ -6436,7 +6438,7 @@ export component AppWindow inherits Window {
                                                 }
                                             }
                                             Row {
-                                                AppCheck { label: Strings.feat-wallet; checked: root.org-feat-wallet; enabled: false; }
+                                                AppCheck { label: Strings.feat-wallet; checked: root.org-wallet-on; enabled: false; }
                                             }
                                         }
                                         AppButton {
@@ -9984,13 +9986,13 @@ export component AppWindow inherits Window {
         confirm-enabled: (root.of-memory-draft && !root.org-feat-memory)
             || (root.of-quests-draft && !root.org-feat-quests)
             || (root.of-vault-draft && root.org-vault-enable == 1)
-            || (root.of-wallet-draft && !root.org-feat-wallet && Purse.phase == 2 && Purse.node != "");
+            || (root.of-wallet-draft && !root.org-wallet-on && Purse.phase == 2 && Purse.node != "");
         dismissed => {
             root.org-features-modal-open = false;
         }
         confirmed => {
             root.org-features-modal-open = false;
-            if (root.of-wallet-draft && !root.org-feat-wallet && Purse.phase == 2 && Purse.node != "") {
+            if (root.of-wallet-draft && !root.org-wallet-on && Purse.phase == 2 && Purse.node != "") {
                 Purse.set-up();
             }
             // OR-in the LIVE flags: a peer's enable can commit while the
@@ -10046,16 +10048,16 @@ export component AppWindow inherits Window {
                 }
             }
             // the purse (W4): its own set-up vote, never a set_features key
-            if root.org-feat-wallet: AppCheck { label: Strings.feat-wallet; checked: true; enabled: false; }
-            if !root.org-feat-wallet && Purse.phase == 2: AppCheck {
+            if root.org-wallet-on: AppCheck { label: Strings.feat-wallet; checked: true; enabled: false; }
+            if !root.org-wallet-on && Purse.phase == 2: AppCheck {
                 label: Strings.feat-wallet;
                 checked <=> root.of-wallet-draft;
             }
             // ticking it is consenting to these (design §3.3); the set-up
             // needs this seat's node first (U4)
-            if !root.org-feat-wallet && Purse.phase == 2 && root.of-wallet-draft: PurseNotes { }
-            if !root.org-feat-wallet && Purse.phase == 2 && root.of-wallet-draft && Purse.node == "": NodeChooser { }
-            if !root.org-feat-wallet && Purse.phase != 2: HorizontalLayout {
+            if !root.org-wallet-on && Purse.phase == 2 && root.of-wallet-draft: PurseNotes { }
+            if !root.org-wallet-on && Purse.phase == 2 && root.of-wallet-draft && Purse.node == "": NodeChooser { }
+            if !root.org-wallet-on && Purse.phase != 2: HorizontalLayout {
                 height: 28px * Theme.ui-scale;
                 spacing: 10px;
                 Text {

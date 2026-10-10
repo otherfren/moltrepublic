@@ -1718,6 +1718,7 @@ lexicon! {
     wl_sealing: "Sealing", "Besiegeln";
     wl_ready: "The purse is ready", "Die Kasse steht";
     wl_try_again: "Try again", "Erneut versuchen";
+    wl_not_running: "Set-up not running", "Einrichtung läuft nicht";
     wl_online: "Everyone must be online.", "Alle müssen online sein.";
     wl_agree: "Agree", "Zustimmen";
     wl_decline: "Decline", "Ablehnen";

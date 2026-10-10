@@ -1088,3 +1088,16 @@ fn with_init_view() -> molt_core::wallet::WalletView {
     let b = with_init();
     genesis_seat("a", &b, b.blocks.clone()).wallet_view()
 }
+
+/// A restart never revives a run (§3.3), so a voted set-up with none in
+/// memory and no automatic start waiting can be started by hand.
+#[test]
+fn a_voted_set_up_without_a_run_can_be_started() {
+    let b = with_init();
+    let mut st = genesis_seat("b", &b, b.blocks.clone());
+    let v = st.wallet_view();
+    assert_eq!(v.phase, molt_core::wallet::WalletPhase::Init);
+    assert!(v.run.is_none() && v.can_start);
+    st.purse.run.auto_from = Some((INIT, T0));
+    assert!(!st.wallet_view().can_start, "the automatic start is still due");
+}

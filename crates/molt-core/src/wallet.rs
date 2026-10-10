@@ -141,6 +141,9 @@ pub struct WalletView {
     pub phase: WalletPhase,
     /// The current run.
     pub run: Option<WalletRunView>,
+    /// Set-up voted, no run in memory and none about to start: a seat
+    /// starts one by hand (`wallet_retry`).
+    pub can_start: bool,
     /// Each seat's key part status.
     pub shareholders: Vec<(MemberId, ShareStatus)>,
     /// Transfers, newest first.
@@ -273,6 +276,7 @@ mod tests {
                 needs_consent: true,
                 daemon_hint: "http://x.onion".to_string(),
             }),
+            can_start: false,
             shareholders: vec![("a".to_string(), ShareStatus::Held), ("b".to_string(), ShareStatus::WatchOnly)],
             history: vec![WalletTxView {
                 txid: "ab".to_string(),
@@ -308,6 +312,7 @@ mod tests {
                 "needs_consent": true,
                 "daemon_hint": "http://x.onion"
             },
+            "can_start": false,
             "shareholders": [["a", "held"], ["b", "watch_only"]],
             "history": [{
                 "txid": "ab",

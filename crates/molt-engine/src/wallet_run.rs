@@ -118,7 +118,7 @@ pub(crate) struct RunRt {
     /// Inits auto-started this session (§3.3: once per init).
     started: BTreeSet<u64>,
     /// A fallback start armed for `(init, at)`.
-    auto_from: Option<(u64, u64)>,
+    pub(crate) auto_from: Option<(u64, u64)>,
     /// Inits this seat consented to in a run.
     consented: BTreeSet<u64>,
     /// Inits whose consent this seat withdrew by a decline (its approval too).

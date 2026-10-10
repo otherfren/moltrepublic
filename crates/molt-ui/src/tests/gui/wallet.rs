@@ -260,6 +260,34 @@ fn a_late_enable_shows_the_panel() {
     assert!(Handle::find_by_element_type_name(&ui, "ConfirmModal").next().is_none(), "closed for good");
 }
 
+/// A voted set-up with no run in memory (every seat restarted) can be
+/// started from the window, not only over MCP.
+#[test]
+fn a_voted_set_up_without_a_run_offers_the_start() {
+    let view = WalletView {
+        phase: WalletPhase::Init,
+        can_start: true,
+        threshold: 2,
+        participants: 3,
+        ..WalletView::default()
+    };
+    let (ui, _shown) = wallet_screen("balance", &view);
+    ui.global::<Purse>().set_node("http://abc.onion:18081".into());
+    let asked = Rc::new(RefCell::new(0));
+    let sink = asked.clone();
+    ui.global::<Purse>().on_retry(move || *sink.borrow_mut() += 1);
+    settle();
+    let s = ui.global::<Strings>();
+    assert!(shown(&ui, &s.get_wl_not_running()));
+    click(&ui, &one(&ui, &s.get_wl_try_again()));
+    assert_eq!(*asked.borrow(), 1);
+
+    let waiting = WalletView { can_start: false, ..view };
+    crate::wallet::apply_wallet(&ui, 0, "w", Some(&waiting));
+    settle();
+    assert!(!shown(&ui, &s.get_wl_try_again()), "a start is due: nothing to press");
+}
+
 fn charter_step(m: i32, n: i32) -> (AppWindow, Shown) {
     backend();
     let ui = AppWindow::new().expect("headless window");
@@ -297,12 +325,14 @@ fn the_wallet_checkbox_defaults_on_within_bounds() {
 /// never a set_features value; outside the bounds it names why.
 #[test]
 fn the_org_modal_proposes_the_set_up() {
-    for phase in [WalletPhase::NoPurse, WalletPhase::Bounds] {
+    // a ratified `wallet` feature whose founding set-up never landed is no purse (W10)
+    for (phase, ratified) in [(WalletPhase::NoPurse, false), (WalletPhase::NoPurse, true), (WalletPhase::Bounds, false)] {
         backend();
         let ui = AppWindow::new().expect("headless window");
         apply_strings(&ui, 0);
         ui.window().set_size(slint::PhysicalSize::new(1100, 800));
         ui.set_org_feat_memory(true);
+        ui.set_org_feat_wallet(ratified);
         crate::wallet::apply_wallet(&ui, 0, "w", Some(&WalletView { phase, ..WalletView::default() }));
         ui.global::<Purse>().set_node("http://abc.onion:18081".into());
         let proposed: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
@@ -329,7 +359,7 @@ fn the_org_modal_proposes_the_set_up() {
             assert!(has_text(&dlg, &s.get_wl_bounds()), "the reason");
             continue;
         }
-        assert_eq!(boxes.len(), 1, "one purse box");
+        assert_eq!(boxes.len(), 1, "one purse box (ratified={ratified})");
         click(&ui, &boxes[0]);
         let propose = s.get_oc_propose().to_string();
         let button = dlg
@@ -339,7 +369,7 @@ fn the_org_modal_proposes_the_set_up() {
             .expect("the propose button");
         click(&ui, &button);
         settle();
-        assert_eq!(set_up.get(), 1, "the set-up vote");
+        assert_eq!(set_up.get(), 1, "the set-up vote (ratified={ratified})");
         assert!(proposed.borrow().is_empty(), "no set_features: {:?}", proposed.borrow());
     }
 }

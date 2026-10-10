@@ -238,8 +238,10 @@ fn apply_run(ui: &AppWindow, lang: i32, ws: &str, v: &WalletView) {
     }
     let (was_active, was_aborted, was_asking) = (p.get_run_active(), p.get_run_aborted(), p.get_needs_consent());
     let run = v.run.as_ref().filter(|_| v.phase != WalletPhase::Ready);
+    let can_start = run.is_none() && v.can_start;
     let line = match run {
         Some(r) => stage_line(lang, r),
+        None if can_start => StageLine { text: lex(lang).wl_not_running.to_string(), ..StageLine::default() },
         None => StageLine { text: lex(lang).wl_waiting.to_string(), ..StageLine::default() },
     };
     let active = run.is_some_and(|r| r.stage != RunStage::Done);
@@ -253,6 +255,7 @@ fn apply_run(ui: &AppWindow, lang: i32, ws: &str, v: &WalletView) {
     p.set_run_missing(line.missing.into());
     p.set_run_progress(line.progress);
     p.set_run_aborted(line.aborted);
+    p.set_can_start(can_start);
     p.set_needs_consent(asking);
     let hint = run.map(|r| r.daemon_hint.as_str()).unwrap_or_default();
     if !hint.is_empty() && p.get_node().is_empty() && p.get_node_draft().is_empty() {
