@@ -785,3 +785,103 @@ fn a_reopened_seat_rejoins_a_run_in_readiness() {
     let ready = c.purse.run.run.as_ref().map(|r| r.ready.clone());
     assert_eq!(ready, Some([1, 2].into_iter().collect()), "both early readies replayed");
 }
+
+/// The purse committed on a seat that holds `records` (none: view only).
+fn seat_with_purse(member: &str, records: &[KeysRecord]) -> (crate::State, Created) {
+    let mut b = with_init();
+    let (c, _) = purse_run(&b, 11, 3000, Network::Mainnet);
+    commit(&mut b, 6, created_value(&c));
+    let mut st = genesis_seat(member, &b, b.blocks.clone());
+    st.wallet_on_open(Ok(records.iter().map(KeysRecord::encode).collect()));
+    (st, c)
+}
+
+/// Plan §7.8 (design §5): a seat without a key part asks; a holder
+/// answers; the answer counts only when it opens the address, and only
+/// from a seat.
+#[test]
+fn a_view_answer_must_open_the_address() {
+    let b = with_init();
+    let (_, records) = purse_run(&b, 11, 3000, Network::Mainnet);
+    let (mut c, _) = seat_with_purse("c", &[]);
+    assert!(!c.wallet_view().can_watch);
+    c.wallet_seat_tick(1000);
+    assert!(sent(&c).iter().any(|f| matches!(f, WalletFrame::ViewAsk(a) if a.init == INIT)), "it asks");
+
+    let (mut a, _) = seat_with_purse("a", &records[..1]);
+    a.wallet_on_view_ask(&"c".to_string(), INIT);
+    let answer = sent(&a)
+        .into_iter()
+        .find_map(|f| match f {
+            WalletFrame::ViewResp(r) => Some(hex::decode(&r.view.0).expect("hex")),
+            _ => None,
+        })
+        .expect("a holder answers");
+    assert_eq!(answer, records[0].view.to_vec());
+
+    let mut wrong = answer.clone();
+    wrong[0] ^= 1;
+    c.cmd_net_wallet_view_answer(&"a".to_string(), &wrong).expect("ack");
+    assert!(!c.wallet_view().can_watch, "a key that does not open the address");
+    c.cmd_net_wallet_view_answer(&"z".to_string(), &answer).expect("ack");
+    assert!(!c.wallet_view().can_watch, "not a seat");
+    c.cmd_net_wallet_view_answer(&"a".to_string(), &answer).expect("ack");
+    let v = c.wallet_view();
+    assert!(v.can_watch);
+    assert!(v.shareholders.contains(&("c".to_string(), ShareStatus::WatchOnly)), "still no key part");
+}
+
+/// Plan §7.8: each seat's status frame fills its row; this seat speaks
+/// for itself, a stranger and an unknown status change nothing.
+#[test]
+fn status_frames_fill_the_shareholders() {
+    let b = with_init();
+    let (_, records) = purse_run(&b, 11, 3000, Network::Mainnet);
+    let (mut a, _) = seat_with_purse("a", &records[..1]);
+    let rows = |st: &crate::State| st.wallet_view().shareholders;
+    assert_eq!(
+        rows(&a),
+        vec![
+            ("a".to_string(), ShareStatus::Held),
+            ("b".to_string(), ShareStatus::Unknown),
+            ("c".to_string(), ShareStatus::Unknown)
+        ]
+    );
+    a.cmd_net_wallet_status(&"b".to_string(), ShareStatus::Held).expect("ack");
+    a.cmd_net_wallet_status(&"c".to_string(), ShareStatus::WatchOnly).expect("ack");
+    a.cmd_net_wallet_status(&"z".to_string(), ShareStatus::Held).expect("ack");
+    a.cmd_net_wallet_status(&"a".to_string(), ShareStatus::WatchOnly).expect("ack");
+    a.cmd_net_wallet_status(&"b".to_string(), ShareStatus::Unknown).expect("ack");
+    assert_eq!(
+        rows(&a),
+        vec![
+            ("a".to_string(), ShareStatus::Held),
+            ("b".to_string(), ShareStatus::Held),
+            ("c".to_string(), ShareStatus::WatchOnly)
+        ]
+    );
+    sent(&a);
+    a.wallet_seat_tick(1000);
+    let out = sent(&a);
+    assert!(out.iter().any(|f| matches!(f, WalletFrame::Status(s) if s.held && s.init == INIT)));
+    assert!(!out.iter().any(|f| matches!(f, WalletFrame::ViewAsk(_))), "a holder never asks");
+}
+
+/// Plan §7.3 (W1, I15): the founding stage is armed only by `wallet` in
+/// the charter within the bounds, and the ratification counts as consent.
+#[test]
+fn the_founding_stage_needs_wallet_within_bounds() {
+    let b = with_init();
+    let mut st = genesis_seat("b", &b, b.blocks.clone());
+    st.wallet_arm_founding(Some(&["memory".to_string()]));
+    assert!(!st.wallet_view().founding);
+    assert!(!st.wallet_consents(INIT));
+    st.wallet_arm_founding(Some(&["memory".to_string(), "wallet".to_string()]));
+    assert!(st.wallet_view().founding);
+    assert!(st.wallet_consents(INIT), "ratified at the founding");
+
+    let all = Builder::new(&ABC, 3);
+    let mut st = genesis_seat("b", &all, all.blocks.clone());
+    st.wallet_arm_founding(Some(&["wallet".to_string()]));
+    assert!(!st.wallet_view().founding, "3-of-3 has no purse");
+}

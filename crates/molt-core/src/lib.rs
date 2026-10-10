@@ -2115,6 +2115,13 @@ pub struct TransportState {
     /// Grants this seat applied that a reorg displaced (plan 1.4).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vault_displaced: Vec<vault::VaultDisplacedGrant>,
+    /// Each seat's key part status as its last status frame said.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub wallet_status: BTreeMap<MemberId, wallet::ShareStatus>,
+    /// The purse's private view key, held without a key part (a
+    /// phrase-only recovery). Sensitive like `vault_seed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallet_view: Option<vault::SecretBytes>,
 }
 
 /// A seat's default mirror budget per republic: 1 GiB.
@@ -8209,9 +8216,16 @@ mod tests {
         let back: TransportState = serde_json::from_value(json).expect("decode");
         assert_eq!(back, st, "v4 fields survive the round trip");
 
+        st.wallet_status.insert("b".to_string(), wallet::ShareStatus::WatchOnly);
+        st.wallet_view = Some(vault::SecretBytes(vec![9; 32]));
+        let json = serde_json::to_value(&st).expect("encode");
+        assert_eq!(json["wallet_status"], serde_json::json!({"b": "watch_only"}));
+        let back: TransportState = serde_json::from_value(json).expect("decode");
+        assert_eq!(back, st, "the purse's status and view key survive");
+
         let legacy = serde_json::to_value(TransportState::default()).expect("encode default");
         let obj = legacy.as_object().expect("object");
-        for key in ["kind", "relays", "rotation_seed", "relay_cursors"] {
+        for key in ["kind", "relays", "rotation_seed", "relay_cursors", "wallet_status", "wallet_view"] {
             assert!(
                 !obj.contains_key(key),
                 "default state must not serialize `{key}` — legacy shape preserved"

@@ -206,6 +206,8 @@ pub struct WalletView {
     pub shareholders: Vec<(String, ShareStatus)>, // Held | WatchOnly | Unknown
     pub history: Vec<WalletTxView>,
     pub can_spend: bool,             // Etappe 1: immer false
+    pub can_watch: bool,             // View-Key liegt hier (7b)
+    pub founding: bool,              // Gründungssitzung mit wallet: Kassen-Stufe (7b)
 }
 
 pub struct WalletRunView {
@@ -685,7 +687,8 @@ Fork-Höhen fest. Bis dahin `can_spend = false`, kein `sign.rs`.
      fails closed: no nonce, and the run aborts. A decline withdraws
      this seat's consent for the init, its approval included, until it
      accepts again (in memory: after a reopen the approval counts again).
-     Only `not ready` and `timeout` name missing seats. The other runs'
+     `not ready` and `timeout` name the missing seats, a decline its
+     decliner (§11 U2); no other abort names a seat. The other runs'
      records go once the purse block is below a cut, not at its commit:
      a reorg may still make another run the purse.
      The starter sends `wdhint` with its start; `WalletRunView` gains
@@ -697,7 +700,26 @@ Fork-Höhen fest. Bis dahin `can_spend = false`, kein `sign.rs`.
      end (`tests/wallet_run.rs`) behind the test seams
      `__wallet_deadline`, `__wallet_withhold_attestation`,
      `__wallet_start_with`.
-   - [ ] 7b: §7.3 + §7.8; §10.29–31, 38b, 40–41.
+   - [x] 7b: §7.3 + §7.8; §10.29–31, 38b, 40–41 (2026-10-10). This
+     seat's standing lives in `molt-engine/src/wallet_seat.rs`. A create
+     or join finish with `wallet` ratified and W1 holding arms the stage
+     (memory only; never a recovery or reopen): position k proposes
+     `k-1` steps after arming once it has a daemon, until an init card
+     or applied init is visible; the ratification is this seat's consent
+     for the init card (signed after the birthday check) and the run.
+     `WalletView` gains `founding` (the wizard's purse stage follows)
+     and `can_watch` (the view key is here). Three more tags:
+     `wstat` (`held` true/false, own status every 30 s and on change;
+     the own row is `Held` with the purse's record, else `WatchOnly`),
+     `wvask` (every 15 s while no view key opens the address) and
+     `wvresp` (any holder, at most once per asker in 10 s). Statuses
+     and a handed-over view key are kept in `transport.state`
+     (`wallet_status`, `wallet_view`, sealed like `vault_seed`), not in
+     the scan file: a damaged scan file costs a rescan, never the
+     view key. A purse adopted without its block hook (a recovery's
+     chain) settles on the next beat. §10.29–31, 38b, 40–41 run end to
+     end (`tests/wallet_stage.rs`); the status, ask/answer and arming
+     rules also as unit tests (`wallet_run_tests.rs`).
 8. [ ] §7.9 Scanner; manueller regtest-Lauf (the RPC transport landed
    with step 6).
 9. [ ] §11 UI.

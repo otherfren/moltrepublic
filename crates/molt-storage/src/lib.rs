@@ -3311,7 +3311,7 @@ enum WriterMsg {
     /// (same channel, FIFO — a read enqueued after an append sees it).
     ReadFrom(u64, tokio::sync::oneshot::Sender<Vec<EventEnvelope>>),
     /// Persist `transport.state` (atomic rewrite).
-    SaveTransport(TransportState),
+    SaveTransport(Box<TransportState>),
     /// Merge the engine's receive-side accept windows (delivery guarantee
     /// §4.2/§4.7) into `transport.state`, touching nothing else. Its own
     /// message (not part of `SaveTransport`) because the ENGINE owns the
@@ -3654,7 +3654,7 @@ impl StorageHandle {
     /// only cost resends, which the peers' dedup absorbs — better than
     /// blocking the transport on a struggling disk.
     pub fn save_transport_state(&self, state: TransportState) {
-        match self.tx.try_send(WriterMsg::SaveTransport(state)) {
+        match self.tx.try_send(WriterMsg::SaveTransport(Box::new(state))) {
             Ok(()) => {}
             Err(mpsc::TrySendError::Full(_)) => {
                 tracing::warn!(dropped = "transport.state save", "writer queue full");
@@ -4083,6 +4083,7 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                         }
                     }
                     Ok(WriterMsg::SaveTransport(state)) => {
+                        let state = *state;
                         // a stale cursor update from a supervisor task winding
                         // down after the clean-close merge — dropping it protects
                         // the merged crypto (the workspace is closing anyway)
@@ -4121,6 +4122,11 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                             // a re-derived seed lands; a clone without one never clears it
                             if state.vault_seed.is_some() {
                                 ts.vault_seed = state.vault_seed;
+                            }
+                            // …and the purse's key part statuses (wallet plan §7.8)
+                            ts.wallet_status = state.wallet_status;
+                            if state.wallet_view.is_some() {
+                                ts.wallet_view = state.wallet_view;
                             }
                             // append-only union: a stale clone never erases an audit line
                             for d in state.vault_displaced {
@@ -6093,6 +6099,31 @@ mod tests {
         handle.close(None);
         let (ws, _loaded) = open_workspace(&dir).expect("reopen");
         assert_eq!(ws.read_transport_state().vault_status, status);
+    }
+
+    /// Wallet 7b: the key part statuses and a handed-over view key ride the
+    /// transport save; a later save without a view key keeps it.
+    #[test]
+    fn a_transport_save_carries_the_purse_status_and_view() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let created = create_workspace(&root, &seed, &founded(1)).expect("create");
+        let dir = created.dir().to_path_buf();
+        let handle = start_writer(created);
+        let status = BTreeMap::from([("b".to_string(), molt_core::wallet::ShareStatus::WatchOnly)]);
+        let view = Some(molt_core::vault::SecretBytes(vec![5; 32]));
+        handle.save_transport_state(TransportState {
+            wallet_status: status.clone(),
+            wallet_view: view.clone(),
+            ..TransportState::default()
+        });
+        handle.save_transport_state(TransportState { wallet_status: status.clone(), ..TransportState::default() });
+        handle.close(None);
+        let (ws, _loaded) = open_workspace(&dir).expect("reopen");
+        let ts = ws.read_transport_state();
+        assert_eq!(ts.wallet_status, status);
+        assert_eq!(ts.wallet_view, view);
     }
 
     /// Vault S5: a re-derived seed rides the transport save; a later save

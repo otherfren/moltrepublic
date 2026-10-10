@@ -59,6 +59,7 @@ mod vault;
 mod wake;
 mod wallet;
 mod wallet_run;
+mod wallet_seat;
 mod wiki_export;
 mod wiki_index;
 
@@ -2256,9 +2257,19 @@ impl State {
                 }
                 self.cmd_net_wallet_frame(&from, &body.0)
             }
-            Command::NetWalletScan { .. }
-            | Command::NetWalletStatus { .. }
-            | Command::NetWalletViewAnswer { .. } => self.cmd_net_wallet_unbuilt(),
+            Command::NetWalletStatus { from, status, generation } => {
+                if !self.net_generation_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.cmd_net_wallet_status(&from, status)
+            }
+            Command::NetWalletViewAnswer { from, view, generation } => {
+                if !self.net_generation_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.cmd_net_wallet_view_answer(&from, &view.0)
+            }
+            Command::NetWalletScan { .. } => self.cmd_net_wallet_unbuilt(),
             Command::RecoverInviteStart { member } => self.cmd_recover_invite_start(member),
             Command::RecoverStart { link, phrase } => self.cmd_recover_start(link, phrase),
             Command::NetRecoverSealed {

@@ -98,24 +98,24 @@ async fn the_unbuilt_doors_refuse_compactly() {
         Err(e @ MoltError::Wallet(WalletRefusal::NotChain)) => assert_eq!(e.to_string(), "purse: not a chain republic"),
         other => panic!("unexpected: {other:?}"),
     }
-    let junk = Command::NetWalletFrame { from: peer(), body: secret(), generation: None };
-    assert!(matches!(w.execute(junk).await, Ok(Reply::Ack)), "an unusable frame is dropped");
-    for cmd in [
-        Command::NetWalletScan {
-            scan_height: 1,
-            daemon_height: 2,
-            paused: None,
-            error: String::new(),
-            generation: None,
-        },
+    for unusable in [
+        Command::NetWalletFrame { from: peer(), body: secret(), generation: None },
         Command::NetWalletStatus { from: peer(), status: ShareStatus::Held, generation: None },
         Command::NetWalletViewAnswer { from: peer(), view: secret(), generation: None },
     ] {
-        match w.execute(cmd).await {
-            Err(e @ MoltError::Wallet(WalletRefusal::NotYet)) => {
-                assert_eq!(e.to_string(), "purse: not available yet");
-            }
-            other => panic!("unexpected: {other:?}"),
+        assert!(matches!(w.execute(unusable).await, Ok(Reply::Ack)), "no purse: dropped");
+    }
+    let scan = Command::NetWalletScan {
+        scan_height: 1,
+        daemon_height: 2,
+        paused: None,
+        error: String::new(),
+        generation: None,
+    };
+    match w.execute(scan).await {
+        Err(e @ MoltError::Wallet(WalletRefusal::NotYet)) => {
+            assert_eq!(e.to_string(), "purse: not available yet");
         }
+        other => panic!("unexpected: {other:?}"),
     }
 }

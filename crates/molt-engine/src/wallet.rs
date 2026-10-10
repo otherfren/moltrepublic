@@ -2,8 +2,9 @@
 
 //! The purse (`docs/chain/wallet_treasury_design.md`): its read model, the
 //! init vote (§3.1, the only door) and the command handlers. The run lives
-//! in `wallet_run.rs`; status, recovery and the scanner land with plan §14
-//! steps 7-8 and refuse with one line until then.
+//! in `wallet_run.rs`, this seat's standing (founding stage, status, view
+//! key) in `wallet_seat.rs`; the scanner lands with plan §14 step 8 and
+//! refuses with one line until then.
 
 use std::collections::BTreeSet;
 
@@ -89,6 +90,8 @@ pub(crate) struct PurseRt {
     pub(crate) consent: BTreeSet<u64>,
     /// The run, its records and attestations.
     pub(crate) run: crate::wallet_run::RunRt,
+    /// The founding stage, the key part statuses, a view key without a part.
+    pub(crate) seat: crate::wallet_seat::SeatRt,
 }
 
 impl State {
@@ -255,15 +258,16 @@ impl State {
             Some(_) => WalletPhase::NoPurse,
         };
         let me = self.member();
+        let own = self.wallet_own_status();
         let shareholders = match &purse {
             Some(_) => self
                 .vault_founding_table()
                 .into_iter()
                 .map(|i| {
-                    let status = match (i.member == me, self.purse.run.watch_only) {
-                        (true, false) => molt_core::wallet::ShareStatus::Held,
-                        (true, true) => molt_core::wallet::ShareStatus::WatchOnly,
-                        _ => molt_core::wallet::ShareStatus::Unknown,
+                    let status = if i.member == me {
+                        own
+                    } else {
+                        self.purse.seat.statuses.get(&i.member).copied().unwrap_or_default()
                     };
                     (i.member, status)
                 })
@@ -283,6 +287,8 @@ impl State {
             threshold: u32::from(m),
             participants: u32::from(n),
             phase,
+            can_watch: self.wallet_held_view().is_some(),
+            founding: self.purse.seat.founding,
             ..WalletView::default()
         }
     }
@@ -290,19 +296,35 @@ impl State {
     /// [`molt_core::Command::WalletInit`]: the gates, then a daemon probe
     /// off the actor; [`Command::NetWalletProbe`] proposes and answers.
     pub(crate) fn cmd_wallet_init(&mut self) -> Result<Reply, MoltError> {
-        self.wallet_gates().map_err(MoltError::Wallet)?;
-        if self.wallet_init_pending() || self.purse.init_gen.is_some() {
-            return Err(MoltError::Wallet(WalletRefusal::InitPending));
-        }
-        self.wallet_daemon().map_err(MoltError::Wallet)?;
+        self.wallet_init_ready().map_err(MoltError::Wallet)?;
         // taken LAST: every refusal above is answered by the actor loop
         let reply = self
             .deferred_reply
             .take()
             .ok_or_else(|| MoltError::Engine("no reply channel".to_string()))?;
-        let generation = self.start_wallet_probe(Some(reply)).map_err(MoltError::Wallet)?;
-        self.purse.init_gen = Some(generation);
+        self.wallet_init_probe(Some(reply)).map_err(MoltError::Wallet)?;
         Ok(Reply::Ack)
+    }
+
+    fn wallet_init_ready(&self) -> Result<(), WalletRefusal> {
+        self.wallet_gates()?;
+        if self.wallet_init_pending() || self.purse.init_gen.is_some() {
+            return Err(WalletRefusal::InitPending);
+        }
+        self.wallet_daemon().map(|_| ())
+    }
+
+    /// The gates, then the probe whose answer proposes the init.
+    pub(crate) fn wallet_init_probe(
+        &mut self,
+        reply: Option<tokio::sync::oneshot::Sender<Result<Reply, MoltError>>>,
+    ) -> Result<u64, WalletRefusal> {
+        if reply.is_none() {
+            self.wallet_init_ready()?;
+        }
+        let generation = self.start_wallet_probe(reply)?;
+        self.purse.init_gen = Some(generation);
+        Ok(generation)
     }
 
     /// [`Command::NetWalletProbe`]: a daemon height landed.
@@ -364,8 +386,10 @@ impl State {
             let approved = self.chain.own_approvals.contains(&id);
             let declined = self.proposals.get(&id).is_some_and(|p| p.decliners.contains(&me));
             let decided = approved || declined;
+            // a seat that ratified wallet at this founding consented then (§3.2)
+            let consent = self.purse.consent.contains(&id) || self.purse.seat.founding;
             match self.wallet_approve_check(&payload) {
-                Ok(()) if !decided && self.purse.consent.contains(&id) => {
+                Ok(()) if !decided && consent => {
                     tracing::info!(id, "wallet_init=approved");
                     self.chain_sign_and_gossip_approval(id);
                     self.purse.consent.remove(&id);
@@ -443,9 +467,9 @@ impl State {
         WalletRefusal::Held(Box::new(refusal))
     }
 
-    /// The INTERNAL status and scan feeds.
+    /// The INTERNAL scan feed.
     pub(crate) fn cmd_net_wallet_unbuilt(&mut self) -> Result<Reply, MoltError> {
-        // TODO(step 7b): NetWalletStatus, NetWalletViewAnswer; TODO(step 8): NetWalletScan.
+        // TODO(step 8): NetWalletScan.
         not_yet()
     }
 

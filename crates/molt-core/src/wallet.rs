@@ -145,6 +145,11 @@ pub struct WalletView {
     pub history: Vec<WalletTxView>,
     /// Stage 1: always false.
     pub can_spend: bool,
+    /// This seat holds the view key: it can see the balance.
+    pub can_watch: bool,
+    /// This session founded the republic with the purse: the wizard ends
+    /// with the purse stage.
+    pub founding: bool,
 }
 
 /// W1: a purse needs `2 <= m <= n-1`.
@@ -272,6 +277,8 @@ mod tests {
                 confirmations: 3,
             }],
             can_spend: false,
+            can_watch: true,
+            founding: true,
         };
         let want = json!({
             "address": "4a",
@@ -303,7 +310,9 @@ mod tests {
                 "at": 11,
                 "confirmations": 3
             }],
-            "can_spend": false
+            "can_spend": false,
+            "can_watch": true,
+            "founding": true
         });
         assert_eq!(serde_json::to_value(&view).expect("serializes"), want);
         let back: WalletView = serde_json::from_value(want).expect("deserializes");

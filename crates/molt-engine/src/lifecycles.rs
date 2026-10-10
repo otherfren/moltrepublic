@@ -1109,6 +1109,7 @@ impl State {
             // simulated, the demo-mesh seam would grow fake peers over a
             // real republic's log.
             self.persist_simulated_members(&id, self.ritual_sim);
+            self.wallet_arm_founding(features.as_deref());
             id
         } else {
             demo_workspace_id(&c.name)
@@ -1601,7 +1602,10 @@ impl State {
                 None, // …rooted, never pruned at birth
                 MoltError::Join,
             ) {
-                Ok(id) => id,
+                Ok(id) => {
+                    self.wallet_arm_founding(sealed.features.as_deref());
+                    id
+                }
                 Err(e) => return self.cmd_net_join_failed(e.to_string(), generation),
             }
         } else {

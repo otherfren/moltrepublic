@@ -102,3 +102,17 @@ fn the_keys_record_layout_is_pinned() {
     want.extend_from_slice(&*rec.view);
     assert_eq!(*rec.encode(), want);
 }
+
+/// Design §5: a view key a peer hands over counts only when `view·G` is
+/// the address's view key, on the address's network.
+#[test]
+fn a_view_key_is_checked_against_the_address() {
+    let rec = record();
+    assert!(keys::view_matches(&rec.address, Network::Stagenet, &rec.view));
+    let mut other = *rec.view;
+    other[0] ^= 1;
+    assert!(!keys::view_matches(&rec.address, Network::Stagenet, &other), "another key");
+    assert!(!keys::view_matches(&rec.address, Network::Mainnet, &rec.view), "another network");
+    assert!(!keys::view_matches("4x", Network::Stagenet, &rec.view), "no address");
+    assert!(!keys::view_matches(&rec.address, Network::Stagenet, &[0xff; 32]), "not a scalar");
+}

@@ -400,7 +400,7 @@ const CONTROL_FRAMES: &[(&[u8], ControlParser)] = &[
     (crate::vault_frames::VAULT_REVEAL_TAG, parse_vault),
     (crate::vault_frames::VAULT_RESP_TAG, parse_vault),
     (crate::vault_frames::VAULT_ASK_TAG, parse_vault),
-    // the purse run (wallet plan §7.4): seven tags, one parser
+    // the purse (wallet plan §7.4, §7.8): ten tags, one parser
     (crate::wallet_frames::WALLET_START_TAG, parse_wallet),
     (crate::wallet_frames::WALLET_HINT_TAG, parse_wallet),
     (crate::wallet_frames::WALLET_READY_TAG, parse_wallet),
@@ -408,6 +408,9 @@ const CONTROL_FRAMES: &[(&[u8], ControlParser)] = &[
     (crate::wallet_frames::WALLET_R2_TAG, parse_wallet),
     (crate::wallet_frames::WALLET_ATTEST_TAG, parse_wallet),
     (crate::wallet_frames::WALLET_ABORT_TAG, parse_wallet),
+    (crate::wallet_frames::WALLET_STATUS_TAG, parse_wallet),
+    (crate::wallet_frames::WALLET_VIEW_ASK_TAG, parse_wallet),
+    (crate::wallet_frames::WALLET_VIEW_RESP_TAG, parse_wallet),
 ];
 
 fn parse_wallet(from: MemberId, frame: &[u8]) -> Option<MlsDecode> {

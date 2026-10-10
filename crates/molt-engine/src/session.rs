@@ -1564,6 +1564,7 @@ impl State {
         // serving downloads across restarts
         self.adopt_share_paths();
         self.resume_file_jobs(&transport_state);
+        self.wallet_load_seat(&transport_state);
         self.wallet_on_open(wallet_records);
         Ok(transport_state)
     }

@@ -211,10 +211,21 @@ impl EngineSink for CmdSink {
     }
 
     async fn wallet_frame(&self, member: &MemberId, frame: &molt_net::wallet_frames::WalletFrame) {
-        let cmd = Command::NetWalletFrame {
-            from: member.clone(),
-            body: molt_core::vault::SecretBytes(frame.to_frame()),
-            generation: self.generation,
+        use molt_net::wallet_frames::WalletFrame;
+        let from = member.clone();
+        let generation = self.generation;
+        let cmd = match frame {
+            WalletFrame::Status(s) => {
+                let status = if s.held { molt_core::wallet::ShareStatus::Held } else { molt_core::wallet::ShareStatus::WatchOnly };
+                Command::NetWalletStatus { from, status, generation }
+            }
+            WalletFrame::ViewResp(r) => {
+                let Ok(view) = hex::decode(&r.view.0) else {
+                    return;
+                };
+                Command::NetWalletViewAnswer { from, view: molt_core::vault::SecretBytes(view), generation }
+            }
+            f => Command::NetWalletFrame { from, body: molt_core::vault::SecretBytes(f.to_frame()), generation },
         };
         let _ = self.execute(cmd).await;
     }

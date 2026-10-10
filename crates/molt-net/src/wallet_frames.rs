@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! The purse run's control frames (`docs/chain/wallet_treasury_design.md`
-//! §3.3-§3.5, plan §7.4): start, daemon hint, readiness, round 1, round 2,
-//! attestation, abort. Ephemeral and MLS-authenticated: the seat is the
+//! §3.3-§3.5, §5, plan §7.4, §7.8): start, daemon hint, readiness, round 1,
+//! round 2, attestation, abort; key part status and the view key's ask and
+//! answer. Ephemeral and MLS-authenticated: the seat is the
 //! MLS sender, never a frame field. Each tag is its own version boundary.
 
 use std::collections::BTreeMap;
@@ -25,8 +26,15 @@ pub const WALLET_ATTEST_TAG: &[u8] = b"\x00molt-watt-v1";
 /// An abort with its reason.
 pub const WALLET_ABORT_TAG: &[u8] = b"\x00molt-wabrt-v1";
 
-/// The seven tags, for the disjointness checks.
-pub const WALLET_TAGS: [&[u8]; 7] = [
+/// A seat's key part status.
+pub const WALLET_STATUS_TAG: &[u8] = b"\x00molt-wstat-v1";
+/// A seat without the view key asks for it.
+pub const WALLET_VIEW_ASK_TAG: &[u8] = b"\x00molt-wvask-v1";
+/// The view key, answered over the group.
+pub const WALLET_VIEW_RESP_TAG: &[u8] = b"\x00molt-wvresp-v1";
+
+/// The ten tags, for the disjointness checks.
+pub const WALLET_TAGS: [&[u8]; 10] = [
     WALLET_START_TAG,
     WALLET_HINT_TAG,
     WALLET_READY_TAG,
@@ -34,6 +42,9 @@ pub const WALLET_TAGS: [&[u8]; 7] = [
     WALLET_R2_TAG,
     WALLET_ATTEST_TAG,
     WALLET_ABORT_TAG,
+    WALLET_STATUS_TAG,
+    WALLET_VIEW_ASK_TAG,
+    WALLET_VIEW_RESP_TAG,
 ];
 
 /// The wire version this build writes and accepts.
@@ -52,7 +63,7 @@ const REASON_MAX: usize = 32;
 /// Why a plaintext is not a usable wallet frame.
 #[derive(Debug, PartialEq, Eq)]
 pub enum WalletFrameError {
-    /// None of the seven tags.
+    /// None of the ten tags.
     NotThisFrame,
     /// Beyond [`WALLET_FRAME_MAX_BYTES`].
     TooBig(usize),
@@ -164,6 +175,37 @@ pub struct WalletAbortFrame {
     pub reason: String,
 }
 
+/// The sender holds its key part (`held`) or only watches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletStatusFrame {
+    /// Wire version.
+    pub v: u32,
+    /// The purse's init.
+    pub init: u64,
+    /// `false`: view only.
+    pub held: bool,
+}
+
+/// The sender has the purse but not its view key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletViewAskFrame {
+    /// Wire version.
+    pub v: u32,
+    /// The purse's init.
+    pub init: u64,
+}
+
+/// The purse's private view key; the asker checks it against the address.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletViewRespFrame {
+    /// Wire version.
+    pub v: u32,
+    /// The purse's init.
+    pub init: u64,
+    /// The view key, hex.
+    pub view: SecretHex,
+}
+
 /// One wallet control frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WalletFrame {
@@ -181,6 +223,12 @@ pub enum WalletFrame {
     Attest(WalletAttestFrame),
     /// An abort.
     Abort(WalletAbortFrame),
+    /// A key part status.
+    Status(WalletStatusFrame),
+    /// A view key ask.
+    ViewAsk(WalletViewAskFrame),
+    /// A view key answer.
+    ViewResp(WalletViewRespFrame),
 }
 
 fn is_hex(s: &str, len: usize) -> bool {
@@ -223,15 +271,18 @@ impl WalletFrame {
             WalletFrame::Round2(f) => f.init,
             WalletFrame::Attest(f) => f.init,
             WalletFrame::Abort(f) => f.init,
+            WalletFrame::Status(f) => f.init,
+            WalletFrame::ViewAsk(f) => f.init,
+            WalletFrame::ViewResp(f) => f.init,
         }
     }
 
-    /// The run nonce, hex; `None` for a hint.
+    /// The run nonce, hex; `None` for a hint, a status or a view frame.
     #[must_use]
     pub fn run(&self) -> Option<&str> {
         match self {
             WalletFrame::Start(f) => Some(&f.run),
-            WalletFrame::Hint(_) => None,
+            WalletFrame::Hint(_) | WalletFrame::Status(_) | WalletFrame::ViewAsk(_) | WalletFrame::ViewResp(_) => None,
             WalletFrame::Ready(f) => Some(&f.run),
             WalletFrame::Round1(f) => Some(&f.run),
             WalletFrame::Round2(f) => Some(&f.run),
@@ -251,6 +302,9 @@ impl WalletFrame {
             WalletFrame::Round2(f) => framed(WALLET_R2_TAG, f),
             WalletFrame::Attest(f) => framed(WALLET_ATTEST_TAG, f),
             WalletFrame::Abort(f) => framed(WALLET_ABORT_TAG, f),
+            WalletFrame::Status(f) => framed(WALLET_STATUS_TAG, f),
+            WalletFrame::ViewAsk(f) => framed(WALLET_VIEW_ASK_TAG, f),
+            WalletFrame::ViewResp(f) => framed(WALLET_VIEW_RESP_TAG, f),
         }
     }
 
@@ -287,6 +341,13 @@ impl WalletFrame {
         } else if tag == WALLET_ATTEST_TAG {
             let f: WalletAttestFrame = parse(body)?;
             (is_hex(&f.run, HEX32) && is_hex(&f.sig, HEX_SIG)).then_some(WalletFrame::Attest(f))
+        } else if tag == WALLET_STATUS_TAG {
+            Some(WalletFrame::Status(parse(body)?))
+        } else if tag == WALLET_VIEW_ASK_TAG {
+            Some(WalletFrame::ViewAsk(parse(body)?))
+        } else if tag == WALLET_VIEW_RESP_TAG {
+            let f: WalletViewRespFrame = parse(body)?;
+            is_hex(&f.view.0, HEX32).then_some(WalletFrame::ViewResp(f))
         } else {
             let f: WalletAbortFrame = parse(body)?;
             (is_hex(&f.run, HEX32)
@@ -323,6 +384,9 @@ mod tests {
             }),
             WalletFrame::Attest(WalletAttestFrame { v: WALLET_V, init: 7, run: run.clone(), sig: h('6', 128) }),
             WalletFrame::Abort(WalletAbortFrame { v: WALLET_V, init: 7, run, reason: "not ready".into() }),
+            WalletFrame::Status(WalletStatusFrame { v: WALLET_V, init: 7, held: true }),
+            WalletFrame::ViewAsk(WalletViewAskFrame { v: WALLET_V, init: 7 }),
+            WalletFrame::ViewResp(WalletViewRespFrame { v: WALLET_V, init: 7, view: SecretHex(h('7', 64)) }),
         ]
     }
 
@@ -376,12 +440,27 @@ mod tests {
         assert_eq!(f.to_frame(), want);
     }
 
+    /// The status and view frames carry no run; a short view key is refused,
+    /// and the status tag is byte-pinned.
+    #[test]
+    fn status_and_view_frames_have_no_run() {
+        for f in all().into_iter().skip(7) {
+            assert_eq!(f.run(), None);
+        }
+        let short = WalletFrame::ViewResp(WalletViewRespFrame { v: WALLET_V, init: 1, view: SecretHex(h('7', 62)) });
+        assert_eq!(WalletFrame::from_frame(&short.to_frame()), Err(WalletFrameError::Malformed));
+        let f = WalletFrame::Status(WalletStatusFrame { v: 1, init: 9, held: false });
+        let mut want = b"\x00molt-wstat-v1".to_vec();
+        want.extend_from_slice(br#"{"v":1,"init":9,"held":false}"#);
+        assert_eq!(f.to_frame(), want);
+    }
+
     /// A share or a view contribution never reaches a log through `Debug`.
     #[test]
     fn wallet_frame_debug_redacts_shares() {
         for f in all() {
             let dbg = format!("{f:?}");
-            for secret in [h('2', 320), h('3', 256), h('4', 256)] {
+            for secret in [h('2', 320), h('3', 256), h('4', 256), h('7', 64)] {
                 assert!(!dbg.contains(&secret), "Debug leaks a secret: {dbg}");
             }
         }

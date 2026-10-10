@@ -4,7 +4,7 @@
 use ciphersuite::group::Group;
 use dalek_ff_group::{Ed25519, EdwardsPoint};
 use molt_core::{put_bytes, put_count};
-use monero_wallet::address::{MoneroAddress, Network};
+use monero_wallet::address::{AddressType, MoneroAddress, Network};
 use monero_wallet::ed25519::{Point, Scalar};
 use monero_wallet::ViewPair;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -62,6 +62,19 @@ pub fn standard_address(
     network: Network,
 ) -> Result<MoneroAddress, TreasuryError> {
     view_pair(group_key, view).map(|p| p.legacy_address(network))
+}
+
+/// Does `view` open the standard address `address` on `network`: `view·G`
+/// is its view key (design §5, a key a peer handed over)?
+pub fn view_matches(address: &str, network: Network, view: &[u8; 32]) -> bool {
+    let Ok(addr) = MoneroAddress::from_str(network, address) else {
+        return false;
+    };
+    let Ok(scalar) = Scalar::read(&mut view.as_slice()) else {
+        return false;
+    };
+    matches!(addr.kind(), AddressType::Legacy)
+        && ViewPair::new(addr.spend(), Zeroizing::new(scalar)).is_ok_and(|p| p.view() == addr.view())
 }
 
 /// The pair the standard scanner runs on.

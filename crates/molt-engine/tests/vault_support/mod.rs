@@ -83,8 +83,27 @@ pub async fn found_n_at(
     m: u8,
     features: &[&str],
 ) -> Vec<WalletHandle> {
-    let a = engine(&root.join(NAMES[0]));
-    adopt_relay(&a, url).await;
+    found_n_prepared(root, url, n, m, features, &[]).await
+}
+
+/// [`found_n_at`], each seat `NAMES[i]` patched with `patches[i]` (`null`:
+/// none) before the founding starts.
+pub async fn found_n_prepared(
+    root: &std::path::Path,
+    url: &str,
+    n: u8,
+    m: u8,
+    features: &[&str],
+    patches: &[serde_json::Value],
+) -> Vec<WalletHandle> {
+    let prepare = |w: WalletHandle, i: usize| async move {
+        adopt_relay(&w, url).await;
+        if let Some(patch) = patches.get(i).filter(|p| !p.is_null()) {
+            w.execute(Command::PatchSettings { patch: patch.clone() }).await.expect("patch");
+        }
+        w
+    };
+    let a = prepare(engine(&root.join(NAMES[0])), 0).await;
     a.execute(Command::CreateStart {
         name: "R".to_string(),
         member: NAMES[0].to_string(),
@@ -104,8 +123,7 @@ pub async fn found_n_at(
 
     let mut all = vec![a];
     for (i, link) in links.into_iter().enumerate() {
-        let w = engine(&root.join(NAMES[i + 1]));
-        adopt_relay(&w, url).await;
+        let w = prepare(engine(&root.join(NAMES[i + 1])), i + 1).await;
         w.execute(Command::JoinStart { invite: link, member: NAMES[i + 1].to_string() })
             .await
             .expect("join starts");

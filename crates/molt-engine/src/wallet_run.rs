@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use molt_core::wallet::{RunStage, WalletRefusal, WalletRunView};
+use molt_core::wallet::{RunStage, ShareStatus, WalletRefusal, WalletRunView};
 use molt_core::{ChainChange, Event, MemberId, MoltError, ProposalState, Reply, Surface};
 use molt_net::wallet_frames::{
     WalletAbortFrame, WalletAttestFrame, WalletFrame, WalletHintFrame, WalletReadyFrame,
@@ -124,7 +124,7 @@ pub(crate) struct RunRt {
     hint: String,
     resent_at: u64,
     /// The purse proposal id already settled here.
-    settled: Option<Option<u64>>,
+    pub(crate) settled: Option<Option<u64>>,
     /// The projected purse's record is not held here.
     pub(crate) watch_only: bool,
     last_view: Option<WalletRunView>,
@@ -294,7 +294,7 @@ impl State {
         self.vault_founding_table().into_iter().map(|i| i.member).collect()
     }
 
-    fn wallet_pos(&self, member: &str) -> Option<u16> {
+    pub(crate) fn wallet_pos(&self, member: &str) -> Option<u16> {
         let k = self.wallet_seats().iter().position(|m| m == member)?;
         u16::try_from(k + 1).ok()
     }
@@ -314,7 +314,7 @@ impl State {
         }
     }
 
-    fn wallet_step(&self) -> u64 {
+    pub(crate) fn wallet_step(&self) -> u64 {
         match self.wallet_seams.deadline.load(Ordering::SeqCst) {
             0 => STEP_SECS,
             d => (d / 4).max(1),
@@ -396,6 +396,21 @@ impl State {
         let Ok(frame) = WalletFrame::from_frame(body) else {
             return Ok(Reply::Ack);
         };
+        match frame {
+            WalletFrame::Status(s) => {
+                let status = if s.held { ShareStatus::Held } else { ShareStatus::WatchOnly };
+                return self.cmd_net_wallet_status(from, status);
+            }
+            WalletFrame::ViewAsk(a) => {
+                self.wallet_on_view_ask(from, a.init);
+                return Ok(Reply::Ack);
+            }
+            WalletFrame::ViewResp(r) => {
+                let view = zeroize::Zeroizing::new(hex::decode(&r.view.0).unwrap_or_default());
+                return self.cmd_net_wallet_view_answer(from, &view);
+            }
+            _ => {}
+        }
         if let Some(pos) = self.wallet_pos(from) {
             if *from != self.member() {
                 self.wallet_ingest(pos, frame);
@@ -599,7 +614,7 @@ impl State {
         Ok(())
     }
 
-    fn wallet_send(&self, frame: &WalletFrame) -> bool {
+    pub(crate) fn wallet_send(&self, frame: &WalletFrame) -> bool {
         #[cfg(test)]
         if let Ok(mut s) = self.purse.run.sent.lock() {
             s.push(frame.clone());
@@ -711,11 +726,11 @@ impl State {
         self.wallet_advance();
     }
 
-    /// Consent: given in a run, or the init approval while the log carries it
-    /// and no decline withdrew it (W6).
+    /// Consent: given in a run, or the init approval while the log carries it,
+    /// or `wallet` ratified at this founding (§3.2) - unless a decline withdrew it (W6).
     fn wallet_consents(&self, init: u64) -> bool {
-        self.purse.run.consented.contains(&init)
-            || (self.chain.own_approvals.contains(&init) && !self.purse.run.withdrawn.contains(&init))
+        let standing = self.chain.own_approvals.contains(&init) || self.purse.seat.founding;
+        self.purse.run.consented.contains(&init) || (standing && !self.purse.run.withdrawn.contains(&init))
     }
 
     /// Does this seat stand ready (build, daemon, consent)? Asks the
@@ -1132,7 +1147,7 @@ impl State {
         true
     }
 
-    fn wallet_purse_record(&self, c: &Created) -> Option<usize> {
+    pub(crate) fn wallet_purse_record(&self, c: &Created) -> Option<usize> {
         self.purse.run.records.iter().position(|r| r.run.init_id == c.init && r.run.run == c.run && r.address == c.address)
     }
 
@@ -1230,6 +1245,7 @@ impl State {
 
     /// The beat: seams, deadlines, fallbacks, resends.
     pub(crate) fn wallet_run_tick(&mut self, now: u64) {
+        self.wallet_seat_tick(now);
         let forced = self.wallet_seams.start.lock().ok().and_then(|mut s| s.take());
         if let Some(nonce) = forced {
             if let Err(e) = self.wallet_start(Some(nonce)) {
