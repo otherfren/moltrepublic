@@ -356,7 +356,7 @@ fn a_holder_checks_once_the_payload_is_held() {
     assert!(!st.vault_rx.checked.contains_key(&sid), "no payload, no verdict");
     hold(&mut st, &dep, &sid, &file);
     on_payload_held(&mut st);
-    assert_eq!(st.vault_rx.checked.get(&sid), Some(&true));
+    assert_eq!(st.vault_rx.checked.get(&sid).map(|c| c.1), Some(true));
     let own = st.vault_rx.status.receipts.get(&sid).and_then(|r| r.get("c")).expect("its own receipt");
     assert!(own.verified);
     assert_eq!(card(&st, &sid).verified, 1, "its own receipt counts here");
@@ -368,7 +368,7 @@ fn a_holder_checks_once_the_payload_is_held() {
     on_payload_held(&mut lab);
     let own = lab.vault_rx.status.receipts.get(&sid).and_then(|r| r.get("d")).expect("its own receipt");
     assert!(!own.verified);
-    assert_eq!(lab.vault_rx.checked.get(&sid), Some(&true));
+    assert_eq!(lab.vault_rx.checked.get(&sid).map(|c| c.1), Some(true));
 }
 
 #[test]
@@ -533,7 +533,7 @@ fn many_receipts(n: u64) -> crate::State {
         let sid = secret_id(&b.republic_id, &dep);
         st.proposals.insert(100 + i, pending_card(op(&dep), "a"));
         st.vault_rx.status.receipts.entry(sid.clone()).or_default().insert("c".to_string(), VaultReceipt { verified: true, rev: 1 });
-        st.vault_rx.checked.insert(sid, true);
+        st.vault_rx.checked.insert(sid, (record_digest(&b.republic_id, &dep), true));
     }
     st
 }
@@ -571,4 +571,32 @@ fn an_unchanged_receipt_is_not_sent_twice_at_start() {
     queue(&mut st, 64);
     tick(&mut st, 1_000);
     assert_eq!(sent_receipts(&st), [sid]);
+}
+
+/// A second deposit under the same `secret_id` with another share for
+/// this holder is checked again: the cached verdict is per record.
+#[test]
+fn a_changed_deposit_behind_a_secret_id_is_checked_again() {
+    let b = Builder::vault();
+    let (good, file) = deposit(&b, "a", "n", "one");
+    let sid = secret_id(&b.republic_id, &good);
+    let mut st = seat("c", &b, b.blocks.clone());
+    st.proposals.insert(100, pending_card(op(&good), "a"));
+    hold(&mut st, &good, &sid, &file);
+    on_payload_held(&mut st);
+    let own = |st: &crate::State| st.vault_rx.status.receipts.get(&sid).and_then(|r| r.get("c")).cloned();
+    assert!(own(&st).expect("a receipt").verified);
+
+    let mut bad = good.clone();
+    let i = bad.holders.iter().position(|h| h == "c").expect("a holder");
+    let flipped = if bad.enc_share[i].starts_with('0') { "1" } else { "0" };
+    bad.enc_share[i].replace_range(0..1, flipped);
+    bad.sig_depositor = molt_storage::identity_sign(b.key("a"), &molt_core::vault::deposit_signing_bytes(&b.republic_id, &bad));
+    assert_eq!(secret_id(&b.republic_id, &bad), sid, "same id, other share");
+    if let Some(p) = st.proposals.get_mut(&100) {
+        p.withdrawn = true;
+    }
+    st.proposals.insert(101, pending_card(op(&bad), "a"));
+    on_deposit(&mut st, &sid);
+    assert!(!own(&st).expect("a receipt").verified, "the bad share is complained about");
 }

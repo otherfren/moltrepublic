@@ -77,8 +77,9 @@ impl LabSeams {
 pub(crate) struct ReceiptRuntime {
     /// Receipts and decided reveals (`TransportState.vault_status`).
     pub(crate) status: VaultStatusStore,
-    /// This seat's own check per `secret_id`, this incarnation.
-    pub(crate) checked: BTreeMap<String, bool>,
+    /// This seat's own check per `secret_id`, this incarnation, with the
+    /// digest of the record checked: `secret_id` does not cover the shares.
+    pub(crate) checked: BTreeMap<String, ([u8; 32], bool)>,
     /// When own receipts and reveals were last re-sent (0 = next tick).
     pub(crate) resent_at: u64,
     /// A resend round in progress, and the last frame it queued.
@@ -111,6 +112,11 @@ impl ReceiptRuntime {
     pub(crate) fn loaded(status: VaultStatusStore) -> Self {
         Self { status, ..Self::default() }
     }
+}
+
+fn record_digest(republic_id: &str, dep: &VaultDeposit) -> [u8; 32] {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(molt_core::vault::deposit_signing_bytes(republic_id, dep)).into()
 }
 
 /// One resent frame; the order is the round's order.
@@ -241,15 +247,16 @@ fn sweep(st: &mut crate::State) {
     let complain = st.vault_seams.lab.complain.load(Ordering::SeqCst);
     let mut changed = false;
     for (sid, dep) in live_deposits(st) {
+        let record = record_digest(&rid, &dep);
         if dep.depositor == me
             || !dep.holders.contains(&me)
-            || st.vault_rx.checked.contains_key(&sid)
+            || st.vault_rx.checked.get(&sid).is_some_and(|(r, _)| *r == record)
             || !st.vault_payload_held(&sid)
         {
             continue;
         }
         let ok = molt_vault::check_my_share(&dep, &rid, &ctx, &me, &sk).is_ok();
-        st.vault_rx.checked.insert(sid.clone(), ok);
+        st.vault_rx.checked.insert(sid.clone(), (record, ok));
         if !ok {
             tracing::warn!(secret_id = %sid, depositor = %dep.depositor, "vault: own share fails");
         }
