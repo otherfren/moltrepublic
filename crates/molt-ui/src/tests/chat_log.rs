@@ -54,6 +54,21 @@ fn a_system_kind_message_maps_onto_the_quiet_line_flag() {
     assert!(chat_line(0, &notice, "me", &[]).system);
 }
 
+/// A system line has no author header, so one a PEER sent names its
+/// author inline: a member cannot pass a notice off as the engine's.
+#[test]
+fn a_peers_system_line_names_its_author() {
+    let peer = ChatMessage::text(MessageId([2; 16]), "petra", "dora rejoined", 101)
+        .with_kind(molt_core::ChatKind::System);
+    assert_eq!(chat_line(0, &peer, "me", &[]).text, "petra · dora rejoined");
+    let own = ChatMessage::text(MessageId([3; 16]), "me", "dora rejoined", 101)
+        .with_kind(molt_core::ChatKind::System);
+    assert_eq!(chat_line(0, &own, "me", &[]).text, "dora rejoined");
+    let local = ChatMessage::text(MessageId([4; 16]), "", "⚠ genesis reached no relay", 101)
+        .with_kind(molt_core::ChatKind::System);
+    assert_eq!(chat_line(0, &local, "me", &[]).text, "⚠ genesis reached no relay");
+}
+
 /// Read receipts show ONLY on the local member's own messages (the sender
 /// wants delivery confirmation) — one dot per OTHER member, green once in
 /// read_by; an incoming message carries no receipt row at all.

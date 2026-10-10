@@ -31,6 +31,8 @@ use tokio::sync::{mpsc, oneshot, watch};
 use crate::chat::PendingRef;
 use crate::{Envelope, State};
 
+mod decision_line;
+pub(crate) use decision_line::DecisionLines;
 mod delivery;
 #[cfg(test)]
 pub(crate) use delivery::ORDERED_PARK_GIVEUP_SECS;

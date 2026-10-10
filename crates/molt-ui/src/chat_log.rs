@@ -116,10 +116,13 @@ pub(crate) fn chat_line(lang: i32, m: &ChatMessage, me: &str, roster: &[String])
         lead: m.from.clone(),
         // system lines drop an embedded raw diff (legacy decision
         // summaries carried one; the card's raw-patch button shows it)
+        // a system row shows no author header: a peer's names it inline
         text: if m.kind.is_user() {
             m.body.clone()
-        } else {
+        } else if m.from.is_empty() || m.from == me {
             strip_diff_body(&m.body)
+        } else {
+            format!("{} · {}", m.from, strip_diff_body(&m.body))
         },
         when: if m.ts > 0 {
             when_label(lang, m.ts)

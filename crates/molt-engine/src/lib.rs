@@ -1152,6 +1152,8 @@ pub(crate) struct State {
     /// guaranteed), drained when the `Chat` lands. Bounded; runtime-only —
     /// never persisted, a restart loses parked refs (ephemerality is fine).
     pub(crate) parked: chat::ParkedRefs,
+    /// Wire decision lines: the id lookup and the lines held until decided.
+    pub(crate) decision_lines: net::DecisionLines,
     pub(crate) files: FilePlane,
     /// The GUI's last published rendering claim (`gui_over_mcp.md`):
     /// written only by `Command::UiPublish` (the window's live mirror),
@@ -1464,6 +1466,7 @@ impl State {
             chat_pruned_counts: std::collections::BTreeMap::new(),
             compacted_at: 0,
             parked: chat::ParkedRefs::new(),
+            decision_lines: net::DecisionLines::default(),
             files: FilePlane {
                 wiki_base_fetch: None,
                 wiki_base_next_try: 0,

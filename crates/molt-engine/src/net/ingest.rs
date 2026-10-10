@@ -48,6 +48,36 @@ impl State {
             .any(|declined| crate::chat::decision_summary_id(&republic, id.0, *declined) == msg.id)
     }
 
+    /// Record and announce an admitted wire chat message.
+    pub(super) fn land_wire_chat(&mut self, from: MemberId, msg: molt_core::ChatMessage) {
+        let id = msg.id;
+        let channel = msg.channel.clone();
+        let body = msg.body.clone();
+        let env = self.make_env(from.clone(), WorkspaceEvent::Chat(msg));
+        self.record(env);
+        self.emit(molt_core::Event::Chat {
+            id,
+            from,
+            body,
+            channel,
+        });
+        // P6 drain: refs that outran this message were parked under
+        // its id — the appliers re-evaluate the P5 rules NOW,
+        // against the just-landed link-authenticated message
+        // (delete only from its author, file-removal only from its
+        // sharer, a reaction always — `by` was forced to the link
+        // at park time), through the very same record/emit path a
+        // live arrival takes.
+        for r in self.parked.drain(&id) {
+            match r {
+                PendingRef::React { by, emoji, op } => self.wire_react(id, by, emoji, op),
+                PendingRef::Delete { by } => self.wire_delete(id, by),
+                PendingRef::FileRemove { by } => self.wire_file_remove(id, by),
+                PendingRef::Read { by } => self.wire_read(id, by),
+            }
+        }
+    }
+
     /// The post-gate delivery body (the accept point + the kind match) —
     /// called for direct arrivals and for drained G7 park entries alike.
     pub(super) fn deliver_gated(
@@ -147,32 +177,20 @@ impl State {
                     tracing::warn!(%from, id = %msg.id, "dropping a wire chat message that squats a voted share id");
                     return Ok(Reply::Ack);
                 }
-                let id = msg.id;
-                let channel = msg.channel.clone();
-                let body = msg.body.clone();
-                let env = self.make_env(from.clone(), WorkspaceEvent::Chat(msg));
-                self.record(env);
-                self.emit(molt_core::Event::Chat {
-                    id,
-                    from,
-                    body,
-                    channel,
-                });
-                // P6 drain: refs that outran this message were parked under
-                // its id — the appliers re-evaluate the P5 rules NOW,
-                // against the just-landed link-authenticated message
-                // (delete only from its author, file-removal only from its
-                // sharer, a reaction always — `by` was forced to the link
-                // at park time), through the very same record/emit path a
-                // live arrival takes.
-                for r in self.parked.drain(&id) {
-                    match r {
-                        PendingRef::React { by, emoji, op } => self.wire_react(id, by, emoji, op),
-                        PendingRef::Delete { by } => self.wire_delete(id, by),
-                        PendingRef::FileRemove { by } => self.wire_file_remove(id, by),
-                        PendingRef::Read { by } => self.wire_read(id, by),
+                if let Some((proposal, declined)) = self.decision_id_owner(&msg.id) {
+                    match self.decision_line_verdict(&msg, proposal, declined) {
+                        super::decision_line::Verdict::Genuine => {}
+                        super::decision_line::Verdict::Pending => {
+                            self.hold_decision_line(from, msg);
+                            return Ok(Reply::Ack);
+                        }
+                        super::decision_line::Verdict::Forged => {
+                            tracing::warn!(%from, id = %msg.id, proposal, "dropping a forged decision line");
+                            return Ok(Reply::Ack);
+                        }
                     }
                 }
+                self.land_wire_chat(from, msg);
             }
             // chat-bus B1, the P5 receive-side matrix: the id-addressed chat
             // verbs. Defense in depth mirrors the Chat arm — the acting

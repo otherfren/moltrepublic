@@ -258,7 +258,12 @@ Accepted in the 2026-07-10 review — documented, not fixed:
   republics and chat is ephemeral; the real fix — sender-bound (signed) ids —
   is a protocol decision deferred deliberately. A VOTED share's id is not
   squattable: the wire drops a `Chat` under a Files-state id unless it is
-  that share, and every share door reads the block's identity.
+  that share, and every share door reads the block's identity. Nor is a
+  decision line's: its id is deterministic and so predictable, and the wire
+  admits it only as a System line in its own patch channel whose body is the
+  line this seat would post for the decision it holds - one that outruns the
+  decision is held (bounded, 10 min) until then (`net/decision_line.rs`). A
+  peer's other System lines name their author in the GUI.
 - **Mixed-version reactions degrade to the legacy toggle.**
   `WorkspaceEvent::ChatReacted` now carries an additive idempotent `op`
   (`Add`/`Remove`, `#[serde(default)]`); a peer that does not send it falls

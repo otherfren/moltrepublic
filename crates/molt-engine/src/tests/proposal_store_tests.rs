@@ -402,3 +402,93 @@ fn a_zero_apply_stamp_never_reaches_the_dump() {
         "the applied one carries its stamp"
     );
 }
+
+/// The decision line's id is predictable, so a member can mint it ahead
+/// of the vote. A copy that does not match this seat's own decision never
+/// takes the id: the seat's genuine line lands under it once decided.
+#[test]
+fn a_forged_decision_line_never_takes_the_deterministic_id() {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let (mut walter, _tmp, _dir) = stored_chain_signer(&b, "walter", &["petra", "walter", "dora"]);
+    let payload = json!({ "op": "set_name", "value": "X" });
+    wire(
+        &mut walter,
+        "petra",
+        1,
+        WorkspaceEvent::Proposed { id: ProposalId(4), surface: Surface::Organization, payload: payload.clone() },
+    );
+    let sid = crate::chat::decision_summary_id(&b.republic_id, 4, true);
+    let forged = molt_core::ChatMessage::text(sid, "dora".to_string(), "⚖ #4 ⊘ fake".to_string(), crate::now_secs())
+        .with_channel(molt_core::ChannelRef::Patch { id: ProposalId(4) })
+        .with_kind(molt_core::ChatKind::System);
+    wire(&mut walter, "dora", 1, WorkspaceEvent::Chat(forged));
+    assert!(
+        walter.chat_visible().all(|m| m.id != sid),
+        "an undecided vote shows no decision line"
+    );
+
+    walter.cmd_decline(ProposalId(4), None).expect("own voice");
+    wire(
+        &mut walter,
+        "petra",
+        2,
+        WorkspaceEvent::Declined { id: ProposalId(4), by: "petra".to_string(), hash: String::new() },
+    );
+    walter.cmd_net_delivery_tick().expect("tick");
+    let lines: Vec<(String, String)> = walter
+        .chat_visible()
+        .filter(|m| m.id == sid)
+        .map(|m| (m.from.clone(), m.body.clone()))
+        .collect();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].0, "walter", "the seat's own line holds the id");
+    assert_eq!(lines[0].1, crate::State::decision_summary(4, &payload, Some("petra")));
+}
+
+/// A decision id is only ever the decision line of its own patch channel:
+/// anywhere else, or as a user message, it is a squat and is dropped.
+#[test]
+fn a_decision_id_outside_its_line_is_dropped() {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let (mut walter, _tmp, _dir) = stored_chain_signer(&b, "walter", &["petra", "walter", "dora"]);
+    // proposal 7 is not even known yet: the id is minted ahead
+    let ahead = crate::chat::decision_summary_id(&b.republic_id, 7, false);
+    let in_group = molt_core::ChatMessage::text(ahead, "dora".to_string(), "hi".to_string(), crate::now_secs());
+    wire(&mut walter, "dora", 1, WorkspaceEvent::Chat(in_group));
+    let sid = crate::chat::decision_summary_id(&b.republic_id, 4, false);
+    let as_user = molt_core::ChatMessage::text(sid, "dora".to_string(), "⚖ #4 ✓ x".to_string(), crate::now_secs())
+        .with_channel(molt_core::ChannelRef::Patch { id: ProposalId(4) });
+    wire(&mut walter, "dora", 2, WorkspaceEvent::Chat(as_user));
+    assert!(walter.chat_visible().all(|m| m.id != ahead && m.id != sid));
+}
+
+/// The genuine line may outrun the decision it reports (a catch-up block
+/// still buffered): it is held, and lands once this seat agrees.
+#[test]
+fn a_genuine_decision_line_that_outruns_the_decision_lands_once_decided() {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let (mut walter, _tmp, _dir) = stored_chain_signer(&b, "walter", &["petra", "walter", "dora"]);
+    let payload = json!({ "op": "set_name", "value": "X" });
+    wire(
+        &mut walter,
+        "petra",
+        1,
+        WorkspaceEvent::Proposed { id: ProposalId(4), surface: Surface::Organization, payload: payload.clone() },
+    );
+    let sid = crate::chat::decision_summary_id(&b.republic_id, 4, false);
+    let body = crate::State::decision_summary(4, &payload, None);
+    let line = molt_core::ChatMessage::text(sid, "petra".to_string(), body.clone(), crate::now_secs())
+        .with_channel(molt_core::ChannelRef::Patch { id: ProposalId(4) })
+        .with_kind(molt_core::ChatKind::System);
+    wire(&mut walter, "petra", 2, WorkspaceEvent::Chat(line));
+    assert!(walter.chat_visible().all(|m| m.id != sid), "held while undecided");
+
+    walter.proposals.get_mut(&4).expect("card").state = ProposalState::Applied;
+    walter.cmd_net_delivery_tick().expect("tick");
+    let landed: Vec<(String, String)> = walter
+        .chat_visible()
+        .filter(|m| m.id == sid)
+        .map(|m| (m.from.clone(), m.body.clone()))
+        .collect();
+    assert_eq!(landed, vec![("petra".to_string(), body)]);
+}
