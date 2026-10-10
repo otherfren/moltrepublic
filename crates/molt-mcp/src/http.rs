@@ -8,6 +8,7 @@
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -15,7 +16,7 @@ use http::{header, Request, Response, StatusCode};
 use http_body_util::{combinators::BoxBody, BodyExt, Empty};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use molt_engine::WalletHandle;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorCode,
@@ -60,22 +61,38 @@ impl Http {
         Self { svc }
     }
 
+    /// A connection whose requests have all been refused is closed at
+    /// `deadline`; the timer arms hyper's header read timeout, which also
+    /// bounds an idle keep-alive.
     pub(crate) async fn serve(
         self,
         sock: TcpStream,
         creds: Credentials,
         peer: SocketAddr,
+        deadline: tokio::time::Instant,
     ) -> std::io::Result<()> {
         let creds = Arc::new(creds);
+        let authed = Arc::new(AtomicBool::new(false));
+        let seen = authed.clone();
         let svc = service_fn(move |req: Request<Incoming>| {
             let mut inner = self.svc.clone();
             let creds = creds.clone();
-            async move { Ok::<_, Infallible>(gate(&creds, peer, req, &mut inner).await) }
+            let seen = seen.clone();
+            async move { Ok::<_, Infallible>(gate(&creds, &seen, peer, req, &mut inner).await) }
         });
-        hyper::server::conn::http1::Builder::new()
-            .serve_connection(TokioIo::new(sock), svc)
-            .await
-            .map_err(std::io::Error::other)
+        let conn = hyper::server::conn::http1::Builder::new()
+            .timer(TokioTimer::new())
+            .serve_connection(TokioIo::new(sock), svc);
+        tokio::pin!(conn);
+        tokio::select! {
+            done = conn.as_mut() => return done.map_err(std::io::Error::other),
+            () = tokio::time::sleep_until(deadline) => {}
+        }
+        if !authed.load(Ordering::Acquire) {
+            tracing::warn!(%peer, "MCP connection closed: no auth before deadline");
+            return Ok(());
+        }
+        conn.await.map_err(std::io::Error::other)
     }
 }
 
@@ -89,6 +106,7 @@ fn empty(status: StatusCode) -> http::response::Builder {
 /// extensions; rmcp hands them to the handler as `http::request::Parts`.
 async fn gate(
     creds: &Credentials,
+    authed: &AtomicBool,
     peer: SocketAddr,
     mut req: Request<Incoming>,
     inner: &mut StreamableHttpService<Seat, LocalSessionManager>,
@@ -109,6 +127,7 @@ async fn gate(
             .body(Empty::new().boxed())
             .unwrap_or_default();
     };
+    authed.store(true, Ordering::Release);
     // declared up front so an oversized body is refused before it is read
     // (rmcp bounds the stream as well, for a chunked body)
     let declared = req

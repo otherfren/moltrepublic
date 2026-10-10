@@ -189,6 +189,22 @@ pub async fn serve_listener(
     token: String,
     read_token: String,
 ) -> std::io::Result<()> {
+    serve_listener_with(handle, listener, allow_all, allowlist, token, read_token, PRE_AUTH).await
+}
+
+/// How long a TCP connection may stay unauthenticated before it is closed:
+/// without it, 64 silent peers hold every slot and lock the seat out.
+const PRE_AUTH: std::time::Duration = std::time::Duration::from_secs(10);
+
+async fn serve_listener_with(
+    handle: WalletHandle,
+    listener: TcpListener,
+    allow_all: bool,
+    allowlist: Vec<IpAddr>,
+    token: String,
+    read_token: String,
+    pre_auth: std::time::Duration,
+) -> std::io::Result<()> {
     // bounded (review F7): every accepted socket holds a buffer and costs
     // the actor a session read before it authenticates — a flood must not
     // exhaust either, and one accept error must not end the endpoint
@@ -226,18 +242,23 @@ pub async fn serve_listener(
                 seat: token.clone(),
                 read: read_token.clone(),
             });
+        let deadline = tokio::time::Instant::now() + pre_auth;
         tokio::spawn(async move {
             let _permit = permit; // released with the connection
             // one port, two protocols: an HTTP request opens with its
             // method, a JSON-RPC line with `{`
             let mut first = [0u8; 1];
-            let is_http = matches!(sock.peek(&mut first).await, Ok(1) if first[0].is_ascii_uppercase());
+            let Ok(peeked) = tokio::time::timeout_at(deadline, sock.peek(&mut first)).await else {
+                tracing::warn!(%peer, "MCP connection closed: no auth before deadline");
+                return;
+            };
+            let is_http = matches!(peeked, Ok(1) if first[0].is_ascii_uppercase());
             tracing::info!(%peer, via = if is_http { "http" } else { "line" }, "MCP client connected");
             let outcome = if is_http {
-                http_face.serve(sock, creds, peer).await
+                http_face.serve(sock, creds, peer, deadline).await
             } else {
                 let (r, w) = sock.into_split();
-                serve_conn(h, BufReader::new(r), w, Some(creds)).await
+                serve_conn(h, BufReader::new(r), w, Some((creds, deadline))).await
             };
             if let Err(e) = outcome {
                 tracing::warn!(%peer, error = %e, "MCP connection ended");
@@ -314,20 +335,56 @@ fn secret_eq(given: &str, required: &str) -> bool {
 }
 
 /// The newline-delimited JSON-RPC loop, generic over any reader/writer. When
-/// `auth` is `Some(token)` the client must call `initialize` with a matching
-/// `token` before any other method works; `None` (stdio) skips the gate.
+/// `auth` is `Some` the client must call `initialize` with a matching `token`
+/// before its deadline and before any other method works; `None` (stdio)
+/// skips the gate.
 async fn serve_conn<R, W>(
     handle: WalletHandle,
-    mut reader: R,
-    mut writer: W,
-    auth: Option<Credentials>,
+    reader: R,
+    writer: W,
+    auth: Option<(Credentials, tokio::time::Instant)>,
 ) -> std::io::Result<()>
 where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
+    let (auth, deadline) = match auth {
+        Some((creds, deadline)) => (Some(creds), Some(deadline)),
+        None => (None, None),
+    };
     // stdio (auth == None) is trusted from the start; TCP starts unauthenticated.
     let mut authed: Option<Scope> = auth.is_none().then_some(Scope::Seat);
+    let mut io = (reader, writer);
+    loop {
+        let pending = deadline.filter(|_| authed.is_none());
+        let step = serve_line(&handle, &mut io, auth.as_ref(), &mut authed);
+        let more = match pending {
+            Some(d) => match tokio::time::timeout_at(d, step).await {
+                Ok(more) => more?,
+                Err(_) => {
+                    tracing::warn!("MCP connection closed: no auth before deadline");
+                    return Ok(());
+                }
+            },
+            None => step.await?,
+        };
+        if !more {
+            return Ok(());
+        }
+    }
+}
+
+/// One request line in, at most one reply out; `false` ends the connection.
+async fn serve_line<R, W>(
+    handle: &WalletHandle,
+    (reader, writer): &mut (R, W),
+    auth: Option<&Credentials>,
+    authed: &mut Option<Scope>,
+) -> std::io::Result<bool>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     let mut line = String::new();
     loop {
         line.clear();
@@ -338,12 +395,12 @@ where
         // an out-of-memory kill from a peer that never authenticated. A
         // frame this large is not a request anybody makes; the connection
         // that sent it is done.
-        let n = (&mut reader)
+        let n = (&mut *reader)
             .take(u64::try_from(MAX_RPC_LINE).unwrap_or(u64::MAX))
             .read_line(&mut line)
             .await?;
         if n == 0 {
-            return Ok(()); // EOF
+            return Ok(false); // EOF
         }
         if n >= MAX_RPC_LINE && !line.ends_with('\n') {
             // …and it is NOT skipped: the rest of that line would parse as
@@ -359,14 +416,14 @@ where
             out.push('\n');
             let _ = writer.write_all(out.as_bytes()).await;
             let _ = writer.flush().await;
-            return Ok(());
+            return Ok(false);
         }
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
         let response = match serde_json::from_str::<Value>(trimmed) {
-            Ok(req) => handle_rpc(&handle, req, auth.as_ref(), &mut authed).await,
+            Ok(req) => handle_rpc(handle, req, auth, authed).await,
             Err(e) => Some(error_response(
                 Value::Null,
                 -32700,
@@ -379,6 +436,7 @@ where
             writer.write_all(out.as_bytes()).await?;
             writer.flush().await?;
         }
+        return Ok(true);
     }
 }
 
@@ -2926,6 +2984,10 @@ pub(crate) mod tests {
         }
     }
 
+    fn far() -> tokio::time::Instant {
+        tokio::time::Instant::now() + std::time::Duration::from_secs(3600)
+    }
+
     fn init_req(token: &str) -> Value {
         json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "token": token } })
     }
@@ -4185,7 +4247,7 @@ pub(crate) mod tests {
         // no newline, comfortably past the bound
         let flood = vec![b'x'; MAX_RPC_LINE + 4096];
         let mut out: Vec<u8> = Vec::new();
-        serve_conn(h, BufReader::new(&flood[..]), &mut out, Some(seat_only("secret")))
+        serve_conn(h, BufReader::new(&flood[..]), &mut out, Some((seat_only("secret"), far())))
             .await
             .expect("the server ends the connection, it does not error out");
         let answer = String::from_utf8_lossy(&out);
@@ -4802,4 +4864,148 @@ pub(crate) mod tests {
         assert_eq!(session["wake_skill"], json!("moltrepublic-wake"));
     }
 
+    const PRE_AUTH_TEST: std::time::Duration = std::time::Duration::from_millis(300);
+
+    async fn spawn_bounded(seat: &str) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let handle = wallet();
+        handle
+            .execute(molt_core::Command::PatchSettings {
+                patch: json!({ "mcp_token": seat }),
+            })
+            .await
+            .expect("seed the live key");
+        let seat = seat.to_string();
+        tokio::spawn(async move {
+            let _ = serve_listener_with(
+                handle,
+                listener,
+                false,
+                vec!["127.0.0.1".parse().expect("ip")],
+                seat,
+                String::new(),
+                PRE_AUTH_TEST,
+            )
+            .await;
+        });
+        addr
+    }
+
+    /// The server closed the socket (EOF or reset) within `within`.
+    async fn closed_within(s: &mut tokio::net::TcpStream, within: std::time::Duration) -> bool {
+        let mut buf = [0u8; 4096];
+        let deadline = tokio::time::Instant::now() + within;
+        loop {
+            match tokio::time::timeout_at(deadline, s.read(&mut buf)).await {
+                Err(_) => return false,
+                Ok(Ok(0) | Err(_)) => return true,
+                Ok(Ok(_)) => continue, // a refusal line; keep reading
+            }
+        }
+    }
+
+    /// **A peer that never authenticates cannot hold a connection slot.**
+    /// Silent, half a line, a stalled HTTP head, or wrong tokens over and
+    /// over: each is closed at the pre-auth deadline.
+    #[tokio::test]
+    async fn an_unauthenticated_connection_is_closed_at_the_pre_auth_deadline() {
+        let addr = spawn_bounded("secret").await;
+        let wait = PRE_AUTH_TEST * 6;
+        for opening in [&b""[..], b"{", b"P", b"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n"] {
+            let mut s = tokio::net::TcpStream::connect(addr).await.expect("connect");
+            s.write_all(opening).await.expect("write");
+            assert!(
+                closed_within(&mut s, wait).await,
+                "{:?} still open past the deadline",
+                String::from_utf8_lossy(opening)
+            );
+        }
+        // wrong token, then a keep-alive trickle of refused calls
+        let mut s = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let mut line = serde_json::to_string(&init_req("nope")).expect("json");
+        line.push('\n');
+        s.write_all(line.as_bytes()).await.expect("write");
+        let trickle = async {
+            loop {
+                tokio::time::sleep(PRE_AUTH_TEST / 4).await;
+                let mut l = serde_json::to_string(&tools_list()).expect("json");
+                l.push('\n');
+                if s.write_all(l.as_bytes()).await.is_err() {
+                    return;
+                }
+            }
+        };
+        assert!(
+            tokio::time::timeout(wait, trickle).await.is_ok(),
+            "a refused peer kept its slot"
+        );
+    }
+
+    /// The deadline is pre-auth only: a seat that authenticated keeps an idle
+    /// connection.
+    #[tokio::test]
+    async fn an_authenticated_line_connection_outlives_the_pre_auth_deadline() {
+        let addr = spawn_bounded("secret").await;
+        let s = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let (r, mut w) = s.into_split();
+        let mut r = BufReader::new(r);
+        let mut line = serde_json::to_string(&init_req("secret")).expect("json");
+        line.push('\n');
+        w.write_all(line.as_bytes()).await.expect("write");
+        let mut answer = String::new();
+        r.read_line(&mut answer).await.expect("initialize reply");
+        assert!(answer.contains("\"result\""), "{answer}");
+        tokio::time::sleep(PRE_AUTH_TEST * 3).await;
+        let mut l = serde_json::to_string(&tools_list()).expect("json");
+        l.push('\n');
+        w.write_all(l.as_bytes()).await.expect("still open");
+        answer.clear();
+        r.read_line(&mut answer).await.expect("tools reply");
+        assert!(answer.contains("\"tools\""), "{answer}");
+    }
+
+    /// Over HTTP, one request with a valid bearer makes the connection the
+    /// seat's: its keep-alive outlives the pre-auth deadline.
+    #[tokio::test]
+    async fn an_authenticated_http_connection_outlives_the_pre_auth_deadline() {
+        let addr = spawn_bounded("secret").await;
+        let mut s = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let req = "DELETE /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer secret\r\n\
+                   Content-Length: 0\r\n\r\n";
+        let mut buf = [0u8; 4096];
+        for round in 0..2 {
+            s.write_all(req.as_bytes()).await.expect("write");
+            let n = tokio::time::timeout(PRE_AUTH_TEST * 6, s.read(&mut buf))
+                .await
+                .expect("a reply")
+                .expect("read");
+            let head = String::from_utf8_lossy(&buf[..n]);
+            assert!(head.starts_with("HTTP/1.1 "), "round {round}: {head:?}");
+            assert!(!head.starts_with("HTTP/1.1 401"), "round {round}: {head:?}");
+            tokio::time::sleep(PRE_AUTH_TEST * 2).await;
+        }
+    }
+
+    /// The attack itself: every slot held by a silent peer used to lock the
+    /// seat out for as long as the peer liked.
+    #[tokio::test]
+    async fn silent_peers_cannot_lock_the_seat_out() {
+        let addr = spawn_bounded("secret").await;
+        let mut squatters = Vec::new();
+        for _ in 0..MAX_CONNECTIONS {
+            squatters.push(tokio::net::TcpStream::connect(addr).await.expect("connect"));
+        }
+        tokio::time::sleep(PRE_AUTH_TEST * 3).await;
+        let s = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let (r, mut w) = s.into_split();
+        let mut r = BufReader::new(r);
+        let mut line = serde_json::to_string(&init_req("secret")).expect("json");
+        line.push('\n');
+        w.write_all(line.as_bytes()).await.expect("write");
+        let mut answer = String::new();
+        let _ = tokio::time::timeout(PRE_AUTH_TEST * 6, r.read_line(&mut answer)).await;
+        assert!(answer.contains("\"result\""), "seat locked out: {answer:?}");
+        drop(squatters);
+    }
 }

@@ -50,6 +50,11 @@ token = "2d6f1183510ee92cb59ba355a3f1b502274df9bf708f1bce"
   `Mcp-Session-Id`, GET/DELETE answer 405) and answers `application/json`; the
   client's `Host` must be loopback while `allow` is loopback-only (DNS-rebinding
   guard), and a browser `Origin` is not validated.
+* **At most 64 connections, and none stays unauthenticated.** A connection that
+  has not authenticated within 10 s (a line `initialize` with a valid token, or
+  one HTTP request with a valid bearer) is closed, so silent peers cannot hold
+  the slots. An HTTP keep-alive idles out after 30 s (hyper's header read
+  timeout); an authenticated line connection has no idle limit.
 
 ### Bind address
 
