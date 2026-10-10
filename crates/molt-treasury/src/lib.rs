@@ -12,6 +12,8 @@ pub mod attest;
 pub mod dkg;
 pub mod keys;
 pub mod scan;
+#[cfg(any(test, feature = "test-blocks"))]
+pub mod testing;
 
 pub use dalek_ff_group::{Ed25519, EdwardsPoint};
 pub use dkg_pedpop::{KeyMachine, Participant, SecretShareMachine, ThresholdKeys, ThresholdParams};

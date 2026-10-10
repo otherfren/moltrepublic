@@ -3,8 +3,7 @@
 //! The purse (`docs/chain/wallet_treasury_design.md`): its read model, the
 //! init vote (§3.1, the only door) and the command handlers. The run lives
 //! in `wallet_run.rs`, this seat's standing (founding stage, status, view
-//! key) in `wallet_seat.rs`; the scanner lands with plan §14 step 8 and
-//! refuses with one line until then.
+//! key) in `wallet_seat.rs`, the scanner in `wallet_scan.rs`.
 
 use std::collections::BTreeSet;
 
@@ -28,11 +27,6 @@ pub(crate) const BIRTHDAY_WINDOW: u64 = 1440;
 /// A daemon height older than this is asked again before a birthday is
 /// judged against it.
 const PROBE_FRESH_SECS: u64 = 120;
-
-/// What a not-yet-built door answers.
-fn not_yet() -> Result<Reply, MoltError> {
-    Err(MoltError::Wallet(WalletRefusal::NotYet))
-}
 
 fn op(payload: &Value) -> Option<&str> {
     payload.get("op").and_then(Value::as_str)
@@ -92,6 +86,8 @@ pub(crate) struct PurseRt {
     pub(crate) run: crate::wallet_run::RunRt,
     /// The founding stage, the key part statuses, a view key without a part.
     pub(crate) seat: crate::wallet_seat::SeatRt,
+    /// The scanner.
+    pub(crate) scan: crate::wallet_scan::ScanRt,
 }
 
 impl State {
@@ -252,7 +248,6 @@ impl State {
     pub(crate) fn wallet_view(&self) -> WalletView {
         let rule = self.wallet_rule();
         let (m, n) = rule.unwrap_or((0, 0));
-        // TODO(step 7b): the others' key part status; TODO(step 8): balance, history.
         let purse = self.wallet_purse();
         let phase = match rule {
             None => WalletPhase::Off,
@@ -278,20 +273,27 @@ impl State {
                 .collect(),
             None => Vec::new(),
         };
+        let scan = self.wallet_scan_shown();
+        let watch = purse.is_some() && self.wallet_held_view().is_some();
         WalletView {
             address: purse.as_ref().map(|p| p.created.address.clone()).unwrap_or_default(),
+            balance: if watch { scan.balance } else { 0 },
+            pending: if watch { scan.pending } else { 0 },
+            scan_height: scan.scan_height,
+            scan_paused: scan.paused,
+            history: if watch { scan.history } else { Vec::new() },
             network: purse.as_ref().map_or_else(
                 || self.session.settings.wallet_network.clone(),
                 |p| crate::wallet_run::network_word(p.created.network).to_string(),
             ),
             run: self.wallet_run_view(),
             shareholders,
-            daemon_height: self.purse.height.map_or(0, |(h, _)| h),
-            connected: self.purse.height.is_some(),
+            daemon_height: scan.daemon_height.or(self.purse.height.map(|(h, _)| h)).unwrap_or(0),
+            connected: scan.connected.unwrap_or(self.purse.height.is_some()),
             threshold: u32::from(m),
             participants: u32::from(n),
             phase,
-            can_watch: self.wallet_held_view().is_some(),
+            can_watch: watch,
             founding: self.purse.seat.founding,
             ..WalletView::default()
         }
@@ -469,12 +471,6 @@ impl State {
             let _ = self.start_wallet_probe(None);
         }
         WalletRefusal::Held(Box::new(refusal))
-    }
-
-    /// The INTERNAL scan feed.
-    pub(crate) fn cmd_net_wallet_unbuilt(&mut self) -> Result<Reply, MoltError> {
-        // TODO(step 8): NetWalletScan.
-        not_yet()
     }
 
     /// [`molt_core::Command::WalletAcknowledgeLoss`] (W5): the open

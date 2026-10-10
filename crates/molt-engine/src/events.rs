@@ -778,6 +778,8 @@ impl State {
         self.purse.consent.clear();
         self.purse.run = crate::wallet_run::RunRt::default();
         self.purse.seat = crate::wallet_seat::SeatRt::default();
+        // the scanner only reads: aborting drops nothing in flight
+        self.purse.scan.reset();
         self.cancel_wallet_init();
         self.transport_kind = None;
         self.nostr = None;

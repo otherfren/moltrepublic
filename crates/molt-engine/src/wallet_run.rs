@@ -51,6 +51,8 @@ pub(crate) struct WalletSeams {
     pub(crate) start: std::sync::Mutex<Option<[u8; 32]>>,
     /// The current run's nonce, as the last progress saw it.
     pub(crate) current: std::sync::Mutex<Option<[u8; 32]>>,
+    /// Overrides the scanner's poll and retry base, milliseconds.
+    pub(crate) scan_poll_ms: AtomicU64,
 }
 
 /// One run this seat takes part in.
@@ -1248,6 +1250,7 @@ impl State {
     /// The beat: seams, deadlines, fallbacks, resends.
     pub(crate) fn wallet_run_tick(&mut self, now: u64) {
         self.wallet_seat_tick(now);
+        self.wallet_scan_tick();
         let forced = self.wallet_seams.start.lock().ok().and_then(|mut s| s.take());
         if let Some(nonce) = forced {
             if let Err(e) = self.wallet_start(Some(nonce)) {

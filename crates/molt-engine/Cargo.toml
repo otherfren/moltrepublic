@@ -50,6 +50,8 @@ tantivy.workspace = true
 [dev-dependencies]
 # the in-process monerod double for the purse tests
 molt-net = { workspace = true, features = ["stub-daemon"] }
+# real blocks paying the purse for the stub daemon
+molt-treasury = { workspace = true, features = ["test-blocks"] }
 # a backup whose purse keys file does not authenticate
 molt-storage = { workspace = true, features = ["test-forge"] }
 tempfile.workspace = true

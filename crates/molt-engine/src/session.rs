@@ -1446,6 +1446,7 @@ impl State {
             String::new()
         });
         let wallet_records = opened.read_wallet_keys();
+        let wallet_scan = opened.read_wallet_scan();
         // point of no return: swap the actor state to the new workspace
         self.close_active_storage();
         self.reset_workspace_state();
@@ -1566,6 +1567,7 @@ impl State {
         self.resume_file_jobs(&transport_state);
         self.wallet_load_seat(&transport_state);
         self.wallet_on_open(wallet_records);
+        self.wallet_scan_on_open(wallet_scan);
         Ok(transport_state)
     }
 

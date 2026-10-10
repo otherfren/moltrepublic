@@ -152,6 +152,35 @@ async fn a_founding_with_wallet_runs_the_purse_stage() {
     assert!(progress, "the stage reaches the frontends");
 }
 
+/// Plan §7.3: the lowest position with a daemon proposes; position 1
+/// without one leaves it to position 2, one step after the stage armed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_next_position_proposes_when_the_first_has_no_daemon() {
+    let relay = MockRelay::run().await.expect("relay");
+    let tmp = tempfile::tempdir().expect("tmp");
+    let url = relay.url().await.to_string();
+    let armed = tokio::time::Instant::now();
+    let (all, _ds) = founded(&url, tmp.path(), &["memory", "wallet"], [false, true, true]).await;
+    let step = Duration::from_secs(DEADLINE / 4);
+    let early = armed.elapsed();
+    if early + Duration::from_secs(1) < step {
+        assert!(wallet_cards(&all[0]).await.is_empty(), "nothing before position 2's wait");
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    let card = loop {
+        if let Some(p) = wallet_cards(&all[0]).await.into_iter().find(|p| p.payload["op"] == "wallet_init") {
+            break p;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "no init from position 2");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(card.by, "b", "position 2 proposes");
+    assert!(armed.elapsed() >= step, "after its wait");
+    tokio::time::sleep(step).await;
+    let inits = wallet_cards(&all[0]).await.into_iter().filter(|p| p.payload["op"] == "wallet_init").count();
+    assert_eq!(inits, 1, "position 3 sees it and stays quiet");
+}
+
 /// Plan §10.30 (I15): a seat without a daemon stops the stage; the
 /// republic stays founded and the purse comes once it has one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

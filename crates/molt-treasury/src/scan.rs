@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use dalek_ff_group::EdwardsPoint;
 use monero_wallet::ed25519::Scalar;
+use monero_wallet::address::{MoneroAddress, Network};
 use monero_wallet::interface::ScannableBlock;
 use monero_wallet::transaction::Timelock;
 use monero_wallet::{ScanError, Scanner};
@@ -17,7 +18,7 @@ use molt_core::{put_bytes, put_count};
 use crate::keys::view_pair;
 use crate::{Reader, TreasuryError};
 
-const SCAN_TAG: &[u8] = b"molt-wallet-scan-v1";
+const SCAN_TAG: &[u8] = b"molt-wallet-scan-v2";
 
 /// Confirmations before an output counts as balance.
 pub const CONFIRMATIONS: u64 = 20;
@@ -33,6 +34,8 @@ pub struct Received {
     pub amount: u64,
     /// The block it is in.
     pub height: u64,
+    /// That block's time, unix seconds.
+    pub at: u64,
     /// Its transaction hash.
     pub tx: [u8; 32],
     /// Its position in that transaction.
@@ -122,12 +125,23 @@ impl StandardScanner {
     pub fn new(spend: EdwardsPoint, view: Zeroizing<Scalar>) -> Result<Self, TreasuryError> {
         Ok(Self(Scanner::new(view_pair(spend, view)?)))
     }
+
+    /// The scanner of a standard address whose view key `view` opens it.
+    pub fn for_address(address: &str, network: Network, view: &[u8; 32]) -> Result<Self, TreasuryError> {
+        if !crate::keys::view_matches(address, network, view) {
+            return Err(TreasuryError::SpendKey);
+        }
+        let addr = MoneroAddress::from_str(network, address).map_err(|_| TreasuryError::SpendKey)?;
+        let scalar = Scalar::read(&mut view.as_slice()).map_err(|_| TreasuryError::SpendKey)?;
+        Self::new(EdwardsPoint(addr.spend().into()), Zeroizing::new(scalar))
+    }
 }
 
 impl BlockScanner for StandardScanner {
     fn scan_block(&mut self, block: ScannableBlock) -> Result<Vec<Received>, ScanFault> {
         let height = u64::try_from(block.block.number())
             .map_err(|_| ScanFault::Daemon("block number".into()))?;
+        let at = block.block.header.timestamp;
         Ok(self
             .0
             .scan(block)?
@@ -137,6 +151,7 @@ impl BlockScanner for StandardScanner {
                 key: o.key().compress().to_bytes(),
                 amount: o.commitment().amount,
                 height,
+                at,
                 tx: o.transaction(),
                 index_in_tx: o.index_in_transaction(),
                 lock: o.additional_timelock().into(),
@@ -182,6 +197,11 @@ impl ScanState {
     /// The block to scan next.
     pub fn next_height(&self) -> u64 {
         self.next
+    }
+
+    /// The purse's birthday height.
+    pub fn birthday(&self) -> u64 {
+        self.birthday
     }
 
     /// The outputs held, first seen first.
@@ -236,7 +256,7 @@ impl ScanState {
     }
 
     /// The scan file's bytes: `tag ‖ birthday ‖ next ‖ count ‖ (height ‖
-    /// hash)* ‖ count ‖ (key ‖ amount ‖ height ‖ tx ‖ index ‖ lock kind ‖
+    /// hash)* ‖ count ‖ (key ‖ amount ‖ height ‖ at ‖ tx ‖ index ‖ lock kind ‖
     /// lock value)*`; the seen keys are the outputs' keys.
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -253,6 +273,7 @@ impl ScanState {
             out.extend_from_slice(&r.key);
             out.extend_from_slice(&r.amount.to_le_bytes());
             out.extend_from_slice(&r.height.to_le_bytes());
+            out.extend_from_slice(&r.at.to_le_bytes());
             out.extend_from_slice(&r.tx);
             out.extend_from_slice(&r.index_in_tx.to_le_bytes());
             let (kind, value) = match r.lock {
@@ -302,6 +323,7 @@ impl ScanState {
             let key = r.array()?;
             let amount = r.u64()?;
             let height = r.u64()?;
+            let at = r.u64()?;
             let tx = r.array()?;
             let index_in_tx = r.u64()?;
             let lock = match (r.u8()?, r.u64()?) {
@@ -317,6 +339,7 @@ impl ScanState {
                 key,
                 amount,
                 height,
+                at,
                 tx,
                 index_in_tx,
                 lock,

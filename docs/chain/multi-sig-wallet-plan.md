@@ -723,8 +723,26 @@ Fork-Höhen fest. Bis dahin `can_spend = false`, kein `sign.rs`.
      chain) settles on the next beat. §10.29–31, 38b, 40–41 run end to
      end (`tests/wallet_stage.rs`); the status, ask/answer and arming
      rules also as unit tests (`wallet_run_tests.rs`).
-8. [ ] §7.9 Scanner; manueller regtest-Lauf (the RPC transport landed
-   with step 6).
+8. [x] §7.9 Scanner; manueller regtest-Lauf (2026-10-10). The scanner
+   lives in `molt-engine/src/wallet_scan.rs`: one task while a purse, its
+   view key and a dialable daemon exist (fingerprinted; a change restarts
+   it), aborted in `reset_workspace_state`. It owns the `ScanState`,
+   fetches at most 100 blocks per `get_blocks.bin`
+   (`monero_rpc::scannable_blocks`) and reports each round through
+   `NetWalletScan`, which gained `connected` and the state's bytes; the
+   actor persists changed bytes and fills the view. Polls every 30 s,
+   retries from 10 s doubling to 10 min, a fork pause hourly. A decode
+   error (`DaemonError::Fault`) shows as `scan_paused = "daemon fault"`
+   with `connected` true; only `update needed` emits `WalletScanPaused`.
+   History is one row per transaction, newest first; confirmations are
+   `daemon_height - height`, as the balance rule counts them. The scan
+   layout is `molt-wallet-scan-v2`: each output carries its block's time
+   (a v1 file reads as damage: one rescan). `molt-treasury`'s
+   `test-blocks` feature builds the real blocks the stub daemon serves
+   (a payment is a miner output without its lock).
+   Regtest: monerod (fakechain) takes mainnet addresses.
+   §10 tests: `tests/wallet_scan.rs`, `tests/wallet_regtest.rs`
+   (`#[ignore]`, `MOLT_TEST_MONEROD`).
 9. [ ] §11 UI.
 10. [ ] clippy pro Crate = 0; Suiten grün; Review über den Gesamt-Diff;
     master.

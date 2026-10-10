@@ -108,14 +108,12 @@ async fn the_unbuilt_doors_refuse_compactly() {
     let scan = Command::NetWalletScan {
         scan_height: 1,
         daemon_height: 2,
-        paused: None,
+        paused: Some("update needed".to_string()),
         error: String::new(),
+        connected: true,
+        state: secret(),
         generation: None,
     };
-    match w.execute(scan).await {
-        Err(e @ MoltError::Wallet(WalletRefusal::NotYet)) => {
-            assert_eq!(e.to_string(), "purse: not available yet");
-        }
-        other => panic!("unexpected: {other:?}"),
-    }
+    assert!(matches!(w.execute(scan).await, Ok(Reply::Ack)), "no scanner: dropped");
+    assert!(wallet_view(&w).await.scan_paused.is_none());
 }

@@ -19,6 +19,7 @@ fn out(key: u8, amount: u64, height: u64) -> Received {
         key: [key; 32],
         amount,
         height,
+        at: 0,
         tx: [key; 32],
         index_in_tx: 0,
         lock: Lock::None,
@@ -206,7 +207,7 @@ fn mined_block(number: usize, amount: u64) -> ScannableBlock {
     let header = BlockHeader {
         hardfork_version: 16,
         hardfork_signal: 16,
-        timestamp: 0,
+        timestamp: 1_600_000_000 + u64::try_from(number).expect("number"),
         previous: [0; 32],
         nonce: 0,
     };
@@ -223,6 +224,7 @@ fn a_mined_output_carries_its_lock() {
     assert_eq!(found.len(), 1);
     assert_eq!((found[0].amount, found[0].height), (9, 500));
     assert_eq!(found[0].lock, Lock::Block(560));
+    assert_eq!(found[0].at, 1_600_000_500, "the block's time");
 
     let mut s = ScanState::new(500);
     s.apply(500, hash(500, 0), hash(499, 0), found);
@@ -255,4 +257,22 @@ fn an_identity_spend_key_has_no_scanner() {
     use ciphersuite::group::Group;
     let view = Zeroizing::new(MoneroScalar::hash(b"scan test view"));
     assert!(StandardScanner::new(EdwardsPoint::identity(), view).is_err());
+}
+
+#[test]
+fn a_scanner_opens_from_the_address_and_its_view_key() {
+    use ciphersuite::group::Group;
+    use molt_treasury::keys::{scalar_bytes, standard_address};
+    use molt_treasury::Network;
+    let view = Zeroizing::new(MoneroScalar::hash(b"scan test view"));
+    let address = standard_address(EdwardsPoint::generator(), view.clone(), Network::Mainnet)
+        .expect("address")
+        .to_string();
+    let key = scalar_bytes(&view);
+    let mut sc = StandardScanner::for_address(&address, Network::Mainnet, &key).expect("opens");
+    let found = sc.scan_block(mined_block(500, 9)).expect("scan");
+    assert_eq!(found.len(), 1, "the same purse as from the keys");
+    let other = scalar_bytes(&MoneroScalar::hash(b"another view"));
+    assert!(StandardScanner::for_address(&address, Network::Mainnet, &other).is_err(), "a view key the address does not carry");
+    assert!(StandardScanner::for_address(&address, Network::Testnet, &key).is_err(), "another network");
 }

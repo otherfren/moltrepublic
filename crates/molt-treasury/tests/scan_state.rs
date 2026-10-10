@@ -11,6 +11,7 @@ fn out(key: u8, amount: u64, height: u64, lock: Lock) -> Received {
         key: [key; 32],
         amount,
         height,
+        at: 1_700_000_000 + height,
         tx: [key ^ 0xff; 32],
         index_in_tx: u64::from(key),
         lock,
@@ -56,7 +57,7 @@ fn the_scan_state_layout_is_pinned() {
     let mut s = ScanState::new(10);
     s.apply(10, hash(10), hash(9), vec![out(1, 5, 10, Lock::Block(70))]);
     let mut want = Vec::new();
-    put_bytes(&mut want, b"molt-wallet-scan-v1");
+    put_bytes(&mut want, b"molt-wallet-scan-v2");
     want.extend_from_slice(&10u64.to_le_bytes());
     want.extend_from_slice(&11u64.to_le_bytes());
     want.extend_from_slice(&1u32.to_le_bytes());
@@ -66,6 +67,7 @@ fn the_scan_state_layout_is_pinned() {
     want.extend_from_slice(&[1; 32]);
     want.extend_from_slice(&5u64.to_le_bytes());
     want.extend_from_slice(&10u64.to_le_bytes());
+    want.extend_from_slice(&1_700_000_010u64.to_le_bytes());
     want.extend_from_slice(&[0xfe; 32]);
     want.extend_from_slice(&1u64.to_le_bytes());
     want.push(1);
@@ -90,7 +92,7 @@ fn a_damaged_scan_state_is_refused() {
     let base = s.encode();
     let at = |field_from_end: usize| base.len() - field_from_end;
     let mut low = base.clone();
-    let h = at(8 + 1 + 8 + 32 + 8);
+    let h = at(8 + 1 + 8 + 32 + 8 + 8);
     low[h..h + 8].copy_from_slice(&9u64.to_le_bytes());
     assert!(refused(&low), "output below the birthday");
     let mut lock = base.clone();
@@ -105,13 +107,13 @@ fn a_damaged_scan_state_is_refused() {
     twice.apply(10, hash(10), hash(9), vec![out(1, 5, 10, Lock::None)]);
     twice.apply(11, hash(11), hash(10), vec![out(2, 5, 11, Lock::None)]);
     let mut dup = twice.encode();
-    let second = dup.len() - (32 + 8 + 8 + 32 + 8 + 1 + 8);
+    let second = dup.len() - (32 + 8 + 8 + 8 + 32 + 8 + 1 + 8);
     dup[second..second + 32].copy_from_slice(&[1; 32]);
     assert!(refused(&dup), "a repeated output key");
 
     let mut ahead = base;
     // `next` sits after the tag and the birthday
-    let n = 4 + b"molt-wallet-scan-v1".len() + 8;
+    let n = 4 + b"molt-wallet-scan-v2".len() + 8;
     ahead[n..n + 8].copy_from_slice(&10u64.to_le_bytes());
     assert!(refused(&ahead), "next at a held block and output");
 }
@@ -119,7 +121,7 @@ fn a_damaged_scan_state_is_refused() {
 /// An output-free image: `birthday`, `next`, and the remembered heights.
 fn window(birthday: u64, next: u64, heights: &[u64]) -> Vec<u8> {
     let mut b = Vec::new();
-    put_bytes(&mut b, b"molt-wallet-scan-v1");
+    put_bytes(&mut b, b"molt-wallet-scan-v2");
     b.extend_from_slice(&birthday.to_le_bytes());
     b.extend_from_slice(&next.to_le_bytes());
     b.extend_from_slice(&u32::try_from(heights.len()).expect("count").to_le_bytes());

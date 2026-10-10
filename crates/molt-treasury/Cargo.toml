@@ -12,6 +12,10 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Real blocks for the stub daemon (other crates' tests).
+test-blocks = []
+
 [dependencies]
 molt-core.workspace = true
 dkg.workspace = true

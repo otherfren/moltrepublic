@@ -59,6 +59,7 @@ mod vault;
 mod wake;
 mod wallet;
 mod wallet_run;
+mod wallet_scan;
 mod wallet_seat;
 mod wiki_export;
 mod wiki_index;
@@ -231,6 +232,14 @@ impl WalletHandle {
     #[doc(hidden)]
     pub fn __wallet_deadline(&self, secs: u64) {
         self.wallet_seams.deadline.store(secs, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam (wallet plan §7.9): the scanner polls (and retries) every
+    /// `every`; zero restores the defaults.
+    #[doc(hidden)]
+    pub fn __wallet_scan_poll(&self, every: std::time::Duration) {
+        let ms = u64::try_from(every.as_millis()).unwrap_or(u64::MAX);
+        self.wallet_seams.scan_poll_ms.store(ms, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Test seam (wallet plan §10.38): while set, this seat persists its
@@ -2269,7 +2278,17 @@ impl State {
                 }
                 self.cmd_net_wallet_view_answer(&from, &view.0)
             }
-            Command::NetWalletScan { .. } => self.cmd_net_wallet_unbuilt(),
+            Command::NetWalletScan { scan_height, daemon_height, paused, error, connected, state, generation } => {
+                self.cmd_net_wallet_scan(crate::wallet_scan::ScanReport {
+                    scan_height,
+                    daemon_height,
+                    paused,
+                    error,
+                    connected,
+                    state: state.0.clone(),
+                    generation,
+                })
+            }
             Command::RecoverInviteStart { member } => self.cmd_recover_invite_start(member),
             Command::RecoverStart { link, phrase } => self.cmd_recover_start(link, phrase),
             Command::NetRecoverSealed {

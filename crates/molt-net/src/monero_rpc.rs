@@ -10,7 +10,9 @@
 use std::sync::{Arc, Mutex};
 
 use molt_core::relay::RelayKind;
-use monero_daemon_rpc::prelude::{InterfaceError, MoneroDaemon, ProvidesBlockchainMeta};
+use monero_daemon_rpc::prelude::{
+    InterfaceError, MoneroDaemon, ProvidesBlockchainMeta, ProvidesScannableBlocks, ScannableBlock,
+};
 use monero_daemon_rpc::HttpTransport;
 use zeroize::Zeroizing;
 
@@ -48,6 +50,9 @@ pub enum DaemonError {
     /// Dial, HTTP or RPC failure.
     #[error("daemon: {0}")]
     Rpc(String),
+    /// The daemon answered something that does not decode or check out.
+    #[error("daemon fault: {0}")]
+    Fault(String),
 }
 
 /// A daemon reachable under this node's policy.
@@ -252,6 +257,21 @@ pub async fn daemon_height(transport: DaemonTransport) -> Result<u64, DaemonErro
     u64::try_from(n).map_err(|_| DaemonError::Rpc("height".to_string()))
 }
 
+/// Blocks `from..=to`, each building on the one before (one
+/// `get_blocks.bin` per round trip, at most the blocks asked for).
+///
+/// # Errors
+/// [`DaemonError::Fault`] when the answer does not decode or check out,
+/// else the dial, login or RPC failure.
+pub async fn scannable_blocks(transport: DaemonTransport, from: u64, to: u64) -> Result<Vec<ScannableBlock>, DaemonError> {
+    let range = usize::try_from(from).map_err(|_| DaemonError::Rpc("height".to_string()))?
+        ..=usize::try_from(to).map_err(|_| DaemonError::Rpc("height".to_string()))?;
+    let daemon = MoneroDaemon::new(transport).await.map_err(|e| unwrap_error(&e))?;
+    ProvidesScannableBlocks::contiguous_scannable_blocks(&daemon, range)
+        .await
+        .map_err(|e| unwrap_error(&e))
+}
+
 /// `get_info`'s `synchronized`; a daemon that omits it counts as caught up.
 async fn synchronized(transport: &DaemonTransport) -> Result<bool, DaemonError> {
     const REQ: &str = r#"{"jsonrpc":"2.0","id":0,"method":"get_info"}"#;
@@ -268,16 +288,17 @@ fn unwrap_error(e: &InterfaceError) -> DaemonError {
         InterfaceError::InterfaceError(s) => {
             DaemonError::Rpc(s.strip_prefix("daemon: ").unwrap_or(s).to_string())
         }
-        other => DaemonError::Rpc(other.to_string()),
+        InterfaceError::InvalidInterface(s) | InterfaceError::InternalError(s) => DaemonError::Fault(s.clone()),
     }
 }
 
-/// An in-process monerod double: `json_rpc` and `get_height`, optionally
-/// behind a digest login. Test-only.
+/// An in-process monerod double: `json_rpc`, `get_height` and
+/// `get_blocks.bin` over a chain the test sets, optionally behind a digest
+/// login. Test-only.
 #[cfg(any(test, feature = "stub-daemon"))]
 pub mod stub {
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use md5::{Digest, Md5};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -290,9 +311,27 @@ pub mod stub {
     pub struct StubDaemon {
         /// `http://127.0.0.1:<port>`.
         pub url: String,
-        height: Arc<AtomicU64>,
+        chain: Arc<Chain>,
         hits: Arc<AtomicUsize>,
         task: tokio::task::JoinHandle<()>,
+    }
+
+    /// One block the stub serves: its encoding and its miner transaction's output count.
+    #[derive(Debug, Clone)]
+    pub struct StubBlock {
+        /// The consensus encoding.
+        pub blob: Vec<u8>,
+        /// Outputs of its miner transaction.
+        pub outputs: usize,
+    }
+
+    #[derive(Default)]
+    struct Chain {
+        height: AtomicU64,
+        /// Blocks from `base` on; `get_height` follows them once set.
+        blocks: Mutex<(u64, Vec<StubBlock>)>,
+        /// `get_blocks.bin` answers bytes that do not decode.
+        garbage: AtomicBool,
     }
 
     /// How the stub answers.
@@ -317,9 +356,9 @@ pub mod stub {
         pub async fn start(height: u64, config: StubConfig) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
             let url = format!("http://{}", listener.local_addr().expect("addr"));
-            let height = Arc::new(AtomicU64::new(height));
+            let chain = Arc::new(Chain { height: AtomicU64::new(height), ..Chain::default() });
             let hits = Arc::new(AtomicUsize::new(0));
-            let (h, n) = (height.clone(), hits.clone());
+            let (h, n) = (chain.clone(), hits.clone());
             let task = tokio::spawn(async move {
                 while let Ok((s, _)) = listener.accept().await {
                     let (h, n, c) = (h.clone(), n.clone(), config.clone());
@@ -328,12 +367,26 @@ pub mod stub {
                     });
                 }
             });
-            Self { url, height, hits, task }
+            Self { url, chain, hits, task }
         }
 
         /// Move the chain tip.
         pub fn set_height(&self, height: u64) {
-            self.height.store(height, Ordering::SeqCst);
+            self.chain.height.store(height, Ordering::SeqCst);
+        }
+
+        /// Serve `blocks` as blocks `base..`; the tip is the last one.
+        pub fn set_chain(&self, base: u64, blocks: Vec<StubBlock>) {
+            let tip = (base + u64::try_from(blocks.len()).expect("len")).saturating_sub(1);
+            if let Ok(mut c) = self.chain.blocks.lock() {
+                *c = (base, blocks);
+            }
+            self.chain.height.store(tip, Ordering::SeqCst);
+        }
+
+        /// Answer `get_blocks.bin` with bytes that do not decode.
+        pub fn set_garbage(&self, on: bool) {
+            self.chain.garbage.store(on, Ordering::SeqCst);
         }
 
         /// Requests answered with 200.
@@ -365,9 +418,84 @@ pub mod stub {
         get("response") == want
     }
 
+    fn varint(out: &mut Vec<u8>, v: usize) {
+        let v = u64::try_from(v).expect("small");
+        let (len, mark) = match v {
+            0..=63 => (1, 0),
+            64..=16_383 => (2, 1),
+            16_384..=1_073_741_823 => (4, 2),
+            _ => (8, 3),
+        };
+        out.extend_from_slice(&((v << 2) | mark).to_le_bytes()[..len]);
+    }
+
+    fn key(out: &mut Vec<u8>, k: &str, kind: u8) {
+        out.push(u8::try_from(k.len()).expect("short key"));
+        out.extend_from_slice(k.as_bytes());
+        out.push(kind);
+    }
+
+    const STRING: u8 = 10;
+    const OBJECT: u8 = 12;
+    const UINT64: u8 = 5;
+    const ARRAY: u8 = 0x80;
+
+    /// The u64 after `name` in an epee request (key, type byte, then 8 bytes).
+    fn request_u64(body: &[u8], name: &[u8]) -> Option<u64> {
+        let at = body.windows(name.len()).position(|w| w == name)? + name.len() + 1;
+        Some(u64::from_le_bytes(body.get(at..at + 8)?.try_into().ok()?))
+    }
+
+    /// `get_blocks.bin`: the blocks from `start_height`, at most `max_block_count`.
+    fn blocks_bin(chain: &Chain, body: &[u8]) -> Vec<u8> {
+        let start = request_u64(body, b"start_height").unwrap_or(0);
+        let max = request_u64(body, b"max_block_count").unwrap_or(u64::MAX).max(1);
+        let (base, blocks) = chain.blocks.lock().map(|c| c.clone()).unwrap_or_default();
+        let from = usize::try_from(start.saturating_sub(base)).unwrap_or(usize::MAX);
+        let mut index: u64 = blocks.iter().take(from).map(|b| u64::try_from(b.outputs).unwrap_or(0)).sum();
+        let served: Vec<&StubBlock> = blocks.iter().skip(from).take(usize::try_from(max).unwrap_or(usize::MAX)).collect();
+        let mut out = vec![0x01, 0x11, 0x01, 0x01, 0x01, 0x01, 0x02, 0x01, 1];
+        varint(&mut out, 3);
+        key(&mut out, "status", STRING);
+        varint(&mut out, 2);
+        out.extend_from_slice(b"OK");
+        key(&mut out, "blocks", OBJECT | ARRAY);
+        varint(&mut out, served.len());
+        for b in &served {
+            varint(&mut out, 1);
+            key(&mut out, "block", STRING);
+            if chain.garbage.load(Ordering::SeqCst) {
+                varint(&mut out, 3);
+                out.extend_from_slice(&[0xff; 3]);
+            } else {
+                varint(&mut out, b.blob.len());
+                out.extend_from_slice(&b.blob);
+            }
+        }
+        key(&mut out, "output_indices", OBJECT | ARRAY);
+        varint(&mut out, served.len());
+        for b in &served {
+            varint(&mut out, 1);
+            key(&mut out, "indices", OBJECT | ARRAY);
+            varint(&mut out, 1);
+            if b.outputs == 0 {
+                varint(&mut out, 0);
+                continue;
+            }
+            varint(&mut out, 1);
+            key(&mut out, "indices", UINT64 | ARRAY);
+            varint(&mut out, b.outputs);
+            for _ in 0..b.outputs {
+                out.extend_from_slice(&index.to_le_bytes());
+                index += 1;
+            }
+        }
+        out
+    }
+
     async fn serve(
         mut s: TcpStream,
-        height: &AtomicU64,
+        chain: &Chain,
         hits: &AtomicUsize,
         config: &StubConfig,
     ) -> std::io::Result<()> {
@@ -408,6 +536,14 @@ pub mod stub {
                 return s.write_all(challenge.as_bytes()).await;
             }
         }
+        if path == "/get_blocks.bin" {
+            let body = blocks_bin(chain, &buf[body_at..]);
+            hits.fetch_add(1, Ordering::SeqCst);
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+            s.write_all(head.as_bytes()).await?;
+            return s.write_all(&body).await;
+        }
+        let height = &chain.height;
         let body = match path.as_str() {
             "/json_rpc" if String::from_utf8_lossy(&buf[body_at..]).contains("get_info") => format!(
                 "{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{\"synchronized\":{},\"status\":\"OK\"}}}}",
@@ -493,6 +629,30 @@ mod tests {
         let t = DaemonTransport::new(&onion, "", false, false, &Dialer::Direct).expect("an onion needs no consent");
         let got = daemon_height(t).await;
         assert!(matches!(&got, Err(DaemonError::Rpc(e)) if e.contains("Tor is off")), "{got:?}");
+    }
+
+    /// A block that does not decode is the daemon's fault, not a lost connection.
+    #[tokio::test]
+    async fn an_undecodable_block_is_a_daemon_fault() {
+        let d = StubDaemon::start(0, StubConfig::default()).await;
+        d.set_chain(100, vec![super::stub::StubBlock { blob: vec![0xff; 3], outputs: 0 }]);
+        let got = scannable_blocks(local(&d.url, ""), 100, 100).await;
+        assert!(matches!(&got, Err(DaemonError::Fault(_))), "{got:?}");
+        d.set_garbage(true);
+        let got = scannable_blocks(local(&d.url, ""), 100, 100).await;
+        assert!(matches!(&got, Err(DaemonError::Fault(_))), "{got:?}");
+        assert_eq!(daemon_height(local(&d.url, "")).await, Ok(100), "the tip follows the chain");
+        drop(d);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_daemon_is_no_fault() {
+        let d = StubDaemon::start(0, StubConfig::default()).await;
+        let url = d.url.clone();
+        drop(d);
+        tokio::task::yield_now().await;
+        let got = scannable_blocks(local(&url, ""), 1, 1).await;
+        assert!(matches!(&got, Err(DaemonError::Rpc(_))), "{got:?}");
     }
 
     #[test]

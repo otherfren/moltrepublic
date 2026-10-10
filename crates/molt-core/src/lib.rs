@@ -5065,6 +5065,13 @@ pub enum Command {
         /// A daemon fault, one line.
         #[serde(default)]
         error: String,
+        /// The daemon answered this round.
+        #[serde(default)]
+        connected: bool,
+        /// The scan state's bytes (`molt_treasury::scan::ScanState`); empty
+        /// when unchanged.
+        #[serde(default)]
+        state: vault::SecretBytes,
         /// Scanner incarnation (stale commands are dropped).
         #[serde(default)]
         generation: Option<u64>,
