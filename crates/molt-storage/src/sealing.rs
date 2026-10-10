@@ -78,7 +78,7 @@ pub fn seal_at_rest(ws_dir: &Path, phrase: &str) -> Result<(), StorageError> {
     // (re)read the manifest UNDER the lock — a copy taken before it could
     // be stale (a concurrently-closing engine's rename or version bump)
     // and writing it back below would silently revert those updates
-    let mut manifest = crate::read_manifest(ws_dir)?;
+    let manifest = crate::read_manifest(ws_dir)?;
     if manifest.version > STORAGE_VERSION_SEALED {
         return Err(StorageError::NewerVersion(manifest.version));
     }
@@ -87,10 +87,41 @@ pub fn seal_at_rest(ws_dir: &Path, phrase: &str) -> Result<(), StorageError> {
     // proof-of-credential: the caller must hold the phrase BEFORE we delete
     // their only other way in
     verify_phrase_key(ws_dir, &id, &key)?;
-    // point of no return: remove the device-sealed key material. Deletion
-    // first, manifest second — a crash in between leaves a dir whose marker
-    // ("device") and key files disagree, which `open_workspace` reports as
-    // honest corruption and `unseal_at_rest` repairs (it rewrites both).
+    // a replace-restore or delete parked device-sealed copies of this very
+    // workspace in `.trash`; they hold the same seed
+    seal_trash_copies(ws_dir, &manifest.workspace.id, &id, &key)?;
+    seal_dir(ws_dir, manifest, &id, &key)
+}
+
+/// The sealing proper of a dir whose phrase key is verified.
+///
+/// Point of no return: deletion first, manifest second — a crash in
+/// between leaves a dir whose marker ("device") and key files disagree,
+/// which `open_workspace` reports as honest corruption and `unseal_at_rest`
+/// repairs (it rewrites both).
+fn seal_dir(
+    ws_dir: &Path,
+    mut manifest: WorkspaceManifest,
+    id: &[u8; 32],
+    key: &[u8; 32],
+) -> Result<(), StorageError> {
+    strip_key_material(ws_dir, &manifest)?;
+    // the materialized logo and the member avatars are republic CONTENT in
+    // plaintext (applied images, mirrored out of the encrypted log for
+    // display) — they must not stay readable in a sealed dir. Deleting it
+    // is safe: the log replays it and `sync_logo_file` rebuilds the file at
+    // the next open after a decrypt. The manifest (name, m/n) deliberately
+    // stays — the Open screen lists sealed workspaces by their identity card.
+    remove_logo_files(ws_dir)?;
+    seal_prefs(ws_dir, key, id)?;
+    manifest.crypto.sealed = SEALED_PHRASE.to_string();
+    manifest.version = manifest.version.max(STORAGE_VERSION_SEALED);
+    crate::write_manifest(ws_dir, &manifest)
+}
+
+/// Remove the device-sealed key files and the `tmp/` staging that may hold
+/// a copy of one.
+fn strip_key_material(ws_dir: &Path, manifest: &WorkspaceManifest) -> Result<(), StorageError> {
     // the parent too: O_NOFOLLOW guards the last component only, and a
     // planted `keys` symlink would steer the zero-fill into its target
     if fs::symlink_metadata(ws_dir.join("keys")).is_ok_and(|m| m.file_type().is_symlink()) {
@@ -98,24 +129,154 @@ pub fn seal_at_rest(ws_dir: &Path, phrase: &str) -> Result<(), StorageError> {
     }
     secure_remove(&ws_dir.join(&manifest.crypto.key_file))?;
     secure_remove(&ws_dir.join("keys").join("seed.sealed"))?;
-    // the materialized logo and the member avatars are republic CONTENT in
-    // plaintext (applied images, mirrored out of the encrypted log for
-    // display) — they must
-    // not stay readable in a sealed dir. Deleting it is safe: the log
-    // replays it and `sync_logo_file` rebuilds the file at the next open
-    // after a decrypt. The manifest (name, m/n) deliberately stays — the
-    // Open screen lists sealed workspaces by their identity card.
-    remove_logo_files(ws_dir)?;
     // sweep the atomic-write staging dir: an unseal interrupted between
     // write_atomic's tmp write and its rename can leave a device-sealed key
     // blob under tmp/ (keys/workspace.key → tmp/keys_workspace.key) — key
     // material inside a dir that claims to hold none. tmp/ only ever holds
     // transient staging, so clearing it in a CLOSED (locked) workspace is
     // always safe and idempotent.
-    remove_tmp_staging(ws_dir)?;
-    manifest.crypto.sealed = SEALED_PHRASE.to_string();
-    manifest.version = manifest.version.max(STORAGE_VERSION_SEALED);
-    crate::write_manifest(ws_dir, &manifest)
+    remove_tmp_staging(ws_dir)
+}
+
+/// Seal every `.trash` copy of the workspace `ws_id`. A copy the phrase key
+/// opens is sealed like the live dir (and stays recoverable by the phrase);
+/// any other same-id copy still loses its key files.
+fn seal_trash_copies(
+    ws_dir: &Path,
+    ws_id: &str,
+    id: &[u8; 32],
+    key: &[u8; 32],
+) -> Result<(), StorageError> {
+    let Some(root) = ws_dir.parent() else {
+        return Ok(());
+    };
+    let Ok(rd) = fs::read_dir(root.join(".trash")) else {
+        return Ok(());
+    };
+    for entry in rd.flatten() {
+        // DirEntry::file_type does not follow a planted symlink
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let dir = entry.path();
+        if crate::read_manifest(&dir).map_or(true, |m| m.workspace.id != ws_id) {
+            continue;
+        }
+        let _lock = crate::acquire_lock(&dir)?;
+        let manifest = crate::read_manifest(&dir)?;
+        if manifest.version <= STORAGE_VERSION_SEALED && verify_phrase_key(&dir, id, key).is_ok() {
+            seal_dir(&dir, manifest, id, key)?;
+        } else {
+            strip_key_material(&dir, &manifest)?;
+            tracing::warn!(dir = %dir.display(), "trash_copy=keys_stripped unverified=true");
+        }
+    }
+    Ok(())
+}
+
+/// The content-bearing fields of [`crate::WorkspacePrefs`]: member handles,
+/// topic names, local paths and hashes. A phrase-sealed dir keeps them in
+/// [`crate::PREFS_SEALED_FILE`] only.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct SealedPrefs {
+    #[serde(default)]
+    shared_files: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    shared_file_mtimes: std::collections::BTreeMap<String, u64>,
+    #[serde(default)]
+    read_cursors: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    local_copies: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    mirror_dir: String,
+    #[serde(default)]
+    last_seen: std::collections::BTreeMap<String, u64>,
+}
+
+impl SealedPrefs {
+    /// Move the content out of `p` (its entries win); whether `p` changed.
+    fn absorb(&mut self, p: &mut crate::WorkspacePrefs) -> bool {
+        let changed = !(p.shared_files.is_empty()
+            && p.shared_file_mtimes.is_empty()
+            && p.read_cursors.is_empty()
+            && p.local_copies.is_empty()
+            && p.mirror_dir.is_empty()
+            && p.last_seen.is_empty());
+        self.shared_files.append(&mut p.shared_files);
+        self.shared_file_mtimes.append(&mut p.shared_file_mtimes);
+        self.read_cursors.append(&mut p.read_cursors);
+        self.local_copies.append(&mut p.local_copies);
+        self.last_seen.append(&mut p.last_seen);
+        if !p.mirror_dir.is_empty() {
+            self.mirror_dir = std::mem::take(&mut p.mirror_dir);
+        }
+        changed
+    }
+
+    /// Put the content back into `p`; entries `p` already holds win.
+    fn restore(mut self, p: &mut crate::WorkspacePrefs) {
+        self.shared_files.append(&mut p.shared_files);
+        self.shared_file_mtimes.append(&mut p.shared_file_mtimes);
+        self.read_cursors.append(&mut p.read_cursors);
+        self.local_copies.append(&mut p.local_copies);
+        self.last_seen.append(&mut p.last_seen);
+        p.shared_files = self.shared_files;
+        p.shared_file_mtimes = self.shared_file_mtimes;
+        p.read_cursors = self.read_cursors;
+        p.local_copies = self.local_copies;
+        p.last_seen = self.last_seen;
+        if p.mirror_dir.is_empty() {
+            p.mirror_dir = self.mirror_dir;
+        }
+    }
+}
+
+fn prefs_sealed_key(key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    Zeroizing::new(crate::hkdf32(key, "molt-prefs-sealed", id))
+}
+
+/// The sealed prefs; absent or not opening under `key` reads as empty.
+fn read_sealed_prefs(ws_dir: &Path, key: &[u8; 32], id: &[u8; 32]) -> SealedPrefs {
+    let path = ws_dir.join(crate::PREFS_SEALED_FILE);
+    let Ok(data) = crate::read_capped(&path, crate::READ_CAP_TOML, crate::PREFS_SEALED_FILE) else {
+        return SealedPrefs::default();
+    };
+    let opened = crate::decrypt_state_file(&prefs_sealed_key(key, id), id, crate::PREFS_SEALED_SEGMENT, &data)
+        .and_then(|plain| {
+            serde_json::from_slice(&plain).map_err(|e| StorageError::Corrupt(e.to_string()))
+        });
+    opened.unwrap_or_else(|e| {
+        tracing::warn!(dir = %ws_dir.display(), error = %e, "prefs_sealed=unreadable");
+        SealedPrefs::default()
+    })
+}
+
+/// Move the content-bearing prefs into the sealed file (sealed file first,
+/// stripped `prefs.toml` second: a crash in between loses nothing).
+fn seal_prefs(ws_dir: &Path, key: &[u8; 32], id: &[u8; 32]) -> Result<(), StorageError> {
+    let mut prefs = crate::read_prefs(ws_dir);
+    let mut held = read_sealed_prefs(ws_dir, key, id);
+    if !held.absorb(&mut prefs) {
+        return Ok(());
+    }
+    let plain = serde_json::to_vec(&held)
+        .map_err(|e| StorageError::Corrupt(format!("encoding {}: {e}", crate::PREFS_SEALED_FILE)))?;
+    let frame = crate::encode_frame(&prefs_sealed_key(key, id), id, crate::PREFS_SEALED_SEGMENT, 0, &plain)?;
+    crate::write_atomic(ws_dir, crate::PREFS_SEALED_FILE, &frame, true)?;
+    crate::write_prefs(ws_dir, &prefs)
+}
+
+/// Merge the sealed prefs back into `prefs.toml`, then drop the sealed file.
+fn unseal_prefs(ws_dir: &Path, key: &[u8; 32], id: &[u8; 32]) -> Result<(), StorageError> {
+    let path = ws_dir.join(crate::PREFS_SEALED_FILE);
+    if fs::symlink_metadata(&path).is_err() {
+        return Ok(());
+    }
+    let mut prefs = crate::read_prefs(ws_dir);
+    read_sealed_prefs(ws_dir, key, id).restore(&mut prefs);
+    crate::write_prefs(ws_dir, &prefs)?;
+    fs::remove_file(&path)?;
+    Ok(())
 }
 
 /// Unseal a phrase-sealed workspace: derive the workspace key from the
@@ -143,6 +304,9 @@ pub fn unseal_at_rest(root: &Path, ws_dir: &Path, phrase: &str) -> Result<(), St
     let key = Zeroizing::new(crate::derive_workspace_key(&seed, &manifest.workspace.id));
     // the Poly1305 tag of the genesis frame IS the real phrase verification
     verify_phrase_key(ws_dir, &id, &key)?;
+    // prefs first: a crash after it leaves a dir still marked sealed, which
+    // a second decrypt converges
+    unseal_prefs(ws_dir, &key, &id)?;
     // re-seal the key material under the local device key (keys first,
     // manifest second: a crash in between leaves the dir marked sealed
     // with keys present — a second decrypt converges it)
@@ -791,5 +955,100 @@ mod tests {
         // the phrase repairs the dir either way
         unseal_at_rest(&root, &dir, &phrase).expect("repair");
         assert!(open_workspace(&dir).is_ok());
+    }
+
+    /// Content-bearing prefs (handles, topics, local paths, hashes).
+    fn content_prefs(dir: &Path) -> crate::WorkspacePrefs {
+        let mut p = crate::read_prefs(dir);
+        p.s3_backup = true;
+        p.last_seen.insert("juno".to_string(), 1_700_000_000);
+        p.read_cursors.insert("topic:secret-plans".to_string(), "00".repeat(16));
+        p.shared_files.insert("ab".repeat(16), "/home/petra/plans.pdf".to_string());
+        p.shared_file_mtimes.insert("ab".repeat(16), 7);
+        p.local_copies.insert("cd".repeat(32), "/home/petra/dl/x.pdf".to_string());
+        p.mirror_dir = "/srv/mirror-petra".to_string();
+        crate::write_prefs(dir, &p).expect("prefs");
+        p
+    }
+
+    /// A sealed dir hides the roster (design §5.2): no member handle, topic
+    /// name or local path stays readable in `prefs.toml`; unsealing brings
+    /// the seat's local state back unchanged.
+    #[test]
+    fn sealing_hides_the_content_bearing_prefs_and_unsealing_restores_them() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let (dir, phrase, _id) = make_ws(&root);
+        let before = content_prefs(&dir);
+        seal_at_rest(&dir, &phrase).expect("seal");
+        let mut plain = Vec::new();
+        for entry in walk(&dir) {
+            plain.extend(fs::read(&entry).unwrap_or_default());
+        }
+        let plain = String::from_utf8_lossy(&plain);
+        for needle in ["juno", "secret-plans", "/home/petra", "/srv/mirror-petra", &"cd".repeat(32)] {
+            assert!(!plain.contains(needle), "{needle} readable in a sealed dir");
+        }
+        assert!(crate::read_prefs(&dir).s3_backup, "local switches stay plaintext");
+        unseal_at_rest(&root, &dir, &phrase).expect("unseal");
+        assert_eq!(crate::read_prefs(&dir), before, "unseal restores the prefs");
+        assert!(!dir.join(crate::PREFS_SEALED_FILE).exists());
+    }
+
+    /// Every regular file under `dir`.
+    fn walk(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for e in fs::read_dir(dir).expect("dir").flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                out.extend(walk(&p));
+            } else {
+                out.push(p);
+            }
+        }
+        out
+    }
+
+    fn copy_tree(from: &Path, to: &Path) {
+        fs::create_dir_all(to).expect("mkdir");
+        for e in fs::read_dir(from).expect("dir").flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                copy_tree(&p, &to.join(e.file_name()));
+            } else {
+                fs::copy(&p, to.join(e.file_name())).expect("copy");
+            }
+        }
+    }
+
+    /// A replace-restore (or delete) parks a device-sealed copy of the SAME
+    /// workspace in `.trash`; sealing the live dir must not leave that
+    /// copy's key material behind. It stays recoverable by the phrase; a
+    /// foreign workspace in the trash is left alone.
+    #[test]
+    fn sealing_strips_key_material_from_same_id_trash_copies() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let (dir, phrase, _id) = make_ws(&root);
+        content_prefs(&dir);
+        let copy = root.join("replaced-copy");
+        copy_tree(&dir, &copy);
+        let same = crate::trash_workspace(&root, &copy).expect("trash");
+        let (other_dir, _other_phrase, _) = make_ws(&root);
+        let other = crate::trash_workspace(&root, &other_dir).expect("trash other");
+
+        seal_at_rest(&dir, &phrase).expect("seal");
+
+        assert!(!same.join("keys/workspace.key").exists(), "trashed key removed");
+        assert!(!same.join("keys/seed.sealed").exists(), "trashed seed removed");
+        assert!(is_sealed(&read_manifest(&same).expect("m")), "the copy reads as sealed");
+        assert!(!fs::read_to_string(same.join("prefs.toml")).unwrap_or_default().contains("juno"));
+        assert!(other.join("keys/workspace.key").exists(), "a foreign workspace is untouched");
+        assert!(other.join("keys/seed.sealed").exists());
+        // moved back out of the trash, the phrase still recovers it
+        let back = root.join("recovered");
+        fs::rename(&same, &back).expect("untrash");
+        unseal_at_rest(&root, &back, &phrase).expect("unseal the copy");
+        assert!(open_workspace(&back).is_ok());
     }
 }

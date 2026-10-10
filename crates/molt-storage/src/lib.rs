@@ -167,9 +167,14 @@ const KANBAN_DRAFT_SEGMENT: u64 = u64::MAX - 8;
 const WALLET_KEYS_SEGMENT: u64 = u64::MAX - 9;
 /// AAD segment marker for `wallet_scan.state` (the scanner's progress).
 const WALLET_SCAN_SEGMENT: u64 = u64::MAX - 10;
+/// AAD segment marker for [`PREFS_SEALED_FILE`].
+const PREFS_SEALED_SEGMENT: u64 = u64::MAX - 11;
 /// The lowest reserved marker — a log file numbered at or above it is
 /// ignored (see [`list_sorted`]).
-const RESERVED_SEGMENT_FLOOR: u64 = WALLET_SCAN_SEGMENT;
+const RESERVED_SEGMENT_FLOOR: u64 = PREFS_SEALED_SEGMENT;
+/// The content-bearing prefs of a phrase-sealed dir, sealed under the
+/// workspace key while `prefs.toml` keeps only the local switches.
+pub const PREFS_SEALED_FILE: &str = "prefs.sealed";
 /// The purse's keys records (`docs_archive/chain/wallet_treasury_design.md` §6).
 pub const WALLET_KEYS_FILE: &str = "wallet_keys.state";
 /// The purse scanner's progress; damage costs a rescan.
@@ -5659,10 +5664,11 @@ mod tests {
     /// number is ignored, never the active segment.
     #[test]
     fn segment_floor_ignores_the_reserved_markers() {
-        assert_eq!(RESERVED_SEGMENT_FLOOR, WALLET_SCAN_SEGMENT);
+        assert_eq!(RESERVED_SEGMENT_FLOOR, PREFS_SEALED_SEGMENT);
         const {
             assert!(
-                WALLET_SCAN_SEGMENT < WALLET_KEYS_SEGMENT
+                PREFS_SEALED_SEGMENT < WALLET_SCAN_SEGMENT
+                    && WALLET_SCAN_SEGMENT < WALLET_KEYS_SEGMENT
                     && WALLET_KEYS_SEGMENT < KANBAN_DRAFT_SEGMENT
                     && KANBAN_DRAFT_SEGMENT < KANBAN_WAKES_SEGMENT
                     && KANBAN_WAKES_SEGMENT < VAULT_PAYLOAD_SEGMENT
@@ -5673,6 +5679,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let dir = make_ws(tmp.path(), 2);
         for no in [
+            PREFS_SEALED_SEGMENT,
             WALLET_SCAN_SEGMENT,
             WALLET_KEYS_SEGMENT,
             KANBAN_DRAFT_SEGMENT,
@@ -5684,7 +5691,7 @@ mod tests {
         }
         let (ws, loaded) = open_workspace(&dir).expect("opens despite the planted files");
         assert_eq!(loaded.tail.len(), 3);
-        assert!(ws.seg_no < WALLET_SCAN_SEGMENT);
+        assert!(ws.seg_no < PREFS_SEALED_SEGMENT);
     }
 
     /// WP4b stage 5: the FIRST pruned chain persist raises the manifest

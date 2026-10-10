@@ -602,7 +602,8 @@ fn collect_entries(
             // §3.3 hard exclusion + runtime scratch
             "transport.state" | "LOCK" => {}
             // local working copies and fired wakes: this node's, not history
-            "wiki_draft.json" | "kanban_draft.json" | "kanban_wakes.json" if !is_dir => {}
+            "wiki_draft.json" | "kanban_draft.json" | "kanban_wakes.json" | crate::PREFS_SEALED_FILE
+                if !is_dir => {}
             "keys" | "tmp" if is_dir => {}
             "log" if is_dir => {
                 for seg in fs::read_dir(&path)? {

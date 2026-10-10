@@ -454,6 +454,11 @@ sealed file — a deliberate, flagged deviation (P3):
   default: not in v1, the toggle semantic ships first.
 * `transport.state` and `chain.state` need no migration: their sub-keys
   derive from `workspace_key`, which the phrase re-derives.
+* Sealing also moves the content-bearing `prefs.toml` fields (member
+  presence, read cursors, local paths and hashes, mirror dir) into
+  `prefs.sealed` under a workspace sub-key, and seals every same-id copy
+  in `.trash` (a replace-restore or delete parks one with its keys).
+  Decrypting merges `prefs.sealed` back.
 
 **Verification-oracle note:** deriving-and-trying against the genesis frame
 gives an attacker with the dir exactly the brute-force interface the AEAD
