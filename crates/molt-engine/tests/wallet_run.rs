@@ -120,6 +120,15 @@ async fn approve(w: &WalletHandle, id: molt_core::ProposalId) {
     }
 }
 
+/// Until `w`'s current run is `nonce`.
+async fn wait_run(w: &WalletHandle, nonce: [u8; 32]) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    while w.__wallet_run() != Some(nonce) {
+        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for run {}", hex::encode(&nonce[..4]));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 async fn consent(w: &WalletHandle) {
     wait_wallet(w, "the consent prompt", |v| v.run.as_ref().is_some_and(|r| r.needs_consent)).await;
     w.execute(Command::WalletConsent { accept: true }).await.expect("consent");
@@ -176,13 +185,14 @@ async fn three_seats_found_one_purse() {
     }
 }
 
-/// Plan §10.26: a seat without a daemon never announces readiness; the
-/// run aborts at the deadline and names it.
+/// Plan §10.26: a seat without a daemon never announces readiness, even
+/// with consent; the run aborts at the deadline and names it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_seat_without_a_daemon_aborts_at_readiness_and_is_named() {
     let relay = MockRelay::run().await.expect("relay");
     let tmp = tempfile::tempdir().expect("tmp");
     let (all, names, _ds) = three_with_init(&relay.url().await.to_string(), tmp.path(), 2).await;
+    consent(&all[2]).await;
     for w in &all[..2] {
         let v = wait_wallet(w, "the abort", |v| stage(v) == Some(RunStage::Aborted)).await;
         let r = run(&v);
@@ -218,8 +228,15 @@ async fn a_declined_consent_aborts_the_run_and_retry_starts_a_new_nonce() {
 async fn reopening_does_not_restart_a_run() {
     let relay = MockRelay::run().await.expect("relay");
     let tmp = tempfile::tempdir().expect("tmp");
-    let (all, _, _ds) = three_with_init(&relay.url().await.to_string(), tmp.path(), 3).await;
+    let (all, names, _ds) = three_with_init(&relay.url().await.to_string(), tmp.path(), 3).await;
     wait_wallet(&all[0], "the run", |v| stage(v) == Some(RunStage::Ready)).await;
+    // its start and readiness reached the others before it closes
+    for w in &all[1..] {
+        wait_wallet(w, "seat 1 ready", |v| {
+            v.run.as_ref().is_some_and(|r| r.stage == RunStage::Ready && !r.missing.contains(&names[0]))
+        })
+        .await;
+    }
     let id = read_session(&all[0]).await.active_workspace.clone();
     all[0].execute(Command::CloseWorkspace).await.expect("close");
     all[0].execute(Command::OpenWorkspace { id }).await.expect("reopen");
@@ -248,8 +265,9 @@ async fn racing_starts_converge_on_one_run() {
     all[0].__wallet_start_with([5; 32]);
     all[1].__wallet_start_with([0; 32]);
     all[2].__wallet_start_with([1; 32]);
-    // the seams fire on the next beat, while every run is still in readiness
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    for w in &all {
+        wait_run(w, [5; 32]).await;
+    }
     consent(&all[2]).await;
     for w in &all {
         let v = wait_wallet(w, "the purse", |v| v.phase == WalletPhase::Ready).await;
@@ -260,34 +278,42 @@ async fn racing_starts_converge_on_one_run() {
     assert_eq!(block["run"], hex::encode([5u8; 32]), "position 1 wins over a lower nonce");
 }
 
-/// Plan §10.38a: a start reusing an aborted run's nonce is refused.
+/// Plan §10.38a: a start reusing an aborted run's nonce is refused, also
+/// from a seat that forgot it (reopened).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_reused_nonce_is_refused() {
     let relay = MockRelay::run().await.expect("relay");
     let tmp = tempfile::tempdir().expect("tmp");
     let (all, _, _ds) = three_with_init(&relay.url().await.to_string(), tmp.path(), 3).await;
-    // a's auto-start loses to nothing; c declines it, then b starts with a fixed nonce, c declines again
-    wait_wallet(&all[2], "the prompt", |v| v.run.as_ref().is_some_and(|r| r.needs_consent)).await;
-    all[2].execute(Command::WalletConsent { accept: false }).await.expect("decline");
-    for w in &all {
-        wait_wallet(w, "the abort", |v| stage(v) == Some(RunStage::Aborted)).await;
+    // c declines a's auto-start, then b's run 9, then a's run 8
+    for start in [None, Some((1, [9; 32])), Some((0, [8; 32]))] {
+        if let Some((k, nonce)) = start {
+            all[k].__wallet_start_with(nonce);
+            for w in &all {
+                wait_run(w, nonce).await;
+            }
+        }
+        wait_wallet(&all[2], "the prompt", |v| v.run.as_ref().is_some_and(|r| r.needs_consent)).await;
+        all[2].execute(Command::WalletConsent { accept: false }).await.expect("decline");
+        for w in &all {
+            wait_wallet(w, "the abort", |v| stage(v) == Some(RunStage::Aborted)).await;
+        }
     }
-    all[1].__wallet_start_with([9; 32]);
-    wait_wallet(&all[2], "the second prompt", |v| v.run.as_ref().is_some_and(|r| r.needs_consent)).await;
-    all[2].execute(Command::WalletConsent { accept: false }).await.expect("decline");
-    for w in &all {
-        wait_wallet(w, "the second abort", |v| stage(v) == Some(RunStage::Aborted)).await;
-    }
+    let id = read_session(&all[0]).await.active_workspace.clone();
+    all[0].execute(Command::CloseWorkspace).await.expect("close");
+    all[0].execute(Command::OpenWorkspace { id }).await.expect("reopen");
     all[0].__wallet_start_with([9; 32]);
+    wait_run(&all[0], [9; 32]).await;
     tokio::time::sleep(Duration::from_secs(3)).await;
     for w in &all[1..] {
-        assert_eq!(stage(&wallet(w).await), Some(RunStage::Aborted), "the reused nonce is not joined");
+        assert_eq!(w.__wallet_run(), Some([8; 32]), "the reused nonce is not joined");
+        assert_eq!(stage(&wallet(w).await), Some(RunStage::Aborted));
     }
 }
 
 /// Plan §10.38 (I16): a withheld attestation keeps the purse from
-/// sealing; the next run runs beside the kept record, and when the old
-/// run's last attestation arrives, the old run wins with every share.
+/// sealing; the next run runs beside the kept record, and when the
+/// withheld attestations arrive, whichever run wins, every seat holds its share.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_withheld_attestation_cannot_seal_a_run_without_shares() {
     let relay = MockRelay::run().await.expect("relay");

@@ -213,6 +213,9 @@ pub enum WalletRefusal {
     /// The purse record is not what this seat computed.
     #[error("not this seat's result")]
     NotMine,
+    /// The OS RNG failed: nothing secret is drawn.
+    #[error("no randomness")]
+    Rng,
 }
 
 #[cfg(test)]

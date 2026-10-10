@@ -506,7 +506,7 @@ Presence-Tick bis Commit oder Abbruch; nie im Workspace-Log:
 36. `a_mock_transfer_block_does_not_break_the_chain` (Alt-Republik).
 37. `reopening_does_not_restart_a_run`.
 38. `a_withheld_attestation_cannot_seal_a_run_without_shares`
-    (Records bleiben; der alte Lauf gewinnt mit allen Teilen).
+    (Records bleiben; welcher Lauf auch gewinnt, jeder Sitz hält seinen Teil).
 38a. `racing_starts_converge_on_one_run` und `a_reused_nonce_is_refused`.
 38b. `a_recovery_never_auto_proposes_an_init`.
 38c. `a_restored_record_of_another_run_is_view_only`.
@@ -675,9 +675,13 @@ Fork-Höhen fest. Bis dahin `can_spend = false`, kein `sign.rs`.
      from the next round frame and answers it with `wabrt` `restart`;
      readiness frames of an unknown run wait as early frames, so a
      reopened seat may rejoin a run still in readiness (nothing of it
-     was secret). A seat that left a run in readiness rejoins it on
-     that run's round frame: all n readied it. `WalletRetry` and a
-     start refuse while this seat is in the rounds.
+     was secret); the starter stops resending its start once it is in
+     the rounds. A seat that left a run in readiness rejoins it on
+     that run's round frame: all n readied it. `WalletRetry` refuses
+     while this seat is in readiness or the rounds, a start only in
+     the rounds. A decline is answered to every later frame of its
+     run, so a lost one still arrives as a decline. The purse RNG
+     fails closed: no nonce, and the run aborts.
      The starter sends `wdhint` with its start; `WalletRunView` gains
      `daemon_hint`. New refusals: `no set-up running`, `set-up running`,
      `not this seat's result`. `shareholders` names only this seat's

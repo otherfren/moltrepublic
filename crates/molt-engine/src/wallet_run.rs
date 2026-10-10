@@ -49,6 +49,8 @@ pub(crate) struct WalletSeams {
     pub(crate) withhold: AtomicBool,
     /// A start to send on the next tick, with this nonce.
     pub(crate) start: std::sync::Mutex<Option<[u8; 32]>>,
+    /// The current run's nonce, as the last progress saw it.
+    pub(crate) current: std::sync::Mutex<Option<[u8; 32]>>,
 }
 
 /// One run this seat takes part in.
@@ -102,8 +104,9 @@ pub(crate) struct RunRt {
     seen: BTreeSet<[u8; 32]>,
     /// Runs left in readiness for another start, with their starter.
     left: BTreeMap<[u8; 32], u16>,
-    /// Aborted runs and when their abort last went out.
-    aborted: BTreeMap<[u8; 32], u64>,
+    /// Aborted runs: when their answer last went out, and whether this
+    /// seat declined them (the answer is then the decline).
+    aborted: BTreeMap<[u8; 32], (u64, bool)>,
     early: Vec<(u16, WalletFrame)>,
     /// This seat's keys records, decoded (one per attested run).
     pub(crate) records: Vec<KeysRecord>,
@@ -123,6 +126,9 @@ pub(crate) struct RunRt {
     /// The projected purse's record is not held here.
     pub(crate) watch_only: bool,
     last_view: Option<WalletRunView>,
+    /// Every frame this seat sent (unit tests).
+    #[cfg(test)]
+    pub(crate) sent: std::sync::Mutex<Vec<WalletFrame>>,
 }
 
 impl std::fmt::Debug for RunRt {
@@ -248,18 +254,31 @@ fn attested_of(c: &Created, republic_id: [u8; 32]) -> Attested<'_> {
     }
 }
 
-fn rng() -> rand_chacha::ChaCha20Rng {
-    let mut seed = [0u8; 32];
-    if getrandom::getrandom(&mut seed).is_err() {
-        tracing::error!("wallet_rng=unavailable");
-    }
-    rand_chacha::ChaCha20Rng::from_seed(seed)
+#[cfg(test)]
+thread_local! {
+    /// The OS RNG fails on this thread (unit tests).
+    pub(crate) static RNG_DOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-fn fresh_nonce() -> [u8; 32] {
+/// The OS RNG behind a ChaCha stream; `None` when it fails (never a fixed seed).
+fn rng() -> Option<rand_chacha::ChaCha20Rng> {
+    let mut seed = zeroize::Zeroizing::new([0u8; 32]);
+    #[cfg(test)]
+    if RNG_DOWN.with(std::cell::Cell::get) {
+        tracing::error!("wallet_rng=unavailable");
+        return None;
+    }
+    if let Err(e) = getrandom::getrandom(seed.as_mut()) {
+        tracing::error!(error = %e, "wallet_rng=unavailable");
+        return None;
+    }
+    Some(rand_chacha::ChaCha20Rng::from_seed(*seed))
+}
+
+fn fresh_nonce() -> Option<[u8; 32]> {
     let mut n = [0u8; 32];
-    rng().fill_bytes(&mut n);
-    n
+    rng()?.fill_bytes(&mut n);
+    Some(n)
 }
 
 impl State {
@@ -430,9 +449,13 @@ impl State {
     /// A frame of a run this seat is not in.
     fn wallet_on_foreign(&mut self, pos: u16, nonce: [u8; 32], frame: WalletFrame) {
         let now = self.presence_now();
-        if let Some(at) = self.purse.run.aborted.get(&nonce).copied() {
+        if let Some((at, declined)) = self.purse.run.aborted.get(&nonce).copied() {
             if !matches!(frame, WalletFrame::Abort(_)) && now.saturating_sub(at) >= RESEND_SECS {
-                self.wallet_send_abort(nonce, "aborted");
+                if declined {
+                    self.wallet_send_decline(nonce);
+                } else {
+                    self.wallet_send_abort(nonce, "aborted");
+                }
             }
             return;
         }
@@ -473,7 +496,7 @@ impl State {
             }
         }
         if self.purse.run.seen.contains(&nonce) {
-            tracing::info!(run = %short(&nonce), from = pos, "wallet_start=refused reason=reused");
+            tracing::info!(run = %short(&nonce), from = pos, reason = "reused", "wallet_start=refused");
             return;
         }
         let join = match cur {
@@ -559,7 +582,10 @@ impl State {
     pub(crate) fn wallet_start(&mut self, nonce: Option<[u8; 32]>) -> Result<(), WalletRefusal> {
         let me = self.wallet_pos(&self.member()).ok_or(WalletRefusal::NotChain)?;
         self.wallet_run_ctx().ok_or(WalletRefusal::NoRun)?;
-        let nonce = nonce.unwrap_or_else(fresh_nonce);
+        let nonce = match nonce {
+            Some(n) => n,
+            None => fresh_nonce().ok_or(WalletRefusal::Rng)?,
+        };
         let rounds = self.purse.run.run.as_ref().is_some_and(|r| {
             !r.persisted && matches!(r.stage, RunStage::Round1 | RunStage::Round2)
         });
@@ -572,6 +598,10 @@ impl State {
     }
 
     fn wallet_send(&self, frame: &WalletFrame) -> bool {
+        #[cfg(test)]
+        if let Ok(mut s) = self.purse.run.sent.lock() {
+            s.push(frame.clone());
+        }
         self.group_net.as_ref().is_some_and(|g| g.handle.publish_control(frame.to_frame()))
     }
 
@@ -583,8 +613,21 @@ impl State {
             run: hex::encode(nonce),
             reason: reason.to_string(),
         }));
+        self.wallet_mark_aborted(nonce, false);
+    }
+
+    /// This seat's decline of `nonce`, sent again on every answer.
+    fn wallet_send_decline(&mut self, nonce: [u8; 32]) {
+        let init = self.wallet_init_applied().and_then(|i| i.id).unwrap_or(0);
+        self.wallet_send(&WalletFrame::Ready(WalletReadyFrame { v: WALLET_V, init, run: hex::encode(nonce), ok: false }));
+        self.wallet_mark_aborted(nonce, true);
+    }
+
+    fn wallet_mark_aborted(&mut self, nonce: [u8; 32], declined: bool) {
         let now = self.presence_now();
-        self.purse.run.aborted.insert(nonce, now);
+        let e = self.purse.run.aborted.entry(nonce).or_insert((now, declined));
+        e.0 = now;
+        e.1 |= declined;
     }
 
     /// End the current run before persist (I5): its reason, never a culprit.
@@ -604,8 +647,7 @@ impl State {
         if announce {
             self.wallet_send_abort(nonce, reason);
         } else {
-            let now = self.presence_now();
-            self.purse.run.aborted.insert(nonce, now);
+            self.wallet_mark_aborted(nonce, false);
         }
     }
 
@@ -710,17 +752,20 @@ impl State {
                 run.out.push(f.clone());
                 self.wallet_send(&f);
             }
-            let Some(run) = self.purse.run.run.as_mut() else {
-                return;
-            };
-            if run.ready.len() < usize::from(n) {
+            if !self.purse.run.run.as_ref().is_some_and(|r| r.ready.len() >= usize::from(n)) {
                 return;
             }
             let Ok(params) = dkg::params(m, n, me) else {
                 return;
             };
+            let Some(mut rng) = rng() else {
+                return self.wallet_abort("aborted", Vec::new(), None, "rng", true);
+            };
+            let Some(run) = self.purse.run.run.as_mut() else {
+                return;
+            };
             let run_id = RunId { republic_id: rid, init_id: init, run: run.nonce };
-            let (machine, msg) = dkg::round1(params, dkg::context(&run_id, m, n), &mut rng());
+            let (machine, msg) = dkg::round1(params, dkg::context(&run_id, m, n), &mut rng);
             let f = WalletFrame::Round1(WalletRound1Frame {
                 v: WALLET_V,
                 init,
@@ -733,6 +778,8 @@ impl State {
             run.machine = Some(machine);
             run.stage = RunStage::Round1;
             run.since = now;
+            // a start resent in the rounds would let a seat that lost the run rejoin it (§3.3)
+            run.out.retain(|f| !matches!(f, WalletFrame::Start(_)));
             run.out.push(f.clone());
             self.wallet_send(&f);
         }
@@ -745,6 +792,10 @@ impl State {
     }
 
     fn wallet_round2(&mut self, m: u16, n: u16, me: u16, init: u64) {
+        let now = self.presence_now();
+        let Some(mut rng) = rng() else {
+            return self.wallet_abort("aborted", Vec::new(), None, "rng", true);
+        };
         let Some(run) = self.purse.run.run.as_mut() else {
             return;
         };
@@ -756,7 +807,7 @@ impl State {
             Ok(t) => t,
             Err(e) => return self.wallet_abort("invalid", Vec::new(), None, &e.to_string(), true),
         };
-        let out = dkg::round2(machine, params, &others, &mut rng());
+        let out = dkg::round2(machine, params, &others, &mut rng);
         let Some(run) = self.purse.run.run.as_mut() else {
             return;
         };
@@ -773,6 +824,7 @@ impl State {
         run.key_machine = Some(km);
         run.transcript = Some(t);
         run.stage = RunStage::Round2;
+        run.since = now;
         let f = WalletFrame::Round2(WalletRound2Frame {
             v: WALLET_V,
             init,
@@ -802,6 +854,9 @@ impl State {
         let Some(sk) = self.identity_sk.clone() else {
             return;
         };
+        let Some(mut rng) = rng() else {
+            return self.wallet_abort("aborted", Vec::new(), None, "rng", true);
+        };
         let Some(run) = self.purse.run.run.as_mut() else {
             return;
         };
@@ -809,7 +864,7 @@ impl State {
             return;
         };
         let run_id = RunId { republic_id: rid, init_id: init, run: run.nonce };
-        let done = dkg::complete(km, params, run.shares.frames(), &mut rng()).and_then(|k| {
+        let done = dkg::complete(km, params, run.shares.frames(), &mut rng).and_then(|k| {
             let view = keys::view_key(&run_id, run.round1.frames(), n)?;
             let address = keys::standard_address(k.group_key(), view.clone(), network)?.to_string();
             Ok((k, view, address))
@@ -934,10 +989,12 @@ impl State {
         let Some(me) = self.wallet_pos(&self.member()) else {
             return;
         };
+        // only a card this seat could co-sign holds it back: a bogus one never seals
         let open = self.proposals.values().any(|p| {
             p.surface == Surface::Wallet
                 && p.state == ProposalState::Proposed
                 && parse_created(&p.payload).is_some_and(|c| c.run == nonce)
+                && self.wallet_created_check(&p.payload).is_ok()
         });
         if open {
             return;
@@ -1003,6 +1060,11 @@ impl State {
                 self.wallet_ingest(pos, f);
             }
         }
+        self.wallet_on_commit();
+    }
+
+    /// Wherever the purse may have committed: settle it once, and tell the frontends.
+    pub(crate) fn wallet_on_commit(&mut self) {
         if self.wallet_settle() {
             if let Some(p) = self.wallet_purse() {
                 self.emit(Event::WalletCreated { address: p.created.address });
@@ -1063,7 +1125,18 @@ impl State {
                 self.purse.run.records.insert(0, rec);
                 self.purse.run.watch_only = false;
             }
-            None => self.wallet_view_only(),
+            None => {
+                self.wallet_view_only();
+                if !self.purse.run.records.is_empty() {
+                    let drop = self.purse.run.records.iter().map(KeysRecord::encode).collect();
+                    let dropped = self.active.as_ref().is_some_and(|a| a.handle.drop_wallet_keys_blocking(drop));
+                    if dropped {
+                        self.purse.run.records.clear();
+                    } else {
+                        tracing::error!("wallet_keys=prune_failed");
+                    }
+                }
+            }
         }
         if let Some(run) = self.purse.run.run.as_mut() {
             run.stage = RunStage::Done;
@@ -1127,8 +1200,8 @@ impl State {
             }
         }
         if self.wallet_run_ctx().is_none() {
-            if self.purse.run.run.as_ref().is_some_and(|r| r.stage != RunStage::Done) && self.wallet_settle() {
-                self.wallet_progress();
+            if self.purse.run.run.as_ref().is_some_and(|r| r.stage != RunStage::Done) {
+                self.wallet_on_commit();
             }
             return;
         }
@@ -1238,6 +1311,9 @@ impl State {
 
     /// One event per change of the run view.
     pub(crate) fn wallet_progress(&mut self) {
+        if let Ok(mut c) = self.wallet_seams.current.lock() {
+            *c = self.purse.run.run.as_ref().map(|r| r.nonce);
+        }
         let view = self.wallet_run_view();
         if view != self.purse.run.last_view {
             self.purse.run.last_view.clone_from(&view);
@@ -1264,8 +1340,8 @@ impl State {
             self.wallet_advance();
         } else {
             let me = self.wallet_pos(&self.member()).unwrap_or(0);
-            self.wallet_send(&WalletFrame::Ready(WalletReadyFrame { v: WALLET_V, init, run: hex::encode(nonce), ok: false }));
             self.wallet_abort("declined", vec![me], Some(me), "", false);
+            self.wallet_send_decline(nonce);
         }
         self.wallet_progress();
         Ok(Reply::Ack)

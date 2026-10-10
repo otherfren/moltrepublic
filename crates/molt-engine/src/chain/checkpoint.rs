@@ -420,7 +420,7 @@ impl State {
                     self.wake_trigger("kanban", "");
                 }
                 // never a start here (§3.3): only the purse's commit
-                self.wallet_settle();
+                self.wallet_on_commit();
                 self.rebase_pending_approvals();
                 self.persist_chain_now();
                 if self.chain.catchup_from.is_some_and(|f| f <= new_height) {

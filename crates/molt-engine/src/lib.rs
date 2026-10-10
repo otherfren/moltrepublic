@@ -248,6 +248,12 @@ impl WalletHandle {
         }
     }
 
+    /// Test seam (wallet plan §10.38a): the current run's nonce.
+    #[doc(hidden)]
+    pub fn __wallet_run(&self) -> Option<[u8; 32]> {
+        self.wallet_seams.current.lock().ok().and_then(|c| *c)
+    }
+
     /// Test seam (vault plan S3c): this holder's receipts report a
     /// complaint whatever its check says (the `vault-lab` switch).
     #[doc(hidden)]

@@ -1792,6 +1792,18 @@ impl OpenedWorkspace {
         self.write_wallet_keys(&records)
     }
 
+    /// Drop exactly these records (other runs', once the purse committed
+    /// and this seat holds none of it); a record not named stays.
+    pub fn drop_wallet_keys(&self, drop: &[Zeroizing<Vec<u8>>]) -> Result<(), StorageError> {
+        let mut records = self.read_wallet_keys()?;
+        let before = records.len();
+        records.retain(|r| !drop.iter().any(|d| d.as_slice() == r.as_slice()));
+        if records.len() == before {
+            return Ok(());
+        }
+        self.write_wallet_keys(&records)
+    }
+
     /// The acknowledged loss (wallet design W5): a damaged keys file moves
     /// aside as `.wallet_keys.state.lost<n>`, which nothing exports or
     /// reads. `false` when there is no file.
@@ -3372,6 +3384,11 @@ enum WriterMsg {
         keep: Zeroizing<Vec<u8>>,
         ack: mpsc::SyncSender<bool>,
     },
+    /// Drop exactly these keys records, acking when durable.
+    DropWalletKeys {
+        drop: Vec<Zeroizing<Vec<u8>>>,
+        ack: mpsc::SyncSender<bool>,
+    },
     /// Set a damaged keys file aside (the acknowledged loss).
     SetAsideWalletKeys(mpsc::SyncSender<Result<bool, StorageError>>),
     /// Rewrite `wallet_scan.state`.
@@ -3773,6 +3790,16 @@ impl StorageHandle {
     pub fn prune_wallet_keys_blocking(&self, keep: Zeroizing<Vec<u8>>) -> bool {
         let (ack_tx, ack_rx) = mpsc::sync_channel(1);
         if self.tx.send(WriterMsg::PruneWalletKeys { keep, ack: ack_tx }).is_err() {
+            return false;
+        }
+        ack_rx.recv().unwrap_or(false)
+    }
+
+    /// [`OpenedWorkspace::drop_wallet_keys`], blocking until durable.
+    #[must_use]
+    pub fn drop_wallet_keys_blocking(&self, drop: Vec<Zeroizing<Vec<u8>>>) -> bool {
+        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
+        if self.tx.send(WriterMsg::DropWalletKeys { drop, ack: ack_tx }).is_err() {
             return false;
         }
         ack_rx.recv().unwrap_or(false)
@@ -4262,6 +4289,13 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                     }
                     Ok(WriterMsg::PruneWalletKeys { keep, ack }) => {
                         let wrote = ws.prune_wallet_keys(&keep).and_then(|()| ws.sync());
+                        if let Err(e) = &wrote {
+                            tracing::error!(error = %e, "wallet_keys=unpruned");
+                        }
+                        let _ = ack.send(wrote.is_ok());
+                    }
+                    Ok(WriterMsg::DropWalletKeys { drop, ack }) => {
+                        let wrote = ws.drop_wallet_keys(&drop).and_then(|()| ws.sync());
                         if let Err(e) = &wrote {
                             tracing::error!(error = %e, "wallet_keys=unpruned");
                         }
@@ -5443,6 +5477,8 @@ mod tests {
         let handle = start_writer(ws);
         assert!(handle.persist_wallet_keys_blocking(Zeroizing::new(b"run three".to_vec())));
         assert!(handle.prune_wallet_keys_blocking(Zeroizing::new(b"run two".to_vec())));
+        assert!(handle.persist_wallet_keys_blocking(Zeroizing::new(b"run four".to_vec())));
+        assert!(handle.drop_wallet_keys_blocking(vec![Zeroizing::new(b"run four".to_vec()), Zeroizing::new(b"run five".to_vec())]));
         handle.save_wallet_scan(Zeroizing::new(b"cursor 2".to_vec()));
         handle.close(None);
         let (ws, _) = open_workspace(&dir).expect("reopen");
