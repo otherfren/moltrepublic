@@ -3395,6 +3395,9 @@ pub mod mockrand {
 // rendered as a BIP-39 phrase (`molt-storage::keys`), and founding-ritual
 // tickets are real high-entropy single-use secrets (`molt-net::invite`).
 
+/// The most lines a run log keeps.
+pub const RUN_LOG_CAP: usize = 500;
+
 /// The shared core of every engine-run lifecycle (restore / create / join):
 /// step, progress, outcome and the live log. `#[serde(flatten)]`
 /// keeps the session JSON identical to the previous inline fields.
@@ -3423,6 +3426,14 @@ impl RunCore {
     /// Whether the run is currently in flight.
     pub fn running(&self) -> bool {
         self.step == 1 && self.outcome == 0
+    }
+
+    /// Append one log line, dropping the oldest beyond [`RUN_LOG_CAP`]:
+    /// remote peers feed this log too.
+    pub fn push_log(&mut self, line: String) {
+        let over = (self.log.len() + 1).saturating_sub(RUN_LOG_CAP);
+        self.log.drain(..over);
+        self.log.push(line);
     }
 
     /// A freshly started run.
@@ -8143,6 +8154,18 @@ pub enum MoltError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_run_log_keeps_only_the_newest_lines() {
+        let mut run = RunCore::started();
+        for i in 0..RUN_LOG_CAP + 10 {
+            run.push_log(format!("line {i}"));
+        }
+        assert_eq!(run.log.len(), RUN_LOG_CAP);
+        let newest = format!("line {}", RUN_LOG_CAP + 9);
+        assert_eq!(run.log.last(), Some(&newest));
+        assert_eq!(run.log.first().map(String::as_str), Some("line 10"));
+    }
 
     // ---- wiki_edit's acknowledgement (E1) --------------------------------
 

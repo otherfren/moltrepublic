@@ -700,6 +700,17 @@ impl MlsMember {
             .process_message(&self.provider, protocol)
             .map_err(classify_process_error)?;
         let from = String::from_utf8_lossy(processed.credential().serialized_content()).into_owned();
+        // a credential name is a claim; the leaf's signature key is the
+        // proof - a second leaf under a roster name must not speak as it
+        if let Some(roster) = &self.roster_keys {
+            let key = match processed.sender() {
+                Sender::Member(idx) => group.member_at(*idx).map(|m| m.signature_key),
+                _ => None,
+            };
+            if key.is_none() || roster.get(&from) != key.as_ref() {
+                return Err(MlsError::Wire(format!("sender {from} is not its anchored key")));
+            }
+        }
         // during a REWIND only: the commit we are about to undo removed
         // these leaves — one of them re-deciding the epoch with a lower
         // (back-dated, self-chosen) key would undo its own eviction
@@ -940,6 +951,28 @@ impl MlsMember {
     /// holds and speak as that member (review 2026-08-25, HIGH).
     pub fn set_roster_keys(&mut self, keys: BTreeMap<String, Vec<u8>>) {
         self.roster_keys = Some(keys);
+    }
+
+    /// Whether the group's leaves are exactly `roster`: one leaf per member,
+    /// each under its anchored key. The Welcome's tree is the founder's word
+    /// alone; this is what binds it to the table everyone signed.
+    pub fn check_tree(&self, roster: &BTreeMap<String, Vec<u8>>) -> Result<(), MlsError> {
+        let group = self.group.as_ref().ok_or(MlsError::NoGroup)?;
+        let mut seen = std::collections::BTreeSet::new();
+        for m in group.members() {
+            let name = String::from_utf8_lossy(m.credential.serialized_content()).into_owned();
+            if roster.get(&name) != Some(&m.signature_key) || !seen.insert(name.clone()) {
+                return Err(MlsError::Mls(format!("leaf {name} is not an anchored seat")));
+            }
+        }
+        if seen.len() != roster.len() {
+            return Err(MlsError::Mls(format!(
+                "tree has {} leaves, roster {}",
+                seen.len(),
+                roster.len()
+            )));
+        }
+        Ok(())
     }
 
     /// This node's own handle.
@@ -1613,6 +1646,72 @@ mod tests {
             "a leaf for bob under a foreign key is refused"
         );
         assert_eq!(founder.epoch(), epoch, "nothing merged");
+    }
+
+    /// A founder that slips a second leaf named "bob" under its own key into
+    /// the founding tree: the tree fails the roster check, and once the
+    /// roster keys are armed that leaf cannot speak as bob - neither an
+    /// application message nor a commit. The genuine bob still can.
+    #[test]
+    fn a_rogue_leaf_under_a_roster_name_cannot_speak() {
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        let bob = MlsMember::new(&key(2), "bob").expect("bob");
+        let cara = MlsMember::new(&key(3), "cara").expect("cara");
+        let rogue = MlsMember::new(&key(9), "bob").expect("rogue bob");
+        founder.create_group().expect("create");
+        let honest_roster: BTreeMap<String, Vec<u8>> = [(1u8, "founder"), (2, "bob"), (3, "cara")]
+            .into_iter()
+            .map(|(k, n)| (n.to_string(), key(k).verifying_key().to_bytes().to_vec()))
+            .collect();
+        let welcome = founder
+            .add_members(&[
+                bob.key_package().expect("bob kp"),
+                cara.key_package().expect("cara kp"),
+                rogue.key_package().expect("rogue kp"),
+            ])
+            .expect("add")
+            .expect("welcome");
+        let (mut bob, mut cara, mut rogue) = (bob, cara, rogue);
+        for m in [&mut bob, &mut cara, &mut rogue] {
+            m.join_from_welcome(&welcome).expect("joins");
+        }
+        assert!(
+            cara.check_tree(&honest_roster).is_err(),
+            "a tree with a leaf the roster does not anchor is refused"
+        );
+        cara.set_roster_keys(honest_roster.clone());
+
+        let forged = rogue.encrypt(b"I resign").expect("encrypt");
+        assert!(cara.decrypt(&forged).is_err(), "the rogue leaf cannot speak as bob");
+        let genuine = bob.encrypt(b"+1").expect("encrypt");
+        assert_app(cara.decrypt(&genuine).expect("bob speaks"), "bob", b"+1");
+
+        let epoch = cara.epoch();
+        let cara_kp = MlsMember::new(&key(3), "cara")
+            .expect("cara2")
+            .key_package()
+            .expect("kp");
+        let (commit, _) = rogue
+            .restore_member("cara", &cara_kp, NO_CARRIER_STAMP)
+            .expect("the rogue can build a commit");
+        assert!(cara.decrypt(&commit).is_err(), "nor can it commit");
+        assert_eq!(cara.epoch(), epoch, "nothing merged");
+
+        // the honest tree passes
+        let mut f2 = MlsMember::new(&key(1), "founder").expect("founder");
+        f2.create_group().expect("create");
+        let w2 = f2
+            .add_members(&[
+                MlsMember::new(&key(2), "bob").expect("b").key_package().expect("kp"),
+                MlsMember::new(&key(3), "cara").expect("c").key_package().expect("kp"),
+            ])
+            .expect("add")
+            .expect("welcome");
+        drop(w2);
+        f2.check_tree(&honest_roster).expect("the honest tree matches the roster");
+        let mut short = honest_roster;
+        short.remove("cara");
+        assert!(f2.check_tree(&short).is_err(), "a leaf beyond the roster is refused");
     }
 
     /// **An evicted leaf cannot undo its eviction with a back-dated commit.**

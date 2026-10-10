@@ -258,7 +258,7 @@ pub fn known_log_shapes() -> &'static [LogShape] {
         &["⚠ ", " landed on ", " of ", " relays - ", ""],
         &["✓ direct mesh established · ", " peer(s)"],
         &["→ the group is born · welcomes sent to every member"],
-        &["✗ invite ", ": a second activation by ", " did not verify - ignored"],
+        &["✗ invite ", ": a second activation did not verify - ignored"],
         &["✗ invite ", ": the group already formed around the first activation - cancel and re-mint to let ", " back in"],
         &["✗ invite ", " was activated a second time (by ", ") - that link is spent, they need an unused one"],
         &["· invite ", " activated by ", " - checking"],

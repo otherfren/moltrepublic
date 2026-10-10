@@ -703,16 +703,15 @@ impl State {
         let Some(head) = self.chain.head.as_ref() else {
             return;
         };
-        let keys: std::collections::BTreeMap<String, Vec<u8>> = head
-            .identities
-            .iter()
-            .filter_map(|i| hex::decode(&i.identity_pk).ok().map(|k| (i.member.clone(), k)))
-            .collect();
-        if keys.len() != head.identities.len() {
+        let Some(keys) = crate::founding::identity_key_table(&head.identities) else {
             tracing::warn!(armed = false, "an anchored identity key does not decode");
             return;
-        }
+        };
         if let Ok(mut m) = mls.lock() {
+            // armed regardless: a leaf beyond the roster stays mute under it
+            if let Err(e) = m.check_tree(&keys) {
+                tracing::warn!(error = %e, "mls tree does not match the roster");
+            }
             m.set_roster_keys(keys);
         }
     }

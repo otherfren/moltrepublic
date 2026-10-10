@@ -623,8 +623,8 @@ pub(crate) static LOG_SHAPES_DE: &[(&[&str], &[&str])] = &[
         &["→ die Gruppe ist geboren · Welcomes an alle Mitglieder gesendet"],
     ),
     (
-        &["✗ invite ", ": a second activation by ", " did not verify - ignored"],
-        &["✗ Einladung ", ": eine zweite Aktivierung durch ", " verifizierte nicht - ignoriert"],
+        &["✗ invite ", ": a second activation did not verify - ignored"],
+        &["✗ Einladung ", ": eine zweite Aktivierung verifizierte nicht - ignoriert"],
     ),
     (
         &["✗ invite ", ": the group already formed around the first activation - cancel and re-mint to let ", " back in"],

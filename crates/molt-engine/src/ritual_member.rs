@@ -497,6 +497,15 @@ pub(crate) async fn run_member_ladder<L: RitualLeg, R: Ratify>(
             .join_from_welcome(&bytes)
             .map_err(|e| e.to_string())?;
     }
+    // the Welcome's tree is the founder's word alone: bind it to the table
+    // we ratified, and let no other leaf speak as a seat from here on
+    let keys = crate::founding::identity_key_table(&sealed.identities)
+        .ok_or_else(|| "an anchored identity key does not decode".to_string())?;
+    {
+        let mut g = group.lock().map_err(|_| poisoned())?;
+        g.check_tree(&keys).map_err(|e| format!("the group is not the sealed roster: {e}"))?;
+        g.set_roster_keys(keys);
+    }
     let mesh = leg.finish(name, &sealed, &group, early_mesh).await;
     // snapshot AFTER the leg finished: a bootstrap advanced the ratchet
     let snap = group
@@ -727,6 +736,105 @@ mod tests {
         };
         let err = failure(run_member_ladder(&mut leg, "bob", seat, None::<Ratifier>, true).await);
         assert!(err.contains("not the table we ratified"), "{err}");
+    }
+
+    /// A scripted founder whose Genesis carries a real Welcome over the
+    /// KeyPackage the ladder sent - plus, when `rogue`, a second leaf named
+    /// "bob" under a key the founder holds.
+    struct WelcomingLeg {
+        inner: ScriptedLeg,
+        rogue: bool,
+    }
+
+    impl RitualLeg for WelcomingLeg {
+        async fn next_msg(
+            &mut self,
+            phase: Phase,
+            deadline: Option<tokio::time::Instant>,
+        ) -> Result<RitualMsg, String> {
+            let msg = self.inner.next_msg(phase, deadline).await?;
+            let RitualMsg::Genesis { sealed, .. } = msg else {
+                return Ok(msg);
+            };
+            let kp = self
+                .inner
+                .sent
+                .iter()
+                .find_map(|m| match m {
+                    RitualMsg::Join(j) => hex::decode(&j.key_package).ok(),
+                    _ => None,
+                })
+                .expect("the ladder sent its KeyPackage");
+            let (f_sk, _) = molt_storage::derive_identity_key(&[7u8; 32], "f");
+            let mut founder = molt_net::MlsMember::new(&f_sk, "founder").expect("founder mls");
+            founder.create_group().expect("group");
+            let mut kps = vec![kp];
+            if self.rogue {
+                let (r_sk, _) = molt_storage::derive_identity_key(&[8u8; 32], "r");
+                let rogue = molt_net::MlsMember::new(&r_sk, "bob").expect("rogue mls");
+                kps.push(rogue.key_package().expect("rogue kp"));
+            }
+            let welcome = founder.add_members(&kps).expect("add").expect("welcome");
+            Ok(RitualMsg::Genesis {
+                sealed,
+                welcome: hex::encode(welcome),
+            })
+        }
+
+        async fn send(&mut self, msg: &RitualMsg) -> Result<(), String> {
+            self.inner.send(msg).await
+        }
+
+        fn reply_handover(&self) -> Option<invite::ReplyHandover> {
+            None
+        }
+
+        fn declared_relays(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn in_group(&self) -> bool {
+            false
+        }
+
+        async fn finish(
+            &mut self,
+            _name: &str,
+            _sealed: &SealedRoster,
+            _group: &Arc<Mutex<molt_net::MlsMember>>,
+            _early: Vec<Vec<u8>>,
+        ) -> Option<Vec<molt_core::MeshLink>> {
+            None
+        }
+    }
+
+    /// Sign-what-you-see reaches the MLS tree: a Welcome whose tree holds a
+    /// leaf the sealed roster does not anchor is refused; the honest tree
+    /// joins.
+    #[tokio::test]
+    async fn a_welcome_tree_beyond_the_sealed_roster_is_refused() {
+        for rogue in [true, false] {
+            let seat = bob();
+            let p = proposal_for(&seat, "the pact");
+            let mut leg = WelcomingLeg {
+                inner: ScriptedLeg {
+                    script: VecDeque::from(vec![
+                        RitualMsg::JoinAccepted { seat: 0 },
+                        seal(&p),
+                        genesis(&p),
+                    ]),
+                    sent: Vec::new(),
+                },
+                rogue,
+            };
+            let res = run_member_ladder(&mut leg, "bob", seat, None::<Ratifier>, true).await;
+            if rogue {
+                let err = failure(res);
+                assert!(err.contains("not an anchored seat"), "{err}");
+            } else {
+                assert!(res.is_ok_and(|o| o.mls_snapshot.is_some()), "the honest tree joins");
+            }
+        }
     }
 
     /// ❻½: a Genesis that arrives WHILE the human is still proving the

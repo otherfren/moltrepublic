@@ -1121,8 +1121,8 @@ fn check_roster_anchors(identities: &[molt_core::MemberIdentity]) -> Result<(), 
 /// A member handle as it may be anchored: non-empty, at most
 /// [`MAX_HANDLE_CHARS`] characters, one line, no control characters — it
 /// becomes forever-bytes in the roster and one line of every run log.
-pub(crate) fn check_handle(handle: &str) -> Result<(), String> {
-    let handle = handle.trim();
+pub(crate) fn check_handle(raw: &str) -> Result<(), String> {
+    let handle = raw.trim();
     if handle.is_empty() {
         return Err("the handle must not be empty".to_string());
     }
@@ -1132,7 +1132,51 @@ pub(crate) fn check_handle(handle: &str) -> Result<(), String> {
     if handle.chars().any(char::is_control) {
         return Err("the handle must be one line without control characters".to_string());
     }
+    // the anchored bytes ARE the handle: nothing may render as a different
+    // one (padding, invisible characters, exotic spaces) and still pass the
+    // byte-exact uniqueness check
+    if handle.len() != raw.len()
+        || handle.chars().any(|c| (c.is_whitespace() && c != ' ') || is_default_ignorable(c))
+    {
+        return Err("the handle has invisible or unusual spacing".to_string());
+    }
     Ok(())
+}
+
+/// Unicode's `Default_Ignorable_Code_Point` (DerivedCoreProperties.txt):
+/// code points a renderer draws as nothing.
+fn is_default_ignorable(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{034F}'
+            | '\u{061C}'
+            | '\u{115F}'..='\u{1160}'
+            | '\u{17B4}'..='\u{17B5}'
+            | '\u{180B}'..='\u{180F}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{3164}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FEFF}'
+            | '\u{FFA0}'
+            | '\u{FFF0}'..='\u{FFF8}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0000}'..='\u{E0FFF}'
+    )
+}
+
+/// Each seat's anchored identity key as raw bytes - the MLS leaf key the
+/// seat must carry. `None` when a key does not decode.
+pub(crate) fn identity_key_table(
+    identities: &[molt_core::MemberIdentity],
+) -> Option<std::collections::BTreeMap<String, Vec<u8>>> {
+    identities
+        .iter()
+        .map(|i| hex::decode(&i.identity_pk).ok().map(|k| (i.member.clone(), k)))
+        .collect()
 }
 
 /// The longest handle a seat may carry.
@@ -1757,7 +1801,7 @@ mod ritual_ops {
             if self.session.create.run.log.last() == Some(&note) {
                 return Ok(molt_core::Reply::Ack);
             }
-            self.session.create.run.log.push(note);
+            self.session.create.run.push_log(note);
             self.emit_session(molt_core::SessionScope::Create);
             Ok(molt_core::Reply::Ack)
         }
@@ -1841,7 +1885,7 @@ mod ritual_ops {
                 if what != "genesis" && !self.ritual_generation_current(generation) {
                     return Ok(molt_core::Reply::Ack);
                 }
-                self.session.create.run.log.push(format!(
+                self.session.create.run.push_log(format!(
                     "⚠ {what} landed on {} of {} relays - {detail}",
                     accepted.len(),
                     accepted.len() + failed.len()
@@ -1991,12 +2035,12 @@ mod ritual_ops {
             idx: usize,
             why: String,
         ) -> Result<molt_core::Reply, molt_core::MoltError> {
-            self.session
-                .create
-                .run
-                .log
-                .push(format!("✗ invite {}: {why}", idx + 1));
-            self.emit_session(molt_core::SessionScope::Create);
+            // a repeat of a refusal already shown is a replay or a flood
+            let line = format!("✗ invite {}: {why}", idx + 1);
+            if !self.session.create.run.log.contains(&line) {
+                self.session.create.run.push_log(line);
+                self.emit_session(molt_core::SessionScope::Create);
+            }
             Ok(molt_core::Reply::Ack)
         }
 
@@ -2054,10 +2098,12 @@ mod ritual_ops {
             if !mac_ok {
                 // previously silent: an unverifiable re-activation looked
                 // exactly like "the invitee never tried"
-                self.session.create.run.log.push(format!(
-                    "✗ invite {}: a second activation by {member} did not verify - ignored",
-                    idx + 1
-                ));
+                // unauthenticated: one line per seat, no peer-chosen text
+                let line = format!("✗ invite {}: a second activation did not verify - ignored", idx + 1);
+                if self.session.create.run.log.contains(&line) {
+                    return SpentSeat::Silent;
+                }
+                self.session.create.run.push_log(line);
                 return SpentSeat::Refused;
             }
             let group_born = self
@@ -2132,7 +2178,7 @@ mod ritual_ops {
                     idx + 1
                 )
             };
-            self.session.create.run.log.push(line);
+            self.session.create.run.push_log(line);
             SpentSeat::Refused
         }
 
@@ -2166,22 +2212,6 @@ mod ritual_ops {
                 tracing::warn!(seat, error = %e, "join request with an invalid handle - dropped");
                 return Ok(molt_core::Reply::Ack);
             }
-            // R4's founding twin (2026-08-08): a joiner that declares its
-            // dialable relays lets the founder SEE a pool deviation while
-            // everyone is still in the ritual — one log line naming the
-            // relay, not two sides staring at a partial mesh later. Empty =
-            // no declaration (loopback, older builds); display-grade only.
-            if !relays.is_empty() {
-                let pool = self
-                    .net_ritual
-                    .as_ref()
-                    .map(|r| r.group_relays())
-                    .unwrap_or_default();
-                if let Some(line) = join_relay_deviation(&member, &pool, &relays) {
-                    self.session.create.run.log.push(line);
-                    self.emit_session(molt_core::SessionScope::Create);
-                }
-            }
             let idx = usize::try_from(seat).unwrap_or(usize::MAX);
             // the ticket is single-use: a spent seat is decided FIRST
             let displaced = match self.spent_seat(idx, seat, &member, &identity_pk, &nostr_pk, &proof, &reply) {
@@ -2205,10 +2235,6 @@ mod ritual_ops {
             // activation is indistinguishable from "the invitee never tried",
             // which is exactly the state an operator cannot debug.
             let is_nostr = ritual.nostr.is_some();
-            self.session.create.run.log.push(format!(
-                "· invite {} activated by {member} - checking",
-                idx + 1
-            ));
             // PROOF OF POSSESSION (Nostr only): the request arrived inside a
             // gift wrap whose seal NIP-59 verified, so `sender_npub` is a key
             // the sender demonstrably holds. Requiring it to equal the
@@ -2232,6 +2258,26 @@ mod ritual_ops {
                         .to_string(),
                 );
             }
+            // only a ticket holder gets lines naming it: everything above
+            // is unauthenticated and logs fixed text at most once per seat
+            self.session.create.run.push_log(format!(
+                "· invite {} activated by {member} - checking",
+                idx + 1
+            ));
+            // R4's founding twin (2026-08-08): a joiner that declares its
+            // dialable relays lets the founder SEE a pool deviation while
+            // everyone is still in the ritual — one log line naming the
+            // relay, not two sides staring at a partial mesh later. Empty =
+            // no declaration (loopback, older builds); display-grade only.
+            if !relays.is_empty() {
+                if let Some(line) = join_relay_deviation(&member, &ritual.group_relays(), &relays) {
+                    self.session.create.run.push_log(line);
+                }
+            }
+            self.emit_session(molt_core::SessionScope::Create);
+            let Some(ritual) = &self.net_ritual else {
+                return Ok(molt_core::Reply::Ack);
+            };
             // normalize-or-reject the wire anchor (concept §3, "normalize at
             // ingest"): the MAC only proves the TICKET HOLDER chose these
             // bytes, and the value becomes threshold-signed forever-bytes in
@@ -2406,7 +2452,7 @@ mod ritual_ops {
                         });
                     }
                 }
-                self.session.create.run.log.push(format!(
+                self.session.create.run.push_log(format!(
                     "· invite {} re-activated by {member} - the earlier attempt is replaced",
                     idx + 1
                 ));
@@ -2599,7 +2645,7 @@ mod ritual_ops {
                     .map(|i| i.member.clone());
                 if owner.as_deref() != Some(from.as_str()) {
                     tracing::warn!(seat, %from, "decline refused: not that seat's member");
-                    self.session.create.run.log.push(format!(
+                    self.session.create.run.push_log(format!(
                         "✗ a decline for invite {} came from {from}, who does not hold \
                          that seat - ignored",
                         idx + 1
@@ -2618,7 +2664,7 @@ mod ritual_ops {
             if let Some(view) = self.session.create.seats.get_mut(idx) {
                 view.state = 3; // declined
             }
-            self.session.create.run.log.push(format!(
+            self.session.create.run.push_log(format!(
                 "✗ {who} declined the charter · cancel and re-mint to change it"
             ));
             // a declined seat can never turn sealed, so this founding is over
@@ -2633,7 +2679,7 @@ mod ritual_ops {
             // already blocks maybe_finalize.
             if self.session.create.run.outcome == 0 {
                 self.session.create.run.outcome = 2;
-                self.session.create.run.log.push(
+                self.session.create.run.push_log(
                     "✗ the ritual is over - this republic must be founded anew (close and re-mint)"
                         .to_string(),
                 );
@@ -3561,6 +3607,31 @@ mod tests {
             .is_err_and(|e| e.contains("chat is always on")));
     }
 
+    /// A handle that renders as another must not be anchored: padding,
+    /// invisible format characters and exotic spaces all pass a byte
+    /// compare against the handle they mimic.
+    #[test]
+    fn a_handle_that_renders_as_another_is_refused() {
+        for spoof in [
+            "alice ",
+            " alice",
+            "alice\u{200B}",
+            "al\u{202E}ice",
+            "alice\u{2028}x",
+            "ali\u{00A0}ce",
+            "ali\u{2009}ce",
+            "\u{FEFF}alice",
+            "alice\u{00AD}",
+            "alice\u{FE0F}",
+            "alice\u{3164}",
+        ] {
+            assert!(check_handle(spoof).is_err(), "{spoof:?}");
+        }
+        for ok in ["alice", "Alice Smith", "J\u{fc}rgen", "\u{674e}\u{96f7}", "o'neil-2"] {
+            assert!(check_handle(ok).is_ok(), "{ok:?}");
+        }
+    }
+
     /// A bare, unactivated seat holding `ticket`.
     fn bare_seat(ticket: &str) -> SeatRuntime {
         SeatRuntime {
@@ -3573,6 +3644,70 @@ mod tests {
             backup_confirmed: false,
             parked_backup: None,
         }
+    }
+
+    /// Unauthenticated join requests cannot grow the founder's run log: a
+    /// flood of bad-MAC activations - fresh names each, open and spent
+    /// seats alike - leaves one line per seat and kind.
+    #[test]
+    fn a_flood_of_unverified_joins_does_not_grow_the_run_log() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let mut st = crate::tests::plain_state();
+        let (founder_sk, founder_pk) = molt_storage::derive_identity_key(&[9u8; 32], "f");
+        let hub = LoopbackHub::calm();
+        st.net_ritual = Some(RitualRuntime {
+            transport: hub.transport(),
+            name: "R".to_string(),
+            agenda: String::new(),
+            charter_proposed: false,
+            founded_ts: 0,
+            features: None,
+            rule_m: 3,
+            rule_n: 3,
+            founder: MemberIdentity {
+                member: "founder".to_string(),
+                identity_pk: founder_pk,
+                nostr_pk: npk_founder(),
+                vault_pk: String::new(),
+            },
+            founder_sk,
+            founder_nostr_sk: zeroize::Zeroizing::new(vec![7u8; 32]),
+            seats: vec![bare_seat("t0"), bare_seat("t1")],
+            generation: 0,
+            _sim: Vec::new(),
+            seq: std::sync::atomic::AtomicU64::new(0),
+            nostr: None,
+        });
+        // seat 1 is spent by an honest activation
+        st.net_ritual.as_mut().expect("ritual").seats[1].identity = Some(MemberIdentity {
+            member: "carol".to_string(),
+            identity_pk: "cc".repeat(32),
+            nostr_pk: npk_member(),
+            vault_pk: String::new(),
+        });
+        let before = st.session.create.run.log.len();
+        for i in 0..500u32 {
+            st.cmd_net_join_requested(
+                i % 2,
+                format!("x{i}"),
+                "ab".repeat(32),
+                npk_member(),
+                "00".repeat(32),
+                String::new(),
+                String::new(),
+                String::new(),
+                vec!["wss://elsewhere".to_string()],
+                String::new(),
+                None,
+            )
+            .expect("handler never errors");
+        }
+        let added = st.session.create.run.log.len() - before;
+        assert!(added <= 2, "{added} lines: {:?}", &st.session.create.run.log[before..]);
     }
 
     /// N1 PIN — the ONE ingest choke point normalizes-or-rejects the wire

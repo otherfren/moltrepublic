@@ -159,7 +159,7 @@ impl State {
         if self.session.create.run.log.last() == Some(&line) {
             return;
         }
-        self.session.create.run.log.push(line);
+        self.session.create.run.push_log(line);
     }
 
     pub(crate) fn cmd_relay_add(&mut self, url: String) -> Result<Reply, MoltError> {

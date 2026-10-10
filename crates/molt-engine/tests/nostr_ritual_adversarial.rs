@@ -223,15 +223,16 @@ async fn a_request_claiming_a_transport_key_it_did_not_sign_with_is_refused() {
     .await
     .expect("the wrap publishes — the refusal is the founder's, not the relay's");
 
+    // the refusal names the impersonation, never the unauthenticated name
     let s = wait_for(&a, "the founder to log its verdict on the request", |s| {
-        s.create.run.log.iter().any(|l| l.contains("mallory"))
+        s.create.run.log
+            .iter()
+            .any(|l| l.contains("transport key it did not sign with"))
     })
     .await;
     assert!(
-        s.create.run.log
-            .iter()
-            .any(|l| l.contains("transport key it did not sign with")),
-        "the refusal must name the impersonation: {:?}",
+        !s.create.run.log.iter().any(|l| l.contains("mallory")),
+        "an unauthenticated request logs no peer-chosen text: {:?}",
         s.create.run.log
     );
     assert!(

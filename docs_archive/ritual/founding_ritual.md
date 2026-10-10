@@ -380,7 +380,11 @@ the members can — each was presented by the seat's ticket holder, is a valid
 canonical key, and is unique across seats — and no more (no possession). And
 because every member's `KeyPackage` was added to the MLS group before the
 `Welcome` went out, everyone ends the ritual sharing one group whose
-credential identities are exactly the anchored keys.
+credential identities are exactly the anchored keys. A member does not take
+the founder's word for that: after the genesis check it requires the tree to
+hold exactly one leaf per sealed seat, under that seat's `identity_pk`
+(`MlsMember::check_tree`), and from then on drops any message whose sender
+leaf does not carry the anchored key of the name it claims.
 
 ---
 

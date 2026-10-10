@@ -456,7 +456,7 @@ impl State {
         self.restored_id = None;
         let root = self.workspace_root();
         let mut run = RunCore::started();
-        run.log.push(format!("→ restore started · way {way} · {target}"));
+        run.push_log(format!("→ restore started · way {way} · {target}"));
         self.session.notice.clear();
         self.session.restore = RestoreState { run, way, target };
         self.session.screen = Screen::Restore;
@@ -482,7 +482,7 @@ impl State {
         // 100 is reserved for the verified finish; the bar never regresses
         let r = &mut self.session.restore.run;
         r.progress_pct = r.progress_pct.max(pct.min(99));
-        r.log.push(line);
+        r.push_log(line);
         self.emit_session(SessionScope::Restore);
         Ok(Reply::Ack)
     }
@@ -670,15 +670,15 @@ impl State {
         let r = &mut self.session.restore.run;
         r.progress_pct = 100;
         r.outcome = 1;
-        r.log.push(format!(
+        r.push_log(format!(
             "✓ chain verified · height {} · {}-of-{}",
             head.height, sealed.rule_m, sealed.rule_n
         ));
-        r.log.push(format!(
+        r.push_log(format!(
             "✓ backup from unix {created} ({age_days} day(s) old) · workspace “{name}” materialized"
         ));
         if seed_present && identity_sk.is_none() {
-            r.log.push(
+            r.push_log(
                 "→ the seed does not anchor this seat in the verified roster - \
                  knowledge-only restore"
                     .to_string(),
@@ -686,9 +686,9 @@ impl State {
         }
         if keys_dropped {
             tracing::warn!(seat = "watch_only", "wallet_keys=dropped_at_import");
-            r.log.push("→ purse keys file damaged - view only".to_string());
+            r.push_log("→ purse keys file damaged - view only".to_string());
         }
-        r.log.push(
+        r.push_log(
             "→ knowledge restored - the workspace opens detached and reattaches \
              automatically"
                 .to_string(),
@@ -720,7 +720,7 @@ impl State {
         let headline = crate::relay_msg::restore_headline_for(&error);
         let r = &mut self.session.restore.run;
         r.outcome = 2;
-        r.log.push(format!("✗ restore failed: {error}"));
+        r.push_log(format!("✗ restore failed: {error}"));
         // the few words the operator READS; the sentence above keeps the
         // detail. Unrecognised failures leave it empty on purpose — the
         // surface then shows its generic failed-title rather than a guess.
@@ -873,7 +873,7 @@ impl State {
             seats,
             simulated,
         };
-        self.session.create.run.log.push(format!(
+        self.session.create.run.push_log(format!(
             "→ ritual opened · {member} (founder) · {threshold}-of-{members} · {} invite(s) minted",
             usize::from(members).saturating_sub(1)
         ));
@@ -882,13 +882,13 @@ impl State {
         // assignment above replaced the whole CreateState
         self.session.create.run.log.extend(notes);
         if simulated {
-            self.session.create.run.log.push(
+            self.session.create.run.push_log(
                 "→ SIMULATION - no real network in this build: this node signs for \
                  every member"
                     .to_string(),
             );
         } else {
-            self.session.create.run.log.push(
+            self.session.create.run.push_log(
                 "→ share each link off-band over a private channel - the ritual waits \
                  for the activations"
                     .to_string(),
@@ -2354,7 +2354,7 @@ impl State {
         self.session.join.awaiting_ratify = false;
         self.join_confirm = None;
         self.join_backup = None;
-        self.session.join.run.log.push(format!("✗ join failed: {error}"));
+        self.session.join.run.push_log(format!("✗ join failed: {error}"));
         // the headline is what the operator READS: a few words, large, in the
         // signal colour. The sentence above stays in the log for the detail.
         self.session.join.run.headline = crate::relay_msg::headline_for(&error);
@@ -2421,7 +2421,7 @@ impl State {
         if self.session.join.run.log.last() == Some(&note) {
             return Ok(Reply::Ack);
         }
-        self.session.join.run.log.push(note);
+        self.session.join.run.push_log(note);
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }
@@ -2522,7 +2522,7 @@ impl State {
             return Ok(Reply::Ack); // idempotent (a resend must not stack lines)
         }
         self.session.join.run.progress_pct = 45;
-        self.session.join.run.log.push(line);
+        self.session.join.run.push_log(line);
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }
@@ -2605,7 +2605,7 @@ impl State {
             .push("✗ you declined the charter".to_string());
         // terminal for the whole ritual, not just this join: a declined seat
         // can never seal, so the founder must re-mint — say so here too
-        self.session.join.run.log.push(
+        self.session.join.run.push_log(
             "✗ the ritual is over - this republic must be founded anew".to_string(),
         );
         self.emit_session(SessionScope::Full);
