@@ -844,6 +844,7 @@ impl State {
             fetch.abort();
         }
         self.files.mirror_pending.clear();
+        self.files.piece_wants.clear();
         self.files.mirror_planned_at = 0;
         self.files.mirror_quota_noted = false;
         self.files.mirror_progress.clear();

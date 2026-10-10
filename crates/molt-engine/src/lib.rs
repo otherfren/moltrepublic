@@ -765,6 +765,8 @@ pub(crate) struct FilePlane {
     pub(crate) mirror_fetches: HashMap<molt_core::MessageId, tokio::task::AbortHandle>,
     pub(crate) mirror_pending: HashMap<molt_core::MessageId, u64>,
     pub(crate) mirror_planned_at: u64,
+    /// `PieceWanted` episodes per share: `(first seen, answered at)`.
+    pub(crate) piece_wants: HashMap<molt_core::MessageId, (u64, Option<u64>)>,
     /// K6: the running fetch of the folded wiki base (at most one).
     pub(crate) wiki_base_fetch: Option<tokio::task::AbortHandle>,
     /// Unix seconds before which no new base fetch starts. A fetch that
@@ -1481,6 +1483,7 @@ impl State {
                 mirror_fetches: HashMap::new(),
                 mirror_pending: HashMap::new(),
                 mirror_planned_at: 0,
+                piece_wants: HashMap::new(),
                 mirror_quota_noted: false,
                 mirror_progress: HashMap::new(),
                 mirror_pages: HashMap::new(),

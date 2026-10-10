@@ -27,6 +27,11 @@ const PAGES_STALE_SECS: u64 = 600;
 /// A `FileWanted` the worker sent for a series' stamp is asked again
 /// after this if no announcement came.
 const PENDING_RETRY_SECS: u64 = 600;
+/// A non-elected holder answers a `PieceWanted` repeated after this (the
+/// requester repeats every 30 minutes).
+const PIECE_FALLBACK_SECS: u64 = 15 * 60;
+/// A want episode outlives one repeat of the requester.
+const PIECE_WANT_EPISODE_SECS: u64 = 2 * 3_600;
 /// A failed mirror fetch is not retried before this has passed.
 const FAIL_BACKOFF_SECS: u64 = 600;
 /// The worker plans this often (rides the 1 s delivery tick).
@@ -169,21 +174,29 @@ impl State {
     }
 
     /// Whether THIS seat answers a want for `id` (the lowest-named online
-    /// holder does), and from where: the shared file, or the mirror's
-    /// piece directory (`stored`).
+    /// holder does; any holder answers a want repeated after
+    /// [`PIECE_FALLBACK_SECS`], once per that window), and from where: the
+    /// shared file, or the mirror's piece directory (`stored`).
     pub(crate) fn piece_source_if_elected(
-        &self,
+        &mut self,
         id: &MessageId,
         ident: &crate::files_state::ShareIdentity,
     ) -> Option<(PathBuf, bool)> {
         let me = self.member();
         let holders = self.mirror_holders();
-        let elected = holders
-            .get(id)?
-            .iter()
-            .find(|m| self.member_online(m))?;
-        if *elected != me {
-            return None;
+        let elected = holders.get(id)?.iter().find(|m| self.member_online(m))? == &me;
+        let now = crate::now_secs();
+        let wants = &mut self.files.piece_wants;
+        wants.retain(|_, w| now.saturating_sub(w.0) < PIECE_WANT_EPISODE_SECS);
+        let w = wants.entry(*id).or_insert((now, None));
+        // a claimed hold is unproven: a silent elected seat must not starve the want
+        if !elected {
+            let repeated = now >= w.0.saturating_add(PIECE_FALLBACK_SECS);
+            let rested = w.1.map_or(true, |t| now >= t.saturating_add(PIECE_FALLBACK_SECS));
+            if !(repeated && rested) {
+                return None;
+            }
+            w.1 = Some(now);
         }
         if ident.by == me {
             return self.files.share_paths.get(id).cloned().map(|p| (p, false));

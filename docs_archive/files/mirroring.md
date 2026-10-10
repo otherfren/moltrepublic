@@ -223,6 +223,9 @@ Per open republic, a planning beat every 5 s on the 1 s delivery tick
   the sharer from its file, a complete mirror from its piece directory
   (a `PublishJob` with `stored: true`, published as stored). Two seats
   with different presence views may both answer; the fetcher dedups.
+  A hold claim is unproven, so a want repeated 15 min or more after the
+  first is answered by every whole holder, each at most once per 15 min:
+  a silent elected seat delays a re-seed by one repeat, never stops it.
 - **Quota reached**: the worker stops, ONE notice on the session channel
   (`mirror-quota:<used>:<quota>`); a raised quota, a switch or a dropped
   job re-arms it.
