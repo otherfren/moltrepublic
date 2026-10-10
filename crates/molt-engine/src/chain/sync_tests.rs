@@ -861,3 +861,89 @@ fn a_seat_that_stopped_signing_is_reported_stale() {
         walter.stale_signers()
     );
 }
+
+fn changes(st: &crate::State) -> Vec<ChainChange> {
+    st.chain.blocks.iter().map(|b| b.change.clone()).collect()
+}
+
+/// Audit (chain, high): the link hash covers the attestation list, which
+/// the verifier only filters, so one seat could re-send an old block with a
+/// junk attestation, grind its hash below ours and roll back every block
+/// above it. A same-decision variant may win the slot, never the history.
+#[test]
+fn a_junk_attestation_variant_never_rolls_back_the_chain() {
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    for id in [1, 2, 3] {
+        b.commit_applied(id, &["petra", "walter"]);
+    }
+    let rid = b.republic_id.clone();
+    let mut walter = chain_peer_3("walter", &b);
+    let before = changes(&walter);
+    let honest = b.blocks[1].clone();
+    let variant = (0u32..64)
+        .map(|i| {
+            let mut v = honest.clone();
+            v.sigs.push(molt_core::RosterAttestation { member: "zz".to_string(), sig: format!("{i:064x}") });
+            v
+        })
+        .find(|v| block_hash(&rid, v) < block_hash(&rid, &honest))
+        .expect("a lower-hash variant within 64 tries");
+    walter.receive_block_from("dora", variant);
+    assert_eq!(changes(&walter), before, "no decision is rolled back");
+    assert_eq!(walter.chain.head.as_ref().map(|h| h.height), Some(3));
+    for id in [1u64, 2, 3] {
+        assert_eq!(walter.proposals.get(&id).map(|p| p.state), Some(ProposalState::Applied), "card {id}");
+    }
+}
+
+/// The same attack by a seat that may sign the block: a re-picked valid
+/// signer set is a variant of the same decision. The lower hash wins the
+/// slot (convergence), the blocks above are re-linked, nothing is dropped,
+/// and the original holder converges on the same chain.
+#[test]
+fn a_signer_set_variant_relinks_instead_of_rolling_back() {
+    // a chain whose block 1 has a lower-hash signer-set variant
+    let (b, variant) = (1u64..40)
+        .find_map(|k| {
+            let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+            for id in [k * 10, k * 10 + 1, k * 10 + 2] {
+                b.commit_applied(id, &["petra", "walter"]);
+            }
+            let honest = b.blocks[1].clone();
+            [&["petra", "dora"][..], &["walter", "dora"], &["dora", "petra", "walter"]]
+                .iter()
+                .map(|s| ChainBlock { prev: honest.prev.clone(), ..b.seal(1, honest.change.clone(), s) })
+                .find(|v| block_hash(&b.republic_id, v) < block_hash(&b.republic_id, &honest))
+                .map(|v| (b, v))
+        })
+        .expect("a chain with a lower signer-set variant");
+    let ids: Vec<u64> = b.blocks[1..]
+        .iter()
+        .filter_map(|blk| match &blk.change {
+            ChainChange::Applied { proposal_id, .. } => Some(*proposal_id),
+            _ => None,
+        })
+        .collect();
+    let mut walter = chain_peer_3("walter", &b);
+    let before = changes(&walter);
+    walter.receive_block_from("dora", variant.clone());
+    assert_eq!(changes(&walter), before, "no decision is rolled back");
+    assert_eq!(walter.chain.blocks[1], variant, "the lower variant holds the slot");
+    let relinked = walter.chain.blocks.clone();
+    assert!(walter.walk_own(&relinked).is_ok(), "the re-linked chain verifies");
+    for id in ids {
+        assert_eq!(walter.proposals.get(&id).map(|p| p.state), Some(ProposalState::Applied), "card {id}");
+    }
+    // the old links arriving afterwards change nothing
+    for blk in b.blocks[1..].iter().rev() {
+        walter.receive_block_from("petra", blk.clone());
+    }
+    assert_eq!(walter.chain.blocks, relinked, "the lower variant stands");
+
+    // a holder of the original chain that hears the re-linked one converges
+    let mut petra = chain_peer_3("petra", &b);
+    for blk in relinked[1..].iter().rev() {
+        petra.receive_block_from("walter", blk.clone());
+    }
+    assert_eq!(petra.chain.blocks, relinked, "both holders converge");
+}

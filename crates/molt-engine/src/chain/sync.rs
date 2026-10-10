@@ -290,6 +290,13 @@ impl State {
         let mut candidate: Vec<ChainBlock> =
             self.chain.blocks.iter().filter(|b| b.height < f).cloned().collect();
         candidate.extend(suffix.iter().cloned());
+        let same_decisions = suffix
+            .iter()
+            .all(|c| ours_at(self, c.height).map_or(true, |o| o.change == c.change));
+        if same_decisions {
+            self.relink_onto_variant(from, f, candidate);
+            return;
+        }
         if let Err(e) = self.walk_own(&candidate) {
             tracing::warn!(%from, fork = f, error = %e, "the other branch does not verify - dropped");
             self.chain.fork_candidates.clear();
@@ -355,6 +362,37 @@ impl State {
         if let Some(head) = self.chain.head.as_ref().map(|h| h.height) {
             self.chain.catchup_from = None;
             self.request_catchup(head.saturating_add(1));
+        }
+    }
+
+    /// The other branch differs from ours only in WHO attested (the link
+    /// hash covers the attestation list, member signatures do not cover
+    /// `prev`): take its blocks and re-link ours above them. Nothing is
+    /// decided again, so a ground variant can move hashes, never history.
+    fn relink_onto_variant(&mut self, from: &str, f: u64, mut candidate: Vec<ChainBlock>) {
+        let rid = self.republic_id();
+        let old_head = self.chain.head.as_ref().map_or(0, |h| h.height);
+        let top = candidate.last().map_or(0, |b| b.height);
+        for b in self.chain.blocks.iter().filter(|b| b.height > top) {
+            let mut b = b.clone();
+            b.prev = candidate.last().map(|p| block_hash(&rid, p)).unwrap_or_default();
+            candidate.push(b);
+        }
+        self.chain.fork_candidates.clear();
+        if let Err(e) = self.walk_own(&candidate) {
+            tracing::warn!(%from, fork = f, error = %e, "attestation variant does not verify - dropped");
+            return;
+        }
+        tracing::info!(%from, fork = f, "attestation variant holds the slot - re-linking");
+        let fresh: Vec<ChainBlock> = candidate.iter().filter(|b| b.height > old_head).cloned().collect();
+        self.adopt_chain(candidate);
+        for b in &fresh {
+            self.after_block_applied(b);
+        }
+        self.clear_divergence(from);
+        self.persist_chain_now();
+        if !fresh.is_empty() {
+            self.emit_session(crate::SessionScope::Full);
         }
     }
 
@@ -489,13 +527,6 @@ impl State {
             .iter()
             .find(|b| b.height.saturating_add(1) == block.height)
             .map_or(true, |below| block_hash(&rid, below) == block.prev);
-        if !shared_prev || !is_tip {
-            let since = if shared_prev { block.height } else { block.height.saturating_sub(1) };
-            self.note_divergence(from, since, &block);
-            self.stash_fork_candidate(block);
-            self.try_reorg(from);
-            return;
-        }
         // CHEAP FIRST (review C5): a ground low-hash block costs a full
         // re-walk per frame; the signatures are what any contender must
         // carry, so they are checked against the roster before anything
@@ -504,6 +535,21 @@ impl State {
             block_signers(&rid, &h.identities, &block)
                 .is_ok_and(|signers| signers.len() >= usize::from(h.rule_m))
         });
+        if shared_prev && existing.change == block.change {
+            // the same decision under another attestation list: not a fork
+            if incoming < current && signed {
+                self.stash_fork_candidate(block);
+                self.try_reorg(from);
+            }
+            return;
+        }
+        if !shared_prev || !is_tip {
+            let since = if shared_prev { block.height } else { block.height.saturating_sub(1) };
+            self.note_divergence(from, since, &block);
+            self.stash_fork_candidate(block);
+            self.try_reorg(from);
+            return;
+        }
         if is_tip && incoming < current && !signed {
             tracing::warn!(height = block.height, "tie-break contender without a valid threshold - dropped");
             return;

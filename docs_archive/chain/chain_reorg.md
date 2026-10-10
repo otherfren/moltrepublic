@@ -23,6 +23,12 @@ height has the smaller [`block_hash`].** This is the rule the tip
 tie-break already applies; it is symmetric, so both sides compute the same
 winner once both hold both branches. Length plays no role: a shorter
 winning branch still wins, and the loser's extra blocks return to pending.
+**Except an attestation variant** (audit 2026-10-10): when every block of
+the other branch carries the same `change` as ours at its height, only the
+attestation list differs - which any seat can grind (a junk entry, a
+re-picked signer set). The smaller hash still wins the slot, but our
+blocks above are re-linked onto it (member signatures do not cover
+`prev`), so nothing is dropped or re-voted.
 
 R2 **A reorg never crosses a checkpoint cut.** The candidate chain starts
 at this holder's anchor (the genesis, or the blob's anchor block). A fork
