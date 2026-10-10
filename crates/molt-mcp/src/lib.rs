@@ -2747,7 +2747,7 @@ pub fn tools() -> Vec<ToolDef> {
                 "properties": {
                     "name": { "type": "string", "description": "the final republic name to ratify" },
                     "agenda": { "type": "string", "description": "the free-text charter/agenda to ratify" },
-                    "features": { "type": "array", "items": { "type": "string", "enum": feature_enum() }, "description": "the optional surfaces to activate (chat is always on); omitted = none. memory (the shared wiki) is real; vault is real, needs 2 <= m <= n-2, and can also be enabled later by a set_features vote; quests (the kanban) is real; wallet has no real surface yet (status.surfaces[].implemented) - the GUI wizard locks it off, prefer leaving it out" }
+                    "features": { "type": "array", "items": { "type": "string", "enum": feature_enum() }, "description": "the optional surfaces to activate (chat is always on); omitted = none. memory (the shared wiki) is real; vault is real, needs 2 <= m <= n-2, and can also be enabled later by a set_features vote; quests (the kanban) is real; wallet alone creates no purse: that takes 2 <= m <= n-1 and the wallet_init vote" }
                 },
                 "required": ["name"]
             }),

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! The purse (`docs/chain/wallet_treasury_design.md`): its read model, the
-//! init vote (§3.1, the only door) and the command handlers. Runs and the
-//! scanner land with plan §14 steps 7-8; until then their doors refuse with
-//! one line.
+//! init vote (§3.1, the only door) and the command handlers. The run lives
+//! in `wallet_run.rs`; status, recovery and the scanner land with plan §14
+//! steps 7-8 and refuse with one line until then.
 
 use std::collections::BTreeSet;
 
@@ -15,7 +15,7 @@ use crate::State;
 
 /// The one door's op (W4).
 pub(crate) const WALLET_INIT: &str = "wallet_init";
-/// The purse record's op (step 7).
+/// The purse record's op (design §3.5).
 pub(crate) const WALLET_CREATED: &str = "wallet_created";
 /// The proposer's birthday lies this many blocks below its daemon.
 pub(crate) const BIRTHDAY_MARGIN: u64 = 10;
@@ -37,18 +37,13 @@ fn op(payload: &Value) -> Option<&str> {
     payload.get("op").and_then(Value::as_str)
 }
 
-/// A purse op (§3.6): the closed set every door enforces.
-pub(crate) fn is_purse_op(payload: &Value) -> bool {
-    matches!(op(payload), Some(WALLET_INIT | WALLET_CREATED))
-}
-
 pub(crate) fn is_init(payload: &Value) -> bool {
     op(payload) == Some(WALLET_INIT)
 }
 
-/// What the wire and the propose path take: a purse op, an init well-formed.
+/// The closed op set every door enforces (§3.6), each op in its one shape.
 pub(crate) fn purse_op_ok(payload: &Value) -> bool {
-    is_purse_op(payload) && (!is_init(payload) || parse_init(payload).is_some())
+    parse_init(payload).is_some() || crate::wallet_run::parse_created(payload).is_some()
 }
 
 /// A well-formed init: `(birthday_height, network)`.
@@ -92,6 +87,8 @@ pub(crate) struct PurseRt {
     pub(crate) init_cancelled: BTreeSet<u64>,
     /// Init cards this seat approved before it could check them.
     pub(crate) consent: BTreeSet<u64>,
+    /// The run, its records and attestations.
+    pub(crate) run: crate::wallet_run::RunRt,
 }
 
 impl State {
@@ -189,8 +186,7 @@ impl State {
                 }
                 Ok(())
             }
-            // TODO(step 7): exact match + n attestations
-            Some(WALLET_CREATED) => Err(WalletRefusal::NotYet),
+            Some(WALLET_CREATED) => self.wallet_created_check(payload),
             _ => Err(WalletRefusal::UnknownOp),
         }
     }
@@ -214,7 +210,7 @@ impl State {
 
     /// Ask the daemon for its height off the actor; the answer lands as
     /// [`Command::NetWalletProbe`] on `reply` (the caller's, or nobody's).
-    fn start_wallet_probe(
+    pub(crate) fn start_wallet_probe(
         &mut self,
         reply: Option<tokio::sync::oneshot::Sender<Result<Reply, MoltError>>>,
     ) -> Result<u64, WalletRefusal> {
@@ -249,15 +245,39 @@ impl State {
     pub(crate) fn wallet_view(&self) -> WalletView {
         let rule = self.wallet_rule();
         let (m, n) = rule.unwrap_or((0, 0));
-        // TODO(step 7): Ready with the purse, run, shareholders; TODO(step 8): balance, history.
+        // TODO(step 7b): the others' key part status; TODO(step 8): balance, history.
+        let purse = self.wallet_purse();
         let phase = match rule {
             None => WalletPhase::Off,
             Some((m, n)) if !molt_core::wallet::bounds_ok(m, n) => WalletPhase::Bounds,
+            Some(_) if purse.is_some() => WalletPhase::Ready,
             Some(_) if self.wallet_init_applied().is_some() => WalletPhase::Init,
             Some(_) => WalletPhase::NoPurse,
         };
+        let me = self.member();
+        let shareholders = match &purse {
+            Some(_) => self
+                .vault_founding_table()
+                .into_iter()
+                .map(|i| {
+                    let status = match (i.member == me, self.purse.run.watch_only) {
+                        (true, false) => molt_core::wallet::ShareStatus::Held,
+                        (true, true) => molt_core::wallet::ShareStatus::WatchOnly,
+                        _ => molt_core::wallet::ShareStatus::Unknown,
+                    };
+                    (i.member, status)
+                })
+                .collect(),
+            None => Vec::new(),
+        };
         WalletView {
-            network: self.session.settings.wallet_network.clone(),
+            address: purse.as_ref().map(|p| p.created.address.clone()).unwrap_or_default(),
+            network: purse.as_ref().map_or_else(
+                || self.session.settings.wallet_network.clone(),
+                |p| crate::wallet_run::network_word(p.created.network).to_string(),
+            ),
+            run: self.wallet_run_view(),
+            shareholders,
             daemon_height: self.purse.height.map_or(0, |(h, _)| h),
             connected: self.purse.height.is_some(),
             threshold: u32::from(m),
@@ -315,6 +335,7 @@ impl State {
         };
         if latest {
             self.wallet_review();
+            self.wallet_advance_now();
             self.emit_session(SessionScope::Full);
         }
         out
@@ -422,22 +443,9 @@ impl State {
         WalletRefusal::Held(Box::new(refusal))
     }
 
-    /// [`molt_core::Command::WalletConsent`].
-    pub(crate) fn cmd_wallet_consent(&mut self, _accept: bool) -> Result<Reply, MoltError> {
-        // TODO(step 7): readiness/consent frame of the current run.
-        not_yet()
-    }
-
-    /// [`molt_core::Command::WalletRetry`].
-    pub(crate) fn cmd_wallet_retry(&mut self) -> Result<Reply, MoltError> {
-        // TODO(step 7): a fresh run nonce for the applied init.
-        not_yet()
-    }
-
-    /// The INTERNAL run and scan feeds.
+    /// The INTERNAL status and scan feeds.
     pub(crate) fn cmd_net_wallet_unbuilt(&mut self) -> Result<Reply, MoltError> {
-        // TODO(step 7): NetWalletFrame, NetWalletStatus, NetWalletViewAnswer;
-        // TODO(step 8): NetWalletScan.
+        // TODO(step 7b): NetWalletStatus, NetWalletViewAnswer; TODO(step 8): NetWalletScan.
         not_yet()
     }
 

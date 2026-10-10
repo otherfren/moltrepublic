@@ -90,10 +90,17 @@ async fn the_unbuilt_doors_refuse_compactly() {
     assert!(matches!(w.execute(probe).await, Ok(Reply::Ack)));
     let peer = || "bjorn".to_string();
     let secret = || molt_core::vault::SecretBytes(vec![7; 32]);
+    match w.execute(Command::WalletConsent { accept: true }).await {
+        Err(e @ MoltError::Wallet(WalletRefusal::NoRun)) => assert_eq!(e.to_string(), "purse: no set-up running"),
+        other => panic!("unexpected: {other:?}"),
+    }
+    match w.execute(Command::WalletRetry).await {
+        Err(e @ MoltError::Wallet(WalletRefusal::NotChain)) => assert_eq!(e.to_string(), "purse: not a chain republic"),
+        other => panic!("unexpected: {other:?}"),
+    }
+    let junk = Command::NetWalletFrame { from: peer(), body: secret(), generation: None };
+    assert!(matches!(w.execute(junk).await, Ok(Reply::Ack)), "an unusable frame is dropped");
     for cmd in [
-        Command::WalletConsent { accept: true },
-        Command::WalletRetry,
-        Command::NetWalletFrame { from: peer(), body: secret(), generation: None },
         Command::NetWalletScan {
             scan_height: 1,
             daemon_height: 2,

@@ -121,3 +121,17 @@ fn vault_frame_tags_are_disjoint() {
         }
     }
 }
+
+/// **The purse run's seven tags are parsed and shadow nothing** (wallet
+/// plan §7.4).
+#[test]
+fn wallet_frame_tags_are_disjoint() {
+    use molt_net::wallet_frames::WALLET_TAGS;
+    let all = molt_net::supervisor::control_frame_tags();
+    for tag in WALLET_TAGS {
+        assert!(all.contains(&tag), "the control table parses {:?}", String::from_utf8_lossy(tag));
+        for other in &all {
+            assert!(*other == tag || !other.starts_with(tag) && !tag.starts_with(other));
+        }
+    }
+}

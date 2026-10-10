@@ -89,6 +89,8 @@ pub struct WalletRunView {
     pub reason: Option<String>,
     /// This seat still has to consent.
     pub needs_consent: bool,
+    /// A daemon URL another seat offered; "" for none.
+    pub daemon_hint: String,
 }
 
 /// One incoming or outgoing transfer.
@@ -202,6 +204,15 @@ pub enum WalletRefusal {
     /// The set-up was dropped before its daemon answered.
     #[error("set-up cancelled")]
     Cancelled,
+    /// No set-up is running.
+    #[error("no set-up running")]
+    NoRun,
+    /// A set-up is running.
+    #[error("set-up running")]
+    RunActive,
+    /// The purse record is not what this seat computed.
+    #[error("not this seat's result")]
+    NotMine,
 }
 
 #[cfg(test)]
@@ -246,6 +257,7 @@ mod tests {
                 missing: vec!["b".to_string()],
                 reason: None,
                 needs_consent: true,
+                daemon_hint: "http://x.onion".to_string(),
             }),
             shareholders: vec![("a".to_string(), ShareStatus::Held), ("b".to_string(), ShareStatus::WatchOnly)],
             history: vec![WalletTxView {
@@ -276,7 +288,8 @@ mod tests {
                 "of": 3,
                 "missing": ["b"],
                 "reason": null,
-                "needs_consent": true
+                "needs_consent": true,
+                "daemon_hint": "http://x.onion"
             },
             "shareholders": [["a", "held"], ["b", "watch_only"]],
             "history": [{

@@ -664,7 +664,30 @@ Fork-Höhen fest. Bis dahin `can_spend = false`, kein `sign.rs`.
    organization dialog no longer rides it along. §10.20–22 and 36 are unit tests on built
    chains (`molt-engine/src/wallet_tests.rs`); 23–25a also run end to
    end (`tests/wallet_init.rs`).
-7. [ ] §7.3–7.6 + §7.8; §10.26–35, 37–41.
+7. §7.3–7.6 + §7.8; §10.26–35, 37–41, split in two:
+   - [x] 7a: §7.4–7.6; §10.26–28, 32–35, 37–39 (2026-10-10). The run
+     lives in `molt-engine/src/wallet_run.rs`, the seven frames in
+     `molt-net/src/wallet_frames.rs` (JSON, hex fields, 64 KiB cap);
+     `NetWalletFrame.body` is the whole frame, tag included. Deadlines,
+     fallbacks and resends ride the 1 s delivery beat, resends every
+     10 s (the 30 s presence tick is too coarse for a readiness
+     deadline). A seat that lost a run (reopen) learns its nonce only
+     from the next round frame and answers it with `wabrt` `restart`;
+     readiness frames of an unknown run wait as early frames, so a
+     reopened seat may rejoin a run still in readiness (nothing of it
+     was secret). A seat that left a run in readiness rejoins it on
+     that run's round frame: all n readied it. `WalletRetry` and a
+     start refuse while this seat is in the rounds.
+     The starter sends `wdhint` with its start; `WalletRunView` gains
+     `daemon_hint`. New refusals: `no set-up running`, `set-up running`,
+     `not this seat's result`. `shareholders` names only this seat's
+     own status until the status frame (7b). §10.32–35 and 38c/d are
+     unit tests on built chains (`wallet_run_tests.rs`; 34 cuts the
+     chain between init and purse, and after it); the rest run end to
+     end (`tests/wallet_run.rs`) behind the test seams
+     `__wallet_deadline`, `__wallet_withhold_attestation`,
+     `__wallet_start_with`.
+   - [ ] 7b: §7.3 + §7.8; §10.29–31, 38b, 40–41.
 8. [ ] §7.9 Scanner; manueller regtest-Lauf (the RPC transport landed
    with step 6).
 9. [ ] §11 UI.

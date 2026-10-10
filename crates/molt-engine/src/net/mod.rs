@@ -210,6 +210,15 @@ impl EngineSink for CmdSink {
         let _ = self.execute(cmd).await;
     }
 
+    async fn wallet_frame(&self, member: &MemberId, frame: &molt_net::wallet_frames::WalletFrame) {
+        let cmd = Command::NetWalletFrame {
+            from: member.clone(),
+            body: molt_core::vault::SecretBytes(frame.to_frame()),
+            generation: self.generation,
+        };
+        let _ = self.execute(cmd).await;
+    }
+
     async fn rekeyed(&self, member: &MemberId) {
         let _ = self
             .execute(Command::NetPeerRekeyed {

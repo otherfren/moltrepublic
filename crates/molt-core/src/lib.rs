@@ -141,6 +141,7 @@ impl Surface {
                 | Surface::Memory
                 | Surface::Quests
                 | Surface::Vault
+                | Surface::Wallet
                 | Surface::Files
         )
     }
@@ -5039,7 +5040,7 @@ pub enum Command {
     NetWalletFrame {
         /// The MLS-authenticated sender.
         from: MemberId,
-        /// The frame body after its tag.
+        /// The frame, its tag included.
         body: vault::SecretBytes,
         /// Transport incarnation (stale commands are dropped).
         #[serde(default)]
@@ -8594,7 +8595,15 @@ mod tests {
         let real: Vec<Surface> = Surface::ALL.into_iter().filter(|s| s.is_implemented()).collect();
         assert_eq!(
             real,
-            vec![Surface::Organization, Surface::Chat, Surface::Memory, Surface::Quests, Surface::Vault, Surface::Files]
+            vec![
+                Surface::Organization,
+                Surface::Chat,
+                Surface::Memory,
+                Surface::Quests,
+                Surface::Vault,
+                Surface::Wallet,
+                Surface::Files
+            ]
         );
     }
 

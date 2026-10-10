@@ -218,7 +218,16 @@ fn vault_refusals_render_in_german() {
 #[test]
 fn wallet_refusals_render_in_german() {
     use molt_core::wallet::WalletRefusal as R;
-    for r in [R::NotYet, R::NoKeysFile, R::KeysIntact, R::Cancelled, R::Held(Box::new(R::NoDaemon))] {
+    for r in [
+        R::NotYet,
+        R::NoKeysFile,
+        R::KeysIntact,
+        R::Cancelled,
+        R::Held(Box::new(R::NoDaemon)),
+        R::NoRun,
+        R::RunActive,
+        R::NotMine,
+    ] {
         let english = r.to_string();
         let e = molt_core::MoltError::Wallet(r);
         assert_eq!(super::localize_error(0, &e), e.to_string());

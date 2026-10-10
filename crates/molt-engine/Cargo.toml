@@ -26,6 +26,7 @@ zeroize.workspace = true
 rustix.workspace = true
 molt-net.workspace = true
 molt-vault.workspace = true
+molt-treasury.workspace = true
 # the deposit's OS-seeded nonce stream, the rand_core molt-vault takes
 rand_chacha.workspace = true
 tokio.workspace = true

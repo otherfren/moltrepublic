@@ -58,6 +58,7 @@ mod upload_refs;
 mod vault;
 mod wake;
 mod wallet;
+mod wallet_run;
 mod wiki_export;
 mod wiki_index;
 
@@ -159,6 +160,7 @@ pub struct WalletHandle {
     cmd_tx: mpsc::Sender<Envelope>,
     ev_tx: broadcast::Sender<Event>,
     vault_seams: std::sync::Arc<net::vault_payload::VaultSeams>,
+    wallet_seams: std::sync::Arc<wallet_run::WalletSeams>,
 }
 
 impl WalletHandle {
@@ -221,6 +223,29 @@ impl WalletHandle {
     #[doc(hidden)]
     pub fn __vault_lie_on_reveal(&self, lie: bool) {
         self.vault_seams.lab.lie_on_reveal.store(lie, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam (wallet plan §10): purse run deadlines of `secs` (the
+    /// fallback step is a quarter of it); 0 restores the defaults.
+    #[doc(hidden)]
+    pub fn __wallet_deadline(&self, secs: u64) {
+        self.wallet_seams.deadline.store(secs, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam (wallet plan §10.38): while set, this seat persists its
+    /// keys record but sends no attestation.
+    #[doc(hidden)]
+    pub fn __wallet_withhold_attestation(&self, withhold: bool) {
+        self.wallet_seams.withhold.store(withhold, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam (wallet plan §10.38a): start a run with `nonce` on the
+    /// next beat, whatever runs.
+    #[doc(hidden)]
+    pub fn __wallet_start_with(&self, nonce: [u8; 32]) {
+        if let Ok(mut s) = self.wallet_seams.start.lock() {
+            *s = Some(nonce);
+        }
     }
 
     /// Test seam (vault plan S3c): this holder's receipts report a
@@ -459,6 +484,7 @@ fn spawn_actor(
     state.demo_mesh = seams.demo_mesh;
     state.reopen_seam = seams.reopen_seam;
     let vault_seams = state.vault_seams.clone();
+    let wallet_seams = state.wallet_seams.clone();
     if vault::receipts::lab_complain_at_spawn() {
         tracing::warn!("vault_lab=complain");
         vault_seams.lab.complain.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -487,7 +513,7 @@ fn spawn_actor(
         tracing::debug!("engine actor stopped");
     });
 
-    WalletHandle { cmd_tx, ev_tx, vault_seams }
+    WalletHandle { cmd_tx, ev_tx, vault_seams, wallet_seams }
 }
 
 // The one shared clock (event timestamps must not drift from the storage
@@ -1190,6 +1216,8 @@ pub(crate) struct State {
     pub(crate) nostr: Option<NostrTransport>,
     /// The vault test seams the handle reaches (never a `Command`).
     pub(crate) vault_seams: std::sync::Arc<net::vault_payload::VaultSeams>,
+    /// The purse run's test seams (never a `Command`).
+    pub(crate) wallet_seams: std::sync::Arc<wallet_run::WalletSeams>,
     /// Grant answers and asks of the open workspace (vault plan S4).
     pub(crate) vault_grants: vault::grant::GrantRuntime,
     /// The kind-445 group runtime of an open Nostr workspace (N5.2), with the
@@ -1466,6 +1494,7 @@ impl State {
             transport_kind: None,
             nostr: None,
             vault_seams: std::sync::Arc::default(),
+            wallet_seams: std::sync::Arc::default(),
             vault_grants: vault::grant::GrantRuntime::default(),
             group_net: None,
             delivery: DeliveryState {
@@ -2215,8 +2244,13 @@ impl State {
             Command::NetWalletProbe { height, error, generation } => {
                 self.cmd_net_wallet_probe(height, error, generation)
             }
-            Command::NetWalletFrame { .. }
-            | Command::NetWalletScan { .. }
+            Command::NetWalletFrame { from, body, generation } => {
+                if !self.net_generation_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.cmd_net_wallet_frame(&from, &body.0)
+            }
+            Command::NetWalletScan { .. }
             | Command::NetWalletStatus { .. }
             | Command::NetWalletViewAnswer { .. } => self.cmd_net_wallet_unbuilt(),
             Command::RecoverInviteStart { member } => self.cmd_recover_invite_start(member),

@@ -590,6 +590,7 @@ impl State {
 
         // ---- commit (design §4.1 step 3) ----
         let created = staging.created;
+        let keys_dropped = staging.wallet_keys_dropped();
         let at_rest = staging.at_rest.clone();
         let name = staging.manifest.workspace.name.clone();
         let root = self.workspace_root();
@@ -669,6 +670,10 @@ impl State {
                  knowledge-only restore"
                     .to_string(),
             );
+        }
+        if keys_dropped {
+            tracing::warn!(seat = "watch_only", "wallet_keys=dropped_at_import");
+            r.log.push("→ purse keys file damaged - view only".to_string());
         }
         r.log.push(
             "→ knowledge restored - the workspace opens detached and reattaches \

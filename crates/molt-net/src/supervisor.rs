@@ -400,7 +400,25 @@ const CONTROL_FRAMES: &[(&[u8], ControlParser)] = &[
     (crate::vault_frames::VAULT_REVEAL_TAG, parse_vault),
     (crate::vault_frames::VAULT_RESP_TAG, parse_vault),
     (crate::vault_frames::VAULT_ASK_TAG, parse_vault),
+    // the purse run (wallet plan §7.4): seven tags, one parser
+    (crate::wallet_frames::WALLET_START_TAG, parse_wallet),
+    (crate::wallet_frames::WALLET_HINT_TAG, parse_wallet),
+    (crate::wallet_frames::WALLET_READY_TAG, parse_wallet),
+    (crate::wallet_frames::WALLET_R1_TAG, parse_wallet),
+    (crate::wallet_frames::WALLET_R2_TAG, parse_wallet),
+    (crate::wallet_frames::WALLET_ATTEST_TAG, parse_wallet),
+    (crate::wallet_frames::WALLET_ABORT_TAG, parse_wallet),
 ];
+
+fn parse_wallet(from: MemberId, frame: &[u8]) -> Option<MlsDecode> {
+    match crate::wallet_frames::WalletFrame::from_frame(frame) {
+        Ok(f) => Some(MlsDecode::Wallet(from, Box::new(f))),
+        Err(e) => {
+            tracing::debug!(error = %e, "dropping an unusable wallet frame");
+            None
+        }
+    }
+}
 
 fn parse_vault(from: MemberId, frame: &[u8]) -> Option<MlsDecode> {
     match crate::vault_frames::VaultFrame::from_frame(frame) {
@@ -450,6 +468,8 @@ pub(crate) enum MlsDecode {
     /// A vault control frame (plan S3a): status and transport, never a log
     /// event.
     Vault(MemberId, Box<crate::vault_frames::VaultFrame>),
+    /// A purse run frame: ephemeral, never a log event.
+    Wallet(MemberId, Box<crate::wallet_frames::WalletFrame>),
     /// A commit merged (epoch advanced) — ack it and retry the epoch buffer.
     /// `readmitted` names the members the commit ADDED (a recovery re-key):
     /// the consumer forwards them to the engine BEFORE anything of the new
@@ -621,6 +641,15 @@ pub trait EngineSink: Send + Sync + Clone + 'static {
         &self,
         member: &MemberId,
         frame: &crate::vault_frames::VaultFrame,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        let _ = (member, frame);
+        async {}
+    }
+    /// An authenticated purse run frame from `member`. Default no-op.
+    fn wallet_frame(
+        &self,
+        member: &MemberId,
+        frame: &crate::wallet_frames::WalletFrame,
     ) -> impl std::future::Future<Output = ()> + Send {
         let _ = (member, frame);
         async {}
@@ -1467,7 +1496,8 @@ impl<K: EngineSink> crate::epoch_hold::HeldIngest<HeldMessage> for MeshHeldInges
             | MlsDecode::MirrorDecl(_, _)
             | MlsDecode::MirrorStatus(_, _)
             | MlsDecode::MirrorWho(_)
-            | MlsDecode::Vault(_, _) => {
+            | MlsDecode::Vault(_, _)
+            | MlsDecode::Wallet(_, _) => {
                 self.sink.peer_seen(&self.peer.member).await;
                 ack_all(std::mem::take(held));
                 Held::Progress
@@ -1809,6 +1839,13 @@ where
                         sink.vault_frame(&from, &frame).await;
                     } else {
                         tracing::warn!(peer = %peer.member, claimed = %frame.by(), "a vault frame disowns its link - dropped");
+                    }
+                    ack_all(acks);
+                }
+                MlsDecode::Wallet(from, frame) => {
+                    sink.peer_seen(&peer.member).await;
+                    if from == peer.member {
+                        sink.wallet_frame(&from, &frame).await;
                     }
                     ack_all(acks);
                 }

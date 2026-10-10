@@ -14,7 +14,7 @@ pub mod keys;
 pub mod scan;
 
 pub use dalek_ff_group::{Ed25519, EdwardsPoint};
-pub use dkg_pedpop::{Participant, ThresholdKeys, ThresholdParams};
+pub use dkg_pedpop::{KeyMachine, Participant, SecretShareMachine, ThresholdKeys, ThresholdParams};
 pub use monero_wallet::address::Network;
 pub use monero_wallet::ed25519::Scalar as MoneroScalar;
 /// Re-exported so callers pass the same `rand_core` (0.6) the DKG uses.

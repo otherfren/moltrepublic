@@ -226,7 +226,7 @@ fn a_mock_transfer_block_does_not_break_the_chain() {
     refused(st.wallet_approve_check(&json!({ "op": "transfer" })).map_err(MoltError::Wallet), &WalletRefusal::UnknownOp);
     refused(
         st.wallet_approve_check(&json!({ "op": WALLET_CREATED })).map_err(MoltError::Wallet),
-        &WalletRefusal::NotYet,
+        &WalletRefusal::UnknownOp,
     );
 
     commit_wallet(&mut b, 5, init(2990, "mainnet"));

@@ -430,6 +430,7 @@ impl State {
                     // must never precede it there
                     if surface == molt_core::Surface::Wallet {
                         self.after_wallet_proposed(id.0);
+                        self.wallet_cosign_review();
                     }
                 }
             }

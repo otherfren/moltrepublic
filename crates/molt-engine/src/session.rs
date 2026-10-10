@@ -1445,6 +1445,7 @@ impl State {
             tracing::warn!(error = %e, "kanban_draft=unreadable");
             String::new()
         });
+        let wallet_records = opened.read_wallet_keys();
         // point of no return: swap the actor state to the new workspace
         self.close_active_storage();
         self.reset_workspace_state();
@@ -1563,6 +1564,7 @@ impl State {
         // serving downloads across restarts
         self.adopt_share_paths();
         self.resume_file_jobs(&transport_state);
+        self.wallet_on_open(wallet_records);
         Ok(transport_state)
     }
 

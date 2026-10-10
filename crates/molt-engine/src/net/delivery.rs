@@ -340,6 +340,7 @@ impl State {
         // A2.2: held seals land once their round has passed
         self.drain_held_seals();
         self.wake_tick();
+        self.wallet_run_tick(now);
         Ok(Reply::Ack)
     }
 

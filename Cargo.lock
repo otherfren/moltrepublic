@@ -5143,6 +5143,7 @@ dependencies = [
  "molt-core",
  "molt-net",
  "molt-storage",
+ "molt-treasury",
  "molt-vault",
  "nostr-relay-builder",
  "pulldown-cmark",

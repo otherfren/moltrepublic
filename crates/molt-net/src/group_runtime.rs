@@ -1293,6 +1293,7 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
             | MlsDecode::MirrorStatus(..)
             | MlsDecode::MirrorWho(..)
             | MlsDecode::Vault(..)
+            | MlsDecode::Wallet(..)
             | MlsDecode::Discard
             | MlsDecode::Failed(_)
     ) {
@@ -1378,6 +1379,11 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
                 return Ingest::Nothing;
             }
             sink.vault_frame(&from, &frame).await;
+            Ingest::Nothing
+        }
+        MlsDecode::Wallet(from, frame) => {
+            sink.peer_seen(&from).await;
+            sink.wallet_frame(&from, &frame).await;
             Ingest::Nothing
         }
         // the two arms the mesh supervisor implements and this loop did not:

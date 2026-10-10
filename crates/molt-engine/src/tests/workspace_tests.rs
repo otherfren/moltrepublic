@@ -182,7 +182,7 @@ fn workspace_state_survives_close_and_reopen() {
                 assert!(implemented(Surface::Files));
                 assert!(implemented(Surface::Quests));
                 assert!(implemented(Surface::Vault));
-                assert!(!implemented(Surface::Wallet));
+                assert!(implemented(Surface::Wallet));
             }
             other => panic!("unexpected: {other:?}"),
         }

@@ -776,6 +776,7 @@ impl State {
         self.vault_rx = crate::vault::receipts::ReceiptRuntime::default();
         // consents and a waiting init name the OLD workspace; the daemon height is the node's
         self.purse.consent.clear();
+        self.purse.run = crate::wallet_run::RunRt::default();
         self.cancel_wallet_init();
         self.transport_kind = None;
         self.nostr = None;

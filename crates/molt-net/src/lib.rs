@@ -66,6 +66,7 @@ pub mod transfer;
 pub mod trickle;
 pub mod welcome;
 pub mod vault_frames;
+pub mod wallet_frames;
 /// Embedded in-process Tor via arti — only built with `--features embedded-tor`
 /// (the default build never pulls arti). See the module docs and the
 /// `Cargo.toml` `[features]` note.

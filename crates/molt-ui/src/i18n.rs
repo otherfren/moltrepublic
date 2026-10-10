@@ -65,6 +65,9 @@ fn localize_wallet_refusal(r: &molt_core::wallet::WalletRefusal) -> String {
         W::UseInit => "wallet_init verwenden".into(),
         W::Held(inner) => format!("{} - Zustimmung vorgemerkt", localize_wallet_refusal(inner)),
         W::Cancelled => "Einrichtung abgebrochen".into(),
+        W::NoRun => "keine Einrichtung läuft".into(),
+        W::RunActive => "Einrichtung läuft".into(),
+        W::NotMine => "nicht das Ergebnis dieses Sitzes".into(),
     }
 }
 

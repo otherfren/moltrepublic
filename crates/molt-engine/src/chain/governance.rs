@@ -693,6 +693,8 @@ impl State {
                     self.after_files_applied(payload);
                 } else if *surface == Surface::Vault {
                     self.after_vault_applied(payload);
+                } else if *surface == Surface::Wallet {
+                    self.after_wallet_applied(*proposal_id, payload);
                 }
             }
             // a re-admission committed: on EVERY node, a threshold-approved
