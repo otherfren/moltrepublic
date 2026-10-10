@@ -1073,3 +1073,18 @@ fn an_open_init_card_dies_when_another_init_applies() {
     st.after_wallet_applied(INIT, &init_payload(3000, "mainnet"));
     dead(&st, 7);
 }
+
+/// W11 on every surface: the address never travels without the warning.
+#[test]
+fn the_address_carries_the_warning() {
+    assert!(with_init_view().address_warning.is_empty(), "no address, no warning");
+    let (st, _) = seat_with_purse("a", &[]);
+    let v = st.wallet_view();
+    assert!(!v.address.is_empty());
+    assert_eq!(v.address_warning, molt_core::wallet::ADDRESS_WARNING);
+}
+
+fn with_init_view() -> molt_core::wallet::WalletView {
+    let b = with_init();
+    genesis_seat("a", &b, b.blocks.clone()).wallet_view()
+}

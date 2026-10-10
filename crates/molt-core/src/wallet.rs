@@ -117,6 +117,8 @@ pub struct WalletTxView {
 pub struct WalletView {
     /// The deposit address; "" until the purse exists.
     pub address: String,
+    /// [`ADDRESS_WARNING`] beside an address that cannot spend (W11).
+    pub address_warning: String,
     /// `mainnet` | `stagenet` | `testnet`.
     pub network: String,
     /// Confirmed balance, piconero.
@@ -151,6 +153,9 @@ pub struct WalletView {
     /// with the purse stage.
     pub founding: bool,
 }
+
+/// W11: what every reader of the address is told while spending is not built.
+pub const ADDRESS_WARNING: &str = "spending does not work yet - money sent here is gone";
 
 /// W1: a purse needs `2 <= m <= n-1`.
 #[must_use]
@@ -248,6 +253,7 @@ mod tests {
     fn wallet_view_json_shape_is_pinned() {
         let view = WalletView {
             address: "4a".to_string(),
+            address_warning: ADDRESS_WARNING.to_string(),
             network: "mainnet".to_string(),
             balance: 5,
             pending: 6,
@@ -282,6 +288,7 @@ mod tests {
         };
         let want = json!({
             "address": "4a",
+            "address_warning": "spending does not work yet - money sent here is gone",
             "network": "mainnet",
             "balance": 5,
             "pending": 6,

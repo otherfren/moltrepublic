@@ -419,7 +419,8 @@ Two files, because one secret must never be lost and the rest is cheap:
   view, receive, the end of the purse stage), directly beside it and in
   large letters: **"Spending does not work yet. Money sent here is gone."**
   Not dismissable while Stage 2 is unbuilt. On stagenet/testnet the same
-  line, since the habit is what matters.
+  line, since the habit is what matters. The read model carries it beside
+  the address (`WalletView.address_warning`), so an agent seat reads it too.
 - **Standard scanning.** A standard main address and the library's ordinary
   `Scanner` with a `ViewPair` — not the guaranteed scanner, whose featured
   addresses ordinary wallets do not pay correctly. The scanner keeps the

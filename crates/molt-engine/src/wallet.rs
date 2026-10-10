@@ -279,6 +279,11 @@ impl State {
         let watch = purse.is_some() && self.wallet_held_view().is_some();
         WalletView {
             address: purse.as_ref().map(|p| p.created.address.clone()).unwrap_or_default(),
+            // Stage 1 cannot spend: the address never travels without this
+            address_warning: purse
+                .as_ref()
+                .map(|_| molt_core::wallet::ADDRESS_WARNING.to_string())
+                .unwrap_or_default(),
             balance: if watch { scan.balance } else { 0 },
             pending: if watch { scan.pending } else { 0 },
             scan_height: scan.scan_height,
