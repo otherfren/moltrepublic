@@ -46,6 +46,11 @@ pub(crate) fn is_init(payload: &Value) -> bool {
     op(payload) == Some(WALLET_INIT)
 }
 
+/// What the wire and the propose path take: a purse op, an init well-formed.
+pub(crate) fn purse_op_ok(payload: &Value) -> bool {
+    is_purse_op(payload) && (!is_init(payload) || parse_init(payload).is_some())
+}
+
 /// A well-formed init: `(birthday_height, network)`.
 pub(crate) fn parse_init(payload: &Value) -> Option<(u64, String)> {
     if !is_init(payload) {
@@ -83,6 +88,8 @@ pub(crate) struct PurseRt {
     pub(crate) probing: bool,
     /// The probe a `WalletInit` caller waits on.
     pub(crate) init_gen: Option<u64>,
+    /// Init probes dropped by a close or a daemon change: answered refused.
+    pub(crate) init_cancelled: BTreeSet<u64>,
     /// Init cards this seat approved before it could check them.
     pub(crate) consent: BTreeSet<u64>,
 }
@@ -117,7 +124,7 @@ impl State {
                 p.surface == Surface::Wallet
                     && p.state == ProposalState::Proposed
                     && !p.withdrawn
-                    && is_init(&p.payload)
+                    && parse_init(&p.payload).is_some()
             })
             .map(|(id, p)| (*id, p.payload.clone()))
             .collect()
@@ -163,11 +170,12 @@ impl State {
             Some(WALLET_INIT) => {
                 let (birthday, network) = parse_init(payload).ok_or(WalletRefusal::UnknownOp)?;
                 self.wallet_gates()?;
-                if network != self.session.settings.wallet_network {
-                    return Err(WalletRefusal::Network);
-                }
+                // a daemonless seat's network is only the default: it abstains
                 if self.session.settings.wallet_daemon_url.is_empty() {
                     return Err(WalletRefusal::NoDaemon);
+                }
+                if network != self.session.settings.wallet_network {
+                    return Err(WalletRefusal::Network);
                 }
                 let Some(height) = self.fresh_height() else {
                     return Err(if self.purse.probing || self.purse.probe_error.is_empty() {
@@ -297,7 +305,9 @@ impl State {
                 None => tracing::info!(error = %error, "wallet_probe=failed"),
             }
         }
-        let out = if self.purse.init_gen == Some(generation) {
+        let out = if self.purse.init_cancelled.remove(&generation) {
+            Err(MoltError::Wallet(WalletRefusal::Cancelled))
+        } else if self.purse.init_gen == Some(generation) {
             self.purse.init_gen = None;
             self.propose_wallet_init(height, &error)
         } else {
@@ -331,7 +341,8 @@ impl State {
         let me = self.member();
         for (id, payload) in self.wallet_init_cards() {
             let approved = self.chain.own_approvals.contains(&id);
-            let decided = approved || self.proposals.get(&id).is_some_and(|p| p.decliners.contains(&me));
+            let declined = self.proposals.get(&id).is_some_and(|p| p.decliners.contains(&me));
+            let decided = approved || declined;
             match self.wallet_approve_check(&payload) {
                 Ok(()) if !decided && self.purse.consent.contains(&id) => {
                     tracing::info!(id, "wallet_init=approved");
@@ -342,7 +353,8 @@ impl State {
                 Ok(()) if approved && !self.own_signature_stands(id) => {
                     self.chain_sign_and_gossip_approval(id);
                 }
-                Err(r @ (WalletRefusal::Birthday | WalletRefusal::Network)) if !decided => {
+                // an approved card that aged out could never re-sign: it dies
+                Err(r @ (WalletRefusal::Birthday | WalletRefusal::Network)) if !declined => {
                     tracing::warn!(id, reason = %r, "wallet_init=declined");
                     self.purse.consent.remove(&id);
                     if let Err(e) = self.cmd_decline(ProposalId(id), None) {
@@ -368,12 +380,20 @@ impl State {
 
     /// The daemon settings moved: forget the old height, ask the new one.
     pub(crate) fn wallet_daemon_changed(&mut self) {
+        self.cancel_wallet_init();
         self.purse.probe_gen += 1;
         self.purse.probing = false;
         self.purse.height = None;
         self.purse.probe_error.clear();
         if self.wallet_init_pending() {
             self.wallet_review();
+        }
+    }
+
+    /// The waiting `WalletInit` will not propose: its probe answers refused.
+    pub(crate) fn cancel_wallet_init(&mut self) {
+        if let Some(g) = self.purse.init_gen.take() {
+            self.purse.init_cancelled.insert(g);
         }
     }
 
@@ -390,15 +410,16 @@ impl State {
     }
 
     /// `approve` on an init this seat cannot check yet is kept as consent:
-    /// the seat signs once its daemon answers (§3.1).
-    pub(crate) fn wallet_consent_waits(&mut self, id: u64, refusal: &WalletRefusal) {
+    /// the seat signs once its daemon answers (§3.1). The answer says so.
+    pub(crate) fn wallet_consent_waits(&mut self, id: u64, refusal: WalletRefusal) -> WalletRefusal {
         if !matches!(refusal, WalletRefusal::NoDaemon | WalletRefusal::Checking | WalletRefusal::Daemon(_)) {
-            return;
+            return refusal;
         }
         self.purse.consent.insert(id);
         if matches!(refusal, WalletRefusal::Checking | WalletRefusal::Daemon(_)) && !self.purse.probing {
             let _ = self.start_wallet_probe(None);
         }
+        WalletRefusal::Held(Box::new(refusal))
     }
 
     /// [`molt_core::Command::WalletConsent`].

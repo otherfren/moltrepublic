@@ -652,9 +652,13 @@ Fork-Höhen fest. Bis dahin `can_spend = false`, kein `sign.rs`.
    projection counts the first *well-formed* applied init. A raw
    `propose` on Wallet answers `use wallet_init` (as the vault's). A seat
    judges each init card when it lands: another network or a birthday
-   out of its window declines at once (the card dies, W6); an `approve`
-   it cannot check yet (no daemon, a probe pending) is kept in memory and
-   signs once the daemon answers. `wallet_created` is refused at every
+   out of its window declines at once (the card dies, W6), also after an
+   own approve whose re-sign aged out; a seat without a daemon, or whose
+   daemon is still syncing (`get_info`), abstains on any network. An
+   `approve` it cannot check yet is kept in memory, answers `... -
+   approval held` and signs once the daemon answers. A malformed init is
+   dropped at the wire; a close or a daemon change cancels a waiting
+   `WalletInit` (`set-up cancelled`). `wallet_created` is refused at every
    signing path until step 7. `wallet` is no keep requirement of
    `set_features` (the union keeps it, like the vault), so the
    organization dialog no longer rides it along. §10.20–22 and 36 are unit tests on built

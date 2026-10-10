@@ -196,6 +196,12 @@ pub enum WalletRefusal {
     /// Purse votes come only from their commands.
     #[error("use wallet_init")]
     UseInit,
+    /// An approve this seat cannot check yet: kept, it signs once it can.
+    #[error("{0} - approval held")]
+    Held(Box<WalletRefusal>),
+    /// The set-up was dropped before its daemon answered.
+    #[error("set-up cancelled")]
+    Cancelled,
 }
 
 #[cfg(test)]

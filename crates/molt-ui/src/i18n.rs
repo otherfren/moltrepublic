@@ -46,6 +46,28 @@ pub(crate) fn localize_headline(lang: i32, phrase: &str) -> String {
     .to_string()
 }
 
+fn localize_wallet_refusal(r: &molt_core::wallet::WalletRefusal) -> String {
+    use molt_core::wallet::WalletRefusal as W;
+    match r {
+        W::NotYet => "noch nicht verfügbar".into(),
+        W::NoKeysFile => "keine Schlüsseldatei".into(),
+        W::KeysIntact => "Schlüsseldatei ist intakt".into(),
+        W::NotChain => "keine Chain-Republik".into(),
+        W::Bounds => "braucht 2 <= m <= n-1".into(),
+        W::InitExists => "schon eingerichtet".into(),
+        W::InitPending => "Abstimmung läuft".into(),
+        W::NoDaemon => "kein Daemon".into(),
+        W::Checking => "Daemon wird gefragt".into(),
+        W::Daemon(t) => t.clone(),
+        W::Birthday => "Starthöhe außerhalb des Bereichs".into(),
+        W::Network => "anderes Netzwerk".into(),
+        W::UnknownOp => "unbekannte Op".into(),
+        W::UseInit => "wallet_init verwenden".into(),
+        W::Held(inner) => format!("{} - Zustimmung vorgemerkt", localize_wallet_refusal(inner)),
+        W::Cancelled => "Einrichtung abgebrochen".into(),
+    }
+}
+
 /// One vault refusal in the active language (English = the MCP text,
 /// except the bounds, which the UI says in plain words).
 pub(crate) fn localize_vault_refusal(lang: i32, r: &molt_core::vault::VaultRefusal) -> String {
@@ -97,28 +119,7 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
             format!("Der Vault wird geholt ({have} von {size} Bytes)")
         }
         E::Vault(r) => format!("Vault: {}", localize_vault_refusal(lang, r)),
-        E::Wallet(r) => {
-            use molt_core::wallet::WalletRefusal as W;
-            format!(
-                "Kasse: {}",
-                match r {
-                    W::NotYet => "noch nicht verfügbar",
-                    W::NoKeysFile => "keine Schlüsseldatei",
-                    W::KeysIntact => "Schlüsseldatei ist intakt",
-                    W::NotChain => "keine Chain-Republik",
-                    W::Bounds => "braucht 2 <= m <= n-1",
-                    W::InitExists => "schon eingerichtet",
-                    W::InitPending => "Abstimmung läuft",
-                    W::NoDaemon => "kein Daemon",
-                    W::Checking => "Daemon wird gefragt",
-                    W::Daemon(t) => t.as_str(),
-                    W::Birthday => "Starthöhe außerhalb des Bereichs",
-                    W::Network => "anderes Netzwerk",
-                    W::UnknownOp => "unbekannte Op",
-                    W::UseInit => "wallet_init verwenden",
-                }
-            )
-        }
+        E::Wallet(r) => format!("Kasse: {}", localize_wallet_refusal(r)),
         E::FeatureDisabled(k) => format!("{k}: nicht aktiviert"),
         E::AlreadyTerminal(id, st) => format!("Vorschlag #{} ist bereits {st:?}", id.0),
         E::NotTheProposer(id) => format!("Vorschlag #{}: nur wer vorschlägt, zieht zurück", id.0),

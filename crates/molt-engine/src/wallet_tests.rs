@@ -182,7 +182,7 @@ fn a_seat_without_a_daemon_abstains() {
     let b = Builder::new(&ABC, 2);
     let mut st = genesis_seat("a", &b, b.blocks.clone());
     card_from(&mut st, "b", 5, init(3100, "mainnet"));
-    refused(st.cmd_approve(ProposalId(5), None), &WalletRefusal::NoDaemon);
+    refused(st.cmd_approve(ProposalId(5), None), &WalletRefusal::Held(Box::new(WalletRefusal::NoDaemon)));
     let p = st.proposals.get(&5).expect("card");
     assert_eq!(p.state, ProposalState::Proposed);
     assert!(p.decliners.is_empty() && !st.chain.own_approvals.contains(&5));
@@ -262,4 +262,89 @@ fn a_stale_height_re_signs_once_the_daemon_answers() {
     with_daemon(&mut st, 3000);
     st.wallet_review();
     assert!(st.own_signature_stands(5));
+}
+
+/// No daemon abstains on any network: the default network never declines.
+#[test]
+fn a_seat_without_a_daemon_abstains_on_another_network() {
+    let b = Builder::new(&ABC, 2);
+    let mut st = genesis_seat("a", &b, b.blocks.clone());
+    card_from(&mut st, "b", 5, init(3100, "stagenet"));
+    let p = st.proposals.get(&5).expect("card");
+    assert_eq!(p.state, ProposalState::Proposed);
+    assert!(p.decliners.is_empty(), "abstained, not declined");
+    refused(st.cmd_approve(ProposalId(5), None), &WalletRefusal::Held(Box::new(WalletRefusal::NoDaemon)));
+}
+
+/// An approve kept as consent says so.
+#[test]
+fn a_held_approve_says_it_is_held() {
+    let b = Builder::new(&ABC, 2);
+    let mut st = genesis_seat("a", &b, b.blocks.clone());
+    card_from(&mut st, "b", 5, init(3100, "mainnet"));
+    match st.cmd_approve(ProposalId(5), None) {
+        Err(e) => assert_eq!(e.to_string(), "purse: no daemon - approval held"),
+        other => panic!("unexpected: {other:?}"),
+    }
+    assert!(st.purse.consent.contains(&5));
+}
+
+/// A malformed init never lands: it would lock the door and nothing declines it.
+#[test]
+fn a_malformed_init_is_dropped_at_the_wire() {
+    let b = Builder::new(&ABC, 2);
+    let mut st = genesis_seat("a", &b, b.blocks.clone());
+    card_from(&mut st, "b", 5, init(3100, "regtest"));
+    card_from(&mut st, "b", 6, json!({ "op": WALLET_INIT, "network": "mainnet" }));
+    assert!(!st.proposals.contains_key(&5) && !st.proposals.contains_key(&6));
+    assert!(!st.wallet_init_pending());
+}
+
+/// An approved card whose birthday fell out of the window is declined, not left open.
+#[test]
+fn an_aged_out_init_is_declined_even_after_approving() {
+    let b = Builder::new(&ABC, 2);
+    let mut st = genesis_seat("a", &b, b.blocks.clone());
+    with_daemon(&mut st, 3000);
+    card_from(&mut st, "b", 5, init(2990, "mainnet"));
+    st.cmd_approve(ProposalId(5), None).expect("approved");
+    with_daemon(&mut st, 2990 + BIRTHDAY_WINDOW + 1);
+    st.wallet_review();
+    assert_eq!(st.proposals.get(&5).map(|p| p.state), Some(ProposalState::Rejected));
+    assert!(!st.wallet_init_pending(), "the door opens again");
+}
+
+/// A daemon change while the init probe runs cancels it: the old height never proposes.
+#[test]
+fn a_daemon_change_cancels_a_waiting_init() {
+    let b = Builder::new(&ABC, 2);
+    let mut st = genesis_seat("a", &b, b.blocks.clone());
+    with_daemon(&mut st, 3000);
+    st.purse.probe_gen = 1;
+    st.purse.init_gen = Some(1);
+    st.wallet_daemon_changed();
+    refused(st.cmd_net_wallet_probe(Some(3000), String::new(), Some(1)), &WalletRefusal::Cancelled);
+    assert!(!st.wallet_init_pending(), "nothing proposed");
+    assert!(st.purse.init_gen.is_none());
+}
+
+/// Closing the workspace drops the waiting init and the held consents.
+#[test]
+fn a_close_drops_the_waiting_init_and_consents() {
+    let b = Builder::new(&ABC, 2);
+    let mut st = genesis_seat("a", &b, b.blocks.clone());
+    with_daemon(&mut st, 3000);
+    st.purse.probe_gen = 1;
+    st.purse.init_gen = Some(1);
+    st.purse.probing = true;
+    st.purse.consent.insert(5);
+    st.reset_workspace_state();
+    assert!(st.purse.consent.is_empty() && st.purse.init_gen.is_none());
+
+    let mut other = genesis_seat("a", &b, b.blocks.clone());
+    with_daemon(&mut other, 3000);
+    other.purse = std::mem::take(&mut st.purse);
+    refused(other.cmd_net_wallet_probe(Some(3000), String::new(), Some(1)), &WalletRefusal::Cancelled);
+    assert!(!other.wallet_init_pending(), "nothing proposed into the next republic");
+    assert!(!other.purse.probing && other.purse.height.is_some(), "the height still lands");
 }

@@ -1042,8 +1042,8 @@ impl State {
                 return false;
             }
         }
-        if surface == Surface::Wallet && !crate::wallet::is_purse_op(&payload) {
-            tracing::warn!(%id, %by, "wallet: refusing an unknown op");
+        if surface == Surface::Wallet && !crate::wallet::purse_op_ok(&payload) {
+            tracing::warn!(%id, %by, "wallet: refusing a malformed op");
             return false;
         }
         if let Some(e) = self.wallet_feature_refusal(surface, &payload) {

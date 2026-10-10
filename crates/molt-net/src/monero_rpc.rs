@@ -20,6 +20,8 @@ use crate::s3::http;
 /// monerod's own response queue bound; also the cap when a caller asks for
 /// no per-call limit.
 const MAX_DAEMON_RESPONSE: usize = 100 * 1024 * 1024;
+/// `get_info` is a few hundred bytes.
+const GET_INFO_MAX: usize = 64 * 1024;
 
 /// Why the daemon could not be asked. The display is the one line a user
 /// sees.
@@ -40,6 +42,9 @@ pub enum DaemonError {
     /// The daemon wants a login this node lacks or it refused ours.
     #[error("daemon: login refused")]
     Login,
+    /// The daemon has not caught up with the network.
+    #[error("daemon: syncing")]
+    Syncing,
     /// Dial, HTTP or RPC failure.
     #[error("daemon: {0}")]
     Rpc(String),
@@ -239,9 +244,21 @@ impl HttpTransport for DaemonTransport {
 /// # Errors
 /// Dial, login or RPC failure, one line.
 pub async fn daemon_height(transport: DaemonTransport) -> Result<u64, DaemonError> {
+    if !synchronized(&transport).await? {
+        return Err(DaemonError::Syncing);
+    }
     let daemon = MoneroDaemon::new(transport).await.map_err(|e| unwrap_error(&e))?;
     let n = daemon.latest_block_number().await.map_err(|e| unwrap_error(&e))?;
     u64::try_from(n).map_err(|_| DaemonError::Rpc("height".to_string()))
+}
+
+/// `get_info`'s `synchronized`; a daemon that omits it counts as caught up.
+async fn synchronized(transport: &DaemonTransport) -> Result<bool, DaemonError> {
+    const REQ: &str = r#"{"jsonrpc":"2.0","id":0,"method":"get_info"}"#;
+    let body = transport.post_inner("json_rpc", REQ.as_bytes(), Some(GET_INFO_MAX)).await?;
+    let v: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|_| DaemonError::Rpc("get_info".to_string()))?;
+    Ok(v.pointer("/result/synchronized").and_then(serde_json::Value::as_bool).unwrap_or(true))
 }
 
 /// The transport's own error comes back wrapped by the library.
@@ -285,6 +302,8 @@ pub mod stub {
         pub login: Option<(String, String)>,
         /// Extra bytes in the height answer.
         pub pad: usize,
+        /// `get_info` says the daemon is still syncing.
+        pub syncing: bool,
     }
 
     impl Drop for StubDaemon {
@@ -354,7 +373,7 @@ pub mod stub {
     ) -> std::io::Result<()> {
         let mut buf = Vec::new();
         let mut chunk = [0u8; 4096];
-        let (head, body_len) = loop {
+        let (head, body_at, body_len) = loop {
             let n = s.read(&mut chunk).await?;
             if n == 0 {
                 return Ok(());
@@ -366,7 +385,7 @@ pub mod stub {
                     .lines()
                     .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
                     .unwrap_or(0usize);
-                break (head, end + 4 + len);
+                break (head, end + 4, end + 4 + len);
             }
         };
         while buf.len() < body_len {
@@ -390,6 +409,10 @@ pub mod stub {
             }
         }
         let body = match path.as_str() {
+            "/json_rpc" if String::from_utf8_lossy(&buf[body_at..]).contains("get_info") => format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{\"synchronized\":{},\"status\":\"OK\"}}}}",
+                !config.syncing
+            ),
             "/json_rpc" => "[]".to_string(),
             "/get_height" => format!(
                 "{{\"height\":{},\"status\":\"OK\",\"pad\":\"{}\"}}",
@@ -423,9 +446,16 @@ mod tests {
         assert_eq!(daemon_height(local(&d.url, "")).await, Ok(3005));
     }
 
+    /// A syncing daemon's height is not the network's: it answers nothing.
+    #[tokio::test]
+    async fn a_syncing_daemon_gives_no_height() {
+        let d = StubDaemon::start(3000, StubConfig { syncing: true, ..StubConfig::default() }).await;
+        assert_eq!(daemon_height(local(&d.url, "")).await, Err(DaemonError::Syncing));
+    }
+
     #[tokio::test]
     async fn a_digest_login_answers_the_challenge() {
-        let cfg = StubConfig { login: Some(("u".into(), "pw".into())), pad: 0 };
+        let cfg = StubConfig { login: Some(("u".into(), "pw".into())), ..StubConfig::default() };
         let d = StubDaemon::start(42, cfg).await;
         assert_eq!(daemon_height(local(&d.url, "u:pw")).await, Ok(42));
         assert_eq!(daemon_height(local(&d.url, "u:nope")).await, Err(DaemonError::Login));
@@ -435,7 +465,7 @@ mod tests {
     /// The per-call limit holds: a padded height answer is refused.
     #[tokio::test]
     async fn an_oversized_answer_is_refused() {
-        let d = StubDaemon::start(7, StubConfig { login: None, pad: 2 * 1024 * 1024 }).await;
+        let d = StubDaemon::start(7, StubConfig { pad: 2 * 1024 * 1024, ..StubConfig::default() }).await;
         let got = daemon_height(local(&d.url, "")).await;
         assert!(matches!(&got, Err(DaemonError::Rpc(e)) if e.contains("exceeds")), "{got:?}");
     }

@@ -592,7 +592,7 @@ impl State {
         // (Organization itself always passes — set_features rides it);
         // the purse's init is the door that turns `wallet` on (W4)
         if surface == Surface::Wallet {
-            if !crate::wallet::is_purse_op(&payload) {
+            if !crate::wallet::purse_op_ok(&payload) {
                 return Err(MoltError::Wallet(molt_core::wallet::WalletRefusal::UnknownOp));
             }
             if !crate::wallet::is_init(&payload) {
@@ -937,8 +937,7 @@ impl State {
             }
         };
         if let Some(r) = wallet_refused {
-            self.wallet_consent_waits(proposal.0, &r);
-            return Err(MoltError::Wallet(r));
+            return Err(MoltError::Wallet(self.wallet_consent_waits(proposal.0, r)));
         }
         // A2: the reason goes in FIRST — a tipping signature must never
         // leave its reasoning behind the decision

@@ -18,7 +18,11 @@ mod vault_support;
 use vault_support::found_n_at;
 
 async fn set_daemon(w: &WalletHandle, d: &StubDaemon) {
-    let patch = serde_json::json!({ "wallet_daemon_url": d.url, "wallet_daemon_confirmed": true });
+    set_daemon_on(w, d, "mainnet").await;
+}
+
+async fn set_daemon_on(w: &WalletHandle, d: &StubDaemon, network: &str) {
+    let patch = serde_json::json!({ "wallet_daemon_url": d.url, "wallet_daemon_confirmed": true, "wallet_network": network });
     w.execute(Command::PatchSettings { patch }).await.expect("daemon set");
 }
 
@@ -138,28 +142,34 @@ async fn a_future_birthday_is_declined_but_a_lagging_daemon_is_not() {
     }
 }
 
-/// Plan §10.25a: no daemon - neither approve nor decline; once one is
-/// set, the standing consent signs.
+/// Plan §10.25a: no daemon - neither approve nor decline, whatever the
+/// card's network; once one is set, the standing consent signs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_seat_without_a_daemon_abstains() {
     let relay = MockRelay::run().await.expect("relay");
     let tmp = tempfile::tempdir().expect("tmp");
     let all = three(&relay.url().await.to_string(), tmp.path()).await;
     let (da, db) = (StubDaemon::start(5000, StubConfig::default()).await, StubDaemon::start(5001, StubConfig::default()).await);
-    set_daemon(&all[0], &da).await;
+    set_daemon_on(&all[0], &da, "stagenet").await;
     match all[1].execute(Command::WalletInit).await {
         Err(e @ MoltError::Wallet(WalletRefusal::NoDaemon)) => assert_eq!(e.to_string(), "purse: no daemon"),
         other => panic!("unexpected: {other:?}"),
     }
     let id = init(&all[0]).await;
-    wait_wallet(&all[1], "the init card", |_, p| p.iter().any(|c| c.id == id)).await;
+    for w in &all[1..] {
+        wait_wallet(w, "the init card", |_, p| p.iter().any(|c| c.id == id)).await;
+    }
     match all[1].execute(Command::Approve { proposal: id, note: None }).await {
-        Err(MoltError::Wallet(WalletRefusal::NoDaemon)) => {}
+        Err(e @ MoltError::Wallet(WalletRefusal::Held(_))) => {
+            assert_eq!(e.to_string(), "purse: no daemon - approval held");
+        }
         other => panic!("unexpected: {other:?}"),
     }
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    assert_eq!(card_state(&all[0], id).await, Some(ProposalState::Proposed), "abstained, not declined");
-    set_daemon(&all[1], &db).await;
+    // a seat's own decline is terminal on that seat at once (veto 0)
+    for w in &all[1..] {
+        assert_eq!(card_state(w, id).await, Some(ProposalState::Proposed), "abstained, not declined");
+    }
+    set_daemon_on(&all[1], &db, "stagenet").await;
     for w in &all {
         wait_wallet(w, "the consent to sign once a daemon answers", |v, _| v.phase == WalletPhase::Init).await;
     }

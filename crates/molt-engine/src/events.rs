@@ -774,8 +774,9 @@ impl State {
         self.identity_sk = None;
         self.vault_seed = None;
         self.vault_rx = crate::vault::receipts::ReceiptRuntime::default();
-        // consents name the OLD workspace's cards; the daemon height is the node's
+        // consents and a waiting init name the OLD workspace; the daemon height is the node's
         self.purse.consent.clear();
+        self.cancel_wallet_init();
         self.transport_kind = None;
         self.nostr = None;
         // the recovery inboxes are INBOUND-only (they subscribe and read), so
